@@ -38,8 +38,10 @@ struct Slot {
     peer: bool,
 }
 
-/// What a line sent up that is not a call result, tagged with the person whose machine sent it.
-pub type PersonUpstream = (i64, Upstream);
+/// What a line sent up that is not a call result: the person it acts for, the machine that sent
+/// it, and the frame. The sender travels with it so an answer can go back to that machine — a
+/// question one PC asked is not another PC's to answer.
+pub type PersonUpstream = (i64, i64, Upstream);
 
 pub struct Lines {
     slots: Mutex<HashMap<i64, Slot>>,
@@ -55,9 +57,27 @@ pub struct Lines {
     /// there. Second only to a stored pin when [`Lines::route_for`] picks; a client that is no
     /// longer a candidate (line down, no longer acts for them, channel off) simply never wins.
     sticky: Mutex<HashMap<(i64, Channel), i64>>,
+    /// The Telegram bot, while it runs, so a profile's `tg_link` / `tg_unlink` / `tg_status` can
+    /// be answered on the line that asked (see `telegram.rs`).
+    telegram: Mutex<Option<Weak<crate::telegram::Telegram>>>,
 }
 
 impl Lines {
+    /// Let the lines reach the Telegram bot, for the link questions a profile asks. Called by
+    /// [`crate::telegram::Telegram::attach`].
+    pub fn bind_telegram(&self, bot: &Arc<crate::telegram::Telegram>) {
+        *self.telegram.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::downgrade(bot));
+    }
+
+    /// The bot, while it runs.
+    pub fn telegram(&self) -> Option<Arc<crate::telegram::Telegram>> {
+        self.telegram
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .and_then(Weak::upgrade)
+    }
+
     /// The registry, plus the receiver for everything the lines send up. Each frame is tagged
     /// with its person so the Telegram bridge of that person handles it.
     pub fn new(registry: Arc<Mutex<Registry>>) -> (Self, mpsc::UnboundedReceiver<PersonUpstream>) {
@@ -68,6 +88,7 @@ impl Lines {
                 upstream,
                 registry,
                 voice: Mutex::new(None),
+                telegram: Mutex::new(None),
                 state: Mutex::new(None),
                 sticky: Mutex::new(HashMap::new()),
             },
@@ -202,9 +223,29 @@ impl Lines {
                         };
                         own_line.send(&frame);
                     }
-                    Upstream::RoutePin { person_id, channel } => {
-                        lines.on_route_pin(client_id, &person_id, &channel);
+                    Upstream::RoutePin {
+                        id,
+                        person_id,
+                        channel,
+                        clear,
+                    } => {
+                        let frame = lines.on_route_pin(client_id, &id, &person_id, &channel, clear);
+                        own_line.send(&frame);
                     }
+                    // A profile asking about its own Telegram link. Answered on the line that
+                    // asked, since the answer is a link for that person to tap on their phone.
+                    up @ Upstream::TgAdmin { .. } => match lines.telegram() {
+                        Some(bot) => {
+                            let frame = bot.answer_admin(&lines, client_id, &up);
+                            own_line.send(&frame);
+                        }
+                        None => {
+                            // Still answered with the id it was asked with and the matching
+                            // result type, or the profile waits out its own timeout instead of
+                            // saying why.
+                            own_line.send(&crate::telegram::no_bot_answer(&up));
+                        }
+                    },
                     Upstream::Dev {
                         id,
                         to,
@@ -272,8 +313,11 @@ impl Lines {
                             Some(p) => match p.trim().parse::<i64>() {
                                 Ok(pid) if lines.may_act_as(client_id, pid) => pid,
                                 _ => {
+                                    // The named person is sender-controlled text of any length;
+                                    // the log line keeps a bounded copy.
+                                    let shown: String = p.chars().take(60).collect();
                                     eprintln!(
-                                        "relay: dropped a frame from {machine} naming person {p:?}"
+                                        "relay: dropped a frame from {machine} naming person {shown:?}"
                                     );
                                     continue;
                                 }
@@ -286,14 +330,14 @@ impl Lines {
                         if other.is_voice() {
                             // The voice bridge's frames are dropped until it has asked for them.
                             if let Some(voice) = lines.voice_sink() {
-                                let _ = voice.send((tag, other));
+                                let _ = voice.send((tag, client_id, other));
                             }
                         } else {
-                            let _ = tx.send((tag, other));
+                            let _ = tx.send((tag, client_id, other));
                         }
                     }
                     other => {
-                        let _ = tx.send((person_id, other));
+                        let _ = tx.send((person_id, client_id, other));
                     }
                 }
             }
@@ -315,21 +359,21 @@ impl Lines {
         self.lock().get(&client_id).map(|s| s.line.clone())
     }
 
-    /// Every connected line of a person with its machine's name.
-    pub fn up_lines_of(&self, person_id: i64) -> Vec<(String, Arc<Line>)> {
-        self.lock()
-            .values()
-            .filter(|s| s.person_id == person_id && s.line.is_up())
-            .map(|s| (s.machine.clone(), s.line.clone()))
-            .collect()
-    }
-
-    /// The person's connected line whose current connection is `generation`.
-    pub fn up_on(&self, person_id: i64, generation: u64) -> Option<Arc<Line>> {
-        self.lock()
-            .values()
-            .find(|s| s.person_id == person_id && s.line.generation() == Some(generation))
-            .map(|s| s.line.clone())
+    /// The connected line that a frame for `person_id` on `channel` went down, found by the
+    /// connection it went down. Generations are unique per client, so this finds the same line
+    /// again even after the route has moved to another machine — which is what keeps a message
+    /// with the machine it went to, and lets an answer go back where the question was asked.
+    /// A line that is not a candidate for that person and channel is never found.
+    pub fn up_on_candidate(
+        &self,
+        person_id: i64,
+        channel: Channel,
+        generation: u64,
+    ) -> Option<Arc<Line>> {
+        self.candidates_for(person_id, channel)
+            .into_iter()
+            .map(|(_, _, line)| line)
+            .find(|line| line.generation() == Some(generation))
     }
 
     /// The most recently active connected line of a person.
@@ -388,24 +432,54 @@ impl Lines {
         }
     }
 
-    /// A `route_pin`: the sending PC asks to take a person's channel. Only a PC that acts for
-    /// that person may pin itself to it.
-    fn on_route_pin(&self, client_id: i64, person_id: &str, channel: &str) {
+    /// A `route_pin`: the sending PC asks to take a person's channel, or with `clear` to stop
+    /// and fall back to automatic routing. Only a PC that acts for that person may ask, and the
+    /// answer is a `route_pin_result` — silence would leave the PC guessing.
+    fn on_route_pin(
+        &self,
+        client_id: i64,
+        id: &Value,
+        person_id: &str,
+        channel: &str,
+        clear: bool,
+    ) -> Value {
+        let framed = |outcome: Result<(), &str>| {
+            let mut f = serde_json::json!({ "type": "route_pin_result", "ok": outcome.is_ok() });
+            if !id.is_null() {
+                f["id"] = id.clone();
+            }
+            match outcome {
+                Ok(()) => f["cleared"] = serde_json::json!(clear),
+                Err(why) => f["error"] = serde_json::json!(why),
+            }
+            f
+        };
         let Some(channel) = Channel::parse(channel) else {
             eprintln!("relay: a route_pin named an unknown channel {channel:?}");
-            return;
+            return framed(Err("that channel is not known"));
         };
         let Ok(person) = person_id.trim().parse::<i64>() else {
             eprintln!("relay: a route_pin named a person id that is not a number: {person_id:?}");
-            return;
+            return framed(Err("that person is not a number"));
         };
         if !self.may_act_as(client_id, person) {
             eprintln!("relay: a route_pin was refused: this machine does not act for that person");
-            return;
+            return framed(Err("this PC does not act for that person"));
         }
-        if self.pin(person, channel, client_id) {
+        let done = if clear {
+            self.clear_pin(person, channel)
+        } else {
+            self.pin(person, channel, client_id)
+        };
+        if !done {
+            return framed(Err("the hub could not record that"));
+        }
+        if clear {
+            eprintln!("relay: a route_pin for person {person} was cleared");
+        } else {
             eprintln!("relay: a route_pin now sends person {person} to machine {client_id}");
         }
+        framed(Ok(()))
     }
 
     /// The line a person's `channel` messages go down, or `None` when nothing qualifies.
@@ -472,6 +546,19 @@ impl Lines {
             .collect()
     }
 
+    /// Every candidate line for `person_id` on `channel` as `(client id, machine name, line)`,
+    /// for a person choosing one of them (the bot's `/pc`).
+    pub fn candidate_lines(
+        &self,
+        person_id: i64,
+        channel: Channel,
+    ) -> Vec<(i64, String, Arc<Line>)> {
+        self.candidate_views(person_id, channel)
+            .into_iter()
+            .map(|(client_id, _, machine, line)| (client_id, machine, line))
+            .collect()
+    }
+
     fn candidate_views(
         &self,
         person_id: i64,
@@ -509,22 +596,38 @@ impl Lines {
     }
 
     /// The candidate line for `person_id` on `channel` whose machine is named `machine`
-    /// (case-insensitive); `None` when that machine is down or not a candidate — never another
-    /// machine's line.
+    /// (case-insensitive), with its client id and name. Two people's machines can carry the same
+    /// name, so the one whose own person is `person_id` wins; a machine that is down, or is not a
+    /// candidate for this person and channel, is never chosen.
+    pub fn find_by_name(
+        &self,
+        person_id: i64,
+        channel: Channel,
+        machine: &str,
+    ) -> Option<(i64, String, Arc<Line>)> {
+        let found: Vec<(i64, i64, String, Arc<Line>)> = self
+            .candidate_views(person_id, channel)
+            .into_iter()
+            .filter(|(_, _, name, _)| name.eq_ignore_ascii_case(machine))
+            .collect();
+        found
+            .iter()
+            .find(|(_, home, _, _)| *home == person_id)
+            .or_else(|| found.first())
+            .cloned()
+            .map(|(client_id, _, name, line)| (client_id, name, line))
+    }
+
+    /// The candidate line for `person_id` on `channel` whose machine is named `machine`; `None`
+    /// when that machine is down or is not a candidate — never another machine's line. See
+    /// [`Self::find_by_name`] for how two machines of the same name are told apart.
     pub fn named_candidate(
         &self,
         person_id: i64,
         machine: &str,
         channel: Channel,
     ) -> Option<Arc<Line>> {
-        let client_id = self
-            .lock()
-            .iter()
-            .find(|(_, s)| s.machine.eq_ignore_ascii_case(machine))
-            .map(|(client_id, _)| *client_id)?;
-        self.candidates_for(person_id, channel)
-            .into_iter()
-            .find(|(id, _, _)| *id == client_id)
+        self.find_by_name(person_id, channel, machine)
             .map(|(_, _, line)| line)
     }
 }
@@ -568,13 +671,18 @@ impl Route for PersonRoute {
         self.route().is_some_and(|l| l.send(frame))
     }
 
+    // A message stays with the machine it went to while that machine's line is up, even when the
+    // route for the person now points elsewhere — which is how a pinned or sticky non-home PC, or
+    // one picked only because it is up, still gets its answers.
     fn holds(&self, generation: u64) -> bool {
-        self.lines.up_on(self.person_id, generation).is_some()
+        self.lines
+            .up_on_candidate(self.person_id, Channel::Telegram, generation)
+            .is_some()
     }
 
     fn send_on(&self, generation: u64, frame: &Value) -> bool {
         self.lines
-            .up_on(self.person_id, generation)
+            .up_on_candidate(self.person_id, Channel::Telegram, generation)
             .is_some_and(|l| l.send(frame))
     }
 }
@@ -632,6 +740,25 @@ mod tests {
         let (ga, gb, gc) = (la.attach(tx_a), lb.attach(tx_b), lc.attach(tx_c));
         assert!(ga != gb && gb != gc, "generations differ between clients");
 
+        // Another person's machine carries the same name as this person's own. A named choice
+        // takes the person's own, and never lands on the other person's of that name.
+        let d = client(4, p20, "DESK");
+        let ld = lines.line_for(&d);
+        let (tx_d, _rx_d) = mpsc::unbounded_channel();
+        ld.attach(tx_d);
+        assert!(Arc::ptr_eq(
+            &lines.named_candidate(p10, "desk", Channel::App).unwrap(),
+            &la
+        ));
+        assert!(Arc::ptr_eq(
+            &lines.named_candidate(p20, "desk", Channel::App).unwrap(),
+            &ld
+        ));
+        assert!(lines
+            .named_candidate(p10, "laptop", Channel::Voice)
+            .is_some());
+        assert!(lines.named_candidate(p10, "desk", Channel::App).is_some());
+
         // A second machine does not knock the first off; the person's latest wins Telegram.
         assert!(la.is_up() && lb.is_up());
         let route = PersonRoute::new(lines.clone(), p10);
@@ -654,14 +781,14 @@ mod tests {
         assert_eq!(route.generation(), Some(ga));
         assert_eq!(
             up.recv().await.unwrap(),
-            (p10, Upstream::TelegramFinal("hi".into()))
+            (p10, 1, Upstream::TelegramFinal("hi".into()))
         );
 
         // A named machine is returned even when down; another person's is never reachable.
         lb.detach(gb);
         assert!(lines.pick(p10, Some("LAPTOP")).is_some());
         assert!(lines.pick(p10, Some("pc")).is_none());
-        assert_eq!(lines.up_lines_of(p10).len(), 1);
+        assert_eq!(lines.candidate_names(p10, Channel::App).len(), 1);
         assert!(lines.pick(30, None).is_none());
         assert!(!PersonRoute::new(lines.clone(), 30).is_up());
 
@@ -671,7 +798,7 @@ mod tests {
         assert!(la.receive(ga, ack));
         assert_eq!(
             voice.recv().await.unwrap(),
-            (p10, Upstream::VoiceAck("turn-0001".into()))
+            (p10, 1, Upstream::VoiceAck("turn-0001".into()))
         );
         assert!(up.try_recv().is_err(), "Telegram never saw a voice frame");
     }
@@ -750,6 +877,15 @@ mod tests {
         wait_until(|| lline.claim_for(bea) == Some((true, false))).await;
         wait_until(|| registry.lock().is_ok_and(|r| r.may_act_for(laptop, bea))).await;
         assert_eq!(dline.claim_for(bea), None, "Desk announced no people");
+        // A PC that takes only the Telegram channel is not a candidate for voice at all.
+        assert!(lines
+            .candidate_names(bea, Channel::Telegram)
+            .iter()
+            .any(|name| name == "laptop"));
+        assert!(!lines
+            .candidate_names(bea, Channel::Voice)
+            .iter()
+            .any(|name| name == "laptop"));
         // The broadcast list shows each device's people, home person first.
         let laptop_row = 'find: loop {
             for list in wait_frames(&mut rx_l, "devices").await {
@@ -897,7 +1033,7 @@ mod tests {
         ));
         assert_eq!(
             up.recv().await.unwrap(),
-            (bea, Upstream::TelegramFinal("as Bea".into()))
+            (bea, laptop, Upstream::TelegramFinal("as Bea".into()))
         );
         assert!(lline.receive(
             gl,
@@ -910,7 +1046,7 @@ mod tests {
         assert!(lline.receive(gl, r#"{"type":"telegram_final","text":"plain"}"#));
         assert_eq!(
             up.recv().await.unwrap(),
-            (kim, Upstream::TelegramFinal("plain".into()))
+            (kim, laptop, Upstream::TelegramFinal("plain".into()))
         );
 
         // Routing: home first when nothing else applies � Desk is Bea's own PC even though
@@ -940,7 +1076,7 @@ mod tests {
         ));
         assert_eq!(
             up.recv().await.unwrap(),
-            (bea, Upstream::TelegramAck("m1".into()))
+            (bea, laptop, Upstream::TelegramAck("m1".into()))
         );
         pick(bea, Channel::Telegram, "laptop");
         // A pin beats sticky; clearing it falls back to sticky.
@@ -987,8 +1123,9 @@ mod tests {
         // claims bring it back as a candidate and the pin decides.
         assert!(lline.receive(
             gl,
-            &json!({"type": "route_pin", "personId": bea.to_string(), "channel": "telegram"})
-                .to_string()
+            &json!({"type": "route_pin", "id": "rp1", "personId": bea.to_string(),
+                    "channel": "telegram"})
+            .to_string()
         ));
         assert!(lline.receive(
             gl,
@@ -1004,7 +1141,76 @@ mod tests {
             })
         })
         .await;
+        let pinned = wait_frames(&mut rx_l2, "route_pin_result").await.remove(0);
+        assert_eq!(
+            (
+                pinned["id"].as_str(),
+                pinned["ok"].as_bool(),
+                pinned["cleared"].as_bool()
+            ),
+            (Some("rp1"), Some(true), Some(false)),
+            "the pin was answered with {pinned}"
+        );
         pick(bea, Channel::Telegram, "laptop");
+        // A route to another person's PC delivers there: the frames really go down that line, and
+        // a message stays with the line it went down even after the route moves again.
+        let route = PersonRoute::new(lines.clone(), bea);
+        assert!(route.send(&json!({"type": "telegram", "id": "m9", "text": "hi"})));
+        assert_eq!(wait_frames(&mut rx_l2, "telegram").await[0]["id"], "m9");
+        assert!(route.holds(gl));
+        assert!(route.send_on(gl, &json!({"type": "telegram_answer", "id": "a1"})));
+        assert_eq!(
+            wait_frames(&mut rx_l2, "telegram_answer").await[0]["id"],
+            "a1",
+            "the answer went back to the laptop that carries Bea's Telegram"
+        );
+        lines.pin(bea, Channel::Telegram, desk);
+        pick(bea, Channel::Telegram, "desk");
+        assert!(
+            route.holds(gl),
+            "a line that still carries her Telegram holds"
+        );
+        assert!(route.send_on(gl, &json!({"type": "telegram", "id": "m10"})));
+        assert_eq!(wait_frames(&mut rx_l2, "telegram").await[0]["id"], "m10");
+        // The same frame with `clear` unpins again: it is answered on the line that asked, and
+        // automatic routing decides once more.
+        assert!(lline.receive(
+            gl,
+            &json!({"type": "route_pin", "id": "rp2", "personId": bea.to_string(),
+                    "channel": "telegram", "clear": true})
+            .to_string()
+        ));
+        let cleared = wait_frames(&mut rx_l2, "route_pin_result").await.remove(0);
+        assert_eq!(
+            (
+                cleared["id"].as_str(),
+                cleared["ok"].as_bool(),
+                cleared["cleared"].as_bool()
+            ),
+            (Some("rp2"), Some(true), Some(true)),
+            "the unpin was answered with {cleared}"
+        );
+        wait_until(|| {
+            registry
+                .lock()
+                .is_ok_and(|r| r.pinned_client(bea, "telegram").is_ok_and(|p| p.is_none()))
+        })
+        .await;
+        // With the pin gone, automatic routing decides again: her frames last went up from the
+        // laptop, so sticky keeps them there.
+        pick(bea, Channel::Telegram, "laptop");
+        // A pin refused for another person still gets its answer, not silence.
+        assert!(lline.receive(
+            gl,
+            &json!({"type": "route_pin", "id": "rp3", "personId": "404", "channel": "telegram"})
+                .to_string()
+        ));
+        let refused = wait_frames(&mut rx_l2, "route_pin_result").await.remove(0);
+        assert_eq!(
+            (refused["id"].as_str(), refused["ok"].as_bool()),
+            (Some("rp3"), Some(false)),
+            "the refusal was answered with {refused}"
+        );
         // No PC acts for a stranger, however it is named.
         assert!(lines.route_for(404, Channel::Telegram).is_none());
     }

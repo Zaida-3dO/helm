@@ -14,9 +14,9 @@
 //! |---|---|---|
 //! | hub → Helm | `welcome` | `version`, and who this line is: `personId`, `person`, `machineId`, `machine` |
 //! | hub → Helm | `call` | `id`, `client`, `tool`, `args`, `personId` (the hub person the call acts as, when the hub knows one). `client` names the caller: a client's name, or `peer:<person>` for a household member's call |
-//! | hub → Helm | `telegram` | `id`, `text`, `sentAt` (ms), `ageMinutes` (null when fresh), `bot`. A voice note's `text` is `[Voice note] <transcript>`; a reply or quote puts `Replying to: "<quoted text>"` on the first line. With files: `images` (pictures Helm shows) and `files` (anything else), each a list of `name`, `mediaType` and base64 `data`; at most 10 files and 50 MB in all |
-//! | hub → Helm | `telegram_stop` | — |
-//! | hub → Helm | `telegram_answer` | `id`, `index`: the user tapped button `index` (from 0) of the ask `id`. Sent once per ask |
+//! | hub → Helm | `telegram` | `id`, `text`, `sentAt` (ms), `ageMinutes` (null when fresh), `bot`, `personId` (whose Telegram this is, when the hub knows). A voice note's `text` is `[Voice note] <transcript>`; a reply or quote puts `Replying to: "<quoted text>"` on the first line. With files: `images` (pictures Helm shows) and `files` (anything else), each a list of `name`, `mediaType` and base64 `data`; at most 10 files and 50 MB in all |
+//! | hub → Helm | `telegram_stop` | `personId` (optional): stop the running turn of that person's Telegram chat |
+//! | hub → Helm | `telegram_answer` | `id`, `index`, `personId` (whose Telegram this is, when the hub knows): the user tapped button `index` (from 0) of the ask `id`. Sent once per ask |
 //! | Helm → hub | `sharing` | `chats`, `transcripts`, `messages` (booleans, absent means false): what the household may do with this machine's chats. Sent on connect and whenever a switch changes; reset to all false when the line drops |
 //! | Helm → hub | `peer` | `id`, `op` (`people`, `list_chats`, `read_chat` or `send_message`), `args` (`personId`, optional `machineId`, and the op's own): a question about the household, answered with `peer_result` (see `peer.rs`) |
 //! | hub → Helm | `peer_result` | `id` (the `peer` frame's), `ok`, `result` or `error` (a plain sentence) |
@@ -28,11 +28,11 @@
 //! | Helm → hub | `telegram_notify` | `text`, `personId` (optional): a message Helm starts (an alert), sent as a new message; the live status is left alone |
 //! | Helm → hub | `telegram_ask` | `id` (16-32 lowercase hex), `text`, `options` (1-4 strings), `personId` (optional): a new message with one button per option |
 //! | Helm → hub | `telegram_ask_done` | `id`, `text`, `personId` (optional): the ask was settled in Helm; its message gains `text` and loses its buttons |
-//! | hub → Helm | `voice` | `id` (the turn), `mode` (`conversation` or `chat`), `text` (at most 8000 characters), `source` (`speech` or `typed`), `sentAt` (ms), `ageMinutes` (null when fresh), `continues` (a turn id or null). One turn for the voice chat; sent again every 45 s until `voice_ack` |
-//! | hub → Helm | `voice_stop` | `turn`: the phone cancelled a turn Helm may already have taken |
-//! | hub → Helm | `voice_heard` | `reports`: what the phone did and did not play (see `voice.rs`) |
-//! | hub → Helm | `voice_presence` | `live`, `mode`: whether the phone's talk screen is open, and in which mode |
-//! | hub → Helm | `voice_fresh` | — : start a new voice conversation |
+//! | hub → Helm | `voice` | `id` (the turn), `personId` (whose voice line this is, when the hub knows), `mode` (`conversation` or `chat`), `text` (at most 8000 characters), `source` (`speech` or `typed`), `sentAt` (ms), `ageMinutes` (null when fresh), `continues` (a turn id or null). One turn for the voice chat; sent again every 45 s until `voice_ack` |
+//! | hub → Helm | `voice_stop` | `turn`, `personId` (optional): the phone cancelled a turn Helm may already have taken |
+//! | hub → Helm | `voice_heard` | `reports`, `personId` (optional): what the phone did and did not play (see `voice.rs`) |
+//! | hub → Helm | `voice_presence` | `live`, `mode`, `personId` (optional): whether the phone's talk screen is open, and in which mode |
+//! | hub → Helm | `voice_fresh` | `personId` (optional): start a new voice conversation |
 //! | Helm → hub | `voice_ack` | `id`, `personId` (optional): the turn is placed in the voice chat |
 //! | Helm → hub | `voice_status` | `turn`, `text` (at most 300 characters), `personId` (optional): the working line, shown and never spoken |
 //! | Helm → hub | `voice_attachment` | `reply`, `n` (1-4), `kind`, `title`, and by kind `mediaType` + `data` (base64), `markdown` or `url`, `personId` (optional): one attachment, sent before its reply and held for 60 s |
@@ -42,7 +42,11 @@
 //! | hub → Helm | `devices` | `list`: every device of the household, `{uid, name, personId, person, people ([{personId, person}]), online, lastSeenAt, run, self}`; sent to each `peer` line when a device frame arrives and whenever a line comes up or drops |
 //! | Helm → hub | `person_ensure` | `id`, `name`: make (or find, ignoring case) a hub person of this name for one of this PC's profiles; answered with `person_result`. Needs the `peer` scope |
 //! | hub → Helm | `person_result` | `id` (the `person_ensure`'s), `ok`, `personId`, `person` (the stored name), `created` (bool); or `ok` false with `error` |
-//! | Helm → hub | `route_pin` | `personId`, `channel` (`telegram`, `voice` or `app`): this PC asks to be the one that receives that person's channel until it picks otherwise; only honoured for a person this PC acts for |
+//! | Helm → hub | `tg_link` / `tg_unlink` / `tg_status` | `id` (answered back on the result), `personId`: the profile asks to link its Telegram to that hub person, to unlink it, or asks whether it is linked. Only honoured for a person this PC acts for; answered with the matching `_result` frame below |
+//! | hub → Helm | `tg_link_result` | `id`, `ok`, `url` (`https://t.me/<bot>?start=<code>`: the person taps it once, which is what proves the Telegram account is theirs), or `ok` false with `error` |
+//! | hub → Helm | `tg_unlink_result` / `tg_status_result` | `id`, `ok`, and for a status `linked` (bool), `telegramId` and `handle` when it is linked; or `ok` false with `error` |
+//! | Helm → hub | `route_pin` | `personId`, `channel` (`telegram`, `voice` or `app`), optional `id` and `clear` (an unpin, back to automatic routing): this PC asks to be the one that receives that person's channel until it picks otherwise; only honoured for a person this PC acts for |
+//! | hub → Helm | `route_pin_result` | `id` (the frame's, if it had one), `ok`, `cleared` (whether it was an unpin) or `error`: whether the pin took |
 //! | Helm → hub | `dev` | `id`, `to` (a device uid), `op`, `args`, `as` (optional list of person ids: the acting person first, then anyone a read may also return): a call for another device, answered with `dev_result` (see `devices.rs`) |
 //! | hub → Helm | `dev_call` | `id` (the hub's), `from` (`{uid, name, personId (the acting person, verified), person, people (all verified entries, acting first), machinePersonId (the sender machine's own person)}`), `op`, `args`: another device's call for this one |
 //! | Helm → hub | `dev_result` | `id` (the `dev_call`'s), `ok`, `result` or `error` (`{code, message}`): the answer to a `dev_call` |
@@ -147,10 +151,21 @@ pub enum Upstream {
         id: Value,
         name: String,
     },
-    /// The PC asked to be the one that receives a person's channel. Answered by `lines.rs`.
+    /// The PC asked to be the one that receives a person's channel, or (with `clear`) to stop
+    /// being one. Answered by `lines.rs` with a `route_pin_result`, echoing `id` if it had one.
     RoutePin {
+        id: Value,
         person_id: String,
         channel: String,
+        clear: bool,
+    },
+    /// A profile asked about its own Telegram link: `op` is `link`, `unlink` or `status`, and
+    /// `person_id` the person it asks for. Answered by `telegram.rs` down the line that asked,
+    /// with `tg_link_result`, `tg_unlink_result` or `tg_status_result`.
+    TgAdmin {
+        id: Value,
+        op: String,
+        person_id: String,
     },
     DevPush {
         to: String,
@@ -817,22 +832,28 @@ impl Line {
                     let people = match v.get("people") {
                         None => Some(Vec::new()),
                         Some(Value::Null) => Some(Vec::new()),
-                        Some(Value::Array(list)) => list
-                            .iter()
-                            .map(|p| {
-                                Some(DeviceClaim {
-                                    person_id: p
-                                        .get("personId")
-                                        .and_then(Value::as_str)?
-                                        .to_owned(),
-                                    telegram: p
-                                        .get("telegram")
-                                        .and_then(Value::as_bool)
-                                        .unwrap_or(false),
-                                    voice: p.get("voice").and_then(Value::as_bool).unwrap_or(false),
+                        // A malformed entry is skipped, not fatal: the rest of the announcement
+                        // (uid, name, run and the good entries) still stands.
+                        Some(Value::Array(list)) => Some(
+                            list.iter()
+                                .filter_map(|p| {
+                                    Some(DeviceClaim {
+                                        person_id: p
+                                            .get("personId")
+                                            .and_then(Value::as_str)?
+                                            .to_owned(),
+                                        telegram: p
+                                            .get("telegram")
+                                            .and_then(Value::as_bool)
+                                            .unwrap_or(false),
+                                        voice: p
+                                            .get("voice")
+                                            .and_then(Value::as_bool)
+                                            .unwrap_or(false),
+                                    })
                                 })
-                            })
-                            .collect(),
+                                .collect(),
+                        ),
                         Some(_) => None,
                     };
                     match people {
@@ -869,10 +890,34 @@ impl Line {
             Some("route_pin") => match (s("personId"), s("channel")) {
                 (Some(person_id), Some(channel)) => self
                     .upstream
-                    .send((None, Upstream::RoutePin { person_id, channel }))
+                    .send((
+                        None,
+                        Upstream::RoutePin {
+                            id: v.get("id").cloned().unwrap_or(Value::Null),
+                            person_id,
+                            channel,
+                            clear: v.get("clear").and_then(Value::as_bool).unwrap_or(false),
+                        },
+                    ))
                     .is_ok(),
                 _ => false,
             },
+            Some(op @ ("tg_link" | "tg_unlink" | "tg_status")) => {
+                match (v.get("id"), s("personId")) {
+                    (Some(id), Some(person_id)) if id.is_string() || id.is_number() => self
+                        .upstream
+                        .send((
+                            None,
+                            Upstream::TgAdmin {
+                                id: id.clone(),
+                                op: op.strip_prefix("tg_").unwrap_or(op).to_owned(),
+                                person_id,
+                            },
+                        ))
+                        .is_ok(),
+                    _ => false,
+                }
+            }
             Some("dev") => match (v.get("id"), s("to"), s("op")) {
                 (Some(id), Some(to), Some(op)) if id.is_string() || id.is_number() => {
                     let args = match v.get("args") {
@@ -901,7 +946,16 @@ impl Line {
                                 },
                             ))
                             .is_ok(),
-                        None => false,
+                        // A call whose `as` list is malformed is answered, not swallowed: the
+                        // caller waits for a `dev_result` either way, so silence is a timeout.
+                        None => self.send_on(
+                            generation,
+                            &crate::devices::error_frame(
+                                id,
+                                "bad_request",
+                                "The `as` list must be a list of person ids as text.",
+                            ),
+                        ),
                     }
                 }
                 _ => false,
@@ -1385,10 +1439,22 @@ mod tests {
             gen,
             r#"{"type":"dev","id":"c1","to":"u2","op":"hello","as":["7","3"]}"#
         ));
+        // One unreadable `people` entry is skipped, not fatal: the announcement still stands
+        // with the entry that can be read.
+        assert!(line.receive(
+            gen,
+            r#"{"type":"device","uid":"u9","name":"Nine","run":false,
+                "people":[{"personId":9},{"personId":"10","voice":true}]}"#
+        ));
+        // A call whose `as` list cannot be read is answered, not swallowed.
+        assert!(line.receive(
+            gen,
+            r#"{"type":"dev","id":"c2","to":"u2","op":"hello","as":[7]}"#
+        ));
         assert!(line.receive(gen, r#"{"type":"person_ensure","id":"p1","name":"Kit"}"#));
         assert!(line.receive(
             gen,
-            r#"{"type":"route_pin","personId":"7","channel":"telegram"}"#
+            r#"{"type":"route_pin","id":"r7","personId":"7","channel":"telegram","clear":true}"#
         ));
         assert!(line.receive(
             gen,
@@ -1445,6 +1511,33 @@ mod tests {
                 vec!["7".to_owned(), "3".to_owned()]
             )
         );
+        let (_, up_nine) = up.try_recv().unwrap();
+        assert_eq!(
+            up_nine,
+            Upstream::Device {
+                uid: "u9".into(),
+                name: "Nine".into(),
+                run: false,
+                people: vec![DeviceClaim {
+                    person_id: "10".into(),
+                    telegram: false,
+                    voice: true,
+                }],
+            }
+        );
+        let answered = frames(&mut rx)
+            .into_iter()
+            .find(|f| f["type"] == "dev_result")
+            .expect("the unreadable `as` list got no answer");
+        assert_eq!(
+            (
+                answered["id"].as_str(),
+                answered["ok"].as_bool(),
+                answered["error"]["code"].as_str()
+            ),
+            (Some("c2"), Some(false), Some("bad_request")),
+            "answered with {answered}"
+        );
         assert_eq!(
             up.try_recv().unwrap(),
             (
@@ -1460,8 +1553,10 @@ mod tests {
             (
                 None,
                 Upstream::RoutePin {
+                    id: json!("r7"),
                     person_id: "7".into(),
-                    channel: "telegram".into()
+                    channel: "telegram".into(),
+                    clear: true
                 }
             )
         );
@@ -1514,9 +1609,7 @@ mod tests {
             r#"{"type":"kn_pull"}"#.to_owned(),
             r#"{"type":"kn_put","id":"p","layer":"everyone"}"#.to_owned(),
             r#"{"type":"dev_result","id":"nobody-asked","ok":true}"#.to_owned(),
-            r#"{"type":"device","uid":"u1","name":"D","people":[{"personId":7}]}"#.to_owned(),
             r#"{"type":"device","uid":"u1","name":"D","people":"x"}"#.to_owned(),
-            r#"{"type":"dev","id":"c","to":"u2","op":"x","as":[7]}"#.to_owned(),
             r#"{"type":"person_ensure","id":"p"}"#.to_owned(),
             r#"{"type":"route_pin","personId":"7"}"#.to_owned(),
         ] {

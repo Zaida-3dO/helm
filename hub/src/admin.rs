@@ -10,6 +10,8 @@
 //! helm-hub client revoke <machine or id> [--person P]
 //! helm-hub client acts-for <machine or id> <person> [--person P]
 //! helm-hub client stop-acting-for <machine or id> <person> [--person P]
+//! helm-hub telegram list                                     linked Telegram accounts
+//! helm-hub telegram unlink <id>                              cut off one account
 //! helm-hub pair --person P --machine M [--scopes S] [--acts-for A]         prints a one-time code
 //! ```
 
@@ -30,6 +32,13 @@ pub const USAGE: &str = "  helm-hub person add <name> | person list
   helm-hub client stop-acting-for <machine or id> <person> [--person P]
                                        let a machine act for another person (read their private
                                        memories, change their rules, skills and agents), or stop it
+  helm-hub telegram list
+                                       every Telegram account the bot answers, and where that link
+                                       came from
+  helm-hub telegram unlink <id>
+                                       cut an account off; a running bot needs a restart to stop
+                                       answering it, and an id listed in the hub's settings must
+                                       be taken out of those as well
   helm-hub pair --person P --machine M [--scopes S] [--acts-for A]
                                        print a one-time pairing code (8 characters, 15 minutes)
 
@@ -42,7 +51,7 @@ pub const USAGE: &str = "  helm-hub person add <name> | person list
 
 /// Whether `first` begins an admin command.
 pub fn is_admin_command(first: &str) -> bool {
-    matches!(first, "person" | "client" | "pair")
+    matches!(first, "person" | "client" | "telegram" | "pair")
 }
 
 /// Run one admin command and return what to print.
@@ -183,6 +192,55 @@ pub fn run(registry: &mut Registry, args: &[String], now_ms: i64) -> Result<Stri
             Ok(format!(
                 "revoked {} of {}; its token stopped working and an open line drops within seconds",
                 c.machine, c.person
+            ))
+        }
+        ["telegram", "list"] => {
+            let links = registry.telegram_links().map_err(|e| e.to_string())?;
+            let mut out = String::new();
+            for l in &links {
+                let name = registry
+                    .person_by_id(l.person_id)
+                    .ok()
+                    .flatten()
+                    .map(|p| p.name)
+                    .unwrap_or_else(|| l.person_id.to_string());
+                let how = match (l.source.as_str(), l.handle.as_deref()) {
+                    ("env", _) => "from the hub's settings".to_owned(),
+                    ("link", Some(handle)) => format!("linked by the person ({handle})"),
+                    ("link", None) => "linked by the person".to_owned(),
+                    (other, _) => other.to_owned(),
+                };
+                out.push_str(&format!("{}  {name}  {how}\n", l.telegram_id));
+            }
+            if links.is_empty() {
+                out.push_str("no Telegram account is linked\n");
+            }
+            Ok(out)
+        }
+        ["telegram", "unlink", rest @ ..] => {
+            let (pos, _) = flags(rest, &[])?;
+            let [id] = pos.as_slice() else {
+                return Err("telegram unlink takes one Telegram account id".into());
+            };
+            let Ok(id) = id.parse::<i64>() else {
+                return Err("the account id is a number".into());
+            };
+            let Some(person) = registry
+                .unlink_telegram_by_id(id)
+                .map_err(|e| e.to_string())?
+            else {
+                return Err(format!("no Telegram account {id} is linked"));
+            };
+            let name = registry
+                .person_by_id(person)
+                .ok()
+                .flatten()
+                .map(|p| p.name)
+                .unwrap_or_else(|| person.to_string());
+            Ok(format!(
+                "unlinked {id} from {name}. Restart the hub for a bot that is already running to \
+                 stop answering it; if the id is listed in the hub's settings, take it out of \
+                 those as well or the link comes back on the next start."
             ))
         }
         ["pair", rest @ ..] => {
@@ -357,6 +415,27 @@ mod tests {
         let sam = r.find_person("Sam").unwrap().id;
         assert!(r.may_act_for(tablet, sam) && r.may_act_for(tablet, kit));
 
+        // The hub's own Telegram accounts, and cutting one off.
+        let sam = r.find_person("Sam").unwrap().id;
+        r.link_telegram(900, sam, Some("@sam"), "link").unwrap();
+        r.link_telegram(901, sam, None, "env").unwrap();
+        let listed = run_line(&mut r, "telegram list").unwrap();
+        assert!(
+            listed.contains("900  Sam  linked by the person (@sam)")
+                && listed.contains("901  Sam  from the hub's settings"),
+            "{listed}"
+        );
+        assert!(
+            run_line(&mut r, "telegram unlink 900")
+                .unwrap()
+                .contains("unlinked 900 from Sam"),
+            "the unlink said otherwise"
+        );
+        assert!(r.telegram_link(900).unwrap().is_none());
+        assert!(
+            r.telegram_link(901).unwrap().is_some(),
+            "unlinking one account took another"
+        );
         // Revoke by name; the token dies at once.
         assert!(run_line(&mut r, "client revoke desk")
             .unwrap()
@@ -370,6 +449,9 @@ mod tests {
             "client add --person Sam --machine m --bogus 1",
             "client revoke",
             "pair --person Sam --machine",
+            "telegram unlink",
+            "telegram unlink notanumber",
+            "telegram unlink 12345678901234",
         ] {
             assert!(run_line(&mut r, bad).is_err(), "{bad}");
         }
