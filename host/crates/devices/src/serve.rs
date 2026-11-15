@@ -20,10 +20,12 @@
 use crate::link::{BoxFut, DeviceLink};
 use crate::subs::{self, Out, Subs, CHATS_SUB, PUSH_ROW_BUDGET};
 use crate::wire::{
-    code, AnswerArgs, ArchiveArgs, Caller, ChatIdArgs, CreateArgs, DeviceFrame, DeviceInfo,
-    DevicePerson, Frame, Hello, Op, PageArgs, PeerDevice, RemoteChat, RenameArgs, SendArgs,
-    SetModelArgs, ShareArgs, WireError, MAX_PAGE_ROWS, MAX_SEND_BYTES, SUB_ROWS,
+    code, AnswerArgs, ArchiveArgs, AttachPutArgs, AttachmentRef, Caller, ChatIdArgs, CreateArgs,
+    DeviceFrame, DeviceInfo, DevicePerson, Frame, Hello, Op, PageArgs, PeerDevice, RemoteChat,
+    RenameArgs, SendArgs, SetModelArgs, ShareArgs, WireError, MAX_CHUNK_BYTES, MAX_PAGE_ROWS,
+    MAX_SEND_ATTACHMENTS, MAX_SEND_BYTES, MAX_UPLOAD_BYTES, SUB_ROWS,
 };
+use base64::Engine as _;
 use helm_chats::types::{
     ChatRecord, Interaction, InteractionAttention, InteractionMethod, MessageRow,
 };
@@ -36,6 +38,16 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 pub type PortResult<T> = Result<T, WireError>;
+
+/// A file carried from another device, with its bytes, ready to hand to the chat.
+#[derive(Clone, Debug)]
+pub struct SentFile {
+    /// `image` or `file`.
+    pub kind: String,
+    pub name: String,
+    pub mime: String,
+    pub bytes: Vec<u8>,
+}
 
 /// A chat as a watcher opens it: the record, the live thread, what waits to be read.
 #[derive(Clone, Debug)]
@@ -90,13 +102,15 @@ pub trait ChatPort: Send + Sync {
     fn release_send(&self, client_id: &str);
     /// Send the text to the chat as the person's own words (origin `remote`). `from` names the
     /// household member who sent it when the chat is not theirs: then it is delivered as a
-    /// message from them, never as the owner's words.
+    /// message from them, never as the owner's words. `files` are the attachments carried with
+    /// it, exactly as a local send hands them over.
     fn send(
         &self,
         chat_id: String,
         client_id: String,
         text: String,
         from: Option<String>,
+        files: Vec<SentFile>,
     ) -> BoxFut<'_, PortResult<()>>;
     fn stop(&self, chat_id: String) -> BoxFut<'_, PortResult<()>>;
     fn answer(&self, a: AnswerArgs) -> BoxFut<'_, PortResult<()>>;
@@ -126,6 +140,25 @@ enum Asker {
 /// instant before the chat drops it.
 const ANSWERED_KEPT: usize = 256;
 
+/// How long an upload waits for the send that names it, and how many wait at once. Older ones
+/// are dropped when a new upload starts.
+const UPLOAD_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+const UPLOADS_KEPT: usize = 32;
+
+/// One file arriving chunk by chunk, joined and kept until a send names it.
+struct Upload {
+    chat_id: String,
+    kind: String,
+    name: String,
+    mime: String,
+    bytes: Vec<u8>,
+    /// The sequence number the next chunk must carry.
+    next_seq: u32,
+    /// Set by the chunk that ends the file; only complete files may be sent.
+    done: bool,
+    touched: Instant,
+}
+
 struct Inner {
     port: Arc<dyn ChatPort>,
     link: Arc<dyn DeviceLink>,
@@ -133,6 +166,8 @@ struct Inner {
     /// Which devices the hub says are up, from its last `devices` frame.
     online: Mutex<HashMap<String, bool>>,
     answered: Mutex<VecDeque<(String, String)>>,
+    /// Files in transit to chats that run here, by upload id.
+    uploads: Mutex<HashMap<String, Upload>>,
     events: mpsc::UnboundedSender<AppEvent>,
     _handle: Handle,
 }
@@ -153,6 +188,7 @@ impl Service {
             subs: Mutex::new(Subs::default()),
             online: Mutex::new(HashMap::new()),
             answered: Mutex::new(VecDeque::new()),
+            uploads: Mutex::new(HashMap::new()),
             events,
             _handle: handle.clone(),
         });
@@ -534,6 +570,10 @@ impl Inner {
                 done(json!({}))
             }
             Op::Page(a) => done(self.page(a).await?),
+            Op::AttachPut(a) => {
+                self.attach_put(a)?;
+                done(json!({}))
+            }
             Op::Send(a) => {
                 // A household member's words on a chat that is not theirs are marked as theirs.
                 let from = match asker {
@@ -588,6 +628,130 @@ impl Inner {
         Ok(page)
     }
 
+    /// Join one chunk into a file on its way to a chat that runs here. The first chunk names
+    /// the file; after that they must arrive in order. The bytes wait until a send names the
+    /// upload id.
+    fn attach_put(&self, a: AttachPutArgs) -> Result<(), WireError> {
+        if uuid::Uuid::parse_str(&a.upload_id).is_err() {
+            return Err(WireError::bad_args("uploadId must be a UUID."));
+        }
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(&a.data)
+            .map_err(|_| WireError::bad_args("data must be base64."))?;
+        if data.len() > MAX_CHUNK_BYTES {
+            return Err(WireError::new(
+                code::BAD_ARGS,
+                "A chunk carries at most 640 KiB.",
+            ));
+        }
+        let mut uploads = lock(&self.uploads);
+        uploads.retain(|_, u| u.touched.elapsed() <= UPLOAD_TTL);
+        if a.seq == 0 {
+            if !matches!(a.kind.as_str(), "image" | "file") || a.name.trim().is_empty() {
+                return Err(WireError::bad_args(
+                    "The first chunk names the file and whether it is an image or a file.",
+                ));
+            }
+            if uploads.len() >= UPLOADS_KEPT {
+                let oldest = uploads
+                    .iter()
+                    .min_by_key(|(_, u)| u.touched)
+                    .map(|(k, _)| k.clone());
+                if let Some(k) = oldest {
+                    uploads.remove(&k);
+                }
+            }
+            uploads.insert(
+                a.upload_id.clone(),
+                Upload {
+                    chat_id: a.chat_id.clone(),
+                    kind: a.kind.clone(),
+                    name: a.name.clone(),
+                    mime: a.mime.clone(),
+                    bytes: data,
+                    next_seq: 1,
+                    done: a.eof,
+                    touched: Instant::now(),
+                },
+            );
+            return Ok(());
+        }
+        let Some(u) = uploads.get_mut(&a.upload_id) else {
+            return Err(WireError::new(
+                code::REFUSED,
+                "That upload was not started, or it has been dropped; start it again.",
+            ));
+        };
+        if u.chat_id != a.chat_id {
+            return Err(WireError::bad_args(
+                "That upload id belongs to another chat.",
+            ));
+        }
+        if u.done {
+            return Err(WireError::new(
+                code::REFUSED,
+                "That upload is already complete.",
+            ));
+        }
+        if a.seq != u.next_seq {
+            return Err(WireError::new(
+                code::REFUSED,
+                "Chunks must arrive in order.",
+            ));
+        }
+        if u.bytes.len() + data.len() > MAX_UPLOAD_BYTES {
+            uploads.remove(&a.upload_id);
+            return Err(WireError::new(
+                code::REFUSED,
+                "A file sent from another device is at most 25 MiB.",
+            ));
+        }
+        u.bytes.extend_from_slice(&data);
+        u.next_seq += 1;
+        u.done = a.eof;
+        u.touched = Instant::now();
+        Ok(())
+    }
+
+    /// The bytes an earlier run of `attach_put` calls left for this send, in the order it
+    /// names them. A missing or unfinished upload is refused: the sender starts it again.
+    fn take_files(
+        &self,
+        chat_id: &str,
+        refs: &[AttachmentRef],
+    ) -> Result<Vec<SentFile>, WireError> {
+        if refs.len() > MAX_SEND_ATTACHMENTS {
+            return Err(WireError::new(
+                code::BAD_ARGS,
+                "A message can carry at most 20 attachments.",
+            ));
+        }
+        let mut files = Vec::with_capacity(refs.len());
+        if refs.is_empty() {
+            return Ok(files);
+        }
+        let uploads = lock(&self.uploads);
+        for r in refs {
+            let bad = || {
+                WireError::new(
+                    code::REFUSED,
+                    "A file did not finish uploading; send again.",
+                )
+            };
+            let u = uploads.get(&r.upload_id).ok_or_else(bad)?;
+            if u.chat_id != chat_id || !u.done {
+                return Err(bad());
+            }
+            files.push(SentFile {
+                kind: u.kind.clone(),
+                name: u.name.clone(),
+                mime: u.mime.clone(),
+                bytes: u.bytes.clone(),
+            });
+        }
+        Ok(files)
+    }
+
     async fn send(&self, a: SendArgs, from: Option<String>) -> Result<Value, WireError> {
         if a.text.trim().is_empty() {
             return Err(WireError::bad_args("There is nothing to send."));
@@ -601,6 +765,7 @@ impl Inner {
         if uuid::Uuid::parse_str(&a.client_id).is_err() {
             return Err(WireError::bad_args("clientId must be a UUID."));
         }
+        let files = self.take_files(&a.chat_id, &a.attachments)?;
         if !self.port.claim_send(&a.client_id, &a.chat_id)? {
             return Ok(json!({ "accepted": true, "duplicate": true }));
         }
@@ -608,10 +773,18 @@ impl Inner {
         // an idle chat starts a turn, a working one takes it in at its next tool boundary.
         let sent = self
             .port
-            .send(a.chat_id, a.client_id.clone(), a.text, from)
+            .send(a.chat_id, a.client_id.clone(), a.text, from, files)
             .await;
         match sent {
-            Ok(()) => Ok(json!({ "accepted": true })),
+            Ok(()) => {
+                // The uploads are spent only once the send went through; a refused one can be
+                // tried again with the same ids.
+                let mut uploads = lock(&self.uploads);
+                for r in &a.attachments {
+                    uploads.remove(&r.upload_id);
+                }
+                Ok(json!({ "accepted": true }))
+            }
             Err(e) => {
                 self.port.release_send(&a.client_id);
                 Err(e)

@@ -2,7 +2,7 @@
 //! builders for the records it holds. Nothing here touches a database, a process or a network.
 
 use crate::link::BoxFut;
-use crate::serve::{ChatPort, ChatState, PortResult};
+use crate::serve::{ChatPort, ChatState, PortResult, SentFile};
 use crate::wire::{
     code, AnswerArgs, ArchiveArgs, CreateArgs, DeviceInfo, DevicePerson, Hello, PersonInfo,
     ProjectInfo, RemoteChat, RenameArgs, SetModelArgs, ShareArgs, WireError,
@@ -112,6 +112,8 @@ pub struct FakeState {
     pub sent: Vec<(String, String, String)>,
     /// For each send, the household member it came from when the chat was not theirs.
     pub sent_from: Vec<Option<String>>,
+    /// For each send, the files it carried.
+    pub sent_files: Vec<Vec<SentFile>>,
     pub stopped: Vec<String>,
     pub answered: Vec<AnswerArgs>,
     pub created: Vec<CreateArgs>,
@@ -351,11 +353,13 @@ impl ChatPort for FakePort {
         client_id: String,
         text: String,
         from: Option<String>,
+        files: Vec<SentFile>,
     ) -> BoxFut<'_, PortResult<()>> {
         let mut st = self.st();
         let r = if st.chats.iter().any(|c| c.id() == chat_id) {
             st.sent.push((chat_id, client_id, text));
             st.sent_from.push(from);
+            st.sent_files.push(files);
             Ok(())
         } else {
             Err(WireError::not_found())

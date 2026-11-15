@@ -14,9 +14,10 @@
 //! An unconfirmed send is never sent again by this code: the person decides. Errors carry the
 //! codes `reconnecting`, `offline`, `not_allowed` and `unconfirmed`.
 
-use crate::mirror::{chat_value, local_page, Mirror, PAGE_ROWS, UNCONFIRMED};
+use crate::mirror::{chat_value, local_page, staged_dir, Mirror, PAGE_ROWS, UNCONFIRMED};
 use crate::serve::confirm_options;
-use crate::wire::{code, WireError};
+use crate::wire::{code, WireError, MAX_CHUNK_BYTES, MAX_SEND_ATTACHMENTS, MAX_UPLOAD_BYTES};
+use base64::Engine as _;
 use helm_chats::remote::{Fut, RemoteChats, Res};
 use helm_chats::types::{
     ChatSendArgs, ChatSetModelArgs, DraftSaveArgs, Interaction, InteractionAnswerArgs,
@@ -28,6 +29,18 @@ use serde_json::{json, Value};
 
 /// The most a draft may hold, as for a chat that runs here.
 const MAX_DRAFT_BYTES: usize = 2 * 1024 * 1024;
+
+/// One file staged on this PC for a send to a chat on another device.
+struct StagedFile {
+    /// `image` or `file`.
+    kind: String,
+    name: String,
+    mime: String,
+    /// Where its bytes sit here: a name in this PC's staged folder for a picture, an absolute
+    /// path for a file. Only pictures are removed after a send.
+    target: String,
+    bytes: Vec<u8>,
+}
 
 fn db_err(e: rusqlite::Error) -> ApiError {
     ApiError::internal(e.to_string())
@@ -140,6 +153,146 @@ impl Mirror {
 
     /// Ask the device, naming the people the call acts for (the acting person first); an
     /// empty set means the caller PC's own person, as before.
+    /// The files staged on this PC for a send to a remote chat, in the order the send names
+    /// them, with their bytes read in: pictures `devices_attach` saved here, and files it
+    /// referenced by path. An id that matches nothing staged is refused before any words move.
+    fn staged_attachments(
+        &self,
+        chat_id: &str,
+        ids: &[String],
+    ) -> Result<Vec<StagedFile>, ApiError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = self
+            .inner
+            .db
+            .snapshot(|tx| {
+                let mut out = Vec::new();
+                for id in ids {
+                    let row = tx
+                        .query_row(
+                            "SELECT kind, name, mime, target, bytes
+                             FROM mirror_attachments WHERE id = ?1 AND chat_id = ?2",
+                            rusqlite::params![id, chat_id],
+                            |r| {
+                                Ok((
+                                    r.get::<_, String>(0)?,
+                                    r.get::<_, String>(1)?,
+                                    r.get::<_, String>(2)?,
+                                    r.get::<_, String>(3)?,
+                                    r.get::<_, i64>(4)?,
+                                ))
+                            },
+                        )
+                        .optional()?;
+                    if let Some((kind, name, mime, target, size)) = row {
+                        out.push((id.clone(), kind, name, mime, target, size));
+                    }
+                }
+                Ok::<_, rusqlite::Error>(out)
+            })
+            .map_err(db_err)?;
+        let dir = staged_dir(self.inner.db.path());
+        let mut files = Vec::with_capacity(ids.len());
+        for (_id, kind, name, mime, target, size) in rows {
+            if size > MAX_UPLOAD_BYTES as i64 {
+                return Err(ApiError::new(
+                    "too_large",
+                    "A file sent to another device is at most 25 MB.",
+                ));
+            }
+            // A picture was saved here when it was attached; a file stays where it is and is
+            // read anew, so it crosses as it stands when the message goes.
+            let path = if kind == "image" {
+                dir.join(&target)
+            } else {
+                std::path::PathBuf::from(&target)
+            };
+            let bytes = std::fs::read(&path).map_err(|_| {
+                ApiError::new(
+                    "refused",
+                    "A staged file could not be read; attach it again.",
+                )
+            })?;
+            // The file may have changed since it was attached; the cap is checked anew.
+            if bytes.len() > MAX_UPLOAD_BYTES {
+                return Err(ApiError::new(
+                    "too_large",
+                    "A file sent to another device is at most 25 MB.",
+                ));
+            }
+            files.push(StagedFile {
+                kind,
+                name,
+                mime,
+                target,
+                bytes,
+            });
+        }
+        if files.len() != ids.len() {
+            return Err(ApiError::new(
+                "refused",
+                "An attachment is no longer staged; attach it again.",
+            ));
+        }
+        Ok(files)
+    }
+
+    /// Carry one staged file across as an ordered run of chunks, each small enough for the
+    /// line. The serving PC joins them and answers once the last has arrived.
+    async fn upload_file(
+        &self,
+        device: &str,
+        chat_id: &str,
+        f: &StagedFile,
+        upload_id: &str,
+        act: &[String],
+    ) -> Result<(), ApiError> {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let mut offset = 0usize;
+        let mut seq = 0u32;
+        loop {
+            let end = (offset + MAX_CHUNK_BYTES).min(f.bytes.len());
+            let eof = end == f.bytes.len();
+            let mut args = json!({
+                "chatId": chat_id,
+                "uploadId": upload_id,
+                "seq": seq,
+                "eof": eof,
+                "data": b64.encode(&f.bytes[offset..end]),
+            });
+            if seq == 0 {
+                args["kind"] = json!(f.kind);
+                args["name"] = json!(f.name);
+                args["mime"] = json!(f.mime);
+            }
+            self.ask_as(device, "attach_put", args, "a file", act)
+                .await?;
+            offset = end;
+            seq += 1;
+            if eof {
+                return Ok(());
+            }
+        }
+    }
+
+    /// A send that went through has spent its staged files here.
+    fn drop_staged(&self, ids: &[String], staged: &[StagedFile]) {
+        let dir = staged_dir(self.inner.db.path());
+        let _ = self.inner.db.write(|tx| {
+            for id in ids {
+                tx.execute("DELETE FROM mirror_attachments WHERE id = ?1", [id])?;
+            }
+            Ok::<_, rusqlite::Error>(())
+        });
+        for f in staged {
+            if f.kind == "image" {
+                let _ = std::fs::remove_file(dir.join(&f.target));
+            }
+        }
+    }
+
     async fn ask_as(
         &self,
         device: &str,
@@ -465,23 +618,40 @@ impl RemoteChats for Mirror {
         Box::pin(async move {
             let device = m.device_of(&a.chat_id)?;
             m.check_live(&device)?;
-            if a.attachments.as_ref().is_some_and(|v| !v.is_empty()) {
-                return Err(ApiError::new(
-                    "refused",
-                    "Images and files can't be sent to a chat on another device yet.",
+            let ids: Vec<String> = a.attachments.clone().unwrap_or_default();
+            if ids.len() > MAX_SEND_ATTACHMENTS {
+                return Err(ApiError::bad_args(
+                    "A message can carry at most 20 attachments.",
                 ));
             }
             let steer = a.action != SendAction::Default;
-            let args = json!({
+            // Never sent a second time from here: an unconfirmed send is the person's call.
+            let act = [m.acting(&a.chat_id)?];
+            // The files cross to that PC first, chunk by chunk; the send names the ids they
+            // arrived under. A refused upload stops here, before any words move.
+            let staged = m.staged_attachments(&a.chat_id, &ids)?;
+            let mut uploads = Vec::new();
+            for f in &staged {
+                let upload_id = uuid::Uuid::new_v4().to_string();
+                m.upload_file(&device, &a.chat_id, f, &upload_id, &act)
+                    .await?;
+                uploads.push(json!({ "uploadId": upload_id }));
+            }
+            let mut args = json!({
                 "chatId": a.chat_id,
                 "clientId": a.submission_id,
                 "text": a.text,
                 "mode": if steer { "steer" } else { "queue" },
             });
-            // Never sent a second time from here: an unconfirmed send is the person's call.
-            let act = [m.acting(&a.chat_id)?];
+            if !uploads.is_empty() {
+                args["attachments"] = json!(uploads);
+            }
             m.ask_as(&device, "send", args, "this message", &act)
                 .await?;
+            // The message arrived: this PC has no further use for the staged files.
+            if !ids.is_empty() {
+                m.drop_staged(&ids, &staged);
+            }
             if a.origin.unwrap_or_default() == SendOrigin::Composer {
                 let _ = m.inner.db.write(|tx| {
                     tx.execute(

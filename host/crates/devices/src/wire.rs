@@ -13,6 +13,8 @@
 //! | `dev_push` | both ways | `to`/`from (uid), sub, seq, event`: news for a subscription |
 //!
 //! Every frame is at most [`MAX_FRAME_BYTES`]; senders trim what they carry to stay under it.
+//! A file bigger than a frame crosses as an ordered run of `attach_put` calls (at most
+//! [`MAX_CHUNK_BYTES`] raw bytes each), and the `send` that follows names the upload ids.
 
 use helm_chats::types::ChatRecord;
 use serde::{Deserialize, Serialize};
@@ -311,7 +313,55 @@ pub struct SendArgs {
     pub client_id: String,
     pub text: String,
     pub mode: SendMode,
+    /// The files carried with the message. Their bytes came over just before, in `attach_put`
+    /// calls under these ids, and wait on this PC for the message that names them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentRef>,
 }
+
+/// One file's place in a send: the id its bytes came under.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttachmentRef {
+    pub upload_id: String,
+}
+
+/// One chunk of a file being carried to a chat on another PC. The first chunk (sequence 0)
+/// also names the file. Every frame is at most [`MAX_FRAME_BYTES`], so a large file comes in
+/// chunks; the serving PC joins them and keeps the whole bytes under the upload id until a
+/// send names it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttachPutArgs {
+    pub chat_id: String,
+    /// A fresh UUID per file, chosen by the sending side.
+    pub upload_id: String,
+    /// `image` or `file`, named with the first chunk.
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub mime: String,
+    /// The chunk's place in the file, from 0; one out of turn is refused.
+    #[serde(default)]
+    pub seq: u32,
+    /// Marks the last chunk. With it the file is complete.
+    #[serde(default)]
+    pub eof: bool,
+    /// Base64 of this chunk's bytes, at most [`MAX_CHUNK_BYTES`] raw.
+    #[serde(default)]
+    pub data: String,
+}
+
+/// Raw bytes a chunk carries. Its base64 plus the rest of the frame stays under
+/// [`MAX_FRAME_BYTES`].
+pub const MAX_CHUNK_BYTES: usize = 640 * 1024;
+/// The most bytes one upload may reach; the chats of the PC that receives answer with their
+/// own sentence past this.
+pub const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
+/// The most files one message sent from another device may carry.
+pub const MAX_SEND_ATTACHMENTS: usize = 20;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -380,6 +430,7 @@ pub enum Op {
     ChatUnsub(ChatIdArgs),
     ChatsUnsub,
     Page(PageArgs),
+    AttachPut(AttachPutArgs),
     Send(SendArgs),
     Stop(ChatIdArgs),
     Answer(AnswerArgs),
@@ -413,6 +464,7 @@ impl Op {
                 Op::ChatsUnsub
             }
             "page" => Op::Page(args(a)?),
+            "attach_put" => Op::AttachPut(args(a)?),
             "send" => Op::Send(args(a)?),
             "stop" => Op::Stop(args(a)?),
             "answer" => Op::Answer(args(a)?),
@@ -430,7 +482,8 @@ impl Op {
     pub fn is_run(&self) -> bool {
         matches!(
             self,
-            Op::Send(_)
+            Op::AttachPut(_)
+                | Op::Send(_)
                 | Op::Stop(_)
                 | Op::Answer(_)
                 | Op::Create(_)

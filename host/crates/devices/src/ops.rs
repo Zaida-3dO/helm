@@ -2,6 +2,7 @@
 
 use crate::identity::{self, DeviceError};
 use crate::mirror::{self, Mirror, MirrorSlot};
+use base64::Engine as _;
 use helm_chats::clock::Clock;
 use helm_core::db::Database;
 use helm_ipc::{ApiError, AppEvent, OpClass, OpCtx, OpRegistry};
@@ -15,7 +16,8 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("devices_list", OpClass::Blocking, devices_list)
         .blocking("devices_chats", OpClass::Blocking, devices_chats)
         .async_op("devices_create_chat", devices_create_chat)
-        .async_op("devices_open_chat", devices_open_chat);
+        .async_op("devices_open_chat", devices_open_chat)
+        .async_op("devices_attach", devices_attach);
 }
 
 fn fail(e: DeviceError) -> ApiError {
@@ -234,4 +236,155 @@ async fn devices_open_chat(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
         .await
         .map_err(|e| ApiError::new(&e.code, e.message))?;
     Ok(json!({}))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Attachments for a chat that runs on another device
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AttachArgs {
+    chat_id: String,
+    /// `image` or `file`.
+    kind: String,
+    name: String,
+    /// The image's mime type and bytes, base64 (an image).
+    #[serde(default)]
+    mime: Option<String>,
+    #[serde(default)]
+    data: Option<String>,
+    /// The file's path on this PC (a file): it is read when the message goes, not now.
+    #[serde(default)]
+    path: Option<String>,
+}
+
+/// `devices_attach`: stage an image or a file on this PC for the next message to a chat that
+/// runs on another device. The composer uses this instead of the chats' own `attachment_put`,
+/// which only knows chats that run here. Answers `{attachmentId}`; the send names it.
+async fn devices_attach(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: AttachArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    let db = ctx.services.need::<Database>()?;
+    let id = uuid::Uuid::new_v4().to_string();
+    match a.kind.as_str() {
+        "image" => {
+            let data = a
+                .data
+                .ok_or_else(|| ApiError::bad_args("An image comes with its bytes."))?;
+            // Base64 is about 4/3 of the bytes: refuse an oversized payload before decoding it.
+            if data.len() > helm_chats::attachments::MAX_IMAGE_BYTES / 3 * 4 + 8 {
+                return Err(ApiError::new("too_large", "An image can be at most 25 MB."));
+            }
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data.as_bytes())
+                .map_err(|_| ApiError::bad_args("bytes must be base64."))?;
+            let dir = mirror::staged_dir(db.path());
+            // The same checks as a local attachment: mime, size, pixels, stillness. The file
+            // is written now, under a fresh id, and stays until the send has gone through.
+            let staged = match helm_chats::attachments::stage_image(
+                &dir,
+                &a.name,
+                a.mime.as_deref().unwrap_or(""),
+                &bytes,
+            ) {
+                Ok(s) => s,
+                Err(r) => return Err(ApiError::from(r)),
+            };
+            let spec = Staged {
+                id: &staged.id,
+                chat_id: &a.chat_id,
+                kind: "image",
+                name: &staged.name,
+                mime: &staged.mime,
+                target: &staged.id,
+                bytes: bytes.len() as i64,
+            };
+            match stage_row(&db, &spec) {
+                Ok(()) => Ok(json!({ "attachmentId": staged.id })),
+                Err(e) => {
+                    // No row: the file would be left behind with nothing to name it.
+                    let _ = std::fs::remove_file(dir.join(&staged.id));
+                    Err(e)
+                }
+            }
+        }
+        "file" => {
+            let path = a
+                .path
+                .ok_or_else(|| ApiError::bad_args("A file comes with its path on this PC."))?;
+            let meta = std::fs::metadata(&path)
+                .map_err(|_| ApiError::new("not_found", "That file is not on this PC."))?;
+            if !meta.is_file() {
+                return Err(ApiError::bad_args("Only files can be attached."));
+            }
+            if meta.len() > helm_chats::attachments::MAX_FILE_BYTES as u64 {
+                return Err(ApiError::new("too_large", "A file can be at most 25 MB."));
+            }
+            let spec = Staged {
+                id: &id,
+                chat_id: &a.chat_id,
+                kind: "file",
+                name: &a.name,
+                mime: "",
+                target: &path,
+                bytes: meta.len() as i64,
+            };
+            stage_row(&db, &spec)?;
+            Ok(json!({ "attachmentId": id }))
+        }
+        other => Err(ApiError::bad_args(format!(
+            "kind must be image or file, not {other}."
+        ))),
+    }
+}
+
+/// One attachment checked and ready to record for a mirrored chat.
+struct Staged<'a> {
+    id: &'a str,
+    chat_id: &'a str,
+    kind: &'a str,
+    name: &'a str,
+    mime: &'a str,
+    /// A name in this PC's staged folder (picture) or the file's own path (file).
+    target: &'a str,
+    bytes: i64,
+}
+
+/// Record one staged attachment for a chat that is a copy of another device's. Only mirrored
+/// chats take one; a chat keeps at most the send limit of them waiting.
+fn stage_row(db: &Database, s: &Staged<'_>) -> Result<(), ApiError> {
+    let (chat_id, id, kind, name, mime, target, bytes) =
+        (s.chat_id, s.id, s.kind, s.name, s.mime, s.target, s.bytes);
+    db.write(|tx| {
+        let mirrored: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM mirror_chats WHERE chat_id = ?1)",
+            [chat_id],
+            |r| r.get(0),
+        )?;
+        if !mirrored {
+            return Ok(Err(ApiError::new(
+                "not_found",
+                "That chat does not run on another device of this household.",
+            )));
+        }
+        let waiting: i64 = tx.query_row(
+            "SELECT count(*) FROM mirror_attachments WHERE chat_id = ?1",
+            [chat_id],
+            |r| r.get(0),
+        )?;
+        if waiting >= helm_chats::attachments::MAX_PER_MESSAGE as i64 {
+            return Ok(Err(ApiError::new(
+                "refused",
+                "A message can carry at most 20 attachments.",
+            )));
+        }
+        tx.execute(
+            "INSERT INTO mirror_attachments(id, chat_id, kind, name, mime, target, bytes, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![id, chat_id, kind, name, mime, target, bytes, helm_core::now_ms()],
+        )?;
+        Ok(Ok(()))
+    })
+    .map_err(|e: rusqlite::Error| ApiError::internal(e.to_string()))?
 }

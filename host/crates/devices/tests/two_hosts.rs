@@ -793,6 +793,85 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         port.st().sent,
         [("c1".to_owned(), id.to_owned(), "hi".to_owned())]
     );
+
+    // A picture and a file ride with a message: staged on this PC, they cross in ordered
+    // chunks and reach the chat on the PC that runs it just as a local attachment would.
+    let stage = b.db.path().parent().unwrap().join("mirror-attachments");
+    std::fs::create_dir_all(&stage).unwrap();
+    let img: Vec<u8> = (0..650_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(stage.join("att-img"), &img).unwrap();
+    let note = b.db.path().with_file_name("big-note.txt");
+    let note_bytes: Vec<u8> = (0..700_004u32).map(|i| b'a' + (i % 26) as u8).collect();
+    std::fs::write(&note, &note_bytes).unwrap();
+    b.db.write(|tx| {
+        tx.execute(
+            "INSERT INTO mirror_attachments(id, chat_id, kind, name, mime, target, bytes, created_at)
+             VALUES ('att-img', 'c1', 'image', 'shot.png', 'image/png', 'att-img', ?1, 1)",
+            [img.len() as i64],
+        )?;
+        tx.execute(
+            "INSERT INTO mirror_attachments(id, chat_id, kind, name, mime, target, bytes, created_at)
+             VALUES ('att-file', 'c1', 'file', 'big-note.txt', '', ?1, ?2, 2)",
+            rusqlite::params![note.to_str().unwrap(), note_bytes.len() as i64],
+        )?;
+        Ok::<_, rusqlite::Error>(())
+    })
+    .unwrap();
+    let with_files = api
+        .call_host(
+            "chat_send",
+            json!({
+                "chatId": "c1",
+                "submissionId": "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b5b",
+                "text": "look",
+                "action": "default",
+                "draftRevision": 0,
+                "attachments": ["att-img", "att-file"],
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(with_files["submission"]["state"], "accepted");
+    {
+        let st = port.st();
+        let files = st.sent_files.last().unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(
+            (
+                files[0].kind.as_str(),
+                files[0].name.as_str(),
+                files[0].mime.as_str()
+            ),
+            ("image", "shot.png", "image/png")
+        );
+        assert_eq!(files[0].bytes, img);
+        assert_eq!(
+            (files[1].kind.as_str(), files[1].name.as_str()),
+            ("file", "big-note.txt")
+        );
+        assert_eq!(files[1].bytes, note_bytes);
+    }
+    // Spent by the send: the rows and the picture are gone from this PC.
+    assert_eq!(count(&b, "SELECT COUNT(*) FROM mirror_attachments"), 0);
+    assert!(!stage.join("att-img").exists());
+    // An id that is no longer staged is refused in words, before any second copy moves.
+    let e = api
+        .call_host(
+            "chat_send",
+            json!({
+                "chatId": "c1",
+                "submissionId": "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b5c",
+                "text": "again",
+                "action": "default",
+                "draftRevision": 0,
+                "attachments": ["att-img"],
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, "refused");
+    assert_eq!(port.st().sent.len(), 2);
+
     // Its switch off: read-only, said in words, nothing sent.
     port.set_run(false);
     host.announce();
@@ -819,7 +898,7 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         e.message.starts_with("Desk is offline (last seen "),
         "{e:?}"
     );
-    assert_eq!(port.st().sent.len(), 1);
+    assert_eq!(port.st().sent.len(), 2);
     let page = api
         .call_host("transcript_page", json!({"chatId": "c1"}))
         .await
@@ -843,7 +922,7 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         .await
         .unwrap();
     assert_eq!(got["chat"]["draft"], "note");
-    assert_eq!(port.st().sent.len(), 1);
+    assert_eq!(port.st().sent.len(), 2);
     // This PC's own line down reads differently.
     b.mirror.line_down();
     b.link.set_up(false);

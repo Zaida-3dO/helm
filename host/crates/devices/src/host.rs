@@ -8,12 +8,12 @@
 use crate::identity;
 use crate::link::BoxFut;
 use crate::sends;
-use crate::serve::{ChatPort, ChatState, PortResult};
+use crate::serve::{ChatPort, ChatState, PortResult, SentFile};
 use crate::wire::{
     code, AnswerArgs, ArchiveArgs, CreateArgs, DeviceInfo, DevicePerson, Hello, PersonInfo,
     ProjectInfo, RemoteChat, RenameArgs, SetModelArgs, ShareArgs, WireError,
 };
-use helm_chats::submit::{self, HostSend};
+use helm_chats::submit::{self, HostFile, HostImage, HostSend};
 use helm_chats::types::{ChatGetResult, ChatRecord, MessageRow, SubmissionOrigin};
 use helm_chats::{store, ChatRuntime};
 use helm_core::db::Database;
@@ -469,6 +469,7 @@ impl ChatPort for HostPort {
         client_id: String,
         text: String,
         from: Option<String>,
+        files: Vec<SentFile>,
     ) -> BoxFut<'_, PortResult<()>> {
         Box::pin(async move {
             self.here(&chat_id)?;
@@ -483,7 +484,26 @@ impl ChatPort for HostPort {
                 Some(name) => (household_message(&name, &text), SubmissionOrigin::OtherChat),
             };
             tokio::task::spawn_blocking(move || {
-                submit::host_send(
+                // The same path a send from the phone takes: the chat saves the pictures and
+                // files as a local send does, and the message carries them.
+                let images: Vec<HostImage<'_>> = files
+                    .iter()
+                    .filter(|f| f.kind == "image")
+                    .map(|f| HostImage {
+                        name: &f.name,
+                        mime: &f.mime,
+                        bytes: &f.bytes,
+                    })
+                    .collect();
+                let attached: Vec<HostFile<'_>> = files
+                    .iter()
+                    .filter(|f| f.kind != "image")
+                    .map(|f| HostFile {
+                        name: &f.name,
+                        bytes: &f.bytes,
+                    })
+                    .collect();
+                submit::host_send_with_attachments(
                     &rt,
                     HostSend {
                         chat_id: &chat_id,
@@ -491,6 +511,8 @@ impl ChatPort for HostPort {
                         text: &text,
                         origin,
                     },
+                    &images,
+                    &attached,
                 )
             })
             .await
