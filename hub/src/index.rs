@@ -500,20 +500,24 @@ pub fn chunk_text(description: &str, body: &str, fallback: &str) -> Vec<(String,
     out
 }
 
+/// A memory row as the mirror needs it: title, description, body, tags, owner,
+/// visibility, vector, model, dim, and the update time in milliseconds.
+type MemoryRow = (
+    String,
+    String,
+    String,
+    String,
+    Option<i64>,
+    String,
+    Option<Vec<u8>>,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+);
+
 /// Write the mirror doc of memory `id` (or remove it, if the memory is gone).
 pub fn mirror_memory(conn: &Connection, id: i64) -> rusqlite::Result<Delta> {
-    let row: Option<(
-        String,
-        String,
-        String,
-        String,
-        Option<i64>,
-        String,
-        Option<Vec<u8>>,
-        Option<String>,
-        Option<i64>,
-        Option<i64>,
-    )> = conn
+    let row: Option<MemoryRow> = conn
         .query_row(
             "SELECT title, description, body, tags, owner_person, visibility, vector, model, dim,
                     CAST(strftime('%s', updated_at) AS INTEGER) * 1000
@@ -1836,7 +1840,7 @@ mod tests {
             "{:?}",
             chunks.iter().map(|c| c.1.len()).collect::<Vec<_>>()
         );
-        assert_eq!(chunks[0].1.starts_with("about it"), true);
+        assert!(chunks[0].1.starts_with("about it"));
         assert!(chunks.iter().any(|(h, _)| h == "Two"));
         assert_eq!(chunks.last().map(|c| c.0.as_str()), Some("Three"));
         // Nothing is lost.
