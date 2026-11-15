@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { McpPreset, McpServer } from '../../api/mcp.ts';
 import { GOOGLE_PRESET, SIGN_IN_WINDOW_MS, blockState, clientSaved, emailLooksValid, watchState, type GoogleAccountList } from './google.ts';
-import { connectLabel } from './oauth.ts';
+import { canDisconnect, connectLabel } from './oauth.ts';
 import { blankServer, draftFromPreset, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable } from './readiness.ts';
 
 const hub: McpPreset = {
@@ -54,6 +54,9 @@ test('a browser-signed-in server asks for the browser, never for a token field',
   assert.equal(connectLabel(undefined, 'idle'), 'Connect');
   assert.equal(connectLabel({ connected: true }, 'signin_required'), 'Sign in again');
   assert.equal(connectLabel({ connected: true }, 'connected'), undefined);
+  assert.equal(canDisconnect({ connected: true }), true);
+  assert.equal(canDisconnect({ connected: false }), false);
+  assert.equal(canDisconnect(undefined), false);
 });
 
 test('the empty page names a reason and where to act', () => {

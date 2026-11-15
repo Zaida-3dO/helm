@@ -14,7 +14,8 @@ export function oauthOps(api: Api) {
     /** Opens the browser sign-in; resolves when it finishes, refuses while it can still be retried. */
     connect: (serverId: string) => api<OAuthStatus>('mcp_oauth_connect', { serverId }),
     status: (serverId: string) => api<OAuthStatus>('mcp_oauth_status', { serverId }),
-    forget: (serverId: string) => api<OAuthStatus>('mcp_oauth_disconnect', { serverId }),
+    /** Forgets the kept sign-in (nothing is revoked at the server). Answers nothing. */
+    forget: (serverId: string) => api<null>('mcp_oauth_disconnect', { serverId }),
   };
 }
 
@@ -23,6 +24,11 @@ export type OAuthOps = ReturnType<typeof oauthOps>;
 /** True for a server at an address that signs in through the browser. */
 export function isOAuthServer(s: McpServer): boolean {
   return s.transport.type !== 'stdio' && !!s.transport.oauth;
+}
+
+/** True when a sign-in is kept for the server, so Disconnect is worth offering. */
+export function canDisconnect(status: OAuthStatus | undefined): boolean {
+  return !!status?.connected;
 }
 
 /** The button a row offers for browser sign-in, or nothing when there is nothing to offer. */
