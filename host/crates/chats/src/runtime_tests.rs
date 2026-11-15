@@ -8,7 +8,7 @@ use helm_core::profile::Profile;
 use helm_ipc::{Caller, Dispatcher, OpCtx, OpRegistry, RecordingSink, Services};
 use helm_workers::WorkerOutput;
 use serde_json::{json, Map, Value};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -17,9 +17,15 @@ struct FakeLink {
     cmds: mpsc::UnboundedSender<Value>,
     out: mpsc::Sender<WorkerOutput>,
     terminated: AtomicBool,
+    /// How many processes this worker's group reports (the worker and the CLI make two).
+    tree: Arc<AtomicU32>,
 }
 
 impl WorkerLink for FakeLink {
+    fn tree_size(&self) -> Option<u32> {
+        Some(self.tree.load(Ordering::SeqCst))
+    }
+
     fn send(&self, command: &Value) -> bool {
         self.cmds.send(command.clone()).is_ok()
     }
@@ -40,6 +46,8 @@ pub struct FakeWorker {
     pub req: SpawnRequest,
     cmds: mpsc::UnboundedReceiver<Value>,
     out: mpsc::Sender<WorkerOutput>,
+    /// The size of the group this worker reports; a test grows it to play a build starting.
+    pub tree: Arc<AtomicU32>,
 }
 
 impl FakeWorker {
@@ -149,6 +157,8 @@ pub struct FakeSpawner {
     /// The triage helper's answer.
     pub triage: Mutex<Result<(bool, String), String>>,
     pub triage_jobs: Mutex<Vec<Value>>,
+    /// The group size a worker reports when it starts.
+    pub tree_at_launch: AtomicU32,
 }
 
 impl Spawner for FakeSpawner {
@@ -158,16 +168,19 @@ impl Spawner for FakeSpawner {
         }
         let (ctx, crx) = mpsc::unbounded_channel();
         let (otx, orx) = mpsc::channel(256);
+        let tree = Arc::new(AtomicU32::new(self.tree_at_launch.load(Ordering::SeqCst)));
         let link = Arc::new(FakeLink {
             cmds: ctx,
             out: otx.clone(),
             terminated: AtomicBool::new(false),
+            tree: tree.clone(),
         });
         // A test that has already finished no longer listens; that is not this test's failure.
         let _ = self.tx.send(FakeWorker {
             req: req.clone(),
             cmds: crx,
             out: otx,
+            tree,
         });
         Ok((link, orx))
     }
@@ -262,6 +275,7 @@ pub fn harness_with_services(limits: Limits, extra: impl FnOnce(&mut Services)) 
         title_jobs: Mutex::new(Vec::new()),
         triage: Mutex::new(Err("no triage in this test".into())),
         triage_jobs: Mutex::new(Vec::new()),
+        tree_at_launch: AtomicU32::new(2),
     });
     let rt = ChatRuntime::new(
         db.clone(),
@@ -2741,16 +2755,20 @@ async fn a_worker_that_never_answers_the_stop_is_killed_at_the_archive_limit() {
 
 /// A busy chat reports a live state (generating, tool, waitingUser, silent) that the tick
 /// maintains without asking any model. Only the silent one is flagged, and when it is, the flag,
-/// the attention row and a one-per-spell note to the parent chat all say the same thing; a
-/// running tool call and a card waiting on the person never raise it, and the next output ends
-/// the whole thing.
+/// the attention row and a note to a busy parent chat all say the same thing (at most one note
+/// per child per hour, and none to an idle parent: a timer starts no model call); a running tool
+/// call and a card waiting on the person never raise it, and the next output ends the whole
+/// thing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_silent_running_chat_shows_as_stalled_until_output() {
     let mut h = harness_with(Limits {
         tick: Duration::from_millis(50),
         ..limits()
     });
-    let parent = h.create().await;
+    // The parent is mid-turn on a tool call, which is never silent, so only the child is flagged.
+    let (parent, _, pw) = running_turn(&mut h).await;
+    pw.emit(json!({"type": "tool_execution_start", "toolCallId": "pt", "toolName": "Bash", "args": {"command": "sleep"}, "stoppable": true}))
+        .await;
     // The silent window starts parked (the harness default): on a loaded machine the start-up
     // itself can outlast a short window, which would let the first observed state be `silent`
     // rather than `generating`. The window is shortened once the turn is demonstrably open.
@@ -2825,13 +2843,13 @@ async fn a_silent_running_chat_shows_as_stalled_until_output() {
         h.col(&format!(
             "SELECT m.origin FROM submissions s \
              JOIN submission_meta m ON m.submission_id = s.id \
-             WHERE s.chat_id = '{parent}'"
+             WHERE s.chat_id = '{parent}' AND m.origin = 'app'"
         )) == ["app"]
     })
     .await;
     assert!(
         h.col(&format!(
-            "SELECT text FROM submissions WHERE chat_id = '{parent}'"
+            "SELECT text FROM submissions WHERE chat_id = '{parent}' AND text LIKE 'Helm noticed%'"
         ))[0]
             .contains("silent for"),
         "the note says what and how long"
@@ -2841,21 +2859,62 @@ async fn a_silent_running_chat_shows_as_stalled_until_output() {
     h.until("unstalled", |h| flag(h) == ["0"]).await;
     h.until("generating again", |h| state(h) == "generating")
         .await;
-    // The note goes once per silent spell: this chat recovered, so a fresh silent gets a fresh
-    // note — and never more than one while it stays silent.
+    // The note goes once per hour per child: this chat recovered and went silent again, and the
+    // parent is not told a second time.
     let notes = |h: &H| {
         h.col(&format!(
-            "SELECT count(*) FROM submissions WHERE chat_id = '{parent}'"
+            "SELECT count(*) FROM submissions WHERE chat_id = '{parent}' AND text LIKE 'Helm noticed%'"
         ))
     };
     tokio::time::sleep(Duration::from_millis(1150)).await;
     h.until("stalled again", |h| flag(h) == ["1"]).await;
-    // The note for the new spell arrives on its own task: wait for it, then check it stays the
-    // only one while the chat keeps saying nothing.
-    h.until("the new spell tells the parent once", |h| notes(h) == ["2"])
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        notes(&h),
+        ["1"],
+        "a second spell adds nothing within the hour"
+    );
+
+    // A parent that is idle is left idle: its silent child raises the flag and nothing else.
+    let idle = h.create().await;
+    let (child2, _, _w2) = running_turn(&mut h).await;
+    h.db.write(|tx| {
+        tx.execute(
+            "UPDATE chats SET parent_chat_id = ?1 WHERE id = ?2",
+            [&idle, &child2],
+        )
+    })
+    .unwrap();
+    h.until("the second child is flagged", |h| {
+        h.col(&format!(
+            "SELECT stalled FROM chat_activity WHERE chat_id = '{child2}'"
+        )) == ["1"]
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        h.col(&format!(
+            "SELECT count(*) FROM submissions WHERE chat_id = '{idle}'"
+        )),
+        ["0"],
+        "no turn is opened in an idle parent"
+    );
+
+    // A chat whose own helpers (tool servers, say) keep its process group at three from the
+    // start still goes silent at the ordinary limit; only a group that grows past what it
+    // began with (a build left running) stretches the limit and clears the flag.
+    h.spawner.tree_at_launch.store(3, Ordering::SeqCst);
+    let (c3, _, w3) = running_turn(&mut h).await;
+    let flag3 = |h: &H| {
+        h.col(&format!(
+            "SELECT stalled FROM chat_activity WHERE chat_id = '{c3}'"
+        ))
+    };
+    h.until("silent at the ordinary limit", |h| flag3(h) == ["1"])
         .await;
-    tokio::time::sleep(Duration::from_millis(650)).await;
-    assert_eq!(notes(&h), ["2"], "staying silent adds nothing");
+    w3.tree.store(4, Ordering::SeqCst);
+    h.until("a grown group stretches the limit", |h| flag3(h) == ["0"])
+        .await;
 }
 
 /// A muted chat leaves the badge and every group, but keep-awake still counts it.
@@ -6525,6 +6584,43 @@ async fn a_model_change_while_only_a_queue_wait_runs_restarts_the_turn_now() {
     hw.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-held"}))
         .await;
     hw.expect("shutdown").await;
+
+    // Between steps of a turn that has already replied and run a tool: nothing is in flight,
+    // but starting the turn again would repeat what it did. The change waits for the idle point
+    // and the opening message is not sent a second time.
+    let bc = h.create().await;
+    h.send(&bc, "ship it", "default").await;
+    let mut bw = h.worker().await;
+    bw.ready().await;
+    let p = bw.expect("prompt").await;
+    ack(&bw, &p).await;
+    bw.emit(json!({"type": "agent_start"})).await;
+    reply(&h, &bw, "mb1", "Pushing now.").await;
+    bw.emit(json!({"type": "tool_execution_start", "toolCallId": "tb1", "toolName": "Bash", "args": {"command": "git push"}, "stoppable": true}))
+        .await;
+    bw.emit(json!({"type": "tool_execution_end", "toolCallId": "tb1", "toolName": "Bash", "result": {"text": "pushed"}, "isError": false}))
+        .await;
+    h.until("the tool call finished", |h| {
+        h.col(&format!(
+            "SELECT status FROM messages WHERE chat_id = '{bc}' AND tool_call_id = 'tb1'"
+        )) == ["complete"]
+    })
+    .await;
+    h.call(
+        "chat_set_model",
+        json!({"chatId": &bc, "model": "local/ollama/qwen3:8b"}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        bw.no_command_for(Duration::from_millis(200))
+            .await
+            .is_none(),
+        "a turn that has acted is not stopped and opened again"
+    );
+    bw.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-b"}))
+        .await;
+    bw.expect("shutdown").await;
 }
 
 /// A send that lands while the previous worker is still winding down (a relaunch from any
@@ -7323,7 +7419,7 @@ async fn new_local_turns_wait_when_the_server_carries_its_cap() {
     h.until("and shows its place in line", |h| {
         h.col(&format!(
             "SELECT local_ahead FROM chat_activity WHERE chat_id = '{third}'"
-        )) == ["2"]
+        )) == ["1"]
             && serde_json::from_str::<Value>(
                 &h.col(&format!(
                     "SELECT COALESCE(state, 'null') FROM chat_activity WHERE chat_id = '{third}'"
@@ -7364,4 +7460,88 @@ async fn new_local_turns_wait_when_the_server_carries_its_cap() {
         sid3.as_str(),
         "the same message opens the turn"
     );
+
+    // Cap one, one chat working and two waiting: the waiters do not count each other as busy,
+    // so the oldest starts the moment the place frees, and the next only after it.
+    ack(&w3, &p3).await;
+    w3.emit(json!({"type": "agent_start"})).await;
+    w2.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-c2"}))
+        .await;
+    w3.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-c3"}))
+        .await;
+    h.until("the first three chats are idle", |h| {
+        [&first, &second, &third]
+            .iter()
+            .all(|c| h.status(c) == "idle")
+    })
+    .await;
+    h.db.write(|tx| helm_core::prefs::set_generic(tx, "localChatCap", &json!(1)))
+        .unwrap();
+    let c4 = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
+        )
+        .await
+        .unwrap(),
+    );
+    h.send(&c4, "job four", "default").await;
+    let mut w4 = h.worker().await;
+    w4.ready().await;
+    let p4 = w4.expect("prompt").await;
+    ack(&w4, &p4).await;
+    w4.emit(json!({"type": "agent_start"})).await;
+    let c5 = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
+        )
+        .await
+        .unwrap(),
+    );
+    let (sid5, _) = h.send(&c5, "job five", "default").await;
+    h.until("the fifth waits for the place", |h| {
+        h.status(&c5) == "starting" && !asked(h, &c5)
+    })
+    .await;
+    let c6 = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
+        )
+        .await
+        .unwrap(),
+    );
+    let (sid6, _) = h.send(&c6, "job six", "default").await;
+    let ahead_of = |h: &H, id: &str| {
+        h.col(&format!(
+            "SELECT COALESCE(local_ahead, 'NULL') FROM chat_activity WHERE chat_id = '{id}'"
+        ))
+    };
+    h.until("the sixth waits behind the fifth", |h| {
+        ahead_of(h, &c5) == ["1"] && ahead_of(h, &c6) == ["2"] && !asked(h, &c6)
+    })
+    .await;
+    w4.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-c4"}))
+        .await;
+    h.until("the oldest waiter takes the place", |h| asked(h, &c5))
+        .await;
+    let mut w5 = h.worker().await;
+    w5.ready().await;
+    let p5 = w5.expect("prompt").await;
+    assert_eq!(p5["submissionId"], sid5.as_str(), "in the order they sent");
+    ack(&w5, &p5).await;
+    w5.emit(json!({"type": "agent_start"})).await;
+    h.until("the sixth keeps waiting while the fifth works", |h| {
+        ahead_of(h, &c6) == ["1"] && !asked(h, &c6)
+    })
+    .await;
+    w5.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-c5"}))
+        .await;
+    h.until("and the sixth goes when it ends", |h| asked(h, &c6))
+        .await;
+    let mut w6 = h.worker().await;
+    w6.ready().await;
+    let p6 = w6.expect("prompt").await;
+    assert_eq!(p6["submissionId"], sid6.as_str());
 }

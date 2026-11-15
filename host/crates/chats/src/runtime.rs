@@ -621,6 +621,10 @@ pub(crate) struct Live {
     /// known. The mirror of the chat record's `localAhead` (the [`crate::store`] read); set and
     /// cleared by the maintenance tick's check, the first output, and the turn's end.
     pub local_ahead: Option<i64>,
+    /// This chat's turn is held at its start because the server already carries its cap of our
+    /// chats: the place it took in the line (smaller goes first). A chat held here is not working,
+    /// so it does not count against the cap, and the oldest waiter starts first.
+    pub held_at_start: Option<u64>,
 }
 
 /// One local model server's load right now: chats with a turn open on it and working, and chats

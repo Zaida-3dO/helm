@@ -218,6 +218,17 @@ struct Actor {
     /// is only its life before Claude has read it). A provider switch that stops a quiet turn to
     /// restart it on the new model sends this one again.
     turn_opened_by: Option<String>,
+    /// When a note about this chat going silent last reached its parent: one per hour at most.
+    silent_noted_at: Option<Instant>,
+    /// The open turn has produced something: an assistant message began or a tool call started.
+    /// A turn that has acted is never opened again by a provider switch (its side effects would
+    /// repeat); the change waits for the next idle point instead.
+    turn_acted: bool,
+    /// How many processes the worker's kill-group held when the worker was ready and when the
+    /// turn opened, whichever is larger: what a chat's own helpers (native tool servers, a
+    /// language server) keep running all the time. Only a tree grown past it means something the
+    /// chat started is still working.
+    tree_base: u32,
     /// A provider switch stopped this turn to restart it: the submission to open the next turn
     /// once the stop has settled, on a fresh worker for the new model.
     switch_restart: Option<String>,
@@ -349,6 +360,8 @@ const WARM_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(300);
 /// A local server answers one request at a time, so this is how many chats can be "working"
 /// there at once; the rest wait, visibly, with their place in line.
 const DEFAULT_LOCAL_CAP: u64 = 3;
+/// The least time between two notes from one child to its parent about the child being silent.
+const SILENT_NOTE_GAP: std::time::Duration = std::time::Duration::from_secs(3600);
 
 pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
     let (tx, rx) = mpsc::channel(64);
@@ -393,6 +406,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         server_id: None,
         turn_opened_ms: None,
         local_ahead: None,
+        held_at_start: None,
     }));
     let actor = Actor {
         sh: sh.clone(),
@@ -409,6 +423,9 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         run_id: None,
         turn_opener: None,
         turn_opened_by: None,
+        turn_acted: false,
+        tree_base: 2,
+        silent_noted_at: None,
         switch_restart: None,
         stopping: None,
         stop_ended: false,
@@ -786,6 +803,7 @@ impl Actor {
             } else {
                 live.turn_opened_ms = None;
                 live.server_id = None;
+                live.held_at_start = None;
                 // The waiting flag belongs to the turn; it is gone with it.
                 live.local_ahead.take()
             }
@@ -1205,6 +1223,7 @@ impl Actor {
         // The start itself runs on the blocking pool; a failure comes back as `SpawnFailed`.
         let (link, out) = crate::spawning::spawn_off_actor(&self.sh, req);
         self.link = Some(link);
+        self.tree_base = 2;
         self.worker_started = Some(Instant::now());
         self.out = Some(out);
         self.ready = false;
@@ -1331,6 +1350,7 @@ impl Actor {
             }
         }
         self.ready = true;
+        self.sample_tree_base();
         // Registered start lines (for example `mcp_config`) go ahead of anything deferred.
         let start = crate::hostcalls::start_lines(&self.sh, &self.chat_id);
         for cmd in start.into_iter().chain(std::mem::take(&mut self.deferred)) {
@@ -1407,6 +1427,7 @@ impl Actor {
             if let Some((sid, held)) = self.start_wait.take() {
                 self.give_back(std::iter::once(sid).chain(held).collect());
             }
+            self.set_held_at_start(false);
             let error = if self
                 .sh
                 .shutting_down
@@ -1545,6 +1566,7 @@ impl Actor {
         }
         self.stream.clear();
         self.turn_opened_by = None;
+        self.turn_acted = false;
         if self.state.is_some() {
             self.publish_state(None);
         }
@@ -1738,14 +1760,36 @@ impl Actor {
         self.emit_chat();
     }
 
-    /// A child chat went silent: say so in its parent once per silent spell, so an orchestrator
-    /// learns of it without polling. The stalled flag on the child covers the person watching
-    /// the board; this covers the chat that made the child.
-    fn notify_parent_silent(&self, since: i64) {
+    /// A child chat went silent: say so in its parent, so an orchestrator learns of it without
+    /// polling. The stalled flag on the child covers the person watching the board; this covers
+    /// the chat that made the child.
+    ///
+    /// The note goes only to a parent that is busy: it joins the turn already open, as a message
+    /// does. An idle parent is left idle (a timer must not start a model call), and finds the
+    /// child's silence in the chat list when it next looks. A child tells its parent once per
+    /// [`SILENT_NOTE_GAP`] at most, however often it flips between silent and talking.
+    fn notify_parent_silent(&mut self, since: i64) {
         let Some(chat) = self.chat() else { return };
         let Some(parent) = chat.parent_chat_id.clone() else {
             return;
         };
+        if self
+            .silent_noted_at
+            .is_some_and(|t| t.elapsed() < SILENT_NOTE_GAP)
+        {
+            return;
+        }
+        let parent_busy = self
+            .sh
+            .actors
+            .lock()
+            .unwrap()
+            .get(&parent)
+            .is_some_and(|h| h.live.lock().unwrap().thread.status.is_busy());
+        if !parent_busy {
+            return;
+        }
+        self.silent_noted_at = Some(Instant::now());
         let minutes = ((now() - since) / 60_000).max(1);
         let text = format!(
             "Helm noticed: your subchat \"{}\" has been silent for {minutes} minute{} — its turn \
@@ -2209,13 +2253,12 @@ impl Actor {
                 // opened has no launched model, so nothing else would keep its place on show.
                 if let Some((sid, held)) = self.start_wait.take() {
                     let server = self.chat().and_then(|c| local_of(&c)).map(|(s, _)| s);
-                    match server {
-                        Some(s) if self.over_local_cap(&s) => {
-                            let ahead = self.chats_busy_on(&s) as i64;
+                    match server.and_then(|s| self.start_place(&s)) {
+                        Some(ahead) => {
                             self.start_wait = Some((sid, held));
                             self.set_local_ahead(Some(ahead));
                         }
-                        _ => {
+                        None => {
                             self.set_local_ahead(None);
                             self.restart_prepare(sid, held);
                         }
@@ -2232,9 +2275,17 @@ impl Actor {
                 // Something this chat started (a build) is still in the worker's process tree:
                 // its silence is that process working, so the limit stretches.
                 let busy_tree = self.link.as_ref().and_then(|l| l.tree_size()).unwrap_or(0);
-                let limit = if busy_tree >= 3 { base * 3 } else { base };
+                let limit = if busy_tree > self.tree_base {
+                    base * 3
+                } else {
+                    base
+                };
                 let state = self.compute_state(limit);
                 let silent_now = matches!(state, Some(crate::types::ChatState::Silent { .. }));
+                // A turn held at its start for longer than the silent limit is flagged too, so a
+                // line that never moves does not read as "Queued" for ever. It stays Queued: it
+                // is waiting, not silent, and a parent is not told it is lost.
+                let held_long = self.start_wait.is_some() && self.last_output.elapsed() >= limit;
                 let stalled = self.live.lock().unwrap().stalled;
                 self.publish_state(state.clone());
                 if silent_now && !stalled {
@@ -2242,7 +2293,9 @@ impl Actor {
                     if let Some(crate::types::ChatState::Silent { since }) = state {
                         self.notify_parent_silent(since);
                     }
-                } else if !silent_now && stalled {
+                } else if held_long && !stalled {
+                    self.set_stalled(true);
+                } else if !silent_now && !held_long && stalled {
                     self.set_stalled(false);
                 }
             }
@@ -2440,6 +2493,8 @@ impl Actor {
         if !busy {
             self.turn_opener = Some(sid.to_owned());
             self.turn_opened_by = Some(sid.to_owned());
+            self.turn_acted = false;
+            self.sample_tree_base();
         }
         let row = if !busy {
             // A prompt that opens a turn: its user row shows at once, as saved.
@@ -2686,9 +2741,14 @@ impl Actor {
             // live retelling below, where the worker turns the new effort into the
             // local model's thinking budget without a respawn.
             if self.status().is_busy() || self.agents_running() {
-                if self.agents_running() || !self.turn_quiet() || self.turn_opened_by.is_none() {
-                    // Something is genuinely in flight: the change lands at the next idle
-                    // point, as it always did.
+                if self.agents_running()
+                    || !self.turn_quiet()
+                    || self.turn_opened_by.is_none()
+                    || self.turn_acted
+                {
+                    // Something is in flight, or the turn has already replied or run a tool
+                    // (starting it again would repeat what it did): the change lands at the
+                    // next idle point, as it always did.
                     self.relaunch_on_idle = true;
                     self.provider_switch_pending = true;
                 } else {
@@ -2759,9 +2819,28 @@ impl Actor {
         }
     }
 
-    /// How many other chats of ours have a turn open on this server right now, working or
-    /// waiting — the number the soft cap compares against.
-    fn chats_busy_on(&self, server: &str) -> usize {
+    /// Whether this chat's turn may open on `server` now. `None` means it may; `Some(ahead)` means
+    /// it waits at its start, `ahead` being how many chats must go first: the chats held at the
+    /// start before it, and the chats working on the server beyond what leaves it a place.
+    ///
+    /// The server carries at most `localChatCap` of our chats (0 switches the cap off). A local
+    /// server answers one request at a time, so each chat piled onto it only lengthens every
+    /// wait. Only chats that are working count against the cap: a chat held at its start is not
+    /// working, so waiters never block each other. They go in the order they began to wait, the
+    /// oldest first.
+    fn start_place(&self, server: &str) -> Option<i64> {
+        let cap = self
+            .sh
+            .db
+            .snapshot(|tx| Ok::<_, rusqlite::Error>(helm_core::prefs::read(tx, "localChatCap")))
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_u64())
+            .unwrap_or(DEFAULT_LOCAL_CAP) as usize;
+        if cap == 0 {
+            return None;
+        }
+        let mine = self.live.lock().unwrap().held_at_start;
         let handles: Vec<crate::runtime::ActorHandle> = self
             .sh
             .actors
@@ -2771,29 +2850,36 @@ impl Actor {
             .filter(|(id, _)| **id != self.chat_id)
             .map(|(_, h)| h.clone())
             .collect();
-        handles
-            .iter()
-            .filter(|h| {
-                let l = h.live.lock().unwrap();
-                l.thread.status.is_busy() && l.server_id.as_deref() == Some(server)
-            })
-            .count()
+        let (mut working, mut older) = (0usize, 0usize);
+        for h in handles {
+            let l = h.live.lock().unwrap();
+            if !l.thread.status.is_busy() || l.server_id.as_deref() != Some(server) {
+                continue;
+            }
+            match (l.held_at_start, mine) {
+                (None, _) => working += 1,
+                // A chat that has not yet begun to wait goes behind every waiter.
+                (Some(_), None) => older += 1,
+                (Some(theirs), Some(mine)) if theirs < mine => older += 1,
+                _ => {}
+            }
+        }
+        if older == 0 && working < cap {
+            return None;
+        }
+        Some((older + (working + 1).saturating_sub(cap)) as i64)
     }
 
-    /// Whether this server already carries [`DEFAULT_LOCAL_CAP`] of our chats (the stored
-    /// `localChatCap`; 0 switches the cap off). A local server answers one request at a time,
-    /// so each chat piled onto it deepens everyone's wait without any of them working faster —
-    /// the house rule an orchestrator used to have to remember by hand.
-    fn over_local_cap(&self, server: &str) -> bool {
-        let cap = self
-            .sh
-            .db
-            .snapshot(|tx| Ok::<_, rusqlite::Error>(helm_core::prefs::read(tx, "localChatCap")))
-            .ok()
-            .flatten()
-            .and_then(|v| v.as_u64())
-            .unwrap_or(DEFAULT_LOCAL_CAP);
-        cap > 0 && self.chats_busy_on(server) >= cap as usize
+    /// Note that this chat's turn is held at its start (keeping its place if it already was) or
+    /// is not. The place is a sequence number taken when the wait began.
+    fn set_held_at_start(&self, on: bool) {
+        static NEXT_PLACE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let mut live = self.live.lock().unwrap();
+        live.held_at_start = match (on, live.held_at_start) {
+            (true, None) => Some(NEXT_PLACE.fetch_add(1, std::sync::atomic::Ordering::SeqCst)),
+            (true, kept) => kept,
+            (false, _) => None,
+        };
     }
 
     /// A chat on a local model gets its model made ready before each turn it opens (the memory
@@ -2812,14 +2898,17 @@ impl Actor {
             self.refuse_local(&[sid.to_owned()], crate::local::NOT_AVAILABLE);
             return true;
         };
-        if self.over_local_cap(&server_id) {
-            self.last_output = Instant::now();
+        if let Some(ahead) = self.start_place(&server_id) {
+            if self.start_wait.is_none() {
+                self.last_output = Instant::now();
+            }
+            self.set_held_at_start(true);
             self.set_status(ChatStatus::Starting, None);
-            let ahead = self.chats_busy_on(&server_id) as i64;
             self.start_wait = Some((sid.to_owned(), Vec::new()));
             self.set_local_ahead(Some(ahead));
             return true;
         }
+        self.set_held_at_start(false);
         // The chat shows as starting while its model is made ready; Stop works as usual. The wait
         // is not silence: the stall flag counts from here, not from the chat's last output.
         self.last_output = Instant::now();
@@ -2995,6 +3084,7 @@ impl Actor {
             // Waiting at the server's start capacity: nothing reached the server either.
             self.give_back(std::iter::once(sid).chain(held).collect());
             self.set_local_ahead(None);
+            self.set_held_at_start(false);
         }
         if let Some(s) = self.stopping.as_mut() {
             s.replies.push(reply);
@@ -3323,6 +3413,7 @@ impl Actor {
                 let msg = v.get("message").cloned().unwrap_or_default();
                 let role = str_of(&msg, "role").unwrap_or_default();
                 if role == "assistant" {
+                    self.turn_acted = true;
                     let key = self.msg_key(&str_of(&msg, "id").unwrap_or_default());
                     self.stream.insert(
                         key.clone(),
@@ -3362,6 +3453,7 @@ impl Actor {
             "message_end" => self.on_message_end(&v),
             "usage" => self.on_turn_usage(&v),
             "tool_execution_start" => {
+                self.turn_acted = true;
                 let id = str_of(&v, "toolCallId").unwrap_or_default();
                 let name = str_of(&v, "toolName").unwrap_or_default();
                 let args = v.get("args").map(Value::to_string).unwrap_or_default();
@@ -3793,6 +3885,13 @@ impl Actor {
     /// so a provider change need not wait for it.
     fn turn_quiet(&self) -> bool {
         self.tools.is_empty() && self.stream.is_empty()
+    }
+
+    /// Remember how many processes the worker's group holds now, as what the chat's own helpers
+    /// account for ([`Self::tree_base`]). Never below the worker and the CLI themselves.
+    fn sample_tree_base(&mut self) {
+        let now = self.link.as_ref().and_then(|l| l.tree_size()).unwrap_or(0);
+        self.tree_base = self.tree_base.max(now).max(2);
     }
 
     /// The turn has settled or the last background agent ended: a relaunch held for this point
