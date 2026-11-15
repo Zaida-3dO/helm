@@ -599,6 +599,33 @@ impl ChatPort for HostPort {
         })
     }
 
+    fn consent_states(&self, chat_id: String) -> BoxFut<'_, PortResult<Vec<Value>>> {
+        Box::pin(async move {
+            self.here(&chat_id)?;
+            let db = self.db()?;
+            let kinds = self
+                .services()
+                .get::<helm_consent::AllowKinds>()
+                .unwrap_or_else(|| Arc::new(helm_consent::AllowKinds::new()));
+            let list = helm_consent::store::list(&db, &kinds, &chat_id, helm_core::now_ms())
+                .map_err(wire)?;
+            // The chip only needs which card and where it stands, so the rows stay slim:
+            // no reason, evidence or summary crosses the line for them.
+            Ok(list
+                .pending
+                .into_iter()
+                .chain(list.decided)
+                .map(|c| {
+                    json!({
+                        "id": c.id,
+                        "state": c.state.as_str(),
+                        "outcome": c.outcome,
+                    })
+                })
+                .collect())
+        })
+    }
+
     fn create(&self, a: CreateArgs) -> BoxFut<'_, PortResult<String>> {
         Box::pin(async move {
             let db = self.db()?;

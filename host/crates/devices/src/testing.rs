@@ -118,8 +118,8 @@ pub struct FakeState {
     pub answered: Vec<AnswerArgs>,
     /// The pending Allow cards of each chat, as the cards the consent store would show.
     pub consent: HashMap<String, Vec<Value>>,
-    /// The Allow decisions taken from another device: (request id, decision, where from).
-    pub consents: Vec<(String, String, String)>,
+    /// The Allow decisions taken from another device: (chat, request id, decision, where from).
+    pub consents: Vec<(String, String, String, String)>,
     pub created: Vec<CreateArgs>,
     pub renamed: Vec<RenameArgs>,
     pub model_changes: Vec<SetModelArgs>,
@@ -412,8 +412,12 @@ impl ChatPort for FakePort {
         let r = match at {
             Some(at) => {
                 list.remove(at);
-                st.consents
-                    .push((a.request_id.clone(), a.decision.clone(), via));
+                st.consents.push((
+                    a.chat_id.clone(),
+                    a.request_id.clone(),
+                    a.decision.clone(),
+                    via,
+                ));
                 Ok(())
             }
             None => Err(WireError::new(
@@ -422,6 +426,32 @@ impl ChatPort for FakePort {
             )),
         };
         ready(r)
+    }
+
+    fn consent_states(&self, chat_id: String) -> BoxFut<'_, PortResult<Vec<Value>>> {
+        let st = self.st();
+        let mut out: Vec<Value> = st
+            .consent
+            .get(&chat_id)
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|c| {
+                json!({
+                    "id": c["id"],
+                    "state": c["state"].as_str().unwrap_or("pending"),
+                    "outcome": Value::Null,
+                })
+            })
+            .collect();
+        for (_, id, decision, _) in st.consents.iter().filter(|(c, ..)| *c == chat_id) {
+            out.push(json!({
+                "id": id,
+                "state": if decision == "allow" { "allowed" } else { "denied" },
+                "outcome": Value::Null,
+            }));
+        }
+        ready(Ok(out))
     }
 
     fn create(&self, a: CreateArgs) -> BoxFut<'_, PortResult<String>> {

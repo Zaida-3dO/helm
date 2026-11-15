@@ -62,14 +62,23 @@ function AllowChip({ chatId, requestId, remoteDevice, running }: { chatId: strin
   const [state, setState] = useState<string | undefined>();
   const [outcome, setOutcome] = useState<string | null>(null);
   useEffect(() => {
-    // The request lives on the device the chat runs on, and only someone there can decide it.
-    if (remoteDevice) return;
+    // The request lives on the device the chat runs on. On a mirrored chat its state is read
+    // over there; the card itself may still be answered from here.
     let live = true;
     const load = () => {
-      consentOps(shell.api)
-        .list(chatId)
-        .then((l) => {
-          const found = [...l.pending, ...l.decided].find((r) => r.id === requestId);
+      const rows = remoteDevice
+        ? shell
+            .api<{ states: Array<{ id: string; state: string; outcome?: string | null }> }>(
+              'devices_consent_state',
+              { chatId },
+            )
+            .then((r) => r.states)
+        : consentOps(shell.api)
+            .list(chatId)
+            .then((l) => [...l.pending, ...l.decided]);
+      rows
+        .then((all) => {
+          const found = all.find((r) => r.id === requestId);
           if (!live) return;
           setState(found?.state);
           setOutcome(found?.outcome ?? null);
@@ -85,15 +94,18 @@ function AllowChip({ chatId, requestId, remoteDevice, running }: { chatId: strin
       off();
     };
   }, [shell.api, shell.bus, chatId, requestId, remoteDevice]);
-  if (remoteDevice) {
-    return running ? (
-      <span className="allow-chip allow-chip-remote" data-testid="tool-allow-state" data-state="remote">
-        {waitingForApproval(remoteDevice)}
-      </span>
-    ) : null;
-  }
   const chip = allowChipState(state, outcome);
-  if (!chip) return null;
+  if (!chip) {
+    // A mirrored chat whose state could not be read yet: the request still waits over there.
+    if (remoteDevice && running) {
+      return (
+        <span className="allow-chip allow-chip-remote" data-testid="tool-allow-state" data-state="remote">
+          {waitingForApproval(remoteDevice)}
+        </span>
+      );
+    }
+    return null;
+  }
   return (
     <span className={`allow-chip allow-chip-${chip}`} data-testid="tool-allow-state" data-state={chip}>
       {ALLOW_CHIP_TEXT[chip]}

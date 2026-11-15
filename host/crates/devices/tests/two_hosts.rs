@@ -632,11 +632,38 @@ async fn allow_cards_show_on_every_pc_and_the_first_answer_wins() {
     assert_eq!(
         port.st().consents,
         [(
+            "c1".to_owned(),
             "r2".to_owned(),
             "deny".to_owned(),
             "device:Laptop".to_owned()
         )]
     );
+    // The card states read from afar too: a tool row's chip on a copy asks for them so it
+    // can say Allowed or Refused as one does on a chat that runs here.
+    let states = laptop
+        .rpc
+        .call("dev-a", "consent_states", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    let seen: Vec<(String, String)> = states["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            (
+                s["id"].as_str().unwrap().to_owned(),
+                s["state"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("r1".to_owned(), "pending".to_owned()),
+            ("r2".to_owned(), "denied".to_owned())
+        ]
+    );
+
     // A second answer to the same card is refused: the first one won.
     let e = tablet
         .rpc
@@ -762,9 +789,8 @@ fn rows_of(s: &Side, chat: &str) -> Vec<(i64, String)> {
 
 /// The ids of the requests waiting in this PC's copy of a chat's thread state.
 fn copied_interactions(s: &Side, chat: &str) -> Vec<String> {
-    let stored = s
-        .db
-        .snapshot(|tx| {
+    let stored =
+        s.db.snapshot(|tx| {
             tx.query_row(
                 "SELECT thread FROM mirror_chats WHERE chat_id = ?1",
                 [chat],
@@ -932,11 +958,25 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
     assert_eq!(
         port.st().consents,
         [(
+            "c1".to_owned(),
             "r1".to_owned(),
             "allow".to_owned(),
             "device:Laptop".to_owned()
         )]
     );
+    // The state read travels to the copy's window as well: its tool chip says Allowed.
+    let states = api
+        .call_host("devices_consent_state", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    let r1 = states["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "r1")
+        .unwrap();
+    assert_eq!(r1["state"], "allowed");
+
     // The host's answer closes the card on this PC too, on the same event.
     host.observe(&AppEvent::new("consent").with("chatId", "c1"));
     until(|| b.sink.kinds().iter().filter(|k| *k == "consent").count() >= 2).await;
@@ -958,7 +998,13 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         ),
         (
             "a question",
-            fake_interaction("c1", "k-ask", Meth::Select, Some(Att::Question), Some(&["A", "B"])),
+            fake_interaction(
+                "c1",
+                "k-ask",
+                Meth::Select,
+                Some(Att::Question),
+                Some(&["A", "B"]),
+            ),
             json!({"value": "A"}),
         ),
         (

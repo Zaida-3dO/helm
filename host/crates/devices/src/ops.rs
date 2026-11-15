@@ -23,7 +23,8 @@ pub fn register_ops(reg: &mut OpRegistry) {
             OpClass::Blocking,
             devices_consent_list,
         )
-        .async_op("devices_consent_decide", devices_consent_decide);
+        .async_op("devices_consent_decide", devices_consent_decide)
+        .async_op("devices_consent_state", devices_consent_state);
 }
 
 fn fail(e: DeviceError) -> ApiError {
@@ -462,4 +463,13 @@ async fn devices_consent_decide(ctx: OpCtx, args: Value) -> Result<Value, ApiErr
         )
         .await?;
     Ok(json!({}))
+}
+
+/// `devices_consent_state`: ask the device that runs a mirrored chat where its Allow requests
+/// stand, so a tool row on the copy can say Allowed or Refused as one does on a local chat.
+async fn devices_consent_state(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ConsentIdArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
+    mirror.consent_states(&a.chat_id).await
 }

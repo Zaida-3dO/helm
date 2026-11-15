@@ -127,6 +127,9 @@ pub trait ChatPort: Send + Sync {
     /// Answer an Allow card from another device, naming that device for the record. The consent
     /// store decides by compare-and-set: the first answer wins, a second is refused.
     fn consent_decide(&self, a: ConsentDecideArgs, via: String) -> BoxFut<'_, PortResult<()>>;
+    /// Where a chat's Allow requests stand — id, state and outcome only, pending and recently
+    /// decided. A watcher reads this to make a tool row's chip say Allowed or Refused too.
+    fn consent_states(&self, chat_id: String) -> BoxFut<'_, PortResult<Vec<Value>>>;
     /// Start a chat for the local profile linked to the person; `unknown_person` if none is.
     fn create(&self, a: CreateArgs) -> BoxFut<'_, PortResult<String>>;
     fn set_model(&self, a: SetModelArgs) -> BoxFut<'_, PortResult<()>>;
@@ -633,6 +636,11 @@ impl Inner {
                 let via = device_via(from);
                 self.port.consent_decide(a, via).await?;
                 done(json!({}))
+            }
+            Op::ConsentStates(a) => {
+                let mut states = self.port.consent_states(a.chat_id).await?;
+                subs::fit_rows(&mut states, CONSENT_BUDGET);
+                done(json!({ "states": states }))
             }
             Op::Create(a) => {
                 let chat_id = self.port.create(a).await?;

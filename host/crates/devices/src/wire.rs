@@ -448,6 +448,9 @@ pub enum Op {
     Stop(ChatIdArgs),
     Answer(AnswerArgs),
     ConsentDecide(ConsentDecideArgs),
+    /// Where this install's Allow requests for one chat stand, read only. A tool row's chip
+    /// asks for it on a chat that runs here, so a copy can say Allowed or Refused too.
+    ConsentStates(ChatIdArgs),
     Create(CreateArgs),
     SetModel(SetModelArgs),
     Rename(RenameArgs),
@@ -483,6 +486,7 @@ impl Op {
             "stop" => Op::Stop(args(a)?),
             "answer" => Op::Answer(args(a)?),
             "consent_decide" => Op::ConsentDecide(args(a)?),
+            "consent_states" => Op::ConsentStates(args(a)?),
             "create" => Op::Create(args(a)?),
             "set_model" => Op::SetModel(args(a)?),
             "rename" => Op::Rename(args(a)?),

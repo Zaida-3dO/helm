@@ -236,6 +236,9 @@ impl ChatPort for ChannelPort {
     fn consent_decide(&self, a: ConsentDecideArgs, via: String) -> BoxFut<'_, PortResult<()>> {
         self.port.consent_decide(a, via)
     }
+    fn consent_states(&self, chat_id: String) -> BoxFut<'_, PortResult<Vec<Value>>> {
+        self.port.consent_states(chat_id)
+    }
     fn create(&self, a: CreateArgs) -> BoxFut<'_, PortResult<String>> {
         self.port.create(a)
     }

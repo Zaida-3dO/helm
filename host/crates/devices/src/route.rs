@@ -338,6 +338,21 @@ impl Mirror {
         Ok(())
     }
 
+    /// Where the Allow requests of a chat that runs on another PC stand, as that PC's consent
+    /// store says. A tool row's chip asks for this so the copy can say Allowed or Refused too.
+    pub async fn consent_states(&self, chat_id: &str) -> Result<Value, ApiError> {
+        let device = self.device_of(chat_id)?;
+        self.check_live(&device)?;
+        self.ask_as(
+            &device,
+            "consent_states",
+            json!({ "chatId": chat_id }),
+            "those requests",
+            &[],
+        )
+        .await
+    }
+
     /// Ask the device for a change, then show it in the copy here at once; the device's own news
     /// (with a newer revision) replaces it.
     async fn change(
