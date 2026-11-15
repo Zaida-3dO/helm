@@ -324,6 +324,25 @@ async fn the_hub_list_is_checked_again_at_the_call() {
     let v = helm_hub::apptools::call(&line, "remote", "app_list_chats", &json!([1]), None).await;
     assert_eq!(v["isError"], true, "arguments must be an object");
     assert!(rx.try_recv().is_err());
+
+    // What the hub advertises matches what the PC takes: the chat list filters by person and
+    // machine, and the only send mode it names is the one the PC still takes.
+    let list = helm_hub::apptools::tool_list();
+    let spec = |name: &str| {
+        list.iter()
+            .find(|t| t["name"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("{name} is not advertised"))
+    };
+    let props = spec("app_list_chats")["inputSchema"]["properties"].clone();
+    for arg in ["query", "person", "device", "all"] {
+        assert!(props.get(arg).is_some(), "app_list_chats hides {arg}");
+    }
+    assert_eq!(
+        spec("app_send_message")["inputSchema"]["properties"]["mode"]["enum"],
+        json!(["steer"]),
+        "the advertised send modes are not what the PC takes"
+    );
 }
 
 #[tokio::test]
