@@ -2086,6 +2086,13 @@ mod tests {
             self.sends.lock().unwrap().push(a);
             Box::pin(async move { Ok(json!({"submission": {"state": "accepted"}, "chat": {}})) })
         }
+        fn chat_op(
+            &self,
+            _op: &str,
+            _args: serde_json::Value,
+        ) -> crate::remote::Fut<crate::remote::Res> {
+            Box::pin(async { panic!("not used") })
+        }
         fn stop(&self, _chat_id: String) -> crate::remote::Fut<crate::remote::Res> {
             Box::pin(async { panic!("not used") })
         }

@@ -5,6 +5,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import type { ChatOps } from '../api/ops.ts';
+import type { RemoteChatOps } from '../api/devices.ts';
 import type { AttentionSummary } from '../api/types.ts';
 import { useShell } from '../shell/context.ts';
 import { Button, ContextMenu, toast, type MenuItem } from '../ui/index.ts';
@@ -29,9 +30,26 @@ function useSummary(ops: ChatOps): AttentionSummary | null {
   return summary;
 }
 
-export function FlagNote({ chatId, ops }: { chatId: string; ops: ChatOps }) {
+/**
+ * The note for one chat. On this PC it follows the attention summary; for a chat that runs on
+ * another PC the flag lives there, read with `devices_attention` — the same flag, and Snooze
+ * and Mark complete travel to it (intercepted `attention_snooze` / `attention_address`).
+ */
+export function FlagNote({ chatId, ops, devOps }: { chatId: string; ops: ChatOps; devOps?: RemoteChatOps }) {
   const summary = useSummary(ops);
-  const row = flagFor(summary, chatId);
+  const [remoteFlag, setRemoteFlag] = useState<{ chatId: string; kind: string; reason: string } | null>(null);
+  useEffect(() => {
+    if (!devOps) return;
+    let live = true;
+    devOps
+      .attention([chatId])
+      .then((r) => live && setRemoteFlag(r.flagged.find((f) => f.chatId === chatId) ?? null))
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [devOps, chatId]);
+  const row = devOps ? remoteFlag : flagFor(summary, chatId);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);

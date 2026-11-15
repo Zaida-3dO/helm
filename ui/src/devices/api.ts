@@ -15,6 +15,8 @@ export interface DeviceInfo {
   person: string | null;
   /** Every hub person this PC acts for — one per linked profile, the PC's own first. */
   people?: { personId: string; person: string }[];
+  /** The profiles on that PC, from its hello, for "Move to profile" on its chats. */
+  profiles?: { profileId: string; name: string; personId?: string | null }[];
   online: boolean;
   /** An ISO time from the hub, or null when it never connected. */
   lastSeenAt: string | null;
@@ -46,6 +48,10 @@ export type RemoteChatRecord = ChatRecord & {
   personId?: string | null;
   /** The people it is shared with. */
   sharedWith?: string[];
+  /** Those shares as hub person ids (what `sharedWith` is mapped from). */
+  sharedWithPeople?: string[];
+  /** Manual sidebar order on its home PC, when one is set. */
+  position?: number | null;
   projectName?: string;
   projectColour?: string | null;
   /** The board this chat shows under on its home PC; absent when it sits on no board. */
@@ -53,6 +59,8 @@ export type RemoteChatRecord = ChatRecord & {
   boardName?: string | null;
   boardColour?: string | null;
   needsAttention?: boolean;
+  /** Allow cards and questions waiting on the PC that runs the chat (kept fresh in the copy). */
+  waitingCards?: number;
 };
 
 export interface DeviceChats {
@@ -88,6 +96,10 @@ export function deviceOps(api: Api) {
     /** The projects a computer last said it has (every one, not only those holding chats shown to this profile). */
     projects: (deviceUid: string) => api<DeviceChats>('devices_chats', { deviceUid, limit: 1 }).then((r) => r.projects),
     createChat: (a: { deviceUid: string; projectId: string; model?: string; effort?: string }) => api<{ chatId: string }>('devices_create_chat', a),
+    /** Show a mirrored chat to one more person on the PC that runs it, or stop. */
+    shareChat: (a: { chatId: string; personId: string; shared: boolean }) => api<unknown>('devices_share_chat', a),
+    /** Hand a mirrored chat to one of the profiles on the PC that runs it. */
+    moveProfile: (a: { chatId: string; profileId: string }) => api<unknown>('devices_move_profile', a),
     self: () => api<ThisDevice>('device_get', {}),
     rename: (name: string) => api<ThisDevice>('device_rename', { name }),
     /** The stored choice; null when none was made (this computer). */

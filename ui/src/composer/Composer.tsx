@@ -14,7 +14,7 @@ import { resolveKey, sendLabel, sendTooltip, stopTooltip, type KeyContext, type 
 import { Button } from '../ui/controls.tsx';
 import { IconAttach, IconChat, IconFileText as IconFile, IconFolder, IconFolderPlus, IconSparkles, IconX } from '../ui/icons.tsx';
 import { SetupBanner, useRuntimeCheck } from './SetupBanner.tsx';
-import { ContextStatus } from './ContextStatus.tsx';
+import { ContextStatus, ContextStatusRemote } from './ContextStatus.tsx';
 import { useShell } from '../shell/context.ts';
 import { addRef, dropLandsIn, parseFileDrop, pathName, roomLeft, type AttachedRef } from './refs.ts';
 import { ModelPicker } from './ModelPicker.tsx';
@@ -552,8 +552,9 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   const [mentionShut, setMentionShut] = useState<string | null>(null);
   const mentionQuery = mention?.query ?? '';
   useEffect(() => {
-    // Files are looked up on this PC; a chat on another device has its own.
-    if (!mentionQuery || remote) {
+    // For a chat that runs on another PC the same lookup runs there: the `quick_open` op is
+    // answered by the device that runs the chat, so the hits are its project's files.
+    if (!mentionQuery) {
       setMentionHits(null);
       return;
     }
@@ -572,7 +573,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
       live = false;
       clearTimeout(t);
     };
-  }, [mentionQuery, remote, panel, chat.id]);
+  }, [mentionQuery, panel, chat.id]);
   const mentionOpen = mention !== null && mentionHits !== null && mentionHits.q === mention.query && mentionHits.items.length > 0 && mentionShut !== draftText;
   const pickMention = (item: QuickItem) => {
     const text = editor.current?.getText() ?? '';
@@ -665,8 +666,10 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   const onChange = useCallback(
     (text: string) => {
       // The first keystroke in a local chat starts loading its model now (host-side rules keep
-      // this to once between turns, at most once every five minutes); a later send joins it.
-      if (!remote && !prevText.current.trim() && text.trim() && isLocalModel(chat.model)) {
+      // this to once between turns, at most once every five minutes); a later send joins it. A
+      // chat that runs on another PC warms the model there — the loading note shows from its
+      // own state, and a refusal (switch off, device down) is not worth showing while typing.
+      if (!prevText.current.trim() && text.trim() && isLocalModel(chat.model)) {
         void ops.warm(chat.id).catch(() => undefined);
       }
       prevText.current = text;
@@ -853,7 +856,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
             ))}
           </div>
         )}
-        {!remote && <ContextStatus chatId={chat.id} />}
+        {remote ? <ContextStatusRemote api={shell.api} chatId={chat.id} /> : <ContextStatus chatId={chat.id} />}
         {offBy && (
           <span className="visually-hidden" data-testid="composer-remote-blocked">
             {offBy}
@@ -886,7 +889,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
         <div className="composer-bar">
           <div className="composer-selects">
             <ModelPicker chat={chat} ops={ops} loading={checking} deviceUid={remote?.deviceUid} />
-            {!remote && <PermissionChip chatId={chat.id} mode={thread?.permissionMode ?? null} busy={busy} ops={ops} />}
+            <PermissionChip chatId={chat.id} mode={thread?.permissionMode ?? null} busy={busy} ops={ops} />
             {toolbarStart.map((a) => (
               <span key={a.id} className="composer-accessory" data-accessory={a.id}>
                 {a.render(actx)}

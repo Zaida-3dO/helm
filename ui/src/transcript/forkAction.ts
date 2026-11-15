@@ -17,7 +17,6 @@ export function forkAction(ops: ChatOps, open: (chatId: string) => void, onError
     id: FORK_ACTION_ID,
     label: 'Fork from here',
     appliesTo: canForkAt,
-    localOnly: true,
     run: (row, ctx) => {
       ops
         .fork(ctx.chatId, { messageId: row.id })

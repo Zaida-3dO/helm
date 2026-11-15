@@ -25,7 +25,13 @@ pub fn register_ops(reg: &mut OpRegistry) {
             devices_consent_list,
         )
         .async_op("devices_consent_decide", devices_consent_decide)
-        .async_op("devices_consent_state", devices_consent_state);
+        .async_op("devices_consent_state", devices_consent_state)
+        .async_op("devices_share_chat", devices_share_chat)
+        .async_op("devices_move_profile", devices_move_profile)
+        .async_op("devices_submission_action", devices_submission_action)
+        .async_op("devices_item_links", devices_item_links)
+        .async_op("devices_attention", devices_attention)
+        .async_op("devices_composer_defaults", devices_composer_defaults);
 }
 
 fn fail(e: DeviceError) -> ApiError {
@@ -569,4 +575,140 @@ async fn devices_consent_state(ctx: OpCtx, args: Value) -> Result<Value, ApiErro
         serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
     let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
     mirror.consent_states(&a.chat_id).await
+}
+
+// ---------------------------------------------------------------------------------------------
+// Sharing and profile moves for a chat that runs on another device
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ShareChatArgs {
+    chat_id: String,
+    /// One of the hub people the device announced in its hello.
+    person_id: String,
+    shared: bool,
+}
+
+/// `devices_share_chat`: show a mirrored chat to one more person on the PC that runs it, or
+/// stop. The other chat menus cross the wire through the intercepted local ops; the sharing ops
+/// name a list of chats, not one, so they need an op of their own here.
+async fn devices_share_chat(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ShareChatArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
+    mirror
+        .share_chat(&a.chat_id, &a.person_id, a.shared)
+        .await?;
+    Ok(json!({}))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MoveProfileArgs {
+    chat_id: String,
+    /// One of the profiles the device listed in its hello.
+    profile_id: String,
+}
+
+/// `devices_move_profile`: hand a mirrored chat to one of the profiles on the PC that runs it.
+async fn devices_move_profile(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: MoveProfileArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
+    mirror.move_profile(&a.chat_id, &a.profile_id).await?;
+    Ok(json!({}))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Queue actions and sidebar reads for chats that run on other devices
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SubmissionActionArgs {
+    chat_id: String,
+    submission_id: String,
+    /// `withdraw` or `recover`.
+    action: String,
+}
+
+/// `devices_submission_action`: withdraw or recover one queued message of a chat that runs on
+/// another PC. The queue lives there; the change comes back through the copy's `pending` feed.
+async fn devices_submission_action(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: SubmissionActionArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    if !matches!(a.action.as_str(), "withdraw" | "recover") {
+        return Err(ApiError::bad_args("An action is withdraw or recover."));
+    }
+    let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
+    mirror
+        .submission_action(&a.chat_id, &a.submission_id, &a.action)
+        .await?;
+    Ok(json!({}))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatIdsListArgs {
+    chat_ids: Vec<String>,
+}
+
+fn parse_chat_ids(args: Value) -> Result<Vec<String>, ApiError> {
+    let a: ChatIdsListArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    if a.chat_ids.len() > 500 {
+        return Err(ApiError::bad_args("Ask for at most 500 chats."));
+    }
+    Ok(a.chat_ids)
+}
+
+/// `devices_item_links`: the board-item links of named mirrored chats, read from the PCs that
+/// run them. The answer is the same shape as the local `item_links_for_chats`, so the sidebar
+/// cannot tell a mirror chat's links from its own.
+async fn devices_item_links(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let ids = parse_chat_ids(args)?;
+    let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
+    mirror.item_links(&ids).await
+}
+
+/// `devices_attention`: the needs-you and idle-check flag rows of named mirrored chats, read
+/// from the PCs that run them, so a copy gets the same markers a local chat shows.
+async fn devices_attention(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let ids = parse_chat_ids(args)?;
+    let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
+    mirror.attention_rows(&ids).await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ComposerDefaultsArgs {
+    chat_id: String,
+    /// Absent reads the device's new-chat model/effort/reply-length; present saves them.
+    #[serde(default)]
+    patch: Option<Value>,
+}
+
+/// `devices_composer_defaults`: the reply-length follow and the "make default" of the model
+/// picker, for a chat that runs on another PC — read or saved on the PC that runs the chat.
+async fn devices_composer_defaults(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ComposerDefaultsArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
+    if let Some(patch) = &a.patch {
+        // Only the three fields the picker owns; anything else is refused at the wire.
+        let allowed = matches!(
+            patch.as_object().map(|m| {
+                m.keys()
+                    .all(|k| matches!(k.as_str(), "model" | "effort" | "responseVerbosity"))
+            }),
+            Some(true)
+        );
+        if !allowed {
+            return Err(ApiError::bad_args(
+                "The defaults are the model, the effort and the reply length.",
+            ));
+        }
+    }
+    mirror.composer_defaults(&a.chat_id, a.patch.as_ref()).await
 }

@@ -1015,6 +1015,13 @@ impl helm_chats::remote::RemoteChats for FakeWatcher {
     fn stop(&self, _chat_id: String) -> helm_chats::remote::Fut<helm_chats::remote::Res> {
         Box::pin(async { panic!("not used") })
     }
+    fn chat_op(
+        &self,
+        _op: &str,
+        _args: serde_json::Value,
+    ) -> helm_chats::remote::Fut<helm_chats::remote::Res> {
+        Box::pin(async { panic!("not used") })
+    }
     fn answer(
         &self,
         _a: helm_chats::types::InteractionAnswerArgs,

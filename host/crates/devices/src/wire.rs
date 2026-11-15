@@ -434,6 +434,147 @@ pub struct ShareArgs {
     pub shared: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForkArgs {
+    pub chat_id: String,
+    /// A fresh UUID per fork: a repeat is answered without forking twice.
+    pub fork_id: String,
+    /// Fork at that assistant reply ("fork from here"); absent forks the whole chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<i64>,
+    /// With `excerpt`, the copy is a side chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excerpt: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RollOverArgs {
+    pub chat_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MuteArgs {
+    pub chat_id: String,
+    pub muted: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OrganizeArgs {
+    pub chat_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_chat_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_end: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_project_id: Option<String>,
+    /// Absent changes nothing; `null` moves the chat to top level; an id nests under it.
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub parent_chat_id: Option<Option<String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MoveProfileArgs {
+    pub chat_id: String,
+    /// One of the profiles this PC listed in its hello.
+    pub profile_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetPermissionArgs {
+    pub chat_id: String,
+    /// The composer's permission pick, as `chat_set_permission_mode` takes it.
+    pub mode: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VerbositySetArgs {
+    pub chat_id: String,
+    /// `low`, `medium` or `high`; absent follows this PC's new-chat default again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QuickOpenArgs {
+    pub chat_id: String,
+    pub query: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolStopArgs {
+    pub chat_id: String,
+    pub tool_call_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SubmissionArgs {
+    pub chat_id: String,
+    pub submission_id: String,
+    /// `withdraw` or `recover`.
+    pub action: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CheckpointArgs {
+    pub chat_id: String,
+    pub message_id: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChatIdsArgs {
+    pub chat_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SnoozeArgs {
+    pub chat_id: String,
+    /// Until (Unix ms); absent or null unsnoozes — the same rule as the local op.
+    #[serde(default)]
+    pub until: Option<i64>,
+}
+
+/// The PC that runs a chat's defaults for new chats, as far as the model picker cares: the
+/// model, effort and reply length a new chat there starts with. A read answers with these;
+/// `defaults_set` accepts only these three, so a pick from afar cannot rewrite the other
+/// PC's whole runtime page.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DefaultsArgs {
+    /// The chat the picker was open on: the defaults are the ones on the PC that runs it.
+    pub chat_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_verbosity: Option<String>,
+}
+
 /// An op a device carries for another, parsed.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
@@ -456,12 +597,55 @@ pub enum Op {
     Rename(RenameArgs),
     Archive(ArchiveArgs),
     Share(ShareArgs),
+    Fork(ForkArgs),
+    Compact(ChatIdArgs),
+    RollOver(RollOverArgs),
+    /// What the chat has used, read from the PC that runs it. A read: no switch needed.
+    Cost(ChatIdArgs),
+    ExportMarkdown(ChatIdArgs),
+    Organize(OrganizeArgs),
+    MarkUnread(ChatIdArgs),
+    Mute(MuteArgs),
+    MoveProfile(MoveProfileArgs),
+    /// The composer's permission pick, applied on the PC that runs the chat.
+    SetPermission(SetPermissionArgs),
+    /// The chat's reply-length level, as the model picker shows it. A read.
+    VerbosityGet(ChatIdArgs),
+    VerbositySet(VerbositySetArgs),
+    /// Whether the side panel's context eye is on for the chat there. A read.
+    ContextOn(ChatIdArgs),
+    /// The chat's project files matching a mention query, read on the PC that runs it. A read.
+    QuickOpen(QuickOpenArgs),
+    /// Start loading the chat's model on its own PC (the first keystroke of a local chat).
+    Warm(ChatIdArgs),
+    ToolStop(ToolStopArgs),
+    Submission(SubmissionArgs),
+    /// What going back to a message means there, for the confirmation dialog. A read.
+    Checkpoint(CheckpointArgs),
+    /// Needs-you and idle-check flag rows for named chats. A read.
+    Attention(ChatIdsArgs),
+    /// Board-item links for named chats, as the PC that runs them lists them. A read.
+    ItemLinks(ChatIdsArgs),
+    Snooze(SnoozeArgs),
+    Address(ChatIdArgs),
+    /// The PC's new-chat model/effort/reply-length, three fields only. A read.
+    DefaultsGet(ChatIdArgs),
+    DefaultsSet(DefaultsArgs),
 }
 
 fn args<T: for<'de> Deserialize<'de>>(v: Value) -> Result<T, WireError> {
     // A missing argument object reads as an empty one.
     let v = if v.is_null() { json!({}) } else { v };
     serde_json::from_value(v).map_err(|e| WireError::bad_args(e.to_string()))
+}
+
+/// Distinguishes "absent" (`None`) from an explicit `null` (`Some(None)`).
+fn double_option<'de, T, D>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
 }
 
 impl Op {
@@ -492,6 +676,30 @@ impl Op {
             "rename" => Op::Rename(args(a)?),
             "archive" => Op::Archive(args(a)?),
             "share" => Op::Share(args(a)?),
+            "fork" => Op::Fork(args(a)?),
+            "compact" => Op::Compact(args(a)?),
+            "roll_over" => Op::RollOver(args(a)?),
+            "cost" => Op::Cost(args(a)?),
+            "export_markdown" => Op::ExportMarkdown(args(a)?),
+            "organize" => Op::Organize(args(a)?),
+            "mark_unread" => Op::MarkUnread(args(a)?),
+            "mute" => Op::Mute(args(a)?),
+            "move_profile" => Op::MoveProfile(args(a)?),
+            "set_permission" => Op::SetPermission(args(a)?),
+            "verbosity_get" => Op::VerbosityGet(args(a)?),
+            "verbosity_set" => Op::VerbositySet(args(a)?),
+            "context_on" => Op::ContextOn(args(a)?),
+            "quick_open" => Op::QuickOpen(args(a)?),
+            "warm" => Op::Warm(args(a)?),
+            "tool_stop" => Op::ToolStop(args(a)?),
+            "submission" => Op::Submission(args(a)?),
+            "checkpoint" => Op::Checkpoint(args(a)?),
+            "attention" => Op::Attention(args(a)?),
+            "item_links" => Op::ItemLinks(args(a)?),
+            "snooze" => Op::Snooze(args(a)?),
+            "address" => Op::Address(args(a)?),
+            "defaults_get" => Op::DefaultsGet(args(a)?),
+            "defaults_set" => Op::DefaultsSet(args(a)?),
             _ => return Err(WireError::elsewhere()),
         })
     }
@@ -511,6 +719,22 @@ impl Op {
                 | Op::Rename(_)
                 | Op::Archive(_)
                 | Op::Share(_)
+                | Op::Fork(_)
+                | Op::Compact(_)
+                | Op::RollOver(_)
+                | Op::ExportMarkdown(_)
+                | Op::Organize(_)
+                | Op::MarkUnread(_)
+                | Op::Mute(_)
+                | Op::MoveProfile(_)
+                | Op::SetPermission(_)
+                | Op::VerbositySet(_)
+                | Op::Warm(_)
+                | Op::ToolStop(_)
+                | Op::Submission(_)
+                | Op::Snooze(_)
+                | Op::Address(_)
+                | Op::DefaultsSet(_)
         )
     }
 }
@@ -543,6 +767,19 @@ pub struct ProjectInfo {
     pub path: String,
 }
 
+/// One of this device's profiles, as another device lists it. A chat can be labelled with one
+/// from afar (`move_profile`); these are the ids it takes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileInfo {
+    pub profile_id: String,
+    pub name: String,
+    /// The hub person this profile is linked to, when it is linked. A watcher ticks the
+    /// profile that owns a chat by matching it against the chat's person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person_id: Option<String>,
+}
+
 /// The answer to `hello`: who this device is, who uses it, where chats can start and which
 /// models they can run.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -550,6 +787,10 @@ pub struct Hello {
     pub device: DeviceInfo,
     pub people: Vec<PersonInfo>,
     pub projects: Vec<ProjectInfo>,
+    /// This device's profiles. Absent (an older Helm) means the watcher offers no
+    /// "Move to profile" for this device's chats.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<ProfileInfo>,
     /// `null` when this device's `model_catalogue` op failed at hello time.
     pub catalogue: Option<Value>,
 }

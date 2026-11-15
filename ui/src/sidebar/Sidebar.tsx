@@ -9,7 +9,7 @@ import type { EventBus } from '../api/events.ts';
 import type { ChatOps } from '../api/ops.ts';
 import { projectOps, type ProjectNode, type SidebarRow, type SidebarView } from '../api/projects.ts';
 import type { RowPreview } from '../api/generated/projects/index.ts';
-import type { AttentionSummary } from '../api/types.ts';
+import type { AttentionKind, AttentionSummary } from '../api/types.ts';
 import type { ChatStore } from '../state/store.ts';
 import { SETTINGS_DIALOG } from '../settings/index.ts';
 import { SEARCH_DIALOG } from '../search/index.ts';
@@ -17,10 +17,11 @@ import { AttentionInbox, inboxRows, nextAttention } from '../attention/index.ts'
 import { PagesEntry } from '../pages/PagesEntry.tsx';
 import { ProfileDisc } from '../profiles/Disc.tsx';
 import { ProfileItem, moveChatToProfile, profileChoices, rowsForProfile, shareChatWith, shareChoices, sharedFrom, useProfiles } from '../profiles/index.ts';
-import { ALL_DEVICES } from '../devices/api.ts';
+import { ALL_DEVICES, type DeviceInfo } from '../devices/api.ts';
+import { remoteChatOps } from '../api/devices.ts';
 import { DeviceToggle } from '../devices/DeviceToggle.tsx';
 import { useDevices, useRemoteList } from '../devices/hooks.ts';
-import { scopeNote } from '../devices/model.ts';
+import { remoteProfileChoices, remoteShareChoices, scopeNote } from '../devices/model.ts';
 import { useSelection, useShell } from '../shell/context.ts';
 import { ConfirmDialog, ContextMenu, useBinding, type ConfirmSpec, type MenuItem } from '../ui/index.ts';
 import { SidebarActions, compactChat, exportChatMarkdown, rollOverChat, rollOverConfirm } from './actions.ts';
@@ -32,6 +33,8 @@ import { setVisibleOrder } from './rowOrder.ts';
 import { SidebarTop } from './SidebarTop.tsx';
 import { PromptDialog, type Prompt } from './PromptDialog.tsx';
 import { ItemChip, ItemFolderRow, ItemOpenButton, ItemPickerHost, useItemRefs, useOpenItem } from '../itemlinks/ItemUi.tsx'; // item links
+import { refsByChat, type ItemRef } from '../itemlinks/folders.ts';
+import type { ItemLink } from '../api/itemlinks.ts';
 import {
   IconArchive,
   IconChevronDown,
@@ -138,7 +141,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   // Another device's chats: read through the mirror for the active profile, drawn by the same
   // tree. "All devices" mixes them with this PC's own rows; the person filter is the profile
   // picker above — a named profile sees that person's chats, no profile sees everyone's.
-  const { snap: dev } = useDevices(api, bus);
+  const { store: devStore, snap: dev } = useDevices(api, bus);
   const remote = dev.remote;
   const allDevices = dev.allDevices;
   const { snap: other, loadMore: loadMoreRemote } = useRemoteList(api, bus, remote?.uid ?? (allDevices ? ALL_DEVICES : null), activeProfile, archived);
@@ -178,6 +181,35 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     const d = dev.list?.devices.find((x) => x.uid === uid);
     return d ? tagOf(d.name, d.online) : tagOf('Another device', false);
   };
+  // Chats that run on other PCs keep their board-item links and their flags there: read both
+  // from the PCs that run them (mirror reads, allowed even while that PC's switch is off).
+  const devOps = useMemo(() => remoteChatOps(api), [api]);
+  const remoteIds = useMemo(() => [...other.chats.keys()], [other.chats]);
+  const remoteKey = remoteIds.join(',');
+  const [remoteRefs, setRemoteRefs] = useState<ReadonlyMap<string, ItemRef>>(() => new Map());
+  const [remoteAttn, setRemoteAttn] = useState<{ needsYou: { chatId: string; kind: AttentionKind; reason: string }[]; flagged: { chatId: string; kind: AttentionKind; reason: string }[] }>({ needsYou: [], flagged: [] });
+  useEffect(() => {
+    if (!remoteIds.length) {
+      setRemoteRefs(new Map());
+      setRemoteAttn({ needsYou: [], flagged: [] });
+      return;
+    }
+    let live = true;
+    void devOps
+      .itemLinks(remoteIds)
+      .then((r) => live && setRemoteRefs(refsByChat(r.links ?? [])))
+      .catch(() => undefined);
+    void devOps
+      .attention(remoteIds)
+      .then((r) => live && setRemoteAttn({ needsYou: r.needsYou ?? [], flagged: r.flagged ?? [] }))
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [devOps, remoteKey]);
+  const remoteNeedsYouIds = useMemo(() => new Set([...remoteIds.filter((id) => other.chats.get(id)?.needsAttention), ...remoteAttn.needsYou.map((r) => r.chatId)]), [remoteIds, other.chats, remoteAttn]);
+  const remoteFlagReasons = useMemo(() => new Map(remoteAttn.flagged.map((f) => [f.chatId, f.reason])), [remoteAttn]);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [collapsedItems, setCollapsedItems] = useState<Set<string>>(() => new Set());
@@ -265,7 +297,8 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
 
   const openItem = useOpenItem();
   const itemRefs = useItemRefs(useMemo(() => snap.rows.map((r) => r.chatId), [snap.rows]));
-  const flaggedIds = useMemo(() => new Set([...snap.needsYou, ...snap.flagged.keys()]), [snap.needsYou, snap.flagged]);
+  const allItemRefs = useMemo(() => new Map([...itemRefs, ...remoteRefs]), [itemRefs, remoteRefs]);
+  const flaggedIds = useMemo(() => new Set([...snap.needsYou, ...snap.flagged.keys(), ...remoteNeedsYouIds, ...remoteFlagReasons.keys()]), [snap.needsYou, snap.flagged, remoteNeedsYouIds, remoteFlagReasons]);
   const items = useMemo(
     () =>
       buildList(shownProjects, shownRows, {
@@ -274,11 +307,11 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         expandedChats: expanded,
         selectedChatId: selected,
         keptShut: keptShut.chat === selected ? keptShut.ids : undefined,
-        flagged: remote ? undefined : flaggedIds,
+        flagged: flaggedIds,
         closed: remote ? undefined : snap.closed,
-        itemLinks: currentView === 'activity' || remote ? undefined : { refs: itemRefs, collapsed: collapsedItems },
+        itemLinks: currentView === 'activity' ? undefined : { refs: allItemRefs, collapsed: collapsedItems },
       }),
-    [shownProjects, shownRows, listView, currentView, compact, expanded, selected, keptShut, flaggedIds, snap.closed, itemRefs, collapsedItems, remote],
+    [shownProjects, shownRows, listView, currentView, compact, expanded, selected, keptShut, flaggedIds, snap.closed, allItemRefs, collapsedItems, remote],
   );
   useEffect(() => setVisibleOrder(visibleChatOrder(items)), [items]);
   const projectsById = useMemo(() => new Map(shownProjects.map((p) => [p.id, p])), [shownProjects]);
@@ -326,10 +359,16 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     void act.reorderProject(p, dir < 0 ? sibs[to]!.id : (sibs[to + 1]?.id ?? null));
   };
   const promptRename = (row: SidebarRow) => setPrompt({ title: 'Rename chat', label: 'Title', value: row.title, suggestFor: row.chatId, onSave: (t) => act.renameChat(row, t) });
-  const rowMenuItems = (row: SidebarRow): MenuItem[] => {
-    // A chat on another device is renamed here; everything else is done on that device.
-    if (remoteOfRow(row.chatId)) return withChatIcons([{ id: 'rename', label: 'Rename chat…', onSelect: () => promptRename(row) }]);
-    const siblings = snap.rows.filter((r) => r.groupProjectId === row.groupProjectId && r.archived === row.archived);
+  // The device a chat runs on, for the menu's profile and sharing choices.
+  const deviceOfRow = (chatId: string): DeviceInfo | null => {
+    if (remote && remoteOfRow(chatId)) return remote;
+    const uid = other.hosts.get(chatId);
+    if (!uid) return null;
+    return dev.list?.devices.find((x) => x.uid === uid) ?? null;
+  };
+  // Depth helpers over whichever row list a chat sits in (ours, or one device's copy).
+  const nesting = (list: readonly SidebarRow[], row: SidebarRow) => {
+    const siblings = list.filter((r) => r.groupProjectId === row.groupProjectId && r.archived === row.archived);
     const byId = new Map(siblings.map((r) => [r.chatId, r]));
     const depthOf = (id: string) => {
       let d = 0;
@@ -346,6 +385,46 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       const kids = siblings.filter((r) => r.parentChatId === id);
       return kids.length === 0 ? 0 : 1 + Math.max(...kids.map((k) => heightOf(k.chatId)));
     };
+    return { siblings, depthOf, heightOf };
+  };
+  const remoteFail = (e: unknown) => setError(String((e as Error)?.message ?? e));
+  const rowMenuItems = (row: SidebarRow): MenuItem[] => {
+    // A chat on another device: the same menu, carried across the wire. The ops route through
+    // the mirror, which answers with the device's own words.
+    const device = deviceOfRow(row.chatId);
+    if (device) {
+      const record = other.chats.get(row.chatId);
+      if (!record) return withChatIcons([{ id: 'rename', label: 'Rename chat…', onSelect: () => promptRename(row) }]);
+      const { siblings, depthOf, heightOf } = nesting(other.rows, row);
+      return withChatIcons(chatMenuItems(
+        { row, projects: other.projects, siblings, heightOf, depthOf, expanded: expanded.has(row.chatId), view: archived ? 'archived' : currentView, profiles: remoteProfileChoices(device, record), shares: remoteShareChoices(device, record) },
+        {
+          fork: () => void act.fork(row),
+          rename: () => promptRename(row),
+          compact: () => void compactChat(ops, row.chatId, setError),
+          rollOver: () => setConfirm(rollOverConfirm(row.title, () => rollOverChat(ops, row.chatId, setError))),
+          cost: () => setCost({ chatId: row.chatId }),
+          exportMarkdown: () => void exportChatMarkdown(api, row.chatId, setError),
+          moveTo: (id) => void act.moveTo(row, id),
+          moveToProfile: (id) => void devStore.ops.moveProfile({ chatId: row.chatId, profileId: id }).catch(remoteFail),
+          shareWith: (id) => void devStore.ops.shareChat({ chatId: row.chatId, personId: id, shared: !(record.sharedWithPeople ?? []).includes(id) }).catch(remoteFail),
+          nestUnder: (id) => {
+            userCollapsed.current.delete(id);
+            setExpanded((s) => new Set(s).add(id));
+            void act.nestUnder(row, id);
+          },
+          topLevel: () => void act.topLevel(row),
+          toggleChildren: () => toggleChat(row.chatId),
+          markUnread: () => void act.markUnread(row),
+          pin: (p) => void act.pin(row, p),
+          mute: (m) => void act.mute(row, m),
+          archive: () => archiveRow(row),
+          restore: () => void act.restore(row),
+          remove: () => setConfirm(deleteChatConfirm(row, () => act.remove(row))),
+        },
+      ));
+    }
+    const { siblings, depthOf, heightOf } = nesting(snap.rows, row);
     const items = withChatIcons(chatMenuItems(
       { row, projects: snap.projects, hidden: hiddenBoards, siblings, heightOf, depthOf, expanded: expanded.has(row.chatId), view: archived ? 'archived' : currentView, profiles: profileChoices(prof, row.chatId, snap.rows), shares: shareChoices(prof, row.chatId, snap.rows) },
       {
@@ -465,10 +544,15 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const dragRef = useRef<Drag | null>(null);
   dragRef.current = drag;
   const suppressClick = useRef(false);
+  // The device a chat runs on, or null when it runs here — two chats may only trade places
+  // with each other when they run on the same computer.
+  const hostOf = (chatId: string): string | null => other.hosts.get(chatId) ?? null;
+  const rowById = (chatId: string): SidebarRow | undefined =>
+    data.row(chatId) ?? other.rows.find((r) => r.chatId === chatId);
   const startDrag = (e: ReactPointerEvent, src: DragSource, title: string) => {
-    if (e.button !== 0 || e.ctrlKey || e.pointerType === 'touch' || currentView === 'activity' || remote) return;
-    // In the all-devices mix, a chat that runs elsewhere cannot be dragged here.
-    if (src.kind === 'chat' && remoteOfRow(src.chatId)) return;
+    // A chat on another device drags within that device's list: the mirror carries the move.
+    if (e.button !== 0 || e.ctrlKey || e.pointerType === 'touch' || currentView === 'activity') return;
+    // Projects on another device are not ours to reorder here.
     if (src.kind === 'project' && remoteProjectIds.has(src.projectId)) return;
     setDrag({ src, title, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, active: false, target: null });
   };
@@ -485,14 +569,18 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       if (header) {
         const p = projectsById.get(header.dataset.projectId ?? '');
         if (!p) return null;
+        // A chat may only move onto a group that runs where the chat runs.
+        const moving = dragRef.current?.src;
+        if (moving?.kind === 'chat' && (hostOf(moving.chatId) === null) !== !remoteProjectIds.has(p.id)) return null;
         return { kind: 'header', projectId: p.id, parentId: p.parentId, pinned: p.pinned, lowerHalf: lowerOf(header), board: p.kind === 'board' };
       }
       if (chat) {
-        const row = data.row(chat.dataset.chatId ?? '');
+        const row = rowById(chat.dataset.chatId ?? '');
         if (!row) return null;
         const moving = dragRef.current?.src;
-        const rows = data.getSnapshot().rows;
+        const rows = remote ? other.rows : [...data.getSnapshot().rows, ...other.rows];
         const mine = moving?.kind === 'chat' ? moving.chatId : null;
+        const sameDevice = !mine || hostOf(mine) === hostOf(row.chatId);
         return {
           kind: 'chat',
           chatId: row.chatId,
@@ -500,8 +588,8 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           pinned: row.pinned,
           lowerHalf: lowerOf(chat),
           parentChatId: row.parentChatId,
-          levelOk: mine ? canSitUnder(rows, mine, row.parentChatId) : true,
-          nestOk: mine ? canSitUnder(rows, mine, row.chatId) : true,
+          levelOk: mine ? sameDevice && canSitUnder(rows, mine, row.parentChatId) : true,
+          nestOk: mine ? sameDevice && canSitUnder(rows, mine, row.chatId) : true,
           board: projectsById.get(row.groupProjectId)?.kind === 'board',
         };
       }
@@ -532,7 +620,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       const a = d.target ? dropAction(d.src, d.target) : null;
       if (!a) return;
       if (a.kind === 'chat-to-group' || a.kind === 'chat-before' || a.kind === 'chat-nest') {
-        const row = data.row(a.chatId);
+        const row = rowById(a.chatId);
         if (!row) return;
         if (a.kind === 'chat-to-group') void act.moveTo(row, a.groupId);
         else if (a.kind === 'chat-before') void act.reorderBefore(row, a.beforeChatId, { parentChatId: a.parentChatId, pinned: a.pinned, ...(a.moveGroup ? { groupProjectId: a.groupId } : {}) });
@@ -564,7 +652,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       window.removeEventListener('keydown', cancel);
       window.removeEventListener('resize', cancel);
     };
-  }, [drag !== null, act, data, projectsById]);
+  }, [drag !== null, act, data, projectsById, other.rows, other.hosts]);
 
   const paging = remote
     ? { loading: other.loading, complete: !other.more, error: other.error, started: true }
@@ -859,9 +947,9 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         indent={currentView === 'activity' ? 0 : (groupDepth.get(row.groupProjectId) ?? 0) * 16 + (it.block ? 4 : 0)}
         project={projectsById.get(row.groupProjectId)}
         selected={row.chatId === selected}
-        needsYou={!remoteOfRow(row.chatId) && snap.needsYou.has(row.chatId)}
-        needsLabel={needsYouLabel(snap.attention?.needsYou.find((r) => r.chatId === row.chatId)?.kind)}
-        flagReason={remoteOfRow(row.chatId) ? undefined : snap.flagged.get(row.chatId)}
+        needsYou={remoteOfRow(row.chatId) ? remoteNeedsYouIds.has(row.chatId) : snap.needsYou.has(row.chatId)}
+        needsLabel={needsYouLabel(remoteOfRow(row.chatId) ? remoteAttn.needsYou.find((r) => r.chatId === row.chatId)?.kind : snap.attention?.needsYou.find((r) => r.chatId === row.chatId)?.kind)}
+        flagReason={remoteOfRow(row.chatId) ? remoteFlagReasons.get(row.chatId) : snap.flagged.get(row.chatId)}
         remote={remoteOfRow(row.chatId)}
         sharedBy={sharedByOf(row)}
         dragging={drag?.active === true && drag.src.kind === 'chat' && drag.src.chatId === row.chatId}
