@@ -481,6 +481,9 @@ pub struct Client {
     /// Does this PC act for that hub person (a profile of theirs is linked here)? Set while
     /// the services are wired; until then every named person passes, as before.
     person_known: std::sync::OnceLock<PersonCheck>,
+    /// What to do with the person the hub's `welcome` says this line acts as. Set while the
+    /// services are wired; until then the welcome is ignored, as before.
+    home_link: std::sync::OnceLock<HomeLink>,
     handle: Arc<LineHandle>,
     up_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<(u64, Value)>>,
     /// Hub ids of Telegram messages being delivered now: the hub's resend of one of them is
@@ -512,6 +515,10 @@ const MAX_FRAME: usize = 80 * 1024 * 1024;
 
 /// Does this PC act for that hub person? Set once while the services are wired.
 type PersonCheck = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// What the hub's `welcome` says about this line: the person id it acts as, and that
+/// person's name. Set once while the services are wired.
+type HomeLink = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -545,6 +552,7 @@ impl Client {
             devices: std::sync::OnceLock::new(),
             knowledge: std::sync::OnceLock::new(),
             person_known: std::sync::OnceLock::new(),
+            home_link: std::sync::OnceLock::new(),
             handle: Arc::new(LineHandle {
                 state: AtomicU8::new(LineState::Off as u8),
                 up,
@@ -591,6 +599,13 @@ impl Client {
     /// refuses is dropped (or refused, for a call), since nobody here could answer it.
     pub fn set_person_check(&self, f: PersonCheck) {
         let _ = self.person_known.set(f);
+    }
+
+    /// Tell the line what to do when the hub's `welcome` names the person this line acts as
+    /// (the home profile takes that person when it is not linked yet — a line configured
+    /// with a token never went through the pairing op, which is what links it otherwise).
+    pub fn set_home_link(&self, f: HomeLink) {
+        let _ = self.home_link.set(f);
     }
 
     /// The hub person a down frame acts for. `Ok(None)`: it names none (an older hub, or a
@@ -825,6 +840,21 @@ impl Client {
         };
         let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
         match v.get("type").and_then(Value::as_str) {
+            Some("welcome") => {
+                // The hub says who this line acts as. A line set up with a token never went
+                // through the pairing op, so this is where the home profile learns its person.
+                let person = v.get("personId").and_then(|x| {
+                    x.as_str()
+                        .map(str::to_owned)
+                        .or_else(|| x.as_i64().map(|i| i.to_string()))
+                });
+                if let (Some(p), Some(name), Some(f)) = (person, s("person"), self.home_link.get())
+                {
+                    if !p.trim().is_empty() {
+                        f(&p, &name);
+                    }
+                }
+            }
             Some("call") => {
                 let (Some(id), Some(tool)) = (s("id"), s("tool")) else {
                     return;
@@ -1480,6 +1510,27 @@ mod tests {
         assert!(!ran
             .iter()
             .any(|(_, _, c)| c.tool == "app_list_chats" && c.args.get("x").is_some()));
+        // The welcome names the person this line acts as; the home link hears it, number
+        // form included.
+        let home = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+        let hl = home.clone();
+        c.set_home_link(std::sync::Arc::new(move |p: &str, n: &str| {
+            hl.lock().unwrap().push((p.to_owned(), n.to_owned()));
+        }));
+        ws.send(Message::Text(
+            json!({"type": "welcome", "version": 2, "personId": 3, "person": "Pat"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        for _ in 0..100 {
+            if !home.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(*home.lock().unwrap(), vec![("3".to_owned(), "Pat".to_owned())]);
         assert_eq!(c.handle().state(), LineState::Online);
         task.abort();
     }

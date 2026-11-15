@@ -126,7 +126,7 @@ fn line_state(ctx: &OpCtx) -> &'static str {
 }
 
 /// The line and its executor, as shared services. Needs the profile and platform already in place.
-pub fn register_services(services: &mut Services, _events: &Arc<dyn EventSink>) {
+pub fn register_services(services: &mut Services, events: &Arc<dyn EventSink>) {
     let (Some(profile), Some(platform)) = (services.get::<Profile>(), services.get::<Platform>())
     else {
         log::warn!("relay: no profile or platform; the hub line stays off");
@@ -151,10 +151,42 @@ pub fn register_services(services: &mut Services, _events: &Arc<dyn EventSink>) 
     // linked here (the home profile's person always is).
     if let Some(db) = services.get::<helm_core::db::Database>() {
         client.restore_sharing(household::load(&db));
-        let db = db.clone();
+        let db_check = Arc::clone(&db);
         client.set_person_check(Arc::new(move |p: &str| {
-            db.snapshot(|tx| helm_profiles::store::profile_for_person(tx, p).map(|o| o.is_some()))
-                .unwrap_or(false)
+            db_check.snapshot(|tx| {
+                helm_profiles::store::profile_for_person(tx, p).map(|o| o.is_some())
+            })
+            .unwrap_or(false)
+        }));
+        // The hub's welcome names the person this line acts as. Pairing links the home
+        // profile to that person; a line configured with a token never pairs, so the
+        // welcome is where the link happens. A declined person is left declined.
+        let db_link = Arc::clone(&db);
+        let events = events.clone();
+        client.set_home_link(Arc::new(move |p: &str, name: &str| {
+            let linked = db_link
+                .write(|tx| -> Result<bool, helm_profiles::store::ProfileError> {
+                    if helm_profiles::store::is_declined(tx, p)? {
+                        return Ok(false);
+                    }
+                    let home_person = helm_profiles::store::home(tx)?
+                        .and_then(|h| h.hub_person_id)
+                        .unwrap_or_default();
+                    if home_person == p {
+                        return Ok(false);
+                    }
+                    helm_profiles::store::link_home_to_person(
+                        tx,
+                        p,
+                        name,
+                        helm_core::now_ms(),
+                    )?;
+                    Ok(true)
+                })
+                .unwrap_or(false);
+            if linked {
+                events.emit(helm_ipc::AppEvent::new("profiles_changed"));
+            }
         }));
     }
     services.insert(sink);
