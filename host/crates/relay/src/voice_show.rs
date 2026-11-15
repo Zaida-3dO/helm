@@ -880,6 +880,7 @@ mod tests {
         // Only the chat the voice screen talks to may call the tool — in any profile's tag.
         let dir = tempfile::tempdir().unwrap();
         let mut reg = helm_core::db::MigrationRegistry::new();
+        helm_chats::register_migrations(&mut reg);
         helm_profiles::register_migrations(&mut reg);
         let db = helm_core::db::Database::open(&dir.path().join("t.db"), &reg).unwrap();
         assert!(!is_voice_chat(&db, dir.path(), "c1"), "no voice chat yet");

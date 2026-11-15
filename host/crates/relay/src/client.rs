@@ -1382,6 +1382,58 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(*sink.stops.lock().unwrap(), 1);
+
+        // The PC acts for its linked people: a frame naming one is answered for them, a frame
+        // naming anyone else never reaches Helm, and a call for them is refused.
+        c.set_person_check(std::sync::Arc::new(|p: &str| p == "7"));
+        ws.send(Message::Text(
+            json!({"type": "telegram", "id": "m9", "text": "for Sam", "personId": "7",
+                   "sentAt": 5})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            next(&mut ws).await,
+            json!({"type": "telegram_ack", "id": "m9", "personId": "7"})
+        );
+        assert_eq!(
+            sink.got.lock().unwrap().last().unwrap().person.as_deref(),
+            Some("7")
+        );
+        ws.send(Message::Text(
+            json!({"type": "telegram", "id": "m10", "text": "for nobody", "personId": "9",
+                   "sentAt": 5})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        ws.send(Message::Text(
+            json!({"type": "call", "id": "c9", "client": "x", "tool": "app_list_chats",
+                   "args": {}, "personId": "9"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        let refusal = next(&mut ws).await;
+        assert_eq!(refusal["id"], "c9");
+        assert!(
+            refusal["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no profile linked"),
+            "{refusal}"
+        );
+        // Nothing from either unknown-person frame reached Helm.
+        assert_eq!(
+            sink.got.lock().unwrap().iter().filter(|m| m.id == "m10").count(),
+            0
+        );
+        let ran = exec.ran.lock().unwrap();
+        assert!(!ran.iter().any(|(_, _, c)| c.tool == "app_list_chats" && c.args.get("x").is_some()));
         assert_eq!(c.handle().state(), LineState::Online);
         task.abort();
     }

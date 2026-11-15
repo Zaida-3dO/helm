@@ -1107,8 +1107,9 @@ mod tests {
             share(tx, &["c1".into()], &other.id, true)?;
             // The home person is first; an unlinked profile is not in the list at all.
             assert_eq!(linked_person_ids(tx)?, ["7", "9"]);
-            // Each person sees their own and what is shared with them.
-            assert_eq!(visible_to_person(tx, "7")?, ["c1", "c2"]);
+            // Each person sees their own and what is shared with them; a chat assigned to
+            // another profile leaves the home's own view.
+            assert_eq!(visible_to_person(tx, "7")?, ["c1"]);
             let mut nine = visible_to_person(tx, "9")?;
             nine.sort();
             assert_eq!(nine, ["c1", "c2"]);

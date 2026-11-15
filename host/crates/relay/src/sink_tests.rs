@@ -457,7 +457,10 @@ async fn a_message_starts_the_telegram_chat_with_origin_telegram_and_is_stored_o
     let calls = e.ops.calls.lock().unwrap().clone();
     assert_eq!(calls[0].0, "chat_create");
     assert!(
-        calls[0].1["cwd"].as_str().unwrap().ends_with("telegram"),
+        calls[0].1["cwd"]
+            .as_str()
+            .unwrap()
+            .ends_with(&e.ctx.profile_id),
         "{calls:?}"
     );
     let s = subs(&e.db, &chat);
@@ -773,7 +776,7 @@ async fn a_refused_model_opens_the_chat_on_the_app_default() {
 async fn the_telegram_settings_view_shows_the_saved_model_and_effort() {
     let e = env();
     let prof = e.dir.path().join("prof");
-    let path = telegram::policy_path(&prof);
+    let path = crate::people::telegram_paths(&prof, &e.ctx.profile_id).policy;
     let base = telegram::PolicyFile {
         max_age_hours: 6,
         max_tokens: 50_000,
@@ -987,7 +990,7 @@ async fn the_sink_delivers_only_once_wired_and_stop_reaches_the_tagged_chat() {
     // The model and effort saved in Settings reach the new chat: the sink reads the saved
     // settings file per delivery and hands them to `chat_create`.
     telegram::save_policy(
-        &telegram::policy_path(&e.dir.path().join("prof")),
+        &crate::people::telegram_paths(&e.dir.path().join("prof"), &e.ctx.profile_id).policy,
         telegram::PolicyFile {
             max_age_hours: 6,
             max_tokens: 50_000,
