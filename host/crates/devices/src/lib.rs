@@ -33,6 +33,7 @@
 //! | `devices_chats` | blocking | `{deviceUid, profileId?, archived?, offset?, limit? (≤ 200)}` → `{chats, projects: [{id, name, colour, kind}], more}`; for another device the chats are read from the copy and carry `personId`, `sharedWithPeople`, `projectName`, `needsAttention`; event `devices_chats_changed {deviceUid}` |
 //! | `devices_create_chat` | async | `{deviceUid, projectId, model?, effort?}` → `{chatId}`: starts the chat for the active profile's person on that device, then opens it here |
 //! | `devices_open_chat` | async | `{chatId}` → `{}`: listen to a copied chat; its rows arrive as `chat`, `thread`, `pending`, `message` and `refresh` events |
+//! | `devices_attach` | async | `{chatId, kind, name, mime?, data?, path?}` → `{attachmentId}`: stage a picture (base64) or a file (path on this PC) for the next message to a chat that runs on another device; the send names the ids |
 //!
 //! `model_catalogue` also takes `deviceUid` (the models that device last reported). Every other
 //! chat op that names a copied chat is answered by [`route`] (see `helm_chats::remote`).
