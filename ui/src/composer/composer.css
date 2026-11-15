@@ -166,13 +166,15 @@
 .composer-dock .composer-selects > * {
   min-width: 0;
 }
-/* A toolbar accessory centres on the chips (not on the text baseline); one with nothing to show takes no gap. */
-.composer-dock .composer-accessory {
+/* A toolbar accessory centres on the chips (not on the text baseline); one with nothing to show takes no gap.
+   Only the toolbar's: the cards docked above the composer (Allow requests, the workflow strip) are
+   full-width blocks, and a shrink-to-fit row would squeeze them to nothing. */
+.composer-dock .composer-bar .composer-accessory {
   display: inline-flex;
   align-items: center;
   gap: 6px;
 }
-.composer-dock .composer-accessory:empty {
+.composer-dock .composer-bar .composer-accessory:empty {
   display: none;
 }
 .composer-dock .model-picker {
