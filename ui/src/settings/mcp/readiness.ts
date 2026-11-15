@@ -2,6 +2,7 @@
 // page's readiness, preset drafts and the editor-to-save conversion.
 
 import type { McpPreset, McpServer, ServerStatus, ValueRef } from '../../api/mcp.ts';
+import type { OAuthConfig } from '../../api/generated/mcp/index.ts';
 import { GOOGLE_PRESET } from './google.ts';
 import type { OAuthStatus } from './oauth.ts';
 
@@ -139,6 +140,26 @@ function cleanRefs(m: Refs | undefined): Refs | undefined {
   return Object.keys(out).length ? out : undefined;
 }
 
+/** The browser sign-in part of a save: an empty object means "sign in through the browser,
+ * register automatically"; a filled-in client is kept, an empty new secret is dropped, a kept
+ * one rides back as its id. */
+function cleanOauth(o: OAuthConfig): OAuthConfig {
+  const out: OAuthConfig = {};
+  for (const k of ['clientId', 'scope', 'redirectUri'] as const) {
+    const v = o[k];
+    if (v && v.trim()) out[k] = v.trim();
+  }
+  const s = o.clientSecret;
+  if (s?.kind === 'literal') {
+    // A typed value (even over a saved one) replaces; blanking the box keeps the saved secret.
+    if (s.value && s.value.trim()) out.clientSecret = { kind: 'literal', value: s.value };
+    else if (s.secretId) out.clientSecret = { kind: 'literal', secretId: s.secretId };
+  } else if (s?.value) {
+    out.clientSecret = s;
+  }
+  return out;
+}
+
 /** The editor's state as the save op wants it: only the chosen transport's fields, blank entries
  * dropped, a kept secret sent back by id. */
 export function toSaveable(d: McpServer): McpServer {
@@ -155,7 +176,7 @@ export function toSaveable(d: McpServer): McpServer {
           type: t.type,
           url: (t.url ?? '').trim(),
           ...(cleanRefs(t.headers) ? { headers: cleanRefs(t.headers) } : {}),
-          ...(t.oauth ? { oauth: t.oauth } : {}),
+          ...(t.oauth ? { oauth: cleanOauth(t.oauth) } : {}),
         };
   return {
     id: d.id,

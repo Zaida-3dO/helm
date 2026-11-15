@@ -200,6 +200,37 @@ function Editor({
               travels unencrypted on your local network.
             </p>
           )}
+          {t.oauth && (
+            <div className="mcp-oauth" data-testid="mcp-oauth">
+              <p className="mcp-help" data-testid="mcp-oauth-note">
+                This server signs in through your browser.{' '}
+                {isNew ? 'Save it first; Connect then opens the sign-in.' : 'Connect opens the sign-in.'}
+              </p>
+              <label className="mcp-field">
+                <span>Client id</span>
+                <TextInput
+                  data-testid="mcp-oauth-client-id"
+                  spellCheck={false}
+                  autoComplete="off"
+                  placeholder="Only if the server cannot register automatically"
+                  value={t.oauth.clientId ?? ''}
+                  onChange={(e) => setT({ oauth: { ...t.oauth, clientId: e.target.value } })}
+                />
+              </label>
+              <label className="mcp-field">
+                <span>Client secret</span>
+                <TextInput
+                  data-testid="mcp-oauth-client-secret"
+                  type="password"
+                  spellCheck={false}
+                  autoComplete="off"
+                  placeholder={t.oauth.clientSecret?.kind === 'literal' && t.oauth.clientSecret.secretId ? 'Saved; type to replace' : 'Usually left empty'}
+                  value={t.oauth.clientSecret?.kind === 'literal' ? t.oauth.clientSecret.value ?? '' : ''}
+                  onChange={(e) => setT({ oauth: { ...t.oauth, clientSecret: { kind: 'literal', value: e.target.value } } })}
+                />
+              </label>
+            </div>
+          )}
         </>
       ) : (
         <>
@@ -256,6 +287,15 @@ function Editor({
           {test.outcome?.ok ? <IconCheck size={14} /> : <IconWarning size={14} />}
           {test.outcome?.message ?? `The test could not run: ${test.failed}`}
         </p>
+      )}
+      {/* A refused test that wants a sign-in offers the browser route instead of a token field. */}
+      {test.outcome && !test.outcome.ok && test.outcome.signinRequired && remote && !t.oauth && (
+        <div className="mcp-oauth-offer" data-testid="mcp-oauth-offer">
+          <p className="mcp-help">This server signs in through your browser — no token to paste.</p>
+          <Button variant="primary" data-testid="mcp-oauth-use" onClick={() => setT({ oauth: {} })}>
+            Use browser sign-in
+          </Button>
+        </div>
       )}
     </div>
   );

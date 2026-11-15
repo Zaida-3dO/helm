@@ -54,11 +54,15 @@ export function mcpFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
       transport: { type: 'http', url: 'http://10.0.0.2:8080/mcp', headers: { Authorization: { kind: 'literal', secretId: `lit_${'0'.repeat(32)}`, prefix: 'Bearer ' } } },
     },
     { id: 'files', name: 'Local files', enabled: true, allowPrivateHttp: false, transport: { type: 'stdio', command: 'node.exe', args: ['server.js'] } },
+    { id: 'crm', name: 'Example CRM', enabled: true, allowPrivateHttp: false, transport: { type: 'http', url: 'https://crm.example/mcp', oauth: {} } },
   ];
   const status: ServerStatus[] = [
     { serverId: 'helm_hub', state: 'connected', toolCount: 5, at: Date.now() },
     { serverId: 'files', state: 'failed', error: 'Local files exited (code 1).', at: Date.now() },
+    { serverId: 'crm', state: 'signin_required', error: 'Not connected: open Settings > MCP and click Connect.', at: Date.now() },
   ];
+  // Which browser-signed-in servers have a sign-in kept (the fake answers instantly).
+  const oauthSigned: Record<string, boolean> = {};
   const repo: RepoServer[] = [
     { folder: 'C:/work/repo', file: 'C:/work/repo/.mcp.json', name: 'docs', hash: 'a'.repeat(64), state: 'held' },
     { folder: 'C:/work/repo', file: 'C:/work/repo/.mcp.json', name: 'github', hash: 'b'.repeat(64), state: 'approved' },
@@ -132,6 +136,21 @@ export function mcpFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         s.enabled = a.enabled === true;
         rev++;
         return snap();
+      }
+      case 'mcp_oauth_status':
+        return { connected: oauthSigned[String(a.serverId)] === true };
+      case 'mcp_oauth_connect': {
+        // The fake browser round-trip answers at once.
+        oauthSigned[String(a.serverId)] = true;
+        const st = status.find((x) => x.serverId === String(a.serverId));
+        if (st) Object.assign(st, { state: 'connected', toolCount: 2, error: undefined, at: Date.now() });
+        return { connected: true };
+      }
+      case 'mcp_oauth_disconnect': {
+        delete oauthSigned[String(a.serverId)];
+        const st = status.find((x) => x.serverId === String(a.serverId));
+        if (st) Object.assign(st, { state: 'signin_required', error: 'Not connected: open Settings > MCP and click Connect.', at: Date.now() });
+        return null;
       }
       case 'mcp_google_accounts':
         return googleList();

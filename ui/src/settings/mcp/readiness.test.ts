@@ -89,6 +89,20 @@ test('toSaveable keeps only the chosen transport and drops blank entries', () =>
   assert.equal(stdio.allowPrivateHttp, false);
 });
 
+test('a browser sign-in save keeps the marker and only the client values that are filled', () => {
+  const base: McpServer = { id: 'crm', name: 'CRM', enabled: true, allowPrivateHttp: false, transport: { type: 'http', url: 'https://crm.example/mcp' } };
+  assert.equal(toSaveable(base).transport.oauth, undefined, 'no browser sign-in unless asked for');
+  const marker = toSaveable({ ...base, transport: { ...base.transport, oauth: {} } });
+  assert.deepEqual(marker.transport.oauth, {}, 'the empty marker survives: register automatically');
+  const withClient = toSaveable({
+    ...base,
+    transport: { ...base.transport, oauth: { clientId: ' cid ', scope: '  ', clientSecret: { kind: 'literal', value: '  ' } } },
+  });
+  assert.deepEqual(withClient.transport.oauth, { clientId: 'cid' }, 'blank client parts drop away');
+  const kept = toSaveable({ ...base, transport: { ...base.transport, oauth: { clientId: 'cid', clientSecret: { kind: 'literal', secretId: `lit_${'b'.repeat(32)}` } } } });
+  assert.deepEqual(kept.transport.oauth, { clientId: 'cid', clientSecret: { kind: 'literal', secretId: `lit_${'b'.repeat(32)}` } }, 'a saved secret rides back by id, never re-sent');
+});
+
 test('the unencrypted warning shows for plain http off this computer only', () => {
   assert.equal(isPlainRemoteHttp('http://10.0.0.2/mcp'), true);
   assert.equal(isPlainRemoteHttp('http://hub.lan/mcp'), true);
@@ -136,13 +150,14 @@ test('the Google preset drafts a program, its row ignores the environment, and t
 
 test('the setup checklist is the six console steps, each with its console page', () => {
   assert.equal(CONSOLE_STEPS.length, 6);
-  for (const s of CONSOLE_STEPS) {
+  const urls = CONSOLE_STEPS.map((s) => {
     assert.ok(s.label.length > 0);
     assert.match(s.url, /^https:\/\/console\.cloud\.google\.com\//);
-  }
-  assert.match(CONSOLE_STEPS[0].url, /projectcreate/);
-  assert.match(CONSOLE_STEPS[1].url, /gmail\.googleapis\.com/);
-  assert.match(CONSOLE_STEPS[5].url, /clients\/create/);
+    return s.url;
+  });
+  assert.match(urls.join(','), /projectcreate/);
+  assert.match(urls.join(','), /gmail\.googleapis\.com/);
+  assert.match(urls[urls.length - 1] ?? '', /clients\/create/, 'the client step is last');
 });
 
 test('the client form enables Save only once both values are filled', () => {

@@ -136,6 +136,22 @@
   font-size: 12px;
 }
 
+/* Remote browser sign-in: the offer after a refused test, and the optional client pair. */
+.mcp-oauth-offer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.mcp-oauth {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
 /* The editor's connection test answer. */
 .mcp-test {
   display: flex;
