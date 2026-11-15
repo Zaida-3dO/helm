@@ -399,6 +399,8 @@ fn set_label(creds: &CredentialStore, email: &str, label: &str) -> Result<(), St
 
 /// Forget one account: its tokens and its index row. Nothing is revoked at Google.
 fn remove_account(creds: &CredentialStore, email: &str) -> Result<(), String> {
+    // In turn with refreshes, so one in flight cannot write the tokens back afterwards.
+    let _turn = REFRESH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let key = email.to_ascii_lowercase();
     if !listed_accounts(creds)
         .iter()
@@ -762,14 +764,35 @@ pub(crate) fn account_access(store: &McpStore, email: &str, force: bool) -> Resu
         id_token: None,
         ..tokens
     };
-    TokenStore::save(
-        creds,
-        &account_entry(email),
-        &account_identity(email),
-        &auth,
-    )
-    .map_err(|e| e.to_string())?;
+    // Kept only while the stored sign-in still holds the refresh token that was spent: an
+    // account removed or signed in again meanwhile stays as it now is. (Removing and signing in
+    // take the same turn, so this is a second line, as in the remote-server refresh.)
+    let unchanged = TokenStore::load(creds, &account_entry(email), &account_identity(email))
+        .ok()
+        .flatten()
+        .is_some_and(|now| now.tokens.refresh_token.as_deref() == Some(spent.as_str()));
+    if unchanged {
+        TokenStore::save(
+            creds,
+            &account_entry(email),
+            &account_identity(email),
+            &auth,
+        )
+        .map_err(|e| e.to_string())?;
+    }
     Ok(auth.tokens.access_token.clone())
+}
+
+/// Keep a finished sign-in: its token set and its index row, in one turn with the refreshes and
+/// removals so none of them can land between the two writes or over this one.
+fn keep_sign_in(
+    creds: &CredentialStore,
+    email: &str,
+    auth: &StoredAuth,
+) -> Result<(), oauth::OauthError> {
+    let _turn = REFRESH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    TokenStore::save(creds, &account_entry(email), &account_identity(email), auth)?;
+    index_upsert(creds, email, None).map_err(|_| oauth::OauthError::Storage)
 }
 
 /// Begin a browser sign-in for one account: build Google's sign-in address, hand it to the
@@ -864,13 +887,7 @@ fn begin_sign_in(
                 registered_redirect: None,
                 stored_at: None,
             };
-            TokenStore::save(
-                st.creds(),
-                &account_entry(&email),
-                &account_identity(&email),
-                &auth,
-            )?;
-            index_upsert(st.creds(), &email, None).map_err(|_| oauth::OauthError::Storage)
+            keep_sign_in(st.creds(), &email, &auth)
         });
         if let Err(e) = outcome {
             // The error words are the client module's: they name nothing secret.
@@ -1029,6 +1046,7 @@ pub fn keeps_bridge(server: &McpServer) -> bool {
 /// Google accounts server is removed — with no server there is no screen left to remove them
 /// from. Nothing is revoked at Google.
 pub fn forget_all_accounts(creds: &CredentialStore) {
+    let _turn = REFRESH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     for e in read_index(creds) {
         let _ = creds.forget(&account_entry(&e.email));
     }
@@ -2151,5 +2169,167 @@ mod tests {
         );
         // Not due: the stored token answers without a network call.
         assert_eq!(account_access(&st, "a@x.com", false).unwrap(), "tok");
+    }
+
+    /// A token address on this computer that holds its answer until released: the address, a
+    /// signal that the refresh request has arrived, and the release.
+    fn slow_token_endpoint() -> (
+        String,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let (arrived_tx, arrived) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut raw = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let n = stream.read(&mut chunk).unwrap_or(0);
+                raw.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&raw).into_owned();
+                let Some((head, body)) = text.split_once("\r\n\r\n") else {
+                    if n == 0 {
+                        return;
+                    }
+                    continue;
+                };
+                let want: usize = head
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().parse().unwrap_or(0))
+                    })
+                    .unwrap_or(0);
+                if body.len() >= want || n == 0 {
+                    break;
+                }
+            }
+            let _ = arrived_tx.send(());
+            let _ = release_rx.recv_timeout(Duration::from_secs(10));
+            let body = json!({
+                "access_token": "renewed-access",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "refresh_token": "renewed-refresh"
+            })
+            .to_string();
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.flush();
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+            let mut rest = Vec::new();
+            let _ = stream.read_to_end(&mut rest);
+        });
+        (base, arrived, release)
+    }
+
+    fn stored_auth(
+        token_endpoint: &str,
+        access: &str,
+        refresh: &str,
+        expires_at: u64,
+    ) -> StoredAuth {
+        StoredAuth {
+            client: oauth::Client::pre_registered("g-client", Some("g-secret")),
+            tokens: TokenSet {
+                access_token: access.into(),
+                token_type: "Bearer".into(),
+                expires_at: Some(expires_at),
+                refresh_token: Some(refresh.into()),
+                scope: None,
+                id_token: None,
+            },
+            resource: None,
+            auth_server: Some(AuthServer {
+                issuer: "http://127.0.0.1".into(),
+                authorization_endpoint: format!("{token_endpoint}/auth"),
+                token_endpoint: format!("{token_endpoint}/token"),
+                registration_endpoint: None,
+            }),
+            registered_redirect: None,
+            stored_at: None,
+        }
+    }
+
+    /// A refresh in flight is one turn: removing the account, or signing it in again, waits for
+    /// it and then has the last word. A removed account stays removed (index row and sealed
+    /// tokens both gone), and a fresh sign-in's grant is not written over by the old one.
+    #[test]
+    fn a_refresh_in_flight_neither_resurrects_a_removed_account_nor_overwrites_a_fresh_sign_in() {
+        let d = tempfile::tempdir().unwrap();
+        let st = Arc::new(store(d.path()));
+        let load = |st: &McpStore| {
+            TokenStore::load(
+                st.creds(),
+                &account_entry("work@x.com"),
+                &account_identity("work@x.com"),
+            )
+            .unwrap()
+        };
+
+        // Removed while the refresh is out.
+        let (base, arrived, release) = slow_token_endpoint();
+        let old = stored_auth(&base, "old-access", "old-refresh", 1);
+        seed_account(
+            st.creds(),
+            "work@x.com",
+            old.tokens.clone(),
+            old.auth_server.clone(),
+        );
+        let refresher = {
+            let st = st.clone();
+            std::thread::spawn(move || account_access(&st, "work@x.com", true))
+        };
+        arrived.recv_timeout(Duration::from_secs(10)).unwrap();
+        let remover = {
+            let st = st.clone();
+            std::thread::spawn(move || remove_account(st.creds(), "work@x.com"))
+        };
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(!remover.is_finished(), "the removal waits for the refresh");
+        release.send(()).unwrap();
+        assert_eq!(refresher.join().unwrap().unwrap(), "renewed-access");
+        remover.join().unwrap().unwrap();
+        assert!(load(&st).is_none(), "the sealed tokens did not come back");
+        assert!(listed_accounts(st.creds()).is_empty());
+
+        // Signed in again while the refresh is out.
+        let (base, arrived, release) = slow_token_endpoint();
+        let old = stored_auth(&base, "old-access", "old-refresh", 1);
+        seed_account(
+            st.creds(),
+            "work@x.com",
+            old.tokens.clone(),
+            old.auth_server.clone(),
+        );
+        let refresher = {
+            let st = st.clone();
+            std::thread::spawn(move || account_access(&st, "work@x.com", true))
+        };
+        arrived.recv_timeout(Duration::from_secs(10)).unwrap();
+        let signer = {
+            let st = st.clone();
+            let fresh = stored_auth(&base, "fresh-access", "fresh-refresh", 2_000_000_000);
+            std::thread::spawn(move || keep_sign_in(st.creds(), "work@x.com", &fresh))
+        };
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(!signer.is_finished(), "the sign-in waits for the refresh");
+        release.send(()).unwrap();
+        refresher.join().unwrap().unwrap();
+        signer.join().unwrap().unwrap();
+        let kept = load(&st).unwrap();
+        assert_eq!(kept.tokens.access_token, "fresh-access");
+        assert_eq!(kept.tokens.refresh_token.as_deref(), Some("fresh-refresh"));
+        assert_eq!(listed_accounts(st.creds()).len(), 1);
     }
 }
