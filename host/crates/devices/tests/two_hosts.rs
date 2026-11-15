@@ -522,6 +522,36 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         .collect();
     assert_eq!(answered, ["perm", "plan", "trust", "secret", "pick"]);
 
+    // The run switch gates the waiting requests too: with it off a question cannot be
+    // answered from another PC, and putting it back lets the answer through.
+    port.put_interaction(fake_interaction(
+        "c1",
+        "off",
+        Meth::Select,
+        Some(Att::Question),
+        Some(&["A", "B"]),
+    ));
+    port.set_run(false);
+    let e = b
+        .rpc
+        .call(
+            "dev-a",
+            "answer",
+            json!({"chatId": "c1", "requestId": "off", "value": "A", "label": "A"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, code::NOT_ALLOWED);
+    port.set_run(true);
+    b.rpc
+        .call(
+            "dev-a",
+            "answer",
+            json!({"chatId": "c1", "requestId": "off", "value": "A", "label": "A"}),
+        )
+        .await
+        .unwrap();
+
     // A device that drops off the hub loses its subscriptions, and asks again when it is back.
     assert!(host.watchers().contains(&"dev-b".to_owned()));
     b.link.set_up(false);
@@ -730,6 +760,30 @@ fn rows_of(s: &Side, chat: &str) -> Vec<(i64, String)> {
         .collect()
 }
 
+/// The ids of the requests waiting in this PC's copy of a chat's thread state.
+fn copied_interactions(s: &Side, chat: &str) -> Vec<String> {
+    let stored = s
+        .db
+        .snapshot(|tx| {
+            tx.query_row(
+                "SELECT thread FROM mirror_chats WHERE chat_id = ?1",
+                [chat],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()
+        })
+        .unwrap()
+        .flatten();
+    stored
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|t| t.get("interactions").cloned())
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|i| i["id"].as_str().map(str::to_owned))
+        .collect()
+}
+
 fn count(s: &Side, sql: &str) -> i64 {
     s.db.snapshot(|tx| tx.query_row(sql, [], |r| r.get::<_, i64>(0)))
         .unwrap()
@@ -891,6 +945,78 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         .await
         .unwrap();
     assert!(cards["pending"].as_array().unwrap().is_empty());
+
+    // Every kind of request a chat raises and waits on reaches the copy and can be answered
+    // from this PC: a tool permission, a question, a plan approval, a trust prompt and a
+    // secret input. Each answer reaches the chat on the PC that runs it, and the thread
+    // event it raises there closes the card back here.
+    let kinds: Vec<(&str, Interaction, Value)> = vec![
+        (
+            "a tool permission",
+            fake_interaction("c1", "k-perm", Meth::Confirm, Some(Att::Approval), None),
+            json!({"confirmed": true}),
+        ),
+        (
+            "a question",
+            fake_interaction("c1", "k-ask", Meth::Select, Some(Att::Question), Some(&["A", "B"])),
+            json!({"value": "A"}),
+        ),
+        (
+            "a plan approval",
+            fake_interaction(
+                "c1",
+                "k-plan",
+                Meth::Select,
+                Some(Att::Plan),
+                Some(&["Approve plan", "Keep planning"]),
+            ),
+            json!({"value": "Approve plan", "confirmed": true}),
+        ),
+        (
+            "a trust prompt",
+            fake_interaction("c1", "k-trust", Meth::Confirm, Some(Att::Trust), None),
+            json!({"confirmed": true}),
+        ),
+        (
+            "a secret input",
+            Interaction {
+                secret: Some(true),
+                ..fake_interaction("c1", "k-secret", Meth::Input, Some(Att::Question), None)
+            },
+            json!({"value": "hunter2"}),
+        ),
+    ];
+    for (what, waiting, extra) in kinds {
+        port.put_interaction(waiting.clone());
+        host.observe(
+            &AppEvent::new("thread")
+                .with("chatId", "c1")
+                .with("thread", json!({ "interactions": [waiting.clone()] })),
+        );
+        until(|| copied_interactions(&b, "c1") == vec![waiting.id.clone()]).await;
+        let mut args = json!({"chatId": "c1", "requestId": waiting.id});
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let got = api.call_host("interaction_answer", args).await;
+        assert!(got.is_ok(), "{what}: {got:?}");
+        host.observe(
+            &AppEvent::new("thread")
+                .with("chatId", "c1")
+                .with("thread", json!({ "interactions": [] })),
+        );
+        until(|| copied_interactions(&b, "c1").is_empty()).await;
+    }
+    let answered_from_copy: Vec<_> = port
+        .st()
+        .answered
+        .iter()
+        .map(|a| a.request_id.clone())
+        .collect();
+    assert_eq!(
+        answered_from_copy,
+        ["k-perm", "k-ask", "k-plan", "k-trust", "k-secret"]
+    );
 
     // Every chat op on a copied chat: answered from the copy, sent to the device, answered
     // quietly, or refused with the sentence that says where to do it.
