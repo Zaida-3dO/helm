@@ -944,10 +944,16 @@ impl Client {
                     });
                     let reply = match admitted {
                         Err(text) => refusal(&id, text),
-                        Ok(admitted) => answer(
-                            &id,
-                            executor.run(&caller, person.as_deref(), admitted).await,
-                        ),
+                        Ok(admitted) => {
+                            let tool = admitted.tool.clone();
+                            answer(
+                                &id,
+                                executor
+                                    .run(&caller, person.as_deref(), admitted)
+                                    .await
+                                    .map(|r| gate::for_outside(&tool, r)),
+                            )
+                        }
                     };
                     let _ = out.send(reply);
                 });
