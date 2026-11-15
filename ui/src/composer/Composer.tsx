@@ -364,7 +364,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   // Taking one out also drops it on the host, or it would be staged again the next time this chat
   // opens and go out with the next send.
   const discard = (id: string) => {
-    ops.discardAttachment(chat.id, id).catch(() => {
+    (remote ? devOps.discard(chat.id, id) : ops.discardAttachment(chat.id, id)).catch(() => {
       // Not reachable: it only stays staged on the host, as it was before.
     });
   };

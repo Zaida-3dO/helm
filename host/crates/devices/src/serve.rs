@@ -160,9 +160,14 @@ const ANSWERED_KEPT: usize = 256;
 /// are dropped when a new upload starts.
 const UPLOAD_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 const UPLOADS_KEPT: usize = 32;
+/// The most bytes held for uploads waiting on a send: in all, and for any one device.
+const HELD_TOTAL_BYTES: usize = 100 * 1024 * 1024;
+const HELD_DEVICE_BYTES: usize = 50 * 1024 * 1024;
 
 /// One file arriving chunk by chunk, joined and kept until a send names it.
 struct Upload {
+    /// The device that sends it: nobody else may continue, name or take it.
+    owner: String,
     chat_id: String,
     kind: String,
     name: String,
@@ -396,6 +401,7 @@ impl Inner {
             }
             // A card appeared, closed or expired: watchers holding the chat hear the whole
             // pending set again, so any device's card shows the same list at the same time.
+            "consent" if !lock(&self.subs).watching_chat(&chat_id) => Vec::new(),
             "consent" => {
                 let cards = match self.port.consent(chat_id.clone()).await {
                     Ok(mut cards) => {
@@ -429,19 +435,21 @@ impl Inner {
         op: &str,
         args: Value,
     ) -> (Result<Value, WireError>, Option<String>) {
+        // Abandoned uploads go on the clock of any request, not only the next upload.
+        lock(&self.uploads).retain(|_, u| u.touched.elapsed() <= UPLOAD_TTL);
         let op = match Op::parse(op, args) {
             Ok(op) => op,
             Err(e) => return (Err(e), None),
         };
         let run = async {
             let (asker, acting) = self.asker(from)?;
+            // The switch for other devices gates every op that runs or changes a chat here,
+            // whoever is asking; the household switch is a further gate for other people.
+            if op.is_run() && !self.port.run_allowed() {
+                return Err(WireError::not_allowed());
+            }
             let op = match &asker {
-                Asker::Own => {
-                    if op.is_run() && !self.port.run_allowed() {
-                        return Err(WireError::not_allowed());
-                    }
-                    op
-                }
+                Asker::Own => op,
                 Asker::Household { .. } => self.household_op(op)?,
             };
             // A chat started from afar belongs to the acting person: the hub's verified id
@@ -603,7 +611,7 @@ impl Inner {
             }
             Op::Page(a) => done(self.page(a).await?),
             Op::AttachPut(a) => {
-                self.attach_put(a)?;
+                self.attach_put(uid, a)?;
                 done(json!({}))
             }
             Op::Send(a) => {
@@ -615,7 +623,7 @@ impl Inner {
                     }
                     Asker::Own => None,
                 };
-                done(self.send(a, from).await?)
+                done(self.send(uid, a, from).await?)
             }
             Op::Stop(a) => {
                 self.port.stop(a.chat_id).await?;
@@ -680,7 +688,7 @@ impl Inner {
     /// Join one chunk into a file on its way to a chat that runs here. The first chunk names
     /// the file; after that they must arrive in order. The bytes wait until a send names the
     /// upload id.
-    fn attach_put(&self, a: AttachPutArgs) -> Result<(), WireError> {
+    fn attach_put(&self, owner: &str, a: AttachPutArgs) -> Result<(), WireError> {
         if uuid::Uuid::parse_str(&a.upload_id).is_err() {
             return Err(WireError::bad_args("uploadId must be a UUID."));
         }
@@ -695,15 +703,38 @@ impl Inner {
         }
         let mut uploads = lock(&self.uploads);
         uploads.retain(|_, u| u.touched.elapsed() <= UPLOAD_TTL);
+        if uploads.get(&a.upload_id).is_some_and(|u| u.owner != owner) {
+            return Err(WireError::new(
+                code::REFUSED,
+                "That upload id belongs to another device.",
+            ));
+        }
+        let held = |uploads: &HashMap<String, Upload>, own: Option<&str>| -> usize {
+            uploads
+                .values()
+                .filter(|u| own.is_none_or(|o| u.owner == o))
+                .map(|u| u.bytes.len())
+                .sum()
+        };
+        if held(&uploads, None) + data.len() > HELD_TOTAL_BYTES
+            || held(&uploads, Some(owner)) + data.len() > HELD_DEVICE_BYTES
+        {
+            return Err(WireError::new(
+                code::REFUSED,
+                "This PC is holding as many uploaded files as it can; send again in a moment.",
+            ));
+        }
         if a.seq == 0 {
             if !matches!(a.kind.as_str(), "image" | "file") || a.name.trim().is_empty() {
                 return Err(WireError::bad_args(
                     "The first chunk names the file and whether it is an image or a file.",
                 ));
             }
-            if uploads.len() >= UPLOADS_KEPT {
+            // A full house drops the oldest of this device's own uploads, never another's.
+            if uploads.values().filter(|u| u.owner == owner).count() >= UPLOADS_KEPT {
                 let oldest = uploads
                     .iter()
+                    .filter(|(_, u)| u.owner == owner)
                     .min_by_key(|(_, u)| u.touched)
                     .map(|(k, _)| k.clone());
                 if let Some(k) = oldest {
@@ -713,6 +744,7 @@ impl Inner {
             uploads.insert(
                 a.upload_id.clone(),
                 Upload {
+                    owner: owner.to_owned(),
                     chat_id: a.chat_id.clone(),
                     kind: a.kind.clone(),
                     name: a.name.clone(),
@@ -766,6 +798,7 @@ impl Inner {
     /// names them. A missing or unfinished upload is refused: the sender starts it again.
     fn take_files(
         &self,
+        owner: &str,
         chat_id: &str,
         refs: &[AttachmentRef],
     ) -> Result<Vec<SentFile>, WireError> {
@@ -788,7 +821,7 @@ impl Inner {
                 )
             };
             let u = uploads.get(&r.upload_id).ok_or_else(bad)?;
-            if u.chat_id != chat_id || !u.done {
+            if u.owner != owner || u.chat_id != chat_id || !u.done {
                 return Err(bad());
             }
             files.push(SentFile {
@@ -801,7 +834,12 @@ impl Inner {
         Ok(files)
     }
 
-    async fn send(&self, a: SendArgs, from: Option<String>) -> Result<Value, WireError> {
+    async fn send(
+        &self,
+        owner: &str,
+        a: SendArgs,
+        from: Option<String>,
+    ) -> Result<Value, WireError> {
         if a.text.trim().is_empty() {
             return Err(WireError::bad_args("There is nothing to send."));
         }
@@ -814,8 +852,13 @@ impl Inner {
         if uuid::Uuid::parse_str(&a.client_id).is_err() {
             return Err(WireError::bad_args("clientId must be a UUID."));
         }
-        let files = self.take_files(&a.chat_id, &a.attachments)?;
+        let files = self.take_files(owner, &a.chat_id, &a.attachments)?;
         if !self.port.claim_send(&a.client_id, &a.chat_id)? {
+            // A repeat spends nothing, so the uploads it named are let go at once.
+            let mut uploads = lock(&self.uploads);
+            for r in &a.attachments {
+                uploads.remove(&r.upload_id);
+            }
             return Ok(json!({ "accepted": true, "duplicate": true }));
         }
         // Both modes are delivered the way the PC delivers any message it did not type itself:

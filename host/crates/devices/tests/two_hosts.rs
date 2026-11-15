@@ -670,7 +670,7 @@ async fn allow_cards_show_on_every_pc_and_the_first_answer_wins() {
         .call("dev-a", "consent_decide", decide("r2"))
         .await
         .unwrap_err();
-    assert_eq!(e.code, code::REFUSED);
+    assert_eq!(e.code, "conflict");
 
     // Answered on the host PC itself: the window's own click moves the same store, and the
     // service's consent event closes the card on the other PCs.
@@ -949,6 +949,19 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         .await
         .unwrap();
     assert_eq!(cards["pending"].as_array().unwrap().len(), 1);
+    // A copy made from an older device holds no card list (null); the window still gets a list.
+    b.db.write(|tx| {
+        tx.execute(
+            "UPDATE mirror_chats SET consent = 'null' WHERE chat_id = 'c1'",
+            [],
+        )
+    })
+    .unwrap();
+    let old = api
+        .call_host("devices_consent_list", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    assert_eq!(old["pending"], json!([]));
     api.call_host(
         "devices_consent_decide",
         json!({"chatId": "c1", "requestId": "r1", "decision": "allow", "grantMinutes": 15}),
@@ -1121,6 +1134,7 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
     std::fs::create_dir_all(&stage).unwrap();
     let img: Vec<u8> = (0..650_000u32).map(|i| (i % 251) as u8).collect();
     std::fs::write(stage.join("att-img"), &img).unwrap();
+    std::fs::write(stage.join("att-text"), b"a long paste").unwrap();
     let note = b.db.path().with_file_name("big-note.txt");
     let note_bytes: Vec<u8> = (0..700_004u32).map(|i| b'a' + (i % 26) as u8).collect();
     std::fs::write(&note, &note_bytes).unwrap();
@@ -1135,6 +1149,11 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
              VALUES ('att-file', 'c1', 'file', 'big-note.txt', '', ?1, ?2, 2)",
             rusqlite::params![note.to_str().unwrap(), note_bytes.len() as i64],
         )?;
+        tx.execute(
+            "INSERT INTO mirror_attachments(id, chat_id, kind, name, mime, target, bytes, created_at)
+             VALUES ('att-text', 'c1', 'text', 'Pasted text.txt', 'text/plain', 'att-text', 12, 3)",
+            [],
+        )?;
         Ok::<_, rusqlite::Error>(())
     })
     .unwrap();
@@ -1147,7 +1166,7 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
                 "text": "look",
                 "action": "default",
                 "draftRevision": 0,
-                "attachments": ["att-img", "att-file"],
+                "attachments": ["att-img", "att-file", "att-text"],
             }),
         )
         .await
@@ -1156,7 +1175,12 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
     {
         let st = port.st();
         let files = st.sent_files.last().unwrap();
-        assert_eq!(files.len(), 2);
+        assert_eq!(files.len(), 3);
+        // A pasted text crosses as a plain-text file.
+        assert_eq!(
+            (files[2].kind.as_str(), files[2].mime.as_str()),
+            ("file", "text/plain")
+        );
         assert_eq!(
             (
                 files[0].kind.as_str(),
@@ -1175,6 +1199,24 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
     // Spent by the send: the rows and the picture are gone from this PC.
     assert_eq!(count(&b, "SELECT COUNT(*) FROM mirror_attachments"), 0);
     assert!(!stage.join("att-img").exists());
+    // A chip taken out is taken back on this PC too: the row and the saved picture go.
+    std::fs::write(stage.join("att-gone"), b"x").unwrap();
+    b.db.write(|tx| {
+        tx.execute(
+            "INSERT INTO mirror_attachments(id, chat_id, kind, name, mime, target, bytes, created_at)
+             VALUES ('att-gone', 'c1', 'image', 'x.png', 'image/png', 'att-gone', 1, 1)",
+            [],
+        )
+    })
+    .unwrap();
+    api.call_host(
+        "devices_discard",
+        json!({"chatId": "c1", "attachmentId": "att-gone"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(count(&b, "SELECT COUNT(*) FROM mirror_attachments"), 0);
+    assert!(!stage.join("att-gone").exists());
     // An id that is no longer staged is refused in words, before any second copy moves.
     let e = api
         .call_host(
@@ -1560,6 +1602,68 @@ async fn a_household_member_gets_their_own_view_of_the_list_but_is_refused_nothi
     assert_eq!(e.code, code::NOT_ALLOWED);
     assert!(own.rpc.call("dev-a", "hello", json!({})).await.is_ok());
     port.set_household(true);
+    // The switch for other devices gates a household member's run ops too: with it off, every op
+    // that runs or changes a chat is refused, card answers and uploads included; reads stay.
+    port.set_run(false);
+    for (op, args) in [
+        (
+            "consent_decide",
+            json!({"chatId": "hers", "requestId": "r", "decision": "allow"}),
+        ),
+        ("send", send("hers", 9)),
+        (
+            "attach_put",
+            json!({"chatId": "hers", "uploadId": "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b99", "seq": 0, "eof": true, "data": "", "kind": "file", "name": "a.txt", "mime": ""}),
+        ),
+        ("stop", json!({"chatId": "hers"})),
+    ] {
+        let e = sam.rpc.call("dev-a", op, args).await.unwrap_err();
+        assert_eq!(e.code, code::NOT_ALLOWED, "{op}");
+    }
+    assert!(sam.rpc.call("dev-a", "hello", json!({})).await.is_ok());
+    port.set_run(true);
+
+    // Uploads belong to the device that began them, and one device may hold only so much.
+    use base64::Engine as _;
+    let chunk = base64::engine::general_purpose::STANDARD.encode(vec![7u8; 640 * 1024]);
+    let part = |id: &str, seq: u32, eof: bool| {
+        json!({"chatId": "hers", "uploadId": id, "seq": seq, "eof": eof, "data": chunk,
+               "kind": "file", "name": "a.bin", "mime": ""})
+    };
+    let (u1, u2, u3) = (
+        "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b01",
+        "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b02",
+        "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b03",
+    );
+    sam.rpc
+        .call("dev-a", "attach_put", part(u1, 0, false))
+        .await
+        .unwrap();
+    let e = own
+        .rpc
+        .call("dev-a", "attach_put", part(u1, 1, false))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, code::REFUSED);
+    for id in [u1, u2] {
+        let start = if id == u1 { 1 } else { 0 };
+        for seq in start..40 {
+            sam.rpc
+                .call("dev-a", "attach_put", part(id, seq, seq == 39))
+                .await
+                .unwrap();
+        }
+    }
+    let e = sam
+        .rpc
+        .call("dev-a", "attach_put", part(u3, 0, true))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, code::REFUSED);
+    own.rpc
+        .call("dev-a", "attach_put", part(u3, 0, true))
+        .await
+        .unwrap();
     // A person this PC has no profile for is still served: the switch is per household, not
     // per person.
     port.st().people.retain(|p| p != "person-b");
@@ -1780,4 +1884,52 @@ async fn one_pc_acts_as_each_of_its_profiles() {
         .unwrap_err();
     assert_eq!(e.code, code::NOT_ALLOWED);
     assert_eq!(port.st().created.len(), 1);
+}
+
+/// A profile linked after the first sync widens the copy: the app's event tap, handed the
+/// mirror, asks the other PC again with the wider read set, and the chat of the new person
+/// arrives without the hub line dropping.
+#[tokio::test(start_paused = true)]
+async fn a_profile_linked_later_brings_its_chats_into_the_copy() {
+    let router = MemRouter::new();
+    let port = Arc::new(FakePort::new("dev-d", "Desk"));
+    port.st().people = vec!["person-p".to_owned(), "person-s".to_owned()];
+    port.add_chat_of("own-s", "Sam's chat", 10, "person-s", &[]);
+    port.add_chat_of("own-t", "Tia's chat", 11, "person-t", &[]);
+    let link_d = router.connect("dev-d", Some("person-p"), Some("Pat"), true);
+    let host = Service::new(port.clone(), link_d, tokio::runtime::Handle::current());
+    host.announce();
+    let b = side(
+        &router,
+        "dev-l",
+        "Laptop",
+        None,
+        "person-s",
+        "Sam",
+        &[("person-s", true, true)],
+    );
+    until(|| b.mirror.owner("own-s").is_some()).await;
+    assert!(b.mirror.owner("own-t").is_none());
+
+    // The laptop now announces Tia as well; the tap hears the profile change.
+    b.link
+        .set_people(vec!["person-s".to_owned(), "person-t".to_owned()]);
+    b.link.send(Frame::Device(DeviceFrame {
+        uid: "dev-l".to_owned(),
+        name: "Laptop".to_owned(),
+        run: true,
+        people: ["person-s", "person-t"]
+            .iter()
+            .map(|p| DevicePerson {
+                person_id: (*p).to_owned(),
+                telegram: false,
+                voice: false,
+            })
+            .collect(),
+    }));
+    settle().await;
+    let tap = helm_devices::EventTap::default();
+    tap.attach_mirror(b.mirror.clone());
+    tap.observe(&AppEvent::new("profiles_changed"));
+    until(|| b.mirror.owner("own-t").is_some()).await;
 }

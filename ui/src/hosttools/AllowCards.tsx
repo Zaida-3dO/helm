@@ -57,7 +57,7 @@ export function AllowCards({ chatId, remote = false }: { chatId: string; remote?
   const refetch = useCallback(() => {
     ops
       .list(chatId)
-      .then((l) => setCards(l.pending))
+      .then((l) => setCards(Array.isArray(l.pending) ? l.pending : []))
       .catch((e: unknown) => setError(message(e)));
   }, [ops, chatId]);
 

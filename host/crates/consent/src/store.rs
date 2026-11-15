@@ -6,8 +6,9 @@
 //! | `consent_asks` | refusals the app recorded itself; each opens a 2 h words episode for (chat, kind, target) |
 //! | `consent_records` | one row per use of a proof (grant or words); a submission is spent at most once |
 //!
-//! Only [`decide`] mints a grant, and it is reached only through the main-window `consent_decide`
-//! op. [`spend_grant`] and [`spend_words`] run on the caller's own transaction, after every check
+//! Only [`decide`] mints a grant, and it is reached through the main-window `consent_decide`
+//! op, or by the serving PC for a chat served to another device (which checks the chat).
+//! [`spend_grant`] and [`spend_words`] run on the caller's own transaction, after every check
 //! that needs no action, so the spend and the action's first change commit together. An applying
 //! kind's grant is spent only by [`spend_for_apply`], by request id, just before Helm applies it.
 

@@ -420,8 +420,9 @@ impl ChatPort for FakePort {
                 ));
                 Ok(())
             }
+            // The real store answers a late decide with `conflict`.
             None => Err(WireError::new(
-                code::REFUSED,
+                "conflict",
                 "This request was already answered or has expired.",
             )),
         };

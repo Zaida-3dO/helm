@@ -18,6 +18,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .async_op("devices_create_chat", devices_create_chat)
         .async_op("devices_open_chat", devices_open_chat)
         .async_op("devices_attach", devices_attach)
+        .blocking("devices_discard", OpClass::Blocking, devices_discard)
         .blocking(
             "devices_consent_list",
             OpClass::Blocking,
@@ -292,6 +293,42 @@ struct AttachArgs {
     text: Option<String>,
 }
 
+/// `devices_discard`: take back one staged attachment of a chat that runs on another device,
+/// the row and, for a picture or a pasted text, the file saved here.
+fn devices_discard(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Args {
+        chat_id: String,
+        attachment_id: String,
+    }
+    let a: Args = serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    let db = ctx.services.need::<Database>()?;
+    let dir = mirror::staged_dir(db.path());
+    let staged = db
+        .write(|tx| {
+            let row: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT kind, target FROM mirror_attachments WHERE id = ?1 AND chat_id = ?2",
+                    [&a.attachment_id, &a.chat_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            tx.execute(
+                "DELETE FROM mirror_attachments WHERE id = ?1 AND chat_id = ?2",
+                [&a.attachment_id, &a.chat_id],
+            )?;
+            Ok::<_, rusqlite::Error>(row)
+        })
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    if let Some((kind, target)) = staged {
+        if kind == "image" || kind == "text" {
+            let _ = std::fs::remove_file(dir.join(target));
+        }
+    }
+    Ok(json!({}))
+}
+
 /// `devices_attach`: stage an image or a file on this PC for the next message to a chat that
 /// runs on another device. The composer uses this instead of the chats' own `attachment_put`,
 /// which only knows chats that run here. Answers `{attachmentId}`; the send names it.
@@ -376,7 +413,7 @@ async fn devices_attach(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
                 return Err(ApiError::new("too_large", "A file can be at most 25 MB."));
             }
             let dir = mirror::staged_dir(db.path());
-            std::fs::create_dir_all(&dir)
+            helm_core::privfs::create_private_dir_all(&dir)
                 .map_err(|_| ApiError::internal("The staged folder could not be made."))?;
             std::fs::write(dir.join(&id), text.as_bytes())
                 .map_err(|_| ApiError::internal("The text could not be staged."))?;
@@ -480,7 +517,10 @@ fn devices_consent_list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                 )
                 .optional()?;
             Ok::<_, rusqlite::Error>(match stored {
-                Some(s) => serde_json::from_str::<Value>(&s).unwrap_or_else(|_| json!([])),
+                Some(s) => serde_json::from_str::<Value>(&s)
+                    .ok()
+                    .filter(Value::is_array)
+                    .unwrap_or_else(|| json!([])),
                 None => json!([]),
             })
         })

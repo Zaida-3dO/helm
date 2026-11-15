@@ -143,6 +143,16 @@ impl Mirror {
                 self.device(device).and_then(|d| d.last_seen_at).as_deref(),
             ),
             code::NOT_ALLOWED => not_allowed(&name),
+            // An older Helm does not know the card and upload ops and says "do that elsewhere".
+            code::REFUSED
+                if e.message == WireError::elsewhere().message
+                    && matches!(what, "a file" | "that decision" | "those requests") =>
+            {
+                ApiError::new(
+                    "refused",
+                    format!("{name}'s Helm is too old for this; update it there."),
+                )
+            }
             code::TIMEOUT | UNCONFIRMED => ApiError::new(
                 "unconfirmed",
                 format!("{name} didn't confirm {what}. It may or may not have arrived."),
@@ -209,6 +219,13 @@ impl Mirror {
             } else {
                 std::path::PathBuf::from(&target)
             };
+            // A file that grew since it was attached is refused before it is read into memory.
+            if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_UPLOAD_BYTES as u64) {
+                return Err(ApiError::new(
+                    "too_large",
+                    "A file sent to another device is at most 25 MB.",
+                ));
+            }
             let bytes = std::fs::read(&path).map_err(|_| {
                 ApiError::new(
                     "refused",
@@ -263,7 +280,8 @@ impl Mirror {
                 "data": b64.encode(&f.bytes[offset..end]),
             });
             if seq == 0 {
-                args["kind"] = json!(f.kind);
+                // A pasted text is a plain-text file to the PC that runs the chat.
+                args["kind"] = json!(if f.kind == "image" { "image" } else { "file" });
                 args["name"] = json!(f.name);
                 args["mime"] = json!(f.mime);
             }
