@@ -381,6 +381,19 @@ pub struct AnswerArgs {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConsentDecideArgs {
+    pub chat_id: String,
+    pub request_id: String,
+    /// The button the person pressed: `allow` or `deny`.
+    pub decision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_minutes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateArgs {
     pub person_id: String,
     pub project_id: String,
@@ -434,6 +447,7 @@ pub enum Op {
     Send(SendArgs),
     Stop(ChatIdArgs),
     Answer(AnswerArgs),
+    ConsentDecide(ConsentDecideArgs),
     Create(CreateArgs),
     SetModel(SetModelArgs),
     Rename(RenameArgs),
@@ -468,6 +482,7 @@ impl Op {
             "send" => Op::Send(args(a)?),
             "stop" => Op::Stop(args(a)?),
             "answer" => Op::Answer(args(a)?),
+            "consent_decide" => Op::ConsentDecide(args(a)?),
             "create" => Op::Create(args(a)?),
             "set_model" => Op::SetModel(args(a)?),
             "rename" => Op::Rename(args(a)?),
@@ -486,6 +501,7 @@ impl Op {
                 | Op::Send(_)
                 | Op::Stop(_)
                 | Op::Answer(_)
+                | Op::ConsentDecide(_)
                 | Op::Create(_)
                 | Op::SetModel(_)
                 | Op::Rename(_)

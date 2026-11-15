@@ -2,7 +2,7 @@
 //!
 //! | Table | Holds |
 //! |---|---|
-//! | `consent_requests` | Allow requests and, once allowed, their grant (pending → allowed/denied/expired; allowed → used/expired); for an applying kind also `outcome` (what applying did) and `decided_via` (where the user answered: `app`) |
+//! | `consent_requests` | Allow requests and, once allowed, their grant (pending → allowed/denied/expired; allowed → used/expired); for an applying kind also `outcome` (what applying did) and `decided_via` (where the user answered: `app`, or `device:<name>` from another device) |
 //! | `consent_asks` | refusals the app recorded itself; each opens a 2 h words episode for (chat, kind, target) |
 //! | `consent_records` | one row per use of a proof (grant or words); a submission is spent at most once |
 //!
