@@ -10,17 +10,24 @@
 //! the household switches on every new line.
 
 use crate::client::{Client, DeviceSink, LineHandle, LineState};
+use crate::{telegram, voice};
 use helm_chats::ChatRuntime;
 use helm_devices::host::HostPort;
-use helm_devices::link::{DeviceLink, FrameCb};
-use helm_devices::wire::Frame;
+use helm_devices::link::{BoxFut, DeviceLink, FrameCb};
+use helm_devices::serve::{ChatPort, ChatState, PortResult};
+use helm_devices::wire::{
+    AnswerArgs, ArchiveArgs, CreateArgs, DeviceInfo, DevicePerson, Frame, Hello, RenameArgs,
+    RemoteChat, SetModelArgs, ShareArgs,
+};
 use helm_devices::{EventTap, Service};
 use serde_json::Value;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 type Hook = Arc<dyn Fn() + Send + Sync>;
 type Cb = Arc<dyn Fn(Frame) + Send + Sync>;
 type PersonFn = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+type PeopleFn = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
@@ -30,6 +37,9 @@ pub struct HubLink {
     line: Arc<LineHandle>,
     /// Reads the hub person this machine is paired as from the saved connection.
     read_person: PersonFn,
+    /// Reads the hub people of this install's linked profiles, the home profile's first: who
+    /// this PC acts for.
+    read_people: PeopleFn,
     /// That person, read when the link was made and again on every new line (a new pairing
     /// always brings a new line).
     person: Mutex<Option<String>>,
@@ -41,11 +51,12 @@ pub struct HubLink {
 }
 
 impl HubLink {
-    pub fn new(line: Arc<LineHandle>, read_person: PersonFn) -> Arc<HubLink> {
+    pub fn new(line: Arc<LineHandle>, read_person: PersonFn, read_people: PeopleFn) -> Arc<HubLink> {
         let person = read_person();
         Arc::new(HubLink {
             line,
             read_person,
+            read_people,
             person: Mutex::new(person),
             frames: Mutex::new(Vec::new()),
             ups: Mutex::new(Vec::new()),
@@ -79,6 +90,18 @@ impl DeviceLink for HubLink {
 
     fn person_id(&self) -> Option<String> {
         lock(&self.person).clone()
+    }
+
+    /// The hub people this PC acts for, read from the profiles table as it is now — a profile
+    /// linked or removed since the line came up counts at once. With no profiles table yet the
+    /// line's own person is all there is, as before.
+    fn people(&self) -> Vec<String> {
+        let people = (self.read_people)();
+        if people.is_empty() {
+            self.person_id().into_iter().collect()
+        } else {
+            people
+        }
     }
 }
 
@@ -124,7 +147,21 @@ pub fn attach(dispatcher: &Arc<helm_ipc::Dispatcher>) {
     };
     let line = client.handle();
     let reader = client.clone();
-    let link = HubLink::new(line.clone(), Arc::new(move || reader.paired_person()));
+    let read_people: PeopleFn = match services.get::<helm_core::db::Database>() {
+        Some(db) => {
+            let db = db.clone();
+            Arc::new(move || {
+                db.snapshot(|tx| helm_profiles::store::linked_person_ids(tx))
+                    .unwrap_or_default()
+            }) as PeopleFn
+        }
+        None => Arc::new(Vec::new),
+    };
+    let link = HubLink::new(
+        line.clone(),
+        Arc::new(move || reader.paired_person()),
+        read_people,
+    );
     let service = Service::new(
         HostPort::new(dispatcher.clone()),
         link.clone(),

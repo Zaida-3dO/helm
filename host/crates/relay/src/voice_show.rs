@@ -470,17 +470,25 @@ impl Shown {
     }
 }
 
-/// Whether `caller` is the chat the voice screen talks to.
-pub fn is_voice_chat(profile_dir: &Path, caller: &str) -> bool {
-    voice::load_tag(&voice::tag_path(profile_dir)).is_some_and(|t| t.chat_id == caller)
+/// Whether `caller` is the voice chat of any profile on this PC.
+pub fn is_voice_chat(db: &helm_core::db::Database, profile_dir: &Path, caller: &str) -> bool {
+    crate::people::migrate(profile_dir, db);
+    db.snapshot(|tx| helm_profiles::store::list(tx))
+        .unwrap_or_default()
+        .into_iter()
+        .any(|p| {
+            let paths = crate::people::voice_paths(profile_dir, &p.id);
+            voice::load_tag(&paths.tag).is_some_and(|t| t.chat_id == caller)
+        })
 }
 
 fn show(ctx: &ToolCtx, a: Value) -> ToolResult {
     let profile = ctx.services.get::<Profile>();
-    if !profile
-        .as_ref()
-        .is_some_and(|p| is_voice_chat(&p.dir, &ctx.caller_chat_id))
-    {
+    let db = ctx.services.get::<helm_core::db::Database>();
+    if !match (&profile, db) {
+        (Some(p), Some(db)) => is_voice_chat(&db, &p.dir, &ctx.caller_chat_id),
+        _ => false,
+    } {
         return Err(refused(
             "app_voice_show works only in the voice chat, the one the phone's voice screen talks to.",
         ));

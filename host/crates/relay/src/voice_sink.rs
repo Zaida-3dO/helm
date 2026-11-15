@@ -48,7 +48,7 @@ use helm_core::db::Database;
 use helm_hosttools::OpInvoker;
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -72,6 +72,7 @@ pub const START_WAIT_MS: i64 = 120_000;
 const BUSY_RETRY: Duration = Duration::from_secs(20);
 /// The longest working line.
 const MAX_STATUS_CHARS: usize = 300;
+const STARTING: &str = "Helm is still starting; the message will be delivered when Helm is ready.";
 
 /// The working line when nothing is known to be running.
 pub const THINKING: &str = "Thinking";
@@ -83,25 +84,26 @@ pub const NOT_STARTED: &str = "Helm has not started that yet. It is saved in the
 pub const NOTHING_TO_SAY: &str = "Done.";
 
 /// Where the working line and the answers go: the line in the app, a recorder in tests.
+/// `person` is the hub person whose phone this is (`""`: none named, the hub's own default).
 pub trait VoiceUpstream: Send + Sync {
-    fn status(&self, turn: &str, text: &str);
+    fn status(&self, person: &str, turn: &str, text: &str);
     /// `false` when the reply was not sent (the line is down); the mirror then offers it again.
-    fn reply(&self, reply: &Reply) -> bool;
+    fn reply(&self, person: &str, reply: &Reply) -> bool;
     /// One thing to show, sent just before the reply it belongs to. `false` when it was not sent.
-    fn attachment(&self, _frame: &Value) -> bool {
+    fn attachment(&self, _person: &str, _frame: &Value) -> bool {
         true
     }
 }
 
 impl VoiceUpstream for LineHandle {
-    fn status(&self, turn: &str, text: &str) {
-        self.voice_status(turn, text)
+    fn status(&self, person: &str, turn: &str, text: &str) {
+        self.voice_status(person, turn, text)
     }
-    fn reply(&self, reply: &Reply) -> bool {
-        self.voice_reply(reply)
+    fn reply(&self, person: &str, reply: &Reply) -> bool {
+        self.voice_reply(person, reply)
     }
-    fn attachment(&self, frame: &Value) -> bool {
-        self.voice_attachment(frame.clone())
+    fn attachment(&self, person: &str, frame: &Value) -> bool {
+        self.voice_attachment(person, frame.clone())
     }
 }
 
@@ -540,6 +542,8 @@ pub fn decide(route: &Route, owed: &Owed) -> Delivery {
 /// What the mirror sends with: the line, the things queued to be shown, and the claim on them.
 pub struct Outbox {
     up: Arc<dyn VoiceUpstream>,
+    /// The hub person whose phone the answers go to (`""`: none named).
+    person: String,
     shown: Arc<Shown>,
     chat: String,
     /// The things taken from the queue for the answer being sent, by its reply id. They stay
@@ -556,9 +560,15 @@ pub struct Outbox {
 }
 
 impl Outbox {
-    pub fn new(up: Arc<dyn VoiceUpstream>, shown: Arc<Shown>, chat: String) -> Self {
+    pub fn new(
+        up: Arc<dyn VoiceUpstream>,
+        person: String,
+        shown: Arc<Shown>,
+        chat: String,
+    ) -> Self {
         Outbox {
             up,
+            person,
             shown,
             chat,
             claimed: None,
@@ -607,7 +617,7 @@ impl Outbox {
     pub fn status(&self, route: &Route, live: &Live, text: &str) {
         if *route == Route::Phone {
             if let Some(turn) = &live.turn {
-                self.up.status(turn, text);
+                self.up.status(&self.person, turn, text);
             }
         }
     }
@@ -649,7 +659,7 @@ impl Outbox {
             .map(|(_, t)| t.as_slice())
             .unwrap_or_default();
         for (i, a) in things.iter().enumerate() {
-            if !self.up.attachment(&a.frame(&owed.id, i + 1)) {
+            if !self.up.attachment(&self.person, &a.frame(&owed.id, i + 1)) {
                 return false;
             }
         }
@@ -663,7 +673,7 @@ impl Outbox {
                 now,
             );
         }
-        let sent = self.up.reply(&reply);
+        let sent = self.up.reply(&self.person, &reply);
         if sent {
             self.claimed = None;
             if let Some(turn) = &final_for {
@@ -773,14 +783,24 @@ pub async fn mirror(
 
 // ---- in --------------------------------------------------------------------------------
 
-/// Everything a delivery needs, cloned into the blocking pool.
+/// Everything a delivery needs, cloned into the blocking pool. All of it is for one profile:
+/// its voice files and folder, and the hub person its frames carry (`""` when the profile has
+/// no person yet).
 #[derive(Clone)]
 pub struct Ctx {
     pub rt: ChatRuntime,
     pub db: Arc<Database>,
     pub ops: Arc<dyn OpInvoker>,
     pub handle: tokio::runtime::Handle,
+    /// The local profile this exchange belongs to.
+    pub profile_id: String,
+    /// The hub person of that profile, or `""` when it is not linked yet.
+    pub person: String,
     pub tag_path: PathBuf,
+    /// This profile's policy file, re-read where a limit is asked for.
+    pub policy_path: PathBuf,
+    /// Where this profile's heard notes live.
+    pub heard_path: PathBuf,
     /// The folder a new voice chat starts in.
     pub folder: String,
     pub file: voice::PolicyFile,
@@ -856,6 +876,7 @@ pub fn place(c: &Ctx, turn: &VoiceTurn, notes: &[String], now: i64) -> Result<Pl
         new_chat_model: model.map(str::to_owned),
         new_chat_effort: effort.map(str::to_owned),
         ignored: std::sync::Mutex::new(None),
+        profile_id: Some(c.profile_id.clone()),
     };
     let (mut tag, _created) = voice::active_chat(&c.tag_path, &port, &c.policy, now)?;
     let ignored = port
@@ -926,16 +947,17 @@ pub struct ChatVoice {
     up: OnceLock<Arc<dyn VoiceUpstream>>,
     profile_dir: PathBuf,
     serial: tokio::sync::Mutex<()>,
-    live: Arc<Mutex<Live>>,
+    /// What the phone last said about its screen, per profile id.
+    live: Mutex<HashMap<String, Arc<Mutex<Live>>>>,
     /// The chats being mirrored, oldest first, at most [`MAX_MIRRORS`].
     watching: Mutex<Vec<Watched>>,
-    /// The phone's turns that have had their one `voice_final`.
-    finals: Arc<Mutex<VecDeque<String>>>,
+    /// The phone's turns that have had their one `voice_final`, per profile id.
+    finals: Mutex<HashMap<String, Arc<Mutex<VecDeque<String>>>>>,
     /// What `app_voice_show` queued for the next answer.
     shown: Arc<Shown>,
-    /// The voice chat's id as the tag file last said, and when it was read; the event tap asks on
-    /// every busy chat, so the file is read at most every [`TAG_RECHECK`].
-    tagged: Mutex<(Option<Instant>, Option<String>)>,
+    /// Each profile's voice chat id as its tag file last said, and when it was read; the event
+    /// tap asks on every busy chat, so a file is read at most every [`TAG_RECHECK`].
+    tagged: Mutex<HashMap<String, (Option<Instant>, Option<String>)>>,
 }
 
 /// How long the voice chat's id is trusted before the tag file is read again.
@@ -990,11 +1012,11 @@ impl ChatVoice {
             up: OnceLock::new(),
             profile_dir,
             serial: tokio::sync::Mutex::new(()),
-            live: Arc::default(),
+            live: Mutex::new(HashMap::new()),
             watching: Mutex::new(Vec::new()),
-            finals: Arc::default(),
+            finals: Mutex::new(HashMap::new()),
             shown: Arc::default(),
-            tagged: Mutex::new((None, None)),
+            tagged: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1003,24 +1025,45 @@ impl ChatVoice {
         self.shown.clone()
     }
 
-    fn remember_chat(&self, chat: &str) {
-        *self.tagged.lock().unwrap_or_else(|p| p.into_inner()) =
-            (Some(Instant::now()), Some(chat.to_owned()));
+    fn live_for(&self, profile_id: &str) -> Arc<Mutex<Live>> {
+        self.live
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(profile_id.to_owned())
+            .or_default()
+            .clone()
     }
 
-    /// The chat the tag file names, expired or not: news for it is still mirrored until the next
-    /// turn from the phone starts another, or until an hour after its idle time or age limit ran
-    /// out.
-    fn tagged_chat(&self) -> Option<String> {
+    fn finals_for(&self, profile_id: &str) -> Arc<Mutex<VecDeque<String>>> {
+        self.finals
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(profile_id.to_owned())
+            .or_default()
+            .clone()
+    }
+
+    fn remember_chat(&self, profile_id: &str, chat: &str) {
+        *self
+            .tagged
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(profile_id.to_owned())
+            .or_insert((None, None)) = (Some(Instant::now()), Some(chat.to_owned()));
+    }
+
+    /// The chat a profile's tag file names, expired or not: news for it is still mirrored until
+    /// the next turn from the phone starts another, or until an hour after its idle time or age
+    /// limit ran out.
+    fn tagged_chat(&self, profile_id: &str, paths: &voice::Paths) -> Option<String> {
         let mut t = self.tagged.lock().unwrap_or_else(|p| p.into_inner());
-        if t.0.is_none_or(|at| at.elapsed() > TAG_RECHECK) {
-            let policy = voice::load_file(&voice::policy_path(&self.profile_dir))
-                .check()
-                .unwrap_or_default();
+        let e = t.entry(profile_id.to_owned()).or_insert((None, None));
+        if e.0.is_none_or(|at| at.elapsed() > TAG_RECHECK) {
+            let policy = voice::load_file(&paths.policy).check().unwrap_or_default();
             let now = helm_core::now_ms();
-            *t = (
+            *e = (
                 Some(Instant::now()),
-                voice::load_tag(&voice::tag_path(&self.profile_dir))
+                voice::load_tag(&paths.tag)
                     .filter(|g| {
                         let ran_out =
                             (g.last_turn_at + policy.idle_ms).min(g.started_at + policy.max_age_ms);
@@ -1029,28 +1072,66 @@ impl ChatVoice {
                     .map(|g| g.chat_id),
             );
         }
-        t.1.clone()
+        e.1.clone()
     }
 
-    /// Whether `chat` is the one the voice screen talks to.
+    /// Every profile's tagged voice chat, refreshed. A chat is a voice chat when any profile's
+    /// tag names it.
+    fn all_tagged(&self) -> Vec<(String, Option<String>)> {
+        let db = match self.exec.wiring().and_then(|w| w.services.get::<Database>()) {
+            Some(db) => db,
+            None => return vec![],
+        };
+        crate::people::migrate(&self.profile_dir, &db);
+        let profiles = db
+            .snapshot(|tx| helm_profiles::store::list(tx))
+            .unwrap_or_default();
+        profiles
+            .into_iter()
+            .map(|p| {
+                let paths = crate::people::voice_paths(&self.profile_dir, &p.id);
+                let chat = self.tagged_chat(&p.id, &paths);
+                (p.id, chat)
+            })
+            .collect()
+    }
+
+    /// Whether `chat` is the voice chat of any profile.
     pub fn is_voice_chat(&self, chat: &str) -> bool {
-        self.tagged_chat().as_deref() == Some(chat)
+        self.all_tagged().iter().any(|(_, t)| t.as_deref() == Some(chat))
     }
 
-    /// What the attention watch wakes the chat for, as Settings last saved it.
+    /// The profile whose voice chat `chat` is, when it is one.
+    fn profile_of_voice_chat(&self, chat: &str) -> Option<String> {
+        self.all_tagged()
+            .into_iter()
+            .find(|(_, t)| t.as_deref() == Some(chat))
+            .map(|(p, _)| p)
+    }
+
+    /// The home profile's paths — the one the attention watch writes to.
+    fn home_paths(&self) -> Option<voice::Paths> {
+        let db = self.exec.wiring()?.services.get::<Database>()?;
+        let home = crate::people::profile_for(&db, None).ok()?;
+        Some(crate::people::voice_paths(&self.profile_dir, &home.id))
+    }
+
+    /// What the attention watch wakes the chat for, as Settings last saved it (the home
+    /// profile's switch).
     pub fn watch_level(&self) -> WatchLevel {
-        voice::load_file(&voice::policy_path(&self.profile_dir)).watch
+        self.home_paths()
+            .map(|p| voice::load_file(&p.policy).watch)
+            .unwrap_or_default()
     }
 
-    /// The voice chat while its tag holds (not idle, old, full or gone), else `None`.
+    /// The home profile's voice chat while its tag holds (not idle, old, full or gone), else
+    /// `None`. The attention watch notes go there.
     pub async fn active_chat(&self, now: i64) -> Option<String> {
         let db = self.exec.wiring()?.services.get::<Database>()?;
-        let policy = voice::load_file(&voice::policy_path(&self.profile_dir))
-            .check()
-            .unwrap_or_default();
-        let path = voice::tag_path(&self.profile_dir);
+        let paths = self.home_paths()?;
+        let policy = voice::load_file(&paths.policy).check().unwrap_or_default();
         tokio::task::spawn_blocking(move || {
-            voice::current(&path, &FactsOnly(&db), &policy, now).map(|t| t.chat_id)
+            voice::current(&paths.tag, &FactsOnly(&db), &policy, now).map(|t| t.chat_id)
         })
         .await
         .ok()
@@ -1061,9 +1142,9 @@ impl ChatVoice {
     /// finished, a note arrived, another chat wrote to it, or the user typed in Helm), mirror this
     /// one, so its answer goes where it belongs.
     pub async fn woken(&self, chat: &str) {
-        if !self.is_voice_chat(chat) {
+        let Some(pid) = self.profile_of_voice_chat(chat) else {
             return;
-        }
+        };
         let watched = self
             .watching
             .lock()
@@ -1073,7 +1154,9 @@ impl ChatVoice {
         if watched {
             return;
         }
-        let Ok(c) = self.ctx() else { return };
+        let Ok(c) = self.ctx_for_profile(&pid) else {
+            return;
+        };
         let (db, id) = (c.db.clone(), chat.to_owned());
         let Ok(baseline) = tokio::task::spawn_blocking(move || last_answer_row(&db, &id)).await
         else {
@@ -1087,7 +1170,9 @@ impl ChatVoice {
         // Behind the phone's own deliveries, and never holding them up for long: a chat that is
         // busy or full fails the note, which the watch tries again after a while.
         let _turn = self.serial.lock().await;
-        let c = match self.ctx() {
+        // The attention watch's notes go to the home profile's voice chat (one watcher, one
+        // set of attention rows: telling every person's phone the same news would be noise).
+        let c = match self.ctx(None) {
             Ok(c) => c,
             Err(e) => return Noted::Failed(e),
         };
@@ -1098,7 +1183,7 @@ impl ChatVoice {
         );
         match tokio::task::spawn_blocking(move || place_note(&c2, &sid, &text, now)).await {
             Ok(Ok(Some((chat, baseline)))) => {
-                self.remember_chat(&chat);
+                self.remember_chat(&c.profile_id, &chat);
                 self.watch(&c, &chat, baseline, Route::News { about: None });
                 Noted::Sent
             }
@@ -1116,14 +1201,27 @@ impl ChatVoice {
         let _ = self.up.set(up);
     }
 
-    /// What the phone last said about its screen, and the turn being answered.
+    /// What the phone last said about its screen, and the turn being answered — the home
+    /// profile's, for callers that speak for no profile in particular.
     pub fn live(&self) -> Live {
-        self.live.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        match self.home_profile_id() {
+            Some(pid) => self
+                .live_for(&pid)
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone(),
+            None => Live::default(),
+        }
     }
 
-    fn ctx(&self) -> Result<Ctx, String> {
-        const STARTING: &str =
-            "Helm is still starting; the message will be delivered when Helm is ready.";
+    fn home_profile_id(&self) -> Option<String> {
+        let db = self.exec.wiring()?.services.get::<Database>()?;
+        crate::people::profile_for(&db, None).ok().map(|p| p.id)
+    }
+
+    /// The delivery context for the profile that runs the channel of hub person `person`
+    /// (`None`: an older hub's frame, the home profile).
+    pub(crate) fn ctx(&self, person: Option<&str>) -> Result<Ctx, String> {
         let w = self.exec.wiring().ok_or(STARTING)?;
         let ops = self.ops.get().cloned().ok_or(STARTING)?;
         let rt = w
@@ -1134,18 +1232,56 @@ impl ChatVoice {
             .services
             .get::<Database>()
             .ok_or("Helm's database is not available.")?;
+        crate::people::migrate(&self.profile_dir, &db);
+        let profile = crate::people::profile_for(&db, person)?;
+        Ok(self.ctx_of(&rt, &db, &ops, profile))
+    }
+
+    /// The context of a named profile id, for the paths already known to be this PC's.
+    pub(crate) fn ctx_for_profile(&self, profile_id: &str) -> Result<Ctx, String> {
+        let w = self.exec.wiring().ok_or(STARTING)?;
+        let ops = self.ops.get().cloned().ok_or(STARTING)?;
+        let rt = w
+            .services
+            .get::<ChatRuntime>()
+            .ok_or("Helm's chats are not available.")?;
+        let db = w
+            .services
+            .get::<Database>()
+            .ok_or("Helm's database is not available.")?;
+        crate::people::migrate(&self.profile_dir, &db);
+        let profile = db
+            .snapshot(|tx| helm_profiles::store::get(tx, profile_id))
+            .ok()
+            .flatten()
+            .ok_or("This PC has no such profile.")?;
+        Ok(self.ctx_of(&rt, &db, &ops, profile))
+    }
+
+    fn ctx_of(
+        &self,
+        rt: &Arc<ChatRuntime>,
+        db: &Arc<Database>,
+        ops: &Arc<dyn OpInvoker>,
+        profile: helm_profiles::store::Profile,
+    ) -> Ctx {
+        let paths = crate::people::voice_paths(&self.profile_dir, &profile.id);
         // Read once per delivery, so a change in Settings applies to the next message.
-        let file = voice::load_file(&voice::policy_path(&self.profile_dir));
-        Ok(Ctx {
-            rt: (*rt).clone(),
-            db,
-            ops,
+        let file = voice::load_file(&paths.policy);
+        Ctx {
+            rt: (**rt).clone(),
+            db: db.clone(),
+            ops: ops.clone(),
             handle: tokio::runtime::Handle::current(),
-            tag_path: voice::tag_path(&self.profile_dir),
-            folder: plain_path(&voice::folder(&self.profile_dir)),
+            person: profile.hub_person_id.unwrap_or_default(),
+            profile_id: profile.id,
+            tag_path: paths.tag,
+            policy_path: paths.policy,
+            heard_path: paths.heard,
+            folder: plain_path(&paths.folder),
             policy: file.check().unwrap_or_default(),
             file,
-        })
+        }
     }
 
     /// Watch `chat`. One already being watched carries on for this message once its own exchange
@@ -1173,11 +1309,11 @@ impl ChatVoice {
         let task = c.handle.spawn(mirror(
             c.rt.clone(),
             c.db.clone(),
-            Outbox::new(up, self.shown.clone(), chat.to_owned())
-                .with_heard(HeardStore::at(&self.profile_dir))
-                .with_finals(self.finals.clone()),
+            Outbox::new(up, c.person.clone(), self.shown.clone(), chat.to_owned())
+                .with_heard(HeardStore::new(c.heard_path.clone()))
+                .with_finals(self.finals_for(&c.profile_id)),
             baseline,
-            self.live.clone(),
+            self.live_for(&c.profile_id),
             c.tag_path.clone(),
             fallback,
             next.clone(),
@@ -1195,10 +1331,10 @@ impl VoiceSink for ChatVoice {
         Box::pin(async move {
             // One at a time: two turns with no tag must not start two chats.
             let _turn = self.serial.lock().await;
-            let c = self.ctx()?;
+            let c = self.ctx(turn.person.as_deref())?;
             let c2 = c.clone();
             let t2 = turn.clone();
-            let heard = HeardStore::at(&self.profile_dir);
+            let heard = HeardStore::new(c.heard_path.clone());
             let placed = tokio::task::spawn_blocking(move || {
                 let now = helm_core::now_ms();
                 // What the phone did not play of the answers so far rides along with this
@@ -1225,7 +1361,10 @@ impl VoiceSink for ChatVoice {
                 return Ok(());
             };
             let live = {
-                let mut l = self.live.lock().unwrap_or_else(|p| p.into_inner());
+                let mut l = self
+                    .live_for(&c.profile_id)
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
                 l.turn = Some(turn.id);
                 l.mode = Mode::parse(&turn.mode);
                 l.conversation = conversation;
@@ -1235,21 +1374,32 @@ impl VoiceSink for ChatVoice {
             // saved model would otherwise come from a model nobody chose.
             if let (Some(why), Some(up)) = (ignored, self.up.get()) {
                 let note = Owed::unrowed(uuid::Uuid::new_v4().to_string(), What::Answer(why));
-                up.reply(&news_for(&live, None, &note, None, helm_core::now_ms()));
+                up.reply(
+                    &c.person,
+                    &news_for(&live, None, &note, None, helm_core::now_ms()),
+                );
             }
-            self.remember_chat(&chat);
+            self.remember_chat(&c.profile_id, &chat);
             self.watch(&c, &chat, baseline, Route::Phone);
             Ok(())
         })
     }
 
-    fn stop<'a>(&'a self, turn: String) -> BoxFut<'a, ()> {
+    fn stop<'a>(&'a self, person: Option<String>, turn: String) -> BoxFut<'a, ()> {
         Box::pin(async move {
+            let Ok(c) = self.ctx(person.as_deref()) else {
+                return;
+            };
             // Only the turn being answered: an older one has nothing running to stop.
-            if self.live().turn.as_deref() != Some(turn.as_str()) {
+            let answering = self
+                .live_for(&c.profile_id)
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .turn
+                .clone();
+            if answering.as_deref() != Some(turn.as_str()) {
                 return;
             }
-            let Ok(c) = self.ctx() else { return };
             let Some(tag) = voice::load_tag(&c.tag_path) else {
                 return;
             };
@@ -1263,28 +1413,50 @@ impl VoiceSink for ChatVoice {
         })
     }
 
-    fn heard<'a>(&'a self, reports: Vec<Value>) -> BoxFut<'a, ()> {
+    fn heard<'a>(
+        &'a self,
+        person: Option<String>,
+        reports: Vec<Value>,
+    ) -> BoxFut<'a, ()> {
         Box::pin(async move {
             // Kept for the next message; the chat is never woken for a report.
-            let store = HeardStore::at(&self.profile_dir);
+            let Ok(c) = self.ctx(person.as_deref()) else {
+                return;
+            };
+            let store = HeardStore::new(c.heard_path);
             let _ =
                 tokio::task::spawn_blocking(move || store.report(&reports, helm_core::now_ms()))
                     .await;
         })
     }
 
-    fn presence(&self, live: bool, mode: &str) {
-        let mut l = self.live.lock().unwrap_or_else(|p| p.into_inner());
+    fn presence(&self, person: Option<String>, live: bool, mode: &str) {
+        let pid = match self.ctx(person.as_deref()) {
+            Ok(c) => c.profile_id,
+            Err(_) => return,
+        };
+        let mut l = self
+            .live_for(&pid)
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         l.presence_live = live;
         l.presence_mode = Mode::parse(mode);
     }
 
-    fn fresh<'a>(&'a self) -> BoxFut<'a, ()> {
+    fn fresh<'a>(&'a self, person: Option<String>) -> BoxFut<'a, ()> {
         Box::pin(async move {
-            if voice::save_tag(&voice::tag_path(&self.profile_dir), None).is_err() {
+            let Ok(c) = self.ctx(person.as_deref()) else {
+                return;
+            };
+            if voice::save_tag(&c.tag_path, None).is_err() {
                 log::warn!("relay: the voice chat tag could not be removed");
             }
-            *self.tagged.lock().unwrap_or_else(|p| p.into_inner()) = (None, None);
+            *self
+                .tagged
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .entry(c.profile_id)
+                .or_insert((None, None)) = (None, None);
         })
     }
 }
@@ -1316,12 +1488,21 @@ pub struct VoiceView {
     pub max_age_hours: i64,
     pub max_tokens: u64,
     pub watch: WatchLevel,
+    /// Whether this PC takes this person's voice turns (the switch, or its default: on for the
+    /// home profile, off for the others).
+    pub take_voice: bool,
 }
 
-pub fn voice_view(db: &Database, profile_dir: &std::path::Path, now: i64) -> VoiceView {
-    let file = voice::load_file(&voice::policy_path(profile_dir));
+pub fn voice_view(
+    db: &Database,
+    profile_dir: &std::path::Path,
+    profile_id: &str,
+    now: i64,
+) -> VoiceView {
+    let paths = crate::people::voice_paths(profile_dir, profile_id);
+    let file = voice::load_file(&paths.policy);
     let policy = file.check().unwrap_or_default();
-    let chat = voice::load_tag(&voice::tag_path(profile_dir)).and_then(|tag| {
+    let chat = voice::load_tag(&paths.tag).and_then(|tag| {
         let facts = chat_facts(db, &tag.chat_id);
         if voice::expired(&tag, facts, &policy, now).is_some() {
             return None;
@@ -1347,6 +1528,11 @@ pub fn voice_view(db: &Database, profile_dir: &std::path::Path, now: i64) -> Voi
             id: tag.chat_id,
         })
     });
+    let is_home = db
+        .snapshot(|tx| helm_profiles::store::home(tx))
+        .ok()
+        .flatten()
+        .is_some_and(|h| h.id == profile_id);
     VoiceView {
         chat,
         model: file.model,
@@ -1355,6 +1541,7 @@ pub fn voice_view(db: &Database, profile_dir: &std::path::Path, now: i64) -> Voi
         max_age_hours: file.max_age_hours,
         max_tokens: file.max_tokens,
         watch: file.watch,
+        take_voice: voice::takes_voice(&file, is_home),
     }
 }
 

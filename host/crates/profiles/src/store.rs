@@ -616,6 +616,39 @@ pub fn linked_person_ids(conn: &Connection) -> rusqlite::Result<Vec<String>> {
     .collect()
 }
 
+/// The linked profiles as the device frame announces them: profile id, hub person and the home
+/// flag, the home profile's first. The channel switches are read per profile from that profile's
+/// own policy files by whoever assembles the frame.
+pub fn linked_claims(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<(String, String, bool)>> {
+    conn.prepare(
+        "SELECT id, hub_person_id, is_home FROM profiles
+         WHERE hub_person_id IS NOT NULL AND hub_person_id <> ''
+         ORDER BY is_home DESC, created_at, rowid",
+    )?
+    .query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)? != 0,
+        ))
+    })?
+    .collect()
+}
+
+/// The profiles that have a name of their own but no hub person — the ones that ask the hub for
+/// a person to be their own. The unnamed home placeholder is not one: pairing names and links it.
+pub fn unlinked_named(conn: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
+    conn.prepare(
+        "SELECT id, name FROM profiles
+         WHERE (hub_person_id IS NULL OR hub_person_id = '') AND needs_name = 0
+         ORDER BY is_home DESC, created_at, rowid",
+    )?
+    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+    .collect()
+}
+
 /// The chats a hub person sees: those their profile owns, those shared with it, and (for the
 /// home profile) any chat still without an owner. Nobody linked means nobody's chats.
 pub fn visible_to_person(conn: &Connection, person_id: &str) -> Result<Vec<String>, ProfileError> {

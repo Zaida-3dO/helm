@@ -5,8 +5,11 @@
 //!   get a quick answer; it unloads nothing) go through Helm's own host-tool dispatcher as a
 //!   **restricted** caller named `external:<client>`: the restricted gate is default-deny and
 //!   lists only the vetted tools, and the dispatcher re-checks sizes, timeouts and the result limit.
+//!   The hub says which of this PC's people the call is for, and a listing answers with only
+//!   that person's chats; `all: true` lists everything on the PC.
 //! - **`app_send_message`** is Helm's own send with the gate's frame ("sent by another agent,
-//!   not approval"), origin `other_chat`, like any cross-chat message. The caller cannot
+//!   not approval"), origin `other_chat`, like any cross-chat message; a call the hub verified
+//!   for a linked person is framed as from an agent acting for them by name. The caller cannot
 //!   word the frame. Sends are rate-limited per outside caller.
 //!   Each outside caller also gets the chats crate's per-target limit (the same count and window
 //!   as one chat messaging another), and a send counts against either limit only once it is
@@ -270,6 +273,50 @@ impl AppExecutor {
         .unwrap_or_default()
     }
 
+    /// The chats the acting person sees on this PC: their profile's own, those shared with it,
+    /// and (for the home profile) any chat still without an owner. Nobody resolved means nothing
+    /// is visible.
+    fn visible_ids(w: &Wiring, person: Option<&str>) -> HashSet<String> {
+        let Some(db) = w.services.get::<helm_core::db::Database>() else {
+            return HashSet::new();
+        };
+        crate::people::profile_for(db, person)
+            .ok()
+            .map(|p| p.id)
+            .and_then(|pid| db.snapshot(|tx| helm_profiles::store::chat_ids_for(tx, &pid)).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    }
+
+    /// Keep only visible chats in a listing result: the items of `app_list_chats` and the groups
+    /// of `app_list_attention` (whose rows all carry `chatId`). Anything else passes through.
+    fn filter_visible(mut r: Value, ids: &HashSet<String>) -> Value {
+        let keep = |rows: &mut Vec<Value>| {
+            rows.retain(|row| {
+                row.get("chatId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| ids.contains(id))
+            })
+        };
+        if let Some(rows) = r.get_mut("chats").and_then(Value::as_array_mut) {
+            keep(rows);
+        }
+        for key in [
+            "needsYou",
+            "running",
+            "unread",
+            "stalled",
+            "flagged",
+            "muted",
+        ] {
+            if let Some(rows) = r.get_mut(key).and_then(Value::as_array_mut) {
+                keep(rows);
+            }
+        }
+        r
+    }
+
     async fn peer(&self, w: &Wiring, person: &str, call: Admitted) -> Result<Value, ToolFailure> {
         if call.tool == "app_send_message" {
             let key = format!("peer:{person}");
@@ -293,6 +340,7 @@ impl Executor for AppExecutor {
     fn run<'a>(
         &'a self,
         caller: &'a str,
+        person: Option<&'a str>,
         call: Admitted,
     ) -> BoxFut<'a, Result<Value, ToolFailure>> {
         Box::pin(async move {
@@ -300,21 +348,43 @@ impl Executor for AppExecutor {
                 return Err(refused("Helm is still starting; try again in a moment."));
             };
             let (tool, remote) = (call.tool.clone(), call.remote);
+            let all = call.args.get("all").and_then(Value::as_bool) == Some(true);
             match tool.as_str() {
                 // The Remote page's messages are the user's own words, and say so.
                 "app_send_message" if remote => {
                     self.send_message(w, caller, &call.args, &gate::remote_frame)
                 }
                 "app_send_message" => {
-                    self.send_message(w, caller, &call.args, &|b| gate::frame(caller, b))
+                    // A call the hub verified for one of this PC's linked people is framed as
+                    // acting for them, by name; otherwise it is the plain outside-agent frame.
+                    let named = person.and_then(|p| {
+                        w.services
+                            .get::<helm_core::db::Database>()
+                            .and_then(|db| crate::people::profile_for(db, Some(p)).ok())
+                            .map(|pr| pr.name)
+                    });
+                    let framed = |b: &str| match &named {
+                        Some(n) => gate::person_frame(n, b),
+                        None => gate::frame(caller, b),
+                    };
+                    self.send_message(w, caller, &call.args, &framed)
                 }
                 // The gate has already refused these for any other caller; this is the second wall.
                 "app_list_waiting" | "app_answer_waiting" if !remote => Err(refused(
                     "That is only available from the hub's Remote page.",
                 )),
-                "app_list_waiting" => crate::remote::list_waiting(w),
-                "app_answer_waiting" => crate::remote::answer(w, &self.answered, &call.args).await,
-                _ => self.dispatch(w, caller, call).await,
+                "app_list_waiting" => crate::remote::list_waiting(w, person, all),
+                "app_answer_waiting" => {
+                    crate::remote::answer(w, &self.answered, &call.args, person).await
+                }
+                _ => {
+                    let r = self.dispatch(w, caller, call).await?;
+                    // Lists answer with only the calling person's chats, unless they asked for all.
+                    if all || !matches!(tool.as_str(), "app_list_chats" | "app_list_attention") {
+                        return Ok(r);
+                    }
+                    Ok(Self::filter_visible(r, &Self::visible_ids(w, person)))
+                }
             }
         })
     }
@@ -393,9 +463,48 @@ mod tests {
             .unwrap_err();
         assert!(!p.changed);
         let r = e
-            .run("remote", gate::admit("app_list_chats", &json!({})).unwrap())
+            .run("remote", None, gate::admit("app_list_chats", &json!({})).unwrap())
             .await
             .unwrap_err();
         assert!(!r.changed);
+    }
+
+    #[test]
+    fn listings_keep_only_the_visible_chats() {
+        let ids: HashSet<String> = ["a", "c"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        // app_list_chats items, and every group of app_list_attention, key on chatId.
+        let chats = json!({
+            "chats": [{"chatId": "a"}, {"chatId": "b"}, {"chatId": "c"}],
+            "nextOffset": 3,
+        });
+        let r = AppExecutor::filter_visible(chats, &ids);
+        let left: Vec<&str> = r["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["chatId"].as_str().unwrap())
+            .collect();
+        assert_eq!(left, ["a", "c"]);
+        assert_eq!(r["nextOffset"], 3);
+        let attention = json!({
+            "needsYou": [{"chatId": "b"}],
+            "running": [{"chatId": "a"}, {"chatId": "z"}],
+            "unread": [],
+            "stalled": [{"chatId": "c"}],
+            "flagged": [{"chatId": "b"}, {"chatId": "c"}],
+            "muted": [{"chatId": "a"}],
+        });
+        let r = AppExecutor::filter_visible(attention, &ids);
+        assert_eq!(r["needsYou"].as_array().unwrap().len(), 0);
+        assert_eq!(r["running"].as_array().unwrap().len(), 1);
+        assert_eq!(r["stalled"].as_array().unwrap().len(), 1);
+        assert_eq!(r["flagged"].as_array().unwrap().len(), 1);
+        assert_eq!(r["muted"].as_array().unwrap().len(), 1);
+        // A shape with nothing keyed by chatId passes through untouched.
+        let other = json!({"projects": [{"id": "p"}]});
+        assert_eq!(AppExecutor::filter_visible(other.clone(), &ids), other);
     }
 }

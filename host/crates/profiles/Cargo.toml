@@ -11,6 +11,7 @@ helm-core.workspace = true
 helm-ipc.workspace = true
 helm-chats.workspace = true
 helm-devices = { path = "../devices" }
+helm-skills = { path = "../skills" }
 helm-workers.workspace = true
 serde.workspace = true
 serde_json.workspace = true

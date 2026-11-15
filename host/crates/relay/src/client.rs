@@ -21,8 +21,9 @@
 //!   hub never needs them answered.
 //! - `devices`, `dev_call`, `dev_result` and `dev_push`: the household's devices (`crate::devlink`).
 //!   They are handed to the [`DeviceSink`] as they came, and ignored until one is attached.
-//! - `kn_files`, `kn_put_result` and `kn_changed`: the household's knowledge files
-//!   (`crate::knowledge_line`), handed to the [`KnowledgeSink`] as they came and ignored until one
+//! - `kn_files`, `kn_put_result`, `kn_changed` and `person_result`: the household's knowledge
+//!   files and a asked-for hub person (`crate::knowledge_line`), handed to the [`KnowledgeSink`]
+//!   as they came and ignored until one
 //!   is attached.
 //! - The first frame up on every line is `sharing` (the household switches), and another goes
 //!   whenever the user changes one. The device announces itself right after it.
@@ -53,11 +54,14 @@ pub struct ToolFailure {
     pub changed: bool,
 }
 
-/// Runs an admitted call on the PC. `caller` is the hub's client name for the token.
+/// Runs an admitted call on the PC. `caller` is the hub's client name for the token;
+/// `person` is the hub person the hub verified the call is for (`None`: an older hub named
+/// none, and the PC answers for its own person as before).
 pub trait Executor: Send + Sync {
     fn run<'a>(
         &'a self,
         caller: &'a str,
+        person: Option<&'a str>,
         call: gate::Admitted,
     ) -> BoxFut<'a, Result<Value, ToolFailure>>;
 
@@ -104,6 +108,9 @@ impl std::fmt::Debug for TelegramFile {
 pub struct TelegramMessage {
     pub id: String,
     pub text: String,
+    /// The hub person this message is for, verified by the hub. `None`: an older hub, which
+    /// means the PC's own (home) person.
+    pub person: Option<String>,
     /// Pictures sent with it that the chat shows (a photo, or an image sent as a file).
     pub images: Vec<TelegramFile>,
     /// Any other files sent with it (a document, a video, a recording, a picture the chat cannot
@@ -118,9 +125,15 @@ pub struct TelegramMessage {
 pub trait TelegramSink: Send + Sync {
     /// `Ok` once the message is safely in Helm (it is then acknowledged to the hub).
     fn deliver<'a>(&'a self, msg: TelegramMessage) -> BoxFut<'a, Result<(), String>>;
-    fn stop<'a>(&'a self) -> BoxFut<'a, ()>;
+    /// `/stop` from the person's Telegram. `person` `None`: an older hub, the PC's own person.
+    fn stop<'a>(&'a self, person: Option<String>) -> BoxFut<'a, ()>;
     /// The user tapped button `index` of the approval ask `id` ([`LineHandle::telegram_ask`]).
-    fn answer<'a>(&'a self, id: String, index: usize) -> BoxFut<'a, ()>;
+    fn answer<'a>(
+        &'a self,
+        person: Option<String>,
+        id: String,
+        index: usize,
+    ) -> BoxFut<'a, ()>;
 }
 
 /// One turn for the voice chat as the hub forwarded it.
@@ -137,22 +150,26 @@ pub struct VoiceTurn {
     pub age_minutes: Option<i64>,
     /// The turn this one carries on, when it was spoken as a continuation.
     pub continues: Option<String>,
+    /// The hub person this turn is for, verified by the hub. `None`: an older hub, which
+    /// means the PC's own (home) person.
+    pub person: Option<String>,
 }
 
-/// Where voice turns go on the PC.
+/// Where voice turns go on the PC. `person` `None` is an older hub's frame, meaning the PC's
+/// own (home) person.
 pub trait VoiceSink: Send + Sync {
     /// `Ok` once the turn is safely in Helm (it is then acknowledged to the hub).
     fn deliver<'a>(&'a self, turn: VoiceTurn) -> BoxFut<'a, Result<(), String>>;
     /// The phone cancelled this turn after Helm took it.
-    fn stop<'a>(&'a self, turn: String) -> BoxFut<'a, ()>;
+    fn stop<'a>(&'a self, person: Option<String>, turn: String) -> BoxFut<'a, ()>;
     /// What the phone did and did not play: the hub's reports, as sent.
-    fn heard<'a>(&'a self, _reports: Vec<Value>) -> BoxFut<'a, ()> {
+    fn heard<'a>(&'a self, _person: Option<String>, _reports: Vec<Value>) -> BoxFut<'a, ()> {
         Box::pin(async {})
     }
     /// The phone's screen is in front (`live`) or not, in this mode.
-    fn presence(&self, _live: bool, _mode: &str) {}
+    fn presence(&self, _person: Option<String>, _live: bool, _mode: &str) {}
     /// Start the next voice message in a new chat.
-    fn fresh<'a>(&'a self) -> BoxFut<'a, ()> {
+    fn fresh<'a>(&'a self, _person: Option<String>) -> BoxFut<'a, ()> {
         Box::pin(async {})
     }
 }
@@ -349,58 +366,84 @@ impl LineHandle {
         self.state() == LineState::Online && self.push(self.this_line(), frame)
     }
     /// The one live status message on Telegram, edited in place by the hub.
-    pub fn telegram_status(&self, text: &str) {
-        let _ = self.push(ANY_LINE, json!({ "type": "telegram_status", "text": text }));
+    pub fn telegram_status(&self, person: &str, text: &str) {
+        let _ = self.push(ANY_LINE, named("telegram_status", person, json!({ "text": text })));
     }
     /// A message Helm starts (an alert). Sent only while the line is up, so it never waits in
     /// the queue for a later line; `false` when it was not sent.
-    pub fn telegram_notify(&self, text: &str) -> bool {
-        self.state() == LineState::Online
-            && self.push(ANY_LINE, json!({ "type": "telegram_notify", "text": text }))
-    }
-    /// An approval ask: a new message with one button per option. Only a tap on one of them
-    /// comes back (`telegram_answer`); `false` when it was not sent.
-    pub fn telegram_ask(&self, id: &str, text: &str, options: &[String]) -> bool {
+    pub fn telegram_notify(&self, person: &str, text: &str) -> bool {
         self.state() == LineState::Online
             && self.push(
                 ANY_LINE,
-                json!({ "type": "telegram_ask", "id": id, "text": text, "options": options }),
+                named("telegram_notify", person, json!({ "text": text })),
+            )
+    }
+    /// An approval ask: a new message with one button per option. Only a tap on one of them
+    /// comes back (`telegram_answer`); `false` when it was not sent.
+    pub fn telegram_ask(&self, person: &str, id: &str, text: &str, options: &[String]) -> bool {
+        self.state() == LineState::Online
+            && self.push(
+                ANY_LINE,
+                named(
+                    "telegram_ask",
+                    person,
+                    json!({ "id": id, "text": text, "options": options }),
+                ),
             )
     }
     /// The ask was settled in Helm or went away: the hub takes its buttons down.
-    pub fn telegram_ask_done(&self, id: &str, text: &str) {
+    pub fn telegram_ask_done(&self, person: &str, id: &str, text: &str) {
         let _ = self.push(
             ANY_LINE,
-            json!({ "type": "telegram_ask_done", "id": id, "text": text }),
+            named("telegram_ask_done", person, json!({ "id": id, "text": text })),
         );
     }
     /// The turn's answer, sent by the hub as a new message; the status message goes.
     /// `false` when the line is down and it was not sent, so the mirror can try again.
-    pub fn telegram_final(&self, text: &str) -> bool {
+    pub fn telegram_final(&self, person: &str, text: &str) -> bool {
         self.state() == LineState::Online
-            && self.push(ANY_LINE, json!({ "type": "telegram_final", "text": text }))
+            && self.push(
+                ANY_LINE,
+                named("telegram_final", person, json!({ "text": text })),
+            )
     }
 
     /// The voice chat's working line for a turn. The hub passes it to the phone if it is
     /// listening and drops it otherwise, so it is sent only while the line is up.
-    pub fn voice_status(&self, turn: &str, text: &str) {
+    pub fn voice_status(&self, person: &str, turn: &str, text: &str) {
         if self.state() == LineState::Online {
             let _ = self.push(
                 self.this_line(),
-                json!({ "type": "voice_status", "turn": turn, "text": text }),
+                named("voice_status", person, json!({ "turn": turn, "text": text })),
             );
         }
     }
     /// An answer to a turn (`voice_final`), or news (`voice_notify`). `false` when the line is
     /// down and it was not sent, so the mirror can try again. One that was taken is offered
     /// again on the next line for a while, in case the line dropped with it on the way.
-    pub fn voice_reply(&self, reply: &crate::voice::Reply) -> bool {
-        self.push_voice(reply.frame())
+    pub fn voice_reply(&self, person: &str, reply: &crate::voice::Reply) -> bool {
+        self.push_voice(named_from(person, reply.frame()))
     }
     /// One attachment, sent just before the reply it belongs to. `false` when it was not sent.
-    pub fn voice_attachment(&self, frame: Value) -> bool {
-        self.push_voice(frame)
+    pub fn voice_attachment(&self, person: &str, frame: Value) -> bool {
+        self.push_voice(named_from(person, frame))
     }
+}
+
+/// A frame of `kind` with `fields`, naming the hub person `person` it acts for. An empty
+/// `person` names none — an older hub, or a profile not linked yet — and the hub then uses
+/// the client's own person, as before.
+fn named(kind: &str, person: &str, mut fields: Value) -> Value {
+    fields["type"] = json!(kind);
+    named_from(person, fields)
+}
+
+/// Add the person to a frame that is already built (a voice reply or attachment).
+fn named_from(person: &str, mut frame: Value) -> Value {
+    if !person.is_empty() {
+        frame["personId"] = json!(person);
+    }
+    frame
 }
 
 pub struct Client {
@@ -413,6 +456,9 @@ pub struct Client {
     devices: std::sync::OnceLock<Arc<dyn DeviceSink>>,
     /// Where the hub's knowledge frames go; they are ignored until it is attached.
     knowledge: std::sync::OnceLock<Arc<dyn KnowledgeSink>>,
+    /// Does this PC act for that hub person (a profile of theirs is linked here)? Set while
+    /// the services are wired; until then every named person passes, as before.
+    person_known: std::sync::OnceLock<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
     handle: Arc<LineHandle>,
     up_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<(u64, Value)>>,
     /// Hub ids of Telegram messages being delivered now: the hub's resend of one of them is
@@ -473,6 +519,7 @@ impl Client {
             voice: std::sync::OnceLock::new(),
             devices: std::sync::OnceLock::new(),
             knowledge: std::sync::OnceLock::new(),
+            person_known: std::sync::OnceLock::new(),
             handle: Arc::new(LineHandle {
                 state: AtomicU8::new(LineState::Off as u8),
                 up,
@@ -513,6 +560,30 @@ impl Client {
     /// Give the line the sink for the hub's knowledge frames.
     pub fn attach_knowledge(&self, sink: Arc<dyn KnowledgeSink>) {
         let _ = self.knowledge.set(sink);
+    }
+
+    /// Tell the line which hub persons this PC acts for. A frame naming a person the check
+    /// refuses is dropped (or refused, for a call), since nobody here could answer it.
+    pub fn set_person_check(&self, f: Arc<dyn Fn(&str) -> bool + Send + Sync>) {
+        let _ = self.person_known.set(f);
+    }
+
+    /// The hub person a down frame acts for. `Ok(None)`: it names none (an older hub, or a
+    /// person not yet linked) — the home profile's, as before. `Ok(Some)`: that person's.
+    /// `Err`: it names a person this PC does not act for, so nobody here could take it.
+    fn frame_person(&self, v: &Value) -> Result<Option<String>, ()> {
+        let named = v
+            .get("personId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_owned);
+        match (named, self.person_known.get()) {
+            (None, _) => Ok(None),
+            (Some(p), None) => Ok(Some(p)),
+            (Some(p), Some(f)) if f(&p) => Ok(Some(p)),
+            (Some(_), Some(_)) => Err(()),
+        }
     }
 
     /// Tests: the keepalive and silence intervals, scaled down from production.
@@ -738,6 +809,13 @@ impl Client {
                 // The hub stamps a call that came from its Remote page; only then do the page's
                 // own tools get through the gate.
                 let remote = s("scope").as_deref() == Some("remote");
+                let Ok(person) = self.frame_person(&v) else {
+                    let _ = out.send(refusal(
+                        &id,
+                        "This PC has no profile linked for that person.",
+                    ));
+                    return;
+                };
                 let executor = self.executor.clone();
                 let out = out.clone();
                 tokio::spawn(async move {
@@ -750,7 +828,9 @@ impl Client {
                     });
                     let reply = match admitted {
                         Err(text) => refusal(&id, text),
-                        Ok(admitted) => answer(&id, executor.run(&caller, admitted).await),
+                        Ok(admitted) => {
+                            answer(&id, executor.run(&caller, person.as_deref(), admitted).await)
+                        }
                     };
                     let _ = out.send(reply);
                 });
@@ -788,11 +868,19 @@ impl Client {
                 let (Some(id), Some(text)) = (s("id"), s("text")) else {
                     return;
                 };
+                let Ok(person) = self.frame_person(&v) else {
+                    log::info!("relay: a Telegram frame named a person this PC does not act for");
+                    return;
+                };
                 let delivering = self.delivering.clone();
+                let key = match &person {
+                    Some(p) => format!("{p}/{id}"),
+                    None => id.clone(),
+                };
                 if !delivering
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
-                    .insert(id.clone())
+                    .insert(key.clone())
                 {
                     return;
                 }
@@ -814,8 +902,10 @@ impl Client {
                         })
                         .unwrap_or_default()
                 };
+                let r_person = person.clone().unwrap_or_default();
                 let msg = TelegramMessage {
                     id: id.clone(),
+                    person,
                     text,
                     images: list("images"),
                     files: list("files"),
@@ -830,10 +920,14 @@ impl Client {
                     delivering
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
-                        .remove(&id);
+                        .remove(&key);
                     match r {
                         Ok(()) => {
-                            let _ = out.send(json!({ "type": "telegram_ack", "id": id }));
+                            let _ = out.send(named(
+                                "telegram_ack",
+                                &r_person,
+                                json!({ "id": id }),
+                            ));
                         }
                         // Not acknowledged: the hub keeps it and sends it again on the next line.
                         Err(e) => log::warn!("relay: a Telegram message was not delivered: {e}"),
@@ -847,8 +941,13 @@ impl Client {
                 let Some(voice) = self.voice.get().cloned() else {
                     return;
                 };
+                let Ok(person) = self.frame_person(&v) else {
+                    log::info!("relay: a voice frame named a person this PC does not act for");
+                    return;
+                };
                 // The same dedupe as Telegram's, kept apart from it by a prefix.
-                let key = format!("voice/{id}");
+                let r_person = person.clone().unwrap_or_default();
+                let key = format!("voice/{r_person}/{id}");
                 let delivering = self.delivering.clone();
                 if !delivering
                     .lock()
@@ -859,6 +958,7 @@ impl Client {
                 }
                 let turn = VoiceTurn {
                     id: id.clone(),
+                    person,
                     mode: s("mode").unwrap_or_default(),
                     text,
                     source: s("source").unwrap_or_default(),
@@ -875,7 +975,7 @@ impl Client {
                         .remove(&key);
                     match r {
                         Ok(()) => {
-                            let _ = out.send(json!({ "type": "voice_ack", "id": id }));
+                            let _ = out.send(named("voice_ack", &r_person, json!({ "id": id })));
                         }
                         // Not acknowledged: the hub keeps it and sends it again.
                         Err(e) => log::warn!("relay: a voice turn was not delivered: {e}"),
@@ -886,7 +986,10 @@ impl Client {
                 let (Some(turn), Some(voice)) = (s("turn"), self.voice.get().cloned()) else {
                     return;
                 };
-                tokio::spawn(async move { voice.stop(turn).await });
+                let Ok(person) = self.frame_person(&v) else {
+                    return;
+                };
+                tokio::spawn(async move { voice.stop(person, turn).await });
             }
             Some("voice_heard") => {
                 let (Some(reports), Some(voice)) = (
@@ -895,11 +998,18 @@ impl Client {
                 ) else {
                     return;
                 };
-                tokio::spawn(async move { voice.heard(reports).await });
+                let Ok(person) = self.frame_person(&v) else {
+                    return;
+                };
+                tokio::spawn(async move { voice.heard(person, reports).await });
             }
             Some("voice_presence") => {
                 if let Some(voice) = self.voice.get() {
+                    let Ok(person) = self.frame_person(&v) else {
+                        return;
+                    };
                     voice.presence(
+                        person,
                         v.get("live").and_then(Value::as_bool).unwrap_or(false),
                         s("mode").as_deref().unwrap_or("conversation"),
                     );
@@ -909,29 +1019,38 @@ impl Client {
                 let Some(voice) = self.voice.get().cloned() else {
                     return;
                 };
-                tokio::spawn(async move { voice.fresh().await });
+                let Ok(person) = self.frame_person(&v) else {
+                    return;
+                };
+                tokio::spawn(async move { voice.fresh(person).await });
             }
             Some("devices" | "dev_call" | "dev_result" | "dev_push") => {
                 if let Some(d) = self.devices.get() {
                     d.frame(v.clone());
                 }
             }
-            Some("kn_files" | "kn_put_result" | "kn_changed") => {
+            Some("kn_files" | "kn_put_result" | "kn_changed" | "person_result") => {
                 if let Some(k) = self.knowledge.get() {
                     k.frame(v.clone());
                 }
             }
             Some("telegram_stop") => {
                 let sink = self.sink.clone();
-                tokio::spawn(async move { sink.stop().await });
+                let Ok(person) = self.frame_person(&v) else {
+                    return;
+                };
+                tokio::spawn(async move { sink.stop(person).await });
             }
             Some("telegram_answer") => {
                 let (Some(id), Some(index)) = (s("id"), v.get("index").and_then(Value::as_u64))
                 else {
                     return;
                 };
+                let Ok(person) = self.frame_person(&v) else {
+                    return;
+                };
                 let sink = self.sink.clone();
-                tokio::spawn(async move { sink.answer(id, index as usize).await });
+                tokio::spawn(async move { sink.answer(person, id, index as usize).await });
             }
             _ => {}
         }

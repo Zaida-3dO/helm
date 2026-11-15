@@ -30,6 +30,8 @@ pub const MAX_OPTIONS: usize = 4;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ask {
     pub chat_id: String,
+    /// The hub person whose Telegram this was asked on (`""`: none named). Taken down there.
+    pub person: String,
     pub request_id: String,
     pub method: InteractionMethod,
     pub plan: bool,
@@ -45,14 +47,17 @@ pub struct Ask {
 pub struct Waiting {
     pub chat_id: String,
     pub chat_title: String,
+    /// The hub person of the profile that owns the chat (`""`: none linked).
+    pub person: String,
     pub interaction: Interaction,
 }
 
-/// What one look decided: asks to send (`id`, text, options) and asks to take down (`id`, note).
+/// What one look decided: asks to send (`id`, person, text, options) and asks to take down
+/// (`id`, person, note).
 #[derive(Debug, Default, PartialEq)]
 pub struct Step {
-    pub ask: Vec<(String, String, Vec<String>)>,
-    pub done: Vec<(String, String)>,
+    pub ask: Vec<(String, String, String, Vec<String>)>,
+    pub done: Vec<(String, String, String)>,
 }
 
 /// Whether a waiting request may be offered on Telegram.
@@ -185,6 +190,7 @@ pub fn offer(w: &Waiting) -> Option<Offer> {
     }
     let ask = Ask {
         chat_id: w.chat_id.clone(),
+        person: w.person.clone(),
         request_id: w.interaction.id.clone(),
         method: w.interaction.method,
         plan: w.interaction.attention == Some(InteractionAttention::Plan),
@@ -242,17 +248,18 @@ impl Asks {
             .iter()
             .map(|w| (w.chat_id.as_str(), w.interaction.id.as_str()))
             .collect();
-        let gone: Vec<String> = m
+        let gone: Vec<(String, String)> = m
             .iter()
             .filter(|(_, a)| {
                 a.question.is_none() && !live.contains(&(a.chat_id.as_str(), a.request_id.as_str()))
             })
-            .map(|(id, _)| id.clone())
+            .map(|(id, a)| (id.clone(), a.person.clone()))
             .collect();
-        for id in gone {
+        for (id, person) in gone {
             m.remove(&id);
             step.done.push((
                 id,
+                person,
                 "No longer waiting: answered in Helm, or withdrawn.".into(),
             ));
         }
@@ -267,18 +274,27 @@ impl Asks {
                 continue;
             };
             let id = new_id();
-            step.ask.push((id.clone(), o.text, o.ask.options.clone()));
+            let person = o.ask.person.clone();
+            step.ask.push((id.clone(), person, o.text, o.ask.options.clone()));
             m.insert(id, o.ask);
         }
         step
     }
 
     /// A chat's own question, put to the user with buttons. Kept until a tap or a restart.
-    pub fn add_question(&self, id: &str, chat_id: &str, question: &str, options: Vec<String>) {
+    pub fn add_question(
+        &self,
+        id: &str,
+        chat_id: &str,
+        person: &str,
+        question: &str,
+        options: Vec<String>,
+    ) {
         self.map().insert(
             id.to_owned(),
             Ask {
                 chat_id: chat_id.to_owned(),
+                person: person.to_owned(),
                 request_id: String::new(),
                 method: InteractionMethod::Select,
                 plan: false,
@@ -294,16 +310,17 @@ impl Asks {
         self.map().remove(id);
     }
 
-    /// Take every open ask down (approvals were turned off, or the line went away). With
-    /// `questions` false, chats' own questions stay: they are not asked again.
-    pub fn clear(&self, questions: bool) -> Vec<String> {
+    /// Take every open ask down (approvals were turned off, or the line went away), with the
+    /// person each was asked on. With `questions` false, chats' own questions stay: they are
+    /// not asked again.
+    pub fn clear(&self, questions: bool) -> Vec<(String, String)> {
         let mut m = self.map();
-        let ids: Vec<String> = m
+        let ids: Vec<(String, String)> = m
             .iter()
             .filter(|(_, a)| questions || a.question.is_none())
-            .map(|(id, _)| id.clone())
+            .map(|(id, a)| (id.clone(), a.person.clone()))
             .collect();
-        for id in &ids {
+        for (id, _) in &ids {
             m.remove(id);
         }
         ids

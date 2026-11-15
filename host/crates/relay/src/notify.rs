@@ -26,7 +26,7 @@ use helm_core::db::Database;
 use helm_hosttools::{HostToolRegistry, ToolCtx, ToolError, ToolResult, ToolSpec};
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -161,24 +161,79 @@ pub(crate) fn title_of(db: &Database, chat: &str) -> Option<String> {
     .flatten()
 }
 
-/// Write what was sent to the user on Telegram into the Telegram chat: a line in its transcript,
-/// and a note for its agent with the next message. Not for the Telegram chat's own sends.
-fn record_sent(rt: Option<&ChatRuntime>, dir: &Path, from: &str, text: &str, caller: Option<&str>) {
-    let Some(tag) = telegram::load_tag(&telegram::tag_path(dir)) else {
+/// One linked profile's Telegram channel: its files, its switches, the person it acts for and
+/// the chat that currently holds its tag. Everything that reaches a person's phone goes through
+/// the channel of the profile that owns the chat it came from.
+#[derive(Clone)]
+pub(crate) struct Channel {
+    pub profile_id: String,
+    /// The hub person of that profile, `""` when it has none (the hub then uses its own).
+    pub person: String,
+    pub paths: telegram::Paths,
+    pub policy: telegram::PolicyFile,
+    pub tg_chat: Option<String>,
+}
+
+fn channel_of(profile: helm_profiles::store::Profile, profile_dir: &Path) -> Channel {
+    let paths = crate::people::telegram_paths(profile_dir, &profile.id);
+    Channel {
+        tg_chat: telegram::load_tag(&paths.tag).map(|t| t.chat_id),
+        policy: telegram::load_file(&paths.policy),
+        person: profile.hub_person_id.unwrap_or_default(),
+        profile_id: profile.id,
+        paths,
+    }
+}
+
+/// Every linked profile's channel, in the order the profiles are kept.
+pub(crate) fn channels(db: &Database, profile_dir: &Path) -> Vec<Channel> {
+    crate::people::migrate(profile_dir, db);
+    db.snapshot(|tx| helm_profiles::store::list(tx))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| channel_of(p, profile_dir))
+        .collect()
+}
+
+/// The channel of the profile a chat belongs to (the home profile's, when it belongs to none).
+pub(crate) fn owner_channel(
+    db: &Database,
+    profile_dir: &Path,
+    chat: &str,
+) -> Result<Channel, String> {
+    let profile = db
+        .snapshot(|tx| helm_profiles::store::profile_of_chat(tx, chat))
+        .ok()
+        .flatten()
+        .ok_or("Helm has no profile for that chat.")?;
+    Ok(channel_of(profile, profile_dir))
+}
+
+/// Write what was sent to the user on Telegram into that channel's Telegram chat: a line in its
+/// transcript, and a note for its agent with the next message. Not for the Telegram chat's own
+/// sends.
+fn record_sent(
+    rt: Option<&ChatRuntime>,
+    ch: &Channel,
+    from: &str,
+    text: &str,
+    caller: Option<&str>,
+) {
+    let Some(tag) = &ch.tg_chat else {
         return;
     };
-    if Some(tag.chat_id.as_str()) == caller {
+    if Some(tag.as_str()) == caller {
         return;
     }
     if let Some(rt) = rt {
         let line: String = text.chars().take(600).collect();
         rt.add_context_row(
-            &tag.chat_id,
+            tag,
             ContextKind::Telegram,
             &format!("Sent to you on Telegram by {from}: {line}"),
         );
     }
-    if telegram::remember_sent(&telegram::sent_path(dir), from, text).is_err() {
+    if telegram::remember_sent(&ch.paths.sent, from, text).is_err() {
         log::warn!("relay: the note of an alert sent could not be saved");
     }
 }
@@ -199,12 +254,18 @@ fn send(ctx: &ToolCtx, a: Value) -> ToolResult {
             "text is longer than {MAX_TEXT} characters; send a short summary."
         )));
     }
-    if let Some(tag) = profile_dir(ctx).and_then(|d| telegram::load_tag(&telegram::tag_path(&d))) {
-        if tag.chat_id == ctx.caller_chat_id {
-            return Err(ToolError::refused(
-                "This is the Telegram chat: its answers already reach Telegram, so nothing was sent.",
-            ));
-        }
+    let dir = profile_dir(ctx).ok_or_else(|| ToolError::refused("Helm is still starting."))?;
+    let db = ctx
+        .services
+        .get::<Database>()
+        .ok_or_else(|| ToolError::refused("Helm's database is not available."))?;
+    // The message goes to the person the chat belongs to: their Telegram, their channel files.
+    let ch = owner_channel(db, &dir, &ctx.caller_chat_id)
+        .map_err(|e| ToolError::refused(format!("{e}, so nothing was sent.")))?;
+    if ch.tg_chat.as_deref() == Some(ctx.caller_chat_id.as_str()) {
+        return Err(ToolError::refused(
+            "This is the Telegram chat: its answers already reach Telegram, so nothing was sent.",
+        ));
     }
     let line = ctx
         .services
@@ -220,25 +281,19 @@ fn send(ctx: &ToolCtx, a: Value) -> ToolResult {
             "{MAX_PER_HOUR} Telegram messages were already sent in the last hour, so this one was not."
         )));
     }
-    let title = ctx
-        .services
-        .get::<Database>()
-        .and_then(|db| title_of(&db, &ctx.caller_chat_id))
-        .unwrap_or_default();
-    if !line.telegram_notify(&compose(&title, text)) {
+    let title = title_of(db, &ctx.caller_chat_id).unwrap_or_default();
+    if !line.telegram_notify(&ch.person, &compose(&title, text)) {
         return Err(ToolError::refused(
             "Helm's line to the hub dropped, so nothing was sent.",
         ));
     }
-    if let Some(dir) = profile_dir(ctx) {
-        let rt = ctx.services.get::<ChatRuntime>();
-        let from = if title.trim().is_empty() {
-            "a Helm chat"
-        } else {
-            title.trim()
-        };
-        record_sent(rt.as_deref(), &dir, from, text, Some(&ctx.caller_chat_id));
-    }
+    let rt = ctx.services.get::<ChatRuntime>();
+    let from = if title.trim().is_empty() {
+        "a Helm chat"
+    } else {
+        title.trim()
+    };
+    record_sent(rt.as_deref(), &ch, from, text, Some(&ctx.caller_chat_id));
     Ok(json!({ "sent": true }))
 }
 
@@ -268,7 +323,13 @@ fn ask(ctx: &ToolCtx, a: Value) -> ToolResult {
         return Err(ToolError::refused("options: 2 to 4 short labels."));
     }
     let dir = profile_dir(ctx).ok_or_else(|| ToolError::refused("Helm is still starting."))?;
-    if !telegram::load_approvals(&telegram::policy_path(&dir)) {
+    let db = ctx
+        .services
+        .get::<Database>()
+        .ok_or_else(|| ToolError::refused("Helm's database is not available."))?;
+    let ch = owner_channel(db, &dir, &ctx.caller_chat_id)
+        .map_err(|e| ToolError::refused(format!("{e}, so nothing was asked.")))?;
+    if !telegram::load_approvals(&ch.paths.policy) {
         return Err(ToolError::refused(
             "Approving from Telegram is off (the user turns it on in Settings → Hub), so nothing was asked.",
         ));
@@ -291,15 +352,11 @@ fn ask(ctx: &ToolCtx, a: Value) -> ToolResult {
             "{MAX_PER_HOUR} Telegram messages were already sent in the last hour, so nothing was asked."
         )));
     }
-    let title = ctx
-        .services
-        .get::<Database>()
-        .and_then(|db| title_of(&db, &ctx.caller_chat_id))
-        .unwrap_or_default();
+    let title = title_of(db, &ctx.caller_chat_id).unwrap_or_default();
     let id = approve::new_id();
     sink.asks
-        .add_question(&id, &ctx.caller_chat_id, question, options.clone());
-    if !line.telegram_ask(&id, &compose(&title, question), &options) {
+        .add_question(&id, &ctx.caller_chat_id, &ch.person, question, options.clone());
+    if !line.telegram_ask(&ch.person, &id, &compose(&title, question), &options) {
         sink.asks.unsent(&id);
         return Err(ToolError::refused(
             "Helm's line to the hub dropped, so nothing was asked.",
@@ -313,7 +370,7 @@ fn ask(ctx: &ToolCtx, a: Value) -> ToolResult {
     };
     record_sent(
         rt.as_deref(),
-        &dir,
+        &ch,
         from,
         &format!("asked: {question}"),
         Some(&ctx.caller_chat_id),
@@ -379,29 +436,59 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     );
 }
 
-/// What one look found: the away rows (`None`: not away, or alerts off), the requests an ask
-/// could answer (`None`: approving from Telegram is off) and the Telegram chat. The inner
-/// `None`s mean the attention read failed: no look at all, not "nothing waits".
+/// What one look found. Every row and request carries the profile it belongs to, so each
+/// person's phone gets only their own chats' alerts and asks.
 struct Look {
-    rows: Option<Option<Vec<AttentionRow>>>,
-    waiting: Option<Option<Vec<approve::Waiting>>>,
-    tg_chat: Option<String>,
+    /// The channels as they were, in profile order.
+    channels: Vec<Channel>,
+    /// The profile id each chat belongs to (by id, so a chat of one profile is never alerted
+    /// through another's channel).
+    owner: std::collections::HashMap<String, String>,
+    away: bool,
+    /// The attention rows worth alerting (`None`: the read failed — no look, not "nothing").
+    rows: Option<Vec<AttentionRow>>,
+    /// Requests an ask could answer (`None`: approving is off for every profile).
+    waiting: Option<Vec<approve::Waiting>>,
 }
 
-fn look(rt: &ChatRuntime, afk: &helm_afk::AfkService, dir: &Path) -> Look {
-    let policy = telegram::load_file(&telegram::policy_path(dir));
+fn look(rt: &ChatRuntime, afk: &helm_afk::AfkService, db: &Database, dir: &Path) -> Look {
+    let chans = channels(db, dir);
     let away = afk.open_source().is_some();
-    let tg_chat = telegram::load_tag(&telegram::tag_path(dir)).map(|t| t.chat_id);
-    let summary = (away || policy.approvals)
+    let any_alerts = chans.iter().any(|c| c.policy.away_alerts);
+    let any_approvals = chans.iter().any(|c| c.policy.approvals);
+    let owner: std::collections::HashMap<String, String> = db
+        .snapshot(|tx| {
+            let mut st = tx.prepare(
+                "SELECT c.id, COALESCE(NULLIF(c.profile_id, ''), (SELECT id FROM profiles WHERE is_home = 1)) \
+                 FROM chats c",
+            )?;
+            let mut rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            let mut m = std::collections::HashMap::new();
+            for r in rows.by_ref() {
+                let (chat, p): (String, Option<String>) = r?;
+                if let Some(p) = p {
+                    m.insert(chat, p);
+                }
+            }
+            Ok::<_, rusqlite::Error>(m)
+        })
+        .unwrap_or_default();
+    let summary = (away && (any_alerts || any_approvals) || any_approvals)
         .then(|| rt.attention().ok())
         .flatten();
     // A failed read is no look at all, not "nothing waits".
-    let rows = (away && policy.away_alerts).then(|| summary.as_ref().map(alertable));
-    let waiting = policy.approvals.then(|| {
+    let rows = (away && any_alerts).then(|| summary.as_ref().map(alertable)).flatten();
+    let waiting = any_approvals.then(|| {
         let summary = summary.as_ref()?;
         let mut out = vec![];
         for r in &summary.needs_you {
-            let here = away || tg_chat.as_deref() == Some(r.chat_id.as_str());
+            let Some(ch) = chans.iter().find(|c| owner.get(&r.chat_id).is_some_and(|p| p == &c.profile_id)) else {
+                continue;
+            };
+            if !ch.policy.approvals {
+                continue;
+            }
+            let here = away || ch.tg_chat.as_deref() == Some(r.chat_id.as_str());
             if !here || !matches!(r.kind, AttentionKind::Approval | AttentionKind::Plan) {
                 continue;
             }
@@ -413,6 +500,7 @@ fn look(rt: &ChatRuntime, afk: &helm_afk::AfkService, dir: &Path) -> Look {
                 out.push(approve::Waiting {
                     chat_id: r.chat_id.clone(),
                     chat_title: r.title.clone(),
+                    person: ch.person.clone(),
                     interaction: i,
                 });
             }
@@ -420,9 +508,11 @@ fn look(rt: &ChatRuntime, afk: &helm_afk::AfkService, dir: &Path) -> Look {
         Some(out)
     });
     Look {
+        channels: chans,
+        owner,
+        away,
         rows,
         waiting,
-        tg_chat,
     }
 }
 
@@ -430,85 +520,121 @@ fn look(rt: &ChatRuntime, afk: &helm_afk::AfkService, dir: &Path) -> Look {
 pub fn watch_away(
     handle: &tokio::runtime::Handle,
     rt: ChatRuntime,
+    db: Arc<Database>,
     afk: Arc<helm_afk::AfkService>,
     line: Arc<LineHandle>,
     sink: Arc<ChatSink>,
     profile_dir: PathBuf,
 ) {
     handle.spawn(async move {
-        let mut away = Away::default();
+        // One away span per profile: what already waited when its span began, plus what has
+        // been alerted since.
+        let mut away: HashMap<String, Away> = HashMap::new();
         let mut was_online = false;
         let mut every = tokio::time::interval(TICK);
         loop {
             every.tick().await;
-            let (rt2, afk, dir) = (rt.clone(), afk.clone(), profile_dir.clone());
-            let Ok(found) = tokio::task::spawn_blocking(move || look(&rt2, &afk, &dir)).await
+            let (rt2, afk, dir, db2) = (
+                rt.clone(),
+                afk.clone(),
+                profile_dir.clone(),
+                db.clone(),
+            );
+            let Ok(found) =
+                tokio::task::spawn_blocking(move || look(&rt2, &afk, &db2, &dir)).await
             else {
                 continue;
             };
             let online = line.state() == LineState::Online;
             // A line that went away may have taken the hub's buttons with it: ask afresh.
             if online && !was_online {
-                for id in sink.asks.clear(false) {
-                    line.telegram_ask_done(&id, "Asked again below.");
+                for (id, person) in sink.asks.clear(false) {
+                    line.telegram_ask_done(&person, &id, "Asked again below.");
                 }
             }
             was_online = online;
             match &found.waiting {
                 None => {
-                    for id in sink.asks.clear(true) {
+                    for (id, person) in sink.asks.clear(true) {
                         line.telegram_ask_done(
+                            &person,
                             &id,
                             "Approving from Telegram was turned off in Helm.",
                         );
                     }
                 }
-                Some(Some(waiting)) if online => {
+                Some(waiting) if online => {
                     let step = sink.asks.step(waiting, approve::new_id);
-                    for (id, text, options) in step.ask {
-                        if !line.telegram_ask(&id, &text, &options) {
+                    for (id, person, text, options) in step.ask {
+                        if !line.telegram_ask(&person, &id, &text, &options) {
                             sink.asks.unsent(&id);
                         }
                     }
-                    for (id, note) in step.done {
-                        line.telegram_ask_done(&id, &note);
+                    for (id, person, note) in step.done {
+                        line.telegram_ask_done(&person, &id, &note);
                     }
                 }
                 Some(_) => {}
             }
-            let Some(rows) = found.rows else {
-                away.reset();
+            // Not away: the next away span starts afresh for everyone.
+            if !found.away {
+                away.clear();
                 continue;
-            };
-            // With the line down, wait for it: what arrives meanwhile is alerted once it is back.
-            let (Some(rows), true) = (rows, online) else {
-                continue;
-            };
+            }
             // A request asked with buttons is not alerted as well.
-            let asked: HashSet<&str> = match &found.waiting {
-                Some(Some(w)) => w
-                    .iter()
-                    .filter(|w| approve::askable(&w.interaction))
-                    .map(|w| w.chat_id.as_str())
-                    .collect(),
-                _ => HashSet::new(),
-            };
-            let rows: Vec<AttentionRow> = rows
-                .into_iter()
-                .filter(|r| {
-                    !(matches!(r.kind, AttentionKind::Approval | AttentionKind::Plan)
-                        && asked.contains(r.chat_id.as_str()))
+            let asked: HashSet<&str> = found
+                .waiting
+                .as_ref()
+                .map(|w| {
+                    w.iter()
+                        .filter(|w| approve::askable(&w.interaction))
+                        .map(|w| w.chat_id.as_str())
+                        .collect()
                 })
-                .collect();
-            if let Some(alert) = away.step(&rows, found.tg_chat.as_deref()) {
-                // Alerts share the chats' hourly cap; one not sent is tried again next look.
-                if BUDGET.take(helm_core::now_ms()) && line.telegram_notify(&alert.text) {
-                    let (rt2, dir, text) = (rt.clone(), profile_dir.clone(), alert.text.clone());
-                    let _ = tokio::task::spawn_blocking(move || {
-                        record_sent(Some(&rt2), &dir, "Helm, while you were away", &text, None)
+                .unwrap_or_default();
+            for ch in &found.channels {
+                if !ch.policy.away_alerts {
+                    away.remove(&ch.profile_id);
+                    continue;
+                }
+                let a = away.entry(ch.profile_id.clone()).or_default();
+                let Some(rows) = &found.rows else {
+                    // The attention read failed: no look this tick, keep the span as it is.
+                    continue;
+                };
+                let mine: Vec<AttentionRow> = rows
+                    .iter()
+                    .filter(|r| {
+                        found.owner.get(&r.chat_id).is_some_and(|p| *p == ch.profile_id)
+                            && !(matches!(r.kind, AttentionKind::Approval | AttentionKind::Plan)
+                                && asked.contains(r.chat_id.as_str()))
                     })
-                    .await;
-                    away.sent(alert.keys);
+                    .cloned()
+                    .collect();
+                // With the line down, wait for it: what arrives meanwhile is alerted once it
+                // is back.
+                if !online {
+                    continue;
+                }
+                if let Some(alert) = a.step(&mine, ch.tg_chat.as_deref()) {
+                    // Alerts share the chats' hourly cap; one not sent is tried again next look.
+                    if BUDGET.take(helm_core::now_ms())
+                        && line.telegram_notify(&ch.person, &alert.text)
+                    {
+                        let (rt2, text, ch2) =
+                            (rt.clone(), alert.text.clone(), ch.clone());
+                        let _ = tokio::task::spawn_blocking(move || {
+                            record_sent(
+                                Some(&rt2),
+                                &ch2,
+                                "Helm, while you were away",
+                                &text,
+                                None,
+                            )
+                        })
+                        .await;
+                        a.sent(alert.keys);
+                    }
                 }
             }
         }

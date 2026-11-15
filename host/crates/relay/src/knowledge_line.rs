@@ -7,9 +7,11 @@
 //! any change to a knowledge layer on this PC ([`helm_skills::sync::Trigger`]).
 //!
 //! [`start`] runs that loop. A pass first lines up the hub's people with local profiles (a person
-//! the hub knows becomes a profile here, linked by the hub's id), then runs
-//! [`helm_skills::sync::sync_once`] over Everyone and every linked profile, and announces the
-//! layers whose files changed here with `knowledge-changed`.
+//! the hub knows becomes a profile here, linked by the hub's id), then asks the hub for a person
+//! of its own for every unlinked profile that has a name (`person_ensure`, answered by
+//! `person_result`), then runs [`helm_skills::sync::sync_once`] over Everyone and every linked
+//! profile, and announces the layers whose files changed here with `knowledge-changed`. Any link
+//! change emits `profiles_changed`, which re-announces the device frame.
 
 use crate::client::{Client, KnowledgeSink, LineHandle, LineState};
 use base64::Engine as _;
@@ -84,7 +86,7 @@ impl KnowledgeSink for KnowledgeLine {
     fn frame(&self, frame: Value) {
         match frame.get("type").and_then(Value::as_str) {
             Some("kn_changed") => self.poke(),
-            Some("kn_files" | "kn_put_result") => {
+            Some("kn_files" | "kn_put_result" | "person_result") => {
                 let id = frame.get("id").and_then(Value::as_str).unwrap_or("");
                 if let Some(tx) = self.pending().remove(id) {
                     let _ = tx.send(frame);
@@ -258,6 +260,19 @@ pub fn link_people(
     Ok(changed)
 }
 
+/// The person in a `person_result` answer: the hub's id, a number or text, or `None` when the
+/// hub refused or answered with nothing usable.
+fn link_answer(answer: &Value) -> Option<String> {
+    if answer.get("ok").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    match answer.get("personId")? {
+        Value::Number(n) => Some(n.to_string()),
+        Value::String(s) => (!s.trim().is_empty()).then(|| s.trim().to_owned()),
+        _ => None,
+    }
+}
+
 // ---- the loop ---------------------------------------------------------------------------------
 
 /// Start syncing knowledge: attach the sink to the line and run the loop on `handle`.
@@ -320,6 +335,52 @@ async fn run(
                 // Without the household the profiles stay as they are; the files still sync.
                 Err(e) => log::info!("knowledge sync: the hub's people were not read: {e}"),
             }
+        }
+        // An unlinked profile that has a name of its own asks the hub for a person to be its
+        // own — and a name the hub already knows links to that person, with no extra step.
+        let unlinked = db
+            .snapshot(|tx| store::unlinked_named(tx))
+            .unwrap_or_default();
+        let mut linked = false;
+        for (pid, name) in unlinked {
+            match k.ask(json!({"type": "person_ensure", "name": name})).await {
+                Ok(answer) => match link_answer(&answer) {
+                    Some(person) => {
+                        let done = db.write(|tx| {
+                            store::update(
+                                tx,
+                                &pid,
+                                Patch {
+                                    hub_person_id: Some(Some(person)),
+                                    ..Default::default()
+                                },
+                            )
+                        });
+                        match done {
+                            Ok(_) => {
+                                linked = true;
+                                if answer.get("created").and_then(Value::as_bool) == Some(true) {
+                                    log::info!("knowledge sync: the hub made a person for {name}");
+                                }
+                            }
+                            Err(e) => log::warn!(
+                                "knowledge sync: {name} was not linked to the hub: {e:?}"
+                            ),
+                        }
+                    }
+                    None => log::info!(
+                        "knowledge sync: the hub gave {name} no person: {}",
+                        answer
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .unwrap_or("the answer named no one")
+                    ),
+                },
+                Err(e) => log::info!("knowledge sync: {name}'s hub person was not asked: {e}"),
+            }
+        }
+        if linked {
+            events.emit(AppEvent::new("profiles_changed"));
         }
         let profiles: Vec<(String, Option<String>)> = db
             .snapshot(|tx| {
