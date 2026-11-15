@@ -221,6 +221,17 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     // Sealed pages: pins are made through app_pin_page; a page's saved state is its own.
     ("pinned_pages", Tool),
     ("page_state", Data),
+    // Memory indexing: what is uploaded to the hub's search index is the user's decision (agents
+    // go through app_memory_index and the Allow card); the doc rows are only a record of what was sent.
+    (
+        "memindex_sources",
+        UserOnly("What Helm indexes for memory search is yours to choose."),
+    ),
+    (
+        "memindex_settings",
+        UserOnly("Memory indexing's switches are yours to set."),
+    ),
+    ("memindex_docs", Data),
     // Dictation: which speech-to-text server the microphone button sends audio to.
     (
         "dictation_settings",
