@@ -170,7 +170,7 @@ pub fn start(handle: &tokio::runtime::Handle, ctx: &OpCtx, tools: Arc<helm_hostt
     });
     let line = client.handle();
     knowledge_line::start(handle, ctx, &client);
-    handle.spawn(client.run());
+    handle.spawn(client.run_supervised());
     if let (Some(rt), Some(afk), Some(profile), Some(sink)) = (
         ctx.services.get::<helm_chats::ChatRuntime>(),
         ctx.services.get::<helm_afk::AfkService>(),

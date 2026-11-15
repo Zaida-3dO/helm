@@ -549,6 +549,30 @@ impl Client {
         }
     }
 
+    /// `run`, watched: if the loop ever ends — a panic or a fall-through that should not
+    /// happen — it is started again after a backoff, with the reason logged, so a line can
+    /// never stay down for good because its task died.
+    pub async fn run_supervised(self: Arc<Self>) {
+        let mut backoff = Duration::from_secs(1);
+        loop {
+            let c = self.clone();
+            let joined = tokio::task::spawn(std::panic::AssertUnwindSafe(c.run())).await;
+            match joined {
+                Ok(()) => log::error!("relay: the line task ended unexpectedly; restarting it"),
+                Err(e) if e.is_panic() => {
+                    log::error!("relay: the line task panicked; restarting it: {e}")
+                }
+                // The task was cancelled with the app: nothing to restart.
+                Err(_) => return,
+            }
+            // Until the loop proves otherwise the line is down, and nothing may wait on it.
+            self.handle.fail_peers();
+            self.handle.set(LineState::Offline);
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(MAX_BACKOFF);
+        }
+    }
+
     /// Keep the line up until the task is dropped.
     pub async fn run(self: Arc<Self>) {
         let mut backoff = Duration::from_secs(1);
