@@ -35,3 +35,9 @@ export function installProblem(outcome: UpdateInstallOutcome): string | null {
       return null;
   }
 }
+
+/** A `preferences` event changes the update folder when its `changed` map names the preference. */
+export function changesUpdateFolder(event: object): boolean {
+  const c = (event as { changed?: unknown }).changed;
+  return typeof c === 'object' && c !== null && 'updateSource' in c;
+}

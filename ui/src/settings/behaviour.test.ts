@@ -5,6 +5,7 @@ import { parseSendBehavior, sendBehaviorDiff, waitLimitLabel } from './chat/send
 import { changedBy, changeText, describeValue, keyTitle, parseChanges } from './changed/model.ts';
 import { parseNameList } from './applied.ts';
 import { stepZoom } from './generalOptions.ts';
+import { pairedLine } from './hub/pairedLine.ts';
 
 test('send behaviour reads a stored difference and writes back only what differs from the defaults', () => {
   assert.deepEqual(parseSendBehavior(null), HOME_SEND_BEHAVIOR);
@@ -56,4 +57,18 @@ test('name lists and zoom steps stay in range', () => {
   assert.equal(stepZoom(100, 1), 110);
   assert.equal(stepZoom(200, 1), 200);
   assert.equal(stepZoom(50, -1), 50);
+});
+
+test('the hub pairing line tells the real state, and an unreadable connection on its own', () => {
+  const base = { hasAddress: true, hasFallback: false, hasToken: true, personName: 'Pat', machineName: 'Laptop' };
+  const rows: [Parameters<typeof pairedLine>[0], string | null][] = [
+    [null, null],
+    [{ ...base, state: 'online' }, 'Connected as Pat on Laptop'],
+    [{ ...base, state: 'connecting' }, 'Paired as Pat on Laptop, connecting…'],
+    [{ ...base, state: 'offline' }, 'Paired as Pat on Laptop, but the hub is offline'],
+    [{ ...base, state: 'off' }, 'Paired as Pat on Laptop, but the hub line is not set up'],
+    [{ ...base, personName: '', state: 'off' }, null],
+    [{ ...base, personName: '', hasToken: false, state: 'off', configProblem: 'x' }, "The saved hub connection can't be read"],
+  ];
+  for (const [conn, want] of rows) assert.equal(pairedLine(conn), want);
 });

@@ -342,7 +342,7 @@ fn build(services: &Services, chat_id: &str, args: &Value) -> Result<Staged, Str
         };
         for url in [&address, &fallback] {
             if !url.is_empty() && config::is_own_address(url) && !own_hub_allowed(services) {
-                return Err("The hub address is this PC itself. Pair with the hub on its own machine's address, not one served from here.".into());
+                return Err("The hub address is this PC itself (this includes a hub running in WSL or Docker on this PC). Pair with the hub on its own machine's address, not one served from here.".into());
             }
         }
         let code_file = plain_path(&a.code_file, "codeFile")?;

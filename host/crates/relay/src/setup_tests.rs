@@ -280,6 +280,12 @@ fn staged_settings_apply_all_or_nothing_and_never_show_the_code() {
             std::fs::remove_dir(&folder).unwrap();
         }
 
+        // The switch is turned off by someone else between the card and the approval: the card
+        // said "on", so the outcome names the difference.
+        if changed {
+            e.db.write(|tx| prefs::set(tx, DEVICE_RUN_FROM_OTHERS, &Value::Bool(false)))
+                .unwrap();
+        }
         let outcome = e.approve(staged["requestId"].as_str().unwrap());
         assert!(outcome.starts_with(outcome_starts), "{case}: {outcome}");
         if let Some(t) = seen {
@@ -303,6 +309,10 @@ fn staged_settings_apply_all_or_nothing_and_never_show_the_code() {
             assert_eq!(e.paired().person_id, "3");
             assert_eq!(e.pref("deviceHouseholdRun"), Some(Value::Bool(false)));
             assert!(outcome.contains("The code file can be deleted."));
+            assert!(
+                outcome.contains("was off, not on as the card said."),
+                "{outcome}"
+            );
             assert!(e.sink.kinds().contains(&"preferences".to_string()));
         } else {
             assert!(

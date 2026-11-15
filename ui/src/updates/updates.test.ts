@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { busyLine, busyLines, installProblem, restartBody } from './model.ts';
+import { busyLine, busyLines, changesUpdateFolder, installProblem, restartBody } from './model.ts';
 
 test('the restart dialog lists at most four busy chats, cuts long titles and says what is kept', () => {
   const long = 'x'.repeat(100);
@@ -19,4 +19,11 @@ test('the restart dialog lists at most four busy chats, cuts long titles and say
   assert.ok(restartBody({ version: '0.3.1', busyTotal: 2 }).includes('stopped'));
   assert.equal(installProblem('restarting'), null);
   for (const o of ['save_failed', 'busy', 'cancelled'] as const) assert.ok(installProblem(o));
+});
+
+test('the update-folder row re-reads only for a preferences change that names the folder', () => {
+  assert.equal(changesUpdateFolder({ changed: { updateSource: null } }), true);
+  assert.equal(changesUpdateFolder({ changed: { theme: 'dark' } }), false);
+  assert.equal(changesUpdateFolder({}), false);
+  assert.equal(changesUpdateFolder({ changed: 'updateSource' }), false);
 });

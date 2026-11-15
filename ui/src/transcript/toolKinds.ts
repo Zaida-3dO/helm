@@ -91,7 +91,8 @@ export function allowChipState(
   state: string | undefined,
   outcome?: string | null,
 ): 'waiting' | 'allowed' | 'refused' | 'applied' | 'notApplied' | null {
-  // A request Helm applies itself ends with an outcome: say whether it took.
+  // A request Helm applies itself ends with an outcome: say whether it took. Anything that does not
+  // start with "Applied" (a refusal, "Helm stopped while applying") reads as not applied.
   if (state === 'used' && outcome) return outcome.startsWith('Applied') ? 'applied' : 'notApplied';
   switch (state) {
     case 'pending':

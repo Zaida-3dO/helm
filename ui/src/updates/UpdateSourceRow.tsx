@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import { updateOps, type UpdateStatus } from '../api/updates.ts';
 import { useShell } from '../shell/context.ts';
 import { Button, SettingRow, toast } from '../ui/index.ts';
+import { changesUpdateFolder } from './model.ts';
 import './updates.css';
 
 function describe(s: UpdateStatus | null): string {
@@ -28,7 +29,7 @@ export function UpdateSourceRow() {
     void read();
     const offUpdate = shell.bus.on('update', () => void read());
     const offPrefs = shell.bus.on('preferences', (e) => {
-      if ('updateSource' in ((e.changed ?? {}) as Record<string, unknown>)) void read();
+      if (changesUpdateFolder(e)) void read();
     });
     return () => {
       offUpdate();

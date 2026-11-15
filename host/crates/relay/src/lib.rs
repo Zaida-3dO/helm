@@ -236,8 +236,9 @@ fn to_value<T: serde::Serialize>(v: &T) -> Result<Value, ApiError> {
 
 fn connection_get(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
     let creds = ctx_credentials(ctx)?;
-    let mut v = config::view(&config::effective(&creds), line_state(ctx));
-    if let (_, Some(p)) = config::load_checked(&creds) {
+    let (config, problem) = config::effective_checked(&creds);
+    let mut v = config::view(&config, line_state(ctx));
+    if let Some(p) = problem {
         v.config_problem = p.reason().to_owned();
     }
     if let Some(h) = ctx.services.get::<client::LineHandle>() {

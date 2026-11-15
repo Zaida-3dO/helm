@@ -9,26 +9,13 @@ import { useEffect, useMemo, useState } from 'react';
 import { hubOps, type HubConnection } from '../../api/hub.ts';
 import { useShell } from '../../shell/context.ts';
 import { Button, SettingRow, TextInput } from '../../ui/index.ts';
+import { pairedLine } from './pairedLine.ts';
 import '../../profiles/profiles.css';
 
 const POLL_MS = 4000;
 
 function errorText(e: unknown): string {
   return String((e as { message?: unknown })?.message ?? e);
-}
-
-function pairedTitle(conn: HubConnection | null, who: string): string {
-  if (conn?.configProblem) return `Paired as ${who}, but the saved connection can't be read`;
-  switch (conn?.state) {
-    case 'online':
-      return `Connected as ${who}`;
-    case 'connecting':
-      return `Paired as ${who}, connecting…`;
-    case 'off':
-      return `Paired as ${who}, but the hub line is not set up`;
-    default:
-      return `Paired as ${who}, but the hub is offline`;
-  }
 }
 
 export function HubPairing() {
@@ -57,9 +44,7 @@ export function HubPairing() {
     };
   }, [ops]);
 
-  // A saved name says who this PC was paired as, not that the line is up: show the real state.
-  const who = conn?.personName ? `${conn.personName}${conn.machineName ? ` on ${conn.machineName}` : ''}` : null;
-  const paired = who ? pairedTitle(conn, who) : null;
+  const paired = pairedLine(conn);
   const pairedDetail = conn?.configProblem ?? (conn?.state !== 'online' ? conn?.lineRefusal : undefined);
   const ready = address.trim() !== '' && code.trim().length >= 4;
 

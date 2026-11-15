@@ -219,24 +219,45 @@ pub fn load(creds: &CredentialStore) -> RelayConfig {
 
 /// The connection the line should use: the debug-only test override, else the store.
 pub fn effective(creds: &CredentialStore) -> RelayConfig {
+    effective_checked(creds).0
+}
+
+/// [`effective`] with the reason a saved connection could not be used. The reason is logged
+/// when it changes, not on every read, so a long outage cannot fill the host log.
+pub fn effective_checked(creds: &CredentialStore) -> (RelayConfig, Option<ConfigProblem>) {
     if cfg!(debug_assertions) {
         let url = std::env::var(TEST_URL_ENV)
             .ok()
             .filter(|u| !u.trim().is_empty());
         let token = std::env::var(TEST_TOKEN_ENV).ok().filter(|t| !t.is_empty());
         if let (Some(url), Some(token)) = (url, token) {
-            return RelayConfig {
+            let config = RelayConfig {
                 lan_url: url,
                 token,
                 ..Default::default()
             };
+            return (config, None);
         }
     }
     let (config, problem) = load_checked(creds);
-    if let Some(p) = problem {
-        log::warn!("relay: saved hub connection unusable: {p:?}");
+    note_problem(problem);
+    (config, problem)
+}
+
+/// Log a stored-connection problem once per change (0 = none, 1 = keychain, 2 = unopenable).
+fn note_problem(problem: Option<ConfigProblem>) {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static LAST: AtomicU8 = AtomicU8::new(0);
+    let code = match problem {
+        None => 0,
+        Some(ConfigProblem::Keychain) => 1,
+        Some(ConfigProblem::Unopenable) => 2,
+    };
+    if LAST.swap(code, Ordering::Relaxed) != code {
+        if let Some(p) = problem {
+            log::warn!("relay: saved hub connection unusable: {p:?}");
+        }
     }
-    config
 }
 
 /// Apply a save. Errors are fixed sentences: they never carry the input.
