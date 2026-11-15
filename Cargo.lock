@@ -2232,6 +2232,7 @@ version = "2.0.4"
 dependencies = [
  "base64 0.22.1",
  "helm-chats",
+ "helm-consent",
  "helm-core",
  "helm-hosttools",
  "helm-ipc",

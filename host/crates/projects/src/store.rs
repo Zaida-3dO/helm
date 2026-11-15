@@ -179,6 +179,25 @@ pub fn validate_description(raw: &str) -> Res<Option<String>> {
     Ok(Some(d.to_owned()))
 }
 
+/// Startup instructions are plain text over several lines, at most [`MAX_STARTUP_CHARS`]
+/// characters, with no control or hidden characters besides line breaks and tabs; blank means none.
+pub fn validate_startup(raw: &str) -> Res<Option<String>> {
+    let t = raw.replace("\r\n", "\n");
+    let t = t.trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    if t.chars().count() > MAX_STARTUP_CHARS
+        || t.chars().any(|c| c.is_control() && c != '\n' && c != '\t')
+        || helm_core::hidden::hides(t)
+    {
+        return Err(bad(
+            "Startup instructions are plain text of at most 4000 characters.",
+        ));
+    }
+    Ok(Some(t.to_owned()))
+}
+
 /// Check a picture for a project icon: base64 of a PNG, at most [`MAX_ICON_IMAGE_BYTES`] decoded.
 pub fn validate_icon_image(png_base64: &str) -> Res<Vec<u8>> {
     use base64::Engine;
@@ -205,7 +224,7 @@ const PROJECT_SELECT: &str = "SELECT p.id, p.kind, p.name, p.path, p.color, p.cr
         pp.parent_id, pp.source,
         b.board_url, b.board_project_id, b.title, b.headline, b.area, b.repo, b.priority,
         b.last_activity, b.stale, b.completed, COALESCE(l.closed, 0),
-        l.description, COALESCE(l.title_pending, 0)
+        l.description, COALESCE(l.title_pending, 0), l.startup_instructions
      FROM projects p
      LEFT JOIN project_local l ON l.project_id = p.id
      LEFT JOIN project_parents pp ON pp.project_id = p.id
@@ -257,6 +276,7 @@ fn project_from_row(r: &Row<'_>, counts: &HashMap<String, i64>) -> rusqlite::Res
         collapsed: r.get::<_, i64>(8)? != 0,
         icon,
         description: r.get(27)?,
+        startup_instructions: r.get(29)?,
         archived: r.get::<_, i64>(10)? != 0,
         closed: r.get::<_, i64>(26)? != 0,
         primary_folder_project_id: r.get(12)?,
@@ -686,6 +706,16 @@ pub fn update_project(tx: &Transaction<'_>, a: &ProjectUpdateArgs) -> Res<i64> {
         tx.execute(
             "UPDATE project_local SET description = ?2 WHERE project_id = ?1",
             params![id, description],
+        )?;
+    }
+    if let Some(startup) = &a.startup_instructions {
+        let startup = match startup.as_deref() {
+            Some(t) => validate_startup(t)?,
+            None => None,
+        };
+        tx.execute(
+            "UPDATE project_local SET startup_instructions = ?2 WHERE project_id = ?1",
+            params![id, startup],
         )?;
     }
     if let Some(colour) = &a.colour {

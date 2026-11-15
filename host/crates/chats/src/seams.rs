@@ -5,6 +5,7 @@
 //! |---|---|---|
 //! | [`SendContextBuilder`] (service [`SendContext`]) | `helm_panel` (panel context) | `chat_send`, for a composer send that carries `context` |
 //! | [`ProjectGate`] (service [`ProjectGates`]) | `helm_projects` | `chat_restore` and `chat_create`: an archived project refuses both. It also answers which board a chat is on and puts new chats on one ([`crate::store::Boards`]) |
+//! | [`StartupSeam`] (installed with [`crate::ChatRuntime::set_startup_seam`]) | `helm_projects` | a chat's first message: the project's startup instructions ride it as hidden context |
 //! | [`AfkPolicy`] (installed with [`crate::ChatRuntime::set_afk_policy`]) | `helm_afk` | each new interaction a worker raises, and each turn's context block |
 //! | [`QuestionGate`] (installed with [`crate::ChatRuntime::set_question_gate`]) | `helm_gatekeeper` | each new interaction, before AFK; its verdict arrives through [`crate::ChatRuntime::gate_verdict`] |
 //!
@@ -125,6 +126,30 @@ pub trait ProjectGate: Send + Sync {
 /// The service wrapper for [`ProjectGate`].
 #[derive(Clone)]
 pub struct ProjectGates(pub Arc<dyn ProjectGate>);
+
+/// What the project adds to a chat's first message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartupInjection {
+    /// The hidden context that rides the message, ahead of anything else it carries.
+    pub context: String,
+    /// The one visible transcript line saying so.
+    pub row: String,
+}
+
+/// A project's startup instructions, offered once to a new chat's first message.
+pub trait StartupSeam: Send + Sync {
+    /// Called inside the send's transaction for every message to a chat that has not started
+    /// (no run, no fork). `predecessor` is the chat this one continues after a roll over. Answers
+    /// the injection the first time only, and again if the message that carried it never went
+    /// out; `None` when the chat's project has no startup instructions.
+    fn first_send(
+        &self,
+        tx: &Transaction<'_>,
+        chat_id: &str,
+        submission_id: &str,
+        predecessor: Option<&str>,
+    ) -> rusqlite::Result<Option<StartupInjection>>;
+}
 
 /// What AFK does with one pending interaction.
 #[derive(Clone, Debug, PartialEq)]

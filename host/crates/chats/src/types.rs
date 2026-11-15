@@ -641,6 +641,9 @@ pub enum ContextKind {
     /// A gap in the chat's work that was not its doing: the computer slept, the connection was
     /// down, or Helm asked the chat to carry on after one.
     Interruption,
+    /// The project's startup instructions were added to the chat's first message (or, after a
+    /// roll over, the note to carry on with the startup that was already done).
+    Startup,
 }
 
 /// The `details` bag of a message row. Every field is optional and absent when unset.

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildClaudeArgs, disallowedTools } from "../src/drivers/claude/args.ts";
-import { decideGate, decideStop, gateHook, stopHook } from "../src/drivers/claude/gates.ts";
+import { decideGate, decideStop, gateHook, startupWanted, stopHook } from "../src/drivers/claude/gates.ts";
 import { cronTiming, NATIVE_SCHEDULE_TOOLS, scheduleRedirect } from "../src/drivers/claude/schedulecalls.ts";
 import { assertLoopbackHttp, buildClaudeEnv, contextRefusalNote, STRIPPED_UNLESS_API_KEY_MODE, takeLocalKey } from "../src/drivers/claude/env.ts";
 
@@ -281,4 +281,30 @@ test("a chat the workflow gates may act in loses the workflow runner and the REP
   assert.deepEqual(await decideStop(stopWith(() => ({ ok: true, result: { block: false } })), {}), {});
   assert.deepEqual(await decideStop(stopWith(() => ({ ok: false, error: "no" })), {}), {});
   assert.deepEqual(await decideStop(stopWith(() => { throw new Error("timeout"); }), {}), {});
+  // The project's startup question comes first when the launch switched it on, then the workflow's;
+  // the first block wins, a failed question is skipped, and each question is asked only when its switch is on.
+  assert.ok(startupWanted({ HELM_STARTUP_GATE: "1" }) && !startupWanted({}) && !startupWanted({ HELM_STARTUP_GATE: "0" }));
+  stopAsked.length = 0;
+  const byOperation = (blocks: Record<string, boolean>) =>
+    ({
+      call: async (op: string) => {
+        stopAsked.push([op]);
+        if (op === "app_startup_turn_end" && blocks.throws) throw new Error("timeout");
+        return { ok: true, result: blocks[op] ? { block: true, reason: `${op} says wait` } : { block: false } };
+      },
+    }) as unknown as Parameters<typeof decideStop>[0];
+  const both = { startup: true, workflow: true };
+  assert.deepEqual(await decideStop(byOperation({ app_startup_turn_end: true, app_workflow_turn_end: true }), {}, both), { decision: "block", reason: "app_startup_turn_end says wait" });
+  assert.deepEqual(stopAsked, [["app_startup_turn_end"]], "the first block ends the asking");
+  stopAsked.length = 0;
+  assert.deepEqual(await decideStop(byOperation({ app_workflow_turn_end: true }), {}, both), { decision: "block", reason: "app_workflow_turn_end says wait" });
+  assert.deepEqual(stopAsked, [["app_startup_turn_end"], ["app_workflow_turn_end"]]);
+  stopAsked.length = 0;
+  assert.deepEqual(await decideStop(byOperation({ throws: true, app_workflow_turn_end: true }), {}, both), { decision: "block", reason: "app_workflow_turn_end says wait" }, "a failed startup question does not hide the workflow's");
+  stopAsked.length = 0;
+  assert.deepEqual(await decideStop(byOperation({ app_startup_turn_end: true, app_workflow_turn_end: true }), {}, { startup: true }), { decision: "block", reason: "app_startup_turn_end says wait" });
+  assert.deepEqual(await decideStop(byOperation({ app_startup_turn_end: true }), {}, { workflow: true }), {}, "a switch that is off is not asked");
+  assert.deepEqual(await decideStop(byOperation({ app_startup_turn_end: true }), { stop_hook_active: true }, both), {}, "a continuation is never blocked again");
+  // The startup switch alone leaves the workflow's tool restrictions and edit gate off.
+  assert.ok(["Workflow", "REPL"].every((t) => !disallowedTools({}, { HELM_STARTUP_GATE: "1" }).includes(t)));
 });

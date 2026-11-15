@@ -62,6 +62,10 @@
 .sb-root .sb-act,
 .sb-root .sb-toggle,
 .sb-root .sb-children,
+.sb-prompt-error {
+  color: var(--sb-danger, #d46a6a);
+}
+
 .sb-root .sb-error-x {
   display: inline-flex;
   align-items: center;
