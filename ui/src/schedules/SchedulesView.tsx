@@ -24,11 +24,16 @@ export function SchedulesViewHost() {
   }, [open]);
   useLayer('panel', open, () => schedulesView.close());
   if (!open) return null;
+  // The close button hands focus back to the tile that opened the view, not to the page.
+  const closeToTile = () => {
+    schedulesView.close();
+    document.querySelector<HTMLElement>('[data-testid=nav-schedules]')?.focus();
+  };
   return (
     <section className="sched-view" aria-label="Schedules" data-testid="schedules-view">
       <header className="sched-view-head">
         <h2>Schedules</h2>
-        <Button variant="icon" label="Close schedules" onClick={schedulesView.close} data-testid="schedules-view-close">
+        <Button variant="icon" label="Close schedules" onClick={closeToTile} data-testid="schedules-view-close">
           <IconX size={17} />
         </Button>
       </header>

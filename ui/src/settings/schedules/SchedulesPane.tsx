@@ -163,7 +163,14 @@ export function SchedulesPane() {
                 </div>
                 <div className="sched-row-actions">
                   {r.chatId && (
-                    <Button variant="text" onClick={() => shell.select(r.chatId)} data-testid={`reminder-${r.id}-open`}>
+                    <Button
+                      variant="text"
+                      onClick={() => {
+                        schedulesView.close(); // even for the chat already selected, which would not close it by itself
+                        shell.select(r.chatId);
+                      }}
+                      data-testid={`reminder-${r.id}-open`}
+                    >
                       Open {r.chatTitle || 'chat'}
                     </Button>
                   )}

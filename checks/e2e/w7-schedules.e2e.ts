@@ -1,5 +1,5 @@
 // Schedules end to end in the real debug app with the fake claude
-// (fixtures/w7-schedules.json): Settings > Schedules lists the two ready-made schedules off, turns
+// (fixtures/w7-schedules.json): the Schedules view lists the two ready-made schedules off, turns
 // one on for a chat, creates, pauses, resumes and cancels one through the editor; a schedule that
 // comes due while its chat is busy waits and then fires once, for the slot that was waiting; and
 // after a restart with many missed slots the chat gets one prompt, stored as a schedule-origin
@@ -94,7 +94,7 @@ describe("schedules: prompts into an existing chat", { timeout: 10 * 60_000 }, (
     await dispose(app);
   });
 
-  test("S1: Settings > Schedules offers the two ready-made schedules, off, and turns one on for a chat", async () => {
+  test("S1: the Schedules view offers the two ready-made schedules, off, and turns one on for a chat", async () => {
     try {
       chatA = await newChat(page(), work);
       const start = await list();
@@ -218,7 +218,7 @@ describe("schedules: prompts into an existing chat", { timeout: 10 * 60_000 }, (
     await api(page(), "schedule_cancel", { scheduleId: waiting.id, revision: now.revision });
   });
 
-  test("S4: no CSP violation across the pane and the editor", async () => {
+  test("S4: no CSP violation across the Schedules view and the editor", async () => {
     assert.deepEqual(await app!.cspViolations(), []);
   });
 
