@@ -174,6 +174,34 @@ fn channel(
     })
 }
 
+/// Whether the profile that owns `chat_id` lets the Remote page answer its prompts. A chat with
+/// no owner on this PC (or one that cannot be read) follows the calling person's own switch.
+pub(crate) fn owner_switch(
+    profile_dir: &std::path::Path,
+    db: &helm_core::db::Database,
+    chat_id: &str,
+    fallback: &std::path::Path,
+) -> bool {
+    let owner: Option<String> = db
+        .snapshot(|tx| {
+            use rusqlite::OptionalExtension;
+            tx.query_row(
+                "SELECT NULLIF(profile_id, '') FROM chats WHERE id = ?1",
+                [chat_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()
+        })
+        .ok()
+        .flatten()
+        .flatten();
+    let path = match owner {
+        Some(id) => crate::people::telegram_paths(profile_dir, &id).policy,
+        None => fallback.to_path_buf(),
+    };
+    telegram::load_remote_answers(&path)
+}
+
 /// `app_list_waiting`: the prompts that wait, in the attention summary's order. The summary has
 /// no cap on chats that wait on the user, so neither has this list (only [`MAX_LISTED`] prompts).
 /// The page acts for hub person `person` (`None`: the home profile, as on an older hub); it sees
@@ -223,7 +251,9 @@ pub fn list_waiting(w: &Wiring, person: Option<&str>, all: bool) -> Result<Value
                 person: ch.person.clone(),
                 interaction,
             };
-            if let Some(v) = view(&w, on) {
+            // Whether a prompt may be answered from the page is its chat owner's switch.
+            let open = owner_switch(&profile.dir, &db, &r.chat_id, &ch.policy_path);
+            if let Some(v) = view(&w, open) {
                 waiting.push(v);
                 if waiting.len() >= MAX_LISTED {
                     break 'rows;
@@ -365,10 +395,10 @@ pub async fn answer(
         _ => return Err(refused("Helm is still starting.")),
     };
     let ch = channel(&profile.dir, &db, person)?;
-    if !telegram::load_remote_answers(&ch.policy_path) {
+    let chat = args["chatId"].as_str().unwrap_or("");
+    if !owner_switch(&profile.dir, &db, chat, &ch.policy_path) {
         return Err(refused(SWITCH_OFF));
     }
-    let chat = args["chatId"].as_str().unwrap_or("");
     let request = args["requestId"].as_str().unwrap_or("");
     let index = args["index"].as_u64().map(|n| n as usize);
     let label = args["label"].as_str();

@@ -137,6 +137,7 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              profile_id  TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE
          );
          CREATE INDEX IF NOT EXISTS chat_profiles_profile ON chat_profiles(profile_id);
+         CREATE TABLE IF NOT EXISTS declined_people (person_id TEXT PRIMARY KEY);
          DROP TRIGGER IF EXISTS chat_profile_on_insert;",
     )?;
     // Profiles made before these columns existed.
@@ -424,6 +425,18 @@ pub fn update(tx: &Transaction<'_>, id: &str, patch: Patch) -> Result<Profile, P
                 return bad("Another profile is already linked to that person.");
             }
         }
+        // A person this profile stops being is not made into a profile again by the next sync
+        // pass; linking someone on purpose lifts that for them.
+        if let Some(old) = p
+            .hub_person_id
+            .as_deref()
+            .filter(|o| person.as_deref() != Some(*o))
+        {
+            decline_person(tx, old)?;
+        }
+        if let Some(now) = &person {
+            tx.execute("DELETE FROM declined_people WHERE person_id = ?1", [now])?;
+        }
         p.hub_person_id = person;
     }
     tx.execute(
@@ -432,6 +445,24 @@ pub fn update(tx: &Transaction<'_>, id: &str, patch: Patch) -> Result<Profile, P
         params![p.id, p.name, p.colour, p.hub_person_id, p.about, p.needs_name],
     )?;
     Ok(p)
+}
+
+fn decline_person(tx: &Connection, person: &str) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT OR IGNORE INTO declined_people(person_id) VALUES (?1)",
+        [person],
+    )?;
+    Ok(())
+}
+
+/// Whether a hub person was unlinked from, or had their profile deleted on, this PC: the sync
+/// pass leaves them alone (no profile made, no name matched) until they are linked on purpose.
+pub fn is_declined(conn: &Connection, person: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM declined_people WHERE person_id = ?1)",
+        [person],
+        |r| r.get(0),
+    )
 }
 
 /// Delete a profile; its chats move to the home profile. The home profile stays.
@@ -446,6 +477,9 @@ pub fn delete(tx: &Transaction<'_>, id: &str) -> Result<(), ProfileError> {
         params![id, home.id],
     )?;
     tx.execute("DELETE FROM chat_shares WHERE profile_id = ?1", [id])?;
+    if let Some(person) = p.hub_person_id.as_deref() {
+        decline_person(tx, person)?;
+    }
     tx.execute("DELETE FROM profiles WHERE id = ?1", [id])?;
     if active_raw(tx).as_deref() == Some(id) {
         prefs::set(tx, ACTIVE, &serde_json::Value::Null)?;
@@ -637,14 +671,31 @@ pub fn linked_claims(conn: &Connection) -> rusqlite::Result<Vec<(String, String,
 
 /// The profiles that have a name of their own but no hub person — the ones that ask the hub for
 /// a person to be their own. The unnamed home placeholder is not one: pairing names and links it.
-pub fn unlinked_named(conn: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
+/// A profile made after `settled_before` is left a while first, so a profile made by mistake and
+/// removed again never becomes a person on the hub.
+pub fn unlinked_named(
+    conn: &Connection,
+    settled_before: i64,
+) -> rusqlite::Result<Vec<(String, String)>> {
     conn.prepare(
         "SELECT id, name FROM profiles
          WHERE (hub_person_id IS NULL OR hub_person_id = '') AND needs_name = 0
+           AND (is_home = 1 OR created_at <= ?1)
          ORDER BY is_home DESC, created_at, rowid",
     )?
-    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+    .query_map([settled_before], |r| Ok((r.get(0)?, r.get(1)?)))?
     .collect()
+}
+
+/// How many named, unlinked profiles are still inside the wait [`unlinked_named`] applies.
+pub fn unsettled_named(conn: &Connection, settled_before: i64) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM profiles
+         WHERE (hub_person_id IS NULL OR hub_person_id = '') AND needs_name = 0
+           AND is_home = 0 AND created_at > ?1",
+        [settled_before],
+        |r| r.get(0),
+    )
 }
 
 /// The chats a hub person sees: those their profile owns, those shared with it, and (for the
@@ -1119,7 +1170,7 @@ mod tests {
             assert_eq!(claims[0], (home.id.clone(), "7".into(), true));
             assert_eq!(claims[1], (other.id.clone(), "9".into(), false));
             assert_eq!(
-                unlinked_named(tx)?,
+                unlinked_named(tx, i64::MAX)?,
                 [(third.id.clone(), "Third".to_owned())]
             );
             // Each person sees their own and what is shared with them; a chat assigned to
@@ -1141,7 +1192,30 @@ mod tests {
                 },
             )?;
             assert_eq!(linked_person_ids(tx)?, ["7"]);
-            assert_eq!(unlinked_named(tx)?.len(), 2);
+            assert_eq!(unlinked_named(tx, i64::MAX)?.len(), 2);
+            // Unlinking leaves the person declined until someone links them on purpose.
+            assert!(is_declined(tx, "9")? && !is_declined(tx, "7")?);
+            update(
+                tx,
+                &other.id,
+                Patch {
+                    hub_person_id: Some(Some("9".into())),
+                    ..Default::default()
+                },
+            )?;
+            assert!(!is_declined(tx, "9")?);
+            // A profile too new to have settled is not asked about yet.
+            assert!(unlinked_named(tx, i64::MIN)?
+                .iter()
+                .all(|(id, _)| id == &home.id));
+            update(
+                tx,
+                &other.id,
+                Patch {
+                    hub_person_id: Some(None),
+                    ..Default::default()
+                },
+            )?;
             assert!(chats_of_person(tx, &["9".into()]).is_err());
             assert!(channel_default(true) && !channel_default(false));
             Ok(())

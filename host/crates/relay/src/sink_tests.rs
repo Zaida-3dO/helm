@@ -968,6 +968,8 @@ const MIRRORED_ARCHIVED: &str = "0f0f0f0f-7777-8888-9999-000000000002";
 #[derive(Default)]
 struct FakeWatcher {
     sent: Mutex<Vec<helm_chats::types::ChatSendArgs>>,
+    /// The person each send acted as (`None`: the default the sidebar decides).
+    acted_as: Mutex<Vec<Option<String>>>,
 }
 
 impl helm_chats::remote::RemoteChats for FakeWatcher {
@@ -996,7 +998,15 @@ impl helm_chats::remote::RemoteChats for FakeWatcher {
         &self,
         a: helm_chats::types::ChatSendArgs,
     ) -> helm_chats::remote::Fut<helm_chats::remote::Res> {
+        self.send_as(a, None)
+    }
+    fn send_as(
+        &self,
+        a: helm_chats::types::ChatSendArgs,
+        person: Option<String>,
+    ) -> helm_chats::remote::Fut<helm_chats::remote::Res> {
         self.sent.lock().unwrap().push(a);
+        self.acted_as.lock().unwrap().push(person);
         Box::pin(async move { Ok(json!({"submission": {"state": "accepted"}, "chat": {}})) })
     }
     fn get(&self, _chat_id: String) -> helm_chats::remote::Fut<helm_chats::remote::Res> {
@@ -1090,8 +1100,19 @@ async fn outside_calls_reach_reads_and_sends_cross_to_another_pc() {
         .map(|c| c["chatId"].as_str().unwrap())
         .collect();
     assert!(ids.contains(&MIRRORED), "{ids:?}");
-    let call =
-        crate::gate::admit("app_list_chats", &json!({"person": "any", "device": "any"})).unwrap();
+    // With no person named, the list is the acting person's own, counted before paging; the
+    // caller's own `person` is theirs to ask for, and `any` is not narrowed back.
+    let call = crate::gate::admit("app_list_chats", &json!({"device": "any"})).unwrap();
+    let r = exec.run("remote", Some("person-s"), call).await.unwrap();
+    assert!(
+        r["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["chatId"] == MIRRORED),
+        "{r}"
+    );
+    let call = crate::gate::admit("app_list_chats", &json!({"device": "any"})).unwrap();
     let r = exec.run("remote", None, call).await.unwrap();
     assert!(
         !r["chats"]
@@ -2284,4 +2305,127 @@ async fn notes_enter_the_voice_chat_as_the_apps_words_and_the_rows_say_what_bega
         })
         .unwrap();
     assert_eq!(vs::last_answer_row(&e.db, &chat), ended);
+}
+
+// ------------------------------------------------------------------ one channel per person
+
+/// Two people on one PC: each one's Telegram frame lands in their own profile, under their own
+/// policy and tag; a stranger's is refused; an away alert and a Remote-page answer follow the
+/// chat's owner; and changing "take it on this PC" tells the hub at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn each_person_has_their_own_channel_from_frame_to_alert() {
+    use helm_profiles::store::{self, Patch};
+    let e = env();
+    let prof = e.dir.path().join("prof");
+    let beta =
+        e.db.write(|tx| -> Result<String, store::ProfileError> {
+            let home = store::home(tx)?.expect("made at open");
+            store::update(
+                tx,
+                &home.id,
+                Patch {
+                    hub_person_id: Some(Some("person-a".into())),
+                    ..Default::default()
+                },
+            )?;
+            Ok(store::create(tx, "Beta", None, Some("person-b"), 2)?.id)
+        })
+        .unwrap();
+    let alpha = e.ctx.profile_id.clone();
+    let file = |model: Option<&str>, remote_answers: bool| telegram::PolicyFile {
+        max_age_hours: 6,
+        max_tokens: 50_000,
+        away_alerts: true,
+        approvals: false,
+        remote_answers,
+        take_telegram: None,
+        model: model.map(str::to_owned),
+        effort: None,
+    };
+    telegram::save_policy(
+        &crate::people::telegram_paths(&prof, &beta).policy,
+        file(Some("model-b"), true),
+    )
+    .unwrap();
+    telegram::save_policy(
+        &crate::people::telegram_paths(&prof, &alpha).policy,
+        file(None, false),
+    )
+    .unwrap();
+
+    let sink = wired_sink(&e);
+    sink.attach_ops(e.ops.clone());
+    let from = |person: &str, id: &str| TelegramMessage {
+        person: Some(person.to_owned()),
+        ..msg(id, "hello")
+    };
+    sink.deliver(from("person-a", "a1")).await.unwrap();
+    sink.deliver(from("person-b", "b1")).await.unwrap();
+    assert!(
+        sink.deliver(from("person-z", "z1")).await.is_err(),
+        "a person nobody here acts for"
+    );
+    let calls = e.ops.calls.lock().unwrap().clone();
+    let created: Vec<&Value> = calls
+        .iter()
+        .filter(|(o, _)| o == "chat_create")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(created.len(), 2);
+    assert_eq!(created[0].get("model"), None, "A's policy has no model");
+    assert_eq!(created[1]["model"], "model-b", "B's own policy applies");
+    let assigned: Vec<String> = calls
+        .iter()
+        .filter(|(o, _)| o == "profiles_assign_chats")
+        .map(|(_, a)| a["profileId"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(assigned, [alpha.clone(), beta.clone()]);
+    let tag = |pid: &str| {
+        telegram::load_tag(&crate::people::telegram_paths(&prof, pid).tag)
+            .expect("each person has their own tag")
+            .chat_id
+    };
+    let (chat_a, chat_b) = (tag(&alpha), tag(&beta));
+    assert_ne!(chat_a, chat_b);
+
+    // The chats now belong to their people (the fake op above only recorded the assignment): an
+    // alert for one goes to that person's phone, and only that person's Remote switch counts.
+    for (chat, pid) in [(&chat_a, &alpha), (&chat_b, &beta)] {
+        sql(
+            &e.db,
+            "UPDATE chats SET profile_id = ?2 WHERE id = ?1",
+            &[chat, pid],
+        );
+    }
+    for (chat, person) in [(&chat_a, "person-a"), (&chat_b, "person-b")] {
+        let ch = crate::notify::owner_channel(&e.db, &prof, chat).unwrap();
+        assert_eq!(ch.person, person, "the alert carries the owner's person");
+    }
+    let policy_a = crate::people::telegram_paths(&prof, &alpha).policy;
+    for (chat, open) in [(&chat_a, false), (&chat_b, true)] {
+        assert_eq!(
+            crate::remote::owner_switch(&prof, &e.db, chat, &policy_a),
+            open,
+            "the owner's switch decides, not the caller's"
+        );
+    }
+
+    // "Take it on this PC" is said to the hub when it changes, and not when it does not.
+    let mut services = helm_ipc::Services::new();
+    services.insert(e.db.clone());
+    services.insert(Arc::new(helm_core::profile::Profile {
+        dir: prof.clone(),
+        hash: String::new(),
+    }));
+    let events = Arc::new(helm_ipc::RecordingSink::default());
+    let ctx = helm_ipc::OpCtx {
+        services: Arc::new(services),
+        events: events.clone(),
+    };
+    let mut args = serde_json::to_value(file(None, false)).unwrap();
+    args["profileId"] = json!(beta);
+    args["takeTelegram"] = json!(true);
+    crate::telegram_save(&ctx, args.clone()).unwrap();
+    crate::telegram_save(&ctx, args).unwrap();
+    assert_eq!(events.kinds(), ["device_changed"]);
 }

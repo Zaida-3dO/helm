@@ -32,6 +32,8 @@ use tokio::sync::{oneshot, Notify};
 /// How long a request may wait for the hub's answer.
 const TIMEOUT: Duration = Duration::from_secs(30);
 /// Changes within this time make one pass.
+/// How long a new profile stands before it asks the hub for a person of its own.
+const NEW_PROFILE_WAIT: Duration = Duration::from_secs(10 * 60);
 const DEBOUNCE: Duration = Duration::from_millis(800);
 
 pub struct KnowledgeLine {
@@ -232,6 +234,7 @@ pub fn link_people(
             || existing
                 .iter()
                 .any(|p| p.hub_person_id.as_deref() == Some(person.as_str()))
+            || store::is_declined(tx, person)?
         {
             continue;
         }
@@ -306,6 +309,68 @@ pub fn start(handle: &tokio::runtime::Handle, ctx: &OpCtx, client: &Arc<Client>)
     ));
 }
 
+/// Ask the hub for a person for each of `unlinked` (profile id and name) and link what it
+/// answers, then say the profiles changed so the hub is told who this PC acts for.
+async fn ensure_people<F, Fut>(
+    db: &Database,
+    events: &dyn EventSink,
+    unlinked: Vec<(String, String)>,
+    ask: F,
+) where
+    F: Fn(Value) -> Fut,
+    Fut: std::future::Future<Output = Result<Value, String>>,
+{
+    let mut linked = false;
+    for (pid, name) in unlinked {
+        match ask(json!({"type": "person_ensure", "name": name})).await {
+            Ok(answer) => match link_answer(&answer) {
+                // Someone unlinked or deleted here stays so, even when the name matches.
+                Some(person)
+                    if db
+                        .snapshot(|tx| store::is_declined(tx, &person))
+                        .unwrap_or(false) =>
+                {
+                    log::info!("knowledge sync: {name} stays unlinked, as it was left");
+                }
+                Some(person) => {
+                    let done = db.write(|tx| {
+                        store::update(
+                            tx,
+                            &pid,
+                            Patch {
+                                hub_person_id: Some(Some(person)),
+                                ..Default::default()
+                            },
+                        )
+                    });
+                    match done {
+                        Ok(_) => {
+                            linked = true;
+                            if answer.get("created").and_then(Value::as_bool) == Some(true) {
+                                log::info!("knowledge sync: the hub made a person for {name}");
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("knowledge sync: {name} was not linked to the hub: {e:?}")
+                        }
+                    }
+                }
+                None => log::info!(
+                    "knowledge sync: the hub gave {name} no person: {}",
+                    answer
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("the answer named no one")
+                ),
+            },
+            Err(e) => log::info!("knowledge sync: {name}'s hub person was not asked: {e}"),
+        }
+    }
+    if linked {
+        events.emit(AppEvent::new("profiles_changed"));
+    }
+}
+
 async fn run(
     k: Arc<KnowledgeLine>,
     line: Arc<LineHandle>,
@@ -338,50 +403,23 @@ async fn run(
         }
         // An unlinked profile that has a name of its own asks the hub for a person to be its
         // own — and a name the hub already knows links to that person, with no extra step.
+        let settled = helm_core::now_ms() - NEW_PROFILE_WAIT.as_millis() as i64;
         let unlinked = db
-            .snapshot(|tx| store::unlinked_named(tx))
+            .snapshot(|tx| store::unlinked_named(tx, settled))
             .unwrap_or_default();
-        let mut linked = false;
-        for (pid, name) in unlinked {
-            match k.ask(json!({"type": "person_ensure", "name": name})).await {
-                Ok(answer) => match link_answer(&answer) {
-                    Some(person) => {
-                        let done = db.write(|tx| {
-                            store::update(
-                                tx,
-                                &pid,
-                                Patch {
-                                    hub_person_id: Some(Some(person)),
-                                    ..Default::default()
-                                },
-                            )
-                        });
-                        match done {
-                            Ok(_) => {
-                                linked = true;
-                                if answer.get("created").and_then(Value::as_bool) == Some(true) {
-                                    log::info!("knowledge sync: the hub made a person for {name}");
-                                }
-                            }
-                            Err(e) => log::warn!(
-                                "knowledge sync: {name} was not linked to the hub: {e:?}"
-                            ),
-                        }
-                    }
-                    None => log::info!(
-                        "knowledge sync: the hub gave {name} no person: {}",
-                        answer
-                            .get("error")
-                            .and_then(Value::as_str)
-                            .unwrap_or("the answer named no one")
-                    ),
-                },
-                Err(e) => log::info!("knowledge sync: {name}'s hub person was not asked: {e}"),
-            }
+        if db
+            .snapshot(|tx| store::unsettled_named(tx, settled))
+            .unwrap_or(0)
+            > 0
+        {
+            // A profile made a moment ago is asked about once it has stood for a while.
+            let again = k.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(NEW_PROFILE_WAIT + DEBOUNCE).await;
+                again.wake.notify_one();
+            });
         }
-        if linked {
-            events.emit(AppEvent::new("profiles_changed"));
-        }
+        ensure_people(&db, &*events, unlinked, |f| k.ask(f)).await;
         let profiles: Vec<(String, Option<String>)> = db
             .snapshot(|tx| {
                 let mut st = tx.prepare("SELECT id, hub_person_id FROM profiles")?;
@@ -541,5 +579,70 @@ mod tests {
         assert_eq!(person_of("alex").as_deref(), Some("9"));
         assert_eq!(person_of("sam").as_deref(), Some("7"));
         assert_eq!(person_of("me"), None);
+    }
+
+    #[tokio::test]
+    async fn an_unlinked_profile_is_given_a_person_and_the_change_is_announced_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = MigrationRegistry::new();
+        helm_chats::register_migrations(&mut reg);
+        helm_profiles::register_migrations(&mut reg);
+        let db = Database::open(&dir.path().join("t.db"), &reg).unwrap();
+        let (beta, gamma) = db
+            .write(|tx| -> Result<_, ProfileError> {
+                let home = store::ensure_home(tx, 1)?;
+                store::update(
+                    tx,
+                    &home.id,
+                    Patch {
+                        name: Some("Me".into()),
+                        hub_person_id: Some(Some("1".into())),
+                        ..Default::default()
+                    },
+                )?;
+                Ok((
+                    store::create(tx, "Beta", None, None, 2)?.id,
+                    store::create(tx, "Gamma", None, None, 3)?.id,
+                ))
+            })
+            .unwrap();
+        // Gamma was unlinked on purpose earlier: the hub knows the name, but it stays unlinked.
+        db.write(|tx| -> Result<_, ProfileError> {
+            for link in [Some("5".to_owned()), None] {
+                store::update(
+                    tx,
+                    &gamma,
+                    Patch {
+                        hub_person_id: Some(link),
+                        ..Default::default()
+                    },
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let events = helm_ipc::RecordingSink::default();
+        let unlinked = db
+            .snapshot(|tx| store::unlinked_named(tx, i64::MAX))
+            .unwrap();
+        assert_eq!(unlinked.len(), 2);
+        ensure_people(&db, &events, unlinked, |f| async move {
+            let id = if f["name"] == "Gamma" { 5 } else { 8 };
+            Ok(json!({"ok": true, "personId": id, "created": true}))
+        })
+        .await;
+        let person = |id: &str| {
+            db.snapshot(|tx| store::get(tx, id))
+                .unwrap()
+                .unwrap()
+                .hub_person_id
+        };
+        assert_eq!(person(&beta).as_deref(), Some("8"));
+        assert_eq!(person(&gamma), None);
+        assert_eq!(events.kinds(), ["profiles_changed"]);
+        // A person unlinked here is not made into a profile again by the people pass.
+        assert!(!db
+            .write(|tx| link_people(tx, &[("5".into(), "Gamma".into())], 9))
+            .unwrap());
     }
 }
