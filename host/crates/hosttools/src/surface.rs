@@ -229,7 +229,7 @@ pub const FACADES: &[FacadeSpec] = &[
         name: "app_helm_feedback",
         group: "feedback",
         description: "Feedback about Helm itself. Rate a Helm feature you used (rate), file a new item (create), add to one (append), read one (get), list them (list), manage one (update), or summarise agents' ratings (summary).",
-        guidelines: "rate: feature, score -2..2, kind (existing, missing, remove, tweak), note; once per feature per turn.\ncreate: title and text; forUser true when you record what the user told you. Check list first and append instead of filing a duplicate.\nappend: itemId and text (same rules as create).\nget: itemId. list: filters status, author, since, text, limit.\nupdate: itemId; status, note, boardItem, title, text, delete. Whatever you change is recorded under your chat.\nsummary: per-feature ratings; filters feature, since, minScore, maxScore, order, limit.\nNever put secrets in feedback. It is stored on this machine only.",
+        guidelines: "rate: feature, score -2..2, kind (existing, missing, remove, tweak), note; once per feature per turn.\ncreate: title and text; forUser true when you record what the user told you. Check list first and append instead of filing a duplicate.\nappend: id and text (same rules as create).\nget: id. list: filters status, author, since, text, limit.\nupdate: id; status, note, boardItem, title, text, entryId, delete. Whatever you change is recorded under your chat.\nsummary: per-feature ratings; filters feature, since, minScore, maxScore, order, limit.\nNever put secrets in feedback. It is stored on this machine only.",
         core: false,
         actions: &[
             ("rate", "app_feedback"),

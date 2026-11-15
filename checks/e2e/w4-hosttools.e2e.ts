@@ -73,7 +73,9 @@ describe("host tools, the settings toast and the Allow card", { timeout: 10 * 60
       const chats = ((res.structuredContent as Json).chats as Json[]).map((c) => c.chatId);
       assert.ok(chats.includes(chat), "the caller is listed with includeCurrent");
       const tools = (((mcpAnswer(1)?.result as Json).tools as Json[]) ?? []).map((t) => t.name);
-      for (const t of ["app_list_chats", "app_update_settings", "app_request_allow", "app_list_tools", "app_mcp_call"]) assert.ok(tools.includes(t), t);
+      // The list holds the core tools; settings and Allow are reached by group, and still answer to their names.
+      for (const t of ["app_list_chats", "app_help", "app_list_tools", "app_mcp_call"]) assert.ok(tools.includes(t), t);
+      for (const t of ["app_update_settings", "app_settings", "app_request_allow"]) assert.ok(!tools.includes(t), `${t} is not in the chat's own list`);
       // Native MCP stays on: no --strict-mcp-config, and the helm SDK server is on the CLI line.
       const start = fs
         .readFileSync(path.join(profile, "fake-claude.log"), "utf8")

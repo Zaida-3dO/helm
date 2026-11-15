@@ -140,7 +140,7 @@ impl HelpProvider for SkillHelp {
             }
             return Some(out);
         }
-        secs.iter().any(|x| x == section).then(|| ())?;
+        secs.iter().any(|x| x == section).then_some(())?;
         let text = fs::read_to_string(s.dir.join(format!("{section}.md"))).ok()?;
         Some(without_front(&text))
     }
@@ -203,7 +203,7 @@ mod tests {
         );
         assert!(!text.contains("### Long one"), "a long rule is a line");
         assert!(
-            text.contains("- Long one: Start here. (app_help rule/long)"),
+            text.contains("- Long one: Start here. More words follow. More words follow. (app_help rule/long)"),
             "{text}"
         );
         // The same rules answer app_help, whole.

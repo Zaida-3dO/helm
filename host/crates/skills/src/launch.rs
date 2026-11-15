@@ -163,7 +163,7 @@ pub fn for_chat(profile_dir: &Path, chat_id: &str) -> Resolved {
 
 /// A rule at most this long goes into the prompt whole; a longer one is listed by a line and read
 /// with `app_help` when it applies, unless its header says `always: true`.
-pub const INLINE_RULE_CHARS: usize = 600;
+pub const INLINE_RULE_CHARS: usize = 800;
 
 /// One rule as the prompt carries it.
 pub struct Loaded {
@@ -181,19 +181,12 @@ impl Loaded {
         self.front.always || self.body.chars().count() <= INLINE_RULE_CHARS
     }
 
-    /// What the rule is for, in one line of at most 100 characters.
+    /// What the rule is for, in one line of at most 100 characters: its header's summary, else its
+    /// first sentences (not the ones that only repeat its title) until they say enough.
     pub fn summary(&self) -> String {
         let one = match &self.front.summary {
             Some(s) => s.clone(),
-            None => {
-                let flat = self.body.split_whitespace().collect::<Vec<_>>().join(" ");
-                let end = flat
-                    .char_indices()
-                    .find(|(i, c)| matches!(c, '.' | '!' | '?') && flat[i + 1..].starts_with(' '))
-                    .map(|(i, _)| i + 1)
-                    .unwrap_or(flat.len());
-                flat[..end].to_owned()
-            }
+            None => lead_sentences(&self.body, &self.entry.title),
         };
         if one.chars().count() <= helm_hosttools::help::MAX_SUMMARY_CHARS {
             return one;
@@ -204,6 +197,43 @@ impl Loaded {
             .collect();
         format!("{}…", head.trim_end())
     }
+}
+
+/// The first sentences of a rule's text, skipping any that begin with its title, until they hold at
+/// least 40 characters. A line that ends in a colon leads into a list and ends the summary.
+fn lead_sentences(body: &str, title: &str) -> String {
+    let flat = body
+        .lines()
+        .map(|l| l.trim().trim_start_matches(['-', '*', ' ']).trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let title = title.to_lowercase();
+    let mut out = String::new();
+    let mut rest = flat.as_str();
+    while !rest.is_empty() && out.chars().count() < 40 {
+        let end = rest
+            .char_indices()
+            .find(|(i, c)| {
+                (matches!(c, '.' | '!' | '?') || (*c == ':' && *i >= 30))
+                    && rest[i + 1..].starts_with(' ')
+            })
+            .map(|(i, c)| (i + 1, c))
+            .unwrap_or((rest.len(), '.'));
+        let sentence = rest[..end.0].trim();
+        rest = rest[end.0..].trim_start();
+        if sentence.to_lowercase().starts_with(&title) {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(sentence.trim_end_matches(':'));
+        if end.1 == ':' {
+            break;
+        }
+    }
+    out
 }
 
 fn load_rules(root: &Path) -> Vec<Loaded> {
