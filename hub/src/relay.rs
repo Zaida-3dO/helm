@@ -45,7 +45,8 @@
 //! | Helm → hub | `tg_link` / `tg_unlink` / `tg_status` | `id` (answered back on the result), `personId`: the profile asks to link its Telegram to that hub person, to unlink it, or asks whether it is linked. Only honoured for a person this PC acts for; answered with the matching `_result` frame below |
 //! | hub → Helm | `tg_link_result` | `id`, `ok`, `url` (`https://t.me/<bot>?start=<code>`: the person taps it once, which is what proves the Telegram account is theirs), or `ok` false with `error` |
 //! | hub → Helm | `tg_unlink_result` / `tg_status_result` | `id`, `ok`, and for a status `linked` (bool), `telegramId` and `handle` when it is linked; or `ok` false with `error` |
-//! | Helm → hub | `route_pin` | `personId`, `channel` (`telegram`, `voice` or `app`): this PC asks to be the one that receives that person's channel until it picks otherwise; only honoured for a person this PC acts for |
+//! | Helm → hub | `route_pin` | `personId`, `channel` (`telegram`, `voice` or `app`), optional `id` and `clear` (an unpin, back to automatic routing): this PC asks to be the one that receives that person's channel until it picks otherwise; only honoured for a person this PC acts for |
+//! | hub → Helm | `route_pin_result` | `id` (the frame's, if it had one), `ok`, `cleared` (whether it was an unpin) or `error`: whether the pin took |
 //! | Helm → hub | `dev` | `id`, `to` (a device uid), `op`, `args`, `as` (optional list of person ids: the acting person first, then anyone a read may also return): a call for another device, answered with `dev_result` (see `devices.rs`) |
 //! | hub → Helm | `dev_call` | `id` (the hub's), `from` (`{uid, name, personId (the acting person, verified), person, people (all verified entries, acting first), machinePersonId (the sender machine's own person)}`), `op`, `args`: another device's call for this one |
 //! | Helm → hub | `dev_result` | `id` (the `dev_call`'s), `ok`, `result` or `error` (`{code, message}`): the answer to a `dev_call` |
@@ -150,10 +151,13 @@ pub enum Upstream {
         id: Value,
         name: String,
     },
-    /// The PC asked to be the one that receives a person's channel. Answered by `lines.rs`.
+    /// The PC asked to be the one that receives a person's channel, or (with `clear`) to stop
+    /// being one. Answered by `lines.rs` with a `route_pin_result`, echoing `id` if it had one.
     RoutePin {
+        id: Value,
         person_id: String,
         channel: String,
+        clear: bool,
     },
     /// A profile asked about its own Telegram link: `op` is `link`, `unlink` or `status`, and
     /// `person_id` the person it asks for. Answered by `telegram.rs` down the line that asked,
@@ -828,22 +832,28 @@ impl Line {
                     let people = match v.get("people") {
                         None => Some(Vec::new()),
                         Some(Value::Null) => Some(Vec::new()),
-                        Some(Value::Array(list)) => list
-                            .iter()
-                            .map(|p| {
-                                Some(DeviceClaim {
-                                    person_id: p
-                                        .get("personId")
-                                        .and_then(Value::as_str)?
-                                        .to_owned(),
-                                    telegram: p
-                                        .get("telegram")
-                                        .and_then(Value::as_bool)
-                                        .unwrap_or(false),
-                                    voice: p.get("voice").and_then(Value::as_bool).unwrap_or(false),
+                        // A malformed entry is skipped, not fatal: the rest of the announcement
+                        // (uid, name, run and the good entries) still stands.
+                        Some(Value::Array(list)) => Some(
+                            list.iter()
+                                .filter_map(|p| {
+                                    Some(DeviceClaim {
+                                        person_id: p
+                                            .get("personId")
+                                            .and_then(Value::as_str)?
+                                            .to_owned(),
+                                        telegram: p
+                                            .get("telegram")
+                                            .and_then(Value::as_bool)
+                                            .unwrap_or(false),
+                                        voice: p
+                                            .get("voice")
+                                            .and_then(Value::as_bool)
+                                            .unwrap_or(false),
+                                    })
                                 })
-                            })
-                            .collect(),
+                                .collect(),
+                        ),
                         Some(_) => None,
                     };
                     match people {
@@ -880,7 +890,15 @@ impl Line {
             Some("route_pin") => match (s("personId"), s("channel")) {
                 (Some(person_id), Some(channel)) => self
                     .upstream
-                    .send((None, Upstream::RoutePin { person_id, channel }))
+                    .send((
+                        None,
+                        Upstream::RoutePin {
+                            id: v.get("id").cloned().unwrap_or(Value::Null),
+                            person_id,
+                            channel,
+                            clear: v.get("clear").and_then(Value::as_bool).unwrap_or(false),
+                        },
+                    ))
                     .is_ok(),
                 _ => false,
             },
@@ -928,7 +946,16 @@ impl Line {
                                 },
                             ))
                             .is_ok(),
-                        None => false,
+                        // A call whose `as` list is malformed is answered, not swallowed: the
+                        // caller waits for a `dev_result` either way, so silence is a timeout.
+                        None => self.send_on(
+                            generation,
+                            &crate::devices::error_frame(
+                                id,
+                                "bad_request",
+                                "The `as` list must be a list of person ids as text.",
+                            ),
+                        ),
                     }
                 }
                 _ => false,
@@ -1412,10 +1439,22 @@ mod tests {
             gen,
             r#"{"type":"dev","id":"c1","to":"u2","op":"hello","as":["7","3"]}"#
         ));
+        // One unreadable `people` entry is skipped, not fatal: the announcement still stands
+        // with the entry that can be read.
+        assert!(line.receive(
+            gen,
+            r#"{"type":"device","uid":"u9","name":"Nine","run":false,
+                "people":[{"personId":9},{"personId":"10","voice":true}]}"#
+        ));
+        // A call whose `as` list cannot be read is answered, not swallowed.
+        assert!(line.receive(
+            gen,
+            r#"{"type":"dev","id":"c2","to":"u2","op":"hello","as":[7]}"#
+        ));
         assert!(line.receive(gen, r#"{"type":"person_ensure","id":"p1","name":"Kit"}"#));
         assert!(line.receive(
             gen,
-            r#"{"type":"route_pin","personId":"7","channel":"telegram"}"#
+            r#"{"type":"route_pin","id":"r7","personId":"7","channel":"telegram","clear":true}"#
         ));
         assert!(line.receive(
             gen,
@@ -1472,6 +1511,33 @@ mod tests {
                 vec!["7".to_owned(), "3".to_owned()]
             )
         );
+        let (_, up_nine) = up.try_recv().unwrap();
+        assert_eq!(
+            up_nine,
+            Upstream::Device {
+                uid: "u9".into(),
+                name: "Nine".into(),
+                run: false,
+                people: vec![DeviceClaim {
+                    person_id: "10".into(),
+                    telegram: false,
+                    voice: true,
+                }],
+            }
+        );
+        let answered = frames(&mut rx)
+            .into_iter()
+            .find(|f| f["type"] == "dev_result")
+            .expect("the unreadable `as` list got no answer");
+        assert_eq!(
+            (
+                answered["id"].as_str(),
+                answered["ok"].as_bool(),
+                answered["error"]["code"].as_str()
+            ),
+            (Some("c2"), Some(false), Some("bad_request")),
+            "answered with {answered}"
+        );
         assert_eq!(
             up.try_recv().unwrap(),
             (
@@ -1487,8 +1553,10 @@ mod tests {
             (
                 None,
                 Upstream::RoutePin {
+                    id: json!("r7"),
                     person_id: "7".into(),
-                    channel: "telegram".into()
+                    channel: "telegram".into(),
+                    clear: true
                 }
             )
         );
@@ -1541,9 +1609,7 @@ mod tests {
             r#"{"type":"kn_pull"}"#.to_owned(),
             r#"{"type":"kn_put","id":"p","layer":"everyone"}"#.to_owned(),
             r#"{"type":"dev_result","id":"nobody-asked","ok":true}"#.to_owned(),
-            r#"{"type":"device","uid":"u1","name":"D","people":[{"personId":7}]}"#.to_owned(),
             r#"{"type":"device","uid":"u1","name":"D","people":"x"}"#.to_owned(),
-            r#"{"type":"dev","id":"c","to":"u2","op":"x","as":[7]}"#.to_owned(),
             r#"{"type":"person_ensure","id":"p"}"#.to_owned(),
             r#"{"type":"route_pin","personId":"7"}"#.to_owned(),
         ] {

@@ -223,8 +223,14 @@ impl Lines {
                         };
                         own_line.send(&frame);
                     }
-                    Upstream::RoutePin { person_id, channel } => {
-                        lines.on_route_pin(client_id, &person_id, &channel);
+                    Upstream::RoutePin {
+                        id,
+                        person_id,
+                        channel,
+                        clear,
+                    } => {
+                        let frame = lines.on_route_pin(client_id, &id, &person_id, &channel, clear);
+                        own_line.send(&frame);
                     }
                     // A profile asking about its own Telegram link. Answered on the line that
                     // asked, since the answer is a link for that person to tap on their phone.
@@ -307,8 +313,11 @@ impl Lines {
                             Some(p) => match p.trim().parse::<i64>() {
                                 Ok(pid) if lines.may_act_as(client_id, pid) => pid,
                                 _ => {
+                                    // The named person is sender-controlled text of any length;
+                                    // the log line keeps a bounded copy.
+                                    let shown: String = p.chars().take(60).collect();
                                     eprintln!(
-                                        "relay: dropped a frame from {machine} naming person {p:?}"
+                                        "relay: dropped a frame from {machine} naming person {shown:?}"
                                     );
                                     continue;
                                 }
@@ -423,24 +432,54 @@ impl Lines {
         }
     }
 
-    /// A `route_pin`: the sending PC asks to take a person's channel. Only a PC that acts for
-    /// that person may pin itself to it.
-    fn on_route_pin(&self, client_id: i64, person_id: &str, channel: &str) {
+    /// A `route_pin`: the sending PC asks to take a person's channel, or with `clear` to stop
+    /// and fall back to automatic routing. Only a PC that acts for that person may ask, and the
+    /// answer is a `route_pin_result` — silence would leave the PC guessing.
+    fn on_route_pin(
+        &self,
+        client_id: i64,
+        id: &Value,
+        person_id: &str,
+        channel: &str,
+        clear: bool,
+    ) -> Value {
+        let framed = |outcome: Result<(), &str>| {
+            let mut f = serde_json::json!({ "type": "route_pin_result", "ok": outcome.is_ok() });
+            if !id.is_null() {
+                f["id"] = id.clone();
+            }
+            match outcome {
+                Ok(()) => f["cleared"] = serde_json::json!(clear),
+                Err(why) => f["error"] = serde_json::json!(why),
+            }
+            f
+        };
         let Some(channel) = Channel::parse(channel) else {
             eprintln!("relay: a route_pin named an unknown channel {channel:?}");
-            return;
+            return framed(Err("that channel is not known"));
         };
         let Ok(person) = person_id.trim().parse::<i64>() else {
             eprintln!("relay: a route_pin named a person id that is not a number: {person_id:?}");
-            return;
+            return framed(Err("that person is not a number"));
         };
         if !self.may_act_as(client_id, person) {
             eprintln!("relay: a route_pin was refused: this machine does not act for that person");
-            return;
+            return framed(Err("this PC does not act for that person"));
         }
-        if self.pin(person, channel, client_id) {
+        let done = if clear {
+            self.clear_pin(person, channel)
+        } else {
+            self.pin(person, channel, client_id)
+        };
+        if !done {
+            return framed(Err("the hub could not record that"));
+        }
+        if clear {
+            eprintln!("relay: a route_pin for person {person} was cleared");
+        } else {
             eprintln!("relay: a route_pin now sends person {person} to machine {client_id}");
         }
+        framed(Ok(()))
     }
 
     /// The line a person's `channel` messages go down, or `None` when nothing qualifies.
@@ -1084,8 +1123,9 @@ mod tests {
         // claims bring it back as a candidate and the pin decides.
         assert!(lline.receive(
             gl,
-            &json!({"type": "route_pin", "personId": bea.to_string(), "channel": "telegram"})
-                .to_string()
+            &json!({"type": "route_pin", "id": "rp1", "personId": bea.to_string(),
+                    "channel": "telegram"})
+            .to_string()
         ));
         assert!(lline.receive(
             gl,
@@ -1101,6 +1141,16 @@ mod tests {
             })
         })
         .await;
+        let pinned = wait_frames(&mut rx_l2, "route_pin_result").await.remove(0);
+        assert_eq!(
+            (
+                pinned["id"].as_str(),
+                pinned["ok"].as_bool(),
+                pinned["cleared"].as_bool()
+            ),
+            (Some("rp1"), Some(true), Some(false)),
+            "the pin was answered with {pinned}"
+        );
         pick(bea, Channel::Telegram, "laptop");
         // A route to another person's PC delivers there: the frames really go down that line, and
         // a message stays with the line it went down even after the route moves again.
@@ -1122,6 +1172,45 @@ mod tests {
         );
         assert!(route.send_on(gl, &json!({"type": "telegram", "id": "m10"})));
         assert_eq!(wait_frames(&mut rx_l2, "telegram").await[0]["id"], "m10");
+        // The same frame with `clear` unpins again: it is answered on the line that asked, and
+        // automatic routing decides once more.
+        assert!(lline.receive(
+            gl,
+            &json!({"type": "route_pin", "id": "rp2", "personId": bea.to_string(),
+                    "channel": "telegram", "clear": true})
+            .to_string()
+        ));
+        let cleared = wait_frames(&mut rx_l2, "route_pin_result").await.remove(0);
+        assert_eq!(
+            (
+                cleared["id"].as_str(),
+                cleared["ok"].as_bool(),
+                cleared["cleared"].as_bool()
+            ),
+            (Some("rp2"), Some(true), Some(true)),
+            "the unpin was answered with {cleared}"
+        );
+        wait_until(|| {
+            registry
+                .lock()
+                .is_ok_and(|r| r.pinned_client(bea, "telegram").is_ok_and(|p| p.is_none()))
+        })
+        .await;
+        // With the pin gone, automatic routing decides again: her frames last went up from the
+        // laptop, so sticky keeps them there.
+        pick(bea, Channel::Telegram, "laptop");
+        // A pin refused for another person still gets its answer, not silence.
+        assert!(lline.receive(
+            gl,
+            &json!({"type": "route_pin", "id": "rp3", "personId": "404", "channel": "telegram"})
+                .to_string()
+        ));
+        let refused = wait_frames(&mut rx_l2, "route_pin_result").await.remove(0);
+        assert_eq!(
+            (refused["id"].as_str(), refused["ok"].as_bool()),
+            (Some("rp3"), Some(false)),
+            "the refusal was answered with {refused}"
+        );
         // No PC acts for a stranger, however it is named.
         assert!(lines.route_for(404, Channel::Telegram).is_none());
     }
