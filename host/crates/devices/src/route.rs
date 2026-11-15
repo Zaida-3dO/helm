@@ -308,6 +308,51 @@ impl Mirror {
             .map_err(|e| self.failed(device, e, what))
     }
 
+    /// Answer an Allow card of a chat that runs on `device`. The device's consent store decides
+    /// by compare-and-set — whoever answers first wins — and its news closes the card on every
+    /// device holding the chat, this one included.
+    pub async fn consent_decide(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        decision: &str,
+        grant_minutes: Option<i64>,
+        note: Option<String>,
+    ) -> Result<(), ApiError> {
+        let device = self.device_of(chat_id)?;
+        self.check_live(&device)?;
+        let mut args = json!({
+            "chatId": chat_id,
+            "requestId": request_id,
+            "decision": decision,
+        });
+        if let Some(m) = grant_minutes {
+            args["grantMinutes"] = json!(m);
+        }
+        if let Some(n) = note.filter(|n| !n.trim().is_empty()) {
+            args["note"] = json!(n);
+        }
+        let act = self.acting(chat_id)?;
+        self.ask_as(&device, "consent_decide", args, "that decision", &[act])
+            .await?;
+        Ok(())
+    }
+
+    /// Where the Allow requests of a chat that runs on another PC stand, as that PC's consent
+    /// store says. A tool row's chip asks for this so the copy can say Allowed or Refused too.
+    pub async fn consent_states(&self, chat_id: &str) -> Result<Value, ApiError> {
+        let device = self.device_of(chat_id)?;
+        self.check_live(&device)?;
+        self.ask_as(
+            &device,
+            "consent_states",
+            json!({ "chatId": chat_id }),
+            "those requests",
+            &[],
+        )
+        .await
+    }
+
     /// Ask the device for a change, then show it in the copy here at once; the device's own news
     /// (with a newer revision) replaces it.
     async fn change(

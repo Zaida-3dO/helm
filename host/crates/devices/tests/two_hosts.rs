@@ -11,11 +11,11 @@ use helm_chats::types::{
 use helm_core::db::{Database, MigrationRegistry};
 use helm_devices::host::HostPort;
 use helm_devices::link::{DeviceLink, MemLink, MemRouter, Rpc};
-use helm_devices::mirror::{self, ChatView, Mirror, PeopleSync, WhoFilter};
+use helm_devices::mirror::{self, ChatView, Mirror, MirrorSlot, PeopleSync, WhoFilter};
 use helm_devices::testing::{fake_interaction, fake_record, fake_row, FakePort};
 use helm_devices::wire::{code, DeviceFrame, DevicePerson, Frame, Push};
 use helm_devices::{ChatPort, Service};
-use helm_ipc::{Dispatcher, OpCtx, OpIntercept, OpRegistry, RecordingSink, Services};
+use helm_ipc::{AppEvent, Dispatcher, OpCtx, OpIntercept, OpRegistry, RecordingSink, Services};
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -144,7 +144,7 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
             "dev-a",
             "consent_decide",
             json!({"id": "x"}),
-            code::REFUSED,
+            code::BAD_ARGS,
         ),
         (
             &b,
@@ -387,8 +387,9 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         .unwrap();
     assert_eq!(port.st().stopped, ["c1".to_owned()]);
 
-    // Answers: a question, a plan and a tool permission may be answered from afar, with the
-    // words the request shows; a trust prompt, a secret, a doctored label or a second answer may not.
+    // Answers: every waiting request may be answered from afar — a question, a plan, a tool
+    // permission, a trust prompt, a secret input — with the words the request shows; a doctored
+    // label or a second answer may not.
     let secret: Interaction = Interaction {
         secret: Some(true),
         ..fake_interaction("c1", "secret", Meth::Input, Some(Att::Question), None)
@@ -454,13 +455,13 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
             )),
             "trust",
             json!({"confirmed": true, "label": "Allow"}),
-            Some(code::REFUSED),
+            None,
         ),
         (
             Some(secret),
             "secret",
-            json!({"value": "x", "label": "Token"}),
-            Some(code::REFUSED),
+            json!({"value": "hunter2", "label": "Token"}),
+            None,
         ),
         (
             Some(fake_interaction(
@@ -519,7 +520,37 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         .iter()
         .map(|a| a.request_id.clone())
         .collect();
-    assert_eq!(answered, ["perm", "plan", "pick"]);
+    assert_eq!(answered, ["perm", "plan", "trust", "secret", "pick"]);
+
+    // The run switch gates the waiting requests too: with it off a question cannot be
+    // answered from another PC, and putting it back lets the answer through.
+    port.put_interaction(fake_interaction(
+        "c1",
+        "off",
+        Meth::Select,
+        Some(Att::Question),
+        Some(&["A", "B"]),
+    ));
+    port.set_run(false);
+    let e = b
+        .rpc
+        .call(
+            "dev-a",
+            "answer",
+            json!({"chatId": "c1", "requestId": "off", "value": "A", "label": "A"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, code::NOT_ALLOWED);
+    port.set_run(true);
+    b.rpc
+        .call(
+            "dev-a",
+            "answer",
+            json!({"chatId": "c1", "requestId": "off", "value": "A", "label": "A"}),
+        )
+        .await
+        .unwrap();
 
     // A device that drops off the hub loses its subscriptions, and asks again when it is back.
     assert!(host.watchers().contains(&"dev-b".to_owned()));
@@ -542,6 +573,140 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         .await
         .unwrap();
     assert!(host.watchers().contains(&"dev-b".to_owned()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn allow_cards_show_on_every_pc_and_the_first_answer_wins() {
+    let router = MemRouter::new();
+    let port = Arc::new(FakePort::new("dev-a", "Desk"));
+    port.add_chat("c1", "First", 10);
+    let link_a = router.connect("dev-a", Some("person-a"), Some("Alex"), true);
+    let host = Service::new(port.clone(), link_a, tokio::runtime::Handle::current());
+    host.announce();
+    let laptop = Watcher::new(&router, "dev-b", "Laptop", true);
+    let tablet = Watcher::new(&router, "dev-c", "Tablet", true);
+    settle().await;
+
+    let card = |id: &str| {
+        json!({
+            "id": id, "kind": "test-step", "label": "Step",
+            "summary": format!("Do {id}"), "state": "pending", "grantMinutes": 30,
+        })
+    };
+    let decide =
+        |id: &str| json!({"chatId": "c1", "requestId": id, "decision": "deny", "note": "no"});
+    let cards_changed = || AppEvent::new("consent").with("chatId", "c1");
+
+    // A card already waiting on the chat is seen by every PC when it opens the chat.
+    port.put_consent("c1", card("r1"));
+    let sub = laptop
+        .rpc
+        .call("dev-a", "chat_sub", json!({"chatId": "c1", "since": 0}))
+        .await
+        .unwrap();
+    assert_eq!(sub["consent"].as_array().unwrap().len(), 1);
+    assert_eq!(sub["consent"][0]["id"], "r1");
+    tablet
+        .rpc
+        .call("dev-a", "chat_sub", json!({"chatId": "c1", "since": 0}))
+        .await
+        .unwrap();
+
+    // A new card reaches every PC holding the chat at once.
+    port.put_consent("c1", card("r2"));
+    host.observe(&cards_changed());
+    until(|| laptop.heard("chat:c1").len() == 1 && tablet.heard("chat:c1").len() == 1).await;
+    for w in [&laptop, &tablet] {
+        let push = &w.heard("chat:c1")[0];
+        assert_eq!(push.event["kind"], "consent");
+        assert_eq!(push.event["pending"].as_array().unwrap().len(), 2);
+    }
+
+    // Answered from one PC: the store on the PC that runs the chat takes the decision and names
+    // the device, and the card leaves the list everywhere.
+    laptop
+        .rpc
+        .call("dev-a", "consent_decide", decide("r2"))
+        .await
+        .unwrap();
+    assert_eq!(
+        port.st().consents,
+        [(
+            "c1".to_owned(),
+            "r2".to_owned(),
+            "deny".to_owned(),
+            "device:Laptop".to_owned()
+        )]
+    );
+    // The card states read from afar too: a tool row's chip on a copy asks for them so it
+    // can say Allowed or Refused as one does on a chat that runs here.
+    let states = laptop
+        .rpc
+        .call("dev-a", "consent_states", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    let seen: Vec<(String, String)> = states["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            (
+                s["id"].as_str().unwrap().to_owned(),
+                s["state"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("r1".to_owned(), "pending".to_owned()),
+            ("r2".to_owned(), "denied".to_owned())
+        ]
+    );
+
+    // A second answer to the same card is refused: the first one won.
+    let e = tablet
+        .rpc
+        .call("dev-a", "consent_decide", decide("r2"))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, code::REFUSED);
+
+    // Answered on the host PC itself: the window's own click moves the same store, and the
+    // service's consent event closes the card on the other PCs.
+    port.st()
+        .consent
+        .get_mut("c1")
+        .unwrap()
+        .retain(|c| c["id"] != "r1");
+    host.observe(&cards_changed());
+    until(|| laptop.heard("chat:c1").len() == 2 && tablet.heard("chat:c1").len() == 2).await;
+    for w in [&laptop, &tablet] {
+        assert!(w.heard("chat:c1")[1].event["pending"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    // The only gate is the switch: with it off, a decision from another PC is refused; reads and
+    // pushes keep working, and putting it back lets the answer through.
+    port.put_consent("c1", card("r3"));
+    host.observe(&cards_changed());
+    until(|| laptop.heard("chat:c1").len() == 3 && tablet.heard("chat:c1").len() == 3).await;
+    port.set_run(false);
+    let e = tablet
+        .rpc
+        .call("dev-a", "consent_decide", decide("r3"))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, code::NOT_ALLOWED);
+    port.set_run(true);
+    tablet
+        .rpc
+        .call("dev-a", "consent_decide", decide("r3"))
+        .await
+        .unwrap();
+    assert_eq!(port.st().consents.len(), 2);
 }
 
 /// A device that only watches: its own database, its end of the hub, and the events it raises.
@@ -619,6 +784,29 @@ fn rows_of(s: &Side, chat: &str) -> Vec<(i64, String)> {
                 r["text"].as_str().unwrap().to_owned(),
             )
         })
+        .collect()
+}
+
+/// The ids of the requests waiting in this PC's copy of a chat's thread state.
+fn copied_interactions(s: &Side, chat: &str) -> Vec<String> {
+    let stored =
+        s.db.snapshot(|tx| {
+            tx.query_row(
+                "SELECT thread FROM mirror_chats WHERE chat_id = ?1",
+                [chat],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()
+        })
+        .unwrap()
+        .flatten();
+    stored
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|t| t.get("interactions").cloned())
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|i| i["id"].as_str().map(str::to_owned))
         .collect()
 }
 
@@ -701,10 +889,14 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
 
     // The ops the window uses, through the dispatcher, with the check that routes them.
     let mut services = Services::new();
+    services.insert(b.db.clone());
     let routes = Arc::new(RemoteSlot::default());
     routes.attach(Arc::new(b.mirror.clone()));
     services.insert(routes);
     services.insert(Arc::new(OpIntercept(Arc::new(Routes))));
+    let slot = Arc::new(MirrorSlot::default());
+    slot.attach(b.mirror.clone());
+    services.insert(slot);
     let mut ops = OpRegistry::new();
     helm_chats::register_ops(&mut ops);
     helm_devices::register_ops(&mut ops);
@@ -742,6 +934,135 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
     until(|| rows_of(&b, "c1").len() == 3).await;
     assert_eq!(rows_of(&b, "c1")[1], (2, "world!".to_owned()));
     assert!(b.sink.kinds().iter().any(|k| k == "message"));
+
+    // Allow cards ride the copy: a changed card list is kept here, the window hears the same
+    // consent event it would for a chat that runs here, and this PC can answer the card over
+    // the wire.
+    port.put_consent(
+        "c1",
+        json!({"id": "r1", "kind": "test-step", "state": "pending", "grantMinutes": 30}),
+    );
+    host.observe(&AppEvent::new("consent").with("chatId", "c1"));
+    until(|| b.sink.kinds().iter().any(|k| k == "consent")).await;
+    let cards = api
+        .call_host("devices_consent_list", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    assert_eq!(cards["pending"].as_array().unwrap().len(), 1);
+    api.call_host(
+        "devices_consent_decide",
+        json!({"chatId": "c1", "requestId": "r1", "decision": "allow", "grantMinutes": 15}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        port.st().consents,
+        [(
+            "c1".to_owned(),
+            "r1".to_owned(),
+            "allow".to_owned(),
+            "device:Laptop".to_owned()
+        )]
+    );
+    // The state read travels to the copy's window as well: its tool chip says Allowed.
+    let states = api
+        .call_host("devices_consent_state", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    let r1 = states["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "r1")
+        .unwrap();
+    assert_eq!(r1["state"], "allowed");
+
+    // The host's answer closes the card on this PC too, on the same event.
+    host.observe(&AppEvent::new("consent").with("chatId", "c1"));
+    until(|| b.sink.kinds().iter().filter(|k| *k == "consent").count() >= 2).await;
+    let cards = api
+        .call_host("devices_consent_list", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    assert!(cards["pending"].as_array().unwrap().is_empty());
+
+    // Every kind of request a chat raises and waits on reaches the copy and can be answered
+    // from this PC: a tool permission, a question, a plan approval, a trust prompt and a
+    // secret input. Each answer reaches the chat on the PC that runs it, and the thread
+    // event it raises there closes the card back here.
+    let kinds: Vec<(&str, Interaction, Value)> = vec![
+        (
+            "a tool permission",
+            fake_interaction("c1", "k-perm", Meth::Confirm, Some(Att::Approval), None),
+            json!({"confirmed": true}),
+        ),
+        (
+            "a question",
+            fake_interaction(
+                "c1",
+                "k-ask",
+                Meth::Select,
+                Some(Att::Question),
+                Some(&["A", "B"]),
+            ),
+            json!({"value": "A"}),
+        ),
+        (
+            "a plan approval",
+            fake_interaction(
+                "c1",
+                "k-plan",
+                Meth::Select,
+                Some(Att::Plan),
+                Some(&["Approve plan", "Keep planning"]),
+            ),
+            json!({"value": "Approve plan", "confirmed": true}),
+        ),
+        (
+            "a trust prompt",
+            fake_interaction("c1", "k-trust", Meth::Confirm, Some(Att::Trust), None),
+            json!({"confirmed": true}),
+        ),
+        (
+            "a secret input",
+            Interaction {
+                secret: Some(true),
+                ..fake_interaction("c1", "k-secret", Meth::Input, Some(Att::Question), None)
+            },
+            json!({"value": "hunter2"}),
+        ),
+    ];
+    for (what, waiting, extra) in kinds {
+        port.put_interaction(waiting.clone());
+        host.observe(
+            &AppEvent::new("thread")
+                .with("chatId", "c1")
+                .with("thread", json!({ "interactions": [waiting.clone()] })),
+        );
+        until(|| copied_interactions(&b, "c1") == vec![waiting.id.clone()]).await;
+        let mut args = json!({"chatId": "c1", "requestId": waiting.id});
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let got = api.call_host("interaction_answer", args).await;
+        assert!(got.is_ok(), "{what}: {got:?}");
+        host.observe(
+            &AppEvent::new("thread")
+                .with("chatId", "c1")
+                .with("thread", json!({ "interactions": [] })),
+        );
+        until(|| copied_interactions(&b, "c1").is_empty()).await;
+    }
+    let answered_from_copy: Vec<_> = port
+        .st()
+        .answered
+        .iter()
+        .map(|a| a.request_id.clone())
+        .collect();
+    assert_eq!(
+        answered_from_copy,
+        ["k-perm", "k-ask", "k-plan", "k-trust", "k-secret"]
+    );
 
     // Every chat op on a copied chat: answered from the copy, sent to the device, answered
     // quietly, or refused with the sentence that says where to do it.
@@ -1201,7 +1522,7 @@ async fn a_household_member_gets_their_own_view_of_the_list_but_is_refused_nothi
             json!({"chatId": "shared", "requestId": "q2", "value": "A", "label": "A"}),
             None,
         ),
-        ("consent_decide", json!({"id": "x"}), Some(code::REFUSED)),
+        ("consent_decide", json!({"id": "x"}), Some(code::BAD_ARGS)),
         (
             "create",
             json!({"personId": "person-a", "projectId": "proj-1"}),
@@ -1360,10 +1681,14 @@ async fn one_pc_acts_as_each_of_its_profiles() {
 
     // The ops the window uses, through the dispatcher, with the check that routes them.
     let mut services = Services::new();
+    services.insert(b.db.clone());
     let routes = Arc::new(RemoteSlot::default());
     routes.attach(Arc::new(b.mirror.clone()));
     services.insert(routes);
     services.insert(Arc::new(OpIntercept(Arc::new(Routes))));
+    let slot = Arc::new(MirrorSlot::default());
+    slot.attach(b.mirror.clone());
+    services.insert(slot);
     let mut ops = OpRegistry::new();
     helm_chats::register_ops(&mut ops);
     helm_devices::register_ops(&mut ops);

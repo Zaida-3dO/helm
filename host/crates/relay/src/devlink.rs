@@ -14,10 +14,10 @@ use crate::{telegram, voice};
 use helm_chats::ChatRuntime;
 use helm_devices::host::HostPort;
 use helm_devices::link::{BoxFut, DeviceLink, FrameCb};
-use helm_devices::serve::{ChatPort, ChatState, PortResult};
+use helm_devices::serve::{ChatPort, ChatState, PortResult, SentFile};
 use helm_devices::wire::{
-    AnswerArgs, ArchiveArgs, CreateArgs, DeviceInfo, DevicePerson, Frame, Hello, RemoteChat,
-    RenameArgs, SetModelArgs, ShareArgs,
+    AnswerArgs, ArchiveArgs, ConsentDecideArgs, CreateArgs, DeviceInfo, DevicePerson, Frame, Hello,
+    RemoteChat, RenameArgs, SetModelArgs, ShareArgs,
 };
 use helm_devices::{EventTap, Service};
 use serde_json::Value;
@@ -220,7 +220,7 @@ impl ChatPort for ChannelPort {
         client_id: String,
         text: String,
         from: Option<String>,
-        files: Vec<helm_devices::serve::SentFile>,
+        files: Vec<SentFile>,
     ) -> BoxFut<'_, PortResult<()>> {
         self.port.send(chat_id, client_id, text, from, files)
     }
@@ -229,6 +229,15 @@ impl ChatPort for ChannelPort {
     }
     fn answer(&self, a: AnswerArgs) -> BoxFut<'_, PortResult<()>> {
         self.port.answer(a)
+    }
+    fn consent(&self, chat_id: String) -> BoxFut<'_, PortResult<Vec<Value>>> {
+        self.port.consent(chat_id)
+    }
+    fn consent_decide(&self, a: ConsentDecideArgs, via: String) -> BoxFut<'_, PortResult<()>> {
+        self.port.consent_decide(a, via)
+    }
+    fn consent_states(&self, chat_id: String) -> BoxFut<'_, PortResult<Vec<Value>>> {
+        self.port.consent_states(chat_id)
     }
     fn create(&self, a: CreateArgs) -> BoxFut<'_, PortResult<String>> {
         self.port.create(a)

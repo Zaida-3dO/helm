@@ -17,7 +17,14 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("devices_chats", OpClass::Blocking, devices_chats)
         .async_op("devices_create_chat", devices_create_chat)
         .async_op("devices_open_chat", devices_open_chat)
-        .async_op("devices_attach", devices_attach);
+        .async_op("devices_attach", devices_attach)
+        .blocking(
+            "devices_consent_list",
+            OpClass::Blocking,
+            devices_consent_list,
+        )
+        .async_op("devices_consent_decide", devices_consent_decide)
+        .async_op("devices_consent_state", devices_consent_state);
 }
 
 fn fail(e: DeviceError) -> ApiError {
@@ -387,4 +394,82 @@ fn stage_row(db: &Database, s: &Staged<'_>) -> Result<(), ApiError> {
         Ok(Ok(()))
     })
     .map_err(|e: rusqlite::Error| ApiError::internal(e.to_string()))?
+}
+
+// ---------------------------------------------------------------------------------------------
+// Allow cards of a chat that runs on another device
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ConsentIdArgs {
+    chat_id: String,
+}
+
+/// `devices_consent_list`: the Allow cards waiting on a mirrored chat, as this PC last heard them
+/// from the device that runs it. The window re-reads this on each `consent` event, exactly as it
+/// does for a chat that runs here.
+fn devices_consent_list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ConsentIdArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    let db = ctx.services.need::<Database>()?;
+    let cards = db
+        .snapshot(|tx| {
+            let stored: Option<String> = tx
+                .query_row(
+                    "SELECT consent FROM mirror_chats WHERE chat_id = ?1",
+                    [&a.chat_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            Ok::<_, rusqlite::Error>(match stored {
+                Some(s) => serde_json::from_str::<Value>(&s).unwrap_or_else(|_| json!([])),
+                None => json!([]),
+            })
+        })
+        .map_err(|e: rusqlite::Error| ApiError::internal(e.to_string()))?;
+    Ok(json!({ "pending": cards }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ConsentDecideLocalArgs {
+    chat_id: String,
+    request_id: String,
+    decision: String,
+    #[serde(default)]
+    grant_minutes: Option<i64>,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// `devices_consent_decide`: answer an Allow card of a chat that runs on another device. The
+/// store on that PC decides by compare-and-set, so the first answer on any device wins; the
+/// device then pushes the closed card to every PC holding the chat.
+async fn devices_consent_decide(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ConsentDecideLocalArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    if !matches!(a.decision.as_str(), "allow" | "deny") {
+        return Err(ApiError::bad_args("A decision is allow or deny."));
+    }
+    let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
+    mirror
+        .consent_decide(
+            &a.chat_id,
+            &a.request_id,
+            &a.decision,
+            a.grant_minutes,
+            a.note,
+        )
+        .await?;
+    Ok(json!({}))
+}
+
+/// `devices_consent_state`: ask the device that runs a mirrored chat where its Allow requests
+/// stand, so a tool row on the copy can say Allowed or Refused as one does on a local chat.
+async fn devices_consent_state(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ConsentIdArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
+    mirror.consent_states(&a.chat_id).await
 }

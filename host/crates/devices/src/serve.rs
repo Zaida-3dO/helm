@@ -20,10 +20,11 @@
 use crate::link::{BoxFut, DeviceLink};
 use crate::subs::{self, Out, Subs, CHATS_SUB, PUSH_ROW_BUDGET};
 use crate::wire::{
-    code, AnswerArgs, ArchiveArgs, AttachPutArgs, AttachmentRef, Caller, ChatIdArgs, CreateArgs,
-    DeviceFrame, DeviceInfo, DevicePerson, Frame, Hello, Op, PageArgs, PeerDevice, RemoteChat,
-    RenameArgs, SendArgs, SetModelArgs, ShareArgs, WireError, MAX_CHUNK_BYTES, MAX_PAGE_ROWS,
-    MAX_SEND_ATTACHMENTS, MAX_SEND_BYTES, MAX_UPLOAD_BYTES, SUB_ROWS,
+    code, AnswerArgs, ArchiveArgs, AttachPutArgs, AttachmentRef, Caller, ChatIdArgs,
+    ConsentDecideArgs, CreateArgs, DeviceFrame, DeviceInfo, DevicePerson, Frame, Hello, Op,
+    PageArgs, PeerDevice, RemoteChat, RenameArgs, SendArgs, SetModelArgs, ShareArgs, WireError,
+    MAX_CHUNK_BYTES, MAX_PAGE_ROWS, MAX_SEND_ATTACHMENTS, MAX_SEND_BYTES, MAX_UPLOAD_BYTES,
+    SUB_ROWS,
 };
 use base64::Engine as _;
 use helm_chats::types::{
@@ -58,7 +59,13 @@ pub struct ChatState {
     /// The submissions sent but not yet settled.
     pub pending: Value,
     pub interactions: Vec<Interaction>,
+    /// The Allow cards waiting on the person, as the consent store shows them. A card can be
+    /// answered on any device that has the chat open; the first answer wins.
+    pub consent: Vec<Value>,
 }
+
+/// The most the consent cards of one answer or push may weigh together.
+pub const CONSENT_BUDGET: usize = 64 * 1024;
 
 /// Everything the service needs from this install. The production adapter reads the chats and
 /// profiles tables and runs the chat ops; tests use [`crate::testing::FakePort`].
@@ -114,6 +121,15 @@ pub trait ChatPort: Send + Sync {
     ) -> BoxFut<'_, PortResult<()>>;
     fn stop(&self, chat_id: String) -> BoxFut<'_, PortResult<()>>;
     fn answer(&self, a: AnswerArgs) -> BoxFut<'_, PortResult<()>>;
+    /// The Allow cards of a chat that wait on the person, newest checks aside: the pending ones,
+    /// oldest first, as the consent store lists them.
+    fn consent(&self, chat_id: String) -> BoxFut<'_, PortResult<Vec<Value>>>;
+    /// Answer an Allow card from another device, naming that device for the record. The consent
+    /// store decides by compare-and-set: the first answer wins, a second is refused.
+    fn consent_decide(&self, a: ConsentDecideArgs, via: String) -> BoxFut<'_, PortResult<()>>;
+    /// Where a chat's Allow requests stand — id, state and outcome only, pending and recently
+    /// decided. A watcher reads this to make a tool row's chip say Allowed or Refused too.
+    fn consent_states(&self, chat_id: String) -> BoxFut<'_, PortResult<Vec<Value>>>;
     /// Start a chat for the local profile linked to the person; `unknown_person` if none is.
     fn create(&self, a: CreateArgs) -> BoxFut<'_, PortResult<String>>;
     fn set_model(&self, a: SetModelArgs) -> BoxFut<'_, PortResult<()>>;
@@ -241,7 +257,7 @@ impl Service {
                     self.announce();
                 }
             }
-            "chat" | "chat_removed" | "thread" | "pending" | "refresh" | "message"
+            "chat" | "chat_removed" | "thread" | "pending" | "refresh" | "message" | "consent"
                 if !lock(&self.inner.subs).watchers().is_empty() =>
             {
                 let _ = self.inner.events.send(ev.clone());
@@ -314,7 +330,7 @@ async fn consume(inner: Weak<Inner>, mut rx: mpsc::UnboundedReceiver<AppEvent>) 
         };
         let Some(ev) = ev else { return };
         let Some(i) = inner.upgrade() else { return };
-        i.on_event(&ev);
+        i.on_event(&ev).await;
     }
 }
 
@@ -334,7 +350,7 @@ impl Inner {
         *lock(&self.online) = online;
     }
 
-    fn on_event(&self, ev: &AppEvent) {
+    async fn on_event(&self, ev: &AppEvent) {
         let chat_id = ev
             .fields
             .get("chatId")
@@ -377,6 +393,19 @@ impl Inner {
                     .unwrap_or(0);
                 lock(&self.subs).add_rows(&chat_id, revision, &rows, Instant::now());
                 Vec::new()
+            }
+            // A card appeared, closed or expired: watchers holding the chat hear the whole
+            // pending set again, so any device's card shows the same list at the same time.
+            "consent" => {
+                let cards = match self.port.consent(chat_id.clone()).await {
+                    Ok(mut cards) => {
+                        subs::fit_rows(&mut cards, CONSENT_BUDGET);
+                        cards
+                    }
+                    Err(_) => Vec::new(),
+                };
+                let event = json!({ "kind": "consent", "chatId": &chat_id, "pending": cards });
+                lock(&self.subs).chat_event(&chat_id, event)
             }
             _ => Vec::new(),
         };
@@ -544,11 +573,14 @@ impl Inner {
                         // Newest rows matter most: drop the oldest until the answer fits.
                         let mut more = more;
                         fit_rows_newest(&mut rows, &mut more);
+                        let mut consent = state.consent;
+                        subs::fit_rows(&mut consent, CONSENT_BUDGET);
                         Ok((
                             json!({
                                 "chat": state.chat,
                                 "thread": state.thread,
                                 "pending": state.pending,
+                                "consent": consent,
                                 "rows": rows,
                                 "more": more,
                             }),
@@ -592,6 +624,23 @@ impl Inner {
             Op::Answer(a) => {
                 self.answer(a).await?;
                 done(Value::Null)
+            }
+            Op::ConsentDecide(a) => {
+                if a.request_id.trim().is_empty()
+                    || !matches!(a.decision.as_str(), "allow" | "deny")
+                {
+                    return Err(WireError::bad_args(
+                        "A decision is allow or deny for a named request.",
+                    ));
+                }
+                let via = device_via(from);
+                self.port.consent_decide(a, via).await?;
+                done(json!({}))
+            }
+            Op::ConsentStates(a) => {
+                let mut states = self.port.consent_states(a.chat_id).await?;
+                subs::fit_rows(&mut states, CONSENT_BUDGET);
+                done(json!({ "states": states }))
             }
             Op::Create(a) => {
                 let chat_id = self.port.create(a).await?;
@@ -838,6 +887,17 @@ fn fit_rows_newest(rows: &mut Vec<Value>, more: &mut bool) {
     }
 }
 
+/// Where an Allow card was answered from, for the consent record: the asking device by name.
+fn device_via(from: &Caller) -> String {
+    let name: String = from
+        .name
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(40)
+        .collect();
+    format!("device:{}", name.trim())
+}
+
 /// The labels a confirmation shows: the request's own options, or Allow and Deny (Approve plan
 /// and Keep planning for a plan).
 pub(crate) fn confirm_options(i: &Interaction) -> Vec<String> {
@@ -850,23 +910,12 @@ pub(crate) fn confirm_options(i: &Interaction) -> Vec<String> {
     }
 }
 
-/// Whether the answer is one the watcher may give for the request it waits on. Questions,
-/// plan approvals and tool-permission prompts may be answered from another device; a folder-trust
-/// prompt and a secret input never are. The label must be one the request shows, and what the
-/// answer says must agree with it, so a mistaken or doctored answer cannot approve what the
-/// person did not see.
+/// Whether the answer is one the watcher may give for the request it waits on. Every card that
+/// waits on the person — questions, plan approvals, permission and trust prompts, secret input —
+/// can be answered from any device that has the chat open; the gates are the device switches, not
+/// the kind of card. The label must be one the request shows, and what the answer says must agree
+/// with it, so a mistaken or doctored answer cannot approve what the person did not see.
 pub fn check_answer(i: &Interaction, a: &AnswerArgs) -> Result<(), WireError> {
-    if !matches!(
-        i.attention,
-        Some(
-            InteractionAttention::Approval
-                | InteractionAttention::Question
-                | InteractionAttention::Plan
-        )
-    ) || i.secret == Some(true)
-    {
-        return Err(WireError::elsewhere());
-    }
     let mismatch = || WireError::new(code::REFUSED, "That is not what the request shows.");
     // Cancelling approves nothing.
     if a.cancelled == Some(true) {

@@ -29,7 +29,7 @@
 //! [`apply::decide_and_apply`], the one decide path every surface calls, spends the grant and
 //! runs the kind's [`apply::Applier`] under the maintenance lock. Two columns serve them:
 //! `outcome` (what applying did, sent to the agent as the decision note) and `decided_via`
-//! (where the user answered; `app` for this PC's main window). Upkeep holds an applying
+//! (where the user answered; `app` for this PC's main window, `device:<name>` for another device). Upkeep holds an applying
 //! request's note until its outcome is written, or reports after ten minutes that Helm stopped
 //! while applying.
 

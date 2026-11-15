@@ -10,8 +10,8 @@ use crate::link::BoxFut;
 use crate::sends;
 use crate::serve::{ChatPort, ChatState, PortResult, SentFile};
 use crate::wire::{
-    code, AnswerArgs, ArchiveArgs, CreateArgs, DeviceInfo, DevicePerson, Hello, PersonInfo,
-    ProjectInfo, RemoteChat, RenameArgs, SetModelArgs, ShareArgs, WireError,
+    code, AnswerArgs, ArchiveArgs, ConsentDecideArgs, CreateArgs, DeviceInfo, DevicePerson, Hello,
+    PersonInfo, ProjectInfo, RemoteChat, RenameArgs, SetModelArgs, ShareArgs, WireError,
 };
 use helm_chats::submit::{self, HostFile, HostImage, HostSend};
 use helm_chats::types::{ChatGetResult, ChatRecord, MessageRow, SubmissionOrigin};
@@ -144,6 +144,22 @@ impl HostPort {
 
     async fn op(&self, op: &str, args: Value) -> PortResult<Value> {
         self.dispatcher.call_host(op, args).await.map_err(wire)
+    }
+
+    /// The Allow cards waiting on a chat here, as the consent store lists them.
+    fn consent_cards(&self, chat_id: &str) -> PortResult<Vec<Value>> {
+        let db = self.db()?;
+        let kinds = self
+            .services()
+            .get::<helm_consent::AllowKinds>()
+            .unwrap_or_else(|| Arc::new(helm_consent::AllowKinds::new()));
+        let list =
+            helm_consent::store::list(&db, &kinds, chat_id, helm_core::now_ms()).map_err(wire)?;
+        Ok(list
+            .pending
+            .into_iter()
+            .map(|c| serde_json::to_value(c).unwrap_or(Value::Null))
+            .collect())
     }
 
     fn people_and_projects(&self) -> PortResult<(Vec<PersonInfo>, Vec<ProjectInfo>)> {
@@ -392,6 +408,7 @@ impl ChatPort for HostPort {
                 .snapshot(|tx| store::pending(tx, &chat_id))
                 .map_err(db_err)?;
             Ok(ChatState {
+                consent: self.consent_cards(&chat_id)?,
                 chat: self.remote_chat(got.chat),
                 interactions: got.thread.interactions.clone(),
                 thread: serde_json::to_value(&got.thread)
@@ -545,6 +562,67 @@ impl ChatPort for HostPort {
             }
             self.op("interaction_answer", args).await?;
             Ok(())
+        })
+    }
+
+    fn consent(&self, chat_id: String) -> BoxFut<'_, PortResult<Vec<Value>>> {
+        Box::pin(async move {
+            self.here(&chat_id)?;
+            self.consent_cards(&chat_id)
+        })
+    }
+
+    fn consent_decide(&self, a: ConsentDecideArgs, via: String) -> BoxFut<'_, PortResult<()>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            let decision = match a.decision.as_str() {
+                "allow" => helm_consent::Decision::Allow,
+                "deny" => helm_consent::Decision::Deny,
+                _ => {
+                    return Err(WireError::bad_args(
+                        "A decision is allow or deny for a named request.",
+                    ))
+                }
+            };
+            let args = helm_consent::ConsentDecideArgs {
+                request_id: a.request_id,
+                decision,
+                grant_minutes: a.grant_minutes,
+                note: a.note,
+            };
+            let ctx = self.dispatcher.ctx();
+            // The same path the main window's click takes: one compare-and-set out of pending,
+            // and an approved change starts applying here. `via` says which device answered.
+            helm_consent::decide_and_apply(&ctx.services, &ctx.events, &args, &via)
+                .map(|_| ())
+                .map_err(wire)
+        })
+    }
+
+    fn consent_states(&self, chat_id: String) -> BoxFut<'_, PortResult<Vec<Value>>> {
+        Box::pin(async move {
+            self.here(&chat_id)?;
+            let db = self.db()?;
+            let kinds = self
+                .services()
+                .get::<helm_consent::AllowKinds>()
+                .unwrap_or_else(|| Arc::new(helm_consent::AllowKinds::new()));
+            let list = helm_consent::store::list(&db, &kinds, &chat_id, helm_core::now_ms())
+                .map_err(wire)?;
+            // The chip only needs which card and where it stands, so the rows stay slim:
+            // no reason, evidence or summary crosses the line for them.
+            Ok(list
+                .pending
+                .into_iter()
+                .chain(list.decided)
+                .map(|c| {
+                    json!({
+                        "id": c.id,
+                        "state": c.state.as_str(),
+                        "outcome": c.outcome,
+                    })
+                })
+                .collect())
         })
     }
 

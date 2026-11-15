@@ -4,8 +4,8 @@
 use crate::link::BoxFut;
 use crate::serve::{ChatPort, ChatState, PortResult, SentFile};
 use crate::wire::{
-    code, AnswerArgs, ArchiveArgs, CreateArgs, DeviceInfo, DevicePerson, Hello, PersonInfo,
-    ProjectInfo, RemoteChat, RenameArgs, SetModelArgs, ShareArgs, WireError,
+    code, AnswerArgs, ArchiveArgs, ConsentDecideArgs, CreateArgs, DeviceInfo, DevicePerson, Hello,
+    PersonInfo, ProjectInfo, RemoteChat, RenameArgs, SetModelArgs, ShareArgs, WireError,
 };
 use helm_chats::types::{
     ChatRecord, ChatStatus, Harness, Interaction, InteractionAttention, InteractionMethod,
@@ -116,6 +116,10 @@ pub struct FakeState {
     pub sent_files: Vec<Vec<SentFile>>,
     pub stopped: Vec<String>,
     pub answered: Vec<AnswerArgs>,
+    /// The pending Allow cards of each chat, as the cards the consent store would show.
+    pub consent: HashMap<String, Vec<Value>>,
+    /// The Allow decisions taken from another device: (chat, request id, decision, where from).
+    pub consents: Vec<(String, String, String, String)>,
     pub created: Vec<CreateArgs>,
     pub renamed: Vec<RenameArgs>,
     pub model_changes: Vec<SetModelArgs>,
@@ -197,6 +201,15 @@ impl FakePort {
             .entry(i.chat_id.clone())
             .or_default()
             .push(i);
+    }
+
+    /// File an Allow card on a chat, as `app_request_allow` would.
+    pub fn put_consent(&self, chat_id: &str, card: Value) {
+        self.st()
+            .consent
+            .entry(chat_id.to_owned())
+            .or_default()
+            .push(card);
     }
 
     /// Announce the hub people this install acts for (the home person's channel flags first).
@@ -281,6 +294,7 @@ impl ChatPort for FakePort {
         let st = self.st();
         let r = match st.chats.iter().find(|c| c.id() == chat_id) {
             Some(chat) => Ok(ChatState {
+                consent: st.consent.get(&chat_id).cloned().unwrap_or_default(),
                 chat: chat.clone(),
                 thread: json!({
                     "chatId": chat_id,
@@ -380,6 +394,64 @@ impl ChatPort for FakePort {
         }
         st.answered.push(a);
         ready(Ok(()))
+    }
+
+    fn consent(&self, chat_id: String) -> BoxFut<'_, PortResult<Vec<Value>>> {
+        let st = self.st();
+        ready(Ok(st.consent.get(&chat_id).cloned().unwrap_or_default()))
+    }
+
+    fn consent_decide(&self, a: ConsentDecideArgs, via: String) -> BoxFut<'_, PortResult<()>> {
+        let mut st = self.st();
+        // One compare-and-set out of pending, as the consent store does: a second answer to
+        // the same card is refused, and the card leaves the list.
+        let list = st.consent.entry(a.chat_id.clone()).or_default();
+        let at = list
+            .iter()
+            .position(|c| c["id"].as_str() == Some(&a.request_id));
+        let r = match at {
+            Some(at) => {
+                list.remove(at);
+                st.consents.push((
+                    a.chat_id.clone(),
+                    a.request_id.clone(),
+                    a.decision.clone(),
+                    via,
+                ));
+                Ok(())
+            }
+            None => Err(WireError::new(
+                code::REFUSED,
+                "This request was already answered or has expired.",
+            )),
+        };
+        ready(r)
+    }
+
+    fn consent_states(&self, chat_id: String) -> BoxFut<'_, PortResult<Vec<Value>>> {
+        let st = self.st();
+        let mut out: Vec<Value> = st
+            .consent
+            .get(&chat_id)
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|c| {
+                json!({
+                    "id": c["id"],
+                    "state": c["state"].as_str().unwrap_or("pending"),
+                    "outcome": Value::Null,
+                })
+            })
+            .collect();
+        for (_, id, decision, _) in st.consents.iter().filter(|(c, ..)| *c == chat_id) {
+            out.push(json!({
+                "id": id,
+                "state": if decision == "allow" { "allowed" } else { "denied" },
+                "outcome": Value::Null,
+            }));
+        }
+        ready(Ok(out))
     }
 
     fn create(&self, a: CreateArgs) -> BoxFut<'_, PortResult<String>> {

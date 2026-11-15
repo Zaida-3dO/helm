@@ -86,6 +86,7 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              draft_revision  INTEGER NOT NULL DEFAULT 0,
              thread          TEXT,
              pending         TEXT,
+             consent         TEXT,
              older           INTEGER NOT NULL DEFAULT 0
          );
          CREATE INDEX IF NOT EXISTS mirror_chats_device ON mirror_chats(device_uid, revision);
@@ -120,6 +121,8 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
         "ALTER TABLE devices ADD COLUMN people TEXT NOT NULL DEFAULT '[]'",
         [],
     );
+    // A database from before the copy kept Allow cards: gain that too.
+    let _ = tx.execute("ALTER TABLE mirror_chats ADD COLUMN consent TEXT", []);
     Ok(())
 }
 
@@ -1256,6 +1259,7 @@ impl Inner {
         let more = result.get("more").and_then(Value::as_bool).unwrap_or(false);
         let thread = result.get("thread").cloned().unwrap_or(Value::Null);
         let pending = result.get("pending").cloned().unwrap_or(Value::Null);
+        let consent = result.get("consent").cloned().unwrap_or(Value::Null);
         let self_uid = self.self_uid.clone();
         let stored = self.db.write(|tx| {
             if let Some(chat) = result.get("chat") {
@@ -1270,8 +1274,14 @@ impl Inner {
                 return Ok((false, false, Vec::new()));
             }
             tx.execute(
-                "UPDATE mirror_chats SET thread = ?2, pending = ?3, watched_at = ?4 WHERE chat_id = ?1",
-                params![chat_id, thread.to_string(), pending.to_string(), helm_core::now_ms()],
+                "UPDATE mirror_chats SET thread = ?2, pending = ?3, consent = ?4, watched_at = ?5 WHERE chat_id = ?1",
+                params![
+                    chat_id,
+                    thread.to_string(),
+                    pending.to_string(),
+                    consent.to_string(),
+                    helm_core::now_ms()
+                ],
             )?;
             // More news than one answer holds, on top of rows already held: there would be a
             // hole in the middle, so start again from nothing.
@@ -1321,6 +1331,7 @@ impl Inner {
                 .with("revision", revision)
                 .with("pending", pending),
         );
+        self.emit(AppEvent::new("consent").with("chatId", chat_id));
         if again {
             self.restart(&key);
             return;
@@ -1390,6 +1401,19 @@ impl Inner {
                         )
                         .with("pending", pending),
                 );
+                false
+            }
+            // The host's Allow cards changed: keep the copy's list and let the window re-read
+            // it, so a card raised, answered or expired shows the same on every PC.
+            "consent" => {
+                let cards = ev.get("pending").cloned().unwrap_or_else(|| json!([]));
+                let _ = self.db.write(|tx| {
+                    tx.execute(
+                        "UPDATE mirror_chats SET consent = ?2 WHERE chat_id = ?1",
+                        params![chat_id, cards.to_string()],
+                    )
+                });
+                self.emit(AppEvent::new("consent").with("chatId", chat_id));
                 false
             }
             "refresh" => {

@@ -7,5 +7,5 @@ import { AllowCards } from './AllowCards.tsx';
 registerComposerAccessory({
   id: 'allow-cards',
   placement: 'consent',
-  render: (ctx) => createElement(AllowCards, { chatId: ctx.chat.id }),
+  render: (ctx) => createElement(AllowCards, { chatId: ctx.chat.id, remote: ctx.remote === true }),
 });

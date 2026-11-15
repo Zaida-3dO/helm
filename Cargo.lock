@@ -1941,6 +1941,7 @@ dependencies = [
  "base64 0.22.1",
  "getrandom 0.3.4",
  "helm-chats",
+ "helm-consent",
  "helm-core",
  "helm-ipc",
  "hex",
