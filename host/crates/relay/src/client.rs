@@ -409,10 +409,10 @@ pub struct Client {
     sharing: std::sync::Mutex<Sharing>,
     /// Woken when the saved connection changes, so a new address or token applies at once.
     pub reconfigured: tokio::sync::Notify,
-    /// How often the idle line says something itself (see [`KEEPALIVE_EVERY`]).
-    keepalive: Duration,
-    /// How long the line may go without proof of either direction before it is dropped.
-    silence: Duration,
+    /// How often the idle line says something itself, in milliseconds (see [`KEEPALIVE_EVERY`]).
+    keepalive_ms: AtomicU64,
+    /// How long the line may go without proof of either direction, in milliseconds.
+    silence_ms: AtomicU64,
 }
 
 /// The most pictures, and the most other files, taken from one message.
@@ -471,8 +471,8 @@ impl Client {
             delivering: Arc::default(),
             sharing: Default::default(),
             reconfigured: tokio::sync::Notify::new(),
-            keepalive: KEEPALIVE_EVERY,
-            silence: SILENCE,
+            keepalive_ms: AtomicU64::new(KEEPALIVE_EVERY.as_millis() as u64),
+            silence_ms: AtomicU64::new(SILENCE.as_millis() as u64),
         })
     }
 
@@ -499,6 +499,15 @@ impl Client {
     /// Give the line the sink for the hub's knowledge frames.
     pub fn attach_knowledge(&self, sink: Arc<dyn KnowledgeSink>) {
         let _ = self.knowledge.set(sink);
+    }
+
+    /// Tests: the keepalive and silence intervals, scaled down from production.
+    #[cfg(test)]
+    pub(crate) fn set_intervals(&self, keepalive: Duration, silence: Duration) {
+        self.keepalive_ms
+            .store(keepalive.as_millis() as u64, Ordering::SeqCst);
+        self.silence_ms
+            .store(silence.as_millis() as u64, Ordering::SeqCst);
     }
 
     /// What the household may see now.
@@ -646,14 +655,17 @@ impl Client {
         for v in self.handle.voice_to_reoffer() {
             let _ = out_tx.send(v);
         }
-        let silence = tokio::time::sleep(self.silence);
+        let silence_every = Duration::from_millis(self.silence_ms.load(Ordering::SeqCst));
+        let silence = tokio::time::sleep(silence_every);
         tokio::pin!(silence);
-        let mut keepalive = tokio::time::interval(self.keepalive);
+        let mut keepalive = tokio::time::interval(Duration::from_millis(
+            self.keepalive_ms.load(Ordering::SeqCst),
+        ));
         keepalive.tick().await; // the interval's immediate first tick
         loop {
             tokio::select! {
                 frame = stream.next() => {
-                    silence.as_mut().reset(tokio::time::Instant::now() + self.silence);
+                    silence.as_mut().reset(tokio::time::Instant::now() + silence_every);
                     match frame {
                         Some(Ok(Message::Text(t))) => self.on_frame(t.as_str(), &out_tx),
                         Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
@@ -677,7 +689,7 @@ impl Client {
                     // A frame the hub took is proof the line lives; its own pings may be
                     // stopped by the same proxy, so waiting for one to arrive cannot be the
                     // only liveness check.
-                    silence.as_mut().reset(tokio::time::Instant::now() + self.silence);
+                    silence.as_mut().reset(tokio::time::Instant::now() + silence_every);
                 }
                 _ = &mut silence => break,
                 _ = self.reconfigured.notified() => break,
@@ -1618,6 +1630,46 @@ mod tests {
         ups(2).await;
         assert!(c.handle().device_frame(hello.clone()));
         assert_eq!(next(&mut ws).await, hello);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn an_idle_line_says_enough_itself_to_survive_the_hubs_silence_window() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/relay", l.local_addr().unwrap());
+        let c = client((&url, ""), Arc::new(Exec::default()), Arc::new(Sink::default()));
+        // The production intervals, scaled: 30 s inside a 90 s hub window.
+        c.set_intervals(Duration::from_millis(60), Duration::from_millis(600));
+        let task = tokio::spawn(c.clone().run());
+        let (s, _) = tokio::time::timeout(Duration::from_secs(10), l.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut ws = tokio_tungstenite::accept_async(s).await.unwrap();
+        // A hub that reads nothing for 180 ms (three keepalives) drops the line, as the
+        // real one does. The hub itself sends nothing down, so the line also has to stay
+        // up without ever seeing a frame from the hub.
+        let window = Duration::from_millis(180);
+        let started = Instant::now();
+        let mut keepalives = 0;
+        while started.elapsed() < Duration::from_millis(1200) {
+            match tokio::time::timeout(window, ws.next()).await {
+                Ok(Some(Ok(Message::Text(t)))) => {
+                    let v: Value = serde_json::from_str(t.as_str()).unwrap();
+                    assert_eq!(v["type"], "sharing", "the keepalive is a frame the hub takes");
+                    keepalives += 1;
+                }
+                // The hub's window passed with nothing from the line: it would have said
+                // "line silent, dropping it".
+                r => panic!("the hub would have dropped the line after {keepalives} keepalives: {r:?}"),
+            }
+        }
+        assert!(keepalives >= 12, "a frame about every 60 ms: {keepalives}");
+        assert_eq!(
+            c.handle().state(),
+            LineState::Online,
+            "the line is not dropped from the PC side either"
+        );
         task.abort();
     }
 
