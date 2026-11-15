@@ -36,6 +36,12 @@ export const LOCAL_CORE_TOOLS: readonly string[] = [
   "app_workflow_report",
   // A long call moved to the background tells the agent to read its result with this one.
   "app_background_result",
+  // The prompt's workflow guidance names both: a chat may be told to ask for the orchestrator
+  // switch, or to ask the user to allow a step. A tool named in the prompt must be listed.
+  "app_orchestrator_on",
+  "app_request_allow",
+  // The prompt's pages guidance names this one too.
+  "app_pin_page",
 ];
 
 export const WORKER_SERVED: readonly string[] = [...COMPAT_ALWAYS, ...COMPAT_WITH_MCP];

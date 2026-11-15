@@ -19,11 +19,13 @@ export const DISALLOWED_TOOLS = ["CronCreate", "CronDelete", "CronList", "Schedu
 /**
  * Built-ins a local chat does not need. Claude Code's web search runs on Anthropic's servers,
  * which a local model server cannot do; Helm's own search tool takes its place. Helm has its own
- * chat messaging and orchestrator workflow, so Claude Code's are not needed either. Plan mode and
- * notebooks are rarely used and large. Each schema is sent whole in every request on a local
- * server (it cannot expand tool-search results), so anything a small model will not use costs it.
+ * chat messaging and orchestrator workflow, so Claude Code's are not needed either. Notebooks are
+ * rarely used and large. A local chat cannot enter Plan mode on its own, but keeps the way out:
+ * the user can still put the chat there from the composer, and only ExitPlanMode ends it. Each
+ * schema is sent whole in every request on a local server (it cannot expand tool-search results),
+ * so anything a small model will not use costs it.
  */
-const LOCAL_DISALLOWED_TOOLS = ["WebSearch", "SendMessage", "Workflow", "EnterPlanMode", "ExitPlanMode", "NotebookEdit", "ReportFindings", "ListAgents"];
+const LOCAL_DISALLOWED_TOOLS = ["WebSearch", "SendMessage", "Workflow", "EnterPlanMode", "NotebookEdit", "ReportFindings", "ListAgents"];
 
 /** Claude Code's own worktree tools; kept off unless the user lets them through. */
 const WORKTREE_TOOLS = ["EnterWorktree", "ExitWorktree"];

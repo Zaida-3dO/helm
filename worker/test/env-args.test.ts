@@ -187,13 +187,20 @@ test("Claude Code's schedule tools come off the disallowed list only on request,
   assert.ok(scheduleRedirect("CronList", {}).includes("app_list_schedules"));
   assert.ok(scheduleRedirect("CronDelete", {}).includes("app_cancel_schedule"));
   assert.ok(scheduleRedirect("RemoteTrigger", {}).includes("app_create_schedule"));
+  // A local chat does not list the schedule tools, so the refusal says how to reach them; a
+  // Claude chat's refusal does not say it.
+  assert.ok(scheduleRedirect("CronList", {}, true).includes("through app_mcp_call"), "local: names the route");
+  assert.ok(!scheduleRedirect("CronList", {}, false).includes("app_mcp_call"), "Claude chat: no route needed");
+  assert.ok(scheduleRedirect("ScheduleWakeup", { delaySeconds: 120 }, true).includes("through app_mcp_call"));
 });
 
 test("a local chat also loses the built-ins it will not use, and no name is listed twice", () => {
   const local = { baseUrl: "http://127.0.0.1:40731", model: "qwen:8b" };
-  const localOnly = ["WebSearch", "SendMessage", "Workflow", "EnterPlanMode", "ExitPlanMode", "NotebookEdit", "ReportFindings", "ListAgents"];
+  const localOnly = ["WebSearch", "SendMessage", "Workflow", "EnterPlanMode", "NotebookEdit", "ReportFindings", "ListAgents"];
   const on = disallowedTools({ local }, {});
   assert.ok(localOnly.every((t) => on.includes(t)), "a local chat loses them all");
+  // A chat the user put in Plan mode from the composer still needs the way out.
+  assert.equal(on.includes("ExitPlanMode"), false, "a local chat keeps ExitPlanMode");
   assert.equal(new Set(on).size, on.length, "no name listed twice");
   // A local chat the gates act in has already lost Workflow: it is still listed once.
   const gated = disallowedTools({ local }, { HELM_WORKFLOW_GATES: "1" });
