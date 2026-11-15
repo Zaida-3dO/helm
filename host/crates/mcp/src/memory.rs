@@ -201,6 +201,7 @@ mod tests {
             secrets: vec!["tok-secret".into()],
             guidance: None,
             error: None,
+            oauth: false,
         }
     }
 

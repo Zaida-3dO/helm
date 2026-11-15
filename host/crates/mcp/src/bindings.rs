@@ -29,6 +29,7 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
     crate::repo_gate::LaunchGate::export_all_to(dir).map_err(|e| e.to_string())?;
     crate::google::GoogleAccountList::export_all_to(dir).map_err(|e| e.to_string())?;
     crate::google::GoogleSignIn::export_all_to(dir).map_err(|e| e.to_string())?;
+    OAuthStatus::export_all_to(dir).map_err(|e| e.to_string())?;
     let mut names = vec![
         McpEditorSnapshot::ident(),
         McpServer::ident(),
@@ -39,6 +40,7 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         OAuthConfig::ident(),
         AgentSnapshot::ident(),
         AgentServerView::ident(),
+        OAuthStatus::ident(),
         McpServerSaveArgs::ident(),
         McpServerRemoveArgs::ident(),
         McpServerEnableArgs::ident(),

@@ -15,6 +15,9 @@
 //! | `mcp_repo_approve` | maintenance | `{file, name, hash}` → the list |
 //! | `mcp_repo_revoke` | maintenance | `{file, name}` → the list |
 //! | `mcp_google_*` | | the Google accounts block's ops, listed in [`crate::google`] |
+//! | `mcp_oauth_connect` | blocking | `{serverId}` → [`OAuthStatus`](crate::types::OAuthStatus) — the browser sign-in for a remote server, listed in [`crate::oauth_ops`] |
+//! | `mcp_oauth_status` | blocking | `{serverId}` → [`OAuthStatus`](crate::types::OAuthStatus) |
+//! | `mcp_oauth_disconnect` | maintenance | `{serverId}` → `null` |
 //!
 //! Every save emits the `mcp_config {revision}` event (a signal to re-read).
 
@@ -59,6 +62,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
             to_value(&g.seen())
         });
     crate::google::register_ops(reg);
+    crate::oauth_ops::register_ops(reg);
 }
 
 #[derive(serde::Deserialize)]

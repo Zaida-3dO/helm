@@ -743,6 +743,7 @@ mod tests {
             secrets: token.map(|t| vec![t.to_owned()]).unwrap_or_default(),
             guidance: None,
             error: None,
+            oauth: false,
         };
         (draft, resolved)
     }
