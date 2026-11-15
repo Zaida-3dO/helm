@@ -8,7 +8,7 @@ import { useShell } from '../shell/context.ts';
 import { Button, Checkbox } from '../ui/index.ts';
 import { ItemDrawer } from './ItemDrawer.tsx';
 import { columnCount, holdersFor, shortId } from './model.ts';
-import { tasksStoreFor } from './open.ts';
+import { noteTasksStore, tasksStoreFor } from './open.ts';
 import { REFRESH_EVERY_MS, visibleProjects, type TasksState, type TasksStore } from './store.ts';
 
 /** Reads again at most this often when the window is focused repeatedly. */
@@ -18,8 +18,12 @@ function clock(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-export function statusLine(s: TasksState): string {
-  if (s.connection === 'missing') return 'Add the board address and token in Settings, Projects to see tasks.';
+export function statusLine(s: TasksState, remote = false): string {
+  if (s.connection === 'missing') {
+    return remote
+      ? 'The PC this chat runs on has no task board set up in its Settings, Projects.'
+      : 'Add the board address and token in Settings, Projects to see tasks.';
+  }
   if (!s.loaded) return s.error ?? 'Reading board…';
   const parts = ['Updates when this tab is shown and every minute while it stays open'];
   if (s.lastReadAt !== null) parts.push(`Last complete read ${clock(s.lastReadAt)}`);
@@ -27,11 +31,12 @@ export function statusLine(s: TasksState): string {
   return parts.join(' · ');
 }
 
-export function TasksView({ visible, focused }: { visible: boolean; focused: boolean }) {
+export function TasksView({ visible, focused, remoteChatId }: { visible: boolean; focused: boolean; remoteChatId?: string }) {
   const shell = useShell();
-  const store = tasksStoreFor(shell.api);
+  const store = tasksStoreFor(shell.api, remoteChatId);
   const s = useSyncExternalStore(store.subscribe, store.snapshot);
   const lastFocusRead = useRef(0);
+  useEffect(() => noteTasksStore(store), [store]);
 
   // Read on show; stop when hidden. A missing connection reads nothing.
   useEffect(() => {
@@ -67,7 +72,7 @@ export function TasksView({ visible, focused }: { visible: boolean; focused: boo
   return (
     <div className="tk-root" data-testid="tasks-view" data-connection={s.connection} data-loaded={s.loaded ? 'true' : 'false'}>
       <div className="tk-status" data-testid="tasks-status" role="status">
-        {statusLine(s)}
+        {statusLine(s, !!remoteChatId)}
       </div>
       {s.stale && s.loaded && (
         <div className="tk-stale" data-testid="tasks-stale" role="alert">

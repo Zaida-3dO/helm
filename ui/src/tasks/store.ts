@@ -88,11 +88,20 @@ export class TasksStore {
   readonly reader: BoardReader;
 
   private readonly now: () => number;
+  /** Where the saved connection is looked at: this PC's board, or the board of the PC that
+   * runs a mirrored chat. */
+  private readonly connection: () => Promise<{ url: string; hasToken: boolean }>;
 
-  constructor(api: Api, now: () => number = Date.now, reader?: BoardReader) {
+  constructor(
+    api: Api,
+    now: () => number = Date.now,
+    reader?: BoardReader,
+    connection?: () => Promise<{ url: string; hasToken: boolean }>,
+  ) {
     this.now = now;
     this.ops = boardOps(api);
     this.reader = reader ?? new BoardReader(api);
+    this.connection = connection ?? (() => this.ops.connection());
   }
 
   subscribe = (l: () => void): (() => void) => {
@@ -120,7 +129,7 @@ export class TasksStore {
   /** Whether a board address and token are saved; the Tasks entry shows only when they are. */
   async checkConnection(): Promise<boolean> {
     try {
-      const c = await this.ops.connection();
+      const c = await this.connection();
       const ok = c.url.trim() !== '' && c.hasToken;
       this.set({ connection: ok ? 'ready' : 'missing' });
       return ok;

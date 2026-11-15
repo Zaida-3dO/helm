@@ -103,7 +103,7 @@ export function FilesTree({ ops, chatId, root, visible }: FilesTreeProps) {
       const dirs = watchedSlice([root, ...st.expanded.values()]);
       busy = true;
       ops
-        .fileStat(dirs)
+        .fileStat(dirs, chatId)
         .then((stamps) => {
           stamps.forEach((stamp, i) => {
             const dir = dirs[i] as string;
