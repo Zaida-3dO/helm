@@ -409,14 +409,22 @@ pub struct Client {
     sharing: std::sync::Mutex<Sharing>,
     /// Woken when the saved connection changes, so a new address or token applies at once.
     pub reconfigured: tokio::sync::Notify,
+    /// How often the idle line says something itself (see [`KEEPALIVE_EVERY`]).
+    keepalive: Duration,
+    /// How long the line may go without proof of either direction before it is dropped.
+    silence: Duration,
 }
 
 /// The most pictures, and the most other files, taken from one message.
 const MAX_FILES: usize = 10;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
-/// The hub pings every 30 s; a line silent for 100 s is treated as gone.
+/// The hub drops a line that sends nothing for 90 s, and not every proxy carries WebSocket
+/// pings across — so the PC says something itself every [`KEEPALIVE_EVERY`], well inside that
+/// window, and reads its own sent frame as the line being alive in both directions.
 const SILENCE: Duration = Duration::from_secs(100);
+/// A third of the hub's 90-second silence window.
+const KEEPALIVE_EVERY: Duration = Duration::from_secs(30);
 /// The most one frame from the hub may hold: a Telegram message can carry up to 50 MB of files,
 /// which is a third larger as base64, plus its text.
 const MAX_FRAME: usize = 80 * 1024 * 1024;
@@ -463,6 +471,8 @@ impl Client {
             delivering: Arc::default(),
             sharing: Default::default(),
             reconfigured: tokio::sync::Notify::new(),
+            keepalive: KEEPALIVE_EVERY,
+            silence: SILENCE,
         })
     }
 
@@ -612,12 +622,14 @@ impl Client {
         for v in self.handle.voice_to_reoffer() {
             let _ = out_tx.send(v);
         }
-        let silence = tokio::time::sleep(SILENCE);
+        let silence = tokio::time::sleep(self.silence);
         tokio::pin!(silence);
+        let mut keepalive = tokio::time::interval(self.keepalive);
+        keepalive.tick().await; // the interval's immediate first tick
         loop {
             tokio::select! {
                 frame = stream.next() => {
-                    silence.as_mut().reset(tokio::time::Instant::now() + SILENCE);
+                    silence.as_mut().reset(tokio::time::Instant::now() + self.silence);
                     match frame {
                         Some(Ok(Message::Text(t))) => self.on_frame(t.as_str(), &out_tx),
                         Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
@@ -630,6 +642,18 @@ impl Client {
                 Some((for_line, v)) = up_rx.recv() => {
                     if for_line != ANY_LINE && for_line != line { continue; }
                     if sink_ws.send(Message::Text(v.to_string().into())).await.is_err() { break; }
+                }
+                // An idle line still has to reach the hub inside its silence window. A
+                // WebSocket ping is not enough: a proxy in between may answer it itself and
+                // never pass it on. The household switches are a frame the hub already
+                // takes, and re-sending what it already has is harmless.
+                _ = keepalive.tick() => {
+                    let frame = self.sharing().frame();
+                    if sink_ws.send(Message::Text(frame.to_string().into())).await.is_err() { break; }
+                    // A frame the hub took is proof the line lives; its own pings may be
+                    // stopped by the same proxy, so waiting for one to arrive cannot be the
+                    // only liveness check.
+                    silence.as_mut().reset(tokio::time::Instant::now() + self.silence);
                 }
                 _ = &mut silence => break,
                 _ = self.reconfigured.notified() => break,
