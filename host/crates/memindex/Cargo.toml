@@ -1,0 +1,11 @@
+[package]
+name = "helm-memindex"
+description = "Memory feeds: read the local sources (notes, chat records, logs) and cut them into the docs and chunks the hub indexes."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+sha2.workspace = true
