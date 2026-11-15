@@ -17,6 +17,7 @@ import { AttentionInbox, inboxRows, nextAttention } from '../attention/index.ts'
 import { PagesEntry } from '../pages/PagesEntry.tsx';
 import { ProfileDisc } from '../profiles/Disc.tsx';
 import { ProfileItem, moveChatToProfile, profileChoices, rowsForProfile, shareChatWith, shareChoices, sharedFrom, useProfiles } from '../profiles/index.ts';
+import { ALL_DEVICES } from '../devices/api.ts';
 import { DeviceToggle } from '../devices/DeviceToggle.tsx';
 import { useDevices, useRemoteList } from '../devices/hooks.ts';
 import { scopeNote } from '../devices/model.ts';
@@ -123,17 +124,35 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const activeProfile = prof.view?.activeId ?? null;
   const localRows = useMemo(() => rowsForProfile(snap.rows, activeProfile, prof.ids) as SidebarRow[], [snap.rows, activeProfile, prof.ids]);
   const [view, setView] = useState<SidebarView>('projects');
-  // Another device's chats: read through the mirror for the active profile, drawn by the same tree.
+  // Another device's chats: read through the mirror for the active profile, drawn by the same
+  // tree. "All devices" mixes them with this PC's own rows; the person filter is the profile
+  // picker above — a named profile sees that person's chats, no profile sees everyone's.
   const { snap: dev } = useDevices(api, bus);
   const remote = dev.remote;
-  const { snap: other, loadMore: loadMoreRemote } = useRemoteList(api, bus, remote?.uid ?? null, activeProfile, view === 'archived');
-  const shownRows = remote ? other.rows : localRows;
+  const allDevices = dev.allDevices;
+  const { snap: other, loadMore: loadMoreRemote } = useRemoteList(api, bus, remote?.uid ?? (allDevices ? ALL_DEVICES : null), activeProfile, view === 'archived');
+  const shownRows = remote ? other.rows : allDevices ? [...localRows, ...other.rows] : localRows;
   // Another device's groups collapse on this screen only: its projects are not ours to change.
   const [remoteShut, setRemoteShut] = useState<ReadonlySet<string>>(() => new Set());
-  const shownProjects = useMemo(
-    () => (remote ? other.projects.map((p) => (remoteShut.has(p.id) ? { ...p, collapsed: true } : p)) : snap.projects),
-    [remote, other.projects, remoteShut, snap.projects],
-  );
+  const remoteProjectIds = useMemo(() => new Set(other.projects.map((p) => p.id)), [other.projects]);
+  const shutRemote = (list: ProjectNode[]) => list.map((p) => (remoteShut.has(p.id) ? { ...p, collapsed: true } : p));
+  const shownProjects = useMemo(() => {
+    if (remote) return shutRemote(other.projects);
+    if (allDevices) {
+      const mine = new Set(snap.projects.map((p) => p.id));
+      return [...snap.projects, ...shutRemote(other.projects.filter((p) => !mine.has(p.id)))];
+    }
+    return snap.projects;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [remote, allDevices, other.projects, remoteShut, snap.projects]);
+  // A row or group that runs on another computer: read here, changed there.
+  const remoteOfRow = (chatId: string): { name: string; online: boolean } | null => {
+    if (remote) return { name: remote.name, online: remote.online };
+    const uid = other.hosts.get(chatId);
+    if (!uid) return null;
+    const d = dev.list?.devices.find((x) => x.uid === uid);
+    return d ? { name: d.name, online: d.online } : { name: 'Another device', online: false };
+  };
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [collapsedItems, setCollapsedItems] = useState<Set<string>>(() => new Set());
@@ -284,7 +303,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const promptRename = (row: SidebarRow) => setPrompt({ title: 'Rename chat', label: 'Title', value: row.title, suggestFor: row.chatId, onSave: (t) => act.renameChat(row, t) });
   const rowMenuItems = (row: SidebarRow): MenuItem[] => {
     // A chat on another device is renamed here; everything else is done on that device.
-    if (remote) return withChatIcons([{ id: 'rename', label: 'Rename chat…', onSelect: () => promptRename(row) }]);
+    if (remoteOfRow(row.chatId)) return withChatIcons([{ id: 'rename', label: 'Rename chat…', onSelect: () => promptRename(row) }]);
     const siblings = snap.rows.filter((r) => r.groupProjectId === row.groupProjectId && r.archived === row.archived);
     const byId = new Map(siblings.map((r) => [r.chatId, r]));
     const depthOf = (id: string) => {
@@ -423,6 +442,9 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const suppressClick = useRef(false);
   const startDrag = (e: ReactPointerEvent, src: DragSource, title: string) => {
     if (e.button !== 0 || e.ctrlKey || e.pointerType === 'touch' || view === 'activity' || remote) return;
+    // In the all-devices mix, a chat that runs elsewhere cannot be dragged here.
+    if (src.kind === 'chat' && remoteOfRow(src.chatId)) return;
+    if (src.kind === 'project' && remoteProjectIds.has(src.projectId)) return;
     setDrag({ src, title, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, active: false, target: null });
   };
   useEffect(() => {
@@ -519,8 +541,21 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     };
   }, [drag !== null, act, data, projectsById]);
 
-  const paging = remote ? { loading: other.loading, complete: !other.more, error: other.error, started: true } : snap.paging[view];
-  const loadMoreChats = () => (remote ? loadMoreRemote() : void data.page(view));
+  const paging = remote
+    ? { loading: other.loading, complete: !other.more, error: other.error, started: true }
+    : allDevices
+      ? {
+          loading: snap.paging[view].loading || other.loading,
+          complete: snap.paging[view].complete && !other.more,
+          error: snap.paging[view].error ?? other.error,
+          started: true,
+        }
+      : snap.paging[view];
+  const loadMoreChats = () => {
+    if (remote) return loadMoreRemote();
+    if (allDevices) loadMoreRemote();
+    void data.page(view);
+  };
   const switchView = (v: SidebarView) => {
     setView(v);
     setMenu(null);
@@ -611,6 +646,11 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       {remote && (
         <div className="sb-device-note" data-testid="device-scope-note" data-online={remote.online ? 'true' : 'false'}>
           {scopeNote(remote, now)}
+        </div>
+      )}
+      {allDevices && (
+        <div className="sb-device-note" data-testid="device-scope-note" data-online="true">
+          Chats on all your PCs — the profile above decides whose
         </div>
       )}
       <div
@@ -762,7 +802,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
             if (collapse && selected && projectsHolding(projectsById, selectedRow?.groupProjectId).has(p.id)) {
               setKeptShut((k) => ({ chat: selected, ids: new Set(k.chat === selected ? k.ids : []).add(p.id) }));
             }
-            if (remote) {
+            if (remote || remoteProjectIds.has(p.id)) {
               setRemoteShut((s) => {
                 const n = new Set(s);
                 if (collapse) n.add(p.id);
@@ -771,7 +811,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
               });
             } else if (p.collapsed !== collapse) void act.updateProject(p, { collapsed: collapse });
           }}
-          readOnly={!!remote}
+          readOnly={!!remote || remoteProjectIds.has(p.id)}
           onPin={() => void act.updateProject(p, { pinned: !p.pinned })}
           onMove={(dir) => moveProject(p, dir)}
           onNew={() => newChatIn(p)}
@@ -789,10 +829,10 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         indent={view === 'activity' ? 0 : (groupDepth.get(row.groupProjectId) ?? 0) * 16 + (it.block ? 4 : 0)}
         project={projectsById.get(row.groupProjectId)}
         selected={row.chatId === selected}
-        needsYou={!remote && snap.needsYou.has(row.chatId)}
+        needsYou={!remoteOfRow(row.chatId) && snap.needsYou.has(row.chatId)}
         needsLabel={needsYouLabel(snap.attention?.needsYou.find((r) => r.chatId === row.chatId)?.kind)}
-        flagReason={remote ? undefined : snap.flagged.get(row.chatId)}
-        remote={remote ? { name: remote.name, online: remote.online } : null}
+        flagReason={remoteOfRow(row.chatId) ? undefined : snap.flagged.get(row.chatId)}
+        remote={remoteOfRow(row.chatId)}
         sharedBy={sharedByOf(row)}
         dragging={drag?.active === true && drag.src.kind === 'chat' && drag.src.chatId === row.chatId}
         now={now}

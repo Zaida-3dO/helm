@@ -13,6 +13,8 @@ export interface DeviceInfo {
   name: string;
   /** The person who uses it (the hub's name for them); null when unknown. */
   person: string | null;
+  /** Every hub person this PC acts for — one per linked profile, the PC's own first. */
+  people?: { personId: string; person: string }[];
   online: boolean;
   /** An ISO time from the hub, or null when it never connected. */
   lastSeenAt: string | null;
@@ -46,6 +48,10 @@ export type RemoteChatRecord = ChatRecord & {
   sharedWith?: string[];
   projectName?: string;
   projectColour?: string | null;
+  /** The board this chat shows under on its home PC; absent when it sits on no board. */
+  boardId?: string | null;
+  boardName?: string | null;
+  boardColour?: string | null;
   needsAttention?: boolean;
 };
 
@@ -63,11 +69,20 @@ export interface ThisDevice {
 /** The preference that remembers which computer's chats the sidebar shows. */
 export const SELECTED_DEVICE_KEY = 'selectedDevice';
 
+/** A `selectedDevice` value meaning every computer on the hub, this one included. */
+export const ALL_DEVICES = 'all';
+
 export function deviceOps(api: Api) {
   return {
     list: () => api<DevicesList>('devices_list', {}),
-    /** One page of a computer's chats for a profile (own and shared). */
-    chats: (a: { deviceUid: string; profileId: string; archived?: boolean; offset?: number; limit?: number }) => api<DeviceChats>('devices_chats', a),
+    /** One page of a computer's chats for a profile (own and shared). `deviceUid: "all"` is
+     *  every computer this PC keeps a copy of; `who: "any"` widens past the profile to every
+     *  person, a hub person id to that one. Both are a view, never a limit. */
+    chats: (a: { deviceUid: string; profileId: string | null; who?: 'any' | string; archived?: boolean; offset?: number; limit?: number }) => api<DeviceChats>('devices_chats', a),
+    /** Stage an image, a file or pasted text for the next message to a chat that runs on
+     *  another PC; the id rides the send like a local attachment id. */
+    attach: (a: { chatId: string; kind: 'image' | 'file' | 'text'; name: string; mime?: string; data?: string; path?: string; text?: string }) =>
+      api<{ attachmentId: string }>('devices_attach', a),
     /** The projects a computer last said it has (every one, not only those holding chats shown to this profile). */
     projects: (deviceUid: string) => api<DeviceChats>('devices_chats', { deviceUid, limit: 1 }).then((r) => r.projects),
     createChat: (a: { deviceUid: string; projectId: string; model?: string; effort?: string }) => api<{ chatId: string }>('devices_create_chat', a),

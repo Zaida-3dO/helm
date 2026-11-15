@@ -5,7 +5,7 @@ import type { Api } from '../api/client.ts';
 import { DEVICE_EVENTS } from '../api/devices.ts';
 import type { EventBus } from '../api/events.ts';
 import type { ChatRecord } from '../api/types.ts';
-import { deviceOps, type DeviceInfo } from './api.ts';
+import { ALL_DEVICES, deviceOps, type DeviceInfo } from './api.ts';
 import { composerFor, remoteChatState, remoteHostOf, type RemoteChatState, type RemoteComposer } from './state.ts';
 import { devicesStoreFor, RemoteList, type DevicesSnapshot, type DevicesStore, type RemoteListSnapshot } from './store.ts';
 
@@ -44,7 +44,8 @@ export const REMOTE_REFRESH_MS = 400;
 
 /**
  * The chats of another computer for a profile, kept fresh while `deviceUid` is set. With no
- * computer (or no profile) nothing is read and the list is empty.
+ * computer nothing is read and the list is empty. `deviceUid: "all"` reads every computer's copy
+ * at once; with no profile the view widens to every person (the host's default for no profile).
  */
 export function useRemoteList(
   api: Api,
@@ -56,7 +57,7 @@ export function useRemoteList(
   const list = useMemo(() => new RemoteList(deviceOps(api)), [api]);
   const snap = useSyncExternalStore(list.subscribe, () => list.snapshot);
   useEffect(() => {
-    if (!deviceUid || !profileId) {
+    if (!deviceUid) {
       list.clear();
       return;
     }
@@ -67,16 +68,17 @@ export function useRemoteList(
       clearTimeout(timer);
       timer = setTimeout(() => void list.load(q), REMOTE_REFRESH_MS);
     };
+    const fromDevice = (uid: string | undefined) => uid === undefined || uid === deviceUid || deviceUid === ALL_DEVICES;
     const offs = [
       bus.on('chat', (e) => {
         // Only that computer's chats matter here; a record that does not say where it runs is read anyway.
         const host = (e.chat as { hostDeviceId?: string } | undefined)?.hostDeviceId;
-        if (host === undefined || host === deviceUid) later();
+        if (fromDevice(host)) later();
       }),
       bus.on('chat_removed', later),
       // Chats of that computer nobody has open here change without a `chat` event.
       bus.on(DEVICE_EVENTS.chats, (e) => {
-        if ((e as { deviceUid?: string }).deviceUid === deviceUid) later();
+        if (fromDevice((e as { deviceUid?: string }).deviceUid)) later();
       }),
       bus.on(DEVICE_EVENTS.devices, later),
       bus.on(DEVICE_EVENTS.profiles, later),
