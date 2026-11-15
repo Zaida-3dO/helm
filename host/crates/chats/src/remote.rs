@@ -46,6 +46,12 @@ pub trait RemoteChats: Send + Sync {
     fn page(&self, args: TranscriptPageArgs) -> Fut<Res>;
     /// `{submission, chat}` as `chat_send` answers.
     fn send(&self, args: ChatSendArgs) -> Fut<Res>;
+    /// The same send, as the named hub person instead of the person the sidebar shows: a call
+    /// from a chat or from outside acts as its own person. `None` is [`Self::send`].
+    fn send_as(&self, args: ChatSendArgs, person: Option<String>) -> Fut<Res> {
+        let _ = person;
+        self.send(args)
+    }
     fn stop(&self, chat_id: String) -> Fut<Res>;
     fn answer(&self, args: InteractionAnswerArgs) -> Fut<Res>;
     /// The updated chat record, for each of the three that change one.

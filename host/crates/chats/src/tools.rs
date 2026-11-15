@@ -799,6 +799,17 @@ impl SendLimits {
         log.push_back((now, from.to_owned(), to.unwrap_or("").to_owned()));
         Ok(())
     }
+
+    /// Take back the place [`Self::admit`] recorded at `now`, for a send that did not arrive.
+    pub fn give_back(&self, from: &str, to: &str, now: Instant) {
+        let mut log = self.log.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(i) = log
+            .iter()
+            .position(|(t, f, d)| *t == now && f == from && d == to)
+        {
+            log.remove(i);
+        }
+    }
 }
 
 /// The header and fixed paragraph the host puts in front of a cross-chat message:
@@ -930,27 +941,57 @@ async fn send_to_mirror_chat(
     if mirror.meta["archived"] == true {
         return Err(refuse("That chat is archived."));
     }
-    limits.admit(&ctx.caller_chat_id, Some(to), Instant::now())?;
+    let admitted = Instant::now();
+    limits.admit(&ctx.caller_chat_id, Some(to), admitted)?;
     let sender = meta(ctx, &ctx.caller_chat_id)?;
     let text = frame(
         sender["title"].as_str().unwrap_or(""),
         &ctx.caller_chat_id,
         body,
     );
+    // The words go as the person whose profile the sending chat is in, not whoever the sidebar
+    // shows. No profile table or no linked person leaves it to the default.
+    let from = ctx.caller_chat_id.clone();
+    let store = db(ctx)?;
+    let acting: Option<String> = tokio::task::spawn_blocking(move || {
+        store.snapshot(|tx| {
+            Ok::<_, rusqlite::Error>(
+                tx.query_row(
+                    "SELECT hub_person_id FROM profiles WHERE id =
+                         COALESCE((SELECT NULLIF(profile_id, '') FROM chats WHERE id = ?1),
+                                  (SELECT id FROM profiles WHERE is_home = 1))",
+                    [&from],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .ok()
+                .flatten(),
+            )
+        })
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .flatten();
     // A send never touches the draft on the other PC: it was not typed in its composer.
     remote
-        .send(crate::types::ChatSendArgs {
-            chat_id: to.to_owned(),
-            submission_id: uuid::Uuid::new_v4().to_string(),
-            text,
-            action: crate::types::SendAction::Steer,
-            draft_revision: 0,
-            origin: Some(crate::types::SendOrigin::Action),
-            attachments: None,
-            context: None,
-        })
+        .send_as(
+            crate::types::ChatSendArgs {
+                chat_id: to.to_owned(),
+                submission_id: uuid::Uuid::new_v4().to_string(),
+                text,
+                action: crate::types::SendAction::Steer,
+                draft_revision: 0,
+                origin: Some(crate::types::SendOrigin::Action),
+                attachments: None,
+                context: None,
+            },
+            acting,
+        )
         .await
-        .map_err(|e| ToolError::refused(e.message))?;
+        .map_err(|e| {
+            limits.give_back(&ctx.caller_chat_id, to, admitted);
+            ToolError::refused(e.message)
+        })?;
     let (title, _) = cut_bytes(mirror.meta["title"].as_str().unwrap_or(""), 512);
     Ok(json!({
         "delivered": true,

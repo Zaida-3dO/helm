@@ -1219,6 +1219,14 @@ impl TelegramSink for ChatSink {
                 );
                 return;
             };
+            // The tap must come from the person the question was asked of.
+            if ask.person != who {
+                up.notify(
+                    &who,
+                    "That request was not asked of you, so your tap was not used.",
+                );
+                return;
+            }
             let label = ask.options[index].clone();
             let nothing =
                 format!("Your \"{label}\" was not used: that request is no longer waiting.");
