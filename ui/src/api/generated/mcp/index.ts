@@ -4,6 +4,7 @@ export type { AgentServerView } from './AgentServerView.ts';
 export type { AgentSnapshot } from './AgentSnapshot.ts';
 export type { GoogleAccount } from './GoogleAccount.ts';
 export type { GoogleAccountList } from './GoogleAccountList.ts';
+export type { GoogleClientState } from './GoogleClientState.ts';
 export type { GooglePermission } from './GooglePermission.ts';
 export type { GoogleSignIn } from './GoogleSignIn.ts';
 export type { LaunchGate } from './LaunchGate.ts';

@@ -26,6 +26,7 @@
 pub mod admin;
 pub mod bindings;
 pub mod config;
+pub mod gmail;
 pub mod google;
 pub mod lines;
 pub mod memory;

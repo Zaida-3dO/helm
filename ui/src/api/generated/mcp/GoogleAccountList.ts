@@ -11,7 +11,7 @@ export type GoogleAccountList = { accounts: Array<GoogleAccount>,
  */
 permission?: GooglePermission, 
 /**
- * `uvx` was found on `PATH`.
+ * `uvx` was found on `PATH` (the bridge program is still a `uvx` run).
  */
 uvFound: boolean, 
 /**

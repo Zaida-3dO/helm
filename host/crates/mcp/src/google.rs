@@ -1,39 +1,50 @@
-//! Several Google accounts through the open-source `workspace-mcp` server.
+//! Google accounts: signing in through Helm's own OAuth client, and what Gmail support needs
+//! from that.
 //!
-//! Helm never holds a Google password or token. The server runs as a program on this computer,
-//! one process for every account, with the user's own Google sign-in client. It keeps each
-//! account's sign-in as `<address>.json` in a folder inside the profile; Helm only reads that
-//! folder's file names (never their contents) to list the accounts, and deletes a file when the
-//! user removes an account.
+//! Helm signs each account in through the browser itself (the OAuth client in [`crate::oauth`]
+//! pointed at Google's fixed addresses) and keeps each account's tokens in the credential store,
+//! one sealed entry per address. The account list is the stored identities, not files on disk.
+//! The Gmail calls themselves are made by the host ([`crate::gmail`]); the `workspace-mcp`
+//! server the preset starts is only the bridge for Google's other services, and its package
+//! name is pinned at resolve time so saved servers keep running the version Helm tested.
 //!
 //! | op | class | args → result |
 //! |---|---|---|
 //! | `mcp_google_accounts` | blocking | `{serverId}` → [`GoogleAccountList`] |
-//! | `mcp_google_add` | blocking | `{serverId, email}` → [`GoogleSignIn`] (starts the sign-in; the browser opens) |
+//! | `mcp_google_add` | blocking | `{serverId, email?}` → [`GoogleSignIn`] (opens the browser; without an email Google shows its chooser) |
 //! | `mcp_google_remove` | maintenance | `{serverId, email}` → [`GoogleAccountList`] |
 //! | `mcp_google_label` | maintenance | `{serverId, email, label}` → [`GoogleAccountList`] |
 //! | `mcp_google_permission` | maintenance | `{serverId, permission}` → [`McpEditorSnapshot`] |
+//! | `mcp_google_client_get` | blocking | `{}` → [`GoogleClientState`] |
+//! | `mcp_google_client_set` | maintenance | `{clientId, clientSecret}` → [`GoogleClientState`] (write-only: the values are never read back) |
+//! | `mcp_google_client_clear` | maintenance | `{}` → `null` |
 //!
-//! The sign-in client's id and secret are ordinary literals on the server (kept in the credential
-//! store). The credentials folder and the callback port are not stored on the server: they are
-//! added when the server's references are resolved, from this module, so a moved profile keeps
-//! working. The port is chosen once and kept in a small settings file beside the folder, which
-//! also holds the optional label for each address.
+//! The sign-in client is one id + secret pair kept in the credential store for the whole
+//! profile. A server that still carries `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET`
+//! in its own environment (a setup saved before the per-profile client existed) uses those for
+//! that server's sign-ins, and keeps getting the credentials folder and callback port the
+//! program needs to sign itself in; new setups need neither.
+//!
+//! The rules:
+//! - Tokens live only in the credential store, sealed and bound to their entry; nothing here
+//!   returns, logs or prints a token. The account address comes from the `id_token` claim,
+//!   decoded and sanity-checked only — it is never verified against Google's keys, and only a
+//!   loopback-or-https Google sign-in can hand it over in the first place.
+//! - A refresh goes only to the token address kept at sign-in (Google's, always), and refreshes
+//!   of the accounts never overlap: Google retires a refresh token that was used twice.
 
 use crate::config::McpStore;
-use crate::types::{McpEditorSnapshot, ResolvedServer, TransportKind};
-use helm_core::privfs;
-use helm_core::profile::Profile;
+use crate::oauth::{self, AuthServer, StoredAuth, TokenSet, TokenStore};
+use crate::types::{McpEditorSnapshot, McpServer, ResolvedServer};
+use base64::Engine as _;
+use helm_core::credentials::CredentialStore;
 use helm_ipc::{ApiError, OpClass, OpCtx, OpRegistry};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use serde_json::Value;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use ts_rs::TS;
 
 /// The preset id, which is also the default id of a server made from it.
@@ -46,18 +57,38 @@ pub const CLIENT_SECRET_ENV: &str = "GOOGLE_OAUTH_CLIENT_SECRET";
 /// refuses `--tools` (and `--read-only`) beside `--permissions`, and `--permissions` alone loads
 /// only the services it names.
 pub const DEFAULT_ARGS: [&str; 3] = ["workspace-mcp", "--permissions", "gmail:drafts"];
+/// A bare `workspace-mcp` argument is rewritten to this at resolve time, so saved servers run
+/// the version Helm tested. A version the person pinned themselves is left alone.
+pub const WORKSPACE_MCP_PIN: &str = "workspace-mcp==2.4.2";
 
 /// At most this many accounts are listed.
 pub const MAX_ACCOUNTS: usize = 50;
-/// At most this many directory entries are looked at.
-const MAX_SCAN: usize = 500;
 const MAX_LABEL_CHARS: usize = 32;
-const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
-/// How long a started sign-in is watched for.
-const SIGN_IN_WINDOW: Duration = Duration::from_secs(180);
-/// The first start of the server can download it, so the wait is long.
-const STARTUP: Duration = Duration::from_secs(120);
-const AUTH_PREFIX: &str = "https://accounts.google.com/";
+/// An access token with less than this left is refreshed before use.
+const REFRESH_MARGIN: Duration = Duration::from_secs(300);
+/// Google's fixed sign-in addresses. Unlike a remote MCP server there is nothing to discover:
+/// these are published by Google and never move.
+const GOOGLE_ISSUER: &str = "https://accounts.google.com";
+const GOOGLE_AUTHORIZE: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+const GOOGLE_TOKEN: &str = "https://oauth2.googleapis.com/token";
+/// The test hook: in debug builds only, it points the sign-in at an in-process fake that answers
+/// those addresses on this computer (see [`crate::oauth::fake`]). The value must be a plain
+/// loopback http address with no path.
+pub const TEST_AS_ENV: &str = "HELM_TEST_GOOGLE_AS_URL";
+/// Gmail scopes: one per permission level, plus the OpenID ones that identify the account.
+const SCOPE_OPENID: &str = "openid";
+const SCOPE_EMAIL: &str = "email";
+const SCOPE_READONLY: &str = "https://www.googleapis.com/auth/gmail.readonly";
+const SCOPE_COMPOSE: &str = "https://www.googleapis.com/auth/gmail.compose";
+const SCOPE_LABELS: &str = "https://www.googleapis.com/auth/gmail.labels";
+const SCOPE_SEND: &str = "https://www.googleapis.com/auth/gmail.send";
+/// The credential-store entry holding the profile's sign-in client, and the identity sealing it.
+const CLIENT_ENTRY: &str = "google-client";
+const CLIENT_IDENTITY: &str = "google:client";
+/// The credential-store entry listing the accounts (addresses and labels); each account's tokens
+/// are a separate entry. Nothing in the index is a secret — the addresses appear in guidance.
+const INDEX_ENTRY: &str = "google-accounts";
+const INDEX_IDENTITY: &str = "google:accounts";
 
 /// What an account may do with mail. Each level includes the ones before it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -83,6 +114,20 @@ impl GooglePermission {
             .into_iter()
             .find(|p| p.flag() == flag)
     }
+
+    /// The scopes this level asks Google for. `openid email` identify the account. The `send`
+    /// level asks for Google's own send scope: Helm's gate is what keeps drafts-level accounts
+    /// from sending, but Google refuses anything narrower than `gmail.send` for sending.
+    pub fn scopes(self) -> Vec<&'static str> {
+        let mut s = vec![SCOPE_OPENID, SCOPE_EMAIL, SCOPE_READONLY];
+        if self != GooglePermission::Readonly {
+            s.extend([SCOPE_COMPOSE, SCOPE_LABELS]);
+        }
+        if self == GooglePermission::Send {
+            s.push(SCOPE_SEND);
+        }
+        s
+    }
 }
 
 /// One signed-in address and its optional label.
@@ -104,7 +149,7 @@ pub struct GoogleAccountList {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub permission: Option<GooglePermission>,
-    /// `uvx` was found on `PATH`.
+    /// `uvx` was found on `PATH` (the bridge program is still a `uvx` run).
     pub uv_found: bool,
     /// A sign-in Helm started is still open.
     pub signing_in: bool,
@@ -120,65 +165,142 @@ pub struct GoogleSignIn {
     pub auth_url: Option<String>,
 }
 
+/// Whether the profile's Google sign-in client is set. The values themselves never appear.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleClientState {
+    pub configured: bool,
+}
+
 // ---- where things live ----------------------------------------------------------------------
 
-/// The folder the server keeps its sign-ins in.
-pub fn credentials_dir(profile_dir: &Path) -> PathBuf {
+/// The folder the bridge program keeps its own sign-ins in (only for a server still carrying
+/// its own client secrets).
+pub fn credentials_dir(profile_dir: &Path) -> std::path::PathBuf {
     profile_dir.join("mcp").join("google")
 }
 
-fn settings_path(profile_dir: &Path) -> PathBuf {
-    profile_dir.join("mcp").join("google-settings.json")
+/// The profile's sign-in client, as kept in the credential store.
+#[derive(Clone, Serialize, Deserialize)]
+struct ClientPair {
+    client_id: String,
+    client_secret: String,
 }
 
-#[derive(Default, Serialize, Deserialize)]
-struct Settings {
-    #[serde(default)]
-    port: u16,
-    /// Lower-cased address → label.
-    #[serde(default)]
-    labels: BTreeMap<String, String>,
-}
-
-static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
-
-fn read_settings(profile_dir: &Path) -> Settings {
-    privfs::read_capped(&settings_path(profile_dir), MAX_SETTINGS_BYTES + 1)
+fn stored_client(creds: &CredentialStore) -> Option<ClientPair> {
+    creds
+        .read(CLIENT_ENTRY, CLIENT_IDENTITY)
         .ok()
-        .filter(|b| b.len() as u64 <= MAX_SETTINGS_BYTES)
+        .and_then(|b| serde_json::from_slice(&b).ok())
+}
+
+/// The one-line state to answer the client ops with.
+fn client_state(creds: &CredentialStore) -> GoogleClientState {
+    GoogleClientState {
+        configured: stored_client(creds).is_some(),
+    }
+}
+
+fn clean_client(raw: &str, what: &str) -> Result<String, String> {
+    let v = raw.trim();
+    if v.is_empty() || v.len() > 512 || v.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(format!("The Google {what} is not usable."));
+    }
+    Ok(v.to_owned())
+}
+
+/// The credential-entry name for one account's tokens: a hash of the lower-cased address, so
+/// the entry file never carries the address itself (the sealed index does).
+pub fn account_entry(email: &str) -> String {
+    format!(
+        "google-acct-{}",
+        &helm_core::sha256_hex(email.to_ascii_lowercase().as_bytes())[..40]
+    )
+}
+
+/// The identity sealing one account's tokens.
+pub fn account_identity(email: &str) -> String {
+    format!("google:{}", email.to_ascii_lowercase())
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct IndexEntry {
+    email: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+}
+
+fn read_index(creds: &CredentialStore) -> Vec<IndexEntry> {
+    creds
+        .read(INDEX_ENTRY, INDEX_IDENTITY)
+        .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default()
 }
 
-fn write_settings(profile_dir: &Path, s: &Settings) -> Result<(), String> {
-    let path = settings_path(profile_dir);
-    if let Some(dir) = path.parent() {
-        privfs::create_private_dir_all(dir).map_err(|e| e.to_string())?;
+fn write_index(creds: &CredentialStore, list: &[IndexEntry]) -> Result<(), String> {
+    let mut list = list.to_vec();
+    list.truncate(MAX_ACCOUNTS);
+    let json = serde_json::to_vec(&list).map_err(|e| e.to_string())?;
+    creds
+        .write(INDEX_ENTRY, INDEX_IDENTITY, &json)
+        .map_err(|e| e.to_string())
+}
+
+/// The accounts that have stored tokens, sorted, with their labels; index rows whose tokens are
+/// gone are dropped and the index rewritten.
+pub fn listed_accounts(creds: &CredentialStore) -> Vec<GoogleAccount> {
+    let index = read_index(creds);
+    let had = index.len();
+    let mut keep: Vec<IndexEntry> = Vec::new();
+    let mut accounts: Vec<GoogleAccount> = Vec::new();
+    for e in index {
+        let alive = TokenStore::load(creds, &account_entry(&e.email), &account_identity(&e.email))
+            .is_ok_and(|a| a.is_some());
+        if alive {
+            accounts.push(GoogleAccount {
+                email: e.email.clone(),
+                label: e.label.clone(),
+            });
+            keep.push(e);
+        }
     }
-    let bytes = serde_json::to_vec_pretty(s).map_err(|e| e.to_string())?;
-    privfs::write_atomic(&path, &bytes).map_err(|e| e.to_string())
-}
-
-fn free_port() -> Option<u16> {
-    let l = std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?;
-    Some(l.local_addr().ok()?.port())
-}
-
-/// The callback port: chosen once, then kept.
-fn saved_port(profile_dir: &Path) -> u16 {
-    let _g = SETTINGS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let mut s = read_settings(profile_dir);
-    if s.port >= 1024 {
-        return s.port;
+    if keep.len() != had {
+        let _ = write_index(creds, &keep);
     }
-    s.port = free_port().unwrap_or(8000);
-    let _ = write_settings(profile_dir, &s);
-    s.port
+    accounts.sort_by_key(|a| (a.email.to_ascii_lowercase(), a.email.clone()));
+    accounts.truncate(MAX_ACCOUNTS);
+    accounts
 }
 
-// ---- addresses and the account list ---------------------------------------------------------
+/// Keep (or add) one account's row, keeping its label unless a new one is given.
+fn index_upsert(creds: &CredentialStore, email: &str, label: Option<String>) -> Result<(), String> {
+    let key = email.to_ascii_lowercase();
+    let mut index = read_index(creds);
+    let label = label.or_else(|| {
+        index
+            .iter()
+            .find(|e| e.email.to_ascii_lowercase() == key)
+            .and_then(|e| e.label.clone())
+    });
+    index.retain(|e| e.email.to_ascii_lowercase() != key);
+    index.push(IndexEntry {
+        email: email.to_owned(),
+        label,
+    });
+    write_index(creds, &index)
+}
 
-/// A plain address: letters, digits and `._%+-` around one `@`, so it is always a safe file name.
+fn index_remove(creds: &CredentialStore, email: &str) -> Result<(), String> {
+    let key = email.to_ascii_lowercase();
+    let mut index = read_index(creds);
+    index.retain(|e| e.email.to_ascii_lowercase() != key);
+    write_index(creds, &index)
+}
+
+// ---- addresses, labels and the account picker ------------------------------------------------
+
+/// A plain address: letters, digits and `._%+-` around one `@`.
 pub fn valid_email(s: &str) -> bool {
     if s.len() < 3 || s.len() > 254 {
         return false;
@@ -207,71 +329,6 @@ fn clean_email(raw: &str) -> Result<String, String> {
     }
 }
 
-/// A file name's `%XX` escapes read back (the server escapes every character of the address but
-/// letters, digits and `@._-`); `None` when an escape is malformed or the result is not text.
-fn unescape(stem: &str) -> Option<String> {
-    let b = stem.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' {
-            let hex = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
-            out.push(u8::from_str_radix(hex, 16).ok()?);
-            i += 3;
-        } else {
-            out.push(b[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).ok()
-}
-
-/// The sign-ins in `dir`: the address each holds, and its file's own stem (escaped as the server
-/// wrote it), sorted, at most [`MAX_ACCOUNTS`]. Only file names are read: a file's contents are
-/// never opened.
-fn account_files(dir: &Path) -> Vec<(String, String)> {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut out: Vec<(String, String)> = rd
-        .take(MAX_SCAN)
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter_map(|name| {
-            let stem = name.strip_suffix(".json")?;
-            let email = unescape(stem)?;
-            valid_email(&email).then(|| (email, stem.to_owned()))
-        })
-        .collect();
-    out.sort_by_key(|(e, _)| (e.to_ascii_lowercase(), e.clone()));
-    out.dedup_by(|a, b| a.0.eq_ignore_ascii_case(&b.0));
-    out.truncate(MAX_ACCOUNTS);
-    out
-}
-
-/// The addresses that have a sign-in in `dir` (see [`account_files`]).
-pub fn list_accounts(dir: &Path) -> Vec<String> {
-    account_files(dir).into_iter().map(|(e, _)| e).collect()
-}
-
-fn has_account(dir: &Path, email: &str) -> bool {
-    list_accounts(dir)
-        .iter()
-        .any(|e| e.eq_ignore_ascii_case(email))
-}
-
-fn accounts_with_labels(profile_dir: &Path) -> Vec<GoogleAccount> {
-    let labels = read_settings(profile_dir).labels;
-    list_accounts(&credentials_dir(profile_dir))
-        .into_iter()
-        .map(|email| GoogleAccount {
-            label: labels.get(&email.to_ascii_lowercase()).cloned(),
-            email,
-        })
-        .collect()
-}
-
 /// A label is short plain text: it goes into the guidance the agent reads.
 pub fn clean_label(raw: &str) -> Result<Option<String>, String> {
     let l = raw.trim();
@@ -290,47 +347,63 @@ pub fn clean_label(raw: &str) -> Result<Option<String>, String> {
     Ok(Some(l.to_owned()))
 }
 
-fn set_label(profile_dir: &Path, email: &str, label: &str) -> Result<(), String> {
-    let label = clean_label(label)?;
-    if !has_account(&credentials_dir(profile_dir), email) {
-        return Err("That account is not signed in.".into());
-    }
-    let _g = SETTINGS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let mut s = read_settings(profile_dir);
-    let key = email.to_ascii_lowercase();
-    match label {
-        Some(l) => {
-            s.labels.insert(key, l);
-        }
-        None => {
-            s.labels.remove(&key);
-        }
-    }
-    write_settings(profile_dir, &s)
+/// Resolve `what` (an address or a label, matched without regard to case) to a signed-in
+/// account's canonical address.
+pub fn resolve_account(creds: &CredentialStore, what: &str) -> Option<String> {
+    let key = what.trim().to_ascii_lowercase();
+    let accounts = listed_accounts(creds);
+    accounts
+        .iter()
+        .find(|a| a.email.to_ascii_lowercase() == key)
+        .or_else(|| {
+            accounts.iter().find(|a| {
+                a.label
+                    .as_deref()
+                    .is_some_and(|l| l.to_ascii_lowercase() == key)
+            })
+        })
+        .map(|a| a.email.clone())
 }
 
-/// Delete one address's sign-in. The name deleted is the listed one, never the typed text.
-fn remove_account(profile_dir: &Path, email: &str) -> Result<(), String> {
-    let dir = credentials_dir(profile_dir);
-    let Some((found, stem)) = account_files(&dir)
-        .into_iter()
-        .find(|(e, _)| e.eq_ignore_ascii_case(email))
-    else {
+/// Set or clear one account's label. An empty label clears it.
+fn set_label(creds: &CredentialStore, email: &str, label: &str) -> Result<(), String> {
+    let label = clean_label(label)?;
+    let key = email.to_ascii_lowercase();
+    if !listed_accounts(creds)
+        .iter()
+        .any(|a| a.email.to_ascii_lowercase() == key)
+    {
         return Err("That account is not signed in.".into());
-    };
-    std::fs::remove_file(dir.join(format!("{stem}.json")))
-        .map_err(|_| "The sign-in could not be removed.".to_owned())?;
-    let _g = SETTINGS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let mut s = read_settings(profile_dir);
-    if s.labels.remove(&found.to_ascii_lowercase()).is_some() {
-        let _ = write_settings(profile_dir, &s);
     }
-    Ok(())
+    let mut index = read_index(creds);
+    match index
+        .iter_mut()
+        .find(|e| e.email.to_ascii_lowercase() == key)
+    {
+        Some(e) => {
+            e.label = label;
+        }
+        None => return Err("That account is not signed in.".into()),
+    }
+    write_index(creds, &index)
+}
+
+/// Forget one account: its tokens and its index row. Nothing is revoked at Google.
+fn remove_account(creds: &CredentialStore, email: &str) -> Result<(), String> {
+    let key = email.to_ascii_lowercase();
+    if !listed_accounts(creds)
+        .iter()
+        .any(|a| a.email.to_ascii_lowercase() == key)
+    {
+        return Err("That account is not signed in.".into());
+    }
+    TokenStore::forget(creds, &account_entry(email)).map_err(|e| e.to_string())?;
+    index_remove(creds, email)
 }
 
 /// `Accounts: work = a@x, b@y`, for the agent; none when nobody is signed in.
-fn accounts_line(profile_dir: &Path) -> Option<String> {
-    let accounts = accounts_with_labels(profile_dir);
+fn accounts_line(creds: &CredentialStore) -> Option<String> {
+    let accounts = listed_accounts(creds);
     if accounts.is_empty() {
         return None;
     }
@@ -344,39 +417,66 @@ fn accounts_line(profile_dir: &Path) -> Option<String> {
     Some(format!("Accounts: {}", parts.join(", ")))
 }
 
-/// Give the server its callback port. The server reads a plain `PORT` before its own variable, so
-/// one left in the user's environment would move the sign-in page's port: both are set.
-fn set_port(env: &mut BTreeMap<String, String>, port: &str) {
-    env.insert(PORT_ENV.into(), port.to_owned());
-    env.insert("PORT".into(), port.to_owned());
+/// `args` with a bare `workspace-mcp` package rewritten to [`WORKSPACE_MCP_PIN`] — only the
+/// first argument (what `uvx` runs), never a flag's value; a version the person pinned
+/// themselves is left alone.
+pub fn pin_workspace_mcp(args: &[String]) -> Vec<String> {
+    let mut out = args.to_vec();
+    if let Some(a) = out.first_mut() {
+        if a == "workspace-mcp" {
+            *a = WORKSPACE_MCP_PIN.to_owned();
+        }
+    }
+    out
 }
 
-/// Add what only the host knows to a resolved Google server: its folder and port (the user can
-/// still override them with their own environment entries), and the account list for the agent.
-pub fn prepare(profile_dir: &Path, out: &mut ResolvedServer) {
-    let dir = credentials_dir(profile_dir);
-    let _ = privfs::create_private_dir_all(&dir);
-    out.env
-        .entry(CREDENTIALS_ENV.into())
-        .or_insert_with(|| dir.to_string_lossy().into_owned());
-    let port = out
-        .env
-        .get(PORT_ENV)
-        .cloned()
-        .unwrap_or_else(|| saved_port(profile_dir).to_string());
-    set_port(&mut out.env, &port);
-    // The sign-in page is plain http on this computer.
-    out.env
-        .entry("OAUTHLIB_INSECURE_TRANSPORT".into())
-        .or_insert_with(|| "1".into());
-    // A server saved before `--permissions` replaced `--tools` would not start with both.
-    out.args = without_tool_flags(&out.args);
-    if let Some(line) = accounts_line(profile_dir) {
+/// Whether these arguments run the bridge program (first argument, before or after pinning).
+fn runs_workspace_mcp(args: &[String]) -> bool {
+    args.first()
+        .is_some_and(|a| a == "workspace-mcp" || a.starts_with("workspace-mcp=="))
+}
+
+/// Add what only the host knows to a resolved Google server: the package pin, and — only for a
+/// server that still carries its own client secrets — the bridge program's folder and callback
+/// port. The account list for the agent comes from the stored identities either way.
+pub fn prepare(creds: &CredentialStore, profile_dir: &Path, out: &mut ResolvedServer) {
+    out.args = pin_workspace_mcp(&without_tool_flags(&out.args));
+    let legacy = runs_workspace_mcp(&out.args)
+        && [CLIENT_ID_ENV, CLIENT_SECRET_ENV]
+            .iter()
+            .all(|k| out.env.get(*k).is_some_and(|v| !v.is_empty()));
+    if legacy {
+        let dir = credentials_dir(profile_dir);
+        let _ = helm_core::privfs::create_private_dir_all(&dir);
+        out.env
+            .entry(CREDENTIALS_ENV.into())
+            .or_insert_with(|| dir.to_string_lossy().into_owned());
+        // The bridge program reads a plain `PORT` before its own variable, so one left in the
+        // user's environment would move its sign-in page: both are set, freshly each resolve.
+        let port = match out.env.get(PORT_ENV) {
+            Some(v) if !v.is_empty() => v.clone(),
+            _ => free_port()
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "8000".into()),
+        };
+        out.env.insert(PORT_ENV.into(), port.clone());
+        out.env.insert("PORT".into(), port);
+        // The program's own sign-in page is plain http on this computer.
+        out.env
+            .entry("OAUTHLIB_INSECURE_TRANSPORT".into())
+            .or_insert_with(|| "1".into());
+    }
+    if let Some(line) = accounts_line(creds) {
         out.guidance = Some(match out.guidance.take() {
             Some(g) if !g.is_empty() => format!("{g} {line}"),
             _ => line,
         });
     }
+}
+
+fn free_port() -> Option<u16> {
+    let l = std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?;
+    Some(l.local_addr().ok()?.port())
 }
 
 // ---- the permission level -------------------------------------------------------------------
@@ -448,213 +548,184 @@ pub fn with_permission(args: &[String], level: GooglePermission) -> Vec<String> 
     without_tool_flags(&out)
 }
 
-// ---- starting a sign-in ---------------------------------------------------------------------
+// ---- the sign-in ----------------------------------------------------------------------------
 
 static SIGNING_IN: AtomicBool = AtomicBool::new(false);
+/// Refreshes of the accounts never overlap: Google retires a refresh token once it has been
+/// spent, so two callers asking at once must not both use it.
+static REFRESH_LOCK: Mutex<()> = Mutex::new(());
 
-/// Google's sign-in address in the server's reply, if it gave one.
-fn find_auth_url(text: &str) -> Option<String> {
-    let rest = &text[text.find(AUTH_PREFIX)?..];
-    let end = rest
-        .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ')' | ']' | '`'))
-        .unwrap_or(rest.len());
-    let url = &rest[..end];
-    (url.len() <= 4096 && url::Url::parse(url).is_ok()).then(|| url.to_owned())
-}
-
-/// What the `start_google_auth` call returned.
-fn read_sign_in_reply(result: &Value, secrets: &[String]) -> Result<GoogleSignIn, String> {
-    let text = result["content"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|c| c["text"].as_str())
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default();
-    if result["isError"].as_bool() == Some(true) {
-        let said: String = crate::probe::scrub(&text, secrets)
-            .trim()
-            .chars()
-            .take(300)
-            .collect();
-        return Err(if said.is_empty() {
-            "Google sign-in could not start.".into()
-        } else {
-            format!("Google sign-in could not start: {said}")
-        });
+/// Google's sign-in addresses. In a debug build the test hook can point them at an in-process
+/// fake on this computer; nowhere else.
+fn google_as() -> Result<AuthServer, String> {
+    if cfg!(debug_assertions) {
+        if let Some(raw) = std::env::var_os(TEST_AS_ENV) {
+            let raw = raw.to_string_lossy().into_owned();
+            return test_as(&raw).ok_or_else(|| {
+                format!("{TEST_AS_ENV} must be a plain http address on this computer.")
+            });
+        }
     }
-    Ok(GoogleSignIn {
-        auth_url: find_auth_url(&text),
+    Ok(AuthServer {
+        issuer: GOOGLE_ISSUER.into(),
+        authorization_endpoint: GOOGLE_AUTHORIZE.into(),
+        token_endpoint: GOOGLE_TOKEN.into(),
+        registration_endpoint: None,
     })
 }
 
-/// `Some(true)` when the tool takes the parameter, `None` when the server has no such tool.
-fn tool_takes(tools: &Value, tool: &str, param: &str) -> Option<bool> {
-    let t = tools["tools"]
-        .as_array()?
-        .iter()
-        .find(|t| t["name"] == tool)?;
-    Some(t["inputSchema"]["properties"].get(param).is_some())
+/// The fake's addresses from the test hook's value: loopback http only, no path.
+fn test_as(raw: &str) -> Option<AuthServer> {
+    let u = url::Url::parse(raw).ok()?;
+    let loopback = match u.host() {
+        Some(url::Host::Ipv4(a)) => a.is_loopback(),
+        Some(url::Host::Ipv6(a)) => a.is_loopback(),
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        _ => false,
+    };
+    (u.scheme() == "http" && loopback && u.path() == "/" && u.query().is_none()).then(|| {
+        let base = u.to_string().trim_end_matches('/').to_owned();
+        AuthServer {
+            issuer: base.clone(),
+            authorization_endpoint: format!("{base}/o/oauth2/v2/auth"),
+            token_endpoint: format!("{base}/oauth2/token"),
+            registration_endpoint: None,
+        }
+    })
 }
 
-struct Session {
-    child: Child,
-    stdin: ChildStdin,
-    rx: mpsc::Receiver<String>,
-    errors: Arc<Mutex<String>>,
+/// The address from a Google `id_token`: decoded and sanity-checked only. The signature is not
+/// verified (nothing here holds Google's keys); what makes it safe to keep is that it arrived
+/// from Google's own token endpoint over https, through the loopback sign-in.
+fn id_token_email(raw: &str) -> Result<String, String> {
+    let parts: Vec<&str> = raw.split('.').collect();
+    if parts.len() != 3 {
+        return Err("Google did not say which account signed in.".into());
+    }
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let decoded = b64
+        .decode(parts[1])
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(parts[1]))
+        .map_err(|_| "Google did not say which account signed in.".to_owned())?;
+    let claims: Value = serde_json::from_slice(&decoded)
+        .map_err(|_| "Google did not say which account signed in.".to_owned())?;
+    if claims.get("email_verified").and_then(Value::as_bool) == Some(false) {
+        return Err("Google says that address is not verified.".into());
+    }
+    let email = claims
+        .get("email")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    let email = clean_email(email)?;
+    Ok(email.to_ascii_lowercase())
 }
 
-impl Session {
-    fn spawn(r: &ResolvedServer) -> Result<Self, String> {
-        let program = r.command.as_deref().ok_or("The server has no program.")?;
-        let node =
-            helm_workers::node::resolve_node(&helm_workers::node::NodeLookup::from_env()).ok();
-        let path_var = std::env::var_os("PATH").unwrap_or_default();
-        let (exe, args) = crate::probe::plan_spawn(
-            program,
-            &r.args,
-            &path_var,
-            node.as_ref().map(|n| n.path.as_path()),
-            cfg!(windows),
-        )?;
-        let mut cmd = Command::new(exe);
-        cmd.args(args)
-            .envs(&r.env)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        for k in crate::probe::STRIPPED_ENV {
-            cmd.env_remove(k);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        let mut child = cmd.spawn().map_err(|e| {
-            format!("Could not start the program: {e}. Install uv (docs.astral.sh/uv) to run this server.")
-        })?;
-        let (tx, rx) = mpsc::channel::<String>();
-        if let Some(out) = child.stdout.take() {
-            std::thread::spawn(move || {
-                for line in BufReader::new(out).lines().map_while(Result::ok) {
-                    if tx.send(line).is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-        let errors = Arc::new(Mutex::new(String::new()));
-        if let Some(err) = child.stderr.take() {
-            let sink = errors.clone();
-            std::thread::spawn(move || {
-                for line in BufReader::new(err).lines().map_while(Result::ok) {
-                    let mut s = sink.lock().unwrap_or_else(|p| p.into_inner());
-                    if s.len() < 600 {
-                        s.push_str(&line);
-                        s.push(' ');
-                    }
-                }
-            });
-        }
-        let stdin = child.stdin.take().ok_or("The program has no input.")?;
-        Ok(Self {
-            child,
-            stdin,
-            rx,
-            errors,
-        })
+/// The access token to use for one account now, refreshing it first when it is old, expired or
+/// `force`. Refreshes go only to the token address kept at sign-in and never overlap. `Err`
+/// words never carry token material.
+pub(crate) fn account_access(store: &McpStore, email: &str, force: bool) -> Result<String, String> {
+    let creds = store.creds();
+    let due = |a: &StoredAuth| force || a.tokens.expires_within(REFRESH_MARGIN);
+    let mut auth = TokenStore::load(creds, &account_entry(email), &account_identity(email))
+        .map_err(|e| e.to_string())?
+        .ok_or("That account is not signed in.")?;
+    if !due(&auth) {
+        return Ok(auth.tokens.access_token.clone());
     }
-
-    fn send(&mut self, v: &Value) -> Result<(), String> {
-        writeln!(self.stdin, "{v}")
-            .and_then(|_| self.stdin.flush())
-            .map_err(|_| "The program closed its input.".to_owned())
+    let _turn = REFRESH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    // Another caller may have refreshed it while we waited for the turn.
+    auth = TokenStore::load(creds, &account_entry(email), &account_identity(email))
+        .map_err(|e| e.to_string())?
+        .ok_or("That account is not signed in.")?;
+    if !due(&auth) {
+        return Ok(auth.tokens.access_token.clone());
     }
-
-    fn stop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Start the server, ask it to begin the sign-in for `email`, and leave it running to catch the
-/// browser's return until the account appears or the window ends.
-fn begin(r: &ResolvedServer, email: &str) -> Result<(Session, GoogleSignIn), String> {
-    let mut s = Session::spawn(r)?;
-    match talk(&mut s, r, email) {
-        Ok(out) => Ok((s, out)),
-        Err(why) => {
-            let said: String = crate::probe::scrub(
-                s.errors.lock().unwrap_or_else(|p| p.into_inner()).trim(),
-                &r.secrets,
+    let spent = match auth.tokens.refresh_token.clone() {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            return Err(
+                "That account's sign-in has run out and cannot renew itself. Sign it in again."
+                    .into(),
             )
-            .chars()
-            .take(300)
-            .collect();
-            s.stop();
-            Err(if said.is_empty() {
-                why
-            } else {
-                format!("{why} It said: {said}")
-            })
         }
-    }
+    };
+    let Some(as_info) = auth.auth_server.clone() else {
+        return Err("That account's sign-in is missing its details. Sign it in again.".into());
+    };
+    let tokens = oauth::refresh(&oauth::http_agent(), &as_info, &auth.client, &spent, None)
+        .map_err(|e| e.to_string())?;
+    auth.tokens = TokenSet {
+        id_token: None,
+        ..tokens
+    };
+    TokenStore::save(
+        creds,
+        &account_entry(email),
+        &account_identity(email),
+        &auth,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(auth.tokens.access_token.clone())
 }
 
-fn talk(s: &mut Session, r: &ResolvedServer, email: &str) -> Result<GoogleSignIn, String> {
-    let deadline = Instant::now() + STARTUP;
-    s.send(&crate::probe::init_request())?;
-    crate::probe::wait_for(&s.rx, 1, deadline)?;
-    s.send(&crate::probe::initialized_note())?;
-    s.send(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}))?;
-    let tools = crate::probe::wait_for(&s.rx, 2, deadline)?;
-    let wants_service = tool_takes(&tools, "start_google_auth", "service_name")
-        .ok_or("This program does not offer start_google_auth. Is it the workspace-mcp server?")?;
-    let mut args = json!({ "user_google_email": email });
-    if wants_service {
-        args["service_name"] = json!("Gmail");
-    }
-    s.send(&json!({
-        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
-        "params": { "name": "start_google_auth", "arguments": args }
-    }))?;
-    let reply = crate::probe::wait_for(&s.rx, 3, Instant::now() + Duration::from_secs(60))?;
-    read_sign_in_reply(&reply, &r.secrets)
-}
-
-/// Begin the sign-in for `email` with the server `resolved`. The server gets its own callback
-/// port for this, so a chat that already runs it cannot be in the way; the sign-in lands in the
-/// shared folder either way.
-fn start_sign_in(
-    profile_dir: &Path,
-    mut resolved: ResolvedServer,
-    email: &str,
+/// Begin a browser sign-in for one account: build Google's sign-in address, hand it to the
+/// system browser, and finish the sign-in on a thread of its own (which keeps the tokens and
+/// tells the running chats). `hint` pre-fills Google's address box; without one Google shows
+/// its chooser.
+fn begin_sign_in(
+    st: &Arc<McpStore>,
+    cell: Option<Arc<crate::lines::ServicesCell>>,
+    open: &dyn helm_platform::OpenExternal,
+    server: &McpServer,
+    hint: Option<&str>,
 ) -> Result<GoogleSignIn, String> {
-    if let Some(why) = resolved.error.take() {
+    let resolved = st.resolve_draft(server);
+    if let Some(why) = resolved.error {
         return Err(why);
     }
-    if resolved.transport != TransportKind::Stdio {
-        return Err("This server is not a program on this computer.".into());
+    // A server that still carries its own client secrets uses those; otherwise the profile's
+    // one client is used.
+    let entered = resolved
+        .env
+        .get(CLIENT_ID_ENV)
+        .cloned()
+        .filter(|v| !v.is_empty());
+    let pair = match entered {
+        Some(id) => Some(ClientPair {
+            client_id: id,
+            client_secret: resolved
+                .env
+                .get(CLIENT_SECRET_ENV)
+                .cloned()
+                .unwrap_or_default(),
+        })
+        .filter(|p| !p.client_secret.is_empty()),
+        None => None,
     }
-    for k in [CLIENT_ID_ENV, CLIENT_SECRET_ENV] {
-        if resolved.env.get(k).is_none_or(|v| v.is_empty()) {
-            return Err(
-                "Enter the Google client id and secret, save the server, then add the account."
-                    .into(),
-            );
-        }
+    .or_else(|| stored_client(st.creds()))
+    .ok_or("Set the Google sign-in client in Settings → MCP first.")?;
+    let as_info = google_as()?;
+    let level = permission_of(&server.transport.args).unwrap_or(GooglePermission::Drafts);
+    let scopes: Vec<String> = level.scopes().into_iter().map(str::to_owned).collect();
+    let client = oauth::Client::pre_registered(&pair.client_id, Some(&pair.client_secret));
+    let mut extra: Vec<(&str, String)> = vec![
+        ("access_type", "offline".into()),
+        ("prompt", "consent select_account".into()),
+    ];
+    if let Some(h) = hint {
+        extra.push(("login_hint", h.to_owned()));
     }
-    let dir = credentials_dir(profile_dir);
-    if has_account(&dir, email) {
-        return Err("That account is already added. Remove it first to sign in again.".into());
-    }
-    if let Some(p) = free_port() {
-        set_port(&mut resolved.env, &p.to_string());
-    }
+    let extra: Vec<(&str, &str)> = extra.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let pending = oauth::begin_with(
+        &oauth::http_agent(),
+        &as_info,
+        &client,
+        &scopes,
+        None,
+        &extra,
+    )
+    .map_err(|e| e.to_string())?;
     if SIGNING_IN
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -664,34 +735,78 @@ fn start_sign_in(
                 .into(),
         );
     }
-    let (mut session, out) = match begin(&resolved, email) {
-        Ok(x) => x,
-        Err(why) => {
-            SIGNING_IN.store(false, Ordering::SeqCst);
-            return Err(why);
-        }
-    };
-    // Google says which address signed in, which may not be the one typed: any new sign-in
-    // file ends the wait.
-    let before = list_accounts(&dir);
-    std::thread::spawn(move || {
-        let end = Instant::now() + SIGN_IN_WINDOW;
-        while Instant::now() < end {
-            while session.rx.try_recv().is_ok() {}
-            if list_accounts(&dir).iter().any(|e| !before.contains(e)) {
-                // Let the browser's page finish before the program goes.
-                std::thread::sleep(Duration::from_secs(2));
-                break;
-            }
-            if !matches!(session.child.try_wait(), Ok(None)) {
-                break;
-            }
-            std::thread::sleep(Duration::from_secs(1));
-        }
-        session.stop();
+    let auth_url = pending.auth_url.clone();
+    if let Err(e) = open.open_url(&auth_url) {
         SIGNING_IN.store(false, Ordering::SeqCst);
+        return Err(format!("The system browser could not be opened: {e}"));
+    }
+    let st = st.clone();
+    std::thread::spawn(move || {
+        let outcome = pending.finish().and_then(|tokens| {
+            let email = id_token_email(
+                tokens
+                    .id_token
+                    .as_deref()
+                    .ok_or(oauth::OauthError::BadMetadata)?,
+            )
+            .map_err(|_| oauth::OauthError::BadMetadata)?;
+            let auth = StoredAuth {
+                client,
+                tokens: TokenSet {
+                    id_token: None,
+                    ..tokens
+                },
+                resource: None,
+                auth_server: Some(as_info),
+                registered_redirect: None,
+                stored_at: None,
+            };
+            TokenStore::save(
+                st.creds(),
+                &account_entry(&email),
+                &account_identity(&email),
+                &auth,
+            )?;
+            index_upsert(st.creds(), &email, None).map_err(|_| oauth::OauthError::Storage)
+        });
+        if let Err(e) = outcome {
+            // The error words are the client module's: they name nothing secret.
+            log::warn!("google sign-in did not finish: {e}");
+        }
+        SIGNING_IN.store(false, Ordering::SeqCst);
+        if let Some(cell) = cell {
+            cell.broadcast();
+        }
     });
-    Ok(out)
+    Ok(GoogleSignIn {
+        auth_url: Some(auth_url),
+    })
+}
+
+/// Test only: keep one account's token set and index row the way a finished sign-in would.
+#[cfg(test)]
+pub(crate) fn seed_account(
+    creds: &CredentialStore,
+    email: &str,
+    tokens: TokenSet,
+    auth_server: Option<AuthServer>,
+) {
+    let auth = StoredAuth {
+        client: oauth::Client::pre_registered("g-client", Some("g-secret")),
+        tokens,
+        resource: None,
+        auth_server,
+        registered_redirect: None,
+        stored_at: None,
+    };
+    TokenStore::save(
+        creds,
+        &account_entry(email),
+        &account_identity(email),
+        &auth,
+    )
+    .unwrap();
+    index_upsert(creds, email, None).unwrap();
 }
 
 /// `uvx` is on `PATH`.
@@ -707,6 +822,14 @@ pub fn uvx_found() -> bool {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ServerArgs {
     server_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AddArgs {
+    server_id: String,
+    #[serde(default)]
+    email: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -731,6 +854,13 @@ struct PermissionArgs {
     permission: GooglePermission,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ClientArgs {
+    client_id: String,
+    client_secret: String,
+}
+
 fn parse<T: for<'de> Deserialize<'de>>(args: Value) -> Result<T, ApiError> {
     serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))
 }
@@ -739,25 +869,21 @@ fn to_value<T: Serialize>(v: &T) -> Result<Value, ApiError> {
     serde_json::to_value(v).map_err(|e| ApiError::internal(e.to_string()))
 }
 
-/// The saved server `id` if it was made from this preset, with the store and the profile folder.
-fn google_server(
-    ctx: &OpCtx,
-    id: &str,
-) -> Result<(Arc<McpStore>, crate::types::McpServer, PathBuf), ApiError> {
+/// The saved server `id` if it was made from this preset.
+fn google_server(ctx: &OpCtx, id: &str) -> Result<(Arc<McpStore>, McpServer), ApiError> {
     let st = ctx.services.need::<McpStore>()?;
-    let profile = ctx.services.need::<Profile>()?;
     let server = st
         .load()
         .map_err(crate::ops::api_error)?
         .into_iter()
         .find(|s| s.id == id && s.preset.as_deref() == Some(PRESET_ID))
         .ok_or_else(|| ApiError::bad_args("That is not a Google accounts server."))?;
-    Ok((st, server, profile.dir.clone()))
+    Ok((st, server))
 }
 
-fn list_for(profile_dir: &Path, server: &crate::types::McpServer) -> GoogleAccountList {
+fn list_for(store: &McpStore, server: &McpServer) -> GoogleAccountList {
     GoogleAccountList {
-        accounts: accounts_with_labels(profile_dir),
+        accounts: listed_accounts(store.creds()),
         permission: permission_of(&server.transport.args),
         uv_found: uvx_found(),
         signing_in: SIGNING_IN.load(Ordering::SeqCst),
@@ -766,36 +892,59 @@ fn list_for(profile_dir: &Path, server: &crate::types::McpServer) -> GoogleAccou
 
 fn accounts_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ServerArgs = parse(args)?;
-    let (_, server, profile) = google_server(ctx, &a.server_id)?;
-    to_value(&list_for(&profile, &server))
+    let (st, server) = google_server(ctx, &a.server_id)?;
+    to_value(&list_for(&st, &server))
 }
 
 fn add_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
-    let a: EmailArgs = parse(args)?;
-    let (st, server, profile) = google_server(ctx, &a.server_id)?;
-    let email = clean_email(&a.email).map_err(ApiError::bad_args)?;
-    let resolved = st.resolve_draft(&server);
-    let out = start_sign_in(&profile, resolved, &email).map_err(ApiError::bad_args)?;
+    let a: AddArgs = parse(args)?;
+    let (st, server) = google_server(ctx, &a.server_id)?;
+    let hint = a
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .map(clean_email)
+        .transpose()
+        .map_err(ApiError::bad_args)?;
+    let cell = ctx.services.get::<crate::lines::ServicesCell>();
+    let platform = ctx.services.need::<helm_platform::Platform>()?;
+    let out = begin_sign_in(
+        &st,
+        cell,
+        platform.external.as_ref(),
+        &server,
+        hint.as_deref(),
+    )
+    .map_err(ApiError::bad_args)?;
     to_value(&out)
 }
 
 fn remove_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: EmailArgs = parse(args)?;
-    let (_, server, profile) = google_server(ctx, &a.server_id)?;
-    remove_account(&profile, a.email.trim()).map_err(ApiError::bad_args)?;
-    to_value(&list_for(&profile, &server))
+    let (st, server) = google_server(ctx, &a.server_id)?;
+    remove_account(st.creds(), a.email.trim()).map_err(ApiError::bad_args)?;
+    let _ = ctx
+        .services
+        .get::<crate::lines::ServicesCell>()
+        .map(|c| c.broadcast());
+    to_value(&list_for(&st, &server))
 }
 
 fn label_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: LabelArgs = parse(args)?;
-    let (_, server, profile) = google_server(ctx, &a.server_id)?;
-    set_label(&profile, a.email.trim(), &a.label).map_err(ApiError::bad_args)?;
-    to_value(&list_for(&profile, &server))
+    let (st, server) = google_server(ctx, &a.server_id)?;
+    set_label(st.creds(), a.email.trim(), &a.label).map_err(ApiError::bad_args)?;
+    let _ = ctx
+        .services
+        .get::<crate::lines::ServicesCell>()
+        .map(|c| c.broadcast());
+    to_value(&list_for(&st, &server))
 }
 
 fn permission_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: PermissionArgs = parse(args)?;
-    let (st, _, _) = google_server(ctx, &a.server_id)?;
+    let (st, _) = google_server(ctx, &a.server_id)?;
     let snap: McpEditorSnapshot = st
         .mutate(None, |list| {
             let s = list
@@ -811,20 +960,86 @@ fn permission_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     to_value(&snap)
 }
 
+fn client_get_op(ctx: &OpCtx, _: Value) -> Result<Value, ApiError> {
+    let st = ctx.services.need::<McpStore>()?;
+    to_value(&client_state(st.creds()))
+}
+
+fn client_set_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ClientArgs = parse(args)?;
+    let st = ctx.services.need::<McpStore>()?;
+    let client_id = clean_client(&a.client_id, "client id").map_err(ApiError::bad_args)?;
+    let client_secret =
+        clean_client(&a.client_secret, "client secret").map_err(ApiError::bad_args)?;
+    let json = serde_json::to_vec(&ClientPair {
+        client_id,
+        client_secret,
+    })
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    st.creds()
+        .write(CLIENT_ENTRY, CLIENT_IDENTITY, &json)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    to_value(&client_state(st.creds()))
+}
+
+fn client_clear_op(ctx: &OpCtx, _: Value) -> Result<Value, ApiError> {
+    let st = ctx.services.need::<McpStore>()?;
+    st.creds()
+        .forget(CLIENT_ENTRY)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Value::Null)
+}
+
 pub(crate) fn register_ops(reg: &mut OpRegistry) {
     reg.blocking("mcp_google_accounts", OpClass::Blocking, accounts_op)
         .blocking("mcp_google_add", OpClass::Blocking, add_op)
         .blocking("mcp_google_remove", OpClass::Maintenance, remove_op)
         .blocking("mcp_google_label", OpClass::Maintenance, label_op)
-        .blocking("mcp_google_permission", OpClass::Maintenance, permission_op);
+        .blocking("mcp_google_permission", OpClass::Maintenance, permission_op)
+        .blocking("mcp_google_client_get", OpClass::Blocking, client_get_op)
+        .blocking("mcp_google_client_set", OpClass::Maintenance, client_set_op)
+        .blocking(
+            "mcp_google_client_clear",
+            OpClass::Maintenance,
+            client_clear_op,
+        );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::tests::store;
+    use crate::oauth::fake::{Cfg, Fake};
+    use crate::types::{Transport, TransportKind};
+    use serde_json::json;
+    use std::collections::BTreeMap;
+    use std::io::{Read, Write};
+
+    /// Only one test at a time may point the sign-in at its own fake server: the hook is a
+    /// process-wide environment variable.
+    static AS_LOCK: Mutex<()> = Mutex::new(());
 
     fn strings(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn server(args: Vec<String>) -> McpServer {
+        McpServer {
+            id: PRESET_ID.into(),
+            name: "Google".into(),
+            enabled: true,
+            transport: Transport {
+                kind: TransportKind::Stdio,
+                command: Some(if cfg!(windows) { "uvx.exe" } else { "uvx" }.into()),
+                args,
+                env: BTreeMap::new(),
+                url: None,
+                headers: BTreeMap::new(),
+                oauth: None,
+            },
+            allow_private_http: false,
+            preset: Some(PRESET_ID.into()),
+        }
     }
 
     fn resolved() -> ResolvedServer {
@@ -832,7 +1047,7 @@ mod tests {
             id: PRESET_ID.into(),
             name: "Google".into(),
             transport: TransportKind::Stdio,
-            command: Some("uvx.exe".into()),
+            command: Some(if cfg!(windows) { "uvx.exe" } else { "uvx" }.into()),
             args: strings(&DEFAULT_ARGS),
             env: BTreeMap::new(),
             url: None,
@@ -845,14 +1060,88 @@ mod tests {
         }
     }
 
-    fn sign_in(profile: &Path, name: &str) {
-        let dir = credentials_dir(profile);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(name), "NOT-A-REAL-TOKEN").unwrap();
+    /// Put a signed-in account in the store the way a finished sign-in leaves it.
+    fn sign_in(creds: &CredentialStore, email: &str, access: &str, refresh: Option<&str>) {
+        let auth = StoredAuth {
+            client: oauth::Client::pre_registered("g-client", Some("g-secret")),
+            tokens: TokenSet {
+                access_token: access.into(),
+                token_type: "Bearer".into(),
+                expires_at: Some(2_000_000_000),
+                refresh_token: refresh.map(str::to_owned),
+                scope: None,
+                id_token: None,
+            },
+            resource: None,
+            auth_server: Some(AuthServer {
+                issuer: GOOGLE_ISSUER.into(),
+                authorization_endpoint: GOOGLE_AUTHORIZE.into(),
+                token_endpoint: GOOGLE_TOKEN.into(),
+                registration_endpoint: None,
+            }),
+            registered_redirect: None,
+            stored_at: None,
+        };
+        TokenStore::save(
+            creds,
+            &account_entry(email),
+            &account_identity(email),
+            &auth,
+        )
+        .unwrap();
+        index_upsert(creds, email, None).unwrap();
+    }
+
+    /// A stand-in for the browser: opens the sign-in address, follows its one redirect to the
+    /// loopback callback, and is done — exactly what the system browser does.
+    struct FakeBrowser;
+
+    impl helm_platform::OpenExternal for FakeBrowser {
+        fn open_url(&self, url: &str) -> Result<(), String> {
+            let (status, loc) = raw_get(url);
+            if status != 302 {
+                return Err(format!("the sign-in page answered {status}"));
+            }
+            raw_get(&loc.ok_or("the sign-in page sent no redirect")?);
+            Ok(())
+        }
+    }
+
+    fn raw_get(url: &str) -> (u16, Option<String>) {
+        let u = url::Url::parse(url).unwrap();
+        let host = u.host_str().unwrap().to_owned();
+        let port = u.port_or_known_default().unwrap();
+        let mut s = std::net::TcpStream::connect((host.as_str(), port)).unwrap();
+        let path = match u.query() {
+            Some(q) => format!("{}?{q}", u.path()),
+            None => u.path().to_owned(),
+        };
+        write!(
+            s,
+            "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        let _ = s.set_read_timeout(Some(Duration::from_secs(8)));
+        let _ = s.read_to_end(&mut out);
+        let text = String::from_utf8_lossy(&out).into_owned();
+        let head = text.split("\r\n\r\n").next().unwrap_or("");
+        let status: u16 = head
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0);
+        let loc = head.lines().find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.eq_ignore_ascii_case("location")
+                .then(|| v.trim().to_owned())
+        });
+        (status, loc)
     }
 
     #[test]
-    fn addresses_are_plain_and_safe_as_file_names() {
+    fn addresses_are_plain_and_safe() {
         for (s, ok) in [
             ("a@x.com", true),
             ("first.last+tag@mail.example.org", true),
@@ -874,108 +1163,6 @@ mod tests {
         ] {
             assert_eq!(valid_email(s), ok, "{s:?}");
         }
-    }
-
-    #[test]
-    fn the_list_reads_names_only_skips_oddities_and_caps_at_fifty() {
-        let d = tempfile::tempdir().unwrap();
-        let p = d.path();
-        for name in [
-            "b@y.org.json",
-            "A@x.com.json",
-            "notes.json",
-            "c@z.com.txt",
-            "c@z.com",
-            "bad name@x.com.json",
-            ".json",
-            "..json",
-            "a@x.com.JSON",
-        ] {
-            sign_in(p, name);
-        }
-        std::fs::create_dir_all(credentials_dir(p).join("dir@x.com.json")).unwrap();
-        assert_eq!(
-            list_accounts(&credentials_dir(p)),
-            ["A@x.com", "b@y.org"],
-            "sorted without regard to case; folders, other extensions and odd names left out"
-        );
-        assert!(list_accounts(&p.join("missing")).is_empty());
-
-        let many = tempfile::tempdir().unwrap();
-        for i in 0..60 {
-            sign_in(many.path(), &format!("user{i:02}@x.com.json"));
-        }
-        let all = list_accounts(&credentials_dir(many.path()));
-        assert_eq!(all.len(), MAX_ACCOUNTS);
-        assert_eq!(all[0], "user00@x.com");
-    }
-
-    #[test]
-    fn the_permission_argument_is_read_and_rewritten_in_place() {
-        let default = strings(&DEFAULT_ARGS);
-        assert_eq!(permission_of(&default), Some(GooglePermission::Drafts));
-        for (args, level, want) in [
-            (
-                strings(&DEFAULT_ARGS),
-                GooglePermission::Readonly,
-                strings(&["workspace-mcp", "--permissions", "gmail:readonly"]),
-            ),
-            (
-                strings(&DEFAULT_ARGS),
-                GooglePermission::Send,
-                strings(&["workspace-mcp", "--permissions", "gmail:send"]),
-            ),
-            // The flag is missing: it is added at the end, and `--tools` (which the server refuses
-            // beside it) goes.
-            (
-                strings(&["workspace-mcp", "--tools", "gmail"]),
-                GooglePermission::Drafts,
-                strings(&["workspace-mcp", "--permissions", "gmail:drafts"]),
-            ),
-            // Other services' levels and other flags are kept; `--tools` and `--read-only` go.
-            (
-                strings(&[
-                    "workspace-mcp",
-                    "--permissions",
-                    "drive:readonly",
-                    "gmail:full",
-                    "--tools",
-                    "gmail",
-                    "drive",
-                    "--read-only",
-                    "--single-user",
-                ]),
-                GooglePermission::Readonly,
-                strings(&[
-                    "workspace-mcp",
-                    "--permissions",
-                    "drive:readonly",
-                    "gmail:readonly",
-                    "--single-user",
-                ]),
-            ),
-            // The flag has no Gmail level yet: one is added to its values.
-            (
-                strings(&["--permissions", "drive:readonly", "--tools=gmail"]),
-                GooglePermission::Drafts,
-                strings(&["--permissions", "drive:readonly", "gmail:drafts"]),
-            ),
-            (
-                strings(&["--permissions=gmail:full"]),
-                GooglePermission::Send,
-                strings(&["--permissions=gmail:send"]),
-            ),
-        ] {
-            let got = with_permission(&args, level);
-            assert_eq!(got, want);
-            assert_eq!(permission_of(&got), Some(level));
-        }
-        assert_eq!(
-            permission_of(&strings(&["--permissions", "gmail:full"])),
-            None,
-            "a level the picker does not offer is not guessed"
-        );
-        assert_eq!(permission_of(&strings(&["workspace-mcp"])), None);
     }
 
     #[test]
@@ -1001,152 +1188,496 @@ mod tests {
     }
 
     #[test]
-    fn a_resolved_server_gets_its_folder_port_and_account_line() {
-        let d = tempfile::tempdir().unwrap();
-        let p = d.path();
-        let mut r = resolved();
-        r.env.insert(CLIENT_ID_ENV.into(), "the-client-id".into());
-        r.secrets.push("the-client-secret".into());
-        prepare(p, &mut r);
-        let dir = credentials_dir(p);
-        assert!(dir.is_dir(), "the folder is made inside the profile");
-        assert_eq!(r.env[CREDENTIALS_ENV], dir.to_string_lossy());
-        let port: u16 = r.env[PORT_ENV].parse().unwrap();
-        assert!(port >= 1024);
-        assert_eq!(r.env[CLIENT_ID_ENV], "the-client-id");
+    fn the_permission_argument_is_read_and_rewritten_in_place() {
+        let default = strings(&DEFAULT_ARGS);
+        assert_eq!(permission_of(&default), Some(GooglePermission::Drafts));
+        for (args, level, want) in [
+            (
+                strings(&DEFAULT_ARGS),
+                GooglePermission::Readonly,
+                strings(&["workspace-mcp", "--permissions", "gmail:readonly"]),
+            ),
+            (
+                strings(&DEFAULT_ARGS),
+                GooglePermission::Send,
+                strings(&["workspace-mcp", "--permissions", "gmail:send"]),
+            ),
+            (
+                strings(&["workspace-mcp", "--tools", "gmail"]),
+                GooglePermission::Drafts,
+                strings(&["workspace-mcp", "--permissions", "gmail:drafts"]),
+            ),
+            (
+                strings(&[
+                    "workspace-mcp",
+                    "--permissions",
+                    "drive:readonly",
+                    "gmail:full",
+                    "--tools",
+                    "gmail",
+                    "drive",
+                    "--read-only",
+                    "--single-user",
+                ]),
+                GooglePermission::Readonly,
+                strings(&[
+                    "workspace-mcp",
+                    "--permissions",
+                    "drive:readonly",
+                    "gmail:readonly",
+                    "--single-user",
+                ]),
+            ),
+            (
+                strings(&["--permissions", "drive:readonly", "--tools=gmail"]),
+                GooglePermission::Drafts,
+                strings(&["--permissions", "drive:readonly", "gmail:drafts"]),
+            ),
+            (
+                strings(&["--permissions=gmail:full"]),
+                GooglePermission::Send,
+                strings(&["--permissions=gmail:send"]),
+            ),
+        ] {
+            let got = with_permission(&args, level);
+            assert_eq!(got, want);
+            assert_eq!(permission_of(&got), Some(level));
+        }
         assert_eq!(
-            r.secrets,
-            ["the-client-secret"],
-            "the folder and port are not secrets"
+            permission_of(&strings(&["--permissions", "gmail:full"])),
+            None,
+            "a level the picker does not offer is not guessed"
         );
+        assert_eq!(permission_of(&strings(&["workspace-mcp"])), None);
+    }
+
+    #[test]
+    fn the_package_pin_rewrites_only_a_bare_workspace_mcp() {
+        for (args, want) in [
+            (
+                strings(&DEFAULT_ARGS),
+                strings(&["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"]),
+            ),
+            (
+                strings(&["workspace-mcp", "--permissions", "gmail:send"]),
+                strings(&["workspace-mcp==2.4.2", "--permissions", "gmail:send"]),
+            ),
+            // A version the person pinned themselves stands.
+            (
+                strings(&["workspace-mcp==2.3.0", "--permissions", "gmail:send"]),
+                strings(&["workspace-mcp==2.3.0", "--permissions", "gmail:send"]),
+            ),
+            // And the flag position is not an argument to pin.
+            (
+                strings(&["--permissions", "workspace-mcp"]),
+                strings(&["--permissions", "workspace-mcp"]),
+            ),
+            (strings(&[]), strings(&[])),
+        ] {
+            assert_eq!(pin_workspace_mcp(&args), want);
+        }
+    }
+
+    #[test]
+    fn scopes_follow_the_permission_level() {
         assert_eq!(
-            r.guidance.as_deref(),
-            Some("Be careful."),
-            "no account yet, no line"
+            GooglePermission::Readonly.scopes(),
+            [SCOPE_OPENID, SCOPE_EMAIL, SCOPE_READONLY]
+        );
+        let drafts = GooglePermission::Drafts.scopes();
+        assert!(drafts.contains(&SCOPE_COMPOSE) && drafts.contains(&SCOPE_LABELS));
+        assert!(!drafts.contains(&SCOPE_SEND));
+        let send = GooglePermission::Send.scopes();
+        assert!(
+            send.contains(&SCOPE_SEND)
+                && send.contains(&SCOPE_COMPOSE)
+                && send.contains(&SCOPE_READONLY)
+        );
+        assert_eq!(send.len(), 6);
+    }
+
+    #[test]
+    fn a_signed_in_account_is_listed_resolved_by_name_or_label_and_removed() {
+        let d = tempfile::tempdir().unwrap();
+        let st = store(d.path());
+        let creds = st.creds();
+        sign_in(creds, "Work@X.com", "tok-1", Some("r-1"));
+        sign_in(creds, "b@y.org", "tok-2", None);
+        let listed = listed_accounts(creds);
+        assert_eq!(
+            listed.iter().map(|a| a.email.as_str()).collect::<Vec<_>>(),
+            ["b@y.org", "Work@X.com"],
+            "sorted without regard to case, stored as Google gave the address"
+        );
+        set_label(creds, "work@x.com", "work").unwrap();
+        assert_eq!(
+            resolve_account(creds, "WORK"),
+            Some("Work@X.com".into()),
+            "labels match without regard to case"
+        );
+        assert_eq!(resolve_account(creds, "b@y.org"), Some("b@y.org".into()));
+        assert_eq!(resolve_account(creds, "nope"), None);
+        assert!(set_label(creds, "nobody@x.com", "x").is_err());
+
+        remove_account(creds, "work@x.com").unwrap();
+        assert_eq!(
+            listed_accounts(creds)
+                .iter()
+                .map(|a| a.email.as_str())
+                .collect::<Vec<_>>(),
+            ["b@y.org"]
+        );
+        assert!(remove_account(creds, "work@x.com").is_err());
+        assert!(
+            TokenStore::load(
+                creds,
+                &account_entry("Work@X.com"),
+                &account_identity("Work@X.com")
+            )
+            .unwrap()
+            .is_none(),
+            "removing forgets the tokens, not just the list row"
         );
 
-        sign_in(p, "a@x.com.json");
-        sign_in(p, "b@y.org.json");
-        set_label(p, "A@X.com", "work").unwrap();
-        assert!(set_label(p, "nobody@x.com", "x").is_err());
-        let mut again = resolved();
-        prepare(p, &mut again);
-        assert_eq!(
-            again.env[PORT_ENV],
-            port.to_string(),
-            "the port is chosen once"
+        // An index row whose tokens are gone drops out of the list (and the index).
+        index_upsert(creds, "ghost@x.com", None).unwrap();
+        assert_eq!(listed_accounts(creds).len(), 1);
+        assert!(!read_index(creds).iter().any(|e| e.email == "ghost@x.com"));
+    }
+
+    #[test]
+    fn the_client_is_set_got_and_cleared_and_the_values_never_come_back() {
+        let d = tempfile::tempdir().unwrap();
+        let st = store(d.path());
+        assert!(!client_state(st.creds()).configured);
+        let json = serde_json::to_vec(&ClientPair {
+            client_id: "cid".into(),
+            client_secret: "the-secret".into(),
+        })
+        .unwrap();
+        st.creds()
+            .write(CLIENT_ENTRY, CLIENT_IDENTITY, &json)
+            .unwrap();
+        assert!(client_state(st.creds()).configured);
+        let said = serde_json::to_string(&client_state(st.creds())).unwrap();
+        assert!(
+            !said.contains("the-secret") && !said.contains("cid"),
+            "{said}"
         );
+        // The entry on disk is sealed: no plaintext.
+        let raw = std::fs::read_dir(d.path().join("credentials"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter_map(|e| std::fs::read(e.path()).ok())
+            .collect::<Vec<_>>()
+            .iter()
+            .any(|b| b.windows(10).any(|w| w == b"the-secret"));
+        assert!(!raw, "the secret is not plaintext on disk");
+        st.creds().forget(CLIENT_ENTRY).unwrap();
+        assert!(!client_state(st.creds()).configured);
+        for bad in [
+            ("", "s"),
+            ("c", ""),
+            ("c d", "s"),
+            ("c\nx", "s"),
+            ("c", "x".repeat(513).as_str()),
+        ] {
+            assert!(
+                clean_client(bad.0, "client id").is_err()
+                    || clean_client(bad.1, "client secret").is_err(),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_resolved_server_gets_its_pin_and_accounts_and_only_legacy_servers_get_the_program_env() {
+        let d = tempfile::tempdir().unwrap();
+        let st = store(d.path());
+        let creds = st.creds();
+        sign_in(creds, "a@x.com", "tok", Some("r"));
+        sign_in(creds, "b@y.org", "tok", None);
+        set_label(creds, "a@x.com", "work").unwrap();
+
+        // The new shape: pinned, no folder or port env, account line from the store.
+        let mut r = resolved();
+        r.args = strings(&DEFAULT_ARGS);
+        prepare(creds, d.path(), &mut r);
+        assert_eq!(r.args[0], "workspace-mcp==2.4.2");
+        assert!(!r.env.contains_key(CREDENTIALS_ENV));
+        assert!(!r.env.contains_key(PORT_ENV));
         assert_eq!(
-            again.guidance.as_deref(),
+            r.guidance.as_deref(),
             Some("Be careful. Accounts: work = a@x.com, b@y.org")
         );
-        // The user's own entries win, and a plain PORT follows them.
-        let mut own = resolved();
-        own.env.insert(PORT_ENV.into(), "9999".into());
-        prepare(p, &mut own);
+        // Nothing about tokens ever reaches the guidance.
+        assert!(!r.guidance.as_ref().unwrap().contains("tok"));
+
+        // A server that still carries its own client secrets keeps the bridge program's folder
+        // and port.
+        let mut old = resolved();
+        old.env.insert(CLIENT_ID_ENV.into(), "old-id".into());
+        old.env
+            .insert(CLIENT_SECRET_ENV.into(), "old-secret".into());
+        prepare(creds, d.path(), &mut old);
         assert_eq!(
-            (own.env[PORT_ENV].as_str(), own.env["PORT"].as_str()),
+            old.env[CREDENTIALS_ENV],
+            credentials_dir(d.path()).to_string_lossy()
+        );
+        let port: u16 = old.env[PORT_ENV].parse().unwrap();
+        assert!(port >= 1024);
+        assert_eq!(old.env["PORT"], old.env[PORT_ENV]);
+        assert_eq!(old.env["OAUTHLIB_INSECURE_TRANSPORT"], "1");
+        // A user's own port stands.
+        old.env.insert(PORT_ENV.into(), "9999".into());
+        prepare(creds, d.path(), &mut old);
+        assert_eq!(
+            (old.env[PORT_ENV].as_str(), old.env["PORT"].as_str()),
             ("9999", "9999")
         );
+
         // A server saved with `--tools` beside `--permissions` starts without it.
-        let mut old = resolved();
-        old.args = strings(&[
+        let mut both = resolved();
+        both.args = strings(&[
             "workspace-mcp",
             "--tools",
             "gmail",
             "--permissions",
             "gmail:drafts",
         ]);
-        prepare(p, &mut old);
-        assert_eq!(old.args, strings(&DEFAULT_ARGS));
-        // Nothing about the accounts' contents ever reaches the guidance or the settings file.
-        let settings = std::fs::read_to_string(settings_path(p)).unwrap();
-        assert!(!settings.contains("NOT-A-REAL-TOKEN"));
-        assert!(!again.guidance.unwrap().contains("NOT-A-REAL-TOKEN"));
-    }
-
-    #[test]
-    fn removing_deletes_the_listed_file_and_label_only() {
-        let d = tempfile::tempdir().unwrap();
-        let p = d.path();
-        sign_in(p, "a@x.com.json");
-        sign_in(p, "b@y.org.json");
-        sign_in(p, "keep.json");
-        set_label(p, "a@x.com", "work").unwrap();
-        for bad in ["../a@x.com", "nobody@x.com", "", "a@x.com.json", "keep"] {
-            assert!(remove_account(p, bad).is_err(), "{bad:?}");
-        }
-        remove_account(p, "A@x.com").unwrap();
-        assert_eq!(list_accounts(&credentials_dir(p)), ["b@y.org"]);
-        // The server escapes an address's other characters in its file name: listed as the
-        // address, removed by the file's own name; a malformed escape is not an account.
-        sign_in(p, "a%2Bb@x.com.json");
-        sign_in(p, "c%zz@x.com.json");
-        assert_eq!(list_accounts(&credentials_dir(p)), ["a+b@x.com", "b@y.org"]);
-        remove_account(p, "a+b@x.com").unwrap();
-        assert!(!credentials_dir(p).join("a%2Bb@x.com.json").exists());
-        assert!(credentials_dir(p).join("keep.json").is_file());
-        assert!(read_settings(p).labels.is_empty());
-    }
-
-    #[test]
-    fn the_sign_in_reply_gives_the_link_or_a_scrubbed_reason() {
-        let url = "https://accounts.google.com/o/oauth2/auth?client_id=abc&state=s1";
-        for (text, want) in [
-            (format!("Open this link: {url}\nthen come back."), Some(url)),
-            (format!("[Sign in]({url})"), Some(url)),
-            (format!("<{url}>"), Some(url)),
-            ("Your browser was opened.".to_string(), None),
-            ("Go to https://evil.example/login".to_string(), None),
-        ] {
-            let got =
-                read_sign_in_reply(&json!({"content": [{"type": "text", "text": text}]}), &[])
-                    .unwrap();
-            assert_eq!(got.auth_url.as_deref(), want, "{text}");
-        }
-        let err = read_sign_in_reply(
-            &json!({"isError": true, "content": [{"type": "text", "text": "bad client the-client-secret"}]}),
-            &["the-client-secret".into()],
-        )
-        .unwrap_err();
-        assert!(
-            err.contains("[secret]") && !err.contains("the-client-secret"),
-            "{err}"
-        );
-        assert!(read_sign_in_reply(&json!({"isError": true}), &[]).is_err());
-
-        let tools = json!({"tools": [
-            {"name": "start_google_auth", "inputSchema": {"properties": {"user_google_email": {}, "service_name": {}}}},
-            {"name": "other", "inputSchema": {"properties": {}}}
-        ]});
+        prepare(creds, d.path(), &mut both);
         assert_eq!(
-            tool_takes(&tools, "start_google_auth", "service_name"),
-            Some(true)
+            both.args,
+            strings(&["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"])
         );
-        assert_eq!(tool_takes(&tools, "start_google_auth", "nope"), Some(false));
-        assert_eq!(tool_takes(&tools, "missing", "x"), None);
     }
 
     #[test]
-    fn a_sign_in_without_the_client_or_for_a_known_account_never_starts_a_program() {
-        let d = tempfile::tempdir().unwrap();
-        let p = d.path();
-        let mut r = resolved();
-        r.command = Some("definitely-not-a-program.exe".into());
-        let e = start_sign_in(p, r.clone(), "a@x.com").unwrap_err();
-        assert!(e.contains("client id and secret"), "{e}");
-        r.env.insert(CLIENT_ID_ENV.into(), "id".into());
-        r.env.insert(CLIENT_SECRET_ENV.into(), "secret".into());
-        sign_in(p, "a@x.com.json");
-        let e = start_sign_in(p, r.clone(), "A@x.com").unwrap_err();
-        assert!(e.contains("already added"), "{e}");
-        r.error = Some("Environment X: the variable X is not set.".into());
-        assert!(start_sign_in(p, r, "b@y.org")
-            .unwrap_err()
-            .contains("not set"));
-        assert!(
-            !SIGNING_IN.load(Ordering::SeqCst),
-            "a refusal leaves no sign-in open"
+    fn an_id_token_address_is_decoded_and_sanity_checked() {
+        let tok = |payload: Value| {
+            let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+            format!(
+                "{}.{}.sig",
+                b64.encode(br#"{"alg":"RS256"}"#),
+                b64.encode(payload.to_string())
+            )
+        };
+        assert_eq!(
+            id_token_email(&tok(json!({"email": "Work@X.com", "email_verified": true}))).unwrap(),
+            "work@x.com",
+            "stored lower-cased"
         );
+        assert_eq!(
+            id_token_email(&tok(json!({"email": "a@x.com"}))).unwrap(),
+            "a@x.com",
+            "email_verified missing is accepted"
+        );
+        for bad in [
+            String::new(),
+            "not.a.jwt.at.all".into(),
+            "a.b".into(),
+            tok(json!({"email_verified": false, "email": "a@x.com"})),
+            tok(json!({"email": "nope"})),
+            tok(json!({"email": ""})),
+            tok(json!({})),
+        ] {
+            assert!(id_token_email(&bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_test_hook_points_at_this_computer_only() {
+        for (raw, ok) in [
+            ("http://127.0.0.1:9999", true),
+            ("http://localhost:9999", true),
+            ("http://127.0.0.1:9999/", true),
+            ("http://127.0.0.1:9999/as", false),
+            ("http://evil.example:9", false),
+            ("https://127.0.0.1:9", false),
+            ("garbage", false),
+        ] {
+            assert_eq!(test_as(raw).is_some(), ok, "{raw}");
+        }
+        let a = test_as("http://127.0.0.1:9").unwrap();
+        assert_eq!(
+            a.authorization_endpoint,
+            "http://127.0.0.1:9/o/oauth2/v2/auth"
+        );
+        assert_eq!(a.token_endpoint, "http://127.0.0.1:9/oauth2/token");
+    }
+
+    #[test]
+    fn a_whole_sign_in_lands_in_the_store_and_a_refresh_reuses_it() {
+        let _turn = AS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let fake = Fake::start(Cfg {
+            google_shape: true,
+            id_email: Some("Work@X.com".into()),
+            expect_client: Some(("g-client".into(), "g-secret".into())),
+            no_register: true,
+            ..Cfg::default()
+        });
+        std::env::set_var(TEST_AS_ENV, &fake.base);
+        let d = tempfile::tempdir().unwrap();
+        let st = Arc::new(store(d.path()));
+        let mut s = server(strings(&DEFAULT_ARGS));
+        s.transport.env.insert(
+            CLIENT_ID_ENV.into(),
+            crate::types::ValueRef {
+                kind: crate::types::RefKind::Literal,
+                value: Some("g-client".into()),
+                secret_id: None,
+                prefix: None,
+            },
+        );
+        s.transport.env.insert(
+            CLIENT_SECRET_ENV.into(),
+            crate::types::ValueRef {
+                kind: crate::types::RefKind::Literal,
+                value: Some("g-secret".into()),
+                secret_id: None,
+                prefix: None,
+            },
+        );
+        st.mutate(None, |l| {
+            l.push(s.clone());
+            Ok(())
+        })
+        .unwrap();
+
+        let out = begin_sign_in(&st, None, &FakeBrowser, &s, Some("work@x.com")).unwrap();
+        assert!(out
+            .auth_url
+            .as_deref()
+            .unwrap()
+            .contains("/o/oauth2/v2/auth"));
+        // What the sign-in page was asked for, as the fake recorded it.
+        let asked = fake.authorize_params();
+        assert_eq!(
+            asked.get("access_type").map(String::as_str),
+            Some("offline")
+        );
+        assert!(asked.get("prompt").unwrap().contains("consent"));
+        assert!(asked.get("prompt").unwrap().contains("select_account"));
+        assert_eq!(
+            asked.get("login_hint").map(String::as_str),
+            Some("work@x.com")
+        );
+        assert_eq!(
+            asked
+                .get("scope")
+                .unwrap()
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            GooglePermission::Drafts.scopes()
+        );
+        assert!(!asked.contains_key("resource"));
+
+        // The sign-in finishes on its thread: wait for the account to appear.
+        let mut seen = None;
+        for _ in 0..100 {
+            if let Some(e) = resolve_account(st.creds(), "work@x.com") {
+                seen = Some(e);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(seen.as_deref(), Some("work@x.com"));
+        assert!(!SIGNING_IN.load(Ordering::SeqCst));
+
+        // The kept set is a normal sign-in: its token refreshes at Google's kept address.
+        let kept = TokenStore::load(
+            st.creds(),
+            &account_entry("work@x.com"),
+            &account_identity("work@x.com"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(kept.tokens.access_token, "fake-access-1");
+        assert!(kept.tokens.refresh_token.is_some());
+        assert!(kept.tokens.id_token.is_none(), "the id_token is not kept");
+        assert_eq!(
+            kept.auth_server.as_ref().unwrap().token_endpoint,
+            format!("{}/oauth2/token", fake.base)
+        );
+        let fresh = account_access(&st, "work@x.com", true).unwrap();
+        assert_eq!(fresh, "fake-access-2");
+        assert_eq!(fake.refreshes_served(), 1);
+        // Nothing secret appears in anything the account list would say.
+        let said = serde_json::to_string(&list_for(&st, &s)).unwrap();
+        for leak in ["fake-access", "fake-refresh", "g-secret", "fakesignature"] {
+            assert!(!said.contains(leak), "{leak} in {said}");
+        }
+        std::env::remove_var(TEST_AS_ENV);
+    }
+
+    #[test]
+    fn every_way_a_sign_in_is_refused_is_said_in_words_without_secrets() {
+        let _turn = AS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let d = tempfile::tempdir().unwrap();
+        let st = Arc::new(store(d.path()));
+        // No client anywhere: refused before anything opens.
+        st.mutate(None, |l| {
+            l.push(server(strings(&DEFAULT_ARGS)));
+            Ok(())
+        })
+        .unwrap();
+        let s = st.load().unwrap().remove(0);
+        let e = begin_sign_in(&st, None, &FakeBrowser, &s, None).unwrap_err();
+        assert!(e.contains("Set the Google sign-in client"), "{e}");
+        assert!(!SIGNING_IN.load(Ordering::SeqCst));
+
+        // A fake the hook points at that answers badly: the wait fails and the flag clears.
+        std::env::set_var(TEST_AS_ENV, "garbage-not-a-url");
+        st.creds()
+            .write(
+                CLIENT_ENTRY,
+                CLIENT_IDENTITY,
+                &serde_json::to_vec(&ClientPair {
+                    client_id: "c".into(),
+                    client_secret: "s".into(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let e = begin_sign_in(&st, None, &FakeBrowser, &s, None).unwrap_err();
+        assert!(e.contains(TEST_AS_ENV), "{e}");
+        std::env::remove_var(TEST_AS_ENV);
+
+        // A sign-in page that never sends anyone back: the thread's wait runs out, nothing is
+        // stored, and the flag clears on its own.
+        let fake = Fake::start(Cfg {
+            google_shape: true,
+            expect_client: Some(("c".into(), "s".into())),
+            no_register: true,
+            ..Cfg::default()
+        });
+        std::env::set_var(TEST_AS_ENV, &fake.base);
+        // No id_email: the tokens arrive without an address, so nothing is kept.
+        begin_sign_in(&st, None, &FakeBrowser, &s, None).unwrap();
+        for _ in 0..100 {
+            if !SIGNING_IN.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!SIGNING_IN.load(Ordering::SeqCst));
+        assert!(listed_accounts(st.creds()).is_empty());
+        std::env::remove_var(TEST_AS_ENV);
+    }
+
+    #[test]
+    fn an_expired_account_that_cannot_renew_says_so_in_words() {
+        let d = tempfile::tempdir().unwrap();
+        let st = store(d.path());
+        sign_in(st.creds(), "a@x.com", "tok", None);
+        let e = account_access(&st, "a@x.com", true).unwrap_err();
+        assert!(e.contains("cannot renew"), "{e}");
+        assert!(!e.contains("tok"));
+        assert_eq!(
+            account_access(&st, "nobody@x.com", false).unwrap_err(),
+            "That account is not signed in."
+        );
+        // Not due: the stored token answers without a network call.
+        assert_eq!(account_access(&st, "a@x.com", false).unwrap(), "tok");
     }
 }

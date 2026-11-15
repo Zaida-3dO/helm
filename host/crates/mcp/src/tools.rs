@@ -12,6 +12,7 @@ use helm_hosttools::{
 use serde_json::{json, Value};
 
 pub fn register_host_tools(r: &mut HostToolRegistry) {
+    crate::gmail::register_gmail_tools(r);
     // The worker's one-time ask when a browser-signed-in server refuses its header: the host
     // refreshes and answers the header to the worker only. Never listed to agents.
     r.blocking(
