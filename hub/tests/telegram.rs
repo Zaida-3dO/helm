@@ -2115,7 +2115,7 @@ async fn a_person_links_their_own_telegram_and_their_bridge_takes_their_messages
     let own_pc = reg.add_client("Owner", "desk", &scopes).unwrap().client.id;
     let kim_pc = reg.add_client("Kim", "laptop", &scopes).unwrap().client.id;
     let registry = Arc::new(Mutex::new(reg));
-    let (lines, up) = Lines::new(registry.clone());
+    let (lines, mut up) = Lines::new(registry.clone());
     let lines = Arc::new(lines);
 
     // The bot starts as an environment allow-list leaves it: one account, the owner's.
