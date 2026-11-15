@@ -339,7 +339,7 @@ async fn an_upstream_frame_under_the_limit_is_accepted_and_a_bigger_one_ends_the
     ws.send(Message::Text(frame.to_string().into()))
         .await
         .unwrap();
-    let (person, up) = tokio::time::timeout(Duration::from_secs(5), voice.recv())
+    let (person, _client, up) = tokio::time::timeout(Duration::from_secs(5), voice.recv())
         .await
         .expect("the frame within 5 s")
         .unwrap();

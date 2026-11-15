@@ -601,12 +601,16 @@ async fn telegram_goes_to_each_persons_own_helm_and_replies_come_back_to_them_on
 
     // What her machine sends up reaches her Telegram user only.
     assert!(bea_line.receive(bea_gen, r#"{"type":"telegram_final","text":"done"}"#));
-    let (person, frame) = upstream.recv().await.unwrap();
+    let (person, client, frame) = upstream.recv().await.unwrap();
     assert_eq!(
-        (person, &frame),
-        (bea.person_id, &Upstream::TelegramFinal("done".into()))
+        (person, client, &frame),
+        (
+            bea.person_id,
+            bea.id,
+            &Upstream::TelegramFinal("done".into())
+        )
     );
-    tg.on_upstream(person, frame).await;
+    tg.on_upstream(person, client, frame).await;
     let texts: Vec<(i64, String)> = api
         .calls
         .lock()

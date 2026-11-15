@@ -38,8 +38,10 @@ struct Slot {
     peer: bool,
 }
 
-/// What a line sent up that is not a call result, tagged with the person whose machine sent it.
-pub type PersonUpstream = (i64, Upstream);
+/// What a line sent up that is not a call result: the person it acts for, the machine that sent
+/// it, and the frame. The sender travels with it so an answer can go back to that machine — a
+/// question one PC asked is not another PC's to answer.
+pub type PersonUpstream = (i64, i64, Upstream);
 
 pub struct Lines {
     slots: Mutex<HashMap<i64, Slot>>,
@@ -319,14 +321,14 @@ impl Lines {
                         if other.is_voice() {
                             // The voice bridge's frames are dropped until it has asked for them.
                             if let Some(voice) = lines.voice_sink() {
-                                let _ = voice.send((tag, other));
+                                let _ = voice.send((tag, client_id, other));
                             }
                         } else {
-                            let _ = tx.send((tag, other));
+                            let _ = tx.send((tag, client_id, other));
                         }
                     }
                     other => {
-                        let _ = tx.send((person_id, other));
+                        let _ = tx.send((person_id, client_id, other));
                     }
                 }
             }
@@ -740,7 +742,7 @@ mod tests {
         assert_eq!(route.generation(), Some(ga));
         assert_eq!(
             up.recv().await.unwrap(),
-            (p10, Upstream::TelegramFinal("hi".into()))
+            (p10, 1, Upstream::TelegramFinal("hi".into()))
         );
 
         // A named machine is returned even when down; another person's is never reachable.
@@ -757,7 +759,7 @@ mod tests {
         assert!(la.receive(ga, ack));
         assert_eq!(
             voice.recv().await.unwrap(),
-            (p10, Upstream::VoiceAck("turn-0001".into()))
+            (p10, 1, Upstream::VoiceAck("turn-0001".into()))
         );
         assert!(up.try_recv().is_err(), "Telegram never saw a voice frame");
     }
@@ -992,7 +994,7 @@ mod tests {
         ));
         assert_eq!(
             up.recv().await.unwrap(),
-            (bea, Upstream::TelegramFinal("as Bea".into()))
+            (bea, laptop, Upstream::TelegramFinal("as Bea".into()))
         );
         assert!(lline.receive(
             gl,
@@ -1005,7 +1007,7 @@ mod tests {
         assert!(lline.receive(gl, r#"{"type":"telegram_final","text":"plain"}"#));
         assert_eq!(
             up.recv().await.unwrap(),
-            (kim, Upstream::TelegramFinal("plain".into()))
+            (kim, laptop, Upstream::TelegramFinal("plain".into()))
         );
 
         // Routing: home first when nothing else applies � Desk is Bea's own PC even though
@@ -1035,7 +1037,7 @@ mod tests {
         ));
         assert_eq!(
             up.recv().await.unwrap(),
-            (bea, Upstream::TelegramAck("m1".into()))
+            (bea, laptop, Upstream::TelegramAck("m1".into()))
         );
         pick(bea, Channel::Telegram, "laptop");
         // A pin beats sticky; clearing it falls back to sticky.

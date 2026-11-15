@@ -1607,7 +1607,9 @@ impl VoiceBridge {
                 ticker.tick(now_ms());
             }
         });
-        while let Some((person, u)) = upstream.recv().await {
+        // A voice turn already knows the line it went to, so the sender of an acknowledgement is
+        // not needed here.
+        while let Some((person, _client, u)) = upstream.recv().await {
             self.on_upstream(person, u, now_ms());
         }
     }

@@ -729,7 +729,7 @@ async fn one_status_message_is_edited_in_place_then_replaced_by_the_answer() {
         .await; // learns the chat
     e.api.clear();
     e.bridge
-        .on_upstream(Upstream::TelegramStatus("Reading files".into()))
+        .on_upstream(0, Upstream::TelegramStatus("Reading files".into()))
         .await;
     e.bridge.flush_status(T0).await;
     // Debounced: a second status inside the interval is held, not sent.
@@ -751,7 +751,7 @@ async fn one_status_message_is_edited_in_place_then_replaced_by_the_answer() {
     // An alert Helm starts mid-turn is a new, notifying message, and the status stays.
     e.api.clear();
     e.bridge
-        .on_upstream(Upstream::TelegramNotify("Docs chat: finished".into()))
+        .on_upstream(0, Upstream::TelegramNotify("Docs chat: finished".into()))
         .await;
     let calls = e.api.calls();
     assert_eq!(calls.len(), 1, "{calls:?}");
@@ -833,7 +833,7 @@ async fn receive_off_never_polls_but_still_names_the_bot() {
         let (tx_up, rx_up) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             while let Some((_person, u)) = raw.recv().await {
-                if tx_up.send(u).is_err() {
+                if tx_up.send((0, u)).is_err() {
                     break;
                 }
             }
@@ -1748,8 +1748,8 @@ async fn approval_buttons_answer_helm_once_and_only_for_the_allowed_user() {
         text: "Run the migration?".into(),
         options: vec!["Allow".into(), "Deny".into(), "z".repeat(50)],
     };
-    e.bridge.on_upstream(ask(ASK)).await;
-    e.bridge.on_upstream(ask(ASK)).await; // the same id again: already on the phone
+    e.bridge.on_upstream(0, ask(ASK)).await;
+    e.bridge.on_upstream(0, ask(ASK)).await; // the same id again: already on the phone
     let calls = e.api.calls();
     assert_eq!(calls.len(), 1, "{calls:?}");
     let (method, sent) = &calls[0];
@@ -1859,7 +1859,7 @@ async fn approval_buttons_answer_helm_once_and_only_for_the_allowed_user() {
 
     // Settled in Helm: the message gains the outcome and loses its buttons; a later tap is stale.
     const ASK2: &str = "fedcba9876543210";
-    e.bridge.on_upstream(ask(ASK2)).await;
+    e.bridge.on_upstream(0, ask(ASK2)).await;
     let mid2 = *e.api.next_id.lock().unwrap();
     e.api.clear();
     for text in ["Allowed in Helm", "again"] {
@@ -1867,7 +1867,7 @@ async fn approval_buttons_answer_helm_once_and_only_for_the_allowed_user() {
             id: ASK2.into(),
             text: text.into(),
         };
-        e.bridge.on_upstream(done).await;
+        e.bridge.on_upstream(0, done).await;
     }
     assert_eq!(
         e.api.calls(),
@@ -1885,7 +1885,7 @@ async fn approval_buttons_answer_helm_once_and_only_for_the_allowed_user() {
     // At most 50 asks wait: the oldest is forgotten.
     let ids: Vec<String> = (0..51).map(|i| format!("{i:016x}")).collect();
     for id in &ids {
-        e.bridge.on_upstream(ask(id)).await;
+        e.bridge.on_upstream(0, ask(id)).await;
     }
     let first_mid = *e.api.next_id.lock().unwrap() - 50;
     e.api.clear();
@@ -2076,13 +2076,15 @@ async fn wait_frame(rx: &mut mpsc::UnboundedReceiver<String>, what: &str) -> Val
     panic!("no {what} frame arrived");
 }
 
-/// Wait for a condition the hub reaches on its own (a claim from a `device` frame, say).
+/// Wait for a condition the hub reaches on its own (a claim from a `device` frame, or a call to
+/// the fake bot that leaves this runtime on a blocking thread and comes back over loopback).
+/// Yields alone lose that race, so each turn also gives the clock a moment to move.
 async fn wait_until(cond: impl Fn() -> bool) {
-    for _ in 0..400 {
+    for _ in 0..250 {
         if cond() {
             return;
         }
-        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     }
     panic!("the condition never became true");
 }
@@ -2113,7 +2115,7 @@ async fn a_person_links_their_own_telegram_and_their_bridge_takes_their_messages
     let own_pc = reg.add_client("Owner", "desk", &scopes).unwrap().client.id;
     let kim_pc = reg.add_client("Kim", "laptop", &scopes).unwrap().client.id;
     let registry = Arc::new(Mutex::new(reg));
-    let (lines, _up) = Lines::new(registry.clone());
+    let (lines, up) = Lines::new(registry.clone());
     let lines = Arc::new(lines);
 
     // The bot starts as an environment allow-list leaves it: one account, the owner's.
@@ -2131,6 +2133,15 @@ async fn a_person_links_their_own_telegram_and_their_bridge_takes_their_messages
         Arc::new(Telegram::build(api.clone(), &lines, &c, owner, &mut resolve, &|b| b).unwrap());
     tel.clone().attach();
     tel.prime().await;
+
+    // Frames a line sends up on its own (a `telegram_ask`, say) reach the bot, the way the
+    // hub's own wiring hands them over in `Telegram::run`.
+    let tel_up = tel.clone();
+    tokio::spawn(async move {
+        while let Some((person, client, u)) = up.recv().await {
+            tel_up.on_upstream(person, client, u).await;
+        }
+    });
 
     let client = |id: i64, person: i64, name: &str, machine: &str| Client {
         id,
@@ -2292,7 +2303,7 @@ async fn a_person_links_their_own_telegram_and_their_bridge_takes_their_messages
 
     // What Kim's chats send back goes to the linked account.
     api.clear();
-    tel.on_upstream(kim, Upstream::TelegramFinal("the answer".into()))
+    tel.on_upstream(kim, kim_pc, Upstream::TelegramFinal("the answer".into()))
         .await;
     assert_eq!(
         sent_chats(&api),
@@ -2331,13 +2342,51 @@ async fn a_person_links_their_own_telegram_and_their_bridge_takes_their_messages
         "a message routed to another person's PC never arrived"
     );
     api.clear();
-    tel.on_upstream(owner, Upstream::TelegramFinal("answered there".into()))
-        .await;
+    tel.on_upstream(
+        owner,
+        kim_pc,
+        Upstream::TelegramFinal("answered there".into()),
+    )
+    .await;
     assert_eq!(
         sent_chats(&api),
         vec![OWNER],
         "the answer from that PC did not reach the phone"
     );
+
+    // A card raised by the owner's own PC is answered back there, not on the PC that now carries
+    // their Telegram: the machine holding the card is the one that has to hear the tap.
+    const ASK_ID: &str = "0123456789abcdef0123456789abcdef";
+    api.clear();
+    assert!(dline.receive(
+        dgen,
+        &json!({"type": "telegram_ask", "id": ASK_ID, "text": "Merge?",
+                "options": ["Allow", "Deny"], "personId": owner.to_string()})
+        .to_string()
+    ));
+    wait_until(|| api.calls().iter().any(|(m, _)| m == "sendMessage")).await;
+    let mid = *api.next_id.lock().unwrap();
+    let tap = json!({ "update_id": NEXT_UPDATE.fetch_add(1, Ordering::Relaxed),
+                      "callback_query": {
+        "id": "q1", "chat_instance": "c", "data": format!("a:{ASK_ID}:0"),
+        "from": { "id": OWNER, "is_bot": false, "first_name": "x" },
+        "message": { "message_id": mid, "date": 0,
+                     "chat": { "id": OWNER, "type": "private" } } } });
+    assert_eq!(tel.on_update(&tap, now).await, Handled::Button);
+    let answered = wait_frame(&mut drx, "telegram_answer").await;
+    assert_eq!(
+        (answered["id"].as_str(), answered["index"].as_i64()),
+        (Some(ASK_ID), Some(0)),
+        "the tap did not answer the PC that asked"
+    );
+    while let Ok(frame) = krx.try_recv() {
+        let v: Value = serde_json::from_str(&frame).unwrap();
+        assert_ne!(
+            v["type"],
+            json!("telegram_answer"),
+            "the answer went to the PC that only carries the Telegram: {v}"
+        );
+    }
 
     // Unlinking makes them a stranger again.
     assert!(kline.receive(
@@ -2358,11 +2407,15 @@ async fn a_person_links_their_own_telegram_and_their_bridge_takes_their_messages
     // And the unlinked phone stops hearing that person at once: no answer, no alert, no status
     // line, even though their bridge is still standing for their other accounts.
     api.clear();
-    tel.on_upstream(kim, Upstream::TelegramFinal("still listening?".into()))
+    tel.on_upstream(
+        kim,
+        kim_pc,
+        Upstream::TelegramFinal("still listening?".into()),
+    )
+    .await;
+    tel.on_upstream(kim, kim_pc, Upstream::TelegramNotify("an alert".into()))
         .await;
-    tel.on_upstream(kim, Upstream::TelegramNotify("an alert".into()))
-        .await;
-    tel.on_upstream(kim, Upstream::TelegramStatus("working".into()))
+    tel.on_upstream(kim, kim_pc, Upstream::TelegramStatus("working".into()))
         .await;
     assert!(
         api.calls().is_empty(),

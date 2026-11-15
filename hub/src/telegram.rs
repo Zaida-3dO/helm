@@ -624,6 +624,9 @@ struct Ask {
     message_id: i64,
     text: String,
     options: Vec<String>,
+    /// The machine that asked, and the connection it asked on: the tap goes back to that
+    /// machine, since it is the one holding the card, whoever else carries the person's Telegram.
+    origin: Option<(i64, u64)>,
 }
 
 #[derive(Default)]
@@ -1043,6 +1046,25 @@ impl Bridge {
             st.pending_status = None;
         }
         st.asks.retain(|ask| ask.chat != id);
+    }
+
+    /// The connection a frame came up on, as `(client, generation)`, for an answer that must go
+    /// back to the machine that asked.
+    fn origin(&self, client: i64) -> Option<(i64, u64)> {
+        match &self.household_lines {
+            Some(lines) => lines
+                .get(client)
+                .and_then(|line| line.generation().map(|gen| (client, gen))),
+            None => self.line.generation().map(|gen| (0, gen)),
+        }
+    }
+
+    /// The line of the connection `generation` on `client`, while that very connection is up.
+    fn origin_line(&self, client: i64, generation: u64) -> Option<Arc<Line>> {
+        self.household_lines
+            .as_ref()?
+            .get(client)
+            .filter(|line| line.generation() == Some(generation))
     }
 
     /// `personId` for a frame this bridge sends down the line.
@@ -2000,7 +2022,7 @@ impl Bridge {
 
     /// An approval ask: a new (notifying) message with one button per option, one per row. An id
     /// already on the phone is not sent twice.
-    pub async fn on_ask(&self, id: &str, text: &str, options: &[String]) {
+    pub async fn on_ask(&self, client: i64, id: &str, text: &str, options: &[String]) {
         let _g = self.ops.lock().await;
         if self.st().asks.iter().any(|a| a.id == id) {
             return;
@@ -2039,6 +2061,7 @@ impl Bridge {
                     message_id,
                     text,
                     options,
+                    origin: self.origin(client),
                 });
             }
             Ok(None) => eprintln!("telegram: the ask was sent but no message id came back"),
@@ -2121,7 +2144,16 @@ impl Bridge {
         };
         let mut frame = json!({ "type": "telegram_answer", "id": id, "index": index });
         self.tag(&mut frame);
-        if !self.line.send(&frame) {
+        // Back to the machine that asked, while that very connection is up; the routed one only
+        // when it is not.
+        let asked = ask
+            .origin
+            .and_then(|(client, gen)| self.origin_line(client, gen));
+        let sent = match asked {
+            Some(line) => line.send(&frame),
+            None => self.line.send(&frame),
+        };
+        if !sent {
             // Nothing reached Helm, so the buttons stay for another try.
             self.answer_query(query, Some(TAP_OFFLINE)).await;
             return Handled::Button;
@@ -2133,14 +2165,16 @@ impl Bridge {
         Handled::Button
     }
 
-    /// Handle one frame Helm sent up the line.
-    pub async fn on_upstream(&self, u: Upstream) {
+    /// Handle one frame `client` sent up its line.
+    pub async fn on_upstream(&self, client: i64, u: Upstream) {
         match u {
             Upstream::TelegramAck(id) => self.on_ack(&id),
             Upstream::TelegramStatus(t) => self.on_status(&t),
             Upstream::TelegramFinal(t) => self.on_final(&t).await,
             Upstream::TelegramNotify(t) => self.on_notify(&t).await,
-            Upstream::TelegramAsk { id, text, options } => self.on_ask(&id, &text, &options).await,
+            Upstream::TelegramAsk { id, text, options } => {
+                self.on_ask(client, &id, &text, &options).await;
+            }
             Upstream::TelegramAskDone { id, text } => self.on_ask_done(&id, &text).await,
             // Household questions are answered where the line is kept, and the voice frames go
             // to the voice bridge; neither reaches this one.
@@ -2179,7 +2213,7 @@ impl Bridge {
     /// unless another service that already runs the bot posts them.
     pub async fn run(
         self: Arc<Self>,
-        mut upstream: tokio::sync::mpsc::UnboundedReceiver<Upstream>,
+        mut upstream: tokio::sync::mpsc::UnboundedReceiver<(i64, Upstream)>,
     ) {
         if let Err(e) = self.identify().await {
             eprintln!("telegram: getMe failed: {}", e.description);
@@ -2187,8 +2221,8 @@ impl Bridge {
         self.start_ticks();
         let up = self.clone();
         tokio::spawn(async move {
-            while let Some(u) = upstream.recv().await {
-                up.on_upstream(u).await;
+            while let Some((client, u)) = upstream.recv().await {
+                up.on_upstream(client, u).await;
             }
         });
         if self.receive == Receive::Off {
@@ -2703,7 +2737,7 @@ impl Telegram {
     }
 
     /// Handle one frame a person's machine sent up.
-    pub async fn on_upstream(&self, person: i64, u: Upstream) {
+    pub async fn on_upstream(&self, person: i64, client: i64, u: Upstream) {
         let bridge = self
             .bridges
             .lock()
@@ -2712,7 +2746,7 @@ impl Telegram {
             .find(|(p, _)| *p == person)
             .map(|(_, b)| b.clone());
         match bridge {
-            Some(b) => b.on_upstream(u).await,
+            Some(b) => b.on_upstream(client, u).await,
             // A person with a frame but no bridge has no linked Telegram account: there is nobody
             // to send it to.
             None if u.takes_person() => {
@@ -2735,8 +2769,8 @@ impl Telegram {
         }
         let me = self.clone();
         tokio::spawn(async move {
-            while let Some((person, u)) = upstream.recv().await {
-                me.on_upstream(person, u).await;
+            while let Some((person, client, u)) = upstream.recv().await {
+                me.on_upstream(person, client, u).await;
             }
         });
         if self.receive == Receive::Off {
