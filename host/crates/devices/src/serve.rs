@@ -435,13 +435,13 @@ impl Inner {
         };
         let run = async {
             let (asker, acting) = self.asker(from)?;
+            // The switch for other devices gates every op that runs or changes a chat here,
+            // whoever is asking; the household switch is a further gate for other people.
+            if op.is_run() && !self.port.run_allowed() {
+                return Err(WireError::not_allowed());
+            }
             let op = match &asker {
-                Asker::Own => {
-                    if op.is_run() && !self.port.run_allowed() {
-                        return Err(WireError::not_allowed());
-                    }
-                    op
-                }
+                Asker::Own => op,
                 Asker::Household { .. } => self.household_op(op)?,
             };
             // A chat started from afar belongs to the acting person: the hub's verified id

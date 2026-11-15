@@ -1560,6 +1560,26 @@ async fn a_household_member_gets_their_own_view_of_the_list_but_is_refused_nothi
     assert_eq!(e.code, code::NOT_ALLOWED);
     assert!(own.rpc.call("dev-a", "hello", json!({})).await.is_ok());
     port.set_household(true);
+    // The switch for other devices gates a household member's run ops too: with it off, every op
+    // that runs or changes a chat is refused, card answers and uploads included; reads stay.
+    port.set_run(false);
+    for (op, args) in [
+        (
+            "consent_decide",
+            json!({"chatId": "hers", "requestId": "r", "decision": "allow"}),
+        ),
+        ("send", send("hers", 9)),
+        (
+            "attach_put",
+            json!({"chatId": "hers", "uploadId": "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b99", "seq": 0, "eof": true, "data": "", "kind": "file", "name": "a.txt", "mime": ""}),
+        ),
+        ("stop", json!({"chatId": "hers"})),
+    ] {
+        let e = sam.rpc.call("dev-a", op, args).await.unwrap_err();
+        assert_eq!(e.code, code::NOT_ALLOWED, "{op}");
+    }
+    assert!(sam.rpc.call("dev-a", "hello", json!({})).await.is_ok());
+    port.set_run(true);
     // A person this PC has no profile for is still served: the switch is per household, not
     // per person.
     port.st().people.retain(|p| p != "person-b");
