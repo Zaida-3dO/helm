@@ -161,11 +161,79 @@ pub fn for_chat(profile_dir: &Path, chat_id: &str) -> Resolved {
     resolve(profile_dir, &who(chat_id))
 }
 
+/// A rule at most this long goes into the prompt whole; a longer one is listed by a line and read
+/// with `app_help` when it applies, unless its header says `always: true`.
+pub const INLINE_RULE_CHARS: usize = 800;
+
 /// One rule as the prompt carries it.
-struct Loaded {
-    entry: RuleEntry,
-    file: PathBuf,
-    body: String,
+pub struct Loaded {
+    pub entry: RuleEntry,
+    pub file: PathBuf,
+    pub body: String,
+    pub front: rules::Front,
+    /// Its name as a help topic (`rule/<name>`): the file's name, kept apart across layers.
+    pub topic: String,
+}
+
+impl Loaded {
+    /// The prompt carries the whole rule.
+    fn inline(&self) -> bool {
+        self.front.always || self.body.chars().count() <= INLINE_RULE_CHARS
+    }
+
+    /// What the rule is for, in one line of at most 100 characters: its header's summary, else its
+    /// first sentences (not the ones that only repeat its title) until they say enough.
+    pub fn summary(&self) -> String {
+        let one = match &self.front.summary {
+            Some(s) => s.clone(),
+            None => lead_sentences(&self.body, &self.entry.title),
+        };
+        if one.chars().count() <= helm_hosttools::help::MAX_SUMMARY_CHARS {
+            return one;
+        }
+        let head: String = one
+            .chars()
+            .take(helm_hosttools::help::MAX_SUMMARY_CHARS - 1)
+            .collect();
+        format!("{}…", head.trim_end())
+    }
+}
+
+/// The first sentences of a rule's text, skipping any that begin with its title, until they hold at
+/// least 40 characters. A line that ends in a colon leads into a list and ends the summary.
+fn lead_sentences(body: &str, title: &str) -> String {
+    let flat = body
+        .lines()
+        .map(|l| l.trim().trim_start_matches(['-', '*', ' ']).trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let title = title.to_lowercase();
+    let mut out = String::new();
+    let mut rest = flat.as_str();
+    while !rest.is_empty() && out.chars().count() < 40 {
+        let end = rest
+            .char_indices()
+            .find(|(i, c)| {
+                (matches!(c, '.' | '!' | '?') || (*c == ':' && *i >= 30))
+                    && rest[i + 1..].starts_with(' ')
+            })
+            .map(|(i, c)| (i + 1, c))
+            .unwrap_or((rest.len(), '.'));
+        let sentence = rest[..end.0].trim();
+        rest = rest[end.0..].trim_start();
+        if sentence.to_lowercase().starts_with(&title) {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(sentence.trim_end_matches(':'));
+        if end.1 == ':' {
+            break;
+        }
+    }
+    out
 }
 
 fn load_rules(root: &Path) -> Vec<Loaded> {
@@ -183,35 +251,64 @@ fn load_rules(root: &Path) -> Vec<Loaded> {
                 return None;
             }
             let body = rules::body_of(&text);
+            let front = rules::split_front(&text).0;
+            let stem = entry
+                .path
+                .trim_start_matches("rules/")
+                .trim_end_matches(".md")
+                .to_owned();
             (!body.is_empty()).then(|| Loaded {
                 file: rules::rules_dir(root).join(entry.path.trim_start_matches("rules/")),
                 entry,
                 body,
+                front,
+                topic: stem,
             })
         })
         .collect()
 }
 
-/// The `rules` section's text: the Everyone rules, then the person's, then the guidance. Rules go
-/// in whole until `cap` bytes of rule text are used; the rest are listed by path to read when they
-/// apply.
-pub fn rules_text(profile_dir: &Path, who: &ChatKnowledge, cap: usize) -> String {
+/// The rules that apply to a chat, a group at a time: ("Rules for everyone", ...), then the
+/// person's. A person's rule whose file name an Everyone rule also has is named `me-<name>` as a
+/// help topic.
+pub fn rule_groups(profile_dir: &Path, who: &ChatKnowledge) -> Vec<(String, Vec<Loaded>)> {
     let mut groups: Vec<(String, Vec<Loaded>)> = vec![(
         "Rules for everyone".to_owned(),
         load_rules(&Layer::Everyone.root(profile_dir)),
     )];
     if let Some(p) = &who.profile {
-        groups.push((
-            format!("Rules for {}", p.name),
-            load_rules(&Layer::Profile(p.id.clone()).root(profile_dir)),
-        ));
+        let mut own = load_rules(&Layer::Profile(p.id.clone()).root(profile_dir));
+        for r in &mut own {
+            if groups[0].1.iter().any(|e| e.topic == r.topic) {
+                r.topic = format!("me-{}", r.topic);
+            }
+        }
+        groups.push((format!("Rules for {}", p.name), own));
     }
+    groups
+}
+
+/// The `rules` section's text: the Everyone rules, then the person's, then the guidance. A short
+/// rule (or one marked `always`) goes in whole until `cap` bytes of rule text are used; the others
+/// are one line each, with the topic that has the rest.
+pub fn rules_text(profile_dir: &Path, who: &ChatKnowledge, cap: usize) -> String {
+    let groups = rule_groups(profile_dir, who);
     let mut used = 0usize;
     let mut parts: Vec<String> = Vec::new();
     let mut overflow: Vec<String> = Vec::new();
     for (heading, rules) in groups {
         let mut block = String::new();
+        let mut listed = String::new();
         for r in rules {
+            if !r.inline() {
+                listed.push_str(&format!(
+                    "\n- {}: {} (app_help rule/{})",
+                    r.entry.title,
+                    r.summary(),
+                    r.topic
+                ));
+                continue;
+            }
             let text = format!("### {}\n{}", r.entry.title, r.body);
             if used + text.len() <= cap {
                 used += text.len();
@@ -219,6 +316,11 @@ pub fn rules_text(profile_dir: &Path, who: &ChatKnowledge, cap: usize) -> String
             } else {
                 overflow.push(r.file.to_string_lossy().into_owned());
             }
+        }
+        if !listed.is_empty() {
+            block.push_str(&format!(
+                "\n\nLonger rules, one line each; read one in full with app_help before the work it covers:{listed}"
+            ));
         }
         if !block.is_empty() {
             parts.push(format!("{heading}:{block}"));

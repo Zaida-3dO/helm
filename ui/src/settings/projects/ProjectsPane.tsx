@@ -12,6 +12,7 @@ import { syncOnOpen } from '../../sidebar/sync.ts';
 import { ASK_EACH_TIME, getDefaultBoard, NO_DEFAULT_BOARD, setDefaultBoard, type DefaultBoardState } from '../../newchat/boards.ts';
 import { openAddFolder, openNewProject, openPrimaryFolder } from '../../newchat/index.ts';
 import { needsFolder, pickerProjects, primaryFolder, sharedFolders } from '../../newchat/places.ts';
+import { StartupSection } from './StartupSection.tsx';
 
 function errorText(e: unknown): string {
   return String((e as Error)?.message ?? e);
@@ -300,6 +301,7 @@ export function ProjectsPane() {
           ))}
         </ul>
       </section>
+      <StartupSection projects={projects} onSaved={reload} />
       {closedList.length > 0 && (
         <section className="sp-section" aria-labelledby="sp-closed">
           <h3 id="sp-closed">Closed</h3>

@@ -14,7 +14,7 @@ const MAX_TITLE: usize = 120;
 const MAX_CAPTION: usize = 300;
 
 /// The lines about the card tools and the checklist that join the prompt addendum.
-pub const CARDS_ADDENDUM: &str = "Showing things: to show the user pictures (screenshots, mockups, designs to compare), call app_show_images with the file paths so they appear as a gallery in the chat; never answer with a list of file paths. When the user should choose between options, call app_offer_options (give an option a picture where it helps), then end your turn: their choice arrives as their next message. For work with three or more steps, keep a checklist with the todo tool and keep it current as you go.";
+pub const CARDS_ADDENDUM: &str = "Showing things: pictures go in a gallery with app_show_images and choices on a board with app_offer_options; never list file paths. app_show_images is not in your tool list: see app_help helm/cards.";
 
 fn schema() -> Value {
     json!({

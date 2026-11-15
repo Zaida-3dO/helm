@@ -136,6 +136,21 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
         ))));
     }
     services.insert(Arc::new(host_tools()));
+    // The topics other crates add to app_help (rules, skills, the orchestrator's steps).
+    let help = Arc::new(helm_hosttools::help::HelpProviders::default());
+    services.insert(help.clone());
+    if let (Some(db), Some(profile)) = (
+        services.get::<helm_core::db::Database>(),
+        services.get::<helm_core::profile::Profile>(),
+    ) {
+        helm_skills::help::register(
+            &help,
+            profile.dir.clone(),
+            Arc::new(helm_skills::launch::DbLookup { db: db.clone() }),
+        );
+        helm_workflow::register_help(&help, db.clone());
+        helm_projects::startup::register_help(&help, db);
+    }
     // Settings that live outside the preference table but that chats read and change.
     let mut extensions = vec![
         helm_workflow::settings_extension(),
@@ -286,6 +301,8 @@ pub fn host_tools() -> helm_hosttools::HostToolRegistry {
     helm_dictation::register_host_tools(&mut reg);
     helm_memindex::register_host_tools(&mut reg);
     helm_projects::startup::register_host_tools(&mut reg);
+    // Last: groups, the core list, merged tools, short descriptions and app_help.
+    helm_hosttools::surface::apply(&mut reg);
     reg
 }
 
@@ -494,9 +511,7 @@ pub fn launch_contributors(
         order: 20,
         inner: Arc::new(helm_panel::vault::VaultInstructions { db: db.clone() }),
     }))
-    .register_section(Arc::new(helm_hosttools::sections::GuidelinesSection {
-        registry: Arc::new(host_tools()),
-    }))
+    // Pictures and choices are not in a chat's own tool list: this line says where they are.
     .register_section(Arc::new(helm_hosttools::StaticSection {
         id: "cards",
         order: 35,
@@ -620,6 +635,18 @@ mod host_tool_tests {
             "app_memory_index",
             "app_startup_done",
             "app_project_startup",
+            "app_help",
+            // The merged tools come after every tool; the tools above stay callable by their names.
+            "app_chat",
+            "app_attention",
+            "app_helm_feedback",
+            "app_schedule",
+            "app_mcp_servers",
+            "app_project",
+            "app_saved",
+            "app_knowledge",
+            "app_pages",
+            "app_settings",
         ];
         assert_eq!(names(Default::default()), base);
         let delta = |k: helm_hosttools::LaunchKeys| -> Vec<String> {
@@ -750,5 +777,125 @@ mod launch_tests {
             prompt.contains("Helm shows your links in a side panel"),
             "the fragment teaches the clickable link forms"
         );
+    }
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use helm_hosttools::{CatalogueEntry, LaunchKeys};
+
+    /// What the model is sent for one listed tool.
+    fn sent(e: &CatalogueEntry) -> usize {
+        serde_json::to_string(
+            &serde_json::json!({"name": e.name, "description": e.description, "inputSchema": e.input_schema}),
+        )
+        .unwrap()
+        .len()
+    }
+
+    fn everything_on() -> LaunchKeys {
+        LaunchKeys {
+            projects_mode: true,
+            all_settings: true,
+            mcp_enabled: true,
+            gmail_accounts: true,
+            web_tools: true,
+            ..Default::default()
+        }
+    }
+
+    /// What a chat pays for Helm's tools. A chat's own list holds only the core tools; the rest are
+    /// found by group, and families are merged. The caps leave a little room: a tool added to the
+    /// core list, or a description grown past its cap, fails here.
+    #[test]
+    fn a_chats_own_tool_list_stays_small_and_every_description_stays_short() {
+        let reg = super::host_tools();
+        for (label, keys, listed_cap, visible_cap) in [
+            ("default", LaunchKeys::default(), 10_500, 40),
+            ("everything on", everything_on(), 11_500, 50),
+        ] {
+            let all = reg.for_launch(&keys);
+            let visible: Vec<_> = all.iter().filter(|e| e.alias_of.is_none()).collect();
+            let listed: Vec<_> = visible.iter().filter(|e| e.core).collect();
+            let chars: usize = listed.iter().map(|e| sent(e)).sum();
+            if std::env::var("HELM_PRINT_BUDGET").is_ok() {
+                println!(
+                    "BUDGET {label}: {} entries, {} visible, {} listed ({chars} chars); visible total {} chars",
+                    all.len(),
+                    visible.len(),
+                    listed.len(),
+                    visible.iter().map(|e| sent(e)).sum::<usize>()
+                );
+            }
+            assert!(
+                chars <= listed_cap,
+                "{label}: the core tools are {chars} characters, over {listed_cap}"
+            );
+            assert!(
+                visible.len() <= visible_cap,
+                "{label}: {} tools",
+                visible.len()
+            );
+            for e in &visible {
+                // The orchestrator's two tools keep their whole action list: they are listed only
+                // while Orchestrator is on.
+                if e.core_with_orchestrator {
+                    continue;
+                }
+                assert!(
+                    e.description.chars().count() <= 520,
+                    "{} has a {}-character description; the rest belongs in its guidelines",
+                    e.name,
+                    e.description.chars().count()
+                );
+                assert!(!e.group.is_empty(), "{} has no group", e.name);
+            }
+            // A merged tool's old names stay in the catalogue, marked, so they still answer.
+            for f in reg.facades() {
+                for (_, member) in f.actions {
+                    if let Some(e) = all.iter().find(|e| e.name == *member) {
+                        assert_eq!(e.alias_of.as_ref().map(|a| a.tool.as_str()), Some(f.name));
+                    }
+                }
+            }
+        }
+        // Every help topic fits the cap, in parts if need be, and the merged tools say all they do.
+        for name in reg.names() {
+            let topic = format!("tool/{name}");
+            let mut part = 1;
+            loop {
+                let t = if part == 1 {
+                    topic.clone()
+                } else {
+                    format!("{topic}#{part}")
+                };
+                let v = helm_hosttools::help::answer(&reg, None, "c", Some(&t), 0).unwrap();
+                assert!(
+                    v["text"].as_str().unwrap().chars().count()
+                        <= helm_hosttools::help::MAX_TOPIC_CHARS
+                );
+                if v.get("continues").is_none() {
+                    break;
+                }
+                part += 1;
+            }
+        }
+        for f in reg.facades() {
+            assert!(
+                f.guidelines.chars().count() <= helm_hosttools::help::MAX_TOPIC_CHARS,
+                "{}",
+                f.name
+            );
+            for (action, _) in f.actions {
+                helm_hosttools::help::answer(
+                    &reg,
+                    None,
+                    "c",
+                    Some(&format!("tool/{}/{action}", f.name)),
+                    0,
+                )
+                .unwrap();
+            }
+        }
     }
 }

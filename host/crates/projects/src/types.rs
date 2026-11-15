@@ -13,6 +13,10 @@ use ts_rs::TS;
 pub const MAX_DESCRIPTION_CHARS: usize = 200;
 /// The longest startup instructions text, in characters.
 pub const MAX_STARTUP_CHARS: usize = 4_000;
+/// Context files a project lists, and servers it names, at most this many each.
+pub const MAX_STARTUP_LIST: usize = 20;
+/// A context file's path is at most this long.
+pub const MAX_STARTUP_PATH_CHARS: usize = 300;
 
 /// A project's kind: a folder project made in Helm, or a board project mirrored read-only from
 /// Agent Standup.
@@ -91,6 +95,14 @@ pub struct ProjectNode {
     /// What every new chat on this project does first, at most [`MAX_STARTUP_CHARS`] characters
     /// over several lines; `null` when there is none.
     pub startup_instructions: Option<String>,
+    /// Files every new chat on this project is told to read first (absolute paths, listed in its
+    /// first message, never pasted); at most [`MAX_STARTUP_LIST`].
+    #[serde(default)]
+    pub startup_files: Vec<String>,
+    /// The Helm-proxied MCP servers (their ids) this project's chats get; empty leaves every
+    /// server available, as for a project that names none.
+    #[serde(default)]
+    pub startup_servers: Vec<String>,
     /// A named colour or `#rrggbb`, lowercase.
     pub colour: Option<String>,
     pub pinned: bool,
@@ -313,6 +325,14 @@ pub struct ProjectUpdateArgs {
     #[serde(default, deserialize_with = "double_option")]
     #[ts(optional, type = "string | null")]
     pub startup_instructions: Option<Option<String>>,
+    /// Replaces the context files; an empty list clears them.
+    #[serde(default)]
+    #[ts(optional)]
+    pub startup_files: Option<Vec<String>>,
+    /// Replaces the MCP servers the project's chats get; an empty list clears them.
+    #[serde(default)]
+    #[ts(optional)]
+    pub startup_servers: Option<Vec<String>>,
     #[serde(default)]
     #[ts(optional)]
     pub pinned: Option<bool>,

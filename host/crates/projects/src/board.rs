@@ -63,6 +63,12 @@ pub fn register_services(services: &mut Services, _events: &Arc<dyn EventSink>) 
     }
     services.insert(link);
     services.insert(Arc::new(helm_chats::seams::ProjectGates(Arc::new(Gate))));
+    // The servers a project names are the ones its chats get.
+    if let Some(db) = services.get::<Database>() {
+        services.insert(Arc::new(helm_hosttools::McpServerFilterGate(Arc::new(
+            crate::startup::StartupServers { db },
+        ))));
+    }
     // A new chat's first message carries its project's startup instructions.
     if let Some(rt) = services.get::<helm_chats::ChatRuntime>() {
         rt.set_startup_seam(Arc::new(crate::startup::Startup));

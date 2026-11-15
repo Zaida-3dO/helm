@@ -89,7 +89,7 @@ pub use gates::GateLaunch;
 pub use hook::register_worker_lines;
 pub use kinds::register_allow_kinds;
 pub use ops::register_ops;
-pub use tool::{register_host_tools, WorkflowSection};
+pub use tool::{register_help, register_host_tools, WorkflowHelp, WorkflowSection};
 pub use types::*;
 pub use user::{afk_sign_off_waiting, AfkPlanSignOff};
 

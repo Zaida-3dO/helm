@@ -48,30 +48,30 @@ export function cronTiming(rule: string): Record<string, unknown> | null {
   return null;
 }
 
-/** The refusal text for one native schedule call. In a local chat the schedule tools are not in
- * the listed set, so the refusal says how to reach them. */
-export function scheduleRedirect(tool: string, input: unknown, local = false): string {
+/** The refusal text for one native schedule call. Helm's schedule tool is not in a chat's own
+ * tool list, so the refusal says how to reach it. */
+export function scheduleRedirect(tool: string, input: unknown): string {
   const a = obj(input);
   const head = `Helm keeps schedules itself, so ${tool} does nothing here.`;
-  const via = local ? " This chat does not list Helm's schedule tools: call them through app_mcp_call." : "";
+  const via = " app_schedule is not in your tool list: find it with app_list_tools {group: \"schedules\"} and call it with app_mcp_call.";
   switch (tool) {
     case "ScheduleWakeup": {
       const raw = Number(a.delaySeconds);
       const secs = Math.min(3600, Math.max(60, Number.isFinite(raw) ? Math.round(raw) : 60));
-      return `${head} Call app_create_schedule with timing {"kind":"once","inSeconds":${secs}} and a short title and message for the wake-up.${via} ${ASK}`;
+      return `${head} Call app_schedule {"action":"create"} with timing {"kind":"once","inSeconds":${secs}} and a short title and message for the wake-up.${via} ${ASK}`;
     }
     case "CronCreate": {
       const timing = typeof a.cron === "string" ? cronTiming(a.cron) : null;
       const how = timing
-        ? `Call app_create_schedule with timing ${JSON.stringify(timing)} (times are the user's local time).`
-        : "Call app_create_schedule with a timing of kind once, interval (seconds, 60 or more) or weekly (hour, minute, days 0 = Monday to 6 = Sunday); this rule does not map onto one of them exactly, so pick the nearest and tell the user.";
+        ? `Call app_schedule {"action":"create"} with timing ${JSON.stringify(timing)} (times are the user's local time).`
+        : "Call app_schedule {\"action\":\"create\"} with a timing of kind once, interval (seconds, 60 or more) or weekly (hour, minute, days 0 = Monday to 6 = Sunday); this rule does not map onto one of them exactly, so pick the nearest and tell the user.";
       return `${head} ${how}${via} ${ASK}`;
     }
     case "CronList":
-      return `${head} Call app_list_schedules instead.${via}`;
+      return `${head} Call app_schedule {"action":"list"} instead.${via}`;
     case "CronDelete":
-      return `${head} Call app_list_schedules to find the schedule, then app_cancel_schedule.${via}`;
+      return `${head} Call app_schedule {"action":"list"} to find the schedule, then {"action":"cancel"}.${via}`;
     default:
-      return `${head} Remote triggers are not available in Helm; use app_create_schedule for something that should run later.${via} ${ASK}`;
+      return `${head} Remote triggers are not available in Helm; use app_schedule {"action":"create"} for something that should run later.${via} ${ASK}`;
   }
 }

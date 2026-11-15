@@ -21,8 +21,10 @@
 pub mod addendum;
 pub mod chat_verbosity;
 pub mod dispatch;
+pub mod facade;
 pub mod feedback;
 pub mod feedback_items;
+pub mod help;
 pub mod ide;
 mod keybindings;
 pub mod lines;
@@ -39,6 +41,7 @@ pub mod settings_options;
 pub mod shells;
 pub mod show_images;
 pub mod spec;
+pub mod surface;
 pub mod tools;
 
 pub use addendum::{Addendum, AddendumSection, KnowledgeSection, StaticSection};
@@ -51,8 +54,8 @@ pub use registry::{
 pub use settings_ext::{PrefRule, PrefRules, SettingsExtension, SettingsExtensions};
 pub use spec::{
     Availability, CatalogueEntry, Condition, LaunchKeys, McpLaunch, McpLaunchGate, McpLaunchSource,
-    RequestLimit, ToolSpec, WebToolsGate, WebToolsSource, DEFAULT_TIMEOUT_MS, MAX_DESCRIPTION,
-    MAX_TOOL_NAME_BYTES,
+    McpServerFilter, McpServerFilterGate, RequestLimit, ToolSpec, WebToolsGate, WebToolsSource,
+    DEFAULT_TIMEOUT_MS, MAX_DESCRIPTION, MAX_TOOL_NAME_BYTES,
 };
 
 /// This crate's own tools: projects and repositories ([`tools`]). The chat tools register from

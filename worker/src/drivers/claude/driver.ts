@@ -56,10 +56,10 @@ export const HOST_TOOL_HOOK_ID = "helm-host-tools";
 /** PreToolUse hook on every MCP tool: refuses Claude Code's copy of a server Helm also has. */
 export const DUPLICATE_MCP_HOOK_ID = "helm-duplicate-mcp";
 
-/** Told to a local chat, whose tool list holds only the common Helm tools: the rest stay one
- * search and one call away. */
-export const LOCAL_TOOL_RULE =
-  "Helm's tools: your list has the common ones. To find any other Helm tool (schedules, feedback, settings, projects, pages, voice, Telegram, MCP servers…), search with app_list_tools, then call it with app_mcp_call.";
+/** Told to every chat: its tool list holds only the common Helm tools, and the rest stay one
+ * group search and one call away. */
+export const OTHER_TOOLS_RULE =
+  "Helm's other tools (settings, MCP servers, schedules, feedback, saved items, pages, projects, workflow, usage, attention…) are not in your list: find them with app_list_tools (no argument lists the groups), call them with app_mcp_call, and read how with app_help.";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -237,7 +237,6 @@ export class ClaudeDriver implements Driver {
       this.hostTools = new HostToolServer({
         bridge: asHostToolBridge(this.mcp),
         hostTools: launch.hostTools,
-        lean: c.local !== undefined,
         outputCap: c.toolOutputCap === true ? { maxChars: DEFAULT_MAX_CHARS, save: fileSaver(launch.chatId) } : undefined,
         channel,
         notify: (text) => this.ch.emit({ type: "notice", text }),
@@ -789,7 +788,7 @@ export class ClaudeDriver implements Driver {
 
   /** The rules appended to the chat's own agent's instructions: long commands, sub-agent limits. */
   private promptRule(): string | undefined {
-    const parts = [this.longCommands.enabled ? PROMPT_RULE : "", this.budget.enabled ? subagentRule(this.budget.softTurns) : "", this.isLocal ? LOCAL_TOOL_RULE : ""].filter(Boolean);
+    const parts = [this.longCommands.enabled ? PROMPT_RULE : "", this.budget.enabled ? subagentRule(this.budget.softTurns) : "", this.hostTools ? OTHER_TOOLS_RULE : ""].filter(Boolean);
     return parts.length > 0 ? parts.join("\n\n") : undefined;
   }
 
@@ -845,7 +844,7 @@ export class ClaudeDriver implements Driver {
       return;
     }
     if (req.callback_id === SCHEDULE_REDIRECT_HOOK_ID) {
-      const reason = scheduleRedirect(String(input.tool_name ?? ""), input.tool_input, this.isLocal);
+      const reason = scheduleRedirect(String(input.tool_name ?? ""), input.tool_input);
       return this.controlReply(requestId, { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } });
     }
     const toolUseId = String(req.tool_use_id ?? input.tool_use_id ?? "");

@@ -16,6 +16,7 @@
 pub mod agents;
 pub mod bindings;
 pub mod examples;
+pub mod help;
 pub mod launch;
 pub mod layers;
 pub mod memories;

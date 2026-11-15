@@ -89,3 +89,48 @@
   border-radius: 4px;
   background: color-mix(in srgb, var(--warning) 8%, var(--surface));
 }
+
+.sp-startup select {
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.sp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0;
+  border: 0;
+  padding: 0;
+}
+
+.sp-field > span,
+.sp-field > legend {
+  font-size: 12px;
+  color: var(--secondary);
+  padding: 0;
+}
+
+.sp-field textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  resize: vertical;
+}
+
+.sp-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0;
+}

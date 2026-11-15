@@ -73,8 +73,62 @@ pub fn file_name_of(path: &str) -> io::Result<String> {
     Ok(name.to_owned())
 }
 
+/// A rule file's optional header: a `---` line, lines such as `summary: ...` and `always: true`,
+/// and a closing `---` line. A file without one is all text.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Front {
+    /// One line saying what the rule is for; the launch lists a long rule by it.
+    pub summary: Option<String>,
+    /// The launch carries the whole rule, however long it is.
+    pub always: bool,
+}
+
+/// The byte length of the header (both fences and the line end after the closing one), or 0.
+fn front_len(text: &str) -> usize {
+    let t = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let bom = text.len() - t.len();
+    let Some(rest) = t
+        .strip_prefix("---\n")
+        .or_else(|| t.strip_prefix("---\r\n"))
+    else {
+        return 0;
+    };
+    let open = t.len() - rest.len();
+    let mut at = 0;
+    for line in rest.split_inclusive('\n') {
+        if line.trim_end() == "---" {
+            return bom + open + at + line.len();
+        }
+        at += line.len();
+    }
+    0
+}
+
+/// A file's header and the text after it.
+pub fn split_front(text: &str) -> (Front, &str) {
+    let n = front_len(text);
+    if n == 0 {
+        return (Front::default(), text);
+    }
+    let head = &text[..n];
+    let mut f = Front::default();
+    for line in head.lines().skip(1) {
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        let v = v.trim();
+        match k.trim() {
+            "summary" if !v.is_empty() => f.summary = Some(v.chars().take(200).collect()),
+            "always" => f.always = v.eq_ignore_ascii_case("true"),
+            _ => {}
+        }
+    }
+    (f, &text[n..])
+}
+
 /// The title of a rule's text: its first `# ` line, else `fallback`.
 pub fn title_of(text: &str, fallback: &str) -> String {
+    let text = split_front(text).1;
     text.strip_prefix('\u{feff}')
         .unwrap_or(text)
         .lines()
@@ -87,6 +141,7 @@ pub fn title_of(text: &str, fallback: &str) -> String {
 
 /// A rule's instruction: its text without the `# ` title line, trimmed.
 pub fn body_of(text: &str) -> String {
+    let text = split_front(text).1;
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let trimmed = text.trim_start();
     match trimmed.strip_prefix("# ") {
@@ -233,27 +288,32 @@ pub fn write(
     if body.len() as u64 > MAX_RULE_FILE {
         return Err(invalid("the rule is too large"));
     }
+    // A rewritten rule keeps its header (its summary, whether it is always carried).
+    let mut header = String::new();
     let file = match path {
         Some(p) => {
             let file = file_name_of(p)?;
-            let now = read(root, &file)
-                .map_err(|e| match e.kind() {
-                    ErrorKind::NotFound => {
-                        io::Error::new(ErrorKind::NotFound, "no rule there to replace")
-                    }
-                    _ => e,
-                })?
-                .0;
+            let (now, old) = read(root, &file).map_err(|e| match e.kind() {
+                ErrorKind::NotFound => {
+                    io::Error::new(ErrorKind::NotFound, "no rule there to replace")
+                }
+                _ => e,
+            })?;
             if expected_revision.is_some_and(|r| r != now.revision) {
                 return Err(io::Error::new(
                     ErrorKind::AlreadyExists,
                     "the rule changed since it was read",
                 ));
             }
+            header = old[..front_len(&old)].to_owned();
             file
         }
         None => new_file_name(root, title)?,
     };
+    let body = format!("{header}{body}");
+    if body.len() as u64 > MAX_RULE_FILE {
+        return Err(invalid("the rule is too large"));
+    }
     helm_core::privfs::create_private_dir_all(&rules_dir(root))?;
     helm_core::privfs::write_atomic(&rules_dir(root).join(&file), body.as_bytes())?;
     read(root, &file).map(|(e, _)| e)

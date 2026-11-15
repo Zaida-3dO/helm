@@ -2900,6 +2900,127 @@ fn a_new_chats_first_message_carries_the_startup_instructions_once_until_it_repo
     );
 }
 
+/// A project's startup set also holds context files and MCP servers: the files are listed in the
+/// first message and read on request, the servers narrow what the project's chats get, and a project
+/// with only these two gives its chats nothing to report.
+#[test]
+fn a_projects_files_and_servers_reach_its_chats_without_owing_a_report() {
+    use helm_hosttools::help::HelpProvider;
+    use helm_hosttools::McpServerFilter;
+    let env = startup_env();
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_string_lossy().into_owned();
+    let notes = dir.path().join("notes.md");
+    std::fs::write(&notes, "Use the staging database.").unwrap();
+    let notes = notes.to_string_lossy().into_owned();
+    let site = folder(&env.db, "Site", Some(&cwd));
+    let set = |files: &[&str], servers: &[&str]| {
+        let mut a = upd(&site, &env.db);
+        a.startup_files = Some(files.iter().map(|f| (*f).to_owned()).collect());
+        a.startup_servers = Some(servers.iter().map(|f| (*f).to_owned()).collect());
+        update(&env.db, a)
+    };
+    // What a user may list: absolute paths, at most 20 of each, plain text; repeats collapse.
+    let relative = "relative/notes.md".to_owned();
+    let control = "C:/a\u{7}b".to_owned();
+    let many: Vec<String> = (0..21).map(|i| format!("C:/f{i}.md")).collect();
+    for bad in [vec![relative], vec![control], many] {
+        let list: Vec<&str> = bad.iter().map(String::as_str).collect();
+        assert!(
+            matches!(set(&list, &[]), Err(Refusal::BadArgs(_))),
+            "{bad:?}"
+        );
+    }
+    let long = "x".repeat(129);
+    assert!(matches!(
+        set(&[], &[long.as_str()]),
+        Err(Refusal::BadArgs(_))
+    ));
+    set(&[&notes, &notes, "  "], &["hub", "hub", "maps"]).unwrap();
+    let n = node(&env.db, &site);
+    assert_eq!(n.startup_files, std::slice::from_ref(&notes));
+    assert_eq!(n.startup_servers, ["hub", "maps"]);
+
+    // Only files and servers: the first message lists them, the chat owes no report, and the
+    // Stop hook stays off.
+    let chat = chat_in(&env.db, &cwd, 1);
+    let first = env.first_send(&chat, "f1", None).unwrap();
+    assert_eq!(first.row, "Context for Site was added to this chat");
+    assert!(
+        first
+            .context
+            .contains(&format!("- {notes}  (app_help project/notes)")),
+        "{}",
+        first.context
+    );
+    assert!(first
+        .context
+        .contains("MCP servers for this project: hub, maps."));
+    assert!(!first.context.contains("app_startup_done"));
+    assert!(!env.owes(&chat));
+    assert!(env.launch(&chat, &cwd).env.is_empty());
+    assert_eq!(
+        env.call("app_startup_turn_end", &chat, json!({})).unwrap(),
+        json!({"block": false})
+    );
+
+    // With instructions too, the report is owed and the files follow the steps.
+    env.set_text(&site, Some("Make a worktree."));
+    let again = chat_in(&env.db, &cwd, 2);
+    let with = env.first_send(&again, "f2", None).unwrap();
+    assert!(with
+        .context
+        .starts_with("Startup instructions for this project."));
+    assert!(with
+        .context
+        .contains("Make a worktree.\n\nContext files for this project."));
+    assert!(env.owes(&again));
+    let got = env
+        .call("app_project_startup", &again, json!({"action": "get"}))
+        .unwrap();
+    assert_eq!(got["mcpServers"], json!(["hub", "maps"]));
+    assert_eq!(got["contextFiles"], json!([notes]));
+
+    // The servers the project names are the chat's; a project that names none leaves them all.
+    let filter = crate::startup::StartupServers { db: env.db.clone() };
+    assert_eq!(
+        filter.allowed(&again),
+        Some(vec!["hub".to_owned(), "maps".to_owned()])
+    );
+    assert!(filter.any());
+    set(&[], &[]).unwrap();
+    assert_eq!(filter.allowed(&again), None);
+    assert!(!filter.any());
+
+    // app_help reads the instructions and a file where they are, and says so for one that is gone.
+    set(&[&notes], &[]).unwrap();
+    let help = crate::startup::ProjectHelp { db: env.db.clone() };
+    assert_eq!(
+        help.index(&again),
+        [
+            (
+                "startup".to_owned(),
+                "Startup instructions of Site".to_owned()
+            ),
+            ("notes".to_owned(), notes.clone())
+        ]
+    );
+    assert_eq!(
+        help.topic(&again, "startup").as_deref(),
+        Some("Make a worktree.")
+    );
+    assert_eq!(
+        help.topic(&again, "notes").as_deref(),
+        Some("Use the staging database.")
+    );
+    assert_eq!(help.topic(&again, "other"), None);
+    std::fs::remove_file(&notes).unwrap();
+    assert!(help
+        .topic(&again, "notes")
+        .unwrap()
+        .contains("is not a plain file"));
+}
+
 /// An agent reads instructions freely and changes them only through one Approve card that shows
 /// the whole new text; a card made against text that has since changed applies nothing.
 #[test]

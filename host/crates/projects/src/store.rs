@@ -198,6 +198,61 @@ pub fn validate_startup(raw: &str) -> Res<Option<String>> {
     Ok(Some(t.to_owned()))
 }
 
+/// The context files of a startup set: at most [`MAX_STARTUP_LIST`] absolute paths, each plain text.
+pub fn validate_startup_files(list: &[String]) -> Res<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in list {
+        let t = raw.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let absolute = std::path::Path::new(t).is_absolute()
+            || t.starts_with('/')
+            || t.get(1..3) == Some(":\\")
+            || t.get(1..3) == Some(":/");
+        if t.chars().count() > MAX_STARTUP_PATH_CHARS
+            || t.chars().any(char::is_control)
+            || helm_core::hidden::hides(t)
+            || !absolute
+        {
+            return Err(bad(
+                "A context file is an absolute path of at most 300 characters.",
+            ));
+        }
+        if !out.iter().any(|p| p == t) {
+            out.push(t.to_owned());
+        }
+    }
+    if out.len() > MAX_STARTUP_LIST {
+        return Err(bad("A project lists at most 20 context files."));
+    }
+    Ok(out)
+}
+
+/// The MCP servers of a startup set: at most [`MAX_STARTUP_LIST`] server ids, each plain text.
+pub fn validate_startup_servers(list: &[String]) -> Res<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in list {
+        let t = raw.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if t.chars().count() > 128 || t.chars().any(char::is_control) || helm_core::hidden::hides(t)
+        {
+            return Err(bad(
+                "An MCP server is named by its id, at most 128 characters.",
+            ));
+        }
+        if !out.iter().any(|p| p == t) {
+            out.push(t.to_owned());
+        }
+    }
+    if out.len() > MAX_STARTUP_LIST {
+        return Err(bad("A project names at most 20 MCP servers."));
+    }
+    Ok(out)
+}
+
 /// Check a picture for a project icon: base64 of a PNG, at most [`MAX_ICON_IMAGE_BYTES`] decoded.
 pub fn validate_icon_image(png_base64: &str) -> Res<Vec<u8>> {
     use base64::Engine;
@@ -224,7 +279,8 @@ const PROJECT_SELECT: &str = "SELECT p.id, p.kind, p.name, p.path, p.color, p.cr
         pp.parent_id, pp.source,
         b.board_url, b.board_project_id, b.title, b.headline, b.area, b.repo, b.priority,
         b.last_activity, b.stale, b.completed, COALESCE(l.closed, 0),
-        l.description, COALESCE(l.title_pending, 0), l.startup_instructions
+        l.description, COALESCE(l.title_pending, 0), l.startup_instructions,
+        l.startup_files, l.startup_servers
      FROM projects p
      LEFT JOIN project_local l ON l.project_id = p.id
      LEFT JOIN project_parents pp ON pp.project_id = p.id
@@ -234,6 +290,12 @@ const PROJECT_SELECT: &str = "SELECT p.id, p.kind, p.name, p.path, p.color, p.cr
 /// creation first, then id.
 const PROJECT_ORDER: &str =
     "ORDER BY COALESCE(l.pinned, 0) DESC, l.position IS NULL, l.position, p.created_at DESC, p.id";
+
+/// A list stored as JSON text; anything unreadable is an empty list.
+pub(crate) fn json_list(raw: Option<String>) -> Vec<String> {
+    raw.and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
 
 fn project_from_row(r: &Row<'_>, counts: &HashMap<String, i64>) -> rusqlite::Result<ProjectNode> {
     let id: String = r.get(0)?;
@@ -277,6 +339,8 @@ fn project_from_row(r: &Row<'_>, counts: &HashMap<String, i64>) -> rusqlite::Res
         icon,
         description: r.get(27)?,
         startup_instructions: r.get(29)?,
+        startup_files: json_list(r.get(30)?),
+        startup_servers: json_list(r.get(31)?),
         archived: r.get::<_, i64>(10)? != 0,
         closed: r.get::<_, i64>(26)? != 0,
         primary_folder_project_id: r.get(12)?,
@@ -716,6 +780,26 @@ pub fn update_project(tx: &Transaction<'_>, a: &ProjectUpdateArgs) -> Res<i64> {
         tx.execute(
             "UPDATE project_local SET startup_instructions = ?2 WHERE project_id = ?1",
             params![id, startup],
+        )?;
+    }
+    if let Some(files) = &a.startup_files {
+        let files = validate_startup_files(files)?;
+        tx.execute(
+            "UPDATE project_local SET startup_files = ?2 WHERE project_id = ?1",
+            params![
+                id,
+                (!files.is_empty()).then(|| serde_json::json!(files).to_string())
+            ],
+        )?;
+    }
+    if let Some(servers) = &a.startup_servers {
+        let servers = validate_startup_servers(servers)?;
+        tx.execute(
+            "UPDATE project_local SET startup_servers = ?2 WHERE project_id = ?1",
+            params![
+                id,
+                (!servers.is_empty()).then(|| serde_json::json!(servers).to_string())
+            ],
         )?;
     }
     if let Some(colour) = &a.colour {

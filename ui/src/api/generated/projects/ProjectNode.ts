@@ -29,6 +29,16 @@ description: string | null,
  */
 startupInstructions: string | null, 
 /**
+ * Files every new chat on this project is told to read first (absolute paths, listed in its
+ * first message, never pasted); at most [`MAX_STARTUP_LIST`].
+ */
+startupFiles: Array<string>, 
+/**
+ * The Helm-proxied MCP servers (their ids) this project's chats get; empty leaves every
+ * server available, as for a project that names none.
+ */
+startupServers: Array<string>, 
+/**
  * A named colour or `#rrggbb`, lowercase.
  */
 colour: string | null, pinned: boolean, collapsed: boolean, position: number | null, archived: boolean, 
