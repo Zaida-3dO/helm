@@ -1683,6 +1683,28 @@ mod tests {
             hits,
             "nothing refused locally reached Gmail"
         );
+
+        // A server set to Read only: both writing tools are refused in words, and reading still
+        // works.
+        let read_only = env(GooglePermission::Readonly, "tok-me");
+        for (name, args) in [
+            (
+                LABEL,
+                json!({"account": "me@x.com", "id": "m-plain", "add": ["STARRED"]}),
+            ),
+            (
+                DRAFT,
+                json!({"account": "me@x.com", "to": ["a@x.com"], "subject": "s", "body": "b"}),
+            ),
+        ] {
+            let err = call(&read_only, name, args).unwrap_err();
+            assert!(err.contains("read-only"), "{name}: {err}");
+        }
+        assert_eq!(
+            fake.hits().len(),
+            hits,
+            "a read-only server reached Gmail with a write"
+        );
         std::env::remove_var(TEST_URL_ENV);
     }
 
