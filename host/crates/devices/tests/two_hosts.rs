@@ -15,7 +15,10 @@ use helm_devices::mirror::{self, ChatView, Mirror, MirrorSlot, PeopleSync, WhoFi
 use helm_devices::testing::{fake_interaction, fake_record, fake_row, FakePort};
 use helm_devices::wire::{code, DeviceFrame, DevicePerson, Frame, Push};
 use helm_devices::{ChatPort, Service};
-use helm_ipc::{AppEvent, Dispatcher, OpCtx, OpIntercept, OpRegistry, RecordingSink, Services};
+use helm_ipc::{
+    ApiError, AppEvent, Dispatcher, OpClass, OpCtx, OpIntercept, OpRegistry, RecordingSink,
+    Services,
+};
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -133,6 +136,9 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
     assert_eq!(hello["device"]["name"], "Desk");
     assert_eq!(hello["people"][0]["personId"], "person-a");
     assert_eq!(hello["projects"][0]["path"], "/work");
+    // The hello also names this device's profiles, so another window can offer "Move to profile".
+    assert_eq!(hello["profiles"][0]["profileId"], "profile-local");
+    assert_eq!(hello["profiles"][0]["personId"], "person-a");
 
     // What the hub and the host refuse, in one table.
     let big = "x".repeat(2 * 1024 * 1024);
@@ -552,6 +558,85 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         .await
         .unwrap();
 
+    // The chat menu's actions ride the same wire: each is answered, and the chat takes it once.
+    let menu: Vec<(&str, Value, Value)> = vec![
+        (
+            "fork",
+            json!({"chatId": "c1", "forkId": "f-1"}),
+            json!({"chat": {"id": "c1-copy"}}),
+        ),
+        ("compact", json!({"chatId": "c1"}), json!(null)),
+        (
+            "roll_over",
+            json!({"chatId": "c1", "model": "opus", "effort": "high"}),
+            json!({"started": true}),
+        ),
+        (
+            "cost",
+            json!({"chatId": "c1"}),
+            json!({"chatId": "c1", "totalTokens": 1234}),
+        ),
+        (
+            "export_markdown",
+            json!({"chatId": "c1"}),
+            json!({"messages": 3, "path": "c1.md"}),
+        ),
+        (
+            "organize",
+            json!({"chatId": "c1", "pinned": true, "parentChatId": null, "toEnd": true}),
+            json!([{ "chatId": "c1", "groupProjectId": "proj-1", "position": 3, "pinned": true, "parentChatId": null }]),
+        ),
+        ("mark_unread", json!({"chatId": "c1"}), json!({})),
+        ("mute", json!({"chatId": "c1", "muted": true}), json!({})),
+        (
+            "move_profile",
+            json!({"chatId": "c1", "profileId": "profile-p"}),
+            json!({}),
+        ),
+    ];
+    for (op, args, want) in &menu {
+        assert_eq!(
+            &b.rpc.call("dev-a", op, args.clone()).await.unwrap(),
+            want,
+            "{op}"
+        );
+    }
+    {
+        let st = port.st();
+        assert_eq!(st.forked, [("c1".to_owned(), "f-1".to_owned())]);
+        assert_eq!(st.compacted, ["c1"]);
+        assert_eq!(st.rolled_over.len(), 1);
+        assert_eq!(st.rolled_over[0].effort.as_deref(), Some("high"));
+        assert_eq!(st.cost_for, ["c1"]);
+        assert_eq!(st.exported, ["c1"]);
+        assert_eq!(st.organized.len(), 1);
+        // An explicit null parent crosses as such: the chat moves to top level.
+        assert_eq!(st.organized[0].parent_chat_id, Some(None));
+        assert_eq!(st.organized[0].pinned, Some(true));
+        assert_eq!(st.unread_marked, ["c1"]);
+        assert_eq!(st.muted.len(), 1);
+        assert!(st.muted[0].muted);
+        assert_eq!(st.profiles_moved.len(), 1);
+    }
+    // The run switch gates the menu actions like it gates a send — but cost is a read, so it
+    // answers with the switch off too.
+    port.set_run(false);
+    for (op, args, _) in &menu {
+        let got = b.rpc.call("dev-a", op, args.clone()).await;
+        if *op == "cost" {
+            assert!(got.is_ok(), "{op} is a read");
+        } else {
+            assert_eq!(got.unwrap_err().code, code::NOT_ALLOWED, "{op}");
+        }
+    }
+    port.set_run(true);
+    // The `sidebar` news of a move, pin or reorder reaches watchers as a fresh copy of the chat,
+    // which is the only news such a change sends.
+    let heard = b.heard("chats").len();
+    host.observe(&AppEvent::new("sidebar").with("chatIds", json!(["c1"])));
+    until(|| b.heard("chats").len() == heard + 1).await;
+    assert_eq!(b.heard("chats")[heard].event["chat"]["id"], "c1");
+
     // A device that drops off the hub loses its subscriptions, and asks again when it is back.
     assert!(host.watchers().contains(&"dev-b".to_owned()));
     b.link.set_up(false);
@@ -900,6 +985,13 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
     let mut ops = OpRegistry::new();
     helm_chats::register_ops(&mut ops);
     helm_devices::register_ops(&mut ops);
+    // `chat_organize` is registered by a crate this test does not link. The name must be
+    // known for the interceptor to answer it; the handler must never run for a copied chat.
+    ops.blocking("chat_organize", OpClass::Maintenance, |_, _| {
+        Err(ApiError::internal(
+            "the local organize handler ran for a copied chat",
+        ))
+    });
     let api = Dispatcher::new(
         ops,
         OpCtx {
@@ -1081,7 +1173,28 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
             json!({"harness": "claude", "deviceUid": "dev-a"}),
             Ok(json!({"models": []})),
         ),
-        ("chat_fork", json!({"chatId": "c1"}), Err(elsewhere)),
+        (
+            "chat_fork",
+            json!({"chatId": "c1", "forkId": "f-1"}),
+            Ok(json!(null)),
+        ),
+        ("chat_compact", json!({"chatId": "c1"}), Ok(json!(null))),
+        (
+            "chat_roll_over",
+            json!({"chatId": "c1", "model": "sonnet"}),
+            Ok(json!(null)),
+        ),
+        (
+            "chat_mute",
+            json!({"chatId": "c1", "muted": true}),
+            Ok(json!(null)),
+        ),
+        ("unread_mark", json!({"chatId": "c1"}), Ok(json!(null))),
+        (
+            "chat_organize",
+            json!({"chatId": "c1", "pinned": true, "parentChatId": null}),
+            Ok(json!([])),
+        ),
         ("chat_delete", json!({"chatId": "c1"}), Err(elsewhere)),
         ("message_edit_open", json!({"chatId": "c1"}), Err(elsewhere)),
         (
@@ -1104,6 +1217,35 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         .await
         .unwrap_err();
     assert!(!own.message.contains("runs on"), "{own:?}");
+    // The menu ops reached the device once each, and the copy shows the change at once.
+    {
+        let st = port.st();
+        assert_eq!(st.forked, [("c1".to_owned(), "f-1".to_owned())]);
+        assert_eq!(st.compacted, ["c1"]);
+        assert_eq!(st.rolled_over.len(), 1);
+        assert_eq!(st.rolled_over[0].model.as_deref(), Some("sonnet"));
+        assert_eq!(st.unread_marked, ["c1"]);
+        assert!(st.muted.iter().all(|m| m.muted) && st.muted.len() == 1);
+        assert_eq!(st.organized.len(), 1);
+        assert_eq!(st.organized[0].parent_chat_id, Some(None));
+    }
+    let rec =
+        b.db.snapshot(|tx| {
+            tx.query_row(
+                "SELECT record FROM mirror_chats WHERE chat_id = 'c1'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+        })
+        .unwrap();
+    let rec: Value = serde_json::from_str(&rec).unwrap();
+    assert_eq!(
+        (rec["muted"].as_bool(), rec["pinned"].as_bool()),
+        (Some(true), Some(true)),
+        "the copy shows the mute and the pin without waiting for a push"
+    );
+    assert_eq!(rec["position"], 3);
+    assert!(rec["parentChatId"].is_null());
 
     // A send reaches the device once, as the person's own words.
     let id = "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b5a";
@@ -1692,6 +1834,13 @@ async fn one_pc_acts_as_each_of_its_profiles() {
     let mut ops = OpRegistry::new();
     helm_chats::register_ops(&mut ops);
     helm_devices::register_ops(&mut ops);
+    // `chat_organize` is registered by a crate this test does not link. The name must be
+    // known for the interceptor to answer it; the handler must never run for a copied chat.
+    ops.blocking("chat_organize", OpClass::Maintenance, |_, _| {
+        Err(ApiError::internal(
+            "the local organize handler ran for a copied chat",
+        ))
+    });
     let api = Dispatcher::new(
         ops,
         OpCtx {

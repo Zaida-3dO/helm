@@ -4,8 +4,9 @@
 use crate::link::BoxFut;
 use crate::serve::{ChatPort, ChatState, PortResult, SentFile};
 use crate::wire::{
-    code, AnswerArgs, ArchiveArgs, ConsentDecideArgs, CreateArgs, DeviceInfo, DevicePerson, Hello,
-    PersonInfo, ProjectInfo, RemoteChat, RenameArgs, SetModelArgs, ShareArgs, WireError,
+    code, AnswerArgs, ArchiveArgs, ConsentDecideArgs, CreateArgs, DeviceInfo, DevicePerson,
+    ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, PersonInfo, ProfileInfo, ProjectInfo,
+    RemoteChat, RenameArgs, RollOverArgs, SetModelArgs, ShareArgs, WireError,
 };
 use helm_chats::types::{
     ChatRecord, ChatStatus, Harness, Interaction, InteractionAttention, InteractionMethod,
@@ -125,6 +126,16 @@ pub struct FakeState {
     pub model_changes: Vec<SetModelArgs>,
     pub archived: Vec<ArchiveArgs>,
     pub shared: Vec<ShareArgs>,
+    /// For each fork: (chat id, fork id).
+    pub forked: Vec<(String, String)>,
+    pub compacted: Vec<String>,
+    pub rolled_over: Vec<RollOverArgs>,
+    pub cost_for: Vec<String>,
+    pub exported: Vec<String>,
+    pub organized: Vec<OrganizeArgs>,
+    pub unread_marked: Vec<String>,
+    pub muted: Vec<MuteArgs>,
+    pub profiles_moved: Vec<MoveProfileArgs>,
     pub cursor: i64,
     /// The hub people this install announces acting for (what `people()` answers).
     pub announce: Vec<DevicePerson>,
@@ -270,6 +281,18 @@ impl ChatPort for FakePort {
                 kind: "folder".to_owned(),
                 path: "/work".to_owned(),
             }],
+            profiles: vec![
+                ProfileInfo {
+                    profile_id: "profile-local".to_owned(),
+                    name: "Local".to_owned(),
+                    person_id: Some("person-a".to_owned()),
+                },
+                ProfileInfo {
+                    profile_id: "profile-p".to_owned(),
+                    name: "Person P".to_owned(),
+                    person_id: None,
+                },
+            ],
             catalogue: Some(json!({ "models": [] })),
         }))
     }
@@ -487,5 +510,73 @@ impl ChatPort for FakePort {
     fn share(&self, a: ShareArgs) -> BoxFut<'_, PortResult<()>> {
         self.st().shared.push(a);
         ready(Ok(()))
+    }
+
+    fn fork(&self, a: ForkArgs) -> BoxFut<'_, PortResult<Value>> {
+        let mut st = self.st();
+        let r = if st.chats.iter().any(|c| c.id() == a.chat_id) {
+            st.forked.push((a.chat_id.clone(), a.fork_id));
+            Ok(json!({ "chat": { "id": format!("{}-copy", a.chat_id) } }))
+        } else {
+            Err(WireError::not_found())
+        };
+        ready(r)
+    }
+
+    fn compact(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
+        self.st().compacted.push(chat_id);
+        ready(Ok(()))
+    }
+
+    fn roll_over(&self, a: RollOverArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.st().rolled_over.push(a);
+        ready(Ok(json!({ "started": true })))
+    }
+
+    fn cost(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        self.st().cost_for.push(chat_id.clone());
+        ready(Ok(json!({ "chatId": chat_id, "totalTokens": 1234 })))
+    }
+
+    fn export_markdown(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        self.st().exported.push(chat_id.clone());
+        ready(Ok(
+            json!({ "messages": 3, "path": format!("{chat_id}.md") }),
+        ))
+    }
+
+    fn organize(&self, a: OrganizeArgs) -> BoxFut<'_, PortResult<Value>> {
+        // The host answers with the changed sidebar rows; echo what the request set, so the
+        // watcher can show the new placement before the device's own news arrives.
+        let chat_id = a.chat_id.clone();
+        let mut row = json!({ "chatId": chat_id, "groupProjectId": "proj-1", "position": 3 });
+        if let Some(pinned) = a.pinned {
+            row["pinned"] = json!(pinned);
+        }
+        if let Some(parent) = a.parent_chat_id.clone() {
+            row["parentChatId"] = json!(parent);
+        }
+        self.st().organized.push(a);
+        ready(Ok(json!([row])))
+    }
+
+    fn mark_unread(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
+        self.st().unread_marked.push(chat_id);
+        ready(Ok(()))
+    }
+
+    fn set_muted(&self, a: MuteArgs) -> BoxFut<'_, PortResult<()>> {
+        self.st().muted.push(a);
+        ready(Ok(()))
+    }
+
+    fn move_profile(&self, a: MoveProfileArgs) -> BoxFut<'_, PortResult<()>> {
+        self.st().profiles_moved.push(a);
+        ready(Ok(()))
+    }
+
+    fn chat_brief(&self, chat_id: String) -> BoxFut<'_, PortResult<Option<RemoteChat>>> {
+        let st = self.st();
+        ready(Ok(st.chats.iter().find(|c| c.id() == chat_id).cloned()))
     }
 }

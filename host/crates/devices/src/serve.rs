@@ -21,10 +21,10 @@ use crate::link::{BoxFut, DeviceLink};
 use crate::subs::{self, Out, Subs, CHATS_SUB, PUSH_ROW_BUDGET};
 use crate::wire::{
     code, AnswerArgs, ArchiveArgs, AttachPutArgs, AttachmentRef, Caller, ChatIdArgs,
-    ConsentDecideArgs, CreateArgs, DeviceFrame, DeviceInfo, DevicePerson, Frame, Hello, Op,
-    PageArgs, PeerDevice, RemoteChat, RenameArgs, SendArgs, SetModelArgs, ShareArgs, WireError,
-    MAX_CHUNK_BYTES, MAX_PAGE_ROWS, MAX_SEND_ATTACHMENTS, MAX_SEND_BYTES, MAX_UPLOAD_BYTES,
-    SUB_ROWS,
+    ConsentDecideArgs, CreateArgs, DeviceFrame, DeviceInfo, DevicePerson, ForkArgs, Frame, Hello,
+    MoveProfileArgs, MuteArgs, Op, OrganizeArgs, PageArgs, PeerDevice, RemoteChat, RenameArgs,
+    RollOverArgs, SendArgs, SetModelArgs, ShareArgs, WireError, MAX_CHUNK_BYTES, MAX_PAGE_ROWS,
+    MAX_SEND_ATTACHMENTS, MAX_SEND_BYTES, MAX_UPLOAD_BYTES, SUB_ROWS,
 };
 use base64::Engine as _;
 use helm_chats::types::{
@@ -136,6 +136,23 @@ pub trait ChatPort: Send + Sync {
     fn rename(&self, a: RenameArgs) -> BoxFut<'_, PortResult<()>>;
     fn archive(&self, a: ArchiveArgs) -> BoxFut<'_, PortResult<()>>;
     fn share(&self, a: ShareArgs) -> BoxFut<'_, PortResult<()>>;
+    /// Copy this chat here. The answer is whatever this install's fork op answers with.
+    fn fork(&self, a: ForkArgs) -> BoxFut<'_, PortResult<Value>>;
+    fn compact(&self, chat_id: String) -> BoxFut<'_, PortResult<()>>;
+    fn roll_over(&self, a: RollOverArgs) -> BoxFut<'_, PortResult<Value>>;
+    /// What the chat has used, as this install's usage records say. A read.
+    fn cost(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>>;
+    /// Write the chat to a Markdown file on this PC and answer with where it went.
+    fn export_markdown(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>>;
+    /// Move, nest, pin or reorder the chat in this install's sidebar.
+    fn organize(&self, a: OrganizeArgs) -> BoxFut<'_, PortResult<Value>>;
+    fn mark_unread(&self, chat_id: String) -> BoxFut<'_, PortResult<()>>;
+    fn set_muted(&self, a: MuteArgs) -> BoxFut<'_, PortResult<()>>;
+    /// Label the chat with one of this install's profiles.
+    fn move_profile(&self, a: MoveProfileArgs) -> BoxFut<'_, PortResult<()>>;
+    /// The chat as other devices see it, for a push after a sidebar change. `Ok(None)` when
+    /// the chat is not this install's.
+    fn chat_brief(&self, chat_id: String) -> BoxFut<'_, PortResult<Option<RemoteChat>>>;
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -258,6 +275,7 @@ impl Service {
                 }
             }
             "chat" | "chat_removed" | "thread" | "pending" | "refresh" | "message" | "consent"
+            | "sidebar"
                 if !lock(&self.inner.subs).watchers().is_empty() =>
             {
                 let _ = self.inner.events.send(ev.clone());
@@ -393,6 +411,28 @@ impl Inner {
                     .unwrap_or(0);
                 lock(&self.subs).add_rows(&chat_id, revision, &rows, Instant::now());
                 Vec::new()
+            }
+            // Moving, nesting, pinning or reordering a chat raises the projects crate's
+            // `sidebar` event, not a `chat` one; without this the copies would keep the old
+            // placement. Each moved chat is re-read and pushed whole.
+            "sidebar" => {
+                let ids: Vec<String> = ev
+                    .fields
+                    .get("chatIds")
+                    .and_then(Value::as_array)
+                    .map(|l| {
+                        l.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut outs = Vec::new();
+                for id in ids {
+                    if let Ok(Some(chat)) = self.port.chat_brief(id).await {
+                        outs.extend(lock(&self.subs).chat_changed(chat.to_value()));
+                    }
+                }
+                outs
             }
             // A card appeared, closed or expired: watchers holding the chat hear the whole
             // pending set again, so any device's card shows the same list at the same time.
@@ -660,6 +700,27 @@ impl Inner {
             }
             Op::Share(a) => {
                 self.port.share(a).await?;
+                done(json!({}))
+            }
+            Op::Fork(a) => done(self.port.fork(a).await?),
+            Op::Compact(a) => {
+                self.port.compact(a.chat_id).await?;
+                done(Value::Null)
+            }
+            Op::RollOver(a) => done(self.port.roll_over(a).await?),
+            Op::Cost(a) => done(self.port.cost(a.chat_id).await?),
+            Op::ExportMarkdown(a) => done(self.port.export_markdown(a.chat_id).await?),
+            Op::Organize(a) => done(self.port.organize(a).await?),
+            Op::MarkUnread(a) => {
+                self.port.mark_unread(a.chat_id).await?;
+                done(json!({}))
+            }
+            Op::Mute(a) => {
+                self.port.set_muted(a).await?;
+                done(json!({}))
+            }
+            Op::MoveProfile(a) => {
+                self.port.move_profile(a).await?;
                 done(json!({}))
             }
         }

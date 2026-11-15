@@ -10,8 +10,9 @@ use crate::link::BoxFut;
 use crate::sends;
 use crate::serve::{ChatPort, ChatState, PortResult, SentFile};
 use crate::wire::{
-    code, AnswerArgs, ArchiveArgs, ConsentDecideArgs, CreateArgs, DeviceInfo, DevicePerson, Hello,
-    PersonInfo, ProjectInfo, RemoteChat, RenameArgs, SetModelArgs, ShareArgs, WireError,
+    code, AnswerArgs, ArchiveArgs, ConsentDecideArgs, CreateArgs, DeviceInfo, DevicePerson,
+    ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, PersonInfo, ProfileInfo, ProjectInfo,
+    RemoteChat, RenameArgs, RollOverArgs, SetModelArgs, ShareArgs, WireError,
 };
 use helm_chats::submit::{self, HostFile, HostImage, HostSend};
 use helm_chats::types::{ChatGetResult, ChatRecord, MessageRow, SubmissionOrigin};
@@ -160,6 +161,32 @@ impl HostPort {
             .into_iter()
             .map(|c| serde_json::to_value(c).unwrap_or(Value::Null))
             .collect())
+    }
+
+    /// This install's profiles, for the hello: another device's window offers "Move to
+    /// profile" for its chats with these ids. A database without the profiles table has none.
+    fn profile_list(&self) -> Vec<ProfileInfo> {
+        let Ok(db) = self.db() else {
+            return Vec::new();
+        };
+        db.snapshot(|tx| {
+            let rows = tx
+                .prepare("SELECT id, name, hub_person_id FROM profiles ORDER BY name")
+                .or_else(|_| tx.prepare("SELECT id, name, NULL FROM profiles ORDER BY name"))
+                .and_then(|mut st| {
+                    st.query_map([], |r| {
+                        Ok(ProfileInfo {
+                            profile_id: r.get(0)?,
+                            name: r.get(1)?,
+                            person_id: r.get::<_, Option<String>>(2)?,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .unwrap_or_default();
+            Ok::<_, rusqlite::Error>(rows)
+        })
+        .unwrap_or_default()
     }
 
     fn people_and_projects(&self) -> PortResult<(Vec<PersonInfo>, Vec<ProjectInfo>)> {
@@ -311,13 +338,14 @@ impl ChatPort for HostPort {
                 device: self.device(),
                 people,
                 projects,
+                profiles: self.profile_list(),
                 catalogue,
             })
         })
     }
 
     fn remote_chat(&self, record: ChatRecord) -> RemoteChat {
-        let (person, shared, project, board) = self
+        let (person, shared, project, board, position) = self
             .db()
             .ok()
             .and_then(|db| {
@@ -348,11 +376,20 @@ impl ChatPort for HostPort {
                         })
                         .ok()
                         .and_then(|rows| rows.into_iter().next());
-                    Ok::<_, rusqlite::Error>((person, shared, project, board))
+                    // The sidebar order inside a group: a watcher's copy needs it to show the
+                    // same order the person set on this PC (manual drags included).
+                    let position: Option<i64> = tx
+                        .query_row(
+                            "SELECT position FROM chats WHERE id = ?1",
+                            [&record.id],
+                            |r| r.get::<_, Option<i64>>(0),
+                        )
+                        .unwrap_or(None);
+                    Ok::<_, rusqlite::Error>((person, shared, project, board, position))
                 })
                 .ok()
             })
-            .unwrap_or((None, Vec::new(), None, None));
+            .unwrap_or((None, Vec::new(), None, None, None));
         let (project_name, project_colour) = project.unwrap_or_default();
         let waiting = record.unread.completion_id.is_some()
             || self
@@ -360,7 +397,7 @@ impl ChatPort for HostPort {
                 .ok()
                 .and_then(|rt| rt.live_thread(&record.id))
                 .is_some_and(|t| !t.interactions.is_empty());
-        let chat = RemoteChat::from_record(
+        let mut chat = RemoteChat::from_record(
             &record,
             person,
             shared,
@@ -368,6 +405,9 @@ impl ChatPort for HostPort {
             &project_colour,
             waiting,
         );
+        if let Some(p) = position {
+            chat.0.insert("position".into(), json!(p));
+        }
         match board {
             Some((id, name, colour)) => chat.shown_on_board(&id, &name, &colour),
             None => chat,
@@ -731,6 +771,142 @@ impl ChatPort for HostPort {
             )
             .await?;
             Ok(())
+        })
+    }
+
+    fn fork(&self, a: ForkArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            self.op(
+                "chat_fork",
+                json!({ "chatId": a.chat_id, "forkId": a.fork_id }),
+            )
+            .await
+        })
+    }
+
+    fn compact(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
+        Box::pin(async move {
+            self.here(&chat_id)?;
+            self.op("chat_compact", json!({ "chatId": chat_id }))
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn roll_over(&self, a: RollOverArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            let mut args = json!({ "chatId": a.chat_id });
+            if let Some(m) = &a.model {
+                args["model"] = json!(m);
+            }
+            if let Some(e) = &a.effort {
+                args["effort"] = json!(e);
+            }
+            self.op("chat_roll_over", args).await
+        })
+    }
+
+    fn cost(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&chat_id)?;
+            self.op("usage_cost", json!({ "chatId": chat_id })).await
+        })
+    }
+
+    fn export_markdown(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&chat_id)?;
+            self.op("chat_export_markdown", json!({ "chatId": chat_id }))
+                .await
+        })
+    }
+
+    fn organize(&self, a: OrganizeArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            let mut args = json!({ "chatId": a.chat_id });
+            if let Some(p) = a.pinned {
+                args["pinned"] = json!(p);
+            }
+            if let Some(b) = &a.before_chat_id {
+                args["beforeChatId"] = json!(b);
+            }
+            if let Some(t) = a.to_end {
+                args["toEnd"] = json!(t);
+            }
+            if let Some(g) = &a.group_project_id {
+                args["groupProjectId"] = json!(g);
+            }
+            match &a.parent_chat_id {
+                Some(Some(p)) => args["parentChatId"] = json!(p),
+                // An explicit null means "move to top level"; the local op reads it the same way.
+                Some(None) => args["parentChatId"] = Value::Null,
+                None => {}
+            }
+            self.op("chat_organize", args).await
+        })
+    }
+
+    fn mark_unread(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
+        Box::pin(async move {
+            self.here(&chat_id)?;
+            self.op("unread_mark", json!({ "chatId": chat_id })).await?;
+            Ok(())
+        })
+    }
+
+    fn set_muted(&self, a: MuteArgs) -> BoxFut<'_, PortResult<()>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            self.op(
+                "chat_mute",
+                json!({ "chatId": a.chat_id, "muted": a.muted }),
+            )
+            .await?;
+            Ok(())
+        })
+    }
+
+    fn move_profile(&self, a: MoveProfileArgs) -> BoxFut<'_, PortResult<()>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            let known = self
+                .db()?
+                .snapshot(|tx| {
+                    tx.query_row(
+                        "SELECT 1 FROM profiles WHERE id = ?1",
+                        [&a.profile_id],
+                        |_| Ok(()),
+                    )
+                    .optional()
+                })
+                .map_err(db_err)?
+                .is_some();
+            if !known {
+                return Err(WireError::new(
+                    code::UNKNOWN_PERSON,
+                    "No profile on this PC has that id.",
+                ));
+            }
+            self.op(
+                "profiles_assign_chats",
+                json!({ "chatIds": [a.chat_id], "profileId": a.profile_id }),
+            )
+            .await?;
+            Ok(())
+        })
+    }
+
+    fn chat_brief(&self, chat_id: String) -> BoxFut<'_, PortResult<Option<RemoteChat>>> {
+        Box::pin(async move {
+            let rev = self.rt()?.clock().current();
+            let record = self
+                .db()?
+                .snapshot(|tx| store::get_chat(tx, &chat_id, rev))
+                .map_err(db_err)?;
+            Ok(record.map(|r| self.remote_chat(r)))
         })
     }
 }

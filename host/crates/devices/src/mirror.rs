@@ -1818,6 +1818,7 @@ pub fn devices_view(conn: &Connection, line_up: bool) -> rusqlite::Result<Value>
             "person": d.person,
             "personId": d.person_id,
             "people": d.people,
+            "profiles": hello_profiles(conn, &d.uid),
             "online": d.online,
             "lastSeenAt": d.last_seen_at,
             "run": d.run,
@@ -1826,6 +1827,21 @@ pub fn devices_view(conn: &Connection, line_up: bool) -> rusqlite::Result<Value>
         }));
     }
     Ok(json!({ "self": self_uid, "devices": out }))
+}
+
+/// The profiles another device listed in the hello we last heard, for "Move to profile" on its
+/// chats. An empty list when the hello predates the field or never arrived.
+fn hello_profiles(conn: &Connection, uid: &str) -> Value {
+    conn.query_row("SELECT hello FROM devices WHERE uid = ?1", [uid], |r| {
+        r.get::<_, Option<String>>(0)
+    })
+    .optional()
+    .ok()
+    .flatten()
+    .flatten()
+    .and_then(|h| serde_json::from_str::<Value>(&h).ok())
+    .and_then(|h| h.get("profiles").cloned())
+    .unwrap_or_else(|| json!([]))
 }
 
 /// The projects another device last said it has.

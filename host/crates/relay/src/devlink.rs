@@ -16,8 +16,9 @@ use helm_devices::host::HostPort;
 use helm_devices::link::{BoxFut, DeviceLink, FrameCb};
 use helm_devices::serve::{ChatPort, ChatState, PortResult, SentFile};
 use helm_devices::wire::{
-    AnswerArgs, ArchiveArgs, ConsentDecideArgs, CreateArgs, DeviceInfo, DevicePerson, Frame, Hello,
-    RemoteChat, RenameArgs, SetModelArgs, ShareArgs,
+    AnswerArgs, ArchiveArgs, ConsentDecideArgs, CreateArgs, DeviceInfo, DevicePerson, ForkArgs,
+    Frame, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, RemoteChat, RenameArgs, RollOverArgs,
+    SetModelArgs, ShareArgs,
 };
 use helm_devices::{EventTap, Service};
 use serde_json::Value;
@@ -253,6 +254,36 @@ impl ChatPort for ChannelPort {
     }
     fn share(&self, a: ShareArgs) -> BoxFut<'_, PortResult<()>> {
         self.port.share(a)
+    }
+    fn fork(&self, a: ForkArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.port.fork(a)
+    }
+    fn compact(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
+        self.port.compact(chat_id)
+    }
+    fn roll_over(&self, a: RollOverArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.port.roll_over(a)
+    }
+    fn cost(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        self.port.cost(chat_id)
+    }
+    fn export_markdown(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        self.port.export_markdown(chat_id)
+    }
+    fn organize(&self, a: OrganizeArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.port.organize(a)
+    }
+    fn mark_unread(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
+        self.port.mark_unread(chat_id)
+    }
+    fn set_muted(&self, a: MuteArgs) -> BoxFut<'_, PortResult<()>> {
+        self.port.set_muted(a)
+    }
+    fn move_profile(&self, a: MoveProfileArgs) -> BoxFut<'_, PortResult<()>> {
+        self.port.move_profile(a)
+    }
+    fn chat_brief(&self, chat_id: String) -> BoxFut<'_, PortResult<Option<RemoteChat>>> {
+        self.port.chat_brief(chat_id)
     }
 }
 

@@ -24,7 +24,9 @@ pub fn register_ops(reg: &mut OpRegistry) {
             devices_consent_list,
         )
         .async_op("devices_consent_decide", devices_consent_decide)
-        .async_op("devices_consent_state", devices_consent_state);
+        .async_op("devices_consent_state", devices_consent_state)
+        .async_op("devices_share_chat", devices_share_chat)
+        .async_op("devices_move_profile", devices_move_profile);
 }
 
 fn fail(e: DeviceError) -> ApiError {
@@ -529,4 +531,47 @@ async fn devices_consent_state(ctx: OpCtx, args: Value) -> Result<Value, ApiErro
         serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
     let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
     mirror.consent_states(&a.chat_id).await
+}
+
+// ---------------------------------------------------------------------------------------------
+// Sharing and profile moves for a chat that runs on another device
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ShareChatArgs {
+    chat_id: String,
+    /// One of the hub people the device announced in its hello.
+    person_id: String,
+    shared: bool,
+}
+
+/// `devices_share_chat`: show a mirrored chat to one more person on the PC that runs it, or
+/// stop. The other chat menus cross the wire through the intercepted local ops; the sharing ops
+/// name a list of chats, not one, so they need an op of their own here.
+async fn devices_share_chat(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ShareChatArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
+    mirror
+        .share_chat(&a.chat_id, &a.person_id, a.shared)
+        .await?;
+    Ok(json!({}))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MoveProfileArgs {
+    chat_id: String,
+    /// One of the profiles the device listed in its hello.
+    profile_id: String,
+}
+
+/// `devices_move_profile`: hand a mirrored chat to one of the profiles on the PC that runs it.
+async fn devices_move_profile(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: MoveProfileArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
+    mirror.move_profile(&a.chat_id, &a.profile_id).await?;
+    Ok(json!({}))
 }

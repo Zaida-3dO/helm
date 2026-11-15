@@ -434,6 +434,60 @@ pub struct ShareArgs {
     pub shared: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForkArgs {
+    pub chat_id: String,
+    /// A fresh UUID per fork: a repeat is answered without forking twice.
+    pub fork_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RollOverArgs {
+    pub chat_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MuteArgs {
+    pub chat_id: String,
+    pub muted: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OrganizeArgs {
+    pub chat_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_chat_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_end: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_project_id: Option<String>,
+    /// Absent changes nothing; `null` moves the chat to top level; an id nests under it.
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub parent_chat_id: Option<Option<String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MoveProfileArgs {
+    pub chat_id: String,
+    /// One of the profiles this PC listed in its hello.
+    pub profile_id: String,
+}
+
 /// An op a device carries for another, parsed.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
@@ -456,12 +510,31 @@ pub enum Op {
     Rename(RenameArgs),
     Archive(ArchiveArgs),
     Share(ShareArgs),
+    Fork(ForkArgs),
+    Compact(ChatIdArgs),
+    RollOver(RollOverArgs),
+    /// What the chat has used, read from the PC that runs it. A read: no switch needed.
+    Cost(ChatIdArgs),
+    ExportMarkdown(ChatIdArgs),
+    Organize(OrganizeArgs),
+    MarkUnread(ChatIdArgs),
+    Mute(MuteArgs),
+    MoveProfile(MoveProfileArgs),
 }
 
 fn args<T: for<'de> Deserialize<'de>>(v: Value) -> Result<T, WireError> {
     // A missing argument object reads as an empty one.
     let v = if v.is_null() { json!({}) } else { v };
     serde_json::from_value(v).map_err(|e| WireError::bad_args(e.to_string()))
+}
+
+/// Distinguishes "absent" (`None`) from an explicit `null` (`Some(None)`).
+fn double_option<'de, T, D>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
 }
 
 impl Op {
@@ -492,6 +565,15 @@ impl Op {
             "rename" => Op::Rename(args(a)?),
             "archive" => Op::Archive(args(a)?),
             "share" => Op::Share(args(a)?),
+            "fork" => Op::Fork(args(a)?),
+            "compact" => Op::Compact(args(a)?),
+            "roll_over" => Op::RollOver(args(a)?),
+            "cost" => Op::Cost(args(a)?),
+            "export_markdown" => Op::ExportMarkdown(args(a)?),
+            "organize" => Op::Organize(args(a)?),
+            "mark_unread" => Op::MarkUnread(args(a)?),
+            "mute" => Op::Mute(args(a)?),
+            "move_profile" => Op::MoveProfile(args(a)?),
             _ => return Err(WireError::elsewhere()),
         })
     }
@@ -511,6 +593,14 @@ impl Op {
                 | Op::Rename(_)
                 | Op::Archive(_)
                 | Op::Share(_)
+                | Op::Fork(_)
+                | Op::Compact(_)
+                | Op::RollOver(_)
+                | Op::ExportMarkdown(_)
+                | Op::Organize(_)
+                | Op::MarkUnread(_)
+                | Op::Mute(_)
+                | Op::MoveProfile(_)
         )
     }
 }
@@ -543,6 +633,19 @@ pub struct ProjectInfo {
     pub path: String,
 }
 
+/// One of this device's profiles, as another device lists it. A chat can be labelled with one
+/// from afar (`move_profile`); these are the ids it takes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileInfo {
+    pub profile_id: String,
+    pub name: String,
+    /// The hub person this profile is linked to, when it is linked. A watcher ticks the
+    /// profile that owns a chat by matching it against the chat's person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person_id: Option<String>,
+}
+
 /// The answer to `hello`: who this device is, who uses it, where chats can start and which
 /// models they can run.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -550,6 +653,10 @@ pub struct Hello {
     pub device: DeviceInfo,
     pub people: Vec<PersonInfo>,
     pub projects: Vec<ProjectInfo>,
+    /// This device's profiles. Absent (an older Helm) means the watcher offers no
+    /// "Move to profile" for this device's chats.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<ProfileInfo>,
     /// `null` when this device's `model_catalogue` op failed at hello time.
     pub catalogue: Option<Value>,
 }

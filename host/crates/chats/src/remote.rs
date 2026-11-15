@@ -9,6 +9,7 @@
 //! |---|---|
 //! | `chat_get`, `transcript_page` | the mirror (and the device that runs the chat, for older pages) |
 //! | `chat_send`, `chat_stop`, `interaction_answer`, `chat_set_model`, `chat_rename`, `chat_archive`, `chat_restore` | the device that runs the chat |
+//! | `chat_fork`, `chat_compact`, `chat_roll_over`, `usage_cost`, `chat_export_markdown`, `chat_organize`, `unread_mark`, `chat_mute` | the same op on the device that runs the chat |
 //! | `draft_save` | the mirror alone: a draft never leaves this PC |
 //! | `chat_warm`, `title_suggest`, `autocomplete_suggest`, `skills_list` | quietly, with an empty answer |
 //! | `model_catalogue` with a `deviceUid` | the models that device last said it offers |
@@ -54,6 +55,9 @@ pub trait RemoteChats: Send + Sync {
     fn archive(&self, chat_id: String, archived: bool) -> Fut<Res>;
     /// Keep a draft on this PC only.
     fn draft_save(&self, args: DraftSaveArgs) -> Fut<Res>;
+    /// Carry a local op across the wire to the device that runs the chat, answering with what it
+    /// answers. `args` already names the chat; `op` is one of the ops the chat menu runs.
+    fn chat_op(&self, op: &str, args: Value) -> Fut<Res>;
     /// The model catalogue another device last reported.
     fn catalogue(&self, device_uid: String) -> Fut<Res>;
 }
@@ -126,6 +130,15 @@ async fn route(
         "chat_archive" => remote.archive(chat_id, true).await,
         "chat_restore" => remote.archive(chat_id, false).await,
         "draft_save" => remote.draft_save(parse(args)?).await,
+        // The chat menu's other actions: the same op, run on the device that runs the chat.
+        "chat_fork"
+        | "chat_compact"
+        | "chat_roll_over"
+        | "usage_cost"
+        | "chat_export_markdown"
+        | "chat_organize"
+        | "unread_mark"
+        | "chat_mute" => remote.chat_op(&op, args).await,
         // Nothing to warm, suggest or list for a chat that runs somewhere else.
         "chat_warm" => Ok(Value::Null),
         "title_suggest" => Ok(json!({ "title": "", "titles": [] })),

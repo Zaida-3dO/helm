@@ -371,6 +371,112 @@ impl Mirror {
         self.chat_json(chat_id)
     }
 
+    /// Patch this PC's copy after the device that runs the chat accepted a move, pin, nest or
+    /// reorder: the placement it answers with for this chat, and the board stamp when the chat
+    /// now shows under a different board there.
+    fn apply_organize(&self, chat_id: &str, device: &str, answer: &Value) {
+        let Some(row) = answer.as_array().and_then(|l| {
+            l.iter()
+                .find(|r| r.get("chatId").and_then(Value::as_str) == Some(chat_id))
+                .cloned()
+        }) else {
+            return;
+        };
+        let group = row
+            .get("groupProjectId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let board = group.as_deref().and_then(|g| {
+            self.inner
+                .db
+                .snapshot(|tx| {
+                    tx.query_row(
+                        "SELECT name, colour, kind FROM mirror_projects
+                         WHERE device_uid = ?1 AND project_id = ?2",
+                        rusqlite::params![device, g],
+                        |r| {
+                            Ok((
+                                r.get::<_, String>(0)?,
+                                r.get::<_, String>(1)?,
+                                r.get::<_, String>(2)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                })
+                .ok()
+                .flatten()
+        });
+        let pinned = row.get("pinned").cloned();
+        let parent = row.get("parentChatId").cloned();
+        let position = row.get("position").cloned();
+        self.patch_record(chat_id, move |rec| {
+            if let Some(p) = pinned {
+                rec.insert("pinned".into(), p);
+            }
+            if let Some(p) = parent {
+                rec.insert("parentChatId".into(), p);
+            }
+            if let Some(p) = position {
+                rec.insert("position".into(), p);
+            }
+            // A board stamp only changes when the group did; a folder group has none.
+            if rec.get("boardId").and_then(Value::as_str) != group.as_deref() {
+                match board {
+                    Some((name, colour, kind)) if kind == "board" => {
+                        rec.insert("boardId".into(), json!(group));
+                        rec.insert("boardName".into(), json!(name));
+                        rec.insert("boardColour".into(), json!(colour));
+                    }
+                    _ => {
+                        rec.remove("boardId");
+                        rec.remove("boardName");
+                        rec.remove("boardColour");
+                    }
+                }
+            }
+        });
+    }
+
+    /// Show the chat to a person on the device that runs it, or stop (the `share` wire op, which
+    /// answers with that PC's own `profiles_share_chats`).
+    pub async fn share_chat(
+        &self,
+        chat_id: &str,
+        person_id: &str,
+        shared: bool,
+    ) -> Result<(), ApiError> {
+        let device = self.device_of(chat_id)?;
+        self.check_live(&device)?;
+        let act = self.acting(chat_id)?;
+        self.ask_as(
+            &device,
+            "share",
+            json!({ "chatId": chat_id, "personId": person_id, "shared": shared }),
+            "that share",
+            &[act],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Hand the chat to one of the profiles the device listed in its hello (the `move_profile`
+    /// wire op, answered by that PC's own `profiles_assign_chats`).
+    pub async fn move_profile(&self, chat_id: &str, profile_id: &str) -> Result<(), ApiError> {
+        let device = self.device_of(chat_id)?;
+        self.check_live(&device)?;
+        let act = self.acting(chat_id)?;
+        self.ask_as(
+            &device,
+            "move_profile",
+            json!({ "chatId": chat_id, "profileId": profile_id }),
+            "that move",
+            &[act],
+        )
+        .await?;
+        Ok(())
+    }
+
     /// The person a change to this chat acts as, alone on the wire: the active profile's
     /// person, or with "All profiles" the chat owner's person when a profile here is linked to
     /// them, else the home profile's person. A profile with no hub person yet (before the first
@@ -844,6 +950,71 @@ impl RemoteChats for Mirror {
                     rec.insert("archived".into(), json!(archived));
                 },
             )
+            .await
+        })
+    }
+
+    /// Carry one of the chat menu's ops to the device that runs the chat, answering with what
+    /// the same op answers here, so the menu cannot tell the difference.
+    fn chat_op(&self, op: &str, args: Value) -> Fut<Res> {
+        let m = self.clone();
+        let op = op.to_owned();
+        Box::pin(async move {
+            let chat_id = args
+                .get("chatId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let device = m.device_of(&chat_id)?;
+            // What the chat has used is a read: it answers while the device's run switch is off.
+            if op == "usage_cost" {
+                if !m.line_is_up() {
+                    return Err(ApiError::new(
+                        "reconnecting",
+                        "Reconnecting to the hub… showing the copy on this PC.",
+                    ));
+                }
+                match m.device(&device) {
+                    Some(d) if d.online => {}
+                    other => {
+                        return Err(offline(
+                            &m.device_name(&device),
+                            other.and_then(|d| d.last_seen_at).as_deref(),
+                        ))
+                    }
+                }
+                return m.ask_as(&device, "cost", args, "that cost", &[]).await;
+            }
+            // Moving, nesting, pinning and reordering answer with sidebar rows; the one this
+            // call is about lives in this copy, so the copy is patched and no rows come back.
+            if op == "chat_organize" {
+                m.check_live(&device)?;
+                let act = m.acting(&chat_id)?;
+                let rows = m
+                    .ask_as(&device, "organize", args, "that change", &[act])
+                    .await?;
+                m.apply_organize(&chat_id, &device, &rows);
+                return Ok(json!([]));
+            }
+            let wire = match op.as_str() {
+                "chat_fork" => "fork",
+                "chat_compact" => "compact",
+                "chat_roll_over" => "roll_over",
+                "chat_export_markdown" => "export_markdown",
+                "unread_mark" => "mark_unread",
+                "chat_mute" => "mute",
+                _ => return Err(helm_chats::remote::elsewhere(&m.device_name(&device))),
+            };
+            let muted = if op == "chat_mute" {
+                args.get("muted").and_then(Value::as_bool)
+            } else {
+                None
+            };
+            m.change(&chat_id, wire, args, move |rec| {
+                if let Some(on) = muted {
+                    rec.insert("muted".into(), json!(on));
+                }
+            })
             .await
         })
     }
