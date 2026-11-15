@@ -416,7 +416,7 @@ impl McpStore {
         }
         if s.preset.as_deref() == Some(crate::google::PRESET_ID) && out.error.is_none() {
             if let Some(profile_dir) = self.path.parent() {
-                crate::google::prepare(profile_dir, &mut out);
+                crate::google::prepare(&self.creds, profile_dir, &mut out);
             }
         }
         // A server that signs in through the browser is only reachable with that sign-in: its

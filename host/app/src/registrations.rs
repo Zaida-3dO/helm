@@ -418,6 +418,7 @@ pub fn allow_kinds() -> helm_consent::AllowKinds {
     helm_consent::register_allow_kinds(&mut k);
     helm_workflow::register_allow_kinds(&mut k);
     helm_relay::register_allow_kinds(&mut k);
+    helm_mcp::gmail::register_allow_kinds(&mut k);
     k
 }
 
@@ -613,9 +614,18 @@ mod host_tool_tests {
             mcp_enabled: true,
             ..Default::default()
         };
-        assert!(
-            delta(mcp).is_empty(),
-            "app_mcp_tools is the worker's, not the host's"
+        // The Gmail tools ride the MCP switch (in registration order); app_mcp_tools itself is
+        // the worker's, not the host's.
+        assert_eq!(
+            delta(mcp),
+            [
+                "app_gmail_search",
+                "app_gmail_read",
+                "app_gmail_labels",
+                "app_gmail_label",
+                "app_gmail_draft",
+                "app_gmail_send"
+            ]
         );
         let web = helm_hosttools::LaunchKeys {
             web_tools: true,
