@@ -8,6 +8,11 @@
 //! A crate adding a preference adds one line here (its registration line) and declares the key as a
 //! `const` in its own code.
 //!
+//! **A new preference is agent-settable by default**: classify it `Registry(Base)` and chats change
+//! it themselves, with the Undo notice. `High` (a chat stages it and the user approves) and
+//! `UserOnly` (no tool at all, kept for what changes what approval means) each carry a one-line
+//! reason, and need a good one.
+//!
 //! ```
 //! use helm_core::prefs::PrefKey;
 //! const WIDTH: PrefKey = PrefKey::classified("sidebarWidth");
@@ -34,11 +39,15 @@ pub enum PrefClass {
     Registry(Tier),
     /// Changed by agents only through its own host tool.
     Tool,
-    /// Only the user, in Settings. Carries the reason (≤ 130 bytes).
+    /// Agents stage a change (`app_stage_settings`) and it applies only after the user approves
+    /// it. Carries what the approval is for (≤ 130 bytes).
+    High(&'static str),
+    /// Only the user, in Settings: no tool changes it at all. Carries the reason (≤ 130 bytes).
     UserOnly(&'static str),
     /// App state, not a setting.
     Internal,
-    /// Harmless, not yet exposed. This list may only shrink.
+    /// Harmless, not yet exposed. Nothing is listed here now: a new preference is agent-settable
+    /// by default.
     Later,
 }
 
@@ -49,7 +58,7 @@ use Tier::*;
 /// the All-tier `keybindings`, the generic-validated layout keys, and the all-settings
 /// switch. Later features add their keys here.
 pub const CLASSIFIED: &[(&str, PrefClass)] = &[
-    // Base tier (35; responseVerbosity is user-only).
+    // Base tier.
     ("theme", Registry(Base)),
     ("interfaceTheme", Registry(Base)),
     ("appearance", Registry(Base)),
@@ -89,121 +98,89 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
     ("tasks", Registry(Base)),
     // All tier.
     ("keybindings", Registry(All)),
-    // Layout keys the generic writer validates but agents are not offered yet.
-    ("sidebarView", Later),
-    ("terminalHeight", Later),
+    // Layout and chat-behaviour keys.
+    ("sidebarView", Registry(Base)),
+    ("terminalHeight", Registry(Base)),
     // Minutes without output before a running chat is stalled.
-    ("stallMinutes", Later),
+    ("stallMinutes", Registry(Base)),
+    // Settings > Chat and Shell: how the user's own window and keyboard behave. A chat changes
+    // these itself, with the Undo notice.
+    ("scrollOnSend", Registry(Base)),
+    ("doubleShift", Registry(Base)),
+    ("sendBehavior", Registry(Base)),
+    ("responseVerbosity", Registry(Base)),
+    ("notifications", Registry(Base)),
+    ("dictationMic", Registry(Base)),
+    // The board chats with no other home are shown on (a board project id, or "ask").
+    ("defaultBoard", Registry(Base)),
     // The open chat and project, restored at launch.
     ("selection", Internal),
-    // User-only: they change what Helm does outside its window.
-    (
-        "globalHotkey",
-        UserOnly("A system-wide shortcut works in every app, so only you set it."),
-    ),
-    (
-        "notifications",
-        UserOnly(
-            "Where notices about your chats appear, including outside Helm, is yours to choose.",
-        ),
-    ),
-    (
-        "dictationMic",
-        UserOnly("Which microphone Helm listens on is yours to choose."),
-    ),
-    (
-        "terminalShell",
-        UserOnly("The shell your terminal runs is yours to choose."),
-    ),
-    // User-only.
-    // The model background jobs ask (titles, autocomplete, the idle check) sees the words of
-    // every chat, so which model reads them is the user's call.
-    (
-        "backgroundModel",
-        UserOnly(
-            "Which model reads your chats for titles, completions and checks is yours to choose.",
-        ),
-    ),
-    // Reply length is the user's call (default low).
-    (
-        "responseVerbosity",
-        UserOnly("How long the agent's replies are is yours to choose."),
-    ),
-    (
-        "agentSettingsAll",
-        UserOnly("Lets chats change every setting, so only you can turn it on."),
-    ),
-    // "Use my Claude Code MCP servers", default on.
-    (
-        "nativeMcp",
-        UserOnly("Which of your own MCP servers chats load is yours to choose."),
-    ),
-    // The MCP master switch, default on. Off: no chat loads any MCP server.
-    (
-        "mcpEnabled",
-        UserOnly("Whether chats may use MCP servers at all is yours to choose."),
-    ),
-    (
-        "updateSource",
-        UserOnly("Decides which program Helm runs to update itself, so only you choose it."),
-    ),
-    // An internal setting that only the user sets.
-    (
-        "sendBehavior",
-        UserOnly("Changes how your own messages reach a running agent, so only you set it."),
-    ),
-    // Whether agents may read the code editor's open file and selection.
-    (
-        "ideContext",
-        UserOnly("What your editor shares with agents is yours to choose."),
-    ),
-    // Whether sending a message scrolls the chat to its newest message (on when missing).
-    (
-        "scrollOnSend",
-        UserOnly("How your own window scrolls when you send is yours to choose."),
-    ),
-    // Whether tapping Shift twice opens Go to file (on when missing).
-    (
-        "doubleShift",
-        UserOnly("How your own keyboard shortcuts behave is yours to choose."),
-    ),
-    // The board chats with no other home are shown on (a board project id).
-    (
-        "defaultBoard",
-        UserOnly("Which board chats with no other home are shown on is yours to choose."),
-    ),
-    // The pull request view: whether Helm reads and writes GitHub for you.
-    (
-        "githubPrView",
-        UserOnly("Whether Helm reads and writes GitHub for you is yours to choose."),
-    ),
-    // What the household may see of this install's chats; all three switches default to off.
-    (
-        "householdSharing",
-        UserOnly("What other people in your household may see of your chats is yours to choose."),
-    ),
     // The profile whose chats the sidebar shows (a profile id, or "all").
     ("activeProfile", Internal),
     // The device whose chats New creates and the sidebar toggle shows (a device uid); unset is
     // this device.
     ("selectedDevice", Internal),
+    // Higher risk: a chat stages the change and it applies only when the user approves it.
+    (
+        "globalHotkey",
+        High("A system-wide shortcut works in every app, so you approve it."),
+    ),
+    (
+        "terminalShell",
+        High("The shell your terminal runs is a program Helm starts, so you approve it."),
+    ),
+    (
+        "backgroundModel",
+        High("The model that reads your chats for titles and checks is yours to approve."),
+    ),
+    (
+        "ideContext",
+        High("Lets agents read your editor's open file and selection, so you approve it."),
+    ),
+    (
+        "newChatPermissionMode",
+        High("The permission mode new chats start in sets what they may do, so you approve it."),
+    ),
+    // "Use my Claude Code MCP servers", default on.
+    (
+        "nativeMcp",
+        High("Which of your own MCP servers chats load is yours to approve."),
+    ),
+    // The MCP master switch, default on. Off: no chat loads any MCP server.
+    (
+        "mcpEnabled",
+        High("Whether chats may use MCP servers at all is yours to approve."),
+    ),
+    (
+        "updateSource",
+        High("Decides which program Helm runs to update itself, so you approve it."),
+    ),
+    // The pull request view: whether Helm reads and writes GitHub for you.
+    (
+        "githubPrView",
+        High("Whether Helm reads and writes GitHub for you is yours to approve."),
+    ),
+    // What the household may see of this install's chats; all three switches default to off.
+    (
+        "householdSharing",
+        High("What other people in your household may see of your chats is yours to approve."),
+    ),
     // Whether other devices may run chats on this PC (on when missing).
     (
         "deviceRunFromOthers",
-        UserOnly("Whether other devices may run chats on this PC is yours to choose."),
-    ),
-    // The permission mode chats the user starts from the new-chat page begin in: the last one
-    // picked with a chat's chip.
-    (
-        "newChatPermissionMode",
-        UserOnly("The permission mode new chats start in is yours to choose."),
+        High("Whether other devices may run chats on this PC is yours to approve."),
     ),
     // Whether people in the household may run their own chats on this PC (on when missing).
     (
         "deviceHouseholdRun",
-        UserOnly(
-            "Whether people in your household may run their chats on this PC is yours to choose.",
+        High(
+            "Whether people in your household may run their chats on this PC is yours to approve.",
         ),
+    ),
+    // The switch that governs what chats may change without asking.
+    (
+        "agentSettingsAll",
+        UserOnly("Lets chats change every setting without asking, so only you can turn it on."),
     ),
 ];
 
@@ -290,12 +267,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn base_tier_has_36_keys() {
-        let base = CLASSIFIED
+    fn the_tiers_and_the_floor() {
+        let count =
+            |want: fn(&PrefClass) -> bool| CLASSIFIED.iter().filter(|(_, c)| want(c)).count();
+        assert_eq!(count(|c| *c == Registry(Base)), 46);
+        assert_eq!(count(|c| *c == Registry(All)), 1);
+        // The user-only floor is the one switch that governs what chats may change.
+        let user: Vec<_> = CLASSIFIED
             .iter()
-            .filter(|(_, c)| *c == Registry(Base))
-            .count();
-        assert_eq!(base, 36);
+            .filter(|(_, c)| matches!(c, UserOnly(_)))
+            .map(|(k, _)| *k)
+            .collect();
+        assert_eq!(user, ["agentSettingsAll"]);
+        // Nothing is parked: a new preference is agent-settable unless it says why not.
+        assert_eq!(count(|c| *c == Later), 0);
     }
 
     #[test]
@@ -308,9 +293,9 @@ mod tests {
     }
 
     #[test]
-    fn user_only_reasons_fit_130_bytes() {
+    fn user_only_and_high_reasons_fit_130_bytes() {
         for (k, c) in CLASSIFIED {
-            if let UserOnly(reason) = c {
+            if let UserOnly(reason) | High(reason) = c {
                 assert!(reason.len() <= 130, "{k}: reason too long");
             }
         }

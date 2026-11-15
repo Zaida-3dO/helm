@@ -1828,6 +1828,7 @@ dependencies = [
  "helm-workers",
  "helm-workflow",
  "log",
+ "rusqlite",
  "serde_json",
  "tauri",
  "tauri-build",
@@ -2026,6 +2027,7 @@ version = "2.0.4"
 dependencies = [
  "helm-chats",
  "helm-core",
+ "helm-hosttools",
  "helm-ipc",
  "helm-usage",
  "log",

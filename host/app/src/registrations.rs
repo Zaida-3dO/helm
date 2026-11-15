@@ -144,6 +144,12 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     if let Some(web) = services.get::<helm_webtools::WebSearch>() {
         extensions.push(helm_webtools::settings_extension(web));
     }
+    // What a chat may only stage for the user to approve: where the voice goes for dictation, and
+    // the governor that can stop chats.
+    extensions.push(helm_dictation::ext::settings_extension());
+    if let Some(governor) = services.get::<helm_governor::Governor>() {
+        extensions.push(helm_governor::ext::settings_extension(governor));
+    }
     // Servers a chat has opted in to plain http on the private network, with Undo.
     if let Some(store) = services.get::<helm_mcp::McpStore>() {
         extensions.push(helm_mcp::unencrypted::settings_extension(store));
@@ -151,6 +157,10 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     // The Telegram new-chat defaults: chats read the whole policy, change only model and effort.
     if let Some(profile) = services.get::<helm_core::profile::Profile>() {
         extensions.push(helm_relay::settings_extension(&profile.dir));
+        // The Claude Code launch switches kept in claude-runtime.json.
+        extensions.push(helm_chats::runtime_ext::settings_extension(
+            profile.dir.clone(),
+        ));
         // A chat's edits to the repository list, which Undo puts back.
         extensions.push(helm_projects::repo_undo::settings_extension(&profile.dir));
         // A chat's edits to the rules and skills, which Undo puts back.
@@ -159,6 +169,9 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     // Whether this PC is connected to the hub, read only (never the address, token or ids).
     extensions.extend(helm_relay::hub_view::settings_extension(services));
     services.insert(Arc::new(helm_hosttools::SettingsExtensions(extensions)));
+    // What the generic writer cannot know about a few preference keys' values.
+    let rules = crate::pref_rules::pref_rules(services);
+    services.insert(Arc::new(rules));
     services.insert(Arc::new(worker_lines()));
     // Other crates reach running workers through the chat runtime (helm_hosttools::lines).
     if let Some(rt) = services.get::<helm_chats::ChatRuntime>() {

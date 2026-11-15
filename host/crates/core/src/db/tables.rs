@@ -172,7 +172,7 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     // Local model servers: the addresses, switches and numbers around them.
     (
         "local_model_settings",
-        UserOnly("Which local model servers Helm uses is yours to set; chats may change only a few of its switches."),
+        UserOnly("Servers and their keys are yours to set; chats change some switches and stage the games, restart task and pause file."),
     ),
     // Which Ollama variants Helm made for chat windows; written and pruned by Helm alone.
     ("local_model_variants", Data),

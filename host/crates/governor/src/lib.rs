@@ -13,6 +13,7 @@
 //! Not built: proposing backlog items in surplus.
 
 pub mod bands;
+pub mod ext;
 pub mod service;
 pub mod store;
 

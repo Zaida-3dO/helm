@@ -4,6 +4,7 @@
 use super::*;
 use crate::pair::tests::{fake_hub, TOKEN};
 use helm_core::db::MigrationRegistry;
+use helm_core::prefs::{self, DEVICE_RUN_FROM_OTHERS};
 use helm_ipc::RecordingSink;
 use helm_platform::keychain::MemoryKeychain;
 use std::net::TcpListener;
@@ -36,6 +37,7 @@ fn env_with(own_hub_ok: bool) -> Env {
     helm_chats::register_migrations(&mut reg);
     helm_profiles::register_migrations(&mut reg);
     helm_consent::register_migrations(&mut reg);
+    helm_hosttools::register_migrations(&mut reg);
     let db = Arc::new(Database::open(&dir.path().join("t.db"), &reg).unwrap());
     db.write(|tx| {
         tx.execute(
@@ -70,6 +72,8 @@ fn env_with(own_hub_ok: bool) -> Env {
     if own_hub_ok {
         s.insert(Arc::new(AllowOwnHub));
     }
+    let rules = crate::pref_rules::pref_rules(&s);
+    s.insert(Arc::new(helm_hosttools::PrefRules(rules)));
     s.insert(Arc::new(profile));
     s.insert(Arc::new(platform));
     s.insert(db.clone());
@@ -233,7 +237,7 @@ fn staged_settings_apply_all_or_nothing_and_never_show_the_code() {
             Hub::Down,
             "Pat",
             true,
-            "Nothing changed: the update folder is no longer an existing folder",
+            "Nothing changed: The update folder must be an existing folder",
             false,
             false,
         ),
@@ -367,7 +371,32 @@ fn staging_is_refused_when_it_would_be_wrong_or_change_nothing() {
             "updateSource is already none",
         ),
         ("home", json!({}), "at least one change"),
-        ("home", json!({"theme": "dark"}), "theme cannot be staged"),
+        (
+            "home",
+            json!({"theme": "dark"}),
+            "theme is a setting you change yourself",
+        ),
+        (
+            "home",
+            json!({"agentSettingsAll": true}),
+            "agentSettingsAll is yours to change only",
+        ),
+        (
+            "home",
+            json!({"nonsense": 1}),
+            "not a setting that can be staged",
+        ),
+        ("home", json!({"terminalShell": "zsh"}), "pwsh"),
+        (
+            "home",
+            json!({"terminalShell": "pwsh"}),
+            "terminalShell is already pwsh",
+        ),
+        (
+            "home",
+            json!({"householdSharing": {"chats": 1}}),
+            "householdSharing",
+        ),
         (
             "home",
             json!({"updateSource": "relative\\dist"}),
@@ -421,4 +450,52 @@ fn staging_is_refused_when_it_would_be_wrong_or_change_nothing() {
     let ok = e.stage("home", pairing(file, "Pat")).unwrap();
     assert_eq!(ok["state"], "pending");
     assert!(!e.paired().usable());
+}
+
+#[test]
+fn any_high_setting_is_staged_applied_and_left_for_the_users_undo() {
+    let e = env();
+    let staged = e
+        .stage(
+            "home",
+            json!({
+                "terminalShell": "gitbash",
+                "nativeMcp": false,
+                "backgroundModel": {"local": "qwen"},
+                "householdSharing": {"chats": true, "transcripts": true},
+            }),
+        )
+        .unwrap();
+    // The chat is told at once and carries on; nothing has changed yet.
+    assert_eq!(staged["state"], "pending");
+    let lines: Vec<String> = serde_json::from_value(staged["changes"].clone()).unwrap();
+    assert_eq!(lines.len(), 4, "{lines:?}");
+    assert!(lines.contains(&"terminalShell: pwsh → gitbash".to_owned()));
+    assert!(lines.contains(&"nativeMcp: on → off".to_owned()));
+    assert_eq!(e.pref("terminalShell"), None);
+    let outcome = e.approve(staged["requestId"].as_str().unwrap());
+    assert!(outcome.starts_with("Applied."), "{outcome}");
+    assert!(
+        outcome.contains("terminalShell is now gitbash."),
+        "{outcome}"
+    );
+    assert_eq!(e.pref("terminalShell"), Some(json!("gitbash")));
+    assert_eq!(e.pref("nativeMcp"), Some(json!(false)));
+    assert_eq!(e.pref("backgroundModel"), Some(json!({"local": "qwen"})));
+    // The owner's rule filled in the switch the others depend on being off.
+    assert_eq!(
+        e.pref("householdSharing"),
+        Some(json!({"chats": true, "transcripts": true, "messages": false}))
+    );
+    // The user's change list has them for Undo, under the chat that staged them.
+    let listed: Vec<(String, String)> =
+        e.db.snapshot(|tx| {
+            tx.prepare("SELECT key, chat_id FROM settings_changes ORDER BY key")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect()
+        })
+        .unwrap();
+    assert_eq!(listed.len(), 4, "{listed:?}");
+    assert!(listed.iter().all(|(_, c)| c == "home"));
+    assert!(e.sink.kinds().contains(&"external_settings".to_string()));
 }
