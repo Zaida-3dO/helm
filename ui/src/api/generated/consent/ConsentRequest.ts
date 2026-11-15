@@ -39,4 +39,9 @@ appliesOnAllow: boolean,
 /**
  * For a request Helm applied: what happened, once it is done.
  */
-outcome: string | null, };
+outcome: string | null, 
+/**
+ * Where the user answered: `app` (this PC's window), `device:<name>` (another device) or
+ * `telegram`. `None` while pending, and for a request that expired.
+ */
+decidedVia: string | null, };
