@@ -124,6 +124,7 @@ export function ScheduleEditor({
       title={start.schedule ? 'Edit schedule' : 'New schedule'}
       onClose={onClose}
       busy={busy}
+      padded
       testId="schedule-editor"
       intro={
         reminder

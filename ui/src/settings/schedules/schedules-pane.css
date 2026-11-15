@@ -168,3 +168,20 @@
   flex-wrap: wrap;
   gap: 4px 12px;
 }
+
+/* A picker in the form reads as a field like the inputs around it: full width, its value on the
+   left and the chevron on the right (on its own it is a quiet chip, centred in a stretched row). */
+.sched-field > .ui-picker-trigger {
+  max-width: none;
+  justify-content: space-between;
+  height: auto;
+  padding: 8px 11px;
+  border-color: var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: inherit;
+}
+.sched-field > .ui-picker-trigger:hover:not(:disabled) {
+  border-color: var(--secondary);
+}
