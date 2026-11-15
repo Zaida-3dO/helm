@@ -1288,11 +1288,13 @@ impl VoiceBridge {
             held: HELD_MAX_BYTES.saturating_sub(held),
             outbox: self.cfg.outbox_attachment_bytes.saturating_sub(outbox),
         };
+        // The lines this person's voice may go down, which is not only their own machines: a PC
+        // that takes the channel for them, or one the hub pinned, holds a turn it already took.
         p.lines_up = self
             .lines
-            .up_lines_of(person)
+            .candidate_lines(person, Channel::Voice)
             .into_iter()
-            .map(|(_, l)| l)
+            .map(|(_, _, l)| l)
             .collect();
         let r = f(p, &line);
         let forwarded = p.sync(&line, &self.cfg, now);

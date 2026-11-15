@@ -348,21 +348,21 @@ impl Lines {
         self.lock().get(&client_id).map(|s| s.line.clone())
     }
 
-    /// Every connected line of a person with its machine's name.
-    pub fn up_lines_of(&self, person_id: i64) -> Vec<(String, Arc<Line>)> {
-        self.lock()
-            .values()
-            .filter(|s| s.person_id == person_id && s.line.is_up())
-            .map(|s| (s.machine.clone(), s.line.clone()))
-            .collect()
-    }
-
-    /// The person's connected line whose current connection is `generation`.
-    pub fn up_on(&self, person_id: i64, generation: u64) -> Option<Arc<Line>> {
-        self.lock()
-            .values()
-            .find(|s| s.person_id == person_id && s.line.generation() == Some(generation))
-            .map(|s| s.line.clone())
+    /// The connected line that a frame for `person_id` on `channel` went down, found by the
+    /// connection it went down. Generations are unique per client, so this finds the same line
+    /// again even after the route has moved to another machine — which is what keeps a message
+    /// with the machine it went to, and lets an answer go back where the question was asked.
+    /// A line that is not a candidate for that person and channel is never found.
+    pub fn up_on_candidate(
+        &self,
+        person_id: i64,
+        channel: Channel,
+        generation: u64,
+    ) -> Option<Arc<Line>> {
+        self.candidates_for(person_id, channel)
+            .into_iter()
+            .map(|(_, _, line)| line)
+            .find(|line| line.generation() == Some(generation))
     }
 
     /// The most recently active connected line of a person.
@@ -614,13 +614,18 @@ impl Route for PersonRoute {
         self.route().is_some_and(|l| l.send(frame))
     }
 
+    // A message stays with the machine it went to while that machine's line is up, even when the
+    // route for the person now points elsewhere — which is how a pinned or sticky non-home PC, or
+    // one picked only because it is up, still gets its answers.
     fn holds(&self, generation: u64) -> bool {
-        self.lines.up_on(self.person_id, generation).is_some()
+        self.lines
+            .up_on_candidate(self.person_id, Channel::Telegram, generation)
+            .is_some()
     }
 
     fn send_on(&self, generation: u64, frame: &Value) -> bool {
         self.lines
-            .up_on(self.person_id, generation)
+            .up_on_candidate(self.person_id, Channel::Telegram, generation)
             .is_some_and(|l| l.send(frame))
     }
 }
@@ -707,7 +712,7 @@ mod tests {
         lb.detach(gb);
         assert!(lines.pick(p10, Some("LAPTOP")).is_some());
         assert!(lines.pick(p10, Some("pc")).is_none());
-        assert_eq!(lines.up_lines_of(p10).len(), 1);
+        assert_eq!(lines.candidate_names(p10, Channel::App).len(), 1);
         assert!(lines.pick(30, None).is_none());
         assert!(!PersonRoute::new(lines.clone(), 30).is_up());
 
@@ -796,6 +801,15 @@ mod tests {
         wait_until(|| lline.claim_for(bea) == Some((true, false))).await;
         wait_until(|| registry.lock().is_ok_and(|r| r.may_act_for(laptop, bea))).await;
         assert_eq!(dline.claim_for(bea), None, "Desk announced no people");
+        // A PC that takes only the Telegram channel is not a candidate for voice at all.
+        assert!(lines
+            .candidate_names(bea, Channel::Telegram)
+            .iter()
+            .any(|name| name == "laptop"));
+        assert!(!lines
+            .candidate_names(bea, Channel::Voice)
+            .iter()
+            .any(|name| name == "laptop"));
         // The broadcast list shows each device's people, home person first.
         let laptop_row = 'find: loop {
             for list in wait_frames(&mut rx_l, "devices").await {
@@ -1051,6 +1065,26 @@ mod tests {
         })
         .await;
         pick(bea, Channel::Telegram, "laptop");
+        // A route to another person's PC delivers there: the frames really go down that line, and
+        // a message stays with the line it went down even after the route moves again.
+        let route = PersonRoute::new(lines.clone(), bea);
+        assert!(route.send(&json!({"type": "telegram", "id": "m9", "text": "hi"})));
+        assert_eq!(wait_frames(&mut rx_l2, "telegram").await[0]["id"], "m9");
+        assert!(route.holds(gl));
+        assert!(route.send_on(gl, &json!({"type": "telegram_answer", "id": "a1"})));
+        assert_eq!(
+            wait_frames(&mut rx_l2, "telegram_answer").await[0]["id"],
+            "a1",
+            "the answer went back to the laptop that carries Bea's Telegram"
+        );
+        lines.pin(bea, Channel::Telegram, desk);
+        pick(bea, Channel::Telegram, "desk");
+        assert!(
+            route.holds(gl),
+            "a line that still carries her Telegram holds"
+        );
+        assert!(route.send_on(gl, &json!({"type": "telegram", "id": "m10"})));
+        assert_eq!(wait_frames(&mut rx_l2, "telegram").await[0]["id"], "m10");
         // No PC acts for a stranger, however it is named.
         assert!(lines.route_for(404, Channel::Telegram).is_none());
     }
