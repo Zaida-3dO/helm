@@ -1604,6 +1604,48 @@ async fn a_household_member_gets_their_own_view_of_the_list_but_is_refused_nothi
     }
     assert!(sam.rpc.call("dev-a", "hello", json!({})).await.is_ok());
     port.set_run(true);
+
+    // Uploads belong to the device that began them, and one device may hold only so much.
+    use base64::Engine as _;
+    let chunk = base64::engine::general_purpose::STANDARD.encode(vec![7u8; 640 * 1024]);
+    let part = |id: &str, seq: u32, eof: bool| {
+        json!({"chatId": "hers", "uploadId": id, "seq": seq, "eof": eof, "data": chunk,
+               "kind": "file", "name": "a.bin", "mime": ""})
+    };
+    let (u1, u2, u3) = (
+        "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b01",
+        "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b02",
+        "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b03",
+    );
+    sam.rpc
+        .call("dev-a", "attach_put", part(u1, 0, false))
+        .await
+        .unwrap();
+    let e = own
+        .rpc
+        .call("dev-a", "attach_put", part(u1, 1, false))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, code::REFUSED);
+    for id in [u1, u2] {
+        let start = if id == u1 { 1 } else { 0 };
+        for seq in start..40 {
+            sam.rpc
+                .call("dev-a", "attach_put", part(id, seq, seq == 39))
+                .await
+                .unwrap();
+        }
+    }
+    let e = sam
+        .rpc
+        .call("dev-a", "attach_put", part(u3, 0, true))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, code::REFUSED);
+    own.rpc
+        .call("dev-a", "attach_put", part(u3, 0, true))
+        .await
+        .unwrap();
     // A person this PC has no profile for is still served: the switch is per household, not
     // per person.
     port.st().people.retain(|p| p != "person-b");
