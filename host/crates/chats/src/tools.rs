@@ -211,21 +211,37 @@ enum OwnerScope {
     Nobody,
 }
 
-/// `arg` (already lower-cased) names a profile by id or name; `any` crosses profiles; with none
-/// given the list covers the calling chat's own profile.
+/// `arg` (already lower-cased) names a person: their profile here by id, by name, or by the hub
+/// person id it is linked to; `any` crosses people; with none given the list covers the calling
+/// chat's own profile. Profiles and hub people line up one to one on a paired PC, so naming the
+/// profile is naming the person.
 fn owner_scope(tx: &Transaction<'_>, arg: Option<&str>, caller: &str) -> OwnerScope {
     match arg {
         Some("any") => OwnerScope::Everyone,
-        Some(p) => tx
-            .query_row(
-                "SELECT id FROM profiles WHERE lower(id) = ?1 OR lower(name) = ?1 LIMIT 1",
-                [p],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()
-            .ok()
-            .flatten()
-            .map_or(OwnerScope::Nobody, OwnerScope::Profile),
+        Some(p) => {
+            let by_profile = tx
+                .query_row(
+                    "SELECT id FROM profiles WHERE lower(id) = ?1 OR lower(name) = ?1 LIMIT 1",
+                    [p],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()
+                .ok()
+                .flatten();
+            // A hub person's id names the profile linked to them here, when one is. A database
+            // whose profiles table predates the link simply matches nothing here.
+            let by_person = by_profile.or_else(|| {
+                tx.query_row(
+                    "SELECT id FROM profiles WHERE lower(hub_person_id) = ?1 LIMIT 1",
+                    [p],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+            });
+            by_person.map_or(OwnerScope::Nobody, OwnerScope::Profile)
+        }
         None => chat_profile(tx, caller).map_or(OwnerScope::Everyone, |p| OwnerScope::Profile(p.0)),
     }
 }
@@ -424,7 +440,10 @@ fn list_chats(ctx: &ToolCtx, a: Value) -> ToolResult {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let project = str_arg(&a, "projectId").map(str::to_owned);
-    let profile = str_arg(&a, "profile").map(str::to_lowercase);
+    // `profile` is the retired spelling of `person`; both are taken.
+    let person = str_arg(&a, "person")
+        .or_else(|| str_arg(&a, "profile"))
+        .map(str::to_lowercase);
     let device = str_arg(&a, "device").map(str::to_lowercase);
     let caller = ctx.caller_chat_id.clone();
     let boards = Boards::of(&ctx.services);
@@ -436,8 +455,14 @@ fn list_chats(ctx: &ToolCtx, a: Value) -> ToolResult {
     let rows = db(ctx)?
         .snapshot(|tx| {
             let this = this_device(tx);
-            // `device` narrows to one device by name or id; unset or "any" covers them all.
-            let want = device.as_deref().filter(|d| *d != "any");
+            // `device` narrows to one device by name or id. Unset means this PC alone; "any"
+            // covers every device, so chats other paired PCs run join in.
+            let want = match device.as_deref() {
+                None => this.as_ref().map(|(uid, _)| uid.to_lowercase()),
+                Some("any") => None,
+                Some(d) => Some(d.to_owned()),
+            };
+            let want = want.as_deref();
             let include_local = match (want, &this) {
                 (None, _) => true,
                 (Some(d), Some((uid, name))) => d == uid.to_lowercase() || d == name.to_lowercase(),
@@ -466,7 +491,7 @@ fn list_chats(ctx: &ToolCtx, a: Value) -> ToolResult {
             cands.sort_by_key(|c| std::cmp::Reverse(c.0));
             let mut out = Vec::new();
             let mut skipped = 0i64;
-            let scope = owner_scope(tx, profile.as_deref(), &caller);
+            let scope = owner_scope(tx, person.as_deref(), &caller);
             for (_, cand) in cands {
                 let (m, local_id, mirrored) = match cand {
                     Cand::Local(id) => match chat_meta(tx, &boards, &id)? {
@@ -1528,13 +1553,14 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .blocking(
         ToolSpec::read(
             "app_list_chats",
-            format!("List recent Helm chats, newest first, or search their titles and messages (all query words must match). Excludes this chat unless includeCurrent is true. Each chat has its id, title, the board it is shown on (projectId, projectName; null while it is on none), the folder it runs in (folderProjectId, folderPath), its status, whether it is archived, the profile it belongs to (profileId, profileName) and the device it runs on (deviceName). projectId lists one board's chats (a folder project's id lists the chats running in that folder). By default the list covers your own profile's chats, including chats shared with it, on every device. List other people's chats only when the user asks for them: profile names one profile (its name or id) or is \"any\" for every profile, and device names one device (its name or id) or is \"any\"; both \"any\" covers every person on every device. A chat another device runs is found by its title only.{LINKS}"),
+            format!("List recent Helm chats, newest first, or search their titles and messages (all query words must match). Excludes this chat unless includeCurrent is true. Each chat has its id, title, the board it is shown on (projectId, projectName; null while it is on none), the folder it runs in (folderProjectId, folderPath), its status, whether it is archived, the profile it belongs to (profileId, profileName) and the device it runs on (deviceName). projectId lists one board's chats (a folder project's id lists the chats running in that folder). By default the list covers your own profile's chats, including chats shared with it, on this PC. List other people's chats only when the user asks for them: person names one person (their profile's name or id, or their hub person id) or is \"any\" for every profile, and device names one device (its name or id) or is \"any\" for every paired PC; both \"any\" covers every person on every device. A chat another PC runs is found by its title only.{LINKS}"),
             obj(
                 json!({
                     "query": {"type": "string", "maxLength": 512},
                     "projectId": {"type": "string"},
-                    "profile": {"type": "string"},
-                    "device": {"type": "string"},
+                    "person": {"type": "string", "description": "One person (their profile's name or id, or their hub person id), or \"any\" for every profile. \"profile\" is the retired spelling and means the same."},
+                    "profile": {"type": "string", "description": "Retired spelling of person; still accepted."},
+                    "device": {"type": "string", "description": "One device (its name or id), or \"any\" for every paired PC; unset means this PC."},
                     "archived": {"type": "boolean"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 50},
                     "offset": {"type": "integer", "minimum": 0, "maximum": 100000},
@@ -1880,13 +1906,13 @@ mod tests {
         assert!(me["result"].get("parentChatId").is_some() && me["result"].get("model").is_some());
         // Without profiles or a device a chat names none; with them a chat without a profile on
         // its row is the home profile's. A list covers the caller's own profile (and chats shared
-        // with it) unless `profile` names another or is "any"; `device` narrows by device.
+        // with it) on this PC unless `person` names another or is "any" and `device` widens.
         assert!(me["result"]["profileName"].is_null() && me["result"]["deviceName"].is_null());
         h.db.write(|tx| {
             tx.execute_batch(&format!(
-                "CREATE TABLE profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL, is_home INTEGER NOT NULL);
+                "CREATE TABLE profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL, is_home INTEGER NOT NULL, hub_person_id TEXT);
                  CREATE TABLE device_self (uid TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL);
-                 INSERT INTO profiles VALUES ('p-home', 'First', 1), ('p-two', 'Second', 0);
+                 INSERT INTO profiles VALUES ('p-home', 'First', 1, 'person-one'), ('p-two', 'Second', 0, 'person-two');
                  INSERT INTO device_self VALUES ('dev-1', 'Desk', 0);
                  UPDATE chats SET profile_id = 'p-two', host_device_id = 'dev-1' WHERE id = '{b}';"
             ))
@@ -1918,25 +1944,24 @@ mod tests {
         };
         // (calling chat, arguments, the chats listed)
         for (from, args, want) in [
-            (&a, json!({"profile": "SECOND"}), vec![b.clone()]),
-            (&a, json!({"profile": "p-two"}), vec![b.clone()]),
-            (&a, json!({"profile": "first"}), vec![a.clone()]),
-            (&a, json!({"profile": "nobody"}), vec![]),
+            (&a, json!({"person": "SECOND"}), vec![b.clone()]),
+            (&a, json!({"person": "p-two"}), vec![b.clone()]),
+            // A hub person id names their profile here; the retired `profile` spelling is taken.
+            (&a, json!({"person": "PERSON-TWO"}), vec![b.clone()]),
+            (&a, json!({"profile": "second"}), vec![b.clone()]),
+            (&a, json!({"person": "first"}), vec![a.clone()]),
+            (&a, json!({"person": "nobody"}), vec![]),
             (&a, json!({}), vec![a.clone()]),
             (&b, json!({}), vec![b.clone()]),
-            (&b, json!({"profile": "any"}), both.clone()),
+            (&b, json!({"person": "any"}), both.clone()),
+            (&a, json!({"person": "any", "device": "DESK"}), both.clone()),
             (
                 &a,
-                json!({"profile": "any", "device": "DESK"}),
+                json!({"person": "any", "device": "dev-1"}),
                 both.clone(),
             ),
-            (
-                &a,
-                json!({"profile": "any", "device": "dev-1"}),
-                both.clone(),
-            ),
-            (&a, json!({"profile": "any", "device": "any"}), both.clone()),
-            (&a, json!({"profile": "any", "device": "Laptop"}), vec![]),
+            (&a, json!({"person": "any", "device": "any"}), both.clone()),
+            (&a, json!({"person": "any", "device": "Laptop"}), vec![]),
         ] {
             let mut args = args;
             args["includeCurrent"] = json!(true);
@@ -2101,14 +2126,28 @@ mod tests {
                 .map(|c| c["chatId"].as_str().unwrap().to_owned())
                 .collect()
         };
-        // The list covers the caller's person's mirrored chats by default: the person-p chat
-        // is in, the person-s one waits for `profile: any`, the archived one waits for
-        // `archived: true`. `device` narrows by name or id either way.
-        let r = call(&h, &t, &a, "app_list_chats", json!({})).await;
-        assert!(ids_of(&r).contains(&OTHER_CHAT.to_owned()), "{r}");
-        assert!(!ids_of(&r).iter().any(|i| i == OTHER_PERSON_CHAT));
-        let r = call(&h, &t, &a, "app_list_chats", json!({"profile": "any"})).await;
-        let ids = ids_of(&r);
+        // The default list is this PC alone: a mirrored chat waits for `device` — "any", the
+        // device's name, or its id. Among the devices listed, the caller's person's chat is in
+        // by default, another person's waits for `person: any`, and an archived one waits for
+        // `archived: true`.
+        let listed = ids_of(&call(&h, &t, &a, "app_list_chats", json!({})).await);
+        assert!(
+            !listed.iter().any(|i| i.starts_with("0f0f0f0f")),
+            "{listed:?}"
+        );
+        let ids = ids_of(&call(&h, &t, &a, "app_list_chats", json!({"device": "any"})).await);
+        assert!(ids.contains(&OTHER_CHAT.to_owned()), "{ids:?}");
+        assert!(!ids.iter().any(|i| i == OTHER_PERSON_CHAT));
+        let ids = ids_of(
+            &call(
+                &h,
+                &t,
+                &a,
+                "app_list_chats",
+                json!({"person": "any", "device": "any"}),
+            )
+            .await,
+        );
         assert!(
             ids.contains(&OTHER_CHAT.to_owned()) && ids.contains(&OTHER_PERSON_CHAT.to_owned())
         );
@@ -2117,7 +2156,7 @@ mod tests {
             &t,
             &a,
             "app_list_chats",
-            json!({"profile": "any", "device": "Laptop"}),
+            json!({"person": "any", "device": "Laptop"}),
         )
         .await;
         assert_eq!(ids_of(&r), [OTHER_CHAT, OTHER_PERSON_CHAT]);
@@ -2126,7 +2165,7 @@ mod tests {
             &t,
             &a,
             "app_list_chats",
-            json!({"archived": true, "profile": "any", "device": "dev-2"}),
+            json!({"archived": true, "person": "any", "device": "dev-2"}),
         )
         .await;
         assert_eq!(ids_of(&r), [GONE_CHAT]);
