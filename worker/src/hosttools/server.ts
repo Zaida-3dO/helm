@@ -13,15 +13,16 @@
 // answers `app_background_result` from there itself; the host's handler for that tool is only a
 // fallback.
 //
-// With `lean` (a chat on a local model server) `catalogue()` lists only the core host tools
-// (`LOCAL_CORE_TOOLS`): a local server cannot expand tool-search results, so every listed schema
-// is sent in every request. Every other host tool stays reachable — `app_list_tools` searches all
-// of them and `app_mcp_call` calls any of them.
+// `catalogue()` lists only the core host tools (the host marks them `core`): a local model server
+// cannot expand tool-search results, so every listed schema is sent in every request, and on
+// Claude Code every listed name costs a line. Every other host tool stays reachable:
+// `app_list_tools` finds them by group and `app_mcp_call` calls any of them, a merged tool's
+// old names included (those are `aliasOf` entries: callable, never listed or searched).
 
 import type { Json } from "../protocol/types.ts";
 import { DEFAULT_TIMEOUT_MS, NOTHING_CHANGED, type CallResult, type RequestChannel } from "./channel.ts";
 import { capToolResult, type OutputCap } from "./cap.ts";
-import { COMPAT_ALWAYS, COMPAT_WITH_MCP, LOCAL_CORE_TOOLS } from "./names.ts";
+import { COMPAT_ALWAYS, COMPAT_WITH_MCP } from "./names.ts";
 import { BackgroundStore, type BackgroundCall } from "./background.ts";
 import { MAX_TOOL_NAME_BYTES } from "../mcp/naming.ts";
 
@@ -46,6 +47,14 @@ export interface HostTool {
   timeoutMs: number;
   children: boolean;
   mutating: boolean;
+  /** The group `app_list_tools` files the tool under. */
+  group?: string;
+  /** In the chat's own tool list. Absent counts as listed (a catalogue from before the field). */
+  core?: boolean;
+  /** Set when a merged tool took this one over: callable by this name, never listed or searched. */
+  aliasOf?: { tool: string; action: string };
+  /** On a merged tool: what each action does. */
+  actions?: Json[];
 }
 
 /** What the server needs from the MCP bridge. */
@@ -79,8 +88,6 @@ export interface ServerOptions {
   backgroundAfterMs?: number;
   resultWaitMs?: number;
   store?: BackgroundStore;
-  /** A chat on a local model server: list only the core host tools (see the header). */
-  lean?: boolean;
 }
 
 type RpcId = string | number | null;
@@ -94,10 +101,11 @@ interface Rpc {
 const LIST_TOOLS: HostTool = {
   name: "app_list_tools",
   description:
-    "Search Helm's current host tools, with their input schemas and usage guidelines, 10 per page. Use it when a tool you expect is missing from your list or its schema looks out of date, then call the tool through app_mcp_call.",
+    "Find Helm tools that are not in your list. No arguments: the groups, one line each. With group: that group's tools with their schemas and guidelines. With query: a search by words, 10 per page. Call what you find with app_mcp_call.",
   inputSchema: {
     type: "object",
     properties: {
+      group: { type: "string", maxLength: 60, description: "A group name from the group list." },
       query: { type: "string", maxLength: 200, description: "Words to match in tool names and descriptions." },
       offset: { type: "integer", minimum: 0, description: "From a previous page's nextOffset." },
     },
@@ -107,6 +115,7 @@ const LIST_TOOLS: HostTool = {
   timeoutMs: DEFAULT_TIMEOUT_MS,
   children: false,
   mutating: false,
+  group: "tools",
 };
 
 const MCP_CALL: HostTool = {
@@ -126,6 +135,7 @@ const MCP_CALL: HostTool = {
   timeoutMs: DEFAULT_TIMEOUT_MS,
   children: true,
   mutating: true,
+  group: "tools",
 };
 
 const MCP_TOOLS: HostTool = {
@@ -145,6 +155,7 @@ const MCP_TOOLS: HostTool = {
   timeoutMs: 45_000,
   children: true,
   mutating: false,
+  group: "tools",
 };
 
 function text(v: unknown): string {
@@ -205,10 +216,9 @@ export class HostToolServer {
     return this.movable.get(toolCallId)?.() ?? false;
   }
 
-  /** The tools/list catalogue, host tools first. With `lean` only the core host tools are listed. */
+  /** The tools/list catalogue, host tools first: only the core ones, and never a merged tool's old name. */
   catalogue(): HostTool[] {
-    const listed = this.o.lean ? this.o.hostTools.filter((t) => LOCAL_CORE_TOOLS.includes(t.name)) : this.o.hostTools;
-    return [...listed, ...this.compatTools()];
+    return [...this.o.hostTools.filter((t) => !t.aliasOf && t.core !== false), ...this.compatTools()];
   }
 
   private compatTools(): HostTool[] {
@@ -368,21 +378,67 @@ export class HostToolServer {
       caller: { child: caller.child, ...(caller.toolCallId ? { toolCallId: caller.toolCallId } : {}) },
       signal,
     });
-    if (r.ok && name === "app_set_chat_archived" && (r.result as Json | null)?.archivePending === true) this.o.onEndTurn?.();
+    if (r.ok && (name === "app_set_chat_archived" || name === "app_chat") && (r.result as Json | null)?.archivePending === true) this.o.onEndTurn?.();
     return r;
   }
 
+  /**
+   * `app_list_tools`. No `group` and no `query`: the groups. A `group`: its tools in full. A
+   * `query`: a word search over every tool that is not an old name. An old name searched for
+   * exactly is answered with the merged tool that took it over.
+   */
   private search(args: Json): Json {
-    const q = typeof args.query === "string" ? args.query.toLowerCase().split(/\s+/).filter(Boolean) : [];
+    // Every host tool, listed or not, except the old names a merged tool took over.
+    const shown = [...this.o.hostTools.filter((t) => !t.aliasOf), ...this.compatTools()];
+    const full = (t: HostTool): Json => ({
+      name: t.name,
+      description: t.description,
+      inputSchema: t.inputSchema,
+      ...(t.actions?.length ? { actions: t.actions } : {}),
+      ...(t.guidelines ? { guidelines: t.guidelines } : {}),
+    });
+    const group = typeof args.group === "string" ? args.group.trim().toLowerCase() : "";
+    const query = typeof args.query === "string" ? args.query.trim() : "";
+    if (!group && !query) return this.groups(shown);
+    if (group) {
+      const members = shown.filter((t) => groupOf(t) === group);
+      if (members.length === 0) return { error: `There is no group ${group.slice(0, 60)}. Groups: ${[...new Set(shown.map(groupOf))].sort().join(", ")}.` };
+      return { group, tools: members.map(full), total: members.length };
+    }
+    const q = query.toLowerCase().split(/\s+/).filter(Boolean);
     const offset = Number.isInteger(args.offset) && (args.offset as number) > 0 ? (args.offset as number) : 0;
-    // Search every host tool, listed or not: a lean catalogue is small, `app_list_tools` is not.
-    const all = [...this.o.hostTools, ...this.compatTools()];
-    const hits = all.filter((t) => q.every((w) => t.name.includes(w) || t.description.toLowerCase().includes(w)));
-    const page = hits.slice(offset, offset + SEARCH_PAGE).map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema, ...(t.guidelines ? { guidelines: t.guidelines } : {}) }));
-    const out: Json = { tools: page, total: hits.length };
+    const hits = shown.filter((t) => q.every((w) => t.name.includes(w) || t.description.toLowerCase().includes(w)));
+    const out: Json = { tools: hits.slice(offset, offset + SEARCH_PAGE).map(full), total: hits.length };
     if (offset + SEARCH_PAGE < hits.length) out.nextOffset = offset + SEARCH_PAGE;
+    // An old name searched for exactly: say where it went.
+    const old = this.o.hostTools.find((t) => t.aliasOf && t.name === query);
+    const target = old?.aliasOf ? shown.find((t) => t.name === old.aliasOf?.tool) : undefined;
+    if (old?.aliasOf && target) {
+      out.renamed = { from: old.name, to: target.name, action: old.aliasOf.action, note: `${old.name} still works; ${target.name} {"action": "${old.aliasOf.action}"} does the same.` };
+      if (offset === 0 && !(out.tools as Json[]).some((t) => t.name === target.name)) out.tools = [full(target), ...(out.tools as Json[])];
+    }
     return out;
   }
+
+  /** The groups, one line each: the group name, its tools, and what the first one is for. */
+  private groups(shown: HostTool[]): Json {
+    const by = new Map<string, HostTool[]>();
+    for (const t of shown) by.set(groupOf(t), [...(by.get(groupOf(t)) ?? []), t]);
+    const groups = [...by.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([group, tools]) => ({ group, tools: tools.map((t) => t.name), about: firstSentence(tools[0]?.description ?? "") }));
+    return { groups, next: "Call app_list_tools with a group name for its tools and schemas, then app_mcp_call to use one. app_help explains any tool." };
+  }
+}
+
+/** The group a tool is filed under: its own, else its name. */
+function groupOf(t: HostTool): string {
+  return (t.group && t.group.length > 0 ? t.group : t.name.replace(/^app_/, "")).toLowerCase();
+}
+
+function firstSentence(s: string): string {
+  const m = /^(.{1,140}?[.!?])(\s|$)/.exec(s);
+  return m?.[1] ?? s.slice(0, 140);
 }
 
 /** The `--mcp-config` value that registers this server with Claude Code (an SDK-type server). */

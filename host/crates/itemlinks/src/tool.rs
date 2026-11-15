@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 
 pub const DESCRIPTION: &str = "Link THIS chat to a task-board item, so the user can find the chat from the item. itemId is the item's id: the full id, or its first 8 or more hex characters. main: true makes this chat the item's main chat, the one \"open this item\" goes to; do that when this chat becomes the place the item is being worked on. The first chat linked to an item is its main chat. unlink: true removes the link. title: the item's title, so the sidebar can say what the chat is linked to; always pass it when you know it. Linking again changes nothing except that a new title replaces the old one. It is stored in Helm only; the board is not changed.";
 
-pub const SECTION_TEXT: &str = "When a task-board item becomes what this chat is working on, call app_link_item with the item's id and main: true, so the user can open the item and land here. Pass the item's title as title. Link once per item; do not link items you only read or mention.";
+pub const SECTION_TEXT: &str = "When a task-board item becomes what this chat is working on, call app_link_item (found with app_list_tools, called with app_mcp_call) with the item's id and main: true, so the user can open the item and land here. Pass the item's title as title. Link once per item; do not link items you only read or mention.";
 
 pub fn schema() -> Value {
     json!({

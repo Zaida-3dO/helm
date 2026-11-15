@@ -362,6 +362,7 @@ impl Spawner for ProcessSpawner {
         }
         if extras.orchestrator_on {
             claude.subagent_soft_turns = runtime.subagent_turns(true);
+            claude.orchestrator = true;
         }
         claude.fork_session = req.fork_session;
         let worker_dir = PathBuf::from(&self.data_root)
@@ -375,10 +376,12 @@ impl Spawner for ProcessSpawner {
                 crate::hostcalls::sweep_tools_dir(&dir);
                 helm_core::privfs::create_private_dir_all(&dir)
                     .map_err(|e| format!("Helm could not make the host-tool folder: {e}"))?;
-                (
-                    Some(h.tools.clone()),
-                    Some(dir.to_string_lossy().into_owned()),
-                )
+                // The workflow tools are in the chat's own list while Orchestrator is on for it.
+                let mut tools = h.tools.clone();
+                if extras.orchestrator_on {
+                    helm_hosttools::spec::promote_for_orchestrator(&mut tools);
+                }
+                (Some(tools), Some(dir.to_string_lossy().into_owned()))
             }
             None => (None, None),
         };

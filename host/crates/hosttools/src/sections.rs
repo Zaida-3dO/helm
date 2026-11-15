@@ -4,10 +4,8 @@
 //!   `responseVerbosity` (low by default; high adds nothing).
 //! - `links` (order 20): the link teaching (vault notes and `file:line`, the panel crate's
 //!   fragment), adopted unchanged through [`AdoptedSection`] so it is taught once.
-//! - `tools.guidelines` (order 30): usage guidelines registered with host tools.
 
 use crate::addendum::AddendumSection;
-use crate::registry::HostToolRegistry;
 use helm_core::db::Database;
 use helm_workers::contrib::{LaunchContributor, LaunchCtx};
 use serde_json::Value;
@@ -67,31 +65,6 @@ impl AddendumSection for AdoptedSection {
         let parts = self.inner.contribute(ctx).system_prompt;
         let t = parts.join("\n\n");
         (!t.trim().is_empty()).then_some(t)
-    }
-}
-
-/// The host tools' usage guidelines, one paragraph per tool that has them.
-pub struct GuidelinesSection {
-    pub registry: Arc<HostToolRegistry>,
-}
-
-impl AddendumSection for GuidelinesSection {
-    fn id(&self) -> &'static str {
-        "tools.guidelines"
-    }
-    fn order(&self) -> i32 {
-        30
-    }
-    fn text(&self, _ctx: &LaunchCtx<'_>) -> Option<String> {
-        let lines: Vec<String> = self
-            .registry
-            .names()
-            .filter_map(|n| {
-                let g = self.registry.get(n)?.spec.guidelines.clone()?;
-                Some(format!("{n}: {g}"))
-            })
-            .collect();
-        (!lines.is_empty()).then(|| format!("Helm's tools:\n{}", lines.join("\n")))
     }
 }
 

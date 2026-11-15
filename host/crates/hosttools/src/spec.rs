@@ -92,6 +92,15 @@ pub struct ToolSpec {
     /// The handler calls `api` ops that take their own lock ([`crate::OpInvoker`]), so the
     /// dispatcher must not hold the maintenance lock around it (it is not reentrant).
     pub self_locking: bool,
+    /// The group `app_list_tools` files this tool under (`chats`, `schedules`, ...). Empty: the
+    /// tool is listed under its own name.
+    pub group: &'static str,
+    /// In the chat's own tool list. Every other tool is found with `app_list_tools` and called
+    /// with `app_mcp_call`, so a chat pays for the few tools it uses all the time and for nothing
+    /// else.
+    pub core: bool,
+    /// In the chat's own tool list while Orchestrator is on for it, and on demand otherwise.
+    pub core_with_orchestrator: bool,
 }
 
 impl ToolSpec {
@@ -107,6 +116,9 @@ impl ToolSpec {
             availability: Availability::ROOT,
             mutating: false,
             self_locking: false,
+            group: "",
+            core: false,
+            core_with_orchestrator: false,
         }
     }
 
@@ -146,6 +158,24 @@ impl ToolSpec {
 
     pub fn guidelines(mut self, g: impl Into<String>) -> Self {
         self.guidelines = Some(g.into());
+        self
+    }
+
+    /// File the tool under a group of `app_list_tools`.
+    pub fn group(mut self, g: &'static str) -> Self {
+        self.group = g;
+        self
+    }
+
+    /// List the tool in every chat's own tool list.
+    pub fn core(mut self) -> Self {
+        self.core = true;
+        self
+    }
+
+    /// List the tool in the chat's own tool list only while Orchestrator is on for it.
+    pub fn core_with_orchestrator(mut self) -> Self {
+        self.core_with_orchestrator = true;
         self
     }
 
@@ -201,6 +231,28 @@ pub struct CatalogueEntry {
     pub timeout_ms: u64,
     pub children: bool,
     pub mutating: bool,
+    /// The group `app_list_tools` files the tool under; absent when it has none.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub group: String,
+    /// Listed in the chat's own tool list (see [`ToolSpec::core`]).
+    pub core: bool,
+    /// Listed in the chat's own tool list while Orchestrator is on for it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub core_with_orchestrator: bool,
+    /// Set on a tool that a merged tool took over: the old name still works, but it is neither
+    /// listed nor searched, and a search for it names the merged tool and its action.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias_of: Option<AliasOf>,
+    /// On a merged tool: what each action does (the member tools' own words).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<crate::facade::ActionInfo>,
+}
+
+/// Where an old tool name went: the merged tool and the `action` that does what it did.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AliasOf {
+    pub tool: String,
+    pub action: String,
 }
 
 impl From<&ToolSpec> for CatalogueEntry {
@@ -214,6 +266,25 @@ impl From<&ToolSpec> for CatalogueEntry {
             timeout_ms: s.timeout_ms,
             children: s.availability.children,
             mutating: s.mutating,
+            group: s.group.to_owned(),
+            core: s.core,
+            core_with_orchestrator: s.core_with_orchestrator,
+            alias_of: None,
+            actions: Vec::new(),
+        }
+    }
+}
+
+/// Make the tools that count as core only while Orchestrator is on core, in a launch's catalogue
+/// (`hostTools[]` as JSON). The catalogue is built before the launch knows whether Orchestrator
+/// is on, so the launch applies this once it does.
+pub fn promote_for_orchestrator(tools: &mut Value) {
+    let Some(list) = tools.as_array_mut() else {
+        return;
+    };
+    for t in list {
+        if t.get("coreWithOrchestrator").and_then(Value::as_bool) == Some(true) {
+            t["core"] = Value::Bool(true);
         }
     }
 }
@@ -284,3 +355,18 @@ pub struct WebToolsGate(pub std::sync::Arc<dyn WebToolsSource>);
 /// nothing is disabled (the default).
 #[derive(Clone)]
 pub struct McpLaunchGate(pub std::sync::Arc<dyn McpLaunchSource>);
+
+/// Which of Helm's MCP servers a chat may reach, when its project says so. Registered as the
+/// [`McpServerFilterGate`] service by the crate that owns projects; the MCP crate applies it to
+/// each chat's server list.
+pub trait McpServerFilter: Send + Sync {
+    /// The ids of the servers the chat's project allows, or `None` for every server (the project
+    /// names none).
+    fn allowed(&self, chat_id: &str) -> Option<Vec<String>>;
+    /// Whether any project names servers at all, so one list for every chat no longer fits.
+    fn any(&self) -> bool;
+}
+
+/// The service wrapper for [`McpServerFilter`]. With none registered, every chat gets every server.
+#[derive(Clone)]
+pub struct McpServerFilterGate(pub std::sync::Arc<dyn McpServerFilter>);

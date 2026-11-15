@@ -362,34 +362,48 @@ test("the landing guard asks the host before Bash and MCP calls, and fails close
   }
 });
 
-test("a local chat lists only the core host tools, but every host tool stays callable and searchable", async () => {
+test("a chat lists only the core host tools; the rest are found by group and called through app_mcp_call, old names included", async () => {
   const { HostToolServer } = await import("../src/hosttools/server.ts");
-  const core = { name: "app_list_chats", description: "List chats.", inputSchema: { type: "object" }, requestLimitBytes: 8192, timeoutMs: 20000, children: false, mutating: false };
-  const other = { name: "app_list_schedules", description: "List the user's schedules.", inputSchema: { type: "object" }, requestLimitBytes: 8192, timeoutMs: 20000, children: false, mutating: false };
+  const tool = (name: string, extra: Json = {}) => ({ name, description: `${name} does one thing. More text.`, inputSchema: { type: "object" }, requestLimitBytes: 8192, timeoutMs: 20000, children: false, mutating: false, ...extra });
+  const hostTools = [
+    tool("app_list_chats", { core: true, group: "chats" }),
+    tool("app_show_images", { core: false, group: "chats" }),
+    tool("app_create_schedule", { core: false, group: "schedules", aliasOf: { tool: "app_schedule", action: "create" } }),
+    tool("app_schedule", { core: false, group: "schedules", actions: [{ action: "create", tool: "app_create_schedule", description: "Make one." }], guidelines: "Only on request." }),
+    tool("app_older", {}),
+  ];
   const sent: string[] = [];
   const channel = { call: async (name: string) => (sent.push(name), { ok: true as const, result: { name } }) } as never;
-  const mk = (lean: boolean) => new HostToolServer({ hostTools: [core, other], channel, lean });
-  const listed = async (s: InstanceType<typeof HostToolServer>) => {
-    const r = (await s.handle({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { child: false })) as Json;
-    return ((r.result as Json).tools as Json[]).map((t) => t.name);
-  };
-  assert.deepEqual(await listed(mk(true)), ["app_list_chats", "app_list_tools", "app_mcp_call"], "lean: only the core tool plus the compat tools");
-  assert.deepEqual(await listed(mk(false)), ["app_list_chats", "app_list_schedules", "app_list_tools", "app_mcp_call"], "not lean: everything");
-  const lean = mk(true);
-  const call = await lean.call("app_mcp_call", { name: "app_list_schedules", arguments: {} }, { child: false });
-  assert.equal(call.ok, true, "an unlisted host tool still answers through app_mcp_call");
-  assert.deepEqual(sent, ["app_list_schedules"], "the call reached the host channel");
-  const found = (await lean.handle({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "app_list_tools", arguments: { query: "schedules" } } }, { child: false })) as Json;
-  const sc = (found.result as Json).structuredContent as Json;
-  assert.deepEqual((sc.tools as Json[]).map((t) => t.name), ["app_list_schedules"], "app_list_tools finds what the list does not show");
-  assert.equal(sc.total, 1);
+  const s = new HostToolServer({ hostTools, channel });
+  const rpc = async (name: string, args: Json) => (((await s.handle({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }, { child: false })) as Json).result as Json).structuredContent as Json;
+  const listed = ((((await s.handle({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { child: false })) as Json).result as Json).tools as Json[]).map((t) => t.name);
+  assert.deepEqual(listed, ["app_list_chats", "app_older", "app_list_tools", "app_mcp_call"], "core tools, one without the field (an older catalogue), and the compat tools; no alias");
+  // Every tool, an old name included, answers through app_mcp_call.
+  for (const name of ["app_show_images", "app_create_schedule", "app_schedule"]) assert.equal((await s.call("app_mcp_call", { name, arguments: {} }, { child: false })).ok, true, name);
+  assert.deepEqual(sent, ["app_show_images", "app_create_schedule", "app_schedule"], "the calls reached the host channel under the names used");
+  // No argument: the groups, with the old name left out.
+  const groups = (await rpc("app_list_tools", {})).groups as Json[];
+  assert.deepEqual(groups.map((g) => g.group), ["chats", "older", "schedules", "tools"]);
+  assert.deepEqual((groups.find((g) => g.group === "schedules") as Json).tools, ["app_schedule"]);
+  assert.equal((groups.find((g) => g.group === "chats") as Json).about, "app_list_chats does one thing.");
+  // A group: its tools in full, with the actions and guidelines.
+  const sched = ((await rpc("app_list_tools", { group: "schedules" })).tools as Json[])[0] as Json;
+  assert.equal(sched.name, "app_schedule");
+  assert.deepEqual((sched.actions as Json[]).map((a) => a.tool), ["app_create_schedule"]);
+  assert.equal(sched.guidelines, "Only on request.");
+  assert.match(String((await rpc("app_list_tools", { group: "nope" })).error), /no group nope.*chats/);
+  // A search never returns an old name, but an exact search for one says where it went.
+  assert.deepEqual(((await rpc("app_list_tools", { query: "schedule" })).tools as Json[]).map((t) => t.name), ["app_schedule"]);
+  const renamed = await rpc("app_list_tools", { query: "app_create_schedule" });
+  assert.deepEqual(renamed.renamed, { from: "app_create_schedule", to: "app_schedule", action: "create", note: 'app_create_schedule still works; app_schedule {"action": "create"} does the same.' });
+  assert.deepEqual((renamed.tools as Json[]).map((t) => t.name), ["app_schedule"]);
 });
 
-test("a local chat is told where the rest of Helm's tools are; a Claude chat is not", async () => {
-  const { LOCAL_TOOL_RULE } = await import("../src/drivers/claude/driver.ts");
+test("every chat is told where the rest of Helm's tools are", async () => {
+  const { OTHER_TOOLS_RULE } = await import("../src/drivers/claude/driver.ts");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "helm-lean-"));
-  const append = async (claude: Json) => {
-    const s = startWithFixture("tool-call", { claude, launch: { hostTools: [], chatToolsDirectory: dir } });
+  const append = async (claude: Json, hostTools: Json[] = []) => {
+    const s = startWithFixture("tool-call", { claude, launch: hostTools.length > 0 || claude.local ? { hostTools, chatToolsDirectory: dir } : {} });
     try {
       await s.host.ready();
       const argv = (s.fakeStart()?.argv ?? []) as string[];
@@ -399,8 +413,9 @@ test("a local chat is told where the rest of Helm's tools are; a Claude chat is 
     }
   };
   try {
-    assert.ok((await append({ local: { baseUrl: "http://127.0.0.1:9", model: "m" } })).includes(LOCAL_TOOL_RULE), "the local chat gets the line");
-    assert.ok(!(await append({})).includes(LOCAL_TOOL_RULE), "a Claude chat does not");
+    assert.ok((await append({ local: { baseUrl: "http://127.0.0.1:9", model: "m" } })).includes(OTHER_TOOLS_RULE), "a local chat gets the line");
+    assert.ok((await append({}, [LIST_CHATS])).includes(OTHER_TOOLS_RULE), "so does a Claude chat with host tools");
+    assert.ok(!(await append({})).includes(OTHER_TOOLS_RULE), "a chat with no host tools has none to point at");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

@@ -100,7 +100,7 @@ pub fn section_text(db: &Database, chat_id: &str, now: i64) -> Option<String> {
             return Ok(None);
         }
         Ok::<_, rusqlite::Error>(match mode::pin(tx, chat_id, &s, now)? {
-            ChatMode::On => Some(rules::workflow_rules(&s)),
+            ChatMode::On => Some(rules::workflow_index(&s)),
             ChatMode::Auto => Some(rules::AUTO.to_owned()),
             ChatMode::Off => None,
         })
@@ -108,6 +108,59 @@ pub fn section_text(db: &Database, chat_id: &str, now: i64) -> Option<String> {
     .map_err(|e| log::warn!("workflow section for {chat_id}: {e}"))
     .ok()
     .flatten()
+}
+
+/// The `workflow` namespace of `app_help`: each step's rules, read when its turn comes. It answers
+/// only for a chat the workflow is in effect for, with the rules of the current settings.
+pub struct WorkflowHelp {
+    pub db: Arc<Database>,
+}
+
+impl WorkflowHelp {
+    fn settings_for(&self, chat_id: &str) -> Option<WorkflowSettings> {
+        self.db
+            .snapshot(|tx| {
+                let s = settings::load(tx)?;
+                Ok::<_, rusqlite::Error>(mode::in_effect(tx, chat_id, &s)?.then_some(s))
+            })
+            .ok()
+            .flatten()
+    }
+}
+
+impl helm_hosttools::help::HelpProvider for WorkflowHelp {
+    fn namespace(&self) -> &'static str {
+        "workflow"
+    }
+
+    fn about(&self) -> &'static str {
+        "The orchestrator's rules, a step at a time (only in a chat with Orchestrator on)"
+    }
+
+    fn index(&self, chat_id: &str) -> Vec<(String, String)> {
+        let Some(s) = self.settings_for(chat_id) else {
+            return Vec::new();
+        };
+        rules::step_names(&s)
+            .into_iter()
+            .map(|k| {
+                let line = rules::STEP_SUMMARIES
+                    .iter()
+                    .find(|(n, _)| *n == k)
+                    .map_or("", |(_, l)| *l);
+                (k.to_owned(), line.to_owned())
+            })
+            .collect()
+    }
+
+    fn topic(&self, chat_id: &str, name: &str) -> Option<String> {
+        rules::step_text(&self.settings_for(chat_id)?, name)
+    }
+}
+
+/// Add the `workflow` topics to `app_help`.
+pub fn register_help(providers: &helm_hosttools::help::HelpProviders, db: Arc<Database>) {
+    providers.register(Arc::new(WorkflowHelp { db }));
 }
 
 impl AddendumSection for WorkflowSection {
