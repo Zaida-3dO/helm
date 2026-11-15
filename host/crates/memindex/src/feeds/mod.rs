@@ -13,6 +13,7 @@ mod helmchats;
 use crate::model::{Kind, Scope, Source};
 use crate::sources::{ChunkOut, DocOut};
 use helm_core::db::Database;
+use helm_core::secrets::looks_like_secret;
 use helm_profiles::store as profiles;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -56,6 +57,9 @@ pub struct PutDoc {
     pub occurred_at: i64,
     pub tier: &'static str,
     pub chunks: Vec<ChunkOut>,
+    /// How many passages were held back because they look like a credential (the first part
+    /// carries the whole doc's count).
+    pub withheld: usize,
 }
 
 /// What building one entry gave.
@@ -169,9 +173,25 @@ fn wire_hash(content: &str, a: &Audience, locator: &str, tier: &str) -> String {
     format!("{:x}", h.finalize())
 }
 
-/// Turn a built doc into what is sent: the audience folded into its hash, and cut into parts of
-/// at most [`MAX_DOC_CHUNKS`] chunks when it is longer. The first part keeps the doc's key.
-pub fn finish(doc: DocOut, a: &Audience, tier: &'static str, locator: &str) -> Vec<PutDoc> {
+/// Turn a built doc into what is sent: passages that look like a credential held back, the
+/// audience folded into its hash, and the doc cut into parts of at most [`MAX_DOC_CHUNKS`] chunks
+/// when it is longer. The first part keeps the doc's key. A doc with nothing left to send is
+/// skipped.
+pub fn finish(mut doc: DocOut, a: &Audience, tier: &'static str, locator: &str) -> Built {
+    let before = doc.chunks.len();
+    doc.chunks
+        .retain(|c| !looks_like_secret(&c.text) && !looks_like_secret(&c.heading));
+    let withheld = before - doc.chunks.len();
+    if doc.chunks.is_empty() {
+        return Built::Skip(if withheld > 0 {
+            "everything in it looks like a credential".into()
+        } else {
+            "empty".into()
+        });
+    }
+    if looks_like_secret(&doc.title) {
+        doc.title = doc.key.clone();
+    }
     let total = doc.chunks.len().div_ceil(MAX_DOC_CHUNKS).max(1);
     let key = doc.key.clone();
     let mut out = Vec::with_capacity(total);
@@ -188,10 +208,10 @@ pub fn finish(doc: DocOut, a: &Audience, tier: &'static str, locator: &str) -> V
                 format!("{} (part {})", doc.title, i + 1),
             )
         };
-        let content = if total == 1 {
+        let content = if total == 1 && withheld == 0 {
             doc.hash.clone()
         } else {
-            format!("{}:{i}", doc.hash)
+            format!("{}:{i}:{withheld}", doc.hash)
         };
         let at = chunks.first().map_or(doc.occurred_from, |c| c.at);
         out.push(PutDoc {
@@ -206,9 +226,10 @@ pub fn finish(doc: DocOut, a: &Audience, tier: &'static str, locator: &str) -> V
             occurred_at: if i == 0 { doc.occurred_to.max(at) } else { at },
             tier,
             chunks,
+            withheld: if i == 0 { withheld } else { 0 },
         });
     }
-    out
+    Built::Docs(out)
 }
 
 /// `mtime:size` of a file, the cheap fingerprint of it.
@@ -310,8 +331,8 @@ mod tests {
             ("sub/*.md", "sub/deep/a.md", false),
             ("sub/**", "sub/deep/a.md", true),
             ("**/a.md", "a.md", true),
-            ("Bible Study Kit", "Bible Study Kit/x/y.md", true),
-            ("Bible Study Kit/", "Notes/Bible Study Kit/y.md", true),
+            ("Study Kit", "Study Kit/x/y.md", true),
+            ("Study Kit/", "Notes/Study Kit/y.md", true),
             ("node_modules", "a/node_modules/b.md", true),
             ("draft?.md", "draft1.md", true),
             ("draft?.md", "draft12.md", false),
@@ -345,10 +366,14 @@ mod tests {
             chunks: chunks(n),
         };
         let a = Audience::private(None);
-        let one = finish(doc(5), &a, "note", "loc");
+        let docs = |b: Built| match b {
+            Built::Docs(d) => d,
+            Built::Skip(why) => panic!("skipped: {why}"),
+        };
+        let one = docs(finish(doc(5), &a, "note", "loc"));
         assert_eq!(one.len(), 1);
         assert_eq!((one[0].key.as_str(), one[0].parent.as_str()), ("k", "k"));
-        let parts = finish(doc(450), &a, "note", "loc");
+        let parts = docs(finish(doc(450), &a, "note", "loc"));
         let keys: Vec<_> = parts.iter().map(|p| p.key.as_str()).collect();
         assert_eq!(keys, ["k", "k#2", "k#3"]);
         assert!(parts
@@ -359,7 +384,7 @@ mod tests {
         let shared = Audience::from_scope(None, Scope::Everyone);
         assert_ne!(
             one[0].hash,
-            finish(doc(5), &shared, "note", "loc")[0].hash,
+            docs(finish(doc(5), &shared, "note", "loc"))[0].hash,
             "a change of audience is a change"
         );
     }

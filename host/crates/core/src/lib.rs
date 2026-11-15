@@ -8,6 +8,7 @@
 //! | [`revisions`] | CAS and keyed revisions |
 //! | [`drafts`] | `draft_revision` compare-and-set |
 //! | [`hidden`] | invisible and direction-changing characters, screened out of labels and shortcuts |
+//! | [`secrets`] | the check for text that looks like a credential |
 //! | [`hostlog`] | the host's own log in a rolling file, for release builds without a console |
 //! | [`prefs`] | the preference registry and its classes |
 //! | [`credentials`] | AES-256-GCM envelopes; key in Credential Manager |
@@ -27,6 +28,7 @@ pub mod privfs;
 pub mod profile;
 pub mod recovery;
 pub mod revisions;
+pub mod secrets;
 
 /// Milliseconds since the Unix epoch.
 pub fn now_ms() -> i64 {

@@ -31,7 +31,7 @@ impl FolderFeed {
             && !self.src.exclude.iter().any(|g| glob_match(g, rel))
     }
 
-    /// Walk without following links. Hidden folders and `node_modules` are not entered.
+    /// Walk without following links. Hidden folders and files and `node_modules` are skipped.
     fn walk(&self, dir: &Path, root: &Path, out: &mut Vec<Entry>, complete: &mut bool) {
         let Ok(rd) = std::fs::read_dir(dir) else {
             *complete = false;
@@ -58,7 +58,7 @@ impl FolderFeed {
                     continue;
                 }
                 self.walk(&path, root, out, complete);
-            } else if ft.is_file() && self.wanted(&rel) {
+            } else if ft.is_file() && !name.starts_with('.') && self.wanted(&rel) {
                 match e.metadata() {
                     Ok(m) if m.len() <= MAX_FILE_BYTES => out.push(Entry {
                         key: rel,
@@ -109,6 +109,6 @@ impl Feed for FolderFeed {
             return Ok(Built::Skip("empty".into()));
         }
         let audience = Audience::from_scope(owner, self.src.scope);
-        Ok(Built::Docs(super::finish(doc, &audience, "note", key)))
+        Ok(super::finish(doc, &audience, "note", key))
     }
 }
