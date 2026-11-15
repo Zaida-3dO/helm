@@ -8,6 +8,7 @@
 //! | [`revisions`] | CAS and keyed revisions |
 //! | [`drafts`] | `draft_revision` compare-and-set |
 //! | [`hidden`] | invisible and direction-changing characters, screened out of labels and shortcuts |
+//! | [`hostlog`] | the host's own log in a rolling file, for release builds without a console |
 //! | [`prefs`] | the preference registry and its classes |
 //! | [`credentials`] | AES-256-GCM envelopes; key in Credential Manager |
 //! | [`recovery`] | startup recovery of interrupted work |
@@ -18,6 +19,7 @@ pub mod credentials;
 pub mod db;
 pub mod drafts;
 pub mod hidden;
+pub mod hostlog;
 pub mod lifecycle;
 pub mod ops;
 pub mod prefs;
