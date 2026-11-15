@@ -84,11 +84,18 @@ pub fn chat_profile(tx: &Transaction<'_>, chat_id: &str) -> String {
     active_profile(tx)
 }
 
-/// The person this PC is currently set to; the empty key when none is.
+/// The person this PC is currently set to: the profile the sidebar shows, or the home profile
+/// while none is chosen or all of them are shown (every chat without a profile of its own is
+/// given the home one at start). The empty key when there are no profiles at all.
 pub fn active_profile(tx: &Transaction<'_>) -> String {
-    helm_core::prefs::read(tx, "activeProfile")
-        .and_then(|v| v.as_str().map(str::to_owned))
-        .unwrap_or_default()
+    match helm_core::prefs::read(tx, "activeProfile") {
+        Some(Value::String(id)) if !id.is_empty() && id != "all" => id,
+        _ => tx
+            .query_row("SELECT id FROM profiles WHERE is_home = 1", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap_or_default(),
+    }
 }
 
 pub fn load_settings(tx: &Transaction<'_>, profile_id: &str) -> rusqlite::Result<GateSettings> {
@@ -883,5 +890,31 @@ mod tests {
                 .unwrap(),
             "someone"
         );
+        // While no profile is chosen, or all of them are shown, the person is the home
+        // profile: the one every chat without its own is given at start.
+        db.write(|tx| {
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS profiles(id TEXT PRIMARY KEY, is_home INTEGER);
+                 INSERT INTO profiles(id, is_home) VALUES ('home-1', 1), ('other', 0);",
+            )
+        })
+        .unwrap();
+        for pref in [
+            Value::String("all".into()),
+            Value::Null,
+            Value::String("".into()),
+        ] {
+            db.write(|tx| {
+                helm_core::prefs::set_raw(tx, "activeProfile", &pref)?;
+                Ok::<(), helm_core::prefs::PrefError>(())
+            })
+            .unwrap();
+            assert_eq!(
+                db.snapshot(|tx| Ok::<String, rusqlite::Error>(active_profile(tx)))
+                    .unwrap(),
+                "home-1",
+                "{pref:?}"
+            );
+        }
     }
 }
