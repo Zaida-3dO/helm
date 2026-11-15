@@ -88,6 +88,16 @@ pub struct Paired {
     pub client: ClientRow,
 }
 
+/// One Telegram account and the person it belongs to.
+#[derive(Debug, Clone)]
+pub struct TelegramLink {
+    pub telegram_id: i64,
+    pub person_id: i64,
+    /// What Telegram calls the account, when it gave one.
+    pub handle: Option<String>,
+    pub linked_at: String,
+}
+
 /// How long a pairing code works.
 pub const PAIR_CODE_MINUTES: i64 = 15;
 pub const MAX_NAME: usize = 64;
@@ -131,6 +141,12 @@ CREATE TABLE IF NOT EXISTS routes (
     channel   TEXT NOT NULL,
     client_id INTEGER NOT NULL REFERENCES clients(id),
     PRIMARY KEY (person_id, channel)
+);
+CREATE TABLE IF NOT EXISTS telegram_users (
+    telegram_id INTEGER PRIMARY KEY,
+    person_id   INTEGER NOT NULL REFERENCES people(id),
+    handle      TEXT,
+    linked_at   TEXT NOT NULL
 );
 "#;
 
@@ -671,6 +687,12 @@ impl Registry {
         )?;
         tx.execute("DELETE FROM acts_for WHERE person_id = ?1", [from.id])?;
         tx.execute("DELETE FROM routes WHERE person_id = ?1", [from.id])?;
+        // A linked Telegram account keeps working: it moves to the person that stays.
+        tx.execute(
+            "UPDATE OR IGNORE telegram_users SET person_id = ?2 WHERE person_id = ?1",
+            params![from.id, into.id],
+        )?;
+        tx.execute("DELETE FROM telegram_users WHERE person_id = ?1", [from.id])?;
         tx.execute("DELETE FROM people WHERE id = ?1", [from.id])?;
         tx.commit()?;
         Ok(Merged {
@@ -840,6 +862,77 @@ impl Registry {
             params![person_id, channel],
         )?;
         Ok(())
+    }
+
+    // ---- Telegram accounts ----
+
+    /// Every Telegram account linked to a person on this hub. This is the bot's allow-list: an
+    /// id that is not here gets nothing at all.
+    pub fn telegram_links(&self) -> Result<Vec<TelegramLink>> {
+        let mut st = self.conn.prepare(
+            "SELECT telegram_id, person_id, handle, linked_at FROM telegram_users
+             ORDER BY telegram_id",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok(TelegramLink {
+                telegram_id: r.get(0)?,
+                person_id: r.get(1)?,
+                handle: r.get(2)?,
+                linked_at: r.get(3)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// The person a Telegram account belongs to, if it is linked at all.
+    pub fn telegram_link(&self, telegram_id: i64) -> Result<Option<TelegramLink>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT telegram_id, person_id, handle, linked_at FROM telegram_users
+                 WHERE telegram_id = ?1",
+                [telegram_id],
+                |r| {
+                    Ok(TelegramLink {
+                        telegram_id: r.get(0)?,
+                        person_id: r.get(1)?,
+                        handle: r.get(2)?,
+                        linked_at: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Link a Telegram account to a person, replacing whoever had it before. `handle` is what
+    /// Telegram calls the account, when it says.
+    pub fn link_telegram(
+        &mut self,
+        telegram_id: i64,
+        person_id: i64,
+        handle: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            &format!(
+                "INSERT INTO telegram_users (telegram_id, person_id, handle, linked_at)
+                 VALUES (?1, ?2, ?3, {NOW})
+                 ON CONFLICT(telegram_id) DO UPDATE SET person_id = ?2,
+                     handle = COALESCE(?3, handle)"
+            ),
+            params![telegram_id, person_id, handle],
+        )?;
+        Ok(())
+    }
+
+    /// Unlink a Telegram account. Only the link of `person_id` is removed: another person's
+    /// account is nobody else's to drop.
+    pub fn unlink_telegram(&mut self, telegram_id: i64, person_id: i64) -> Result<bool> {
+        let n = self.conn.execute(
+            "DELETE FROM telegram_users WHERE telegram_id = ?1 AND person_id = ?2",
+            params![telegram_id, person_id],
+        )?;
+        Ok(n > 0)
     }
 
     // ---- pairing ----
@@ -1012,8 +1105,8 @@ fn new_token() -> String {
 }
 
 /// Eight characters from [`CODE_ALPHABET`]. The alphabet has 32 symbols, so a random byte maps
-/// onto it without bias.
-fn new_code() -> String {
+/// onto it without bias. Also what the Telegram link codes are made of.
+pub(crate) fn new_code() -> String {
     let (a, b) = (
         uuid::Uuid::new_v4().into_bytes(),
         uuid::Uuid::new_v4().into_bytes(),
