@@ -211,6 +211,13 @@ struct Actor {
     /// The submission that opened the current turn. Until Claude has read it, a worker that dies
     /// is not a crash to carry on from: Claude never saw what it would be continuing.
     turn_opener: Option<String>,
+    /// The submission that opened the current turn, for the turn's whole life ([`Self::turn_opener`]
+    /// is only its life before Claude has read it). A provider switch that stops a quiet turn to
+    /// restart it on the new model sends this one again.
+    turn_opened_by: Option<String>,
+    /// A provider switch stopped this turn to restart it: the submission to open the next turn
+    /// once the stop has settled, on a fresh worker for the new model.
+    switch_restart: Option<String>,
     stopping: Option<StopState>,
     /// A Stop ended this run, so an exit before the next run is one Helm asked for, even once
     /// `stopping` has been settled (a worker that ends itself after an interrupt).
@@ -386,6 +393,8 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         timers: Vec::new(),
         run_id: None,
         turn_opener: None,
+        turn_opened_by: None,
+        switch_restart: None,
         stopping: None,
         stop_ended: false,
         stream: HashMap::new(),
@@ -1364,6 +1373,9 @@ impl Actor {
             }
         }
         self.timers.clear();
+        // A switch waiting on this turn's stop is over: the outage watch carries a crashed
+        // turn on in its own words, and a half-sent opener must not go out twice.
+        self.switch_restart = None;
         // Whatever the worker had not settled is unknowable now, busy or not: a message left
         // "accepted" by a worker that went away must not outlive it.
         self.mark_in_flight_uncertain();
@@ -1512,6 +1524,7 @@ impl Actor {
             });
         }
         self.stream.clear();
+        self.turn_opened_by = None;
         let tool_keys: Vec<String> = self.tools.keys().map(|t| format!("t:{t}")).collect();
         for key in &tool_keys {
             let id = self.chat_id.clone();
@@ -2282,6 +2295,7 @@ impl Actor {
         }
         if !busy {
             self.turn_opener = Some(sid.to_owned());
+            self.turn_opened_by = Some(sid.to_owned());
         }
         let row = if !busy {
             // A prompt that opens a turn: its user row shows at once, as saved.
@@ -2528,8 +2542,25 @@ impl Actor {
             // live retelling below, where the worker turns the new effort into the
             // local model's thinking budget without a respawn.
             if self.status().is_busy() || self.agents_running() {
-                self.relaunch_on_idle = true;
-                self.provider_switch_pending = true;
+                if self.agents_running() || !self.turn_quiet() || self.turn_opened_by.is_none() {
+                    // Something is genuinely in flight: the change lands at the next idle
+                    // point, as it always did.
+                    self.relaunch_on_idle = true;
+                    self.provider_switch_pending = true;
+                } else {
+                    // The turn is open but nothing is running: for a local chat this is the
+                    // wait in the model server's queue, which is not work in progress. Stop
+                    // the turn now and send its opening message again on the new model,
+                    // rather than letting the queued request answer on the old one.
+                    self.context_row(
+                        ContextKind::Notice,
+                        "The model was changed: the turn stops now and starts again on the new model.",
+                    );
+                    self.switch_restart = self.turn_opened_by.clone();
+                    self.provider_switch_pending = true;
+                    let (tx, _rx) = oneshot::channel();
+                    self.stop(tx, true);
+                }
             } else {
                 self.relaunch_worker();
             }
@@ -3556,6 +3587,13 @@ impl Actor {
         self.live.lock().unwrap().thread.subagents_running > 0
     }
 
+    /// Nothing is in flight: no tool call running and no message being generated. A turn in
+    /// this state is waiting — at the model server's queue, or between requests — not working,
+    /// so a provider change need not wait for it.
+    fn turn_quiet(&self) -> bool {
+        self.tools.is_empty() && self.stream.is_empty()
+    }
+
     /// The turn has settled or the last background agent ended: a relaunch held for this point
     /// runs once nothing is left running, and the idle-worker cap is applied.
     fn on_quiet(&mut self) {
@@ -4104,6 +4142,23 @@ impl Actor {
                 // The stop's answer is how the turn ended; what Claude had not read is sent
                 // again right after, which may open the next turn at once.
                 let final_status = self.status();
+                // A provider switch stopped a quiet turn to restart it: its opening message
+                // goes out first, on the new worker the dispatch below starts. If the turn
+                // actually finished before the stop landed, its answer stands and nothing is
+                // sent again — the worker relaunches at this quiet point instead.
+                if let Some(sid) = self.switch_restart.take() {
+                    if outcome == "stopped" || outcome == "interrupted" {
+                        self.write(|t| {
+                            t.execute(
+                                "UPDATE submissions SET state = 'saved', mode = 'prompt' WHERE id = ?1",
+                                [&sid],
+                            )
+                        });
+                        self.dispatch(&sid);
+                    } else {
+                        self.relaunch_on_idle = true;
+                    }
+                }
                 self.settle_dropped(stop.resend);
                 self.emit_pending();
                 for r in stop.replies {

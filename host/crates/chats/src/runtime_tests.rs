@@ -6300,6 +6300,155 @@ async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
     assert!(wl.req.local.is_some(), "launched against the local server");
 }
 
+/// A provider change while the turn is open but nothing is in flight — the wait in a local
+/// model server's queue is a wait, not work — stops the turn at once and opens it again on
+/// the new model, instead of letting the queued request be answered on the old one. The same
+/// in the other direction. A tool call genuinely running is held to the idle point as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_model_change_while_only_a_queue_wait_runs_restarts_the_turn_now() {
+    let mut h = harness();
+    let local = Arc::new(FakeLocal {
+        turns: Mutex::new(Vec::new()),
+        outcome: Mutex::new(Ok("qwen3:8b-helm-64k".into())),
+        gate: Mutex::new(None),
+        finished: Mutex::new(Vec::new()),
+        refreshed: Mutex::new(Vec::new()),
+        held_outcome: Mutex::new(None),
+        queue: Mutex::new(None),
+    });
+    h.rt.set_local_models(local.clone());
+
+    // Local chat to Claude: the turn is open, no tool and no output — a queue wait.
+    let lc = h.create().await;
+    h.call(
+        "chat_set_model",
+        json!({"chatId": &lc, "model": "local/ollama/qwen3:8b"}),
+    )
+    .await
+    .unwrap();
+    let (sid, _) = h.send(&lc, "carry the plan", "default").await;
+    let mut lw = h.worker().await;
+    assert!(
+        lw.req.local.is_some(),
+        "the first worker is on the local server"
+    );
+    lw.ready().await;
+    let p = lw.expect("prompt").await;
+    ack(&lw, &p).await;
+    lw.emit(json!({"type": "agent_start"})).await;
+    h.until("running", |h| h.status(&lc) == "running").await;
+    h.call("chat_set_model", json!({"chatId": &lc, "model": "opus"}))
+        .await
+        .unwrap();
+    let abort = lw.expect("abort").await;
+    lw.respond(
+        &abort,
+        json!({"state": "stopping", "cancelledSubmissionIds": []}),
+    )
+    .await;
+    lw.emit(json!({"type": "agent_settled", "outcome": "stopped"}))
+        .await;
+    lw.expect("shutdown").await;
+    let mut cw2 = h.worker().await;
+    assert!(
+        cw2.req.local.is_none(),
+        "the restarted turn's worker runs the chat's new model"
+    );
+    cw2.ready().await;
+    let p = cw2.expect("prompt").await;
+    assert_eq!(
+        p["submissionId"],
+        sid.as_str(),
+        "the turn's opening message is sent again, not a fresh one"
+    );
+    assert!(
+        p.get("streamingBehavior").is_none(),
+        "it opens the restarted turn"
+    );
+    assert!(
+        texts(&h, &lc)
+            .iter()
+            .any(|t| t.contains("The model was changed")),
+        "the transcript says the turn restarts on the new model"
+    );
+    // Claude chat to local, same shape: the open turn stops and reopens on the local server.
+    let cc = h.create().await;
+    let (sid2, _) = h.send(&cc, "run it", "default").await;
+    let mut cw = h.worker().await;
+    cw.ready().await;
+    let p = cw.expect("prompt").await;
+    ack(&cw, &p).await;
+    cw.emit(json!({"type": "agent_start"})).await;
+    h.until("running", |h| h.status(&cc) == "running").await;
+    h.call(
+        "chat_set_model",
+        json!({"chatId": &cc, "model": "local/ollama/qwen3:8b"}),
+    )
+    .await
+    .unwrap();
+    let abort = cw.expect("abort").await;
+    cw.respond(
+        &abort,
+        json!({"state": "stopping", "cancelledSubmissionIds": []}),
+    )
+    .await;
+    cw.emit(json!({"type": "agent_settled", "outcome": "stopped"}))
+        .await;
+    cw.expect("shutdown").await;
+    let mut lw2 = h.worker().await;
+    assert_eq!(
+        lw2.req.local.as_ref().map(|l| l.model.as_str()),
+        Some("qwen3:8b-helm-64k"),
+        "the reopened turn's worker is launched for the local model it was made ready for"
+    );
+    lw2.ready().await;
+    let p = lw2.expect("prompt").await;
+    assert_eq!(
+        p["submissionId"],
+        sid2.as_str(),
+        "and its message goes out again"
+    );
+
+    // A tool call genuinely running: nothing is stopped now; the change lands at the idle
+    // point after the turn, as it always did.
+    let hc = h.create().await;
+    h.send(&hc, "work", "default").await;
+    let mut hw = h.worker().await;
+    hw.ready().await;
+    let p = hw.expect("prompt").await;
+    ack(&hw, &p).await;
+    hw.emit(json!({"type": "agent_start"})).await;
+    hw.emit(json!({"type": "tool_execution_start", "toolCallId": "tc1", "toolName": "Bash", "args": {"command": "cargo build"}, "stoppable": true}))
+        .await;
+    h.until(
+        "the actor has the tool in hand",
+        |h| {
+            !h.col(&format!(
+                "SELECT id FROM messages WHERE chat_id = '{hc}' AND tool_call_id = 'tc1'"
+            ))
+            .is_empty()
+        },
+    )
+    .await;
+    h.call(
+        "chat_set_model",
+        json!({"chatId": &hc, "model": "local/ollama/qwen3:8b"}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        hw.no_command_for(Duration::from_millis(200))
+            .await
+            .is_none(),
+        "a running tool call is left alone"
+    );
+    hw.emit(json!({"type": "tool_execution_end", "toolCallId": "tc1", "toolName": "Bash", "result": {"text": "done"}, "isError": false}))
+        .await;
+    hw.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-held"}))
+        .await;
+    hw.expect("shutdown").await;
+}
+
 /// A send that lands while the previous worker is still winding down (a relaunch from any
 /// cause) is never handed to the closing worker: the closing link is set aside and a fresh
 /// worker starts, so the prompt reaches a worker that can answer and is not left uncertain.
