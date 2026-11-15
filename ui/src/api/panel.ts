@@ -70,8 +70,10 @@ export function panelOps(api: Api) {
   return {
     fileRead: (path: string, chatId?: string | null) =>
       api<FileView>('file_read', chatId ? { chatId, path } : { path }),
-    /** Change stamps for up to 8 open files, in order; null for one that is gone or not readable. */
-    fileStat: (paths: string[]) => api<Array<FileStamp | null>>('file_stat', { paths }),
+    /** Change stamps for up to 8 open files, in order; null for one that is gone or not readable.
+     * The chat id names whose files these are: a chat that runs on another PC answers there. */
+    fileStat: (paths: string[], chatId?: string | null) =>
+      api<Array<FileStamp | null>>('file_stat', chatId ? { chatId, paths } : { paths }),
     archiveList: (path: string, chatId?: string | null) =>
       api<ArchiveView>('archive_list', chatId ? { chatId, path } : { path }),
     defaultHandler: (path: string) => api<DefaultHandlerResult>('default_handler', { path }),

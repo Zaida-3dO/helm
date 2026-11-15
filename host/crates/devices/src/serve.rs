@@ -20,13 +20,13 @@
 use crate::link::{BoxFut, DeviceLink};
 use crate::subs::{self, Out, Subs, CHATS_SUB, PUSH_ROW_BUDGET};
 use crate::wire::{
-    code, AnswerArgs, ArchiveArgs, AttachPutArgs, AttachmentRef, Caller, ChatIdArgs,
-    CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceFrame, DeviceInfo,
-    DevicePerson, ForkArgs, Frame, Hello, MoveProfileArgs, MuteArgs, Op, OrganizeArgs, PageArgs,
-    PeerDevice, QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs, SendArgs, SetModelArgs,
-    SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs,
-    WireError, MAX_CHUNK_BYTES, MAX_PAGE_ROWS, MAX_SEND_ATTACHMENTS, MAX_SEND_BYTES,
-    MAX_UPLOAD_BYTES, SUB_ROWS,
+    code, AnswerArgs, ArchiveArgs, AttachPutArgs, AttachmentRef, BoardCancelArgs, BoardReadArgs,
+    Caller, ChatIdArgs, CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceFrame,
+    DeviceInfo, DevicePerson, ForkArgs, Frame, Hello, MoveProfileArgs, MuteArgs, Op, OrganizeArgs,
+    PageArgs, PanelStageArgs, PeerDevice, QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs,
+    SendArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs,
+    VerbositySetArgs, WireError, MAX_CHUNK_BYTES, MAX_PAGE_ROWS, MAX_SEND_ATTACHMENTS,
+    MAX_SEND_BYTES, MAX_UPLOAD_BYTES, SUB_ROWS,
 };
 use base64::Engine as _;
 use helm_chats::types::{
@@ -41,6 +41,15 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 pub type PortResult<T> = Result<T, WireError>;
+
+/// One side-panel read of the chat's project folder: the app op it answers with, and its
+/// arguments (which name the chat and, for the path reads, one path or a list of them).
+/// The port checks the paths before anything opens.
+#[derive(Clone, Debug)]
+pub struct PanelRead {
+    pub local_op: &'static str,
+    pub args: Value,
+}
 
 /// A file carried from another device, with its bytes, ready to hand to the chat.
 #[derive(Clone, Debug)]
@@ -161,6 +170,20 @@ pub trait ChatPort: Send + Sync {
     fn context_on(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>>;
     /// The chat's project files matching the mention query, looked up here.
     fn quick_open(&self, a: QuickOpenArgs) -> BoxFut<'_, PortResult<Value>>;
+    /// The chat's project folder path, as this install sees it.
+    fn chat_folder(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>>;
+    /// One side-panel read from the chat's project folder here — a file, a folder listing, a
+    /// change stamp, an archive listing or a path resolution. The paths must lie inside that
+    /// folder; nothing else on this PC is reachable this way.
+    fn panel_read(&self, a: PanelRead) -> BoxFut<'_, PortResult<Value>>;
+    /// Stage or unstage one file of the chat's repository here.
+    fn panel_stage(&self, a: PanelStageArgs, stage: bool) -> BoxFut<'_, PortResult<Value>>;
+    /// Whether a task board address and token are saved on this install.
+    fn board_connection(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>>;
+    /// Run one Tasks-view read of this install's task board.
+    fn board_read(&self, a: BoardReadArgs) -> BoxFut<'_, PortResult<Value>>;
+    /// Stop one of those reads that the asking view no longer waits for.
+    fn board_cancel(&self, a: BoardCancelArgs) -> BoxFut<'_, PortResult<Value>>;
     /// Start loading this chat's model, as the first keystroke of a local chat does.
     fn warm(&self, chat_id: String) -> BoxFut<'_, PortResult<()>>;
     fn tool_stop(&self, a: ToolStopArgs) -> BoxFut<'_, PortResult<Value>>;
@@ -767,6 +790,65 @@ impl Inner {
             Op::VerbositySet(a) => done(self.port.verbosity_set(a).await?),
             Op::ContextOn(a) => done(self.port.context_on(a.chat_id).await?),
             Op::QuickOpen(a) => done(self.port.quick_open(a).await?),
+            Op::ChatFolder(a) => done(self.port.chat_folder(a.chat_id).await?),
+            Op::FileView(a) => done(
+                self.port
+                    .panel_read(PanelRead {
+                        local_op: "file_read",
+                        args: serde_json::to_value(&a)
+                            .map_err(|e| WireError::internal(e.to_string()))?,
+                    })
+                    .await?,
+            ),
+            Op::FileStat(a) => done(
+                self.port
+                    .panel_read(PanelRead {
+                        local_op: "file_stat",
+                        args: serde_json::to_value(&a)
+                            .map_err(|e| WireError::internal(e.to_string()))?,
+                    })
+                    .await?,
+            ),
+            Op::ArchiveList(a) => done(
+                self.port
+                    .panel_read(PanelRead {
+                        local_op: "archive_list",
+                        args: serde_json::to_value(&a)
+                            .map_err(|e| WireError::internal(e.to_string()))?,
+                    })
+                    .await?,
+            ),
+            Op::PathResolve(a) => done(
+                self.port
+                    .panel_read(PanelRead {
+                        local_op: "path_resolve",
+                        args: serde_json::to_value(&a)
+                            .map_err(|e| WireError::internal(e.to_string()))?,
+                    })
+                    .await?,
+            ),
+            Op::Changes(a) => done(
+                self.port
+                    .panel_read(PanelRead {
+                        local_op: "changes",
+                        args: json!({"chatId": a.chat_id}),
+                    })
+                    .await?,
+            ),
+            Op::Diff(a) => done(
+                self.port
+                    .panel_read(PanelRead {
+                        local_op: "diff",
+                        args: serde_json::to_value(&a)
+                            .map_err(|e| WireError::internal(e.to_string()))?,
+                    })
+                    .await?,
+            ),
+            Op::Stage(a) => done(self.port.panel_stage(a, true).await?),
+            Op::Unstage(a) => done(self.port.panel_stage(a, false).await?),
+            Op::BoardConnection(a) => done(self.port.board_connection(a.chat_id).await?),
+            Op::BoardRead(a) => done(self.port.board_read(a).await?),
+            Op::BoardCancel(a) => done(self.port.board_cancel(a).await?),
             Op::Warm(a) => {
                 self.port.warm(a.chat_id).await?;
                 done(Value::Null)

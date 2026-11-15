@@ -31,7 +31,10 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .async_op("devices_submission_action", devices_submission_action)
         .async_op("devices_item_links", devices_item_links)
         .async_op("devices_attention", devices_attention)
-        .async_op("devices_composer_defaults", devices_composer_defaults);
+        .async_op("devices_composer_defaults", devices_composer_defaults)
+        .async_op("devices_board_connection", devices_board_connection)
+        .async_op("devices_board_read", devices_board_read)
+        .async_op("devices_board_cancel", devices_board_cancel);
 }
 
 fn fail(e: DeviceError) -> ApiError {
@@ -711,4 +714,57 @@ async fn devices_composer_defaults(ctx: OpCtx, args: Value) -> Result<Value, Api
         }
     }
     mirror.composer_defaults(&a.chat_id, a.patch.as_ref()).await
+}
+
+// ---------------------------------------------------------------------------------------------
+// The task board of the PC that runs a mirrored chat
+// ---------------------------------------------------------------------------------------------
+
+/// The chat a board call names, and what is left of the args. The board's own read parameters
+/// pass through untouched: the device that runs the chat answers with its own board op, and its
+/// address and token never come across.
+fn split_board_args(args: Value) -> Result<(String, Value), ApiError> {
+    let mut args = args;
+    let map = args
+        .as_object_mut()
+        .ok_or_else(|| ApiError::bad_args("The board call names a chat."))?;
+    let chat_id = match map.remove("chatId") {
+        Some(Value::String(s)) if !s.trim().is_empty() => s,
+        _ => return Err(ApiError::bad_args("The board call names a chat.")),
+    };
+    Ok((chat_id, Value::Object(map.clone())))
+}
+
+/// `devices_board_connection`: whether the PC that runs a mirrored chat has a task board set
+/// up, without its address or token. The Tasks tile shows only when it answers ready.
+async fn devices_board_connection(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let (chat_id, _) = split_board_args(args)?;
+    let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
+    mirror.board_connection(&chat_id).await
+}
+
+/// `devices_board_read`: one read of the task board of the PC that runs a mirrored chat, sent
+/// as that PC's own `board_read` and answered the same way, so the Tasks view cannot tell the
+/// difference. The `action` and its parameters are the board's own.
+async fn devices_board_read(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let (chat_id, params) = split_board_args(args)?;
+    if params.get("action").and_then(Value::as_str).is_none() {
+        return Err(ApiError::bad_args("The board read names an action."));
+    }
+    let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
+    mirror.board_read(&chat_id, params).await
+}
+
+/// `devices_board_cancel`: stop a board read this PC started, on the PC that runs the chat.
+async fn devices_board_cancel(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let (chat_id, mut params) = split_board_args(args)?;
+    let Some(request_id) = params
+        .as_object_mut()
+        .and_then(|m| m.remove("requestId"))
+        .and_then(|v| v.as_str().map(str::to_owned))
+    else {
+        return Err(ApiError::bad_args("The cancel names a request."));
+    };
+    let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
+    mirror.board_cancel(&chat_id, &request_id).await
 }

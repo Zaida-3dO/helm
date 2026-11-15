@@ -61,8 +61,25 @@ interface Job {
   sent: boolean;
 }
 
+/** What a reader sends over: the local `board_read`/`board_cancel`, or the same reads carried
+ * to the PC that runs a mirrored chat (`devices_board_read`/`devices_board_cancel`). */
+export interface BoardOpsLike {
+  read(params: ReadParams, requestId: string, opts: { attachOnly: boolean; timeoutMs: number }): Promise<{ action: string; data: unknown }>;
+  cancel(requestId: string): Promise<unknown>;
+}
+
+/** Reads of the task board on the PC that runs a mirrored chat, sent as its own board ops;
+ * the board's address and token never leave that PC. */
+export function remoteBoardOps(api: Api, chatId: string): BoardOpsLike {
+  return {
+    read: (params, requestId, opts) =>
+      api<{ action: string; data: unknown }>('devices_board_read', { chatId, ...params, requestId, ...opts }),
+    cancel: (requestId) => api<Record<string, never>>('devices_board_cancel', { chatId, requestId }),
+  };
+}
+
 export class BoardReader {
-  private readonly ops: ReturnType<typeof boardOps>;
+  private readonly ops: BoardOpsLike;
   private active = 0;
   private readonly queue: Job[] = [];
   private seq = 0;
@@ -70,8 +87,9 @@ export class BoardReader {
   private readonly maxQueued: number;
   private readonly newId: () => string;
 
-  constructor(api: Api, opts: { maxActive?: number; maxQueued?: number; newId?: () => string } = {}) {
-    this.ops = boardOps(api);
+  constructor(source: Api | BoardOpsLike, opts: { maxActive?: number; maxQueued?: number; newId?: () => string } = {}) {
+    // An `Api` is a function; the remote shape is an object of the same two calls.
+    this.ops = typeof source === 'function' ? boardOps(source) : source;
     this.maxActive = opts.maxActive ?? MAX_ACTIVE;
     this.maxQueued = opts.maxQueued ?? MAX_QUEUED;
     this.newId = opts.newId ?? (() => `tr-${Date.now().toString(36)}-${(this.seq++).toString(36)}`);

@@ -195,7 +195,7 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
       if (busy) return;
       busy = true;
       ops
-        .fileStat([loc.path])
+        .fileStat([loc.path], chatId)
         .then(([stamp]) => {
           if (stopped || !stamp) return;
           const before = baseline.current;
@@ -217,7 +217,7 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
       stopped = true;
       clearInterval(timer);
     };
-  }, [live, visible, loc, loadedFor, ops]);
+  }, [live, visible, loc, loadedFor, ops, chatId]);
 
   // The dot ages in whole seconds and goes after a few.
   const updatedAt = updated && updated.path === loc.path ? updated.at : null;

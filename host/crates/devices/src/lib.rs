@@ -43,11 +43,13 @@
 //! typed by hand from the table above: there is no Rust type to generate bindings from. The
 //! serialised types in [`wire`] are the device-to-device frames, which the UI never sees.
 //!
-//! What another device may ask of this one (`wire::Op`): `hello`, `chats_sub`, `chat_sub`,
-//! `chat_unsub`, `chats_unsub`, `page` (reads, which need only the pairing), and `send`, `stop`,
-//! `answer`, `create`, `set_model`, `rename`, `archive`, `share` (which need the switch "Let other
-//! devices use chats on this PC"). Consent, settings, projects, files and the rest are refused:
-//! they stay with whoever is at this PC.
+//! What another device may ask of this one (`wire::Op`): reads — `hello`, `chats_sub`, `chat_sub`,
+//! `chat_unsub`, `chats_unsub`, `page`, the panel reads of the chat's project folder (`file_view`,
+//! `file_stat`, `changes`, `diff`, `archive_list`, `path_resolve`, `chat_folder`, `quick_open`)
+//! and the task-board reads (`board_connection`, `board_read`, `board_cancel`) — need only the
+//! pairing; everything that changes something (`send`, `stop`, `answer`, `create`, `set_model`,
+//! `rename`, `archive`, `share`, staging, and the rest) also needs the switch "Let other devices
+//! use chats on this PC". Panel paths never leave the chat's project folder.
 
 pub mod host;
 pub mod identity;

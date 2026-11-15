@@ -9,9 +9,10 @@ import type { EventBus } from '../api/events.ts';
 import { toast } from '../ui/index.ts';
 import { openTasks, tasksStoreFor } from './open.ts';
 
-/** Whether the board is connected, and how to open the Tasks tab. */
-export function useTasksEntry(api: Api, bus: EventBus): { ready: boolean; open: () => void } {
-  const store = tasksStoreFor(api);
+/** Whether the board is connected, and how to open the Tasks tab. With the id of a chat that
+ * runs on another PC, the board asked about is the one set up on that PC. */
+export function useTasksEntry(api: Api, bus: EventBus, remoteChatId?: string | null): { ready: boolean; open: () => void } {
+  const store = tasksStoreFor(api, remoteChatId);
   const connection = useSyncExternalStore(store.subscribe, () => store.snapshot().connection);
   useEffect(() => {
     const check = () => void store.checkConnection();
@@ -26,7 +27,7 @@ export function useTasksEntry(api: Api, bus: EventBus): { ready: boolean; open: 
   return {
     ready: connection === 'ready',
     open: () => {
-      if (!openTasks(api)) toast.show({ kind: 'error', text: 'The side panel has no room for another tab.' });
+      if (!openTasks(api, undefined, remoteChatId)) toast.show({ kind: 'error', text: 'The side panel has no room for another tab.' });
     },
   };
 }

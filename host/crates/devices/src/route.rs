@@ -649,6 +649,47 @@ impl Mirror {
         Ok(())
     }
 
+    /// The task-board connection of the PC that runs this chat, as its own board settings have
+    /// it: whether a board is set up at all, without ever carrying its address or token.
+    pub async fn board_connection(&self, chat_id: &str) -> Result<Value, ApiError> {
+        let device = self.device_of(chat_id)?;
+        self.check_up(&device)?;
+        self.ask_as(
+            &device,
+            "board_connection",
+            json!({ "chatId": chat_id }),
+            "that board",
+            &[],
+        )
+        .await
+    }
+
+    /// One read of the task board the PC that runs this chat has set up, sent as that PC's own
+    /// `board_read` op and answered the same way. The board's address and token never leave it.
+    pub async fn board_read(&self, chat_id: &str, params: Value) -> Result<Value, ApiError> {
+        let device = self.device_of(chat_id)?;
+        self.check_up(&device)?;
+        let mut args = params;
+        args["chatId"] = json!(chat_id);
+        self.ask_as(&device, "board_read", args, "that board read", &[])
+            .await
+    }
+
+    /// Stop a board read this PC started on the device that runs the chat, as its own
+    /// `board_cancel` does when a request runs past its time.
+    pub async fn board_cancel(&self, chat_id: &str, request_id: &str) -> Result<Value, ApiError> {
+        let device = self.device_of(chat_id)?;
+        self.check_up(&device)?;
+        self.ask_as(
+            &device,
+            "board_cancel",
+            json!({ "chatId": chat_id, "requestId": request_id }),
+            "that cancel",
+            &[],
+        )
+        .await
+    }
+
     /// The person a change to this chat acts as, alone on the wire: the active profile's
     /// person, or with "All profiles" the chat owner's person when a profile here is linked to
     /// them, else the home profile's person. A profile with no hub person yet (before the first
@@ -787,6 +828,13 @@ fn read_op(op: &str) -> Option<&'static str> {
         "panel_context_get" => "context_on",
         "quick_open" => "quick_open",
         "checkpoint_info" => "checkpoint",
+        "chat_folder" => "chat_folder",
+        "file_read" | "dir_list" => "file_view",
+        "file_stat" => "file_stat",
+        "archive_list" => "archive_list",
+        "path_resolve" => "path_resolve",
+        "changes" => "changes",
+        "diff" => "diff",
         _ => return None,
     })
 }
@@ -1180,16 +1228,27 @@ impl RemoteChats for Mirror {
                 m.apply_organize(&chat_id, &device, &rows);
                 return Ok(json!([]));
             }
-            // Two ops change nothing in this copy, and the caller reads the far PC's own
-            // answer back: the reply-length picker wants the level, and the stop chip wants
-            // what stopped. Hand their answers straight through instead of the copy.
-            if matches!(op.as_str(), "chat_verbosity_set" | "tool_stop") {
+            // Some actions answer with their own result, not the chat record: the control
+            // that asked reads that answer exactly as it does on a chat that runs here.
+            if op == "chat_verbosity_set" || op == "tool_stop" {
                 m.check_live(&device)?;
                 let act = m.acting(&chat_id)?;
-                let wire = if op == "tool_stop" {
-                    "tool_stop"
-                } else {
+                let wire = if op == "chat_verbosity_set" {
                     "verbosity_set"
+                } else {
+                    "tool_stop"
+                };
+                return m.ask_as(&device, wire, args, "that change", &[act]).await;
+            }
+            // Staging answers with the Changes view, not the chat record: the panel updates
+            // itself from the answer exactly as it does on a chat that runs here.
+            if op == "changes_stage" || op == "changes_unstage" {
+                m.check_live(&device)?;
+                let act = m.acting(&chat_id)?;
+                let wire = if op == "changes_stage" {
+                    "stage"
+                } else {
+                    "unstage"
                 };
                 return m.ask_as(&device, wire, args, "that change", &[act]).await;
             }

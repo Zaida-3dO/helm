@@ -9,8 +9,12 @@
 // `transcript_page`, `chat_send`, `chat_stop`, `interaction_answer`, `chat_set_model`,
 // `chat_rename`, `chat_archive`, `chat_restore`, `draft_save`) work on its id unchanged, and the
 // host raises the same `chat`, `thread`, `message`, `pending`, `refresh` and `chat_removed`
-// events for it. Every other op that names such a chat is refused with "This chat runs on {device}.
-// Do that there." (`title_suggest`, `autocomplete_suggest` and `skills_list` answer empty instead; `chat_warm` and the composer and chat-view actions travel to the PC that runs the chat.)
+// events for it. The panel ops that name the chat (`chat_folder`, `file_read`, `dir_list`,
+// `file_stat`, `archive_list`, `path_resolve`, `changes`, `diff`, `changes_stage`,
+// `changes_unstage`, `quick_open`) answer on the PC that runs the chat, kept inside that chat's
+// project folder there. Everything else that names such a chat is refused with "This chat runs on
+// {device}. Do that there." (`title_suggest`, `autocomplete_suggest` and `skills_list` answer
+// empty instead; `chat_warm` and the composer and chat-view actions travel to the PC that runs the chat.)
 
 import type { Api } from './client.ts';
 import type { AttentionKind } from './generated/AttentionKind.ts';

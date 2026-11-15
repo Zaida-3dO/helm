@@ -734,6 +734,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         onSearch={openSearch}
         onAttention={() => setInboxOpen(true)}
         onOpenChat={onSelect}
+        remoteChatId={selected && (remote || other.hosts.has(selected)) ? selected : null}
       />
       {(error ?? snap.error) && (
         <p className="sb-error" role="alert">

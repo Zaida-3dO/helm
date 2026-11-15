@@ -303,6 +303,31 @@ impl ChatPort for ChannelPort {
     fn quick_open(&self, a: helm_devices::wire::QuickOpenArgs) -> BoxFut<'_, PortResult<Value>> {
         self.port.quick_open(a)
     }
+    fn chat_folder(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        self.port.chat_folder(chat_id)
+    }
+    fn panel_read(&self, a: helm_devices::serve::PanelRead) -> BoxFut<'_, PortResult<Value>> {
+        self.port.panel_read(a)
+    }
+    fn panel_stage(
+        &self,
+        a: helm_devices::wire::PanelStageArgs,
+        stage: bool,
+    ) -> BoxFut<'_, PortResult<Value>> {
+        self.port.panel_stage(a, stage)
+    }
+    fn board_connection(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        self.port.board_connection(chat_id)
+    }
+    fn board_read(&self, a: helm_devices::wire::BoardReadArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.port.board_read(a)
+    }
+    fn board_cancel(
+        &self,
+        a: helm_devices::wire::BoardCancelArgs,
+    ) -> BoxFut<'_, PortResult<Value>> {
+        self.port.board_cancel(a)
+    }
     fn warm(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
         self.port.warm(chat_id)
     }

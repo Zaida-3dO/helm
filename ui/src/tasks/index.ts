@@ -3,7 +3,9 @@
 //
 //   openTasks(api)        open the Tasks tab (maximised), no item selected
 //   openTasks(api, id)    open it with that item's drawer showing
-//   tasksStoreFor(api)    the one store (the sidebar entry and Ctrl+K read it)
+//   openTasks(api, id, remoteChatId)   …reading the board of the PC that runs a mirrored chat
+//   tasksStoreFor(api)    this PC's store; with a chat id, that chat's PC's store (the sidebar
+//                         entry and Ctrl+K read it)
 //   useTasksEntry         whether the board is connected, and how to open Tasks (the sidebar's tile)
 //
 // The `tasks` panel kind itself registers from panel/index.ts (register.tsx).

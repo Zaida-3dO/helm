@@ -8,13 +8,14 @@
 use crate::identity;
 use crate::link::BoxFut;
 use crate::sends;
+use crate::serve::PanelRead;
 use crate::serve::{ChatPort, ChatState, PortResult, SentFile};
 use crate::wire::{
-    code, AnswerArgs, ArchiveArgs, CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs,
-    DeviceInfo, DevicePerson, ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, PersonInfo,
-    ProfileInfo, ProjectInfo, QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs, SetModelArgs,
-    SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs,
-    WireError,
+    code, AnswerArgs, ArchiveArgs, BoardCancelArgs, BoardReadArgs, CheckpointArgs,
+    ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo, DevicePerson, ForkArgs, Hello,
+    MoveProfileArgs, MuteArgs, OrganizeArgs, PanelStageArgs, PersonInfo, ProfileInfo, ProjectInfo,
+    QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs, SetModelArgs, SetPermissionArgs,
+    ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError,
 };
 use helm_chats::submit::{self, HostFile, HostImage, HostSend};
 use helm_chats::types::{ChatGetResult, ChatRecord, MessageRow, SubmissionOrigin};
@@ -27,6 +28,11 @@ use std::sync::Arc;
 
 /// The most chats `chats_sub` lists.
 const LISTED: i64 = 2000;
+/// The most a panel or board read's answer may weigh: it has to fit one frame with its envelope.
+const ANSWER_BYTES: usize = 700 * 1024;
+/// The most raw bytes a picture may carry across: its base64 run plus the rest of the view
+/// has to fit one frame.
+const IMAGE_BYTES: u64 = 512 * 1024;
 /// A list's cursor is the revision clock's reading; the activity times it is compared with come
 /// from the wall clock, which may lag the revision clock a little, so a catch-up reaches back
 /// this far.
@@ -40,6 +46,24 @@ fn wire(e: ApiError) -> WireError {
 
 fn db_err(e: rusqlite::Error) -> WireError {
     WireError::internal(e.to_string())
+}
+
+/// Whether `path` is `folder` itself or sits inside it. Both sides come from the panel's
+/// lexical gate, and every link along a watcher's path is refused before it is compared, so a
+/// plain prefix check is the containment. On Windows the comparison folds case and separators.
+fn inside(folder: &std::path::Path, path: &std::path::Path) -> bool {
+    let f = folder.to_string_lossy();
+    let p = path.to_string_lossy();
+    let (f, p) = if cfg!(windows) {
+        (
+            f.replace('/', "\\").to_lowercase(),
+            p.replace('/', "\\").to_lowercase(),
+        )
+    } else {
+        (f.into_owned(), p.into_owned())
+    };
+    let f = f.trim_end_matches(['/', '\\']);
+    p == f || (p.starts_with(f) && matches!(p.as_bytes().get(f.len()), Some(b'/' | b'\\')))
 }
 
 fn person_of_profile(conn: &Connection, profile_id: &str) -> Option<String> {
@@ -147,6 +171,75 @@ impl HostPort {
 
     async fn op(&self, op: &str, args: Value) -> PortResult<Value> {
         self.dispatcher.call_host(op, args).await.map_err(wire)
+    }
+
+    /// The chat's project folder on this PC, taken through the panel's own path gate. A chat
+    /// without a folder (a board-only grouping, or a path the gate refuses) has none.
+    fn project_folder(&self, chat_id: &str) -> PortResult<std::path::PathBuf> {
+        let db = self.db()?;
+        let path = db
+            .snapshot(|tx| {
+                tx.query_row(
+                    "SELECT p.path FROM chats c JOIN projects p ON p.id = c.project_id WHERE c.id = ?1",
+                    [chat_id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()
+            })
+            .map_err(db_err)?
+            .flatten()
+            .filter(|p| helm_panel::pathgate::check(p).is_ok());
+        match path {
+            Some(p) => helm_panel::pathgate::check(&p)
+                .map_err(|r| WireError::new(code::REFUSED, r.message())),
+            None => Err(WireError::new(
+                code::NOT_FOUND,
+                "This chat has no project folder on this PC.",
+            )),
+        }
+    }
+
+    /// One path a watcher asked about, checked the way the panel checks its own (the lexical
+    /// gate, no links along the way, never a private folder) and then kept inside the chat's
+    /// project folder. Nothing else on this PC can be reached over the device line.
+    fn confine(&self, folder: &std::path::Path, raw: &str) -> PortResult<std::path::PathBuf> {
+        let roots = helm_panel::ops::private_roots(self.dispatcher.ctx());
+        let path = helm_panel::viewer::admit(raw, &roots)
+            .map_err(|e| WireError::new(code::REFUSED, e.message()))?;
+        if !inside(folder, &path) {
+            return Err(WireError::new(
+                code::REFUSED,
+                "That path is outside the chat's project folder.",
+            ));
+        }
+        Ok(path)
+    }
+
+    /// A panel or board read's answer: small enough for one frame, pictures only within the
+    /// size that crosses, and no serving address for a PDF or media file — the short-lived
+    /// address the panel's own window opens belongs to this PC alone.
+    fn fit_answer(v: Value) -> PortResult<Value> {
+        let mut v = v;
+        if let Some(kind) = v.get("kind").and_then(Value::as_str) {
+            if kind == "image" && v.get("size").and_then(Value::as_u64).unwrap_or(0) > IMAGE_BYTES {
+                return Err(WireError::new(
+                    code::REFUSED,
+                    "A picture over 512 KiB is only shown on the PC this chat runs on.",
+                ));
+            }
+            if matches!(kind, "pdf" | "audio" | "video" | "font") {
+                if let Some(m) = v.as_object_mut() {
+                    m.remove("url");
+                }
+            }
+        }
+        if v.to_string().len() > ANSWER_BYTES {
+            return Err(WireError::new(
+                code::REFUSED,
+                "That is too large to bring across from the other PC.",
+            ));
+        }
+        Ok(v)
     }
 
     /// The Allow cards waiting on a chat here, as the consent store lists them.
@@ -989,11 +1082,150 @@ impl ChatPort for HostPort {
     fn quick_open(&self, a: QuickOpenArgs) -> BoxFut<'_, PortResult<Value>> {
         Box::pin(async move {
             self.here(&a.chat_id)?;
-            self.op(
-                "quick_open",
-                json!({ "chatId": a.chat_id, "query": a.query }),
-            )
-            .await
+            let folder = self.project_folder(&a.chat_id)?;
+            let mut out = self
+                .op(
+                    "quick_open",
+                    json!({ "chatId": a.chat_id, "query": a.query, "reload": a.reload }),
+                )
+                .await?;
+            // A path-shaped query completes against folders beyond the project; a watcher
+            // only ever sees the chat's own files.
+            if let Some(items) = out.get_mut("items").and_then(Value::as_array_mut) {
+                items.retain(|it| {
+                    it.get("path")
+                        .and_then(Value::as_str)
+                        .is_some_and(|p| inside(&folder, std::path::Path::new(p)))
+                });
+            }
+            Self::fit_answer(out)
+        })
+    }
+
+    fn chat_folder(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&chat_id)?;
+            self.op("chat_folder", json!({ "chatId": chat_id })).await
+        })
+    }
+
+    fn panel_read(&self, a: PanelRead) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            let args = a.args;
+            let chat_id = args
+                .get("chatId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            self.here(&chat_id)?;
+            let folder = self.project_folder(&chat_id)?;
+            let mut args = args;
+            match a.local_op {
+                "file_read" | "archive_list" | "path_resolve" => {
+                    let raw = args
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| WireError::bad_args("The read names a path."))?
+                        .to_owned();
+                    let path = self.confine(&folder, &raw)?;
+                    args["path"] = json!(path.to_string_lossy());
+                }
+                "file_stat" => {
+                    let paths: Vec<String> = args
+                        .get("paths")
+                        .and_then(Value::as_array)
+                        .map(|l| {
+                            l.iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_owned)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let admitted: Vec<String> = paths
+                        .iter()
+                        .map(|p| {
+                            self.confine(&folder, p)
+                                .map(|p| p.to_string_lossy().into_owned())
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    args["paths"] = json!(admitted);
+                }
+                _ => {}
+            }
+            let out = self.op(a.local_op, args).await?;
+            // A resolved path must still be inside the folder: the op knows `~` and drives,
+            // a watcher does not get to look past the chat's own project.
+            if a.local_op == "path_resolve" {
+                let resolved = out
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                if !inside(&folder, std::path::Path::new(&resolved)) {
+                    return Err(WireError::new(code::NOT_FOUND, "Not found."));
+                }
+            }
+            match a.local_op {
+                "file_read" | "archive_list" => Self::fit_answer(out),
+                _ => Ok(out),
+            }
+        })
+    }
+
+    fn panel_stage(&self, a: PanelStageArgs, stage: bool) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            // The path is repository-relative and the local op confines it to the chat's
+            // folder and its own repository, exactly as the panel's own Stage button does.
+            let mut args = json!({ "chatId": a.chat_id, "path": a.path });
+            if let Some(f) = a.from {
+                args["from"] = json!(f);
+            }
+            let out = self
+                .op(
+                    if stage {
+                        "changes_stage"
+                    } else {
+                        "changes_unstage"
+                    },
+                    args,
+                )
+                .await?;
+            Self::fit_answer(out)
+        })
+    }
+
+    fn board_connection(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&chat_id)?;
+            let got = self.op("board_connection_get", json!({})).await?;
+            // The watcher only needs to know a board is set up there: the board's address and
+            // token stay on this PC.
+            let set = got
+                .get("url")
+                .and_then(Value::as_str)
+                .is_some_and(|u| !u.trim().is_empty())
+                && got
+                    .get("hasToken")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+            Ok(json!({ "url": if set { "board" } else { "" }, "hasToken": set }))
+        })
+    }
+
+    fn board_read(&self, a: BoardReadArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            let out = self.op("board_read", a.params).await?;
+            Self::fit_answer(out)
+        })
+    }
+
+    fn board_cancel(&self, a: BoardCancelArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            self.op("board_cancel", json!({ "requestId": a.request_id }))
+                .await
         })
     }
 
