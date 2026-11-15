@@ -7,11 +7,11 @@ import path from "node:path";
 import { test } from "node:test";
 import { isClaudeModelRef, SubagentModelGuard, subagentModelDenyReason } from "../src/drivers/claude/subagentmodel.ts";
 import type { Json } from "../src/protocol/types.ts";
-import { startWithFixture } from "./helpers.ts";
+import { prompt, startWithFixture } from "./helpers.ts";
 
 test("a Claude model name, and what is not one", () => {
-  for (const m of ["opus", "Sonnet", "HAIKU", "claude-opus-4-5", "claude-haiku-4-5-20251001", " opus "]) assert.ok(isClaudeModelRef(m), m);
-  for (const m of ["inherit", "", "qwen:8b", "local/strata/x", "myopus", "claude", "gpt-4"]) assert.ok(!isClaudeModelRef(m), m);
+  for (const m of ["opus", "Sonnet", "HAIKU", "claude-opus-4-5", "claude-haiku-4-5-20251001", " opus ", "opus[1m]", "Sonnet[1m]", "best", "OpusPlan", " opusplan "]) assert.ok(isClaudeModelRef(m), m);
+  for (const m of ["inherit", "", "qwen:8b", "local/strata/x", "myopus", "claude", "gpt-4", "bestof", "opusplanner", "opus[2m]", "opusplan[1m]x"]) assert.ok(!isClaudeModelRef(m), m);
 });
 
 test("the refusal names the agent, the model as asked, and app_create_chat as the way out", () => {
@@ -34,6 +34,8 @@ test("the asked model comes from the call or from the agent's definition, whiche
   fs.writeFileSync(path.join(cwd, ".claude", "agents", "both.md"), "---\nname: both\nmodel: opus\n---\n");
   fs.writeFileSync(path.join(home, ".claude", "agents", "homey.md"), "---\nmodel: claude-opus-4-5\n---\n");
   fs.writeFileSync(path.join(home, ".claude", "agents", "broken.md"), "no frontmatter at all");
+  // A long one-line description ahead of `model:` must not push the model line out of what is read.
+  fs.writeFileSync(path.join(home, ".claude", "agents", "wordy.md"), `---\nname: wordy\ndescription: ${"long ".repeat(2000)}\nmodel: opus\n---\n`);
   const g = new SubagentModelGuard({ agentsFile, cwd, home });
 
   const rows: Array<[string, Json, string | null, string?]> = [
@@ -51,6 +53,7 @@ test("the asked model comes from the call or from the agent's definition, whiche
     ["a local model name is fine", { model: "qwen:8b" }, null],
     ["a definition without a model is fine", { subagent_type: "noModel" }, null],
     ["a markdown file without frontmatter changes nothing", { subagent_type: "broken" }, null],
+    ["a definition whose long description comes before the model line", { subagent_type: "wordy" }, "wordy", "opus"],
   ];
   for (const [label, input, name, model] of rows) {
     const r = g.decide(input as Json & Record<string, unknown>);
@@ -88,6 +91,19 @@ test("the hook rides on a local chat only", async () => {
     assert.ok(local.includes("helm-subagent-model") && local.includes("Agent|Task"), "a local chat registers it on Agent and Task");
     const claude = await run({});
     assert.ok(!claude.includes("helm-subagent-model"), "a Claude chat does not");
+    // And the reply it sends back: a local chat's Agent call asking for opus comes back denied.
+    const s = startWithFixture("subagent-model", { claude: { local: { baseUrl: "http://127.0.0.1:9", model: "m" } }, launch: { hostTools: [], chatToolsDirectory: dir } });
+    try {
+      await s.host.ready();
+      await prompt(s.host, "send a coder");
+      await s.host.waitForType("agent_settled", 8000, 0);
+      const reply = s.received().find((r) => r.type === "control_response" && String((r.response as Json)?.request_id ?? "").startsWith("fake-hook-"));
+      const out = (((reply?.response as Json)?.response as Json)?.hookSpecificOutput ?? {}) as Json;
+      assert.equal(out.permissionDecision, "deny", "the hook call is answered with a refusal");
+      assert.match(String(out.permissionDecisionReason), /The sub-agent 'coder' asks for opus, but this chat runs on a local model server/);
+    } finally {
+      await s.done();
+    }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

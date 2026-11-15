@@ -839,7 +839,7 @@ export class ClaudeDriver implements Driver {
       return;
     }
     if (req.callback_id === SCHEDULE_REDIRECT_HOOK_ID) {
-      const reason = scheduleRedirect(String(input.tool_name ?? ""), input.tool_input);
+      const reason = scheduleRedirect(String(input.tool_name ?? ""), input.tool_input, this.isLocal);
       return this.controlReply(requestId, { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } });
     }
     const toolUseId = String(req.tool_use_id ?? input.tool_use_id ?? "");

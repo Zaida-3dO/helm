@@ -8,11 +8,12 @@ import path from "node:path";
 export const SUBAGENT_MODEL_HOOK_ID = "helm-subagent-model";
 export const SUBAGENT_MODEL_MATCHER = "Agent|Task";
 
-/** True when a model name can only mean a Claude model: `opus`, `sonnet` or `haiku` by themselves,
- * or a full `claude-…` id. `inherit` and anything a local server would answer are not. */
+/** True when a model name can only mean a Claude model: `opus`, `sonnet`, `haiku`, `best` or
+ * `opusplan` by themselves (with Claude Code's `[1m]` alias suffix), or a full `claude-…` id.
+ * `inherit` and anything a local server would answer are not. */
 export function isClaudeModelRef(model: string): boolean {
   const m = model.trim().toLowerCase();
-  return /^(opus|sonnet|haiku)$/.test(m) || m.startsWith("claude-");
+  return /^(opus|sonnet|haiku|best|opusplan)(\[1m\])?$/.test(m) || m.startsWith("claude-");
 }
 
 /** The refusal, exported so a test pins its wording. */
@@ -80,7 +81,9 @@ export class SubagentModelGuard {
       }
       for (const file of files) {
         try {
-          const fm = frontmatter(fs.readFileSync(path.join(dir, file), "utf8").slice(0, 4000));
+          // The cap only bounds what is read: agent files often carry a long description line
+          // before `model:`, and frontmatter stops at its closing `---` line anyway.
+          const fm = frontmatter(fs.readFileSync(path.join(dir, file), "utf8").slice(0, 65536));
           add(fm.name !== "" ? fm.name : file.slice(0, -3), fm.model);
         } catch {
           // As above: quiet.
