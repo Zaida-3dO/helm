@@ -1576,9 +1576,7 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         (
             "devices_composer_defaults",
             json!({"chatId": "c1", "patch": {"model": "opus", "responseVerbosity": "high"}}),
-            Ok(
-                json!({"model": "opus", "effort": "high", "responseVerbosity": "high"}),
-            ),
+            Ok(json!({"model": "opus", "effort": "high", "responseVerbosity": "high"})),
         ),
         (
             "devices_item_links",
