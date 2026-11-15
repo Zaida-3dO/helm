@@ -751,7 +751,7 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         .unwrap_err();
     assert_eq!(e.code, code::BAD_ARGS);
     // Reads answer with the run switch off; every write — including each of the new ones — does
-    // not. The switch covers every op this slice added.
+    // not. The switch covers every op that runs or changes a chat from another PC.
     port.set_run(false);
     for (op, args) in [
         ("verbosity_get", json!({"chatId": "c1"})),

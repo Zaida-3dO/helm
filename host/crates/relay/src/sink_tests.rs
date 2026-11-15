@@ -314,7 +314,7 @@ fn env() -> Env {
         profile_id: pid,
         person: String::new(),
         tag_path: paths.tag,
-        folder: plain_path(&paths.attachments),
+        folder: plain_path(&paths.folder),
         policy: TagPolicy::default(),
         policy_path: paths.policy,
         new_chat_model: None,

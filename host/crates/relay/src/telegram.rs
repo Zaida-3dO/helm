@@ -140,11 +140,11 @@ pub struct Paths {
     pub policy: PathBuf,
     pub answered: PathBuf,
     pub sent: PathBuf,
-    pub attachments: PathBuf,
+    pub folder: PathBuf,
 }
 
-/// The folder one profile's Telegram attachments are saved in.
-pub fn attachments_dir(profile_dir: &Path, profile_id: &str) -> PathBuf {
+/// The folder one profile's new Telegram chats start in.
+pub fn chat_folder(profile_dir: &Path, profile_id: &str) -> PathBuf {
     profile_dir.join("telegram").join(profile_id)
 }
 

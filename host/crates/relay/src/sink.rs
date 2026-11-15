@@ -1111,7 +1111,7 @@ impl ChatSink {
             person: profile.hub_person_id.unwrap_or_default(),
             profile_id: profile.id,
             tag_path: paths.tag,
-            folder: plain_path(&paths.attachments),
+            folder: plain_path(&paths.folder),
             policy: file.check().unwrap_or_default(),
             policy_path: paths.policy,
             new_chat_model: model.map(str::to_owned),
