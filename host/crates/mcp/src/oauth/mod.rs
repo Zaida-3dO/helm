@@ -182,6 +182,53 @@ pub fn begin_on(
     scopes: &[String],
     resource: Option<&str>,
 ) -> Result<Pending, OauthError> {
+    begin_on_with(bound, agent, server, client, scopes, resource, &[])
+}
+
+/// Parameters the flow itself always sets; an `extra` pair may never replace one of them.
+const STANDARD_PARAMS: [&str; 8] = [
+    "response_type",
+    "client_id",
+    "redirect_uri",
+    "state",
+    "code_challenge",
+    "code_challenge_method",
+    "scope",
+    "resource",
+];
+
+/// [`begin_on`] with a provider's own extra sign-in-page parameters (`extra`): pairs appended to
+/// the address as-is, except where a name is one the flow sets itself. An empty value is left
+/// out. Google's `access_type`, `prompt` and `login_hint` travel this way.
+pub fn begin_with(
+    agent: &ureq::Agent,
+    server: &AuthServer,
+    client: &Client,
+    scopes: &[String],
+    resource: Option<&str>,
+    extra: &[(&str, &str)],
+) -> Result<Pending, OauthError> {
+    begin_on_with(
+        bind(0, "/callback")?,
+        agent,
+        server,
+        client,
+        scopes,
+        resource,
+        extra,
+    )
+}
+
+/// [`begin_with`] on a listener bound earlier (see [`bind`]).
+pub fn begin_on_with(
+    bound: Bound,
+    agent: &ureq::Agent,
+    server: &AuthServer,
+    client: &Client,
+    scopes: &[String],
+    resource: Option<&str>,
+    extra: &[(&str, &str)],
+) -> Result<Pending, OauthError> {
     let Bound { listener, state } = bound;
     let redirect_uri = listener.redirect_uri();
     let verifier = pkce::random_verifier();
@@ -208,6 +255,11 @@ pub fn begin_on(
         }
         if let Some(r) = resource {
             q.append_pair("resource", r);
+        }
+        for (k, v) in extra {
+            if !v.is_empty() && !STANDARD_PARAMS.iter().any(|s| s == k) {
+                q.append_pair(k, v);
+            }
         }
     }
     Ok(Pending {
