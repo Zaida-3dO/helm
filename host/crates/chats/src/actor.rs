@@ -2850,6 +2850,17 @@ impl Actor {
 
     // ------------------------------------------------------------------ timers
 
+    /// A line already waiting on the worker's output channel, taken without waiting; `None`
+    /// when the channel is empty or gone.
+    fn next_queued_worker_line(&mut self) -> Option<WorkerOutput> {
+        let rx = self.out.as_mut()?;
+        match rx.try_recv() {
+            Ok(out) => Some(out),
+            Err(mpsc::error::TryRecvError::Empty)
+            | Err(mpsc::error::TryRecvError::Disconnected) => None,
+        }
+    }
+
     fn on_timers(&mut self) {
         let now_i = TInstant::now();
         let (due, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.timers)
@@ -2888,6 +2899,24 @@ impl Actor {
                 }
                 Timer::StopDeadline => {
                     if self.stopping.is_some() {
+                        // A line the worker already sent outranks the deadline: the kill cures a
+                        // silent worker, not one that is on its way out. On an oversubscribed
+                        // machine the deadline's expiry and the worker's own settle line can land
+                        // in the same scheduling slice, where killing is a coin flip; take the
+                        // line and re-arm the deadline instead, so a worker that keeps talking
+                        // without settling is still killed.
+                        if let Some(out) = self.next_queued_worker_line() {
+                            self.on_output(Some(out));
+                            if self.stopping.is_some() && !self.finished {
+                                let lim = if self.archived {
+                                    self.sh.cfg.limits.archive_stop
+                                } else {
+                                    self.sh.cfg.limits.stop
+                                };
+                                self.add_timer(lim, Timer::StopDeadline);
+                            }
+                            continue;
+                        }
                         let why = if self.archived {
                             ARCHIVE_STOP_NOTE
                         } else {
