@@ -15,12 +15,12 @@
 //! | `app_gmail_send` | send — only at permission level `send`, and only past an Allow card |
 //!
 //! Sending gates like the workflow tools ([`helm_consent`]): without proof the call records the
-//! ask and refuses with the fixed form and the Allow hint; with `grant` or `userQuote` it spends
-//! the user's Allow for exactly this message — the target binds account, every recipient, the
-//! subject and the whole body text, and the card shows them (the body by its first 200
-//! characters), so a grant can never spend on another message. A send is capped at 5 recipients
-//! in total and a 200-character subject so the card can say the whole thing; the typed sentence
-//! only covers a single recipient without cc, and names the address and the subject.
+//! ask and refuses with the Allow hint; with a `grant` it spends the user's Allow for exactly
+//! this message — the target binds account, every recipient, the subject, the whole body text
+//! and the thread, and the card shows them (the body by its first 200 characters), so a grant
+//! can never spend on another message. Typed words never approve a send. A send is capped at 5
+//! recipients in total, 80 characters an address and a 200-character subject so the card can
+//! say the whole thing.
 //!
 //! Limits are host-side before anything goes out: at most 50 search hits, bodies at most 16 KiB,
 //! 20 recipients for a draft and 5 for a send, read text capped. The base address can be pointed
@@ -67,6 +67,10 @@ const MAX_SEND_RECIPIENTS: usize = 5;
 /// A send subject is at most this long, so the card shows the whole subject and what is bound
 /// is what goes out.
 const MAX_SEND_SUBJECT: usize = 200;
+/// A send address is at most this long, so five of them, the subject and the body's start all
+/// fit on the stored card whole (the consent store cuts a line at 240 characters and a card at
+/// 1,200).
+const MAX_SEND_ADDRESS: usize = 80;
 /// How much of the body the card shows.
 const BODY_EXCERPT_CHARS: usize = 200;
 const MAX_LABELS: usize = 20;
@@ -142,20 +146,52 @@ struct Account {
     access: String,
 }
 
-/// Everything a call needs: the store (for the level and for refreshes) and the account. An
-/// unknown account or a dead sign-in is refused in words, before any network use.
+/// The signed-in addresses (with their labels), for a refusal that names the choices.
+fn account_choices(store: &McpStore) -> String {
+    let list = google::listed_accounts(store.creds());
+    if list.is_empty() {
+        return "No Google account is signed in; the user signs one in under Settings → MCP."
+            .to_owned();
+    }
+    let names: Vec<String> = list
+        .iter()
+        .map(|a| match &a.label {
+            Some(l) => format!("{} (label \"{l}\")", a.email),
+            None => a.email.clone(),
+        })
+        .collect();
+    format!("Signed-in accounts: {}.", names.join(", "))
+}
+
+/// Everything a call needs: the store (for the level and for refreshes) and the account named by
+/// the call's `account`. The MCP master switch, an unknown or missing account and a dead
+/// sign-in are refused in words (naming the signed-in accounts), before any network use.
 fn resolve(
     ctx: &ToolCtx,
-    account_arg: &str,
+    args: &Value,
 ) -> Result<(Arc<McpStore>, crate::types::McpServer, Account), ToolError> {
+    if let Some(db) = ctx.services.get::<helm_core::db::Database>() {
+        if !crate::repo_gate::all_on(&db) {
+            return Err(ToolError::refused(
+                "MCP is switched off in Settings → MCP, so Helm's Gmail tools are off too.",
+            ));
+        }
+    }
     let store = ctx
         .services
         .get::<McpStore>()
         .ok_or_else(|| ToolError::refused("MCP settings are not available."))?;
     let server = google_server(&store)?;
+    let Some(account_arg) = arg_str(args, "account") else {
+        return Err(ToolError::refused(format!(
+            "The call names no account. {}",
+            account_choices(&store)
+        )));
+    };
     let email = google::resolve_account(store.creds(), account_arg).ok_or_else(|| {
         ToolError::refused(format!(
-            "No signed-in Google account called \"{account_arg}\". Sign one in under Settings → MCP."
+            "No signed-in Google account called \"{account_arg}\". {}",
+            account_choices(&store)
         ))
     })?;
     let access = google::account_access(&store, &email, false).map_err(ToolError::refused)?;
@@ -275,12 +311,6 @@ fn arg_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
-}
-
-fn parse_account(args: &Value) -> Result<String, ToolError> {
-    arg_str(args, "account")
-        .map(str::to_owned)
-        .ok_or_else(|| ToolError::refused("The call names no account."))
 }
 
 /// A Gmail message or thread id: a short run of letters, digits, dashes and underscores.
@@ -493,7 +523,7 @@ fn cap_chars(s: &str, max: usize) -> String {
 // ---- the tools ------------------------------------------------------------------------------------
 
 fn search_tool(ctx: &ToolCtx, args: Value) -> ToolResult {
-    let (store, _server, mut account) = resolve(ctx, &parse_account(&args)?)?;
+    let (store, _server, mut account) = resolve(ctx, &args)?;
     let query = arg_str(&args, "query").unwrap_or("").to_owned();
     if query.is_empty() || query.chars().count() > MAX_QUERY {
         return Err(ToolError::refused(
@@ -555,7 +585,7 @@ fn search_tool(ctx: &ToolCtx, args: Value) -> ToolResult {
 }
 
 fn read_tool(ctx: &ToolCtx, args: Value) -> ToolResult {
-    let (store, _server, mut account) = resolve(ctx, &parse_account(&args)?)?;
+    let (store, _server, mut account) = resolve(ctx, &args)?;
     let id = parse_id(&args, "id")?;
     let m = gmail_call(
         &store,
@@ -583,7 +613,7 @@ fn read_tool(ctx: &ToolCtx, args: Value) -> ToolResult {
 }
 
 fn labels_tool(ctx: &ToolCtx, args: Value) -> ToolResult {
-    let (store, _server, mut account) = resolve(ctx, &parse_account(&args)?)?;
+    let (store, _server, mut account) = resolve(ctx, &args)?;
     let got = gmail_call(&store, &mut account, "GET", "labels", &[], None)?;
     let labels: Vec<Value> = got
         .get("labels")
@@ -599,7 +629,7 @@ fn labels_tool(ctx: &ToolCtx, args: Value) -> ToolResult {
 }
 
 fn label_tool(ctx: &ToolCtx, args: Value) -> ToolResult {
-    let (store, server, mut account) = resolve(ctx, &parse_account(&args)?)?;
+    let (store, server, mut account) = resolve(ctx, &args)?;
     require_level(&server, "label messages")?;
     let id = parse_id(&args, "id")?;
     let add = label_names(&args, "add")?;
@@ -676,7 +706,7 @@ fn compose_args() -> Value {
 }
 
 fn draft_tool(ctx: &ToolCtx, args: Value) -> ToolResult {
-    let (store, server, mut account) = resolve(ctx, &parse_account(&args)?)?;
+    let (store, server, mut account) = resolve(ctx, &args)?;
     require_level(&server, "create drafts")?;
     let m = parse_message(&args)?;
     let raw = message_raw(&m.to, &m.cc, &m.subject, &m.body).map_err(ToolError::refused)?;
@@ -700,7 +730,7 @@ fn draft_tool(ctx: &ToolCtx, args: Value) -> ToolResult {
 }
 
 fn send_tool(ctx: &ToolCtx, args: Value) -> ToolResult {
-    let (store, server, mut account) = resolve(ctx, &parse_account(&args)?)?;
+    let (store, server, mut account) = resolve(ctx, &args)?;
     if google::permission_of(&server.transport.args) != Some(google::GooglePermission::Send) {
         return Err(ToolError::refused(
             "Sending is switched off for Google accounts: raise the permission level to \"send\" \
@@ -713,8 +743,12 @@ fn send_tool(ctx: &ToolCtx, args: Value) -> ToolResult {
     // A message of that size can still go out as a draft.
     if m.to.len() + m.cc.len() > MAX_SEND_RECIPIENTS {
         return Err(ToolError::refused(format!(
-            "A send covers at most {MAX_SEND_RECIPIENTS} recipients in total (to and cc \
-             together); make it a draft instead, or send to fewer."
+            "A send covers at most {MAX_SEND_RECIPIENTS} recipients in total (to and cc              together); make it a draft instead, or send to fewer."
+        )));
+    }
+    if m.to.iter().chain(&m.cc).any(|a| a.len() > MAX_SEND_ADDRESS) {
+        return Err(ToolError::refused(format!(
+            "A send address is at most {MAX_SEND_ADDRESS} characters; make it a draft instead."
         )));
     }
     let subject: String = m.subject.chars().filter(|c| !c.is_control()).collect();
@@ -723,19 +757,18 @@ fn send_tool(ctx: &ToolCtx, args: Value) -> ToolResult {
             "A send subject is at most {MAX_SEND_SUBJECT} characters."
         )));
     }
-    // The Allow binds this exact message: account, every recipient, the subject and the whole
-    // body, so a grant for one message can never spend on another.
+    // The Allow binds this exact message: account, every recipient, the subject, the whole body
+    // and the thread, so a grant for one message can never spend on another. Only the user's
+    // click on the card approves it: the card carries the whole message, typed words never count.
     let target = json!({
         "account": account.email.to_ascii_lowercase(),
         "to": m.to,
         "cc": m.cc,
         "subject": m.subject,
         "body": m.body,
+        "threadId": m.thread_id,
     });
-    // The typed sentence only speaks for a message the user can hold in their head at once:
-    // one recipient, no cc. Everything else is approved by the click on the card alone.
-    let words_allowed = m.to.len() == 1 && m.cc.is_empty();
-    consent_gate(ctx, &args, &target, words_allowed)?;
+    consent_gate(ctx, &args, &target)?;
     let raw = message_raw(&m.to, &m.cc, &m.subject, &m.body).map_err(ToolError::refused)?;
     let mut body = json!({"raw": raw});
     if let Some(t) = &m.thread_id {
@@ -756,17 +789,11 @@ fn send_tool(ctx: &ToolCtx, args: Value) -> ToolResult {
     }))
 }
 
-/// The workflow-shaped gate: without proof, record the ask and refuse with the fixed form (when
-/// words can speak for this message) and the Allow hint; with a claimed `grant` or `userQuote`,
-/// spend the user's Allow for exactly this message. `words_allowed` is decided by the caller
-/// from the whole message: typed sentences only cover a single-recipient message without cc.
-/// Everything happens in one transaction; a refusal sends nothing.
-fn consent_gate(
-    ctx: &ToolCtx,
-    args: &Value,
-    target: &Value,
-    words_allowed: bool,
-) -> Result<(), ToolError> {
+/// The workflow-shaped gate: without proof, record the ask and refuse with the Allow hint; with a
+/// claimed `grant`, spend the user's Allow for exactly this message. Typed words never approve
+/// a send, so a `userQuote` is refused before anything is asked or spent. Everything happens in
+/// one transaction; a refusal sends nothing.
+fn consent_gate(ctx: &ToolCtx, args: &Value, target: &Value) -> Result<(), ToolError> {
     let db = ctx
         .services
         .get::<helm_core::db::Database>()
@@ -775,15 +802,12 @@ fn consent_gate(
         .services
         .get::<AllowKinds>()
         .ok_or_else(|| ToolError::refused("Consent is not available."))?;
-    let grant = arg_str(args, "grant").is_some();
-    let words = arg_str(args, "userQuote").is_some();
-    if words && !words_allowed {
+    if arg_str(args, "userQuote").is_some() {
         return Err(ToolError::refused(
-            "That message has more than one recipient or a cc: only the user's own click on an \
-             Allow card can approve it — typed words never count for it. File the card with \
-             app_request_allow and ask the user to approve it.",
+            "Typed words never approve a send: only the user's own click on an Allow card can.              File the card with app_request_allow and ask the user to approve it.",
         ));
     }
+    let grant = arg_str(args, "grant").is_some();
     let now = helm_core::now_ms();
     let chat = ctx.caller_chat_id.clone();
     let target = target.clone();
@@ -795,35 +819,14 @@ fn consent_gate(
                 )
                 .map(|_| ())
                 .map_err(|r| r.0)
-            } else if words {
-                helm_consent::store::spend_words(
-                    tx, &kinds, &chat, SEND_KIND, &target, USED_BY, now,
-                )
-                .map(|_| ())
-                .map_err(|r| r.0)
             } else {
                 match helm_consent::store::record_ask(tx, &kinds, &chat, SEND_KIND, &target, now) {
                     Ok(()) => {
-                        let body = if words_allowed {
-                            let form = kinds
-                                .get(SEND_KIND)
-                                .and_then(|k| (k.canonical)(tx, &chat, &target).ok())
-                                .map(|c| c.fixed_form)
-                                .unwrap_or_default();
-                            format!(
-                                "Sending that message needs the user's permission: ask them to \
-                                 send exactly \"{form}\" and pass their words as userQuote."
-                            )
-                        } else {
-                            "Sending that message needs the user's permission, and typed words \
-                             do not count for a message with more than one recipient: file an \
-                             Allow card with app_request_allow and ask the user to approve it."
-                                .to_owned()
-                        };
+                        let body = "Sending that message needs the user's permission: file an                                     Allow card with app_request_allow and ask the user to approve                                     it.";
                         Err(helm_consent::store::with_allow_hint(
-                            tx, &kinds, &chat, SEND_KIND, &target, &body,
+                            tx, &kinds, &chat, SEND_KIND, &target, body,
                         )
-                        .unwrap_or(body))
+                        .unwrap_or_else(|_| body.to_owned()))
                     }
                     Err(r) => Err(r.0),
                 }
@@ -836,13 +839,14 @@ fn consent_gate(
 
 // ---- the allow kind -------------------------------------------------------------------------------
 
-/// The kind behind `app_gmail_send`: one message, bound to sender, recipients, subject and the
-/// body's hash.
+/// The kind behind `app_gmail_send`: one message, bound to sender, recipients, subject, body and
+/// thread. Only a click approves it: the card carries the whole message, so no typed sentence
+/// can stand in.
 pub fn gmail_send_kind() -> AllowKind {
     AllowKind {
         id: SEND_KIND,
         label: "Send a Gmail message",
-        accepts_words: true,
+        accepts_words: false,
         canonical: send_canonical,
     }
 }
@@ -871,9 +875,9 @@ fn body_excerpt(body: &str) -> String {
 
 /// Rebuilds the canonical target from the agent's: everything lower-cased, recipients sorted
 /// and de-duplicated, the subject trimmed with control characters out, and the whole body kept
-/// — the card shows its start, and a grant is bound to the exact text. The card lines name every
-/// `to` and `cc` address, the full subject and the body's first line; the typed sentence only
-/// exists for a single recipient without cc, and then it names the address and the subject too.
+/// — the card shows its start, and a grant is bound to the exact text — and the thread kept. The
+/// card lines name every `to` and `cc` address, the full subject, the thread and the body's first
+/// line; an address over [`MAX_SEND_ADDRESS`] is refused so none of them is cut on the card.
 fn send_canonical(_tx: &Transaction<'_>, _chat: &str, target: &Value) -> Result<Canonical, String> {
     let bad = || "The send request is malformed.".to_owned();
     let o = target.as_object().ok_or_else(bad)?;
@@ -901,6 +905,11 @@ fn send_canonical(_tx: &Transaction<'_>, _chat: &str, target: &Value) -> Result<
                         let e = v.as_str().map(str::trim).unwrap_or("");
                         if !google::valid_email(e) {
                             return Err(bad());
+                        }
+                        if e.len() > MAX_SEND_ADDRESS {
+                            return Err(format!(
+                                "A send address is at most {MAX_SEND_ADDRESS} characters."
+                            ));
                         }
                         Ok(e.to_ascii_lowercase())
                     })
@@ -945,15 +954,31 @@ fn send_canonical(_tx: &Transaction<'_>, _chat: &str, target: &Value) -> Result<
             )
         })?
         .to_owned();
+    let thread_id = match o.get("threadId") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let t = v.as_str().map(str::trim).ok_or_else(bad)?;
+            if t.is_empty()
+                || t.len() > 50
+                || !t
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+            {
+                return Err(bad());
+            }
+            Some(t.to_owned())
+        }
+    };
     let canonical = json!({
         "account": account,
         "to": to,
         "cc": cc,
         "subject": subject,
         "body": body,
+        "threadId": thread_id,
     });
     let summary = format!("Send Gmail from {account}");
-    let mut details = Vec::with_capacity(to.len() + cc.len() + 2);
+    let mut details = Vec::with_capacity(to.len() + cc.len() + 3);
     for a in &to {
         details.push(format!("To: {a}"));
     }
@@ -961,28 +986,33 @@ fn send_canonical(_tx: &Transaction<'_>, _chat: &str, target: &Value) -> Result<
         details.push(format!("Cc: {a}"));
     }
     details.push(format!("Subject: {subject}"));
+    if let Some(t) = &thread_id {
+        details.push(format!("In thread: {t}"));
+    }
     details.push(format!("Body starts: {}", body_excerpt(&body)));
-    // The typed sentence only speaks for a message the user can take in whole: one address, no
-    // cc. It names the address and the subject, so two messages that merely share a recipient
-    // never share a sentence.
-    let fixed_form = if to.len() == 1 && cc.is_empty() {
-        format!("Approve the Gmail send to {} about \"{subject}\".", to[0])
-    } else {
-        String::new()
-    };
     Ok(Canonical {
         target: canonical,
         summary,
-        fixed_form,
+        fixed_form: String::new(),
         details,
     })
 }
 
 // ---- registration ---------------------------------------------------------------------------------
 
+/// The sentence every Gmail tool's description ends with: the agent is not given the accounts
+/// at launch, so it learns them from the first refusal.
+const ACCOUNTS_NOTE: &str = "Signed-in accounts are listed in the refusal when `account` is \
+                             missing or unknown.";
+
+fn note_accounts(mut spec: ToolSpec) -> ToolSpec {
+    spec.description = format!("{} {ACCOUNTS_NOTE}", spec.description);
+    spec
+}
+
 pub fn register_gmail_tools(r: &mut HostToolRegistry) {
     r.blocking(
-        ToolSpec::read(
+        note_accounts(ToolSpec::read(
             SEARCH,
             "Search one signed-in Gmail account with Gmail query syntax (from:, to:, \
              subject:, is:unread, has:attachment, newer_than:7d...). Returns the newest matches \
@@ -997,14 +1027,14 @@ pub fn register_gmail_tools(r: &mut HostToolRegistry) {
                 "required": ["account", "query"],
                 "additionalProperties": false
             }),
-        )
+        ))
         .when(Condition::GmailAccounts)
         .timeout_ms(60_000)
         .guidelines(GUIDANCE),
         search_tool,
     );
     r.blocking(
-        ToolSpec::read(
+        note_accounts(ToolSpec::read(
             READ,
             "Read one Gmail message in full: headers, labels and the body text (plain, or HTML \
              with its tags taken out). The id comes from app_gmail_search.",
@@ -1017,13 +1047,13 @@ pub fn register_gmail_tools(r: &mut HostToolRegistry) {
                 "required": ["account", "id"],
                 "additionalProperties": false
             }),
-        )
+        ))
         .when(Condition::GmailAccounts)
         .guidelines(GUIDANCE),
         read_tool,
     );
     r.blocking(
-        ToolSpec::read(
+        note_accounts(ToolSpec::read(
             LABELS,
             "List the labels of one signed-in Gmail account (ids and names, for app_gmail_label).",
             json!({
@@ -1032,13 +1062,13 @@ pub fn register_gmail_tools(r: &mut HostToolRegistry) {
                 "required": ["account"],
                 "additionalProperties": false
             }),
-        )
+        ))
         .when(Condition::GmailAccounts)
         .guidelines(GUIDANCE),
         labels_tool,
     );
     r.blocking(
-        ToolSpec::write(
+        note_accounts(ToolSpec::write(
             LABEL,
             "Add or remove Gmail labels on one message (Gmail's own names, like INBOX, UNREAD, \
              STARRED, or the labels app_gmail_labels lists).",
@@ -1053,39 +1083,38 @@ pub fn register_gmail_tools(r: &mut HostToolRegistry) {
                 "required": ["account", "id"],
                 "additionalProperties": false
             }),
-        )
+        ))
         .when(Condition::GmailAccounts)
         .guidelines(GUIDANCE),
         label_tool,
     );
     r.blocking(
-        ToolSpec::write(
+        note_accounts(ToolSpec::write(
             DRAFT,
             "Create a Gmail draft in one signed-in account (optionally inside an existing \
              thread). Prefer this over app_gmail_send unless the user asked for the message to \
              be sent.",
             compose_args(),
-        )
+        ))
         .when(Condition::GmailAccounts)
         .large()
         .guidelines(GUIDANCE),
         draft_tool,
     );
     r.blocking(
-        ToolSpec::write(
+        note_accounts(ToolSpec::write(
             SEND,
             "Send a Gmail message from one signed-in account. Only on the user's explicit ask \
              for this exact message to be sent; prefer app_gmail_draft. It needs the Google \
-             server's permission level \"send\" and the user's Allow: without it the call files \
-             a permission request and refuses. With the user's own words or an Allow grant, \
-             pass them as userQuote or grant.",
+             server's permission level \"send\" and the user's click on an Allow card: \
+             without it the call refuses. File the card with app_request_allow, and once the \
+             user has approved it pass the grant. Typed words never count.",
             {
                 let mut s = compose_args();
                 s["properties"]["grant"] = json!({"type": "string", "maxLength": 64});
-                s["properties"]["userQuote"] = json!({"type": "string", "maxLength": 500});
                 s
             },
-        )
+        ))
         .when(Condition::GmailAccounts)
         .large()
         .guidelines(GUIDANCE),
@@ -1527,6 +1556,18 @@ mod tests {
         assert!(err.contains("404"), "{err}");
         assert!(!err.contains("tok-me") && !err.contains("r-1"), "{err}");
 
+        // An unknown or missing account is refused with the choices named, tokens never.
+        for args in [
+            json!({"account": "nope@x.com", "query": "x"}),
+            json!({"query": "x"}),
+        ] {
+            let err = call(&e, SEARCH, args).unwrap_err();
+            assert!(
+                err.contains("me@x.com") && err.contains("Work@Y.org"),
+                "{err}"
+            );
+            assert!(!err.contains("tok-"), "{err}");
+        }
         let err = call(&e, SEARCH, json!({"account": "nope@x.com", "query": "x"})).unwrap_err();
         assert!(err.contains("No signed-in Google account"), "{err}");
 
@@ -1699,11 +1740,8 @@ mod tests {
 
         let e = env(GooglePermission::Send, "tok-me");
         let err = call(&e, SEND, msg.clone()).unwrap_err();
-        assert!(
-            err.contains("Approve the Gmail send to ann@x.com about \"Weekly\"."),
-            "{err}"
-        );
-        assert!(err.contains("userQuote"), "{err}");
+        assert!(err.contains("Allow card"), "{err}");
+        assert!(!err.contains("userQuote"), "{err}");
         assert!(err.contains("app_request_allow"), "{err}");
         assert!(!err.contains("tok-me"), "{err}");
         let asks: i64 =
@@ -1718,8 +1756,8 @@ mod tests {
         assert_eq!(asks, 1, "the refusal recorded the ask");
         assert!(fake.hits().is_empty(), "no Allow, nothing sent");
 
-        // A claimed grant with no Allow standing: refused. A claimed quote with no recorded
-        // user words: refused. Neither sends.
+        // A claimed grant with no Allow standing: refused. Typed words are refused outright,
+        // whatever was typed. Neither sends.
         let mut claimed = msg.clone();
         claimed["grant"] = json!("g1");
         let err = call(&e, SEND, claimed.clone()).unwrap_err();
@@ -1727,7 +1765,8 @@ mod tests {
         claimed.as_object_mut().unwrap().remove("grant");
         claimed["userQuote"] = json!("Approve the Gmail send to ann@x.com about \"Weekly\".");
         let err = call(&e, SEND, claimed).unwrap_err();
-        assert!(!err.is_empty() && !err.contains("tok-me"), "{err}");
+        assert!(err.contains("Typed words never approve a send"), "{err}");
+        assert!(!err.contains("tok-me"), "{err}");
         assert!(fake.hits().is_empty(), "unproved claims sent nothing");
 
         // The user's Allow for exactly this target, filed and approved in their window: the
@@ -1829,6 +1868,14 @@ mod tests {
             assert_eq!(c.target["subject"], "Re: Weekly", "trimmed, control characters out");
             assert_eq!(c.target["body"], "Line one\nLine two", "the whole body is bound");
             assert_eq!(c.summary, "Send Gmail from me@x.com");
+            // exactly at the cap is fine.
+            let at_cap = format!("{}@{}.com", "a".repeat(60), "d".repeat(MAX_SEND_ADDRESS - 65));
+            assert!(send_canonical(
+                tx,
+                "c0",
+                &json!({"account": "a@x.com", "to": [at_cap], "subject": "s", "body": "b"})
+            )
+            .is_ok());
             assert_eq!(
                 c.details.iter().map(String::as_str).collect::<Vec<_>>(),
                 [
@@ -1839,22 +1886,18 @@ mod tests {
                     "Body starts: Line one Line two"
                 ]
             );
-            assert!(
-                c.fixed_form.is_empty(),
-                "more than one recipient and a cc: only the card's click counts"
-            );
-            // A single recipient without cc: the typed sentence names the address and the
-            // subject, so two messages that merely share a recipient never share a sentence.
+            assert_eq!(c.target["threadId"], Value::Null);
+            // No typed sentence exists for a send, however small: only the card's click counts.
             let one = send_canonical(
                 tx,
                 "c0",
-                &json!({"account": "me@x.com", "to": ["Ann@X.com"], "subject": "Weekly", "body": "b"}),
+                &json!({"account": "me@x.com", "to": ["Ann@X.com"], "subject": "Weekly",
+                        "body": "b", "threadId": "t-1"}),
             )
             .unwrap();
-            assert_eq!(
-                one.fixed_form,
-                "Approve the Gmail send to ann@x.com about \"Weekly\"."
-            );
+            assert!(one.fixed_form.is_empty());
+            assert_eq!(one.target["threadId"], "t-1", "the thread is bound");
+            assert!(one.details.iter().any(|l| l == "In thread: t-1"));
             assert!(one.details.iter().any(|l| l == "Body starts: b"));
             // Caps and malformed targets.
             let long_subject = "x".repeat(201);
@@ -1874,6 +1917,12 @@ mod tests {
                        "cc": ["f@x.com"], "subject": "s", "body": "b"}),
                 json!({"account": "a@x.com", "to": ["a@x.com"], "subject": "s",
                        "body": "b", "cc": ["nope"]}),
+                // an address over the card's line, and a thread id that is not one.
+                json!({"account": "a@x.com",
+                       "to": [format!("{}@{}.com", "a".repeat(60), "d".repeat(MAX_SEND_ADDRESS - 64))],
+                       "subject": "s", "body": "b"}),
+                json!({"account": "a@x.com", "to": ["a@x.com"], "subject": "s", "body": "b",
+                       "threadId": "../x"}),
                 json!([]),
             ] {
                 assert!(send_canonical(tx, "c0", &bad).is_err(), "{bad}");
@@ -1965,97 +2014,173 @@ mod tests {
         );
     }
 
-    /// Two messages that share the alphabetically first recipient are not interchangeable: a
-    /// multi-recipient send refuses the typed sentence outright, before any ask is spent.
+    /// The long-address edge of the card: five addresses at the cap, a full-length subject and
+    /// a long body still leave the subject and every address's ending on the stored card, and
+    /// an address over the cap never gets that far.
     #[test]
-    fn a_multi_recipient_send_refuses_typed_words_before_anything_is_spent() {
+    fn a_send_with_five_longest_addresses_keeps_the_subject_and_every_ending_on_the_card() {
         let _turn = GMAIL_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let fake = FakeGmail::start(&["tok-me"]);
         std::env::set_var(TEST_URL_ENV, &fake.base);
         let e = env(GooglePermission::Send, "tok-me");
-        for to in [
-            json!(["ann@x.com", "boss@corp.example"]),
-            json!(["ann@x.com", "zed@evil.example"]),
-        ] {
-            let err = call(
-                &e,
-                SEND,
-                json!({"account": "me@x.com", "to": to, "subject": "Weekly figures",
-                       "body": "the figures"}),
+        let addr = |c: char| {
+            format!(
+                "{}@{}.com",
+                c.to_string().repeat(60),
+                "d".repeat(MAX_SEND_ADDRESS - 65)
             )
-            .unwrap_err();
-            assert!(err.contains("typed words do not count"), "{err}");
-            assert!(err.contains("app_request_allow"), "{err}");
+        };
+        let longest: Vec<String> = ['a', 'b', 'c', 'd', 'e'].map(addr).to_vec();
+        assert!(longest.iter().all(|a| a.len() == MAX_SEND_ADDRESS));
+        let subject = format!("S{}END", "u".repeat(MAX_SEND_SUBJECT - 4));
+        let msg = json!({"account": "me@x.com", "to": &longest[..3], "cc": &longest[3..],
+                         "subject": subject, "body": "b ".repeat(400)});
+        let err = call(&e, SEND, msg.clone()).unwrap_err();
+        assert!(err.contains("Allow card"), "{err}");
+        // The card the user is shown for exactly that target.
+        let target = json!({
+            "account": "me@x.com", "to": &longest[..3], "cc": &longest[3..],
+            "subject": subject, "body": "b ".repeat(400), "threadId": "thread-0123456789"
+        });
+        let request = |target: &Value| {
+            helm_consent::store::request(
+                &e.db,
+                &e.kinds,
+                helm_consent::NewRequest {
+                    chat_id: "c0",
+                    kind: SEND_KIND,
+                    target,
+                    reason: "r",
+                    evidence: "",
+                    grant_minutes: None,
+                    tool_use_id: None,
+                },
+                helm_core::now_ms(),
+            )
+        };
+        let r = request(&target).unwrap();
+        for a in &longest {
+            assert!(
+                r.summary.contains(&format!(": {a}\n")),
+                "{a} cut from:\n{}",
+                r.summary
+            );
         }
-        // The exfiltrating shape, claimed with the honest one's sentence: refused at the gate,
-        // before any ask or grant is spent.
-        let err = call(
-            &e,
-            SEND,
-            json!({"account": "me@x.com", "to": ["ann@x.com", "zed@evil.example"],
-                   "subject": "Weekly figures", "body": "the figures",
-                   "userQuote": "Approve the Gmail send to ann@x.com about \"Weekly figures\"."}),
-        )
-        .unwrap_err();
         assert!(
-            err.contains("only the user's own click on an Allow card"),
-            "{err}"
+            r.summary.contains(&format!("Subject: {subject}\n")),
+            "{}",
+            r.summary
         );
-        assert!(fake.hits().is_empty(), "no typed words, nothing sent");
+        assert!(r.summary.contains("Body starts: b b"), "{}", r.summary);
+        assert!(
+            r.summary.contains("In thread: thread-0123456789"),
+            "{}",
+            r.summary
+        );
+        // Over the cap: refused before any ask is recorded, here and as a filed card.
+        let over = format!(
+            "{}@{}.com",
+            "a".repeat(60),
+            "d".repeat(MAX_SEND_ADDRESS - 64)
+        );
+        let mut long = msg.clone();
+        long["to"] = json!([over]);
+        long["cc"] = json!([]);
+        let err = call(&e, SEND, long).unwrap_err();
+        assert!(err.contains("at most 80 characters"), "{err}");
+        let mut filed = target.clone();
+        filed["to"] = json!([over]);
+        assert!(request(&filed).is_err());
+        assert!(fake.hits().is_empty(), "nothing was sent");
         std::env::remove_var(TEST_URL_ENV);
     }
 
-    /// The typed-words success path end to end: the refusal records the ask and names the
-    /// sentence, the user types it in the chat, and exactly that message rides the fake once;
-    /// the same words cannot spend again.
+    /// No typed words ever approve a send: a `userQuote` is refused outright, with or without
+    /// an ask on file or the sentence typed in the chat, and two asks that share recipient and
+    /// subject cannot spend on each other (the Allow for one message does not carry another
+    /// message's body, account or thread).
     #[test]
-    fn the_typed_sentence_carries_a_single_recipient_send_once() {
+    fn typed_words_never_send_and_two_asks_sharing_a_recipient_do_not_spend_on_each_other() {
         let _turn = GMAIL_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let fake = FakeGmail::start(&["tok-me"]);
         std::env::set_var(TEST_URL_ENV, &fake.base);
         let e = env(GooglePermission::Send, "tok-me");
-        let msg = json!({"account": "me@x.com", "to": ["Ann@X.com"], "subject": "Weekly",
-                         "body": "Fire the boiler"});
-        let err = call(&e, SEND, msg.clone()).unwrap_err();
-        let form = "Approve the Gmail send to ann@x.com about \"Weekly\".";
-        assert!(err.contains(form), "{err}");
-        // The user types the sentence, in this chat, after the refusal. The row sits just after
-        // the recorded ask, and the clock is let catch up so it is also at or before the next
-        // call's `now`.
-        let typed_at =
-            e.db.write::<_, rusqlite::Error>(|tx| {
-                let asked: i64 = tx.query_row(
-                    "SELECT MAX(created_at) FROM consent_asks
-                     WHERE chat_id = 'c0' AND kind = 'gmailSend'",
-                    [],
-                    |r| r.get(0),
-                )?;
-                let at = asked + 10;
-                tx.execute(
-                    "INSERT INTO submissions(id, chat_id, text, state, created_at)
-                     VALUES ('s1', 'c0', ?1, 'complete', ?2)",
-                    params![form, at],
-                )?;
-                tx.execute(
-                    "INSERT INTO submission_meta(submission_id, origin) VALUES ('s1', 'typed')",
-                    [],
-                )?;
-                Ok(at)
-            })
-            .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(
-            (typed_at + 5 - helm_core::now_ms()).max(0) as u64,
-        ));
-        let mut approved = msg.clone();
-        approved["userQuote"] = json!(form);
-        let out = call(&e, SEND, approved).unwrap();
-        assert_eq!(out["messageId"], "sent-7");
-        // Spent: the same words again get a fresh refusal, and nothing else rides the fake.
-        let mut again = msg.clone();
-        again["userQuote"] = json!(form);
-        let err = call(&e, SEND, again).unwrap_err();
-        assert!(!err.is_empty() && !err.contains("tok-me"), "{err}");
-        assert_eq!(fake.hits().len(), 1, "only the approved message was sent");
+        let a = json!({"account": "me@x.com", "to": ["boss@corp.example"],
+                       "subject": "Q3 figures", "body": "honest body"});
+        let sentence = "Approve the Gmail send to boss@corp.example about \"Q3 figures\".";
+        // Before and after an ask is on file the quote is refused outright.
+        for _ in 0..2 {
+            let mut quoted = a.clone();
+            quoted["userQuote"] = json!(sentence);
+            let err = call(&e, SEND, quoted).unwrap_err();
+            assert!(err.contains("Typed words never approve a send"), "{err}");
+            assert!(call(&e, SEND, a.clone())
+                .unwrap_err()
+                .contains("Allow card"));
+        }
+        // The sentence typed in the chat after the ask: still nothing sends.
+        e.db.write::<_, rusqlite::Error>(|tx| {
+            tx.execute(
+                "INSERT INTO submissions(id, chat_id, text, state, created_at)
+                 VALUES ('s1', 'c0', ?1, 'complete', ?2)",
+                params![sentence, helm_core::now_ms() + 1],
+            )?;
+            tx.execute(
+                "INSERT INTO submission_meta(submission_id, origin) VALUES ('s1', 'typed')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let mut quoted = a.clone();
+        quoted["userQuote"] = json!(sentence);
+        assert!(call(&e, SEND, quoted).is_err());
+        // The Allow card for message A is approved. The swapped B shares recipient and subject
+        // but not the body, the account or the thread: none can spend A's Allow.
+        let target = json!({"account": "me@x.com", "to": ["boss@corp.example"], "cc": [],
+                            "subject": "Q3 figures", "body": "honest body", "threadId": null});
+        let r = helm_consent::store::request(
+            &e.db,
+            &e.kinds,
+            helm_consent::NewRequest {
+                chat_id: "c0",
+                kind: SEND_KIND,
+                target: &target,
+                reason: "asked",
+                evidence: "",
+                grant_minutes: None,
+                tool_use_id: None,
+            },
+            helm_core::now_ms(),
+        )
+        .unwrap();
+        helm_consent::store::decide(
+            &e.db,
+            &e.kinds,
+            &r.id,
+            helm_consent::types::Decision::Allow,
+            None,
+            None,
+            helm_core::now_ms(),
+        )
+        .unwrap();
+        for swap in [
+            json!({"body": "SWAPPED body"}),
+            json!({"account": "Work@Y.org"}),
+            json!({"threadId": "t-other"}),
+        ] {
+            let mut b = a.clone();
+            for (k, v) in swap.as_object().unwrap() {
+                b[k] = v.clone();
+            }
+            b["grant"] = json!("the-allow");
+            assert!(call(&e, SEND, b).is_err(), "{swap}");
+        }
+        assert!(fake.hits().is_empty(), "no swapped message got out");
+        let mut ok = a.clone();
+        ok["grant"] = json!("the-allow");
+        assert_eq!(call(&e, SEND, ok).unwrap()["messageId"], "sent-7");
+        assert_eq!(fake.hits().len(), 1);
         std::env::remove_var(TEST_URL_ENV);
     }
 
@@ -2129,5 +2254,36 @@ mod tests {
         };
         let err = f(&ctx, json!({"account": "a@x.com", "query": "x"})).unwrap_err();
         assert!(err.text().contains("Settings → MCP"), "{}", err.text());
+        // Every tool's description tells the agent where to learn the accounts.
+        for n in [SEARCH, READ, LABELS, LABEL, DRAFT, SEND] {
+            assert!(
+                r.get(n)
+                    .unwrap()
+                    .spec
+                    .description
+                    .contains("listed in the refusal"),
+                "{n}"
+            );
+        }
+    }
+
+    /// The MCP master switch off: a call is refused at once, even with a server and an account.
+    #[test]
+    fn the_master_switch_off_refuses_every_call() {
+        let _turn = GMAIL_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let fake = FakeGmail::start(&["tok-me"]);
+        std::env::set_var(TEST_URL_ENV, &fake.base);
+        let e = env(GooglePermission::Send, "tok-me");
+        assert!(call(&e, LABELS, json!({"account": "me@x.com"})).is_ok());
+        e.db.write::<_, rusqlite::Error>(|tx| {
+            helm_core::prefs::set_raw(tx, "mcpEnabled", &json!(false))
+                .map_err(|_| rusqlite::Error::InvalidQuery)
+        })
+        .unwrap();
+        let hits = fake.hits().len();
+        let err = call(&e, LABELS, json!({"account": "me@x.com"})).unwrap_err();
+        assert!(err.contains("switched off"), "{err}");
+        assert_eq!(fake.hits().len(), hits, "nothing reached Gmail");
+        std::env::remove_var(TEST_URL_ENV);
     }
 }
