@@ -10,8 +10,8 @@ use crate::link::BoxFut;
 use crate::sends;
 use crate::serve::{ChatPort, ChatState, PortResult};
 use crate::wire::{
-    code, AnswerArgs, ArchiveArgs, CreateArgs, DeviceInfo, Hello, PersonInfo, ProjectInfo,
-    RemoteChat, RenameArgs, SetModelArgs, ShareArgs, WireError,
+    code, AnswerArgs, ArchiveArgs, CreateArgs, DeviceInfo, DevicePerson, Hello, PersonInfo,
+    ProjectInfo, RemoteChat, RenameArgs, SetModelArgs, ShareArgs, WireError,
 };
 use helm_chats::submit::{self, HostSend};
 use helm_chats::types::{ChatGetResult, ChatRecord, MessageRow, SubmissionOrigin};
@@ -219,12 +219,56 @@ impl ChatPort for HostPort {
         self.switch("deviceHouseholdRun")
     }
 
-    fn person_known(&self, person_id: &str) -> bool {
-        self.db()
-            .ok()
-            .and_then(|db| db.snapshot(|tx| profile_of_person(tx, person_id)).ok())
-            .flatten()
-            .is_some()
+    /// The hub people of this install's linked profiles, the home profile's first. The home
+    /// person's Telegram and voice come to this PC by default; the others start off until their
+    /// profile's switches say otherwise.
+    fn people(&self) -> Vec<DevicePerson> {
+        let rows = || -> rusqlite::Result<Vec<(String, bool)>> {
+            let Ok(db) = self.db() else {
+                return Ok(Vec::new());
+            };
+            db.snapshot(|tx| {
+                let mut st = tx.prepare(
+                    "SELECT hub_person_id, is_home FROM profiles
+                     WHERE hub_person_id IS NOT NULL
+                     ORDER BY is_home DESC, name",
+                )?;
+                let rows = st
+                    .query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+        };
+        let rows = rows().unwrap_or_else(|_| {
+            // A database without the home flag (a minimal one made for a test): every linked
+            // profile, by name, none home.
+            let Ok(db) = self.db() else { return Vec::new() };
+            db.snapshot(|tx| {
+                let rows = tx
+                    .prepare(
+                        "SELECT hub_person_id, 0 FROM profiles
+                         WHERE hub_person_id IS NOT NULL ORDER BY name",
+                    )
+                    .and_then(|mut st| {
+                        st.query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)))?
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                    });
+                Ok::<_, rusqlite::Error>(rows.unwrap_or_default())
+            })
+            .unwrap_or_default()
+        });
+        let mut out: Vec<DevicePerson> = Vec::new();
+        for (person_id, home) in rows {
+            if out.iter().any(|d| d.person_id == person_id) {
+                continue;
+            }
+            out.push(DevicePerson {
+                telegram: home,
+                voice: home,
+                person_id,
+            });
+        }
+        out
     }
 
     fn hello(&self) -> BoxFut<'_, PortResult<Hello>> {

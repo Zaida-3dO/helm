@@ -6,11 +6,13 @@
 //! to do it on the PC the chat runs on.
 //!
 //! Who asks decides the rest. A PC that is not paired with a person on the hub answers no one.
-//! A device of the same person reads freely and runs chats while the switch "Let other devices
-//! use chats on this PC" is on. A device of another person in the household needs the switch
-//! "Let people in my household run their chats on this PC" and a profile here linked to them; it
-//! then sees and runs only that person's own chats and the chats shared with them, answers what
-//! waits only on their own chats, and starts chats only for themselves.
+//! A device acting as this PC's own person reads freely and runs chats while the switch "Let
+//! other devices use chats on this PC" is on. One acting as anyone else needs the switch "Let
+//! people in my household run their chats on this PC". The person says who is acting, not what
+//! they may touch: a chat is not hidden from a person who acts here, but attribution holds —
+//! a chat started from afar belongs to the acting person, and their words on a chat that is not
+//! theirs arrive framed as a message from them, never as the owner's own words. The list a
+//! watcher subscribes to is filtered to its read set as a convenience, not as access control.
 //!
 //! Chat events from this install reach the service through [`Service::observe`] (the app's event
 //! tap), and go to the watchers that subscribed as pushes ([`crate::subs`]).
@@ -18,9 +20,9 @@
 use crate::link::{BoxFut, DeviceLink};
 use crate::subs::{self, Out, Subs, CHATS_SUB, PUSH_ROW_BUDGET};
 use crate::wire::{
-    code, AnswerArgs, ArchiveArgs, Caller, ChatIdArgs, CreateArgs, DeviceFrame, DeviceInfo, Frame,
-    Hello, Op, PageArgs, PeerDevice, RemoteChat, RenameArgs, SendArgs, SetModelArgs, ShareArgs,
-    WireError, MAX_PAGE_ROWS, MAX_SEND_BYTES, SUB_ROWS,
+    code, AnswerArgs, ArchiveArgs, Caller, ChatIdArgs, CreateArgs, DeviceFrame, DeviceInfo,
+    DevicePerson, Frame, Hello, Op, PageArgs, PeerDevice, RemoteChat, RenameArgs, SendArgs,
+    SetModelArgs, ShareArgs, WireError, MAX_PAGE_ROWS, MAX_SEND_BYTES, SUB_ROWS,
 };
 use helm_chats::types::{
     ChatRecord, Interaction, InteractionAttention, InteractionMethod, MessageRow,
@@ -55,8 +57,11 @@ pub trait ChatPort: Send + Sync {
     fn run_allowed(&self) -> bool;
     /// Whether people in the household may run their own chats here.
     fn household_run(&self) -> bool;
-    /// Whether a profile on this install is linked to the hub person.
-    fn person_known(&self, person_id: &str) -> bool;
+    /// The hub people this PC acts for, one per linked profile, the home profile's first,
+    /// with the channels it takes for each. They are announced in the `device` frame.
+    fn people(&self) -> Vec<DevicePerson> {
+        Vec::new()
+    }
     fn hello(&self) -> BoxFut<'_, PortResult<Hello>>;
     /// A chat record as other devices see it.
     fn remote_chat(&self, record: ChatRecord) -> RemoteChat;
@@ -107,12 +112,13 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// Who a request comes from, as this PC sees it.
+/// Who a request comes from, as the hub's stamp says. The person names who is acting; it is not
+/// a limit on what they may touch.
 #[derive(Clone, Debug, PartialEq)]
 enum Asker {
-    /// A device of the person this PC is paired as.
+    /// Acting as the person this PC is itself paired with.
     Own,
-    /// A device of another person in the household: their hub id and name.
+    /// Acting as anyone else in the household: their hub id and name.
     Household { person_id: String, name: String },
 }
 
@@ -166,27 +172,29 @@ impl Service {
         Service { inner }
     }
 
-    /// The `device` frame: who this is and whether others may run chats here.
+    /// The `device` frame: who this is, whether others may run chats here, and the hub people
+    /// this PC acts for.
     pub fn device_frame(&self) -> Frame {
         let d = self.inner.port.device();
         Frame::Device(DeviceFrame {
             uid: d.uid,
             name: d.name,
             run: self.inner.port.run_allowed(),
+            people: self.inner.port.people(),
         })
     }
 
-    /// Tell the hub who this device is. Sent after the household switches on every new line, and
-    /// whenever the name or the run switch changes.
+    /// Tell the hub who this device is and who it acts for. Sent after the household switches
+    /// on every new line, and whenever the name, the run switch or the linked people change.
     pub fn announce(&self) {
         self.inner.link.send(self.device_frame());
     }
 
     /// An event this install emitted. Chat events go to the watchers that subscribed; a changed
-    /// device name or run switch is announced.
+    /// device name, run switch or set of linked profiles is announced.
     pub fn observe(&self, ev: &AppEvent) {
         match ev.kind.as_str() {
-            "device_changed" => self.announce(),
+            "device_changed" | "profiles_changed" => self.announce(),
             "preferences" => {
                 let changed = ev
                     .fields
@@ -212,23 +220,37 @@ impl Service {
     }
 }
 
-/// Where the app's event tap hands events to the service once there is one.
+/// Where the app's event tap hands events to the service once there is one. The tap also
+/// carries the mirror so a profile change re-announces the people *and* re-syncs the copies.
 #[derive(Default)]
-pub struct EventTap(OnceLock<Service>);
+pub struct EventTap {
+    service: OnceLock<Service>,
+    mirror: OnceLock<crate::mirror::Mirror>,
+}
 
 impl EventTap {
     pub fn attach(&self, service: Service) {
-        let _ = self.0.set(service);
+        let _ = self.service.set(service);
+    }
+
+    /// Attach this PC's mirror so `profiles_changed` can widen or narrow the copies' read sets.
+    pub fn attach_mirror(&self, mirror: crate::mirror::Mirror) {
+        let _ = self.mirror.set(mirror);
     }
 
     pub fn observe(&self, ev: &AppEvent) {
-        if let Some(s) = self.0.get() {
+        if let Some(s) = self.service.get() {
             s.observe(ev);
+        }
+        if ev.kind == "profiles_changed" {
+            if let Some(m) = self.mirror.get() {
+                m.people_changed();
+            }
         }
     }
 
     pub fn service(&self) -> Option<Service> {
-        self.0.get().cloned()
+        self.service.get().cloned()
     }
 }
 
@@ -347,7 +369,7 @@ impl Inner {
             Err(e) => return (Err(e), None),
         };
         let run = async {
-            let asker = self.asker(from)?;
+            let (asker, acting) = self.asker(from)?;
             let op = match &asker {
                 Asker::Own => {
                     if op.is_run() && !self.port.run_allowed() {
@@ -355,9 +377,18 @@ impl Inner {
                     }
                     op
                 }
-                Asker::Household { person_id, .. } => self.household_op(person_id, op).await?,
+                Asker::Household { .. } => self.household_op(op)?,
             };
-            self.run_parsed(&from.uid, &asker, op).await
+            // A chat started from afar belongs to the acting person: the hub's verified id
+            // overwrites whatever the request named.
+            let op = match op {
+                Op::Create(mut a) => {
+                    a.person_id = acting;
+                    Op::Create(a)
+                }
+                op => op,
+            };
+            self.run_parsed(from, &asker, op).await
         };
         match run.await {
             Ok((v, sub)) => (Ok(v), sub),
@@ -365,9 +396,9 @@ impl Inner {
         }
     }
 
-    /// Who is asking. A PC paired with no person answers no one; a caller with no person is
-    /// refused too.
-    fn asker(&self, from: &Caller) -> Result<Asker, WireError> {
+    /// Who is asking, as the hub stamped it, and their id. A PC paired with no person answers no
+    /// one; a caller with no person is refused too.
+    fn asker(&self, from: &Caller) -> Result<(Asker, String), WireError> {
         let Some(me) = self.link.person_id().filter(|p| !p.is_empty()) else {
             return Err(WireError::new(
                 code::NOT_ALLOWED,
@@ -375,15 +406,18 @@ impl Inner {
             ));
         };
         match from.person_id.as_deref().filter(|p| !p.is_empty()) {
-            Some(p) if p == me => Ok(Asker::Own),
-            Some(p) => Ok(Asker::Household {
-                person_id: p.to_owned(),
-                name: from
-                    .person
-                    .clone()
-                    .filter(|n| !n.trim().is_empty())
-                    .unwrap_or_else(|| "someone in the household".to_owned()),
-            }),
+            Some(p) if p == me => Ok((Asker::Own, p.to_owned())),
+            Some(p) => Ok((
+                Asker::Household {
+                    person_id: p.to_owned(),
+                    name: from
+                        .person
+                        .clone()
+                        .filter(|n| !n.trim().is_empty())
+                        .unwrap_or_else(|| "someone in the household".to_owned()),
+                },
+                p.to_owned(),
+            )),
             None => Err(WireError::new(
                 code::NOT_ALLOWED,
                 "This PC only answers devices paired with a person on the hub.",
@@ -391,77 +425,53 @@ impl Inner {
         }
     }
 
-    /// Check a household member's request against the switch and their own chats, and pin a
-    /// new chat to them.
-    async fn household_op(&self, person_id: &str, op: Op) -> Result<Op, WireError> {
+    /// Check a request that acts as someone other than this PC's own person against that
+    /// person's switch. There is no per-person limit on which chats they may touch: profiles
+    /// keep concerns apart, they are not access control.
+    fn household_op(&self, op: Op) -> Result<Op, WireError> {
         if !self.port.household_run() {
             return Err(WireError::new(
                 code::NOT_ALLOWED,
                 "This PC doesn't let people in the household run their chats here.",
             ));
         }
-        if !self.port.person_known(person_id) {
-            return Err(WireError::new(
-                code::NOT_ALLOWED,
-                "No one on this PC is linked to you, so you can't use its chats.",
-            ));
-        }
-        let (chat_id, own_only) = match op {
-            Op::Hello | Op::ChatsSub(_) | Op::ChatsUnsub | Op::ChatUnsub(_) => return Ok(op),
-            Op::Create(mut a) => {
-                a.person_id = person_id.to_owned();
-                return Ok(Op::Create(a));
-            }
-            Op::ChatSub(ref a) => (a.chat_id.clone(), false),
-            Op::Page(ref a) => (a.chat_id.clone(), false),
-            Op::Send(ref a) => (a.chat_id.clone(), false),
-            Op::Stop(ref a) => (a.chat_id.clone(), false),
-            Op::SetModel(ref a) => (a.chat_id.clone(), false),
-            Op::Rename(ref a) => (a.chat_id.clone(), false),
-            Op::Archive(ref a) => (a.chat_id.clone(), false),
-            // What a chat waits on, and who it is shared with, are for the person whose chat it is.
-            Op::Answer(ref a) => (a.chat_id.clone(), true),
-            Op::Share(ref a) => (a.chat_id.clone(), true),
-        };
-        let chat = self.port.chat(chat_id).await?.chat.to_value();
-        if !subs::visible_to(&chat, person_id) {
-            return Err(WireError::new(
-                code::NOT_FOUND,
-                "That chat is not on this device, or not shared with you.",
-            ));
-        }
-        if own_only && !subs::owned_by(&chat, person_id) {
-            return Err(WireError::new(
-                code::REFUSED,
-                "Only the person whose chat this is can do that from another device.",
-            ));
-        }
         Ok(op)
+    }
+
+    /// The read set for this caller's subscriptions: the people its `as` covers, as a filter on
+    /// the list it hears. `None` (no filter) when the set includes this PC's own person, which
+    /// it does in practice for every paired PC.
+    fn read_scope(&self, from: &Caller) -> Option<Vec<String>> {
+        let me = self.link.person_id()?;
+        let set: Vec<String> = if from.people.is_empty() {
+            from.person_id.iter().cloned().collect()
+        } else {
+            from.people.iter().map(|p| p.person_id.clone()).collect()
+        };
+        (!set.contains(&me)).then_some(set)
     }
 
     async fn run_parsed(
         &self,
-        uid: &str,
+        from: &Caller,
         asker: &Asker,
         op: Op,
     ) -> Result<(Value, Option<String>), WireError> {
+        let uid = from.uid.as_str();
         let done = |v: Value| -> Result<(Value, Option<String>), WireError> { Ok((v, None)) };
-        let scope = match asker {
-            Asker::Own => None,
-            Asker::Household { person_id, .. } => Some(person_id.as_str()),
-        };
+        let scope = self.read_scope(from);
         match op {
             Op::Hello => done(to_value(&self.port.hello().await?)?),
             Op::ChatsSub(a) => {
                 {
                     let mut subs = lock(&self.subs);
-                    subs.set_scope(uid, scope);
+                    subs.set_scope(uid, scope.as_deref());
                     subs.add_chats(uid);
                 }
                 match self.port.chats(a.since).await {
                     Ok((mut chats, cursor)) => {
-                        if let Some(p) = scope {
-                            chats.retain(|c| subs::visible_to(&c.to_value(), p));
+                        if let Some(p) = &scope {
+                            chats.retain(|c| subs::visible_to_any(&c.to_value(), p));
                             lock(&self.subs).listed(uid, chats.iter().map(|c| c.id().to_owned()));
                         }
                         Ok((
@@ -478,7 +488,7 @@ impl Inner {
             Op::ChatSub(a) => {
                 {
                     let mut subs = lock(&self.subs);
-                    subs.set_scope(uid, scope);
+                    subs.set_scope(uid, scope.as_deref());
                     subs.add_chat(uid, &a.chat_id);
                 }
                 let read = async {

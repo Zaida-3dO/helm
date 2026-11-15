@@ -4,8 +4,8 @@
 use crate::link::BoxFut;
 use crate::serve::{ChatPort, ChatState, PortResult};
 use crate::wire::{
-    code, AnswerArgs, ArchiveArgs, CreateArgs, DeviceInfo, Hello, PersonInfo, ProjectInfo,
-    RemoteChat, RenameArgs, SetModelArgs, ShareArgs, WireError,
+    code, AnswerArgs, ArchiveArgs, CreateArgs, DeviceInfo, DevicePerson, Hello, PersonInfo,
+    ProjectInfo, RemoteChat, RenameArgs, SetModelArgs, ShareArgs, WireError,
 };
 use helm_chats::types::{
     ChatRecord, ChatStatus, Harness, Interaction, InteractionAttention, InteractionMethod,
@@ -120,6 +120,8 @@ pub struct FakeState {
     pub archived: Vec<ArchiveArgs>,
     pub shared: Vec<ShareArgs>,
     pub cursor: i64,
+    /// The hub people this install announces acting for (what `people()` answers).
+    pub announce: Vec<DevicePerson>,
 }
 
 /// A whole install's chats in memory.
@@ -194,6 +196,18 @@ impl FakePort {
             .or_default()
             .push(i);
     }
+
+    /// Announce the hub people this install acts for (the home person's channel flags first).
+    pub fn announce_people(&self, people: &[(&str, bool, bool)]) {
+        self.st().announce = people
+            .iter()
+            .map(|(p, telegram, voice)| DevicePerson {
+                person_id: (*p).to_owned(),
+                telegram: *telegram,
+                voice: *voice,
+            })
+            .collect();
+    }
 }
 
 fn ready<T: Send + 'static>(v: PortResult<T>) -> BoxFut<'static, PortResult<T>> {
@@ -216,8 +230,8 @@ impl ChatPort for FakePort {
         self.household.load(Ordering::SeqCst)
     }
 
-    fn person_known(&self, person_id: &str) -> bool {
-        self.st().people.iter().any(|p| p == person_id)
+    fn people(&self) -> Vec<DevicePerson> {
+        self.st().announce.clone()
     }
 
     fn hello(&self) -> BoxFut<'_, PortResult<Hello>> {

@@ -23,7 +23,7 @@ use helm_chats::types::{
     InteractionMethod, SendAction, SendOrigin, TranscriptPageArgs,
 };
 use helm_ipc::ApiError;
-use rusqlite::OptionalExtension;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 
 /// The most a draft may hold, as for a chat that runs here.
@@ -102,7 +102,10 @@ impl Mirror {
         if let Some(e) = effort {
             args["effort"] = json!(e);
         }
-        let made = self.ask(device, "create", args, "the new chat").await?;
+        let act = [person_id.to_owned()];
+        let made = self
+            .ask_as(device, "create", args, "the new chat", &act)
+            .await?;
         let id = made
             .get("chatId")
             .and_then(Value::as_str)
@@ -135,16 +138,19 @@ impl Mirror {
         }
     }
 
-    async fn ask(
+    /// Ask the device, naming the people the call acts for (the acting person first); an
+    /// empty set means the caller PC's own person, as before.
+    async fn ask_as(
         &self,
         device: &str,
         op: &str,
         args: Value,
         what: &str,
+        act: &[String],
     ) -> Result<Value, ApiError> {
         self.inner
             .rpc
-            .call(device, op, args)
+            .call_as(device, op, args, act)
             .await
             .map_err(|e| self.failed(device, e, what))
     }
@@ -160,10 +166,114 @@ impl Mirror {
     ) -> Res {
         let device = self.device_of(chat_id)?;
         self.check_live(&device)?;
-        self.ask(&device, op, args, "that change").await?;
+        let act = self.acting(chat_id)?;
+        self.ask_as(&device, op, args, "that change", &[act])
+            .await?;
         self.patch_record(chat_id, patch);
         self.chat_json(chat_id)
     }
+
+    /// The person a change to this chat acts as, alone on the wire: the active profile's
+    /// person, or with "All profiles" the chat owner's person when a profile here is linked to
+    /// them, else the home profile's person. A profile with no hub person yet (before the first
+    /// sync pass lines it up) is refused in words.
+    fn acting(&self, chat_id: &str) -> Result<String, ApiError> {
+        let chat_person = self
+            .inner
+            .db
+            .snapshot(|tx| {
+                let chat_person = tx
+                    .query_row(
+                        "SELECT record FROM mirror_chats WHERE chat_id = ?1",
+                        [chat_id],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .optional()?
+                    .and_then(|rec| {
+                        serde_json::from_str::<Value>(&rec).ok().and_then(|v| {
+                            v.get("personId")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                        })
+                    });
+                let has_profiles: bool = tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'profiles')",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(false);
+                Ok::<_, rusqlite::Error>((chat_person, has_profiles))
+            })
+            .map_err(db_err)?;
+        if !chat_person.1 {
+            // An install without a profiles table: the line's own people stand in.
+            return self.inner.link.people().into_iter().next().ok_or_else(|| {
+                ApiError::new(
+                    "refused",
+                    "This profile isn't set up on the hub yet; try again in a moment.",
+                )
+            });
+        }
+        self.inner
+            .db
+            .snapshot(|tx| Ok::<_, rusqlite::Error>(acting_person(tx, chat_person.0.as_deref())))
+            .map_err(db_err)?
+    }
+}
+
+/// The acting person for requests about a mirrored chat (see [`Mirror::acting`]).
+pub(crate) fn acting_person(
+    conn: &Connection,
+    chat_person: Option<&str>,
+) -> Result<String, ApiError> {
+    let not_set_up = || {
+        ApiError::new(
+            "refused",
+            "This profile isn't set up on the hub yet; try again in a moment.",
+        )
+    };
+    let active = helm_core::prefs::read(conn, "activeProfile")
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .filter(|s| s != "all");
+    if let Some(profile) = active {
+        let person: Option<Option<String>> = conn
+            .query_row(
+                "SELECT hub_person_id FROM profiles WHERE id = ?1",
+                [profile],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db_err)?
+            .flatten();
+        match person {
+            Some(Some(p)) => return Ok(p),
+            Some(None) => return Err(not_set_up()),
+            None => {}
+        }
+    }
+    if let Some(p) = chat_person {
+        let linked: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM profiles WHERE hub_person_id = ?1)",
+                [p],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if linked {
+            return Ok(p.to_owned());
+        }
+    }
+    conn.query_row(
+        "SELECT hub_person_id FROM profiles WHERE is_home = 1",
+        [],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .flatten()
+    .ok_or_else(not_set_up)
 }
 
 fn offline(name: &str, last_seen: Option<&str>) -> ApiError {
@@ -369,7 +479,9 @@ impl RemoteChats for Mirror {
                 "mode": if steer { "steer" } else { "queue" },
             });
             // Never sent a second time from here: an unconfirmed send is the person's call.
-            m.ask(&device, "send", args, "this message").await?;
+            let act = [m.acting(&a.chat_id)?];
+            m.ask_as(&device, "send", args, "this message", &act)
+                .await?;
             if a.origin.unwrap_or_default() == SendOrigin::Composer {
                 let _ = m.inner.db.write(|tx| {
                     tx.execute(
@@ -399,8 +511,15 @@ impl RemoteChats for Mirror {
         Box::pin(async move {
             let device = m.device_of(&chat_id)?;
             m.check_live(&device)?;
-            m.ask(&device, "stop", json!({ "chatId": chat_id }), "the stop")
-                .await?;
+            let act = [m.acting(&chat_id)?];
+            m.ask_as(
+                &device,
+                "stop",
+                json!({ "chatId": chat_id }),
+                "the stop",
+                &act,
+            )
+            .await?;
             let chat = m.chat_json(&chat_id)?;
             Ok(json!({ "status": chat["status"] }))
         })
@@ -454,7 +573,9 @@ impl RemoteChats for Mirror {
             if let Some(c) = a.cancelled {
                 args["cancelled"] = json!(c);
             }
-            m.ask(&device, "answer", args, "that answer").await?;
+            let act = [m.acting(&a.chat_id)?];
+            m.ask_as(&device, "answer", args, "that answer", &act)
+                .await?;
             Ok(Value::Null)
         })
     }
