@@ -176,6 +176,7 @@ impl Lines {
         };
         let (lines, own_line) = (self.clone(), line.clone());
         let dev_calls = Arc::new(tokio::sync::Semaphore::new(devices::MAX_DEV_CALLS));
+        let ix_calls = Arc::new(tokio::sync::Semaphore::new(4));
         tokio::spawn(async move {
             while let Some((claimed, u)) = rx.recv().await {
                 match u {
@@ -274,6 +275,31 @@ impl Lines {
                         seq,
                         event,
                     } => devices::push(&lines, client_id, &to, sub, seq, event),
+                    // The search index's frames. Each runs on a task of its own (the database
+                    // work is on the blocking pool); a machine that floods them is told to wait.
+                    Upstream::Ix {
+                        kind,
+                        id,
+                        frame,
+                        size,
+                    } => {
+                        let Ok(permit) = ix_calls.clone().try_acquire_owned() else {
+                            own_line.send(&serde_json::json!({
+                                "type": crate::index::reply_type(&kind), "id": id,
+                                "ok": false, "error": "The index is busy; try again shortly.",
+                            }));
+                            continue;
+                        };
+                        let (lines, line) = (lines.clone(), own_line.clone());
+                        tokio::spawn(async move {
+                            let reply = crate::index::answer_frame(
+                                &lines, client_id, &kind, &id, frame, size,
+                            )
+                            .await;
+                            line.send(&reply);
+                            drop(permit);
+                        });
+                    }
                     Upstream::KnPull { id, since, limit } => {
                         own_line.send(&knowledge::pull_frame(&lines, client_id, &id, since, limit));
                     }

@@ -2189,6 +2189,7 @@ impl Bridge {
             | Upstream::DevPush { .. }
             | Upstream::KnPull { .. }
             | Upstream::KnPut { .. }
+            | Upstream::Ix { .. }
             | Upstream::PersonEnsure { .. }
             | Upstream::RoutePin { .. }
             | Upstream::TgAdmin { .. } => {}

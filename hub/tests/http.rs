@@ -335,3 +335,113 @@ async fn bad_input_is_a_tool_error_not_a_crash() {
         StatusCode::BAD_REQUEST
     );
 }
+
+/// A stand-in for the NAS embedding server: answers every request with `vector` after `delay`.
+async fn fake_embedder(delay: std::time::Duration, vector: Vec<f32>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut s, _)) = listener.accept().await else {
+                return;
+            };
+            let vector = vector.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let _ = s.read(&mut buf).await;
+                tokio::time::sleep(delay).await;
+                let body = json!({ "data": [{ "embedding": vector }] }).to_string();
+                let _ = s
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            });
+        }
+    });
+    url
+}
+
+fn app_with_embedder(url: Option<String>) -> axum::Router {
+    let registry = Registry::from_legacy_spec(&format!("helm:{RW}"), "owner").unwrap();
+    let registry = Arc::new(Mutex::new(registry));
+    let lines = Arc::new(Lines::new(registry.clone()).0);
+    let embedder = helm_hub::embed::QueryEmbedder::new(lines.clone(), url, "nomic-embed-text")
+        .with_timeouts(
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(400),
+        );
+    router(Arc::new(
+        AppState::new(
+            Store::open_in_memory().unwrap(),
+            registry,
+            Options { allow_mutate: true },
+            lines,
+            None,
+        )
+        .with_embedder(embedder),
+    ))
+}
+
+#[tokio::test]
+async fn a_query_is_embedded_by_the_nas_server_or_the_search_falls_back_to_keywords() {
+    let body = json!({ "title": "Tomato care", "body": "Water the beds at dawn",
+        "vector": [1.0, 0.0, 0.0], "model": "nomic-embed-text:latest" });
+    let ask = json!({ "query": "vegetables hydration schedule", "parseDates": false });
+    for (label, delay_ms, meaning) in [
+        ("fast", 0u64, "nas"),
+        ("slow", 900, "off: the embedder timed out"),
+    ] {
+        let url = fake_embedder(
+            std::time::Duration::from_millis(delay_ms),
+            vec![0.9, 0.1, 0.0],
+        )
+        .await;
+        let app = app_with_embedder(Some(url));
+        call(&app, RW, "memory_write", body.clone()).await;
+        let r = call(&app, RW, "memory_search", ask.clone()).await;
+        let s = &r["structuredContent"];
+        assert_eq!(s["searched"]["meaning"], meaning, "{label}: {s}");
+        if meaning == "nas" {
+            // No word matches: the vector alone found the memory, and its 2.0 fields are there.
+            assert_eq!(
+                (s["mode"].as_str(), s["count"].as_i64()),
+                (Some("hybrid"), Some(1)),
+                "{s}"
+            );
+            assert_eq!(s["results"][0]["matched"], json!(["vector"]));
+            assert_eq!(s["results"][0]["kind"], "memory");
+            assert!(s["results"][0]["id"].is_i64() && s["results"][0]["mine"] == true);
+            assert!(s["results"][0]["ref"].as_str().unwrap().starts_with("m:"));
+        } else {
+            assert_eq!(
+                (s["mode"].as_str(), s["count"].as_i64()),
+                (Some("keyword"), Some(0)),
+                "{s}"
+            );
+            // Keywords still work while the embedder is slow.
+            let r = call(&app, RW, "memory_search", json!({ "query": "tomato" })).await;
+            assert_eq!(r["structuredContent"]["count"], 1);
+        }
+    }
+    // No embedder and no PC: keywords, and the search says so.
+    let r = call(&app_with_embedder(None), RW, "memory_search", ask).await;
+    assert!(r["structuredContent"]["searched"]["meaning"]
+        .as_str()
+        .unwrap()
+        .starts_with("off:"));
+    // A date window and an unknown source are checked.
+    let app = app(false);
+    for bad in [
+        json!({ "query": "x", "after": "last tuesday" }),
+        json!({ "query": "x", "sources": ["mail"] }),
+        json!({ "query": "x", "tier": "trace" }),
+    ] {
+        assert_eq!(call(&app, RW, "memory_search", bad).await["isError"], true);
+    }
+}
