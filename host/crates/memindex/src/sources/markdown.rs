@@ -2,9 +2,9 @@
 //! path it can quote back ("Title › Chapter › Section") so a hit reads with its context.
 //!
 //! The reading order for a date is the front-matter `date:` key, else the first `YYYY-MM-DD`
-//! in the file name, else the modification time the caller supplies. The first H1 names the
-//! doc (that H1 is then not repeated in the heading path), else the front-matter `title:`,
-//! else the file stem. Text under each H1–H3 heading becomes a chunk of at most
+//! in the file name, else the modification time the caller supplies. The first level-one heading names the
+//! doc (that heading is then not repeated in the heading path), else the front-matter `title:`,
+//! else the file stem. Text under each a level-1 to level-3 heading becomes a chunk of at most
 //! [`MAX_CHUNK_CHARS`] characters; neighbouring short sections merge toward
 //! [`TARGET_CHUNK_CHARS`], and a section longer than the cap splits at paragraph edges, with
 //! the last paragraph of the previous piece repeated at the head of the next one when it
@@ -132,7 +132,7 @@ pub fn chunk_markdown(path: &str, content: &str, mtime_ms: i64) -> DocOut {
     finish_doc(path.to_string(), title, path.to_string(), at, at, chunks)
 }
 
-/// `Some(level, text)` for an H1–H3 line, else `None`. Deeper headings stay in the body.
+/// `Some(level, text)` for an a level-1 to level-3 line, else `None`. Deeper headings stay in the body.
 fn heading_of(line: &str) -> Option<(u8, String)> {
     let trimmed = line.trim_start();
     for (level, prefix) in [(1u8, "# "), (2, "## "), (3, "### ")] {
@@ -263,7 +263,7 @@ mod tests {
         assert_eq!(doc.chunks.len(), 1);
         assert_eq!(
             doc.chunks[0].heading, "",
-            "the title H1 is not repeated in the path"
+            "that title heading is not repeated in the path"
         );
         assert_eq!(doc.chunks[0].text, "Idea\nA short note about the relay.");
         assert_eq!(doc.chunks[0].at, ms(2026, 1, 2));
@@ -307,17 +307,17 @@ mod tests {
         assert!(d.chunks[0].text.contains("second."));
         assert!(d.chunks[0].text.contains("third."));
 
-        // the H1 names the doc even with a front-matter title; the path drops that H1
+        // the first heading names the doc even with a front-matter title; the path drops that first heading
         let d = chunk_markdown(
             "z/n.md",
             "---\ntitle: Named\n---\n\n# Chapter\n\n## Part\n\nbody.",
             ms(2026, 1, 2),
         );
-        assert_eq!(d.title, "Chapter", "the first H1 names the doc");
+        assert_eq!(d.title, "Chapter", "the first heading names the doc");
         assert_eq!(d.chunks[0].heading, "Part");
         assert!(d.chunks[0].text.starts_with("Chapter › Part\n"));
 
-        // with no H1 the front-matter title rules and the H2 shapes the path
+        // with no first heading the front-matter title rules and a level-two heading shapes the path
         let long = "i".repeat(TARGET_CHUNK_CHARS);
         let d = chunk_markdown(
             "z/n.md",
@@ -329,7 +329,7 @@ mod tests {
         assert_eq!(d.chunks[1].heading, "Part");
         assert!(d.chunks[1].text.starts_with("Named › Part\n"));
 
-        // H4 is body, not a section edge
+        // a level-four heading is body, not a section edge
         let d = chunk_markdown("z/n.md", "# T\n\none\n#### four\n\ntwo", ms(2026, 1, 2));
         assert_eq!(d.chunks.len(), 1);
         assert!(d.chunks[0].text.contains("#### four"));
