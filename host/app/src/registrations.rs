@@ -148,7 +148,8 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
             profile.dir.clone(),
             Arc::new(helm_skills::launch::DbLookup { db: db.clone() }),
         );
-        helm_workflow::register_help(&help, db);
+        helm_workflow::register_help(&help, db.clone());
+        helm_projects::startup::register_help(&help, db);
     }
     // Settings that live outside the preference table but that chats read and change.
     let mut extensions = vec![
@@ -834,7 +835,7 @@ mod surface_tests {
                     e.name,
                     e.description.chars().count()
                 );
-                assert!(e.group != "", "{} has no group", e.name);
+                assert!(!e.group.is_empty(), "{} has no group", e.name);
             }
             // A merged tool's old names stay in the catalogue, marked, so they still answer.
             for f in reg.facades() {

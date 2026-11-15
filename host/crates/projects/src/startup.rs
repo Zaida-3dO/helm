@@ -22,6 +22,11 @@
 //! An agent reads them with `app_project_startup {action: get}` and changes them with
 //! `{action: set}`, which stages one Approve card (allow kind [`KIND`]) that Helm applies on the
 //! click, as for the settings an agent may not change itself.
+//!
+//! The startup set also holds **context files** (listed in the first message, never pasted; an
+//! agent reads one with `app_help project/<name>`) and the **MCP servers** the project's chats get
+//! (the others are left out of the chat's server list). Only the user sets these two, in Settings:
+//! a file path decides what an agent is shown, and a server list what it may reach.
 
 use crate::store::{self, Res};
 use crate::types::{ProjectNode, ProjectUpdateArgs};
@@ -54,7 +59,7 @@ const MAX_PATH_CHARS: usize = 300;
 const MAX_NOTES_CHARS: usize = 1000;
 
 /// The reason the Stop hook gives while the report is missing.
-pub const BLOCK_REASON: &str = "This project has startup instructions and they are not reported yet. Finish them and call app_startup_done (or app_startup_done with continued: true after a roll-over) before ending this turn.";
+pub const BLOCK_REASON: &str = "This project has startup instructions and they are not reported yet. Finish them and call app_startup_done through app_mcp_call (or with continued: true after a roll-over) before ending this turn.";
 
 pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     tx.execute_batch(
@@ -79,13 +84,17 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
 pub struct StartupSet {
     pub project_id: String,
     pub project_name: String,
+    /// The instructions; empty when the project has only files or servers.
     pub text: String,
+    pub files: Vec<String>,
+    pub servers: Vec<String>,
 }
 
 fn instructions_of(tx: &Transaction<'_>, project_id: &str) -> rusqlite::Result<Option<StartupSet>> {
     Ok(tx
         .query_row(
-            "SELECT p.id, COALESCE(l.title_override, b.title, p.name), l.startup_instructions
+            "SELECT p.id, COALESCE(l.title_override, b.title, p.name), l.startup_instructions,
+                    l.startup_files, l.startup_servers
              FROM projects p
              LEFT JOIN project_local l ON l.project_id = p.id
              LEFT JOIN board_projects b ON b.project_id = p.id
@@ -96,17 +105,23 @@ fn instructions_of(tx: &Transaction<'_>, project_id: &str) -> rusqlite::Result<O
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
                 ))
             },
         )
         .optional()?
-        .and_then(|(project_id, project_name, text)| {
-            text.filter(|t| !t.trim().is_empty())
-                .map(|text| StartupSet {
-                    project_id,
-                    project_name,
-                    text,
-                })
+        .and_then(|(project_id, project_name, text, files, servers)| {
+            let text = text.filter(|t| !t.trim().is_empty()).unwrap_or_default();
+            let files = store::json_list(files);
+            let servers = store::json_list(servers);
+            (!text.is_empty() || !files.is_empty() || !servers.is_empty()).then_some(StartupSet {
+                project_id,
+                project_name,
+                text,
+                files,
+                servers,
+            })
         }))
 }
 
@@ -145,8 +160,9 @@ fn carried_by(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<Option<St
     .optional()
 }
 
-/// True while the chat was told its startup and has not reported it: the Stop hook blocks, and the
-/// launch switches the hook on.
+/// True while the chat was told its startup instructions (or told to carry on its predecessor's)
+/// and has not reported it: the Stop hook blocks, and the launch switches the hook on. A project
+/// that has only context files or servers gives a chat nothing to report.
 pub fn owes_startup(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<bool> {
     if carried_by(tx, chat_id)?.is_none() {
         return Ok(false);
@@ -156,7 +172,18 @@ pub fn owes_startup(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<boo
         [chat_id],
         |r| r.get(0),
     )?;
-    Ok(!done)
+    if done {
+        return Ok(false);
+    }
+    let kind: String = tx.query_row(
+        "SELECT kind FROM chat_startup_sent WHERE chat_id = ?1",
+        [chat_id],
+        |r| r.get(0),
+    )?;
+    if kind == "continue" {
+        return Ok(true);
+    }
+    Ok(set_for_chat(tx, chat_id)?.is_some_and(|s| !s.text.is_empty()))
 }
 
 /// What a chat reported, as stored.
@@ -223,8 +250,59 @@ fn predecessor_report(
 /// The text a new chat's first message carries.
 pub fn start_text(instructions: &str) -> String {
     format!(
-        "Startup instructions for this project. Do these first, in order, before any other work. When they are done, call app_startup_done with the steps you completed (and the worktree, branch and local addresses if you made any). Then continue with the user's message.\n\n{instructions}"
+        "Startup instructions for this project. Do these first, in order, before any other work. When they are done, call app_startup_done (not in your tool list: call it with app_mcp_call) with the steps you completed (and the worktree, branch and local addresses if you made any). Then continue with the user's message.\n\n{instructions}"
     )
+}
+
+/// What a project's context files and servers add to the first message, or nothing.
+pub fn context_text(set: &StartupSet) -> String {
+    let mut out = String::new();
+    if !set.files.is_empty() {
+        out.push_str("Context files for this project. Read the ones the work needs before you start; they are not pasted here (app_help project/<name> reads one in parts):\n");
+        for (i, f) in set.files.iter().enumerate() {
+            out.push_str(&format!(
+                "- {f}  (app_help project/{})\n",
+                file_topic(&set.files, i)
+            ));
+        }
+    }
+    if !set.servers.is_empty() {
+        out.push_str(&format!(
+            "MCP servers for this project: {}. They are the only ones app_mcp_tools finds in this chat.\n",
+            set.servers.join(", ")
+        ));
+    }
+    out.trim_end().to_owned()
+}
+
+/// A context file's help topic: its file name without the extension, kept apart from the others.
+fn file_topic(files: &[String], index: usize) -> String {
+    let stem = |p: &str| {
+        let name = p.rsplit(['/', '\\']).next().unwrap_or(p);
+        let stem = name.rsplit_once('.').map_or(name, |(s, _)| s);
+        let clean: String = stem
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        if clean.is_empty() {
+            "file".to_owned()
+        } else {
+            clean
+        }
+    };
+    let mine = stem(&files[index]);
+    let earlier = files[..index].iter().filter(|p| stem(p) == mine).count();
+    if earlier == 0 {
+        mine
+    } else {
+        format!("{mine}-{}", earlier + 1)
+    }
 }
 
 /// The text a roll-over successor's first message carries.
@@ -272,16 +350,27 @@ impl StartupSeam for Startup {
                 },
             )
         } else if let Some(set) = set_for_chat(tx, chat_id)? {
-            (
-                "start",
-                StartupInjection {
-                    context: start_text(&set.text),
-                    row: format!(
+            let extra = context_text(&set);
+            let (context, row) = if set.text.is_empty() {
+                (
+                    extra,
+                    format!("Context for {} was added to this chat", set.project_name),
+                )
+            } else {
+                let mut c = start_text(&set.text);
+                if !extra.is_empty() {
+                    c.push_str("\n\n");
+                    c.push_str(&extra);
+                }
+                (
+                    c,
+                    format!(
                         "Startup instructions for {} were added to this chat",
                         set.project_name
                     ),
-                },
-            )
+                )
+            };
+            ("start", StartupInjection { context, row })
         } else {
             return Ok(None);
         };
@@ -432,6 +521,9 @@ fn project_startup(ctx: &ToolCtx, args: Value) -> ToolResult {
             "name": node.name,
             "startupInstructions": node.startup_instructions,
             "characters": node.startup_instructions.as_deref().map_or(0, |t| t.chars().count()),
+            "contextFiles": node.startup_files,
+            "mcpServers": node.startup_servers,
+            "note": "Context files and MCP servers are set by the user in Settings > Projects; set here changes the instructions only.",
         })),
         Some("set") => stage_set(ctx, &db, &node, &args),
         _ => Err(refused("action is get or set.")),
@@ -685,4 +777,108 @@ impl Applier for StartupApplier {
             Err(e) => format!("Nothing changed: {}", refusal_text(&e)),
         }
     }
+}
+
+// ---- the context files and servers ----------------------------------------------------------
+
+/// The MCP servers a chat's project allows ([`helm_hosttools::McpServerFilter`]).
+pub struct StartupServers {
+    pub db: Arc<Database>,
+}
+
+impl helm_hosttools::McpServerFilter for StartupServers {
+    fn allowed(&self, chat_id: &str) -> Option<Vec<String>> {
+        let set = self
+            .db
+            .snapshot(|tx| set_for_chat(tx, chat_id))
+            .ok()
+            .flatten()?;
+        (!set.servers.is_empty()).then_some(set.servers)
+    }
+
+    fn any(&self) -> bool {
+        self.db
+            .snapshot(|tx| {
+                tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM project_local
+                     WHERE startup_servers IS NOT NULL AND startup_servers != '')",
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )
+            })
+            .unwrap_or(false)
+    }
+}
+
+/// The longest context file Helm reads for `app_help`.
+const MAX_CONTEXT_FILE: u64 = 256 * 1024;
+
+/// The `project` namespace of `app_help`: this chat's project's startup instructions and context
+/// files, read from where they are when asked.
+pub struct ProjectHelp {
+    pub db: Arc<Database>,
+}
+
+impl helm_hosttools::help::HelpProvider for ProjectHelp {
+    fn namespace(&self) -> &'static str {
+        "project"
+    }
+
+    fn about(&self) -> &'static str {
+        "This chat's project: its startup instructions and context files"
+    }
+
+    fn index(&self, chat_id: &str) -> Vec<(String, String)> {
+        let Some(set) = self
+            .db
+            .snapshot(|tx| set_for_chat(tx, chat_id))
+            .ok()
+            .flatten()
+        else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        if !set.text.is_empty() {
+            out.push((
+                "startup".to_owned(),
+                format!("Startup instructions of {}", set.project_name),
+            ));
+        }
+        for (i, f) in set.files.iter().enumerate() {
+            out.push((file_topic(&set.files, i), f.chars().take(90).collect()));
+        }
+        out
+    }
+
+    fn topic(&self, chat_id: &str, name: &str) -> Option<String> {
+        let set = self
+            .db
+            .snapshot(|tx| set_for_chat(tx, chat_id))
+            .ok()
+            .flatten()?;
+        if name == "startup" {
+            return (!set.text.is_empty()).then_some(set.text);
+        }
+        let i = (0..set.files.len()).find(|i| file_topic(&set.files, *i) == name)?;
+        let path = std::path::Path::new(&set.files[i]);
+        let plain = std::fs::symlink_metadata(path)
+            .is_ok_and(|m| m.is_file() && m.len() <= MAX_CONTEXT_FILE);
+        if !plain {
+            return Some(format!(
+                "{} is not a plain file of at most {} KiB, so Helm does not read it here.",
+                set.files[i],
+                MAX_CONTEXT_FILE / 1024
+            ));
+        }
+        let text = String::from_utf8_lossy(&std::fs::read(path).ok()?).into_owned();
+        if helm_core::hidden::hides(&text) {
+            return Some("That file holds invisible or direction-changing characters, so Helm does not show it.".into());
+        }
+        Some(text)
+    }
+}
+
+/// Add the `project` topics to `app_help`.
+pub fn register_help(providers: &helm_hosttools::help::HelpProviders, db: Arc<Database>) {
+    providers.register(Arc::new(ProjectHelp { db }));
 }

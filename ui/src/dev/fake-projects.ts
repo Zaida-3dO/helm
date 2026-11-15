@@ -39,7 +39,7 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
     parentId: null,
     parentSource: null,
     description: null,
-    startupInstructions: null,
+    startupInstructions: null, startupFiles: [], startupServers: [],
     icon: null,
     colour: null,
     pinned: false,
@@ -172,6 +172,8 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
         if ('colour' in args) next.colour = (args.colour as string) ?? null;
         if ('description' in args) next.description = typeof args.description === 'string' ? args.description : null;
         if ('startupInstructions' in args) next.startupInstructions = typeof args.startupInstructions === 'string' && args.startupInstructions !== '' ? args.startupInstructions : null;
+        if (Array.isArray(args.startupFiles)) next.startupFiles = args.startupFiles.filter((f): f is string => typeof f === 'string');
+        if (Array.isArray(args.startupServers)) next.startupServers = args.startupServers.filter((f): f is string => typeof f === 'string');
         if (typeof args.pinned === 'boolean') next.pinned = args.pinned;
         if (typeof args.collapsed === 'boolean') next.collapsed = args.collapsed;
         if ('parentId' in args) next.parentId = (args.parentId as string) ?? null;

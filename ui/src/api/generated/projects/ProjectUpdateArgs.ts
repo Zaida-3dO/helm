@@ -12,7 +12,15 @@ description?: string | null,
 /**
  * Several lines, at most [`MAX_STARTUP_CHARS`] characters; `null` or blank clears.
  */
-startupInstructions?: string | null, pinned?: boolean, collapsed?: boolean, 
+startupInstructions?: string | null, 
+/**
+ * Replaces the context files; an empty list clears them.
+ */
+startupFiles?: Array<string>, 
+/**
+ * Replaces the MCP servers the project's chats get; an empty list clears them.
+ */
+startupServers?: Array<string>, pinned?: boolean, collapsed?: boolean, 
 /**
  * Reorder within the sibling pin group: place before this project (`null` = last). Rewrites the
  * group's positions 0..n atomically; a no-op move writes nothing.

@@ -32,6 +32,7 @@ pub fn register(reg: &mut MigrationRegistry) {
         .one_time("projects-closed", add_closed)
         .one_time("projects-icon-and-description", add_icon_and_description)
         .one_time("projects-startup-instructions", add_startup_instructions)
+        .one_time("projects-startup-set", add_startup_set)
         .initializer("projects-startup", crate::startup::init)
         .initializer("projects-repositories", crate::repos::init);
 }
@@ -51,6 +52,8 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              revision                   INTEGER NOT NULL DEFAULT 0,
              description                TEXT,
              startup_instructions       TEXT,
+             startup_files              TEXT,
+             startup_servers            TEXT,
              icon_image                 BLOB,
              title_pending              INTEGER NOT NULL DEFAULT 0
          );
@@ -194,6 +197,24 @@ fn add_startup_instructions(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     )?;
     if !present {
         tx.execute_batch("ALTER TABLE project_local ADD COLUMN startup_instructions TEXT")?;
+    }
+    Ok(())
+}
+
+/// The startup set's context files and MCP servers arrived after the instructions: a profile made
+/// before them gets the columns here. A new profile already has them from `init`.
+fn add_startup_set(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    for column in ["startup_files", "startup_servers"] {
+        let present: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('project_local') WHERE name = ?1)",
+            [column],
+            |r| r.get(0),
+        )?;
+        if !present {
+            tx.execute_batch(&format!(
+                "ALTER TABLE project_local ADD COLUMN {column} TEXT"
+            ))?;
+        }
     }
     Ok(())
 }
