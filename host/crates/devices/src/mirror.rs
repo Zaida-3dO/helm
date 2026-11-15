@@ -1260,7 +1260,12 @@ impl Inner {
         let more = result.get("more").and_then(Value::as_bool).unwrap_or(false);
         let thread = result.get("thread").cloned().unwrap_or(Value::Null);
         let pending = result.get("pending").cloned().unwrap_or(Value::Null);
-        let consent = result.get("consent").cloned().unwrap_or(Value::Null);
+        // A device on an older Helm sends no cards: the copy holds an empty list, never null.
+        let consent = result
+            .get("consent")
+            .filter(|c| c.is_array())
+            .cloned()
+            .unwrap_or_else(|| json!([]));
         let self_uid = self.self_uid.clone();
         let stored = self.db.write(|tx| {
             if let Some(chat) = result.get("chat") {

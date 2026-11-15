@@ -480,7 +480,10 @@ fn devices_consent_list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                 )
                 .optional()?;
             Ok::<_, rusqlite::Error>(match stored {
-                Some(s) => serde_json::from_str::<Value>(&s).unwrap_or_else(|_| json!([])),
+                Some(s) => serde_json::from_str::<Value>(&s)
+                    .ok()
+                    .filter(Value::is_array)
+                    .unwrap_or_else(|| json!([])),
                 None => json!([]),
             })
         })
