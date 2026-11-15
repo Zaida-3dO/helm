@@ -217,6 +217,7 @@ pub fn start(handle: &tokio::runtime::Handle, ctx: &OpCtx, tools: Arc<helm_hostt
             afk,
             line,
             sink,
+            ctx.services.clone(),
             profile.dir.clone(),
         );
     }

@@ -1122,6 +1122,95 @@ impl ChatSink {
         })
     }
 
+    /// A tap on a staged settings change: the same one decision the card in Helm makes, so the
+    /// first answer wins. The chat must still belong to the profile that was asked; whatever the
+    /// outcome the tap is spent and the person is told what happened.
+    async fn answer_consent(
+        &self,
+        c: &Ctx,
+        ask: &crate::approve::Ask,
+        index: usize,
+        up: &Arc<dyn Upstream>,
+    ) {
+        let label = ask.options[index].clone();
+        let unused = |why: &str| format!("Your \"{label}\" was not used: {why}");
+        let Some(w) = self.exec.wiring() else {
+            up.notify(&c.person, &unused("Helm is still starting."));
+            return;
+        };
+        let (services, events) = (w.services.clone(), w.events.clone());
+        let (db, chat, profile) = (c.db.clone(), ask.chat_id.clone(), c.profile_id.clone());
+        let owned = tokio::task::spawn_blocking(move || {
+            db.snapshot(|tx| helm_profiles::store::profile_of_chat(tx, &chat))
+                .ok()
+                .flatten()
+                .is_some_and(|p| p.id == profile)
+        })
+        .await
+        .unwrap_or(false);
+        if !owned {
+            up.notify(&c.person, &unused("that chat is not yours."));
+            return;
+        }
+        let ask2 = ask.clone();
+        let done = tokio::task::spawn_blocking(move || {
+            let d = crate::approve::decide_consent(&services, &events, &ask2, index)?;
+            let allowed = d.request.state != helm_consent::RequestState::Denied;
+            if let Some(applying) = d.applying {
+                let _ = applying.join();
+            }
+            let kinds = services.get::<helm_consent::AllowKinds>();
+            let db = services.need::<Database>()?;
+            let outcome = kinds
+                .and_then(|k| {
+                    helm_consent::store::get(&db, &k, &d.request.id)
+                        .ok()
+                        .flatten()
+                })
+                .and_then(|r| r.outcome);
+            Ok::<_, helm_ipc::ApiError>((allowed, outcome))
+        })
+        .await;
+        match done {
+            Ok(Ok((allowed, outcome))) => {
+                c.rt.add_context_row(
+                    &ask.chat_id,
+                    helm_chats::types::ContextKind::Telegram,
+                    &format!("Answered from Telegram: {label}"),
+                );
+                let said = match (allowed, outcome) {
+                    (true, Some(o)) => format!("Approved. {o}"),
+                    (true, None) => "Approved.".to_owned(),
+                    (false, _) => "Denied: nothing changed.".to_owned(),
+                };
+                up.notify(&c.person, &said);
+            }
+            Ok(Err(e)) if e.code == "conflict" => {
+                // Somebody answered first: say where, from the shared record.
+                let (db, id) = (c.db.clone(), ask.request_id.clone());
+                let services = self.exec.wiring().map(|w| w.services.clone());
+                let note = tokio::task::spawn_blocking(move || {
+                    let kinds = services?.get::<helm_consent::AllowKinds>()?;
+                    let r = helm_consent::store::get(&db, &kinds, &id).ok().flatten();
+                    Some(crate::approve::settled_note(
+                        r.as_ref(),
+                        helm_core::now_ms(),
+                    ))
+                })
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "It was answered already.".into());
+                up.notify(&c.person, &unused(&note));
+            }
+            Ok(Err(e)) => up.notify(
+                &c.person,
+                &unused(&format!("Helm could not answer it ({}).", e.message)),
+            ),
+            Err(_) => up.notify(&c.person, &unused("Helm could not answer it.")),
+        }
+    }
+
     /// Watch `chat` for its profile unless it is already being watched. One task per chat; a
     /// new exchange in a watched chat reuses the task, a chat whose task ended gets a new one.
     fn watch(&self, c: &Ctx, chat: &str, baseline: i64) {
@@ -1212,21 +1301,31 @@ impl TelegramSink for ChatSink {
                 return;
             };
             let who = person.clone().unwrap_or_default();
-            let Some(ask) = self.asks.take(&id, index) else {
-                up.notify(
-                    &who,
-                    "That request is no longer waiting, so your tap was not used.",
-                );
-                return;
-            };
             // The tap must come from the person the question was asked of.
-            if ask.person != who {
-                up.notify(
-                    &who,
-                    "That request was not asked of you, so your tap was not used.",
-                );
-                return;
-            }
+            let ask = match self.asks.tap(&id, index, &who, helm_core::now_ms()) {
+                crate::approve::Tap::Taken(ask) => ask,
+                crate::approve::Tap::Gone => {
+                    up.notify(
+                        &who,
+                        "That request is no longer waiting, so your tap was not used.",
+                    );
+                    return;
+                }
+                crate::approve::Tap::Foreign => {
+                    up.notify(
+                        &who,
+                        "That request was not asked of you, so your tap was not used.",
+                    );
+                    return;
+                }
+                crate::approve::Tap::Expired => {
+                    up.notify(
+                        &who,
+                        "That request has expired, so your tap was not used. Open Helm to answer it.",
+                    );
+                    return;
+                }
+            };
             let label = ask.options[index].clone();
             let nothing =
                 format!("Your \"{label}\" was not used: that request is no longer waiting.");
@@ -1241,6 +1340,10 @@ impl TelegramSink for ChatSink {
                         "Your \"{label}\" was not used: approving from Telegram is off in Helm."
                     ),
                 );
+                return;
+            }
+            if ask.consent {
+                self.answer_consent(&c, &ask, index, &up).await;
                 return;
             }
             if let Some(question) = &ask.question {
