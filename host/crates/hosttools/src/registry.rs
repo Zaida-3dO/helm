@@ -331,6 +331,11 @@ impl HostToolRegistry {
             if self.alias_of(member).is_some() {
                 panic!("{member} is already merged into another tool");
             }
+            // The worker admits a call by the merged name alone, so a member that a launch may
+            // not list cannot sit behind one.
+            if self.tools[member].spec.availability.when != crate::spec::Condition::Always {
+                panic!("{name}: {member} is not always listed, so it cannot be merged");
+            }
             if f.actions[..i].iter().any(|(_, m)| m == member) && f.fixed_for(action).is_none() {
                 panic!("{name}: {member} is listed twice without a fixed argument");
             }

@@ -663,6 +663,9 @@ pub(crate) struct Shared {
     /// Every worker exit, logged, grouped into incidents, and its crashes remembered for the
     /// outage watch ([`crate::exits`]).
     pub exits: crate::exits::ExitLog,
+    /// The launch keys each chat's worker was last launched with ([`crate::hostcalls::launch`]),
+    /// for `app_help` to teach only the tools that launch lists.
+    pub launched_keys: Mutex<HashMap<String, helm_hosttools::LaunchKeys>>,
 }
 
 /// The runtime service.
@@ -705,6 +708,7 @@ impl ChatRuntime {
                 local: std::sync::OnceLock::new(),
                 local_queue: Mutex::new(HashMap::new()),
                 exits: crate::exits::ExitLog::new(&cfg_profile),
+                launched_keys: Mutex::new(HashMap::new()),
             }),
         };
         rt.start_tick();

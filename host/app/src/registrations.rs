@@ -190,6 +190,7 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     services.insert(Arc::new(worker_lines()));
     // Other crates reach running workers through the chat runtime (helm_hosttools::lines).
     if let Some(rt) = services.get::<helm_chats::ChatRuntime>() {
+        services.insert(Arc::new(helm_hosttools::LaunchRecords(rt.clone())));
         services.insert(Arc::new(helm_hosttools::Broadcaster(rt)));
     }
     services.insert(Arc::new(allow_kinds()));
@@ -860,7 +861,19 @@ mod surface_tests {
             }
         }
         // Every help topic fits the cap, in parts if need be, and the merged tools say all they do.
+        let every = helm_hosttools::LaunchKeys {
+            projects_mode: true,
+            all_settings: true,
+            mcp_enabled: true,
+            gmail_accounts: true,
+            web_tools: true,
+            ..Default::default()
+        };
         for name in reg.names() {
+            // The worker's own tools have no topic: no launch lists them.
+            if reg.get(name).unwrap().spec.availability.when == helm_hosttools::Condition::Worker {
+                continue;
+            }
             let topic = format!("tool/{name}");
             let mut part = 1;
             loop {
@@ -869,7 +882,7 @@ mod surface_tests {
                 } else {
                     format!("{topic}#{part}")
                 };
-                let v = helm_hosttools::help::answer(&reg, None, "c", Some(&t), 0).unwrap();
+                let v = helm_hosttools::help::answer(&reg, None, "c", &every, Some(&t), 0).unwrap();
                 assert!(
                     v["text"].as_str().unwrap().chars().count()
                         <= helm_hosttools::help::MAX_TOPIC_CHARS
@@ -891,6 +904,7 @@ mod surface_tests {
                     &reg,
                     None,
                     "c",
+                    &every,
                     Some(&format!("tool/{}/{action}", f.name)),
                     0,
                 )

@@ -46,7 +46,9 @@ pub mod tools;
 
 pub use addendum::{Addendum, AddendumSection, KnowledgeSection, StaticSection};
 pub use dispatch::{Caller, CallerBinding, ChatRequest, HostTools};
-pub use lines::{Broadcaster, WorkerBroadcast, WorkerLineCtx, WorkerLines};
+pub use lines::{
+    Broadcaster, LaunchRecord, LaunchRecords, WorkerBroadcast, WorkerLineCtx, WorkerLines,
+};
 pub use registry::{
     CallOrigin, Changed, HostToolRegistry, OpInvoker, RegisteredTool, ToolCtx, ToolError,
     ToolFuture, ToolHandler, ToolResult,
