@@ -72,8 +72,8 @@ pub const TABLE: &[(&str, Class)] = &[
     ("app_list_schedules", Class::Denied(SCHEDULES)),
     ("app_list_tools", Class::Denied(TOOLS)),
     ("app_list_waiting", Class::Allowed),
-    // The hub asks it before it transcribes: it only unloads idle local models, and only the
-    // hub's own speech caller may ask ([`HUB_ONLY`]).
+    // Older hubs still ask it before they transcribe. It answers at once and unloads nothing, and
+    // only the hub's own speech caller may ask ([`HUB_ONLY`]).
     ("app_make_room_for_speech", Class::Allowed),
     ("app_mcp_call", Class::Denied(MCP)),
     ("app_mcp_tools", Class::Denied(MCP)),
