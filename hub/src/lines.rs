@@ -55,9 +55,27 @@ pub struct Lines {
     /// there. Second only to a stored pin when [`Lines::route_for`] picks; a client that is no
     /// longer a candidate (line down, no longer acts for them, channel off) simply never wins.
     sticky: Mutex<HashMap<(i64, Channel), i64>>,
+    /// The Telegram bot, while it runs, so a profile's `tg_link` / `tg_unlink` / `tg_status` can
+    /// be answered on the line that asked (see `telegram.rs`).
+    telegram: Mutex<Option<Weak<crate::telegram::Telegram>>>,
 }
 
 impl Lines {
+    /// Let the lines reach the Telegram bot, for the link questions a profile asks. Called by
+    /// [`crate::telegram::Telegram::attach`].
+    pub fn bind_telegram(&self, bot: &Arc<crate::telegram::Telegram>) {
+        *self.telegram.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::downgrade(bot));
+    }
+
+    /// The bot, while it runs.
+    pub fn telegram(&self) -> Option<Arc<crate::telegram::Telegram>> {
+        self.telegram
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .and_then(Weak::upgrade)
+    }
+
     /// The registry, plus the receiver for everything the lines send up. Each frame is tagged
     /// with its person so the Telegram bridge of that person handles it.
     pub fn new(registry: Arc<Mutex<Registry>>) -> (Self, mpsc::UnboundedReceiver<PersonUpstream>) {
@@ -68,6 +86,7 @@ impl Lines {
                 upstream,
                 registry,
                 voice: Mutex::new(None),
+                telegram: Mutex::new(None),
                 state: Mutex::new(None),
                 sticky: Mutex::new(HashMap::new()),
             },
@@ -205,6 +224,20 @@ impl Lines {
                     Upstream::RoutePin { person_id, channel } => {
                         lines.on_route_pin(client_id, &person_id, &channel);
                     }
+                    // A profile asking about its own Telegram link. Answered on the line that
+                    // asked, since the answer is a link for that person to tap on their phone.
+                    up @ Upstream::TgAdmin { .. } => match lines.telegram() {
+                        Some(bot) => {
+                            let frame = bot.answer_admin(&lines, client_id, &up);
+                            own_line.send(&frame);
+                        }
+                        None => {
+                            own_line.send(&serde_json::json!({
+                                "type": "tg_link_result", "ok": false,
+                                "error": "this hub has no Telegram bot",
+                            }));
+                        }
+                    },
                     Upstream::Dev {
                         id,
                         to,
@@ -469,6 +502,19 @@ impl Lines {
         self.candidate_views(person_id, channel)
             .into_iter()
             .map(|(_, _, machine, _)| machine)
+            .collect()
+    }
+
+    /// Every candidate line for `person_id` on `channel` as `(client id, machine name, line)`,
+    /// for a person choosing one of them (the bot's `/pc`).
+    pub fn candidate_lines(
+        &self,
+        person_id: i64,
+        channel: Channel,
+    ) -> Vec<(i64, String, Arc<Line>)> {
+        self.candidate_views(person_id, channel)
+            .into_iter()
+            .map(|(client_id, _, machine, line)| (client_id, machine, line))
             .collect()
     }
 

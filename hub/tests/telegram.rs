@@ -4,6 +4,7 @@
 
 use axum::body::{Body, Bytes};
 use axum::http::{header, HeaderMap, Request, StatusCode};
+use helm_hub::auth::{Client, Scopes};
 use helm_hub::lines::Lines;
 use helm_hub::mcp::Options;
 use helm_hub::registry::Registry;
@@ -2058,5 +2059,231 @@ async fn http_voice_downloads_the_file_and_posts_a_multipart_form() {
     assert!(
         heard.starts_with("the speech-to-text server could not be reached"),
         "{heard}"
+    );
+}
+
+/// The next frame of `type` down a line, waiting for the hub's forwarding task to make it.
+async fn wait_frame(rx: &mut mpsc::UnboundedReceiver<String>, what: &str) -> Value {
+    for _ in 0..400 {
+        while let Ok(f) = rx.try_recv() {
+            let v: Value = serde_json::from_str(&f).unwrap();
+            if v["type"] == what {
+                return v;
+            }
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("no {what} frame arrived");
+}
+
+/// The link flow for a person who brings their own Telegram account: a PC asks for a link with
+/// `tg_link`, the person taps the address it answers on their phone, and the code is what proves
+/// which account is theirs. Their bridge is made on the spot, their messages go down their own
+/// PC's line named with them, `tg_status` says so, and `tg_unlink` makes them a stranger again. A
+/// used code is answered exactly like a stranger, and a PC that does not act for the person is
+/// refused.
+#[tokio::test]
+async fn a_person_links_their_own_telegram_and_their_bridge_takes_their_messages() {
+    const LINKED_ID: i64 = 5150;
+    let api = Arc::new(FakeApi::default());
+    let scopes = Scopes::parse_list("relay,peer").unwrap();
+    let mut reg = Registry::open_in_memory().unwrap();
+    let owner = reg.ensure_person("Owner").unwrap().id;
+    let kim = reg.ensure_person("Kim").unwrap().id;
+    let own_pc = reg.add_client("Owner", "desk", &scopes).unwrap().client.id;
+    let kim_pc = reg.add_client("Kim", "laptop", &scopes).unwrap().client.id;
+    let registry = Arc::new(Mutex::new(reg));
+    let (lines, _up) = Lines::new(registry.clone());
+    let lines = Arc::new(lines);
+
+    // The bot starts as an environment allow-list leaves it: one account, the owner's.
+    let c = TelegramConfig {
+        people: vec![(OWNER, "Owner".to_owned())],
+        ..cfg()
+    };
+    let mut resolve = |name: &str| -> Result<i64, String> {
+        let mut r = registry.lock().unwrap();
+        r.ensure_person(name)
+            .map(|p| p.id)
+            .map_err(|e| e.to_string())
+    };
+    let tel =
+        Arc::new(Telegram::build(api.clone(), &lines, &c, owner, &mut resolve, &|b| b).unwrap());
+    tel.clone().attach();
+    tel.prime().await;
+
+    let client = |id: i64, person: i64, name: &str, machine: &str| Client {
+        id,
+        name: machine.into(),
+        person_id: person,
+        person: name.into(),
+        machine: machine.into(),
+        scopes: scopes.clone(),
+    };
+    let dline = lines.line_for(&client(own_pc, owner, "Owner", "desk"));
+    let (dtx, mut drx) = mpsc::unbounded_channel();
+    let dgen = dline.attach(dtx);
+    let kline = lines.line_for(&client(kim_pc, kim, "Kim", "laptop"));
+    let (ktx, mut krx) = mpsc::unbounded_channel();
+    let kgen = kline.attach(ktx);
+    let now = now_ms();
+
+    // Kim's PC asks. The answer is an address for Kim to tap, named for the hub's own bot.
+    assert!(kline.receive(
+        kgen,
+        &json!({"type": "tg_link", "id": "l1", "personId": kim.to_string()}).to_string()
+    ));
+    let asked = wait_frame(&mut krx, "tg_link_result").await;
+    assert_eq!(asked["ok"], json!(true), "the ask was refused: {asked}");
+    let url = asked["url"].as_str().unwrap().to_owned();
+    let code = url.split("?start=").nth(1).unwrap().to_owned();
+    assert_eq!(url, format!("https://t.me/helm_test_bot?start={code}"));
+
+    // The tap, from an account nobody has ever heard of.
+    let mut tap = update(LINKED_ID, &format!("/start {code}"), now / 1000);
+    tap["message"]["from"]["username"] = json!("kim");
+    assert_eq!(tel.on_update(&tap, now).await, Handled::Command);
+    assert!(
+        api.sent_texts()
+            .iter()
+            .any(|t| t == "Linked to Helm as Kim."),
+        "the tap was answered with {:?}",
+        api.sent_texts()
+    );
+
+    // The same code, spent, in front of another stranger: the same silence any stranger gets.
+    // (The account that used it is allowed now, so its own `/start` is the ordinary greeting.)
+    api.clear();
+    assert_eq!(
+        tel.on_update(
+            &update(STRANGER, &format!("/start {code}"), now / 1000),
+            now
+        )
+        .await,
+        Handled::Ignored
+    );
+    assert_eq!(
+        tel.on_update(&update(STRANGER, "/start ZZZZ-ZZZZ", now / 1000), now)
+            .await,
+        Handled::Ignored
+    );
+    assert!(api.calls().is_empty(), "a spent or wrong code was answered");
+
+    // Their messages now go down their own PC's line, and name who they are for.
+    assert_eq!(
+        tel.on_update(&update(LINKED_ID, "hello", now / 1000), now)
+            .await,
+        Handled::Forwarded
+    );
+    let got = wait_frame(&mut krx, "telegram").await;
+    assert_eq!(
+        (
+            got["text"].as_str(),
+            got["personId"].as_str(),
+            got["bot"].as_str()
+        ),
+        (
+            Some("hello"),
+            Some(kim.to_string().as_str()),
+            Some("helm_test_bot")
+        )
+    );
+
+    // The profile can ask whether it is linked, and sees what Telegram calls the account.
+    assert!(kline.receive(
+        kgen,
+        &json!({"type": "tg_status", "id": "s1", "personId": kim.to_string()}).to_string()
+    ));
+    let status = wait_frame(&mut krx, "tg_status_result").await;
+    assert_eq!(
+        (
+            status["linked"].as_bool(),
+            status["handle"].as_str(),
+            status["telegramId"].as_str()
+        ),
+        (
+            Some(true),
+            Some("@kim"),
+            Some(LINKED_ID.to_string().as_str())
+        ),
+        "status was {status}"
+    );
+
+    // `/pc` lists the PCs that can take their Telegram, marks the one that does, and pins one of
+    // them. A machine that does not act for them is not offered and cannot be picked.
+    api.clear();
+    assert_eq!(
+        tel.on_update(&update(LINKED_ID, "/pc", now / 1000), now)
+            .await,
+        Handled::Command
+    );
+    let shown = api.sent_texts().join(" / ");
+    assert!(
+        shown.contains("laptop") && !shown.contains("desk"),
+        "the PC list was {shown}"
+    );
+    assert_eq!(
+        tel.on_update(&update(LINKED_ID, "/pc desk", now / 1000), now)
+            .await,
+        Handled::Command
+    );
+    assert!(
+        api.sent_texts()
+            .last()
+            .is_some_and(|t| t.starts_with("No PC by that name")),
+        "a machine that does not act for Kim was chosen: {:?}",
+        api.sent_texts().last()
+    );
+    assert_eq!(
+        tel.on_update(&update(LINKED_ID, "/pc laptop", now / 1000), now)
+            .await,
+        Handled::Command
+    );
+    assert!(
+        api.sent_texts()
+            .last()
+            .is_some_and(|t| t.contains("laptop") && t.contains("now goes to")),
+        "the pin was not confirmed: {:?}",
+        api.sent_texts().last()
+    );
+
+    // A PC that does not act for Kim cannot ask about them.
+    assert!(dline.receive(
+        dgen,
+        &json!({"type": "tg_link", "id": "l2", "personId": kim.to_string()}).to_string()
+    ));
+    let refused = wait_frame(&mut drx, "tg_link_result").await;
+    assert_eq!(
+        refused["ok"],
+        json!(false),
+        "a stranger's PC was heard: {refused}"
+    );
+
+    // The environment's own account keeps working, named with its own person.
+    assert_eq!(
+        tel.on_update(&update(OWNER, "mine", now / 1000), now).await,
+        Handled::Forwarded
+    );
+    let mine = wait_frame(&mut drx, "telegram").await;
+    assert_eq!(
+        (mine["text"].as_str(), mine["personId"].as_str()),
+        (Some("mine"), Some(owner.to_string().as_str()))
+    );
+
+    // Unlinking makes them a stranger again.
+    assert!(kline.receive(
+        kgen,
+        &json!({"type": "tg_unlink", "id": "u1", "personId": kim.to_string()}).to_string()
+    ));
+    let gone = wait_frame(&mut krx, "tg_unlink_result").await;
+    assert_eq!(
+        (gone["ok"].as_bool(), gone["unlinked"].as_i64()),
+        (Some(true), Some(1)),
+        "unlink said {gone}"
+    );
+    assert_eq!(
+        tel.on_update(&update(LINKED_ID, "again", now / 1000), now)
+            .await,
+        Handled::Ignored
     );
 }

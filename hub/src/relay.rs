@@ -14,9 +14,9 @@
 //! |---|---|---|
 //! | hub → Helm | `welcome` | `version`, and who this line is: `personId`, `person`, `machineId`, `machine` |
 //! | hub → Helm | `call` | `id`, `client`, `tool`, `args`, `personId` (the hub person the call acts as, when the hub knows one). `client` names the caller: a client's name, or `peer:<person>` for a household member's call |
-//! | hub → Helm | `telegram` | `id`, `text`, `sentAt` (ms), `ageMinutes` (null when fresh), `bot`. A voice note's `text` is `[Voice note] <transcript>`; a reply or quote puts `Replying to: "<quoted text>"` on the first line. With files: `images` (pictures Helm shows) and `files` (anything else), each a list of `name`, `mediaType` and base64 `data`; at most 10 files and 50 MB in all |
-//! | hub → Helm | `telegram_stop` | — |
-//! | hub → Helm | `telegram_answer` | `id`, `index`: the user tapped button `index` (from 0) of the ask `id`. Sent once per ask |
+//! | hub → Helm | `telegram` | `id`, `text`, `sentAt` (ms), `ageMinutes` (null when fresh), `bot`, `personId` (whose Telegram this is, when the hub knows). A voice note's `text` is `[Voice note] <transcript>`; a reply or quote puts `Replying to: "<quoted text>"` on the first line. With files: `images` (pictures Helm shows) and `files` (anything else), each a list of `name`, `mediaType` and base64 `data`; at most 10 files and 50 MB in all |
+//! | hub → Helm | `telegram_stop` | `personId` (optional): stop the running turn of that person's Telegram chat |
+//! | hub → Helm | `telegram_answer` | `id`, `index`, `personId` (whose Telegram this is, when the hub knows): the user tapped button `index` (from 0) of the ask `id`. Sent once per ask |
 //! | Helm → hub | `sharing` | `chats`, `transcripts`, `messages` (booleans, absent means false): what the household may do with this machine's chats. Sent on connect and whenever a switch changes; reset to all false when the line drops |
 //! | Helm → hub | `peer` | `id`, `op` (`people`, `list_chats`, `read_chat` or `send_message`), `args` (`personId`, optional `machineId`, and the op's own): a question about the household, answered with `peer_result` (see `peer.rs`) |
 //! | hub → Helm | `peer_result` | `id` (the `peer` frame's), `ok`, `result` or `error` (a plain sentence) |
@@ -28,11 +28,11 @@
 //! | Helm → hub | `telegram_notify` | `text`, `personId` (optional): a message Helm starts (an alert), sent as a new message; the live status is left alone |
 //! | Helm → hub | `telegram_ask` | `id` (16-32 lowercase hex), `text`, `options` (1-4 strings), `personId` (optional): a new message with one button per option |
 //! | Helm → hub | `telegram_ask_done` | `id`, `text`, `personId` (optional): the ask was settled in Helm; its message gains `text` and loses its buttons |
-//! | hub → Helm | `voice` | `id` (the turn), `mode` (`conversation` or `chat`), `text` (at most 8000 characters), `source` (`speech` or `typed`), `sentAt` (ms), `ageMinutes` (null when fresh), `continues` (a turn id or null). One turn for the voice chat; sent again every 45 s until `voice_ack` |
-//! | hub → Helm | `voice_stop` | `turn`: the phone cancelled a turn Helm may already have taken |
-//! | hub → Helm | `voice_heard` | `reports`: what the phone did and did not play (see `voice.rs`) |
-//! | hub → Helm | `voice_presence` | `live`, `mode`: whether the phone's talk screen is open, and in which mode |
-//! | hub → Helm | `voice_fresh` | — : start a new voice conversation |
+//! | hub → Helm | `voice` | `id` (the turn), `personId` (whose voice line this is, when the hub knows), `mode` (`conversation` or `chat`), `text` (at most 8000 characters), `source` (`speech` or `typed`), `sentAt` (ms), `ageMinutes` (null when fresh), `continues` (a turn id or null). One turn for the voice chat; sent again every 45 s until `voice_ack` |
+//! | hub → Helm | `voice_stop` | `turn`, `personId` (optional): the phone cancelled a turn Helm may already have taken |
+//! | hub → Helm | `voice_heard` | `reports`, `personId` (optional): what the phone did and did not play (see `voice.rs`) |
+//! | hub → Helm | `voice_presence` | `live`, `mode`, `personId` (optional): whether the phone's talk screen is open, and in which mode |
+//! | hub → Helm | `voice_fresh` | `personId` (optional): start a new voice conversation |
 //! | Helm → hub | `voice_ack` | `id`, `personId` (optional): the turn is placed in the voice chat |
 //! | Helm → hub | `voice_status` | `turn`, `text` (at most 300 characters), `personId` (optional): the working line, shown and never spoken |
 //! | Helm → hub | `voice_attachment` | `reply`, `n` (1-4), `kind`, `title`, and by kind `mediaType` + `data` (base64), `markdown` or `url`, `personId` (optional): one attachment, sent before its reply and held for 60 s |
@@ -42,6 +42,9 @@
 //! | hub → Helm | `devices` | `list`: every device of the household, `{uid, name, personId, person, people ([{personId, person}]), online, lastSeenAt, run, self}`; sent to each `peer` line when a device frame arrives and whenever a line comes up or drops |
 //! | Helm → hub | `person_ensure` | `id`, `name`: make (or find, ignoring case) a hub person of this name for one of this PC's profiles; answered with `person_result`. Needs the `peer` scope |
 //! | hub → Helm | `person_result` | `id` (the `person_ensure`'s), `ok`, `personId`, `person` (the stored name), `created` (bool); or `ok` false with `error` |
+//! | Helm → hub | `tg_link` / `tg_unlink` / `tg_status` | `id` (answered back on the result), `personId`: the profile asks to link its Telegram to that hub person, to unlink it, or asks whether it is linked. Only honoured for a person this PC acts for; answered with the matching `_result` frame below |
+//! | hub → Helm | `tg_link_result` | `id`, `ok`, `url` (`https://t.me/<bot>?start=<code>`: the person taps it once, which is what proves the Telegram account is theirs), or `ok` false with `error` |
+//! | hub → Helm | `tg_unlink_result` / `tg_status_result` | `id`, `ok`, and for a status `linked` (bool), `telegramId` and `handle` when it is linked; or `ok` false with `error` |
 //! | Helm → hub | `route_pin` | `personId`, `channel` (`telegram`, `voice` or `app`): this PC asks to be the one that receives that person's channel until it picks otherwise; only honoured for a person this PC acts for |
 //! | Helm → hub | `dev` | `id`, `to` (a device uid), `op`, `args`, `as` (optional list of person ids: the acting person first, then anyone a read may also return): a call for another device, answered with `dev_result` (see `devices.rs`) |
 //! | hub → Helm | `dev_call` | `id` (the hub's), `from` (`{uid, name, personId (the acting person, verified), person, people (all verified entries, acting first), machinePersonId (the sender machine's own person)}`), `op`, `args`: another device's call for this one |
@@ -151,6 +154,14 @@ pub enum Upstream {
     RoutePin {
         person_id: String,
         channel: String,
+    },
+    /// A profile asked about its own Telegram link: `op` is `link`, `unlink` or `status`, and
+    /// `person_id` the person it asks for. Answered by `telegram.rs` down the line that asked,
+    /// with `tg_link_result`, `tg_unlink_result` or `tg_status_result`.
+    TgAdmin {
+        id: Value,
+        op: String,
+        person_id: String,
     },
     DevPush {
         to: String,
@@ -873,6 +884,22 @@ impl Line {
                     .is_ok(),
                 _ => false,
             },
+            Some(op @ ("tg_link" | "tg_unlink" | "tg_status")) => {
+                match (v.get("id"), s("personId")) {
+                    (Some(id), Some(person_id)) if id.is_string() || id.is_number() => self
+                        .upstream
+                        .send((
+                            None,
+                            Upstream::TgAdmin {
+                                id: id.clone(),
+                                op: op.strip_prefix("tg_").unwrap_or(op).to_owned(),
+                                person_id,
+                            },
+                        ))
+                        .is_ok(),
+                    _ => false,
+                }
+            }
             Some("dev") => match (v.get("id"), s("to"), s("op")) {
                 (Some(id), Some(to), Some(op)) if id.is_string() || id.is_number() => {
                     let args = match v.get("args") {
