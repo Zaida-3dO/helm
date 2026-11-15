@@ -11,10 +11,17 @@ export type GoogleAccountList = { accounts: Array<GoogleAccount>,
  */
 permission?: GooglePermission, 
 /**
- * `uvx` was found on `PATH` (the bridge program is still a `uvx` run).
+ * `uvx` was found on `PATH` (only meaningful for a bridge server: a host-served one needs
+ * no program of its own).
  */
 uvFound: boolean, 
 /**
  * A sign-in Helm started is still open.
  */
-signingIn: boolean, };
+signingIn: boolean, 
+/**
+ * Gmail for this server is served by Helm's own tools; the worker never starts a process
+ * for it. False only for a server that still carries its own client secrets (a setup saved
+ * before the per-profile client existed), which keeps its bridge.
+ */
+hostServed: boolean, };

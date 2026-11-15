@@ -169,6 +169,7 @@ pub(crate) fn launch(
         });
     let keys = helm_hosttools::LaunchKeys {
         mcp_enabled: mcp.helm_servers,
+        gmail_accounts: mcp.gmail_accounts,
         web_tools,
         ..keys
     };

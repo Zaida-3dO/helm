@@ -235,11 +235,17 @@ impl helm_hosttools::McpLaunchSource for McpLaunchFlags {
                     .ok()
             })
             .is_some_and(|l| l.iter().any(|s| s.enabled));
+        let gmail = any_enabled
+            && self
+                .store
+                .as_ref()
+                .is_some_and(|s| helm_mcp::google::gmail_served(s));
         let helm_servers = all_on && any_enabled;
         helm_hosttools::McpLaunch {
             native: g.native,
             disabled: g.disabled,
             helm_servers,
+            gmail_accounts: gmail,
         }
     }
 }
@@ -614,10 +620,21 @@ mod host_tool_tests {
             mcp_enabled: true,
             ..Default::default()
         };
-        // The Gmail tools ride the MCP switch (in registration order); app_mcp_tools itself is
-        // the worker's, not the host's.
+        // MCP on alone lists no Gmail tools; they ride the host's own served condition — an
+        // enabled Google accounts server with at least one signed-in account. (app_mcp_tools
+        // itself is the worker's, not the host's.)
+        assert!(
+            delta(mcp).is_empty(),
+            "the MCP switch alone adds no Gmail tool: {:?}",
+            delta(mcp)
+        );
+        let gmail = helm_hosttools::LaunchKeys {
+            mcp_enabled: true,
+            gmail_accounts: true,
+            ..Default::default()
+        };
         assert_eq!(
-            delta(mcp),
+            delta(gmail),
             [
                 "app_gmail_search",
                 "app_gmail_read",

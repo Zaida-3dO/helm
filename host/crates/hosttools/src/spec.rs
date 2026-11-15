@@ -45,6 +45,9 @@ pub enum Condition {
     ProjectsModeAndAllSettings,
     /// At least one enabled MCP server.
     McpEnabled,
+    /// Gmail is served by Helm for this launch: an enabled Google accounts server with at least
+    /// one signed-in account ([`LaunchKeys::gmail_accounts`]).
+    GmailAccounts,
     /// Helm's own web search is offered to this launch ([`LaunchKeys::web_tools`]).
     WebTools,
     /// Never listed: the worker itself calls it (a hook asking the host), agents never see it.
@@ -225,6 +228,9 @@ pub struct LaunchKeys {
     pub restricted: bool,
     /// The chat runs on a local model server configured in Helm, not on Claude.
     pub local_chat: bool,
+    /// Gmail is served by Helm: an enabled Google accounts server and at least one signed-in
+    /// account (see [`McpLaunch::gmail_accounts`]).
+    pub gmail_accounts: bool,
     /// Helm's own web search is offered to this launch (see [`WebToolsGate`]).
     pub web_tools: bool,
 }
@@ -236,6 +242,7 @@ impl LaunchKeys {
             Condition::ProjectsMode => self.projects_mode,
             Condition::ProjectsModeAndAllSettings => self.projects_mode && self.all_settings,
             Condition::McpEnabled => self.mcp_enabled,
+            Condition::GmailAccounts => self.gmail_accounts,
             Condition::WebTools => self.web_tools,
             Condition::Worker => false,
         }
@@ -253,6 +260,9 @@ pub struct McpLaunch {
     pub disabled: Vec<String>,
     /// At least one Helm-configured MCP server is enabled (lists `app_mcp_tools`).
     pub helm_servers: bool,
+    /// An enabled Google accounts server and at least one signed-in account (lists the
+    /// Gmail host tools).
+    pub gmail_accounts: bool,
 }
 
 /// The MCP crate's side of the launch; registered as the [`McpLaunchGate`] service.

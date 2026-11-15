@@ -32,6 +32,10 @@ pub struct Canonical {
     pub summary: String,
     /// The fixed-form sentence the user's own words must contain, e.g. `Approve the MCP server x.`
     pub fixed_form: String,
+    /// Extra host-built card lines shown under the summary, one per entry (each cut like a
+    /// summary line). Only the host's own canonical builder fills these — never agent text — so a
+    /// card can show a whole target (every recipient, the full subject) that no single line fits.
+    pub details: Vec<String>,
 }
 
 /// Builds the canonical target from the agent's target and the host's records. An `Err` is the
@@ -183,6 +187,7 @@ pub fn test_kind() -> AllowKind {
             target: serde_json::json!({ "name": name }),
             summary: format!("Run the test action {name}"),
             fixed_form: format!("Run the test action {name}."),
+            details: Vec::new(),
         })
     }
     AllowKind {

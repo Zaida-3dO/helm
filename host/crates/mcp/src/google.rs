@@ -81,6 +81,9 @@ const SCOPE_EMAIL: &str = "email";
 const SCOPE_READONLY: &str = "https://www.googleapis.com/auth/gmail.readonly";
 const SCOPE_COMPOSE: &str = "https://www.googleapis.com/auth/gmail.compose";
 const SCOPE_LABELS: &str = "https://www.googleapis.com/auth/gmail.labels";
+/// Labels on messages. `gmail.labels` only manages label definitions, so labelling a message
+/// needs this one.
+const SCOPE_MODIFY: &str = "https://www.googleapis.com/auth/gmail.modify";
 const SCOPE_SEND: &str = "https://www.googleapis.com/auth/gmail.send";
 /// The credential-store entry holding the profile's sign-in client, and the identity sealing it.
 const CLIENT_ENTRY: &str = "google-client";
@@ -121,7 +124,7 @@ impl GooglePermission {
     pub fn scopes(self) -> Vec<&'static str> {
         let mut s = vec![SCOPE_OPENID, SCOPE_EMAIL, SCOPE_READONLY];
         if self != GooglePermission::Readonly {
-            s.extend([SCOPE_COMPOSE, SCOPE_LABELS]);
+            s.extend([SCOPE_COMPOSE, SCOPE_LABELS, SCOPE_MODIFY]);
         }
         if self == GooglePermission::Send {
             s.push(SCOPE_SEND);
@@ -149,10 +152,15 @@ pub struct GoogleAccountList {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub permission: Option<GooglePermission>,
-    /// `uvx` was found on `PATH` (the bridge program is still a `uvx` run).
+    /// `uvx` was found on `PATH` (only meaningful for a bridge server: a host-served one needs
+    /// no program of its own).
     pub uv_found: bool,
     /// A sign-in Helm started is still open.
     pub signing_in: bool,
+    /// Gmail for this server is served by Helm's own tools; the worker never starts a process
+    /// for it. False only for a server that still carries its own client secrets (a setup saved
+    /// before the per-profile client existed), which keeps its bridge.
+    pub host_served: bool,
 }
 
 /// The answer to starting a sign-in.
@@ -437,8 +445,13 @@ fn runs_workspace_mcp(args: &[String]) -> bool {
 }
 
 /// Add what only the host knows to a resolved Google server: the package pin, and — only for a
-/// server that still carries its own client secrets — the bridge program's folder and callback
-/// port. The account list for the agent comes from the stored identities either way.
+/// server that still carries its own client secrets (a setup saved before the per-profile client
+/// existed) — the bridge program's folder and callback port. A server without a client of its
+/// own is host-served: Helm's own Gmail tools answer for it and the worker never starts a
+/// process for it. For a legacy server that keeps the bridge, `gmail:send` is clamped to
+/// `gmail:drafts`: sending exists only as `app_gmail_send`, behind the Allow card, and the
+/// bridge must not offer a card-less send. The account list for the agent comes from the stored
+/// identities either way.
 pub fn prepare(creds: &CredentialStore, profile_dir: &Path, out: &mut ResolvedServer) {
     out.args = pin_workspace_mcp(&without_tool_flags(&out.args));
     let legacy = runs_workspace_mcp(&out.args)
@@ -446,6 +459,9 @@ pub fn prepare(creds: &CredentialStore, profile_dir: &Path, out: &mut ResolvedSe
             .iter()
             .all(|k| out.env.get(*k).is_some_and(|v| !v.is_empty()));
     if legacy {
+        if permission_of(&out.args) == Some(GooglePermission::Send) {
+            out.args = with_permission(&out.args, GooglePermission::Drafts);
+        }
         let dir = credentials_dir(profile_dir);
         let _ = helm_core::privfs::create_private_dir_all(&dir);
         out.env
@@ -465,6 +481,9 @@ pub fn prepare(creds: &CredentialStore, profile_dir: &Path, out: &mut ResolvedSe
         out.env
             .entry("OAUTHLIB_INSECURE_TRANSPORT".into())
             .or_insert_with(|| "1".into());
+    } else {
+        // Nothing signs this one in from the outside: Helm serves Gmail itself.
+        out.host_served = true;
     }
     if let Some(line) = accounts_line(creds) {
         out.guidance = Some(match out.guidance.take() {
@@ -633,12 +652,15 @@ pub(crate) fn account_access(store: &McpStore, email: &str, force: bool) -> Resu
     if !due(&auth) {
         return Ok(auth.tokens.access_token.clone());
     }
+    let seen = auth.tokens.access_token.clone();
     let _turn = REFRESH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    // Another caller may have refreshed it while we waited for the turn.
+    // Another caller may have refreshed it while we waited for the turn: the same rule the
+    // OAuth core uses — if the token in the store is no longer the one we were refused with,
+    // somebody already renewed it and we use theirs instead of spending a second refresh.
     auth = TokenStore::load(creds, &account_entry(email), &account_identity(email))
         .map_err(|e| e.to_string())?
         .ok_or("That account is not signed in.")?;
-    if !due(&auth) {
+    if !due(&auth) || (force && auth.tokens.access_token != seen) {
         return Ok(auth.tokens.access_token.clone());
     }
     let spent = match auth.tokens.refresh_token.clone() {
@@ -869,6 +891,19 @@ fn to_value<T: Serialize>(v: &T) -> Result<Value, ApiError> {
     serde_json::to_value(v).map_err(|e| ApiError::internal(e.to_string()))
 }
 
+/// Whether Gmail is served by Helm for a chat launch: an enabled server made from this preset
+/// and at least one signed-in account. The Gmail host tools are only listed when this is true.
+pub fn gmail_served(store: &McpStore) -> bool {
+    let servers = match store.load() {
+        Ok(l) => l,
+        Err(_) => return false,
+    };
+    servers
+        .iter()
+        .any(|s| s.enabled && s.preset.as_deref() == Some(PRESET_ID))
+        && !listed_accounts(store.creds()).is_empty()
+}
+
 /// The saved server `id` if it was made from this preset.
 fn google_server(ctx: &OpCtx, id: &str) -> Result<(Arc<McpStore>, McpServer), ApiError> {
     let st = ctx.services.need::<McpStore>()?;
@@ -881,12 +916,33 @@ fn google_server(ctx: &OpCtx, id: &str) -> Result<(Arc<McpStore>, McpServer), Ap
     Ok((st, server))
 }
 
+/// Whether a stored Google server still carries its own client secrets in its env — the only
+/// shape that keeps the external bridge program. A server created after the per-profile client
+/// has no client env and is served by Helm's own tools.
+pub fn keeps_bridge(server: &McpServer) -> bool {
+    runs_workspace_mcp(&server.transport.args)
+        && [CLIENT_ID_ENV, CLIENT_SECRET_ENV]
+            .iter()
+            .all(|k| server.transport.env.contains_key(*k))
+}
+
+/// Forget every Google account: the sealed index and each account's tokens. Called when the last
+/// Google accounts server is removed — with no server there is no screen left to remove them
+/// from. Nothing is revoked at Google.
+pub fn forget_all_accounts(creds: &CredentialStore) {
+    for e in read_index(creds) {
+        let _ = creds.forget(&account_entry(&e.email));
+    }
+    let _ = creds.forget(INDEX_ENTRY);
+}
+
 fn list_for(store: &McpStore, server: &McpServer) -> GoogleAccountList {
     GoogleAccountList {
         accounts: listed_accounts(store.creds()),
         permission: permission_of(&server.transport.args),
         uv_found: uvx_found(),
         signing_in: SIGNING_IN.load(Ordering::SeqCst),
+        host_served: !keeps_bridge(server),
     }
 }
 
@@ -1057,6 +1113,7 @@ mod tests {
             guidance: Some("Be careful.".into()),
             error: None,
             oauth: false,
+            host_served: false,
         }
     }
 
@@ -1285,15 +1342,21 @@ mod tests {
             [SCOPE_OPENID, SCOPE_EMAIL, SCOPE_READONLY]
         );
         let drafts = GooglePermission::Drafts.scopes();
-        assert!(drafts.contains(&SCOPE_COMPOSE) && drafts.contains(&SCOPE_LABELS));
+        assert!(
+            drafts.contains(&SCOPE_COMPOSE)
+                && drafts.contains(&SCOPE_LABELS)
+                && drafts.contains(&SCOPE_MODIFY),
+            "labelling messages needs gmail.modify"
+        );
         assert!(!drafts.contains(&SCOPE_SEND));
         let send = GooglePermission::Send.scopes();
         assert!(
             send.contains(&SCOPE_SEND)
                 && send.contains(&SCOPE_COMPOSE)
                 && send.contains(&SCOPE_READONLY)
+                && send.contains(&SCOPE_MODIFY)
         );
-        assert_eq!(send.len(), 6);
+        assert_eq!(send.len(), 7);
     }
 
     #[test]
@@ -1399,11 +1462,14 @@ mod tests {
         sign_in(creds, "b@y.org", "tok", None);
         set_label(creds, "a@x.com", "work").unwrap();
 
-        // The new shape: pinned, no folder or port env, account line from the store.
+        // The new shape: pinned, host-served (no process for the worker to start), no folder or
+        // port env, account line from the store. A saved `gmail:send` is left in the stored
+        // server (the picker shows it) but host-served servers never run the bridge at all.
         let mut r = resolved();
         r.args = strings(&DEFAULT_ARGS);
         prepare(creds, d.path(), &mut r);
         assert_eq!(r.args[0], "workspace-mcp==2.4.2");
+        assert!(r.host_served, "no client of its own: Helm serves it");
         assert!(!r.env.contains_key(CREDENTIALS_ENV));
         assert!(!r.env.contains_key(PORT_ENV));
         assert_eq!(
@@ -1414,12 +1480,16 @@ mod tests {
         assert!(!r.guidance.as_ref().unwrap().contains("tok"));
 
         // A server that still carries its own client secrets keeps the bridge program's folder
-        // and port.
+        // and port — and its gmail:send is clamped to drafts, because sending must always go
+        // through the host tool behind the Allow card.
         let mut old = resolved();
+        old.args = strings(&["workspace-mcp", "--permissions", "gmail:send"]);
         old.env.insert(CLIENT_ID_ENV.into(), "old-id".into());
         old.env
             .insert(CLIENT_SECRET_ENV.into(), "old-secret".into());
         prepare(creds, d.path(), &mut old);
+        assert!(!old.host_served, "a legacy server keeps its bridge");
+        assert_eq!(permission_of(&old.args), Some(GooglePermission::Drafts));
         assert_eq!(
             old.env[CREDENTIALS_ENV],
             credentials_dir(d.path()).to_string_lossy()
@@ -1450,6 +1520,104 @@ mod tests {
             both.args,
             strings(&["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"])
         );
+    }
+
+    /// The accounts belong to the Google accounts server: editing or disabling it keeps them,
+    /// and only the removal of the last one forgets them (index rows and sealed tokens alike).
+    #[test]
+    fn removing_the_last_google_server_forgets_the_accounts() {
+        let d = tempfile::tempdir().unwrap();
+        let st = store(d.path());
+        sign_in(st.creds(), "a@x.com", "tok", Some("r"));
+        sign_in(st.creds(), "b@y.org", "tok", None);
+        let srv = |id: &str, preset: Option<&str>| McpServer {
+            id: id.into(),
+            name: "Google".into(),
+            enabled: true,
+            transport: Transport {
+                kind: TransportKind::Stdio,
+                command: Some("uvx".into()),
+                args: strings(&DEFAULT_ARGS),
+                env: BTreeMap::new(),
+                url: None,
+                headers: BTreeMap::new(),
+                oauth: None,
+            },
+            allow_private_http: false,
+            preset: preset.map(Into::into),
+        };
+        st.mutate(None, |l| {
+            l.push(srv("google_accounts", Some(PRESET_ID)));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(listed_accounts(st.creds()).len(), 2);
+        // Disabling keeps them: the user can turn it back on and find the accounts.
+        st.mutate(None, |l| {
+            l.iter_mut().for_each(|s| s.enabled = false);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(listed_accounts(st.creds()).len(), 2);
+        // Removing one of two Google servers keeps them.
+        st.mutate(None, |l| {
+            l.iter_mut().for_each(|s| s.enabled = true);
+            l.push(srv("google_two", Some(PRESET_ID)));
+            Ok(())
+        })
+        .unwrap();
+        st.mutate(None, |l| {
+            l.retain(|s| s.id != "google_accounts");
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(listed_accounts(st.creds()).len(), 2);
+        // A server that only looks like one (no preset tag) does not count.
+        st.mutate(None, |l| {
+            l.push(srv("impostor", None));
+            Ok(())
+        })
+        .unwrap();
+        // The last Google server goes: so do the accounts and their tokens.
+        st.mutate(None, |l| {
+            l.retain(|s| s.preset.as_deref() != Some(PRESET_ID));
+            Ok(())
+        })
+        .unwrap();
+        assert!(listed_accounts(st.creds()).is_empty());
+        assert!(read_index(st.creds()).is_empty());
+        for email in ["a@x.com", "b@y.org"] {
+            assert!(
+                TokenStore::load(st.creds(), &account_entry(email), &account_identity(email))
+                    .unwrap()
+                    .is_none(),
+                "{email}'s tokens are gone, not just the list rows"
+            );
+        }
+        // What the account dialog reports: the default shape is host-served; only a saved
+        // server with its own client env keeps the bridge.
+        assert!(!keeps_bridge(&srv("google_accounts", Some(PRESET_ID))));
+        let mut legacy = srv("google_accounts", Some(PRESET_ID));
+        legacy.transport.args = strings(&["workspace-mcp", "--permissions", "gmail:drafts"]);
+        legacy.transport.env.insert(
+            CLIENT_ID_ENV.into(),
+            crate::types::ValueRef {
+                kind: crate::types::RefKind::Environment,
+                value: Some("MY_ID".into()),
+                secret_id: None,
+                prefix: None,
+            },
+        );
+        legacy.transport.env.insert(
+            CLIENT_SECRET_ENV.into(),
+            crate::types::ValueRef {
+                kind: crate::types::RefKind::Environment,
+                value: Some("MY_SECRET".into()),
+                secret_id: None,
+                prefix: None,
+            },
+        );
+        assert!(keeps_bridge(&legacy));
     }
 
     #[test]

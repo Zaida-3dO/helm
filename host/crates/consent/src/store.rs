@@ -162,18 +162,23 @@ fn cut(s: &str, max: usize) -> String {
 }
 
 /// A summary as stored: an ordinary kind's on one line; an applying kind's as lines, each cut to
-/// 240 characters and the whole to 1,200.
-fn card_summary(summary: &str, applying: bool) -> String {
+/// 240 characters and the whole to 1,200. A kind's host-built `details` lines join the summary's
+/// own lines, so a card can show a whole target across lines.
+fn card_summary(summary: &str, details: &[String], applying: bool) -> String {
     use crate::kinds::{MAX_SUMMARY, MAX_SUMMARY_LINE};
-    if !applying {
+    if details.is_empty() && !applying {
         return cut(&summary.replace(['\r', '\n'], " "), MAX_SUMMARY_LINE);
     }
-    let lines: Vec<String> = summary
+    let mut lines: Vec<String> = summary
         .lines()
+        .chain(details.iter().map(String::as_str))
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .map(|l| cut(l, MAX_SUMMARY_LINE))
         .collect();
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
     cut(&lines.join("\n"), MAX_SUMMARY)
 }
 
@@ -274,7 +279,7 @@ pub fn request(
                 k.id,
                 crate::kinds::canonical_json(&c.target),
                 hash,
-                card_summary(&c.summary, kinds.applies_on_allow(k.id)),
+                card_summary(&c.summary, &c.details, kinds.applies_on_allow(k.id)),
                 reason,
                 r.evidence,
                 r.tool_use_id,

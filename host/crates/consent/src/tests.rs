@@ -667,6 +667,7 @@ fn applying_kind() -> AllowKind {
                 "y".repeat(300)
             ),
             fixed_form: String::new(),
+            details: Vec::new(),
         })
     }
     AllowKind {

@@ -117,6 +117,7 @@ fn change_canonical(
             crate::mode::tooltip_reason(&run.title)
         ),
         fixed_form: form(&label),
+        details: Vec::new(),
     })
 }
 
@@ -145,6 +146,7 @@ fn skip(tx: &Transaction<'_>, chat: &str, t: &Value) -> Result<Canonical, String
             crate::mode::tooltip_reason(&run.title)
         ),
         fixed_form: format!("Skip the {label} stage."),
+        details: Vec::new(),
     })
 }
 
@@ -166,6 +168,7 @@ fn allow_more(tx: &Transaction<'_>, chat: &str, t: &Value) -> Result<Canonical, 
             crate::mode::tooltip_reason(&run.title)
         ),
         fixed_form: format!("Allow {n} more {label} rounds."),
+        details: Vec::new(),
     })
 }
 
@@ -185,6 +188,7 @@ fn reopen(tx: &Transaction<'_>, chat: &str, t: &Value) -> Result<Canonical, Stri
             crate::mode::tooltip_reason(&run.title)
         ),
         fixed_form: "Reopen the task.".into(),
+        details: Vec::new(),
     })
 }
 
@@ -203,6 +207,7 @@ fn clear_visual(tx: &Transaction<'_>, chat: &str, t: &Value) -> Result<Canonical
             crate::mode::tooltip_reason(&run.title)
         ),
         fixed_form: "Clear the visual flag.".into(),
+        details: Vec::new(),
     })
 }
 

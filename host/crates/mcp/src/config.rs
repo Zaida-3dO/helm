@@ -220,6 +220,15 @@ impl McpStore {
                 crate::oauth_ops::forget_sign_in(&self.creds, &old.id);
             }
         }
+        // Google accounts belong to the Google accounts server: when the last one is removed,
+        // the accounts and their refresh tokens go too — no screen is left to remove them from.
+        let google = |list: &[McpServer]| {
+            list.iter()
+                .any(|s| s.preset.as_deref() == Some(crate::google::PRESET_ID))
+        };
+        if google(&before) && !google(&after) {
+            crate::google::forget_all_accounts(&self.creds);
+        }
         let revision = revision_of(&after);
         for l in self
             .listeners
@@ -370,6 +379,7 @@ impl McpStore {
             guidance: crate::presets::guidance_for(s.preset.as_deref()),
             error: None,
             oauth: s.transport.oauth.is_some() && t.kind.is_remote(),
+            host_served: false,
         };
         let mut secrets = Vec::new();
         let mut run = || -> Result<(StrMap, StrMap), String> {

@@ -263,4 +263,9 @@ pub struct ResolvedServer {
     /// `Authorization` header when the server refuses the one it has.
     #[serde(default, skip_serializing_if = "is_false")]
     pub oauth: bool,
+    /// The server's services are built into Helm: the worker never starts it and never shows a
+    /// failure for it. (A Google accounts server without a sign-in client of its own: Gmail runs
+    /// through the host's own tools and its Allow card.)
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub host_served: bool,
 }

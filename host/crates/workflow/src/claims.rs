@@ -239,6 +239,7 @@ pub fn canonical(tx: &Transaction<'_>, chat: &str, t: &Value) -> Result<Canonica
             target: json!({"itemId": item, "holder": holder}),
             summary: format!("Start a second task for board item {item} in this chat"),
             fixed_form: format!("Take over item {item}."),
+            details: Vec::new(),
         });
     }
     let (repo, branch) = target(t)?;
@@ -255,6 +256,7 @@ pub fn canonical(tx: &Transaction<'_>, chat: &str, t: &Value) -> Result<Canonica
             crate::mode::tooltip_reason(&h.chat_title)
         ),
         fixed_form: format!("Take over {label}."),
+        details: Vec::new(),
     })
 }
 

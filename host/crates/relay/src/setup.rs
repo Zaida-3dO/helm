@@ -168,6 +168,7 @@ fn canonical(_tx: &Transaction<'_>, _chat: &str, target: &Value) -> Result<Canon
         target: serde_json::to_value(&staged).map_err(|e| e.to_string())?,
         summary: lines.join("\n"),
         fixed_form: String::new(),
+        details: Vec::new(),
     })
 }
 

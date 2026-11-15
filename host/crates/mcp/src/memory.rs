@@ -202,6 +202,7 @@ mod tests {
             guidance: None,
             error: None,
             oauth: false,
+            host_served: false,
         }
     }
 
