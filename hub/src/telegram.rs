@@ -1964,7 +1964,9 @@ impl Bridge {
             | Upstream::Dev { .. }
             | Upstream::DevPush { .. }
             | Upstream::KnPull { .. }
-            | Upstream::KnPut { .. } => {}
+            | Upstream::KnPut { .. }
+            | Upstream::PersonEnsure { .. }
+            | Upstream::RoutePin { .. } => {}
         }
     }
 
