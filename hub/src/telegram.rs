@@ -2537,12 +2537,8 @@ impl Telegram {
         };
         match op.as_str() {
             "link" => {
-                let code = new_code();
-                let expires = now_ms() + link_code_lifetime_ms();
-                self.codes
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .insert(digest(&code), (person, expires));
+                // Know the answer is deliverable before keeping a code: a refusal must not
+                // leave one stored.
                 let name = match self.bot_username() {
                     Some(name) => name,
                     None => {
@@ -2551,6 +2547,13 @@ impl Telegram {
                         )
                     }
                 };
+                let code = new_code();
+                let expires = now_ms() + link_code_lifetime_ms();
+                let mut codes = self.codes.lock().unwrap_or_else(|p| p.into_inner());
+                // Only the newest code for this person stands, and nothing already
+                // out of date is kept: a person who keeps asking cannot pile up codes.
+                codes.retain(|_, (who, at)| *who != person || *at >= now_ms());
+                codes.insert(digest(&code), (person, expires));
                 json!({
                     "type": "tg_link_result", "id": id, "ok": true,
                     "url": format!("https://t.me/{name}?start={code}"),
