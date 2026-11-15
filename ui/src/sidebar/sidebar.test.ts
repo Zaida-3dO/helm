@@ -8,7 +8,7 @@ import { SidebarActions, type ActionDeps } from './actions.ts';
 import { UndoStack } from './undo.ts';
 import { buildList, chatAncestors, headerSubtitle, HEIGHTS, nestRows, showsCalmWheel, stepChat, visibleChatOrder, type ListItem } from './model.ts';
 import { loadMore, readBudget, type PageResult } from './paging.ts';
-import { age, needsYouLabel, rowAttention, rowStatusLabel, trailingIndicator } from './status.ts';
+import { age, needsYouLabel, rowAttention, rowStateLabel, rowStatusLabel, trailingIndicator } from './status.ts';
 import { layout, visibleRange } from './virtual.ts';
 import { mergeOrder, moveView, orderViews, readOrder, slotsFit, splitViews, touchView, writeOrder } from './tiles.ts';
 
@@ -102,6 +102,16 @@ test('status priority: running > unread > lingering > interrupted > pinned', () 
   assert.equal(rowStatusLabel({ stalled: false, local: true, localAhead: null }), 'Using the local model');
   assert.equal(rowStatusLabel({ stalled: true, local: false, localAhead: null }), 'Running, no output for a while');
   assert.equal(rowStatusLabel({ stalled: false, local: false, localAhead: null }), 'Task running');
+  // The state chip's wording: a queue wait says its place, a tool says its name, silence reads as
+  // quiet; generating and a card waiting on the person get no chip (the wheel and the flag say it).
+  assert.equal(rowStateLabel({ kind: 'queued', ahead: 2 }), 'Queued 2');
+  assert.equal(rowStateLabel({ kind: 'queued' }), 'Queued');
+  assert.equal(rowStateLabel({ kind: 'tool', name: 'Bash', since: 1 }), 'Bash');
+  assert.equal(rowStateLabel({ kind: 'silent', since: 1 }), 'Quiet');
+  assert.equal(rowStateLabel({ kind: 'generating', since: 1 }), null);
+  assert.equal(rowStateLabel({ kind: 'waitingUser' }), null);
+  assert.equal(rowStateLabel(undefined), null);
+  assert.equal(rowStateLabel(null), null);
 });
 
 test('age is relative: now, minutes, hours, days', () => {

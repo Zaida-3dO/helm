@@ -191,6 +191,11 @@ pub struct SidebarRow {
     /// set for a local chat.
     #[ts(type = "number | null")]
     pub local_ahead: Option<i64>,
+    /// What a busy chat is doing right now, as the maintenance tick last saw it; `null` while
+    /// no turn is open. The row's state chip reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub state: Option<helm_chats::types::ChatState>,
     /// The chat holds an unsent draft: drawn as a small pencil before the age.
     pub has_draft: bool,
     /// The profile the chat belongs to; left out when the chat has none.

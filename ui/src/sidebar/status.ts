@@ -2,7 +2,7 @@
 // interrupted > pinned. Unread comes from the attention summary and lingering
 // from the live thread's background work; the host row carries what the database knows.
 
-import type { ChatStatus } from '../api/types.ts';
+import type { ChatState, ChatStatus } from '../api/types.ts';
 import type { RowAttention } from '../api/projects.ts';
 import type { AttentionKind } from '../api/generated/AttentionKind.ts';
 import { LOCAL_WORKING_LABEL, localWaitLabel } from '../state/localModel.ts';
@@ -58,6 +58,22 @@ export function rowStatusLabel(row: { stalled: boolean; local: boolean; localAhe
   if (row.stalled) return 'Running, no output for a while';
   if (row.local) return LOCAL_WORKING_LABEL;
   return ATTENTION_LABEL.running;
+}
+
+/** The running mark's state chip: short words for what the live state says, or null when the
+ * wheel alone already says it (generating, or a card that raises its own flag). */
+export function rowStateLabel(state: ChatState | null | undefined): string | null {
+  if (!state) return null;
+  switch (state.kind) {
+    case 'queued':
+      return state.ahead == null ? 'Queued' : `Queued ${state.ahead}`;
+    case 'tool':
+      return state.name;
+    case 'silent':
+      return 'Quiet';
+    default:
+      return null;
+  }
 }
 
 /** The flag on a chat waiting on you: a question, plan or permission asks to be answered. */

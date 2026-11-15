@@ -5,6 +5,7 @@ export type { BoardConnectionSaveArgs } from './BoardConnectionSaveArgs.ts';
 export type { BoardInfo } from './BoardInfo.ts';
 export type { BoardSyncState } from './BoardSyncState.ts';
 export type { ChatOrganizeArgs } from './ChatOrganizeArgs.ts';
+export type { ChatState } from './ChatState.ts';
 export type { ChatStatus } from './ChatStatus.ts';
 export type { ParentSource } from './ParentSource.ts';
 export type { ProjectCreateArgs } from './ProjectCreateArgs.ts';
