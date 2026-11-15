@@ -40,6 +40,11 @@
 //! `relay_telegram_reset` (drop the tag, so the next message starts a new chat). The same policy
 //! reaches chats through [`agent_settings`]: the `telegram` key of `app_get_settings` and
 //! `app_update_settings`, where chats may change only the new chat's model and effort.
+//! Per profile the hub is asked about its Telegram account: `relay_tg_link` (a one-tap link the
+//! person taps on their phone), `relay_tg_status` (linked, and the handle) and `relay_tg_unlink`;
+//! `relay_route_pin` asks the hub to send one of the profile's person's channels (telegram or
+//! voice) to this PC. Each names its profile with `{profileId}` (absent: the home profile) and
+//! needs that profile to be linked to a person on the hub.
 //!
 //! The voice chat (Settings → Hub's Voice block): `relay_voice_get` → [`voice_sink::VoiceView`]
 //! (the chat the phone talks to, the model and effort a new voice chat opens with, the idle, age
@@ -241,7 +246,11 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("relay_telegram_reset", OpClass::Blocking, telegram_reset)
         .blocking("relay_voice_get", OpClass::Blocking, voice_get)
         .blocking("relay_voice_save", OpClass::Blocking, voice_save)
-        .blocking("relay_voice_reset", OpClass::Blocking, voice_reset);
+        .blocking("relay_voice_reset", OpClass::Blocking, voice_reset)
+        .async_op("relay_tg_link", tg_link)
+        .async_op("relay_tg_status", tg_status)
+        .async_op("relay_tg_unlink", tg_unlink)
+        .async_op("relay_route_pin", route_pin);
     pair::register_ops(reg);
     household::register_ops(reg);
 }
@@ -300,6 +309,84 @@ fn channel_profile(ctx: &OpCtx, args: &Value) -> Result<String, ApiError> {
             .map(|p| p.id)
             .ok_or_else(|| ApiError::bad_args("There is no profile with that id.")),
     }
+}
+
+/// The hub person a channel op acts on: the profile from [`channel_profile`], linked to a person
+/// on the hub. An unlinked profile gets one plain sentence — the settings pane says so too.
+fn channel_person(ctx: &OpCtx, args: &Value) -> Result<String, ApiError> {
+    let pid = channel_profile(ctx, args)?;
+    let db = ctx.services.need::<helm_core::db::Database>()?;
+    db.snapshot(|tx| helm_profiles::store::get(tx, &pid))
+        .ok()
+        .flatten()
+        .and_then(|p| p.hub_person_id)
+        .ok_or_else(|| ApiError::bad_args("This profile has no person on the hub yet."))
+}
+
+/// Ask the hub one thing about the profile's Telegram account (`tg_link`, `tg_status` or
+/// `tg_unlink`) and wait for the answer that carries the same id. The hub's frame, passed on.
+async fn tg_ask(ctx: &OpCtx, kind: &str, args: &Value) -> Result<Value, ApiError> {
+    let person = channel_person(ctx, args)?;
+    let line = ctx
+        .services
+        .get::<client::LineHandle>()
+        .ok_or_else(|| ApiError::new("unavailable", "Helm is not connected to the hub."))?;
+    line.request(json!({ "type": kind, "personId": person }))
+        .await
+        .map_err(|e| ApiError::new("unavailable", e))
+}
+
+/// `relay_tg_link`: ask the hub for a one-tap link the person taps on their phone. The hub
+/// answers with the address and when the code behind it stops working.
+async fn tg_link(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let v = tg_ask(&ctx, "tg_link", &args).await?;
+    Ok(json!({
+        "url": v.get("url").cloned().unwrap_or(Value::Null),
+        "expiresAt": v.get("expiresAt").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+/// `relay_tg_status`: whether this profile's hub person has a linked Telegram account, and the
+/// bot's handle if so.
+async fn tg_status(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let v = tg_ask(&ctx, "tg_status", &args).await?;
+    let linked = v.get("linked").and_then(Value::as_bool).unwrap_or(false);
+    let mut out = json!({ "linked": linked });
+    if linked {
+        if let Some(h) = v.get("handle") {
+            out["handle"] = h.clone();
+        }
+    }
+    Ok(out)
+}
+
+/// `relay_tg_unlink`: drop this profile's hub person's Telegram link from the hub.
+async fn tg_unlink(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let v = tg_ask(&ctx, "tg_unlink", &args).await?;
+    Ok(json!({ "unlinked": v.get("unlinked").cloned().unwrap_or(Value::Null) }))
+}
+
+/// `relay_route_pin`: ask the hub to send this profile's person's channel to this PC from now on
+/// (`channel`: `telegram` or `voice`). The hub keeps the pin; the bot's own command hands the
+/// choice back.
+async fn route_pin(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let person = channel_person(&ctx, &args)?;
+    let channel = args
+        .get("channel")
+        .and_then(Value::as_str)
+        .filter(|c| *c == "telegram" || *c == "voice")
+        .ok_or_else(|| ApiError::bad_args("Expected channel to be telegram or voice."))?;
+    let line = ctx
+        .services
+        .get::<client::LineHandle>()
+        .ok_or_else(|| ApiError::new("unavailable", "Helm is not connected to the hub."))?;
+    if !line.route_pin(&person, channel) {
+        return Err(ApiError::new(
+            "unavailable",
+            "Helm is not connected to the hub.",
+        ));
+    }
+    Ok(json!({ "pinned": true }))
 }
 
 fn telegram_view(ctx: &OpCtx, args: &Value) -> Result<Value, ApiError> {

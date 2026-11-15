@@ -299,6 +299,13 @@ impl LineHandle {
     /// or `send_message`) and wait for its answer. Fails at once while the line is down, and when
     /// the line drops or the hub is silent for 30 seconds before it answers.
     pub async fn peer(&self, op: &str, args: Value) -> Result<Value, String> {
+        self.request(json!({ "type": "peer", "op": op, "args": args }))
+            .await
+    }
+
+    /// Send one request frame to the hub and wait for the answer that carries the same id.
+    /// The id is made here, so the caller's frame must not set one.
+    pub async fn request(&self, mut frame: Value) -> Result<Value, String> {
         if self.state() != LineState::Online {
             return Err("Helm is not connected to the hub.".into());
         }
@@ -308,10 +315,8 @@ impl LineHandle {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .insert(id.clone(), tx);
-        if !self.push(
-            self.this_line(),
-            json!({ "type": "peer", "id": id, "op": op, "args": args }),
-        ) {
+        frame["id"] = json!(id);
+        if !self.push(self.this_line(), frame) {
             self.peers
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -354,6 +359,17 @@ impl LineHandle {
             let _ = tx.send(Err("The hub line dropped before the answer came.".into()));
         }
     }
+    /// Tell the hub that this PC wants to carry a person's channel ("Use this PC" in Settings).
+    /// Fire and forget: the hub answers the next messages that way, and the bot's own commands
+    /// report the route. `false` when the line is down and it was not sent.
+    pub fn route_pin(&self, person_id: &str, channel: &str) -> bool {
+        self.state() == LineState::Online
+            && self.push(
+                self.this_line(),
+                json!({ "type": "route_pin", "personId": person_id, "channel": channel }),
+            )
+    }
+
     /// A device frame for the hub. `false` when the line is down and it was not sent: device
     /// requests are never queued for a later line, and one still queued when its line drops is
     /// dropped with it.
@@ -869,6 +885,18 @@ impl Client {
                 };
                 let answer = if v.get("ok").and_then(Value::as_bool) == Some(true) {
                     Ok(v.get("result").cloned().unwrap_or(Value::Null))
+                } else {
+                    Err(s("error").unwrap_or_else(|| "The hub could not answer.".into()))
+                };
+                self.handle.resolve_peer(&id, answer);
+            }
+            // The hub's answers to the Telegram link requests; each carries back the id we sent.
+            Some("tg_link_result" | "tg_status_result" | "tg_unlink_result") => {
+                let Some(id) = s("id") else {
+                    return;
+                };
+                let answer = if v.get("ok").and_then(Value::as_bool) == Some(true) {
+                    Ok(v)
                 } else {
                     Err(s("error").unwrap_or_else(|| "The hub could not answer.".into()))
                 };
