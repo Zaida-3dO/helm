@@ -64,12 +64,15 @@ export function mcpFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
     { folder: 'C:/work/repo', file: 'C:/work/repo/.mcp.json', name: 'github', hash: 'b'.repeat(64), state: 'approved' },
   ];
   const snap = () => ({ revision: revision(), servers: structuredClone(servers) });
-  // The Google accounts block: a few addresses in memory, and a sign-in that lands after 4 s.
+  // The Google accounts dialog: the sign-in client (set or not), a few addresses in memory,
+  // and a fake browser sign-in that lands a demo account after 4 s.
   const accounts: GoogleAccount[] = [];
+  let googleClient = false;
+  let googleSigningIn = false;
   const googleList = (): GoogleAccountList => {
     const level = servers.find((x) => x.preset === 'google_accounts')?.transport.args?.find((x) => x.startsWith('gmail:'))?.slice(6);
     const permission = (['readonly', 'drafts', 'send'] as GooglePermission[]).find((p) => p === level);
-    return { accounts: structuredClone(accounts), ...(permission ? { permission } : {}), uvFound: true, signingIn: false };
+    return { accounts: structuredClone(accounts), ...(permission ? { permission } : {}), uvFound: true, signingIn: googleSigningIn };
   };
   const check = (a: Record<string, unknown>) => {
     if (typeof a.revision === 'string' && a.revision !== revision()) throw new ApiError('conflict', 'The MCP settings changed since they were read.');
@@ -132,10 +135,21 @@ export function mcpFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
       }
       case 'mcp_google_accounts':
         return googleList();
+      case 'mcp_google_client_get':
+        return { configured: googleClient };
+      case 'mcp_google_client_set': {
+        if (!String(a.clientId ?? '').trim() || !String(a.clientSecret ?? '').trim()) throw new ApiError('bad_args', 'The Google client id is not usable.');
+        googleClient = true;
+        return { configured: true };
+      }
       case 'mcp_google_add': {
-        const email = String(a.email);
-        if (accounts.some((x) => x.email.toLowerCase() === email.toLowerCase())) throw new ApiError('bad_args', 'That account is already added. Remove it first to sign in again.');
-        setTimeout(() => accounts.push({ email }), 4000);
+        if (!googleClient) throw new ApiError('bad_args', 'Set the Google sign-in client in Settings → MCP first.');
+        if (googleSigningIn) throw new ApiError('bad_args', 'A sign-in is already open. Finish it in your browser, or try again in a few minutes.');
+        googleSigningIn = true;
+        setTimeout(() => {
+          googleSigningIn = false;
+          accounts.push({ email: `demo.account${accounts.length + 1}@gmail.com` });
+        }, 4000);
         return { authUrl: 'https://accounts.google.com/o/oauth2/auth?fake=1' };
       }
       case 'mcp_google_remove': {

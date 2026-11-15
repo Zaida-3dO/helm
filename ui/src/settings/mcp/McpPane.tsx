@@ -4,12 +4,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { mcpOps, type McpPreset, type McpServer, type RefKind, type RepoServer, type ServerStatus, type TestOutcome, type ValueRef } from '../../api/mcp.ts';
+import { shellOps } from '../../api/shell.ts';
 import { useShell } from '../../shell/context.ts';
-import { Button, Checkbox, Segmented, TextArea, TextInput } from '../../ui/index.ts';
+import { Button, Checkbox, Segmented, TextArea, TextInput, toast } from '../../ui/index.ts';
 import { IconCheck, IconWarning } from '../../ui/icons.tsx';
 import { WheelMark } from '../../ui/status/index.ts';
-import { GoogleAccounts, SetUpOnce } from './GoogleAccounts.tsx';
-import { googleOps, isGoogleServer } from './google.ts';
+import { GoogleAccountsDialog } from './GoogleAccounts.tsx';
+import { GOOGLE_PRESET, googleOps, isGoogleServer } from './google.ts';
 import { WAITING_NOTE, canDisconnect, connectLabel, isOAuthServer, oauthOps, type OAuthStatus } from './oauth.ts';
 import { blankServer, draftFromPreset, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable } from './readiness.ts';
 
@@ -108,6 +109,14 @@ function Editor({
   const t = draft.transport;
   const setT = (patch: Partial<McpServer['transport']>) => onChange({ ...draft, transport: { ...t, ...patch } });
   const remote = t.type !== 'stdio';
+  // Opening the editor must be visible: scroll it into view and put the caret in its first field.
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    el.scrollIntoView({ block: 'start' });
+    el.querySelector<HTMLElement>('input, textarea')?.focus();
+  }, []);
   // The last connection test. Any edit to the draft makes its answer stale, so it is dropped.
   const [test, setTest] = useState<{ running: boolean; outcome?: TestOutcome; failed?: string }>({ running: false });
   const run = useRef(0);
@@ -127,10 +136,14 @@ function Editor({
       <h4>{isNew ? 'Add a server' : `Edit ${draft.name}`}</h4>
       {preset && <p className="mcp-help">{preset.description}</p>}
       {preset?.secretEnv?.length ? (
-        <>
+        preset.id === GOOGLE_PRESET ? (
+          <p className="mcp-help">
+            Your Google sign-in client and accounts are set in the Google accounts dialog, not here. Leave Environment empty unless this server is an older
+            one that carries its own client.
+          </p>
+        ) : (
           <p className="mcp-help">Under Environment, enter {preset.secretEnv.join(' and ')} as secrets.</p>
-          <SetUpOnce open={isNew} />
-        </>
+        )
       ) : null}
       <label className="mcp-field">
         <span>Name</span>
@@ -261,6 +274,8 @@ export function McpPane() {
   const [presets, setPresets] = useState<McpPreset[]>([]);
   const [status, setStatus] = useState<Record<string, ServerStatus>>({});
   const [draft, setDraft] = useState<{ server: McpServer; isNew: boolean } | null>(null);
+  // The Google accounts dialog: the id of the server it is open for, or null.
+  const [googleDialog, setGoogleDialog] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [native, setNative] = useState(true);
@@ -366,6 +381,18 @@ export function McpPane() {
   };
 
   const ids = servers.map((s) => s.id);
+  const openLink = (url: string) => void shellOps(shell.api).openExternal(url).catch((e: unknown) => toast.show({ kind: 'error', text: errorText(e) }));
+
+  /** Clicking a preset must open its setup visibly: a Google server goes straight to its dialog (its draft has no choices to make), the rest to the editor. */
+  const openPreset = (p: McpPreset) => {
+    const server = draftFromPreset(p, ids);
+    if (p.id === GOOGLE_PRESET) {
+      void run(() => ops.save(toSaveable(server), revision)).then((ok) => ok && setGoogleDialog(server.id));
+      return;
+    }
+    setDraft({ server, isNew: true });
+  };
+
   const empty = pageReadiness(servers);
   return (
     <div className="mcp-pane" data-testid="mcp-pane">
@@ -433,6 +460,11 @@ export function McpPane() {
                     Disconnect
                   </Button>
                 )}
+                {isGoogleServer(s) && (
+                  <Button className="mcp-act" data-testid={`mcp-google-${s.id}`} onClick={() => setGoogleDialog(s.id)}>
+                    Accounts
+                  </Button>
+                )}
                 <Button className="mcp-act" onClick={() => setDraft({ server: structuredClone(s), isNew: false })}>
                   Edit
                 </Button>
@@ -448,17 +480,18 @@ export function McpPane() {
             );
           })}
         </ul>
-        {servers.filter(isGoogleServer).map((s) => (
-          <GoogleAccounts
-            key={s.id}
-            server={s}
+        {googleDialog && servers.some((s) => s.id === googleDialog && isGoogleServer(s)) && (
+          <GoogleAccountsDialog
+            server={servers.find((s) => s.id === googleDialog)!}
             ops={google}
+            onOpenLink={openLink}
+            onClose={() => setGoogleDialog(null)}
             onSnapshot={(snap) => {
               setServers(snap.servers);
               setRevision(snap.revision);
             }}
           />
-        ))}
+        )}
         {error && (
           <p className="mcp-error" role="alert">
             {error}
@@ -545,7 +578,7 @@ export function McpPane() {
         <h3 id="mcp-presets">Add a server</h3>
         <div className="mcp-actions">
           {presets.map((p) => (
-            <Button key={p.id} data-testid={`mcp-add-preset-${p.id}`} onClick={() => setDraft({ server: draftFromPreset(p, ids), isNew: true })}>
+            <Button key={p.id} data-testid={`mcp-add-preset-${p.id}`} onClick={() => openPreset(p)}>
               {p.name}
             </Button>
           ))}

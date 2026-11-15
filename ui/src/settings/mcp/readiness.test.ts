@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { McpPreset, McpServer } from '../../api/mcp.ts';
-import { GOOGLE_PRESET, SIGN_IN_WINDOW_MS, blockState, clientSaved, emailLooksValid, watchState, type GoogleAccountList } from './google.ts';
+import { CONSOLE_STEPS, GOOGLE_PRESET, SIGN_IN_WINDOW_MS, blockState, clientLooksSet, watchState, type GoogleAccountList } from './google.ts';
 import { canDisconnect, connectLabel } from './oauth.ts';
 import { blankServer, draftFromPreset, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable } from './readiness.ts';
 
@@ -113,53 +113,53 @@ const google: McpPreset = {
   secretEnv: ['GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET'],
 };
 
-test('the Google preset drafts a program that needs its client, and the accounts block leads with what to fix', () => {
+test('the Google preset drafts a program, its row ignores the environment, and the dialog leads with what to fix', () => {
   const d = draftFromPreset(google, []);
   assert.equal(d.preset, GOOGLE_PRESET);
   assert.equal(d.transport.type, 'stdio');
   assert.equal(d.transport.command, 'uvx.exe');
   assert.deepEqual(d.transport.args?.slice(-2), ['--permissions', 'gmail:drafts'], 'new servers read and draft, never send');
-  assert.deepEqual(Object.keys(d.transport.env ?? {}), ['GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET']);
-  assert.equal(toSaveable(d).transport.env, undefined, 'empty secrets are left out, never saved blank');
-  assert.equal(clientSaved(d), false);
-
-  const need = serverReadiness(toSaveable(d), undefined, [google]);
-  assert.deepEqual([need.state, need.reason, need.actionLabel], ['inactive', 'Needs its client id and secret.', 'Edit']);
-  const secret = { kind: 'literal' as const, secretId: `lit_${'a'.repeat(32)}` };
-  const saved: McpServer = { ...d, transport: { ...d.transport, env: { GOOGLE_OAUTH_CLIENT_ID: secret, GOOGLE_OAUTH_CLIENT_SECRET: secret } } };
-  assert.equal(clientSaved(saved), true);
-  assert.equal(serverReadiness(saved, undefined, [google]).state, 'ready');
+  assert.deepEqual(toSaveable(d).transport.env, undefined, 'no environment secrets are drafted for the Google preset');
+  // The sign-in client is one per profile, kept by the host: the row never asks for environment values.
+  assert.equal(serverReadiness(toSaveable(d), undefined, [google]).state, 'ready');
 
   const list = (over: Partial<GoogleAccountList> = {}): GoogleAccountList => ({ accounts: [], uvFound: true, signingIn: false, ...over });
-  assert.equal(blockState(saved, null).kind, 'loading');
-  const noUv = blockState(saved, list({ uvFound: false }));
+  assert.equal(blockState(null, null).kind, 'loading');
+  assert.equal(blockState(list(), null).kind, 'loading', 'the client state is still unknown');
+  const noUv = blockState(list({ uvFound: false }), false);
   assert.ok(noUv.kind === 'no-uv' && /Install uv/.test(noUv.message), 'uv missing comes first');
-  assert.equal(blockState(d, list({ uvFound: false })).kind, 'no-uv');
-  assert.equal(blockState(d, list()).kind, 'no-client');
-  assert.equal(blockState(saved, list()).kind, 'empty');
-  assert.equal(blockState(saved, list({ accounts: [{ email: 'a@x.com' }], permission: 'drafts' })).kind, 'ready');
+  assert.equal(blockState(list({ uvFound: false }), true).kind, 'no-uv');
+  assert.equal(blockState(list(), false).kind, 'no-client');
+  assert.equal(blockState(list(), true).kind, 'empty');
+  assert.equal(blockState(list({ accounts: [{ email: 'a@x.com' }], permission: 'drafts' }), true).kind, 'ready');
 });
 
-test('a started sign-in is watched until the address appears or three minutes pass', () => {
-  const w = { startedAt: 1_000, email: ' A@X.com ' };
-  const none: { email: string }[] = [];
-  assert.equal(watchState(w, 1_000, none), 'waiting');
-  assert.equal(watchState(w, 1_000 + SIGN_IN_WINDOW_MS - 1, [{ email: 'b@y.org' }]), 'waiting');
-  assert.equal(watchState(w, 1_000 + SIGN_IN_WINDOW_MS, none), 'timeout');
-  assert.equal(watchState(w, 5_000, [{ email: 'b@y.org' }, { email: 'a@x.com' }]), 'added', 'case and spaces do not matter');
-  assert.equal(watchState(w, 1_000 + SIGN_IN_WINDOW_MS * 2, [{ email: 'a@x.com' }]), 'added', 'an address that arrived in time is still added');
-});
-
-test('addresses are checked loosely before the host checks them', () => {
-  for (const [s, ok] of [
-    ['a@x.com', true],
-    [' first.last+tag@mail.example.org ', true],
-    ['', false],
-    ['a@x', false],
-    ['a b@x.com', false],
-    ['@x.com', false],
-    ['a@@x.com', false],
-  ] as const) {
-    assert.equal(emailLooksValid(s), ok, s);
+test('the setup checklist is the six console steps, each with its console page', () => {
+  assert.equal(CONSOLE_STEPS.length, 6);
+  for (const s of CONSOLE_STEPS) {
+    assert.ok(s.label.length > 0);
+    assert.match(s.url, /^https:\/\/console\.cloud\.google\.com\//);
   }
+  assert.match(CONSOLE_STEPS[0].url, /projectcreate/);
+  assert.match(CONSOLE_STEPS[1].url, /gmail\.googleapis\.com/);
+  assert.match(CONSOLE_STEPS[5].url, /clients\/create/);
+});
+
+test('the client form enables Save only once both values are filled', () => {
+  assert.equal(clientLooksSet('id', 'sec'), true);
+  assert.equal(clientLooksSet('  id  ', ' sec '), true, 'spaces are trimmed before the check');
+  assert.equal(clientLooksSet('', 'sec'), false);
+  assert.equal(clientLooksSet('id', '   '), false);
+});
+
+test('a started sign-in is watched until a new address appears or three minutes pass', () => {
+  const w = { startedAt: 1_000, known: ['old@x.com'] };
+  const none = [{ email: 'old@x.com' }];
+  assert.equal(watchState(w, 1_000, []), 'waiting', 'no accounts is not a new one');
+  assert.equal(watchState(w, 1_000, none), 'waiting', 'an address that was already there is not new');
+  assert.equal(watchState(w, 1_000 + SIGN_IN_WINDOW_MS - 1, none), 'waiting');
+  assert.equal(watchState(w, 1_000 + SIGN_IN_WINDOW_MS, none), 'timeout');
+  assert.equal(watchState(w, 5_000, [...none, { email: 'NEW@gmail.com' }]), 'added', 'a new address is added');
+  assert.equal(watchState(w, 5_000, [{ email: 'old@x.com' }, { email: 'OLD@X.COM' }]), 'waiting', 'case and repeats do not make an address new');
+  assert.equal(watchState(w, 1_000 + SIGN_IN_WINDOW_MS * 2, [{ email: 'new@gmail.com' }]), 'added', 'an address that arrived in time is still added');
 });

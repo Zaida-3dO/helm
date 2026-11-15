@@ -2,6 +2,7 @@
 // page's readiness, preset drafts and the editor-to-save conversion.
 
 import type { McpPreset, McpServer, ServerStatus, ValueRef } from '../../api/mcp.ts';
+import { GOOGLE_PRESET } from './google.ts';
 import type { OAuthStatus } from './oauth.ts';
 
 export interface Readiness {
@@ -23,6 +24,8 @@ function tokenMissing(s: McpServer, presets: McpPreset[]): boolean {
 function envMissing(s: McpServer, presets: McpPreset[]): boolean {
   const p = presets.find((x) => x.id === s.preset);
   if (!p?.secretEnv?.length || s.transport.type !== 'stdio') return false;
+  // A Google accounts server keeps its sign-in client in its own dialog, not in the environment.
+  if (p.id === GOOGLE_PRESET) return false;
   const env = s.transport.env ?? {};
   return p.secretEnv.some((k) => {
     const r = env[k];
@@ -74,7 +77,12 @@ export function draftFromPreset(p: McpPreset, taken: string[]): McpServer {
   let id = p.id;
   for (let i = 2; taken.includes(id); i++) id = `${p.id.slice(0, 21)}_${i}`;
   if (p.transport === 'stdio') {
-    // A program preset: what to run, and an empty secret for each name the user types in.
+    // A program preset: what to run, and an empty secret for each name the user types in. A
+    // Google accounts server types none: its client is set in the accounts dialog.
+    const env =
+      p.id === GOOGLE_PRESET
+        ? {}
+        : Object.fromEntries((p.secretEnv ?? []).map((k) => [k, { kind: 'literal' as const, value: '' }]));
     return {
       id,
       name: p.name,
@@ -85,7 +93,7 @@ export function draftFromPreset(p: McpPreset, taken: string[]): McpServer {
         type: 'stdio',
         command: p.command ?? '',
         args: [...(p.args ?? [])],
-        env: Object.fromEntries((p.secretEnv ?? []).map((k) => [k, { kind: 'literal' as const, value: '' }])),
+        env,
       },
     };
   }
