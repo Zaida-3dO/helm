@@ -877,9 +877,12 @@ mod tests {
                    "title": "Docs", "url": "https://example.com"})
         );
 
-        // Only the chat the voice screen talks to may call the tool.
+        // Only the chat the voice screen talks to may call the tool — in any profile's tag.
         let dir = tempfile::tempdir().unwrap();
-        assert!(!is_voice_chat(dir.path(), "c1"), "no voice chat yet");
+        let mut reg = helm_core::db::MigrationRegistry::new();
+        helm_profiles::register_migrations(&mut reg);
+        let db = helm_core::db::Database::open(&dir.path().join("t.db"), &reg).unwrap();
+        assert!(!is_voice_chat(&db, dir.path(), "c1"), "no voice chat yet");
         let tag = voice::VoiceTag {
             chat_id: "c1".into(),
             started_at: 0,
@@ -888,8 +891,13 @@ mod tests {
             conversation: "x".into(),
             primed: true,
         };
-        voice::save_tag(&voice::tag_path(dir.path()), Some(&tag)).unwrap();
-        assert!(is_voice_chat(dir.path(), "c1"));
-        assert!(!is_voice_chat(dir.path(), "c2"));
+        let pid = db
+            .snapshot(|tx| helm_profiles::store::home(tx))
+            .unwrap()
+            .unwrap()
+            .id;
+        voice::save_tag(&crate::people::voice_paths(dir.path(), &pid).tag, Some(&tag)).unwrap();
+        assert!(is_voice_chat(&db, dir.path(), "c1"));
+        assert!(!is_voice_chat(&db, dir.path(), "c2"));
     }
 }

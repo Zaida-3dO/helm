@@ -153,6 +153,8 @@ pub fn view(w: &Waiting, on: bool) -> Option<Value> {
 /// One profile's Remote-page settings: which profile, and where its switch is kept.
 struct RemoteChannel {
     profile_id: String,
+    /// The hub person this channel answers for; empty while no profile is linked to one.
+    person: String,
     policy_path: std::path::PathBuf,
 }
 
@@ -168,6 +170,7 @@ fn channel(
     Ok(RemoteChannel {
         policy_path: crate::people::telegram_paths(profile_dir, &p.id).policy,
         profile_id: p.id,
+        person: p.hub_person_id.unwrap_or_default(),
     })
 }
 
@@ -217,6 +220,7 @@ pub fn list_waiting(w: &Wiring, person: Option<&str>, all: bool) -> Result<Value
             let w = Waiting {
                 chat_id: r.chat_id.clone(),
                 chat_title: r.title.clone(),
+                person: ch.person.clone(),
                 interaction,
             };
             if let Some(v) = view(&w, on) {
@@ -266,6 +270,7 @@ pub fn plan(
     let w = Waiting {
         chat_id: chat_id.to_owned(),
         chat_title: title.to_owned(),
+        person: String::new(),
         interaction: i.clone(),
     };
     if let Some(o) = approve::offer(&w) {
@@ -467,6 +472,7 @@ mod tests {
         Waiting {
             chat_id: "c1".into(),
             chat_title: "Docs".into(),
+            person: String::new(),
             interaction: i,
         }
     }

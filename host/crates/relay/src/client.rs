@@ -812,7 +812,7 @@ impl Client {
                 let Ok(person) = self.frame_person(&v) else {
                     let _ = out.send(refusal(
                         &id,
-                        "This PC has no profile linked for that person.",
+                        "This PC has no profile linked for that person.".to_owned(),
                     ));
                     return;
                 };
@@ -1068,7 +1068,7 @@ mod tests {
 
     #[derive(Default)]
     struct Exec {
-        ran: Mutex<Vec<(String, gate::Admitted)>>,
+        ran: Mutex<Vec<(String, Option<String>, gate::Admitted)>>,
         peer: Mutex<Vec<(String, gate::Admitted)>>,
     }
     impl Executor for Exec {
@@ -1084,9 +1084,13 @@ mod tests {
         fn run<'a>(
             &'a self,
             caller: &'a str,
+            person: Option<&'a str>,
             call: gate::Admitted,
         ) -> BoxFut<'a, Result<Value, ToolFailure>> {
-            self.ran.lock().unwrap().push((caller.to_owned(), call));
+            self.ran
+                .lock()
+                .unwrap()
+                .push((caller.to_owned(), person.map(str::to_owned), call));
             Box::pin(async { Ok(json!({ "chats": [] })) })
         }
     }
@@ -1107,11 +1111,11 @@ mod tests {
             };
             Box::pin(async move { r })
         }
-        fn stop<'a>(&'a self) -> BoxFut<'a, ()> {
+        fn stop<'a>(&'a self, _person: Option<String>) -> BoxFut<'a, ()> {
             *self.stops.lock().unwrap() += 1;
             Box::pin(async {})
         }
-        fn answer<'a>(&'a self, _id: String, _index: usize) -> BoxFut<'a, ()> {
+        fn answer<'a>(&'a self, _person: Option<String>, _id: String, _index: usize) -> BoxFut<'a, ()> {
             Box::pin(async {})
         }
     }
@@ -1119,9 +1123,9 @@ mod tests {
     #[derive(Default)]
     struct Voice {
         got: Mutex<Vec<VoiceTurn>>,
-        stops: Mutex<Vec<String>>,
+        stops: Mutex<Vec<(Option<String>, String)>>,
         heard: Mutex<Vec<Value>>,
-        presence: Mutex<Vec<(bool, String)>>,
+        presence: Mutex<Vec<(Option<String>, bool, String)>>,
         fresh: Mutex<usize>,
         refuse: std::sync::atomic::AtomicBool,
         hold: std::sync::atomic::AtomicBool,
@@ -1143,18 +1147,21 @@ mod tests {
                 }
             })
         }
-        fn stop<'a>(&'a self, turn: String) -> BoxFut<'a, ()> {
-            self.stops.lock().unwrap().push(turn);
+        fn stop<'a>(&'a self, person: Option<String>, turn: String) -> BoxFut<'a, ()> {
+            self.stops.lock().unwrap().push((person, turn));
             Box::pin(async {})
         }
-        fn heard<'a>(&'a self, reports: Vec<Value>) -> BoxFut<'a, ()> {
+        fn heard<'a>(&'a self, _person: Option<String>, reports: Vec<Value>) -> BoxFut<'a, ()> {
             self.heard.lock().unwrap().extend(reports);
             Box::pin(async {})
         }
-        fn presence(&self, live: bool, mode: &str) {
-            self.presence.lock().unwrap().push((live, mode.to_owned()));
+        fn presence(&self, person: Option<String>, live: bool, mode: &str) {
+            self.presence
+                .lock()
+                .unwrap()
+                .push((person, live, mode.to_owned()));
         }
-        fn fresh<'a>(&'a self) -> BoxFut<'a, ()> {
+        fn fresh<'a>(&'a self, _person: Option<String>) -> BoxFut<'a, ()> {
             *self.fresh.lock().unwrap() += 1;
             Box::pin(async {})
         }
@@ -1307,7 +1314,7 @@ mod tests {
         {
             let ran = exec.ran.lock().unwrap();
             assert_eq!(ran.len(), 2, "only the stamped call ran");
-            assert!(ran[1].1.remote && ran[1].1.tool == "app_list_waiting");
+            assert!(ran[1].2.remote && ran[1].2.tool == "app_list_waiting");
         }
 
         // Telegram: delivered, then acknowledged.
@@ -1363,7 +1370,7 @@ mod tests {
         .await
         .unwrap();
         // Status goes up the line.
-        c.handle().telegram_status("Running tests");
+        c.handle().telegram_status("", "Running tests");
         assert_eq!(
             next(&mut ws).await,
             json!({"type": "telegram_status", "text": "Running tests"})
@@ -1514,7 +1521,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
-        c.handle().telegram_final("marker");
+        c.handle().telegram_final("", "marker");
         // The next frame up is the marker, not an ack.
         assert_eq!(next(&mut ws).await["type"], "telegram_final");
         assert_eq!(sink.got.lock().unwrap().len(), 1);
@@ -1565,6 +1572,7 @@ mod tests {
                 id: "t1".into(),
                 mode: "chat".into(),
                 text: "hello".into(),
+                person: None,
                 source: "typed".into(),
                 sent_at: 5,
                 age_minutes: Some(3),
@@ -1615,13 +1623,19 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert_eq!(*voice.stops.lock().unwrap(), ["t3".to_owned()]);
+        assert_eq!(
+            *voice.stops.lock().unwrap(),
+            [(None, "t3".to_owned())]
+        );
         assert_eq!(voice.heard.lock().unwrap()[0]["reply"], "r1");
-        assert_eq!(*voice.presence.lock().unwrap(), [(true, "chat".to_owned())]);
+        assert_eq!(
+            *voice.presence.lock().unwrap(),
+            [(None, true, "chat".to_owned())]
+        );
 
         // Upward: the working line, then an answer and news in the shape the hub expects.
         let h = c.handle();
-        h.voice_status("t1", "Thinking");
+        h.voice_status("", "t1", "Thinking");
         assert_eq!(
             next(&mut ws).await,
             json!({"type": "voice_status", "turn": "t1", "text": "Thinking"})
@@ -1634,7 +1648,7 @@ mod tests {
             "c1".into(),
             9,
         );
-        assert!(h.voice_reply(&reply));
+        assert!(h.voice_reply("", &reply));
         let f = next(&mut ws).await;
         assert_eq!(
             (f["type"].as_str(), f["id"].as_str()),
@@ -1645,7 +1659,7 @@ mod tests {
             json!({"n": 2, "text": "Want the details?"})
         );
         reply.turn = None;
-        assert!(h.voice_reply(&reply));
+        assert!(h.voice_reply("", &reply));
         assert_eq!(next(&mut ws).await["type"], "voice_notify");
         task.abort();
     }
@@ -1709,7 +1723,7 @@ mod tests {
         assert_eq!(next(&mut ws).await, hello);
         // A voice answer goes up at once.
         let shown = json!({"type": "voice_attachment", "reply": "r1", "n": 1});
-        assert!(c.handle().voice_attachment(shown.clone()));
+        assert!(c.handle().voice_attachment("", shown.clone()));
         assert_eq!(next(&mut ws).await, shown);
 
         // Device frames reach the sink as sent; other frames and unknown types do not.

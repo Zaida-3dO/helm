@@ -41,7 +41,7 @@ pub fn migrate(profile_dir: &Path, db: &Database) {
         return;
     }
     let home: Option<String> = db
-        .snapshot(|tx| store::home(tx).ok().flatten())
+        .snapshot(|tx| store::home(tx))
         .ok()
         .flatten()
         .map(|p| p.id);
@@ -115,7 +115,7 @@ pub fn profile_for(
 ) -> Result<helm_profiles::store::Profile, String> {
     match person.map(str::trim).filter(|p| !p.is_empty()) {
         None => db
-            .snapshot(|tx| store::home(tx).ok().flatten())
+            .snapshot(|tx| store::home(tx))
             .ok()
             .flatten()
             .ok_or_else(|| "This Helm has no home profile yet.".to_owned()),

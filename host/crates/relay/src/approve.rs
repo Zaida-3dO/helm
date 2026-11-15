@@ -387,6 +387,7 @@ mod tests {
         Waiting {
             chat_id: "c1".into(),
             chat_title: "Docs".into(),
+            person: "p7".into(),
             interaction: i,
         }
     }
@@ -423,11 +424,12 @@ mod tests {
         long.id = "r9".into();
         long.context.as_mut().unwrap()[0].text = "x".repeat(401);
         let s = Asks::default().step(&[waiting(long)], new_id);
-        assert_eq!(s.ask[0].2, ["Deny", "Stop turn"]);
+        assert_eq!(s.ask[0].1, "p7", "the ask carries the chat owner's person");
+        assert_eq!(s.ask[0].3, ["Deny", "Stop turn"]);
         assert!(
-            s.ask[0].1.ends_with("open Helm to allow it."),
+            s.ask[0].2.ends_with("open Helm to allow it."),
             "{}",
-            s.ask[0].1
+            s.ask[0].2
         );
 
         let asks = Asks::default();
@@ -440,7 +442,7 @@ mod tests {
         let both = [waiting(approval.clone()), waiting(plan.clone())];
         let s = asks.step(&both, &mut id);
         assert_eq!(s.ask.len(), 2);
-        assert_eq!(s.ask[1].2, ["Approve plan", "Keep planning"]);
+        assert_eq!(s.ask[1].3, ["Approve plan", "Keep planning"]);
         assert!(asks.step(&both, &mut id).ask.is_empty(), "asked once");
         // The plan was answered in Helm: its buttons come down.
         let s = asks.step(&[waiting(approval.clone())], &mut id);
@@ -486,6 +488,7 @@ mod tests {
         asks.add_question(
             "q1",
             "c9",
+            "p7",
             "Merge and redeploy?",
             vec!["Yes".into(), "No".into()],
         );

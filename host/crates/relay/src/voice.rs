@@ -185,6 +185,7 @@ pub fn policy_path(profile_dir: &Path) -> PathBuf {
 
 /// One profile's voice files: its tag and policy, the store of what the phone heard, and the
 /// folder its chats start in.
+#[derive(Clone)]
 pub struct Paths {
     pub tag: PathBuf,
     pub policy: PathBuf,

@@ -260,7 +260,7 @@ fn send(ctx: &ToolCtx, a: Value) -> ToolResult {
         .get::<Database>()
         .ok_or_else(|| ToolError::refused("Helm's database is not available."))?;
     // The message goes to the person the chat belongs to: their Telegram, their channel files.
-    let ch = owner_channel(db, &dir, &ctx.caller_chat_id)
+    let ch = owner_channel(&db, &dir, &ctx.caller_chat_id)
         .map_err(|e| ToolError::refused(format!("{e}, so nothing was sent.")))?;
     if ch.tg_chat.as_deref() == Some(ctx.caller_chat_id.as_str()) {
         return Err(ToolError::refused(
@@ -281,7 +281,7 @@ fn send(ctx: &ToolCtx, a: Value) -> ToolResult {
             "{MAX_PER_HOUR} Telegram messages were already sent in the last hour, so this one was not."
         )));
     }
-    let title = title_of(db, &ctx.caller_chat_id).unwrap_or_default();
+    let title = title_of(&db, &ctx.caller_chat_id).unwrap_or_default();
     if !line.telegram_notify(&ch.person, &compose(&title, text)) {
         return Err(ToolError::refused(
             "Helm's line to the hub dropped, so nothing was sent.",
@@ -327,7 +327,7 @@ fn ask(ctx: &ToolCtx, a: Value) -> ToolResult {
         .services
         .get::<Database>()
         .ok_or_else(|| ToolError::refused("Helm's database is not available."))?;
-    let ch = owner_channel(db, &dir, &ctx.caller_chat_id)
+    let ch = owner_channel(&db, &dir, &ctx.caller_chat_id)
         .map_err(|e| ToolError::refused(format!("{e}, so nothing was asked.")))?;
     if !telegram::load_approvals(&ch.paths.policy) {
         return Err(ToolError::refused(
@@ -352,7 +352,7 @@ fn ask(ctx: &ToolCtx, a: Value) -> ToolResult {
             "{MAX_PER_HOUR} Telegram messages were already sent in the last hour, so nothing was asked."
         )));
     }
-    let title = title_of(db, &ctx.caller_chat_id).unwrap_or_default();
+    let title = title_of(&db, &ctx.caller_chat_id).unwrap_or_default();
     let id = approve::new_id();
     sink.asks
         .add_question(&id, &ctx.caller_chat_id, &ch.person, question, options.clone());
@@ -506,7 +506,8 @@ fn look(rt: &ChatRuntime, afk: &helm_afk::AfkService, db: &Database, dir: &Path)
             }
         }
         Some(out)
-    });
+    })
+    .flatten();
     Look {
         channels: chans,
         owner,

@@ -280,7 +280,7 @@ impl AppExecutor {
         let Some(db) = w.services.get::<helm_core::db::Database>() else {
             return HashSet::new();
         };
-        crate::people::profile_for(db, person)
+        crate::people::profile_for(&db, person)
             .ok()
             .map(|p| p.id)
             .and_then(|pid| db.snapshot(|tx| helm_profiles::store::chat_ids_for(tx, &pid)).ok())
@@ -360,7 +360,7 @@ impl Executor for AppExecutor {
                     let named = person.and_then(|p| {
                         w.services
                             .get::<helm_core::db::Database>()
-                            .and_then(|db| crate::people::profile_for(db, Some(p)).ok())
+                            .and_then(|db| crate::people::profile_for(&db, Some(p)).ok())
                             .map(|pr| pr.name)
                     });
                     let framed = |b: &str| match &named {

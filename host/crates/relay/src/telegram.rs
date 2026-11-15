@@ -134,6 +134,7 @@ pub fn policy_path(profile_dir: &Path) -> PathBuf {
 
 /// One profile's Telegram files: its tag, policy, answered ids and sent notes, and the folder
 /// its pictures and files are saved in.
+#[derive(Clone)]
 pub struct Paths {
     pub tag: PathBuf,
     pub policy: PathBuf,
@@ -745,6 +746,7 @@ mod tests {
             away_alerts: false,
             approvals: true,
             remote_answers: true,
+            take_telegram: Some(false),
             model: Some("model-one".into()),
             effort: Some("medium".into()),
         };
@@ -759,6 +761,7 @@ mod tests {
                 away_alerts: true,
                 approvals: false,
                 remote_answers: false,
+                take_telegram: None,
                 model: None,
                 effort: None,
             };

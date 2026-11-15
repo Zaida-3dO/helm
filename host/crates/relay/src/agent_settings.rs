@@ -588,6 +588,7 @@ mod tests {
                 away_alerts: false,
                 approvals: true,
                 remote_answers: false,
+                take_telegram: None,
                 model: Some("sonnet".into()),
                 effort: Some("medium".into()),
             },

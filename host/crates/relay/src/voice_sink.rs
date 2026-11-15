@@ -1361,8 +1361,8 @@ impl VoiceSink for ChatVoice {
                 return Ok(());
             };
             let live = {
-                let mut l = self
-                    .live_for(&c.profile_id)
+                let cell = self.live_for(&c.profile_id);
+                let mut l = cell
                     .lock()
                     .unwrap_or_else(|p| p.into_inner());
                 l.turn = Some(turn.id);
@@ -1435,10 +1435,8 @@ impl VoiceSink for ChatVoice {
             Ok(c) => c.profile_id,
             Err(_) => return,
         };
-        let mut l = self
-            .live_for(&pid)
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let cell = self.live_for(&pid);
+        let mut l = cell.lock().unwrap_or_else(|p| p.into_inner());
         l.presence_live = live;
         l.presence_mode = Mode::parse(mode);
     }
@@ -1533,6 +1531,7 @@ pub fn voice_view(
         .ok()
         .flatten()
         .is_some_and(|h| h.id == profile_id);
+    let take_voice = voice::takes_voice(&file, is_home);
     VoiceView {
         chat,
         model: file.model,
@@ -1541,7 +1540,7 @@ pub fn voice_view(
         max_age_hours: file.max_age_hours,
         max_tokens: file.max_tokens,
         watch: file.watch,
-        take_voice: voice::takes_voice(&file, is_home),
+        take_voice,
     }
 }
 
