@@ -2,13 +2,13 @@
 //! builders for the records it holds. Nothing here touches a database, a process or a network.
 
 use crate::link::BoxFut;
-use crate::serve::{ChatPort, ChatState, PortResult, SentFile};
+use crate::serve::{ChatPort, ChatState, PanelRead, PortResult, SentFile};
 use crate::wire::{
-    code, AnswerArgs, ArchiveArgs, CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs,
-    DeviceInfo, DevicePerson, ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, PersonInfo,
-    ProfileInfo, ProjectInfo, QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs, SetModelArgs,
-    SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs,
-    WireError,
+    code, AnswerArgs, ArchiveArgs, BoardCancelArgs, BoardReadArgs, CheckpointArgs,
+    ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo, DevicePerson, ForkArgs, Hello,
+    MoveProfileArgs, MuteArgs, OrganizeArgs, PanelStageArgs, PersonInfo, ProfileInfo, ProjectInfo,
+    QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs, SetModelArgs, SetPermissionArgs,
+    ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError,
 };
 use helm_chats::types::{
     ChatRecord, ChatStatus, Harness, Interaction, InteractionAttention, InteractionMethod,
@@ -142,6 +142,14 @@ pub struct FakeState {
     pub verbosity_set: Vec<VerbositySetArgs>,
     pub context_asked: Vec<String>,
     pub quick_opened: Vec<QuickOpenArgs>,
+    pub folders_asked: Vec<String>,
+    /// Each side-panel read: the op it answers and the (confined) arguments it was given.
+    pub panel_reads: Vec<(&'static str, Value)>,
+    /// Each stage/unstage: (args, whether it was a stage).
+    pub stages: Vec<(PanelStageArgs, bool)>,
+    pub boards_connection_for: Vec<String>,
+    pub boards_read: Vec<BoardReadArgs>,
+    pub boards_cancelled: Vec<BoardCancelArgs>,
     pub warmed: Vec<String>,
     pub tool_stopped: Vec<ToolStopArgs>,
     pub submissions: Vec<SubmissionArgs>,
@@ -631,6 +639,74 @@ impl ChatPort for FakePort {
         ready(Ok(
             json!({ "mode": "files", "items": [{ "path": hit }], "partial": false }),
         ))
+    }
+
+    fn chat_folder(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        self.st().folders_asked.push(chat_id);
+        ready(Ok(json!({ "path": "/work" })))
+    }
+
+    fn panel_read(&self, a: PanelRead) -> BoxFut<'_, PortResult<Value>> {
+        let echo = json!({ "op": a.local_op, "args": a.args.clone() });
+        let path = a.args.get("path").cloned();
+        let stamps = a
+            .args
+            .get("paths")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        self.st().panel_reads.push((a.local_op, a.args));
+        ready(Ok(match a.local_op {
+            "file_read" | "dir_list" => json!({
+                "path": path.unwrap_or(Value::Null),
+                "kind": "text", "size": 5, "text": "one\n", "truncated": false,
+            }),
+            "changes" => {
+                json!({ "repoTop": "/work", "branch": "main", "records": [], "truncated": false })
+            }
+            "diff" => json!({ "patch": "", "fullContext": false, "truncated": false }),
+            "file_stat" => Value::Array(vec![Value::Null; stamps]),
+            _ => echo,
+        }))
+    }
+
+    fn panel_stage(&self, a: PanelStageArgs, stage: bool) -> BoxFut<'_, PortResult<Value>> {
+        self.st().stages.push((a, stage));
+        ready(Ok(
+            json!({ "changes": { "repoTop": "/work", "branch": "main", "records": [], "truncated": false }, "noop": false }),
+        ))
+    }
+
+    fn board_connection(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        self.st().boards_connection_for.push(chat_id);
+        ready(Ok(
+            json!({ "url": "https://board.example", "hasToken": true }),
+        ))
+    }
+
+    fn board_read(&self, a: BoardReadArgs) -> BoxFut<'_, PortResult<Value>> {
+        let action = a
+            .params
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let data = match action.as_str() {
+            "projects" => {
+                json!({ "projects": [{ "id": "p1", "title": "Work" }], "complete": true })
+            }
+            "ready" => json!({ "ready": true }),
+            "fleet" => json!({ "assignments": [], "complete": true }),
+            "board_page" => json!({ "board": { "columns": {} } }),
+            "item" => json!({ "item": { "id": "i1", "title": "One", "state": "open" } }),
+            _ => json!({}),
+        };
+        self.st().boards_read.push(a);
+        ready(Ok(json!({ "action": action, "data": data })))
+    }
+
+    fn board_cancel(&self, a: BoardCancelArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.st().boards_cancelled.push(a);
+        ready(Ok(json!({ "cancelled": true })))
     }
 
     fn warm(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {

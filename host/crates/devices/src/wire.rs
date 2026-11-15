@@ -518,6 +518,47 @@ pub struct VerbositySetArgs {
 pub struct QuickOpenArgs {
     pub chat_id: String,
     pub query: String,
+    /// Drop the cached listing first, as the panel's Go-to-file refresh does.
+    #[serde(default)]
+    pub reload: bool,
+}
+
+/// A side-panel read that names one path: a file, a folder listing, an archive listing or a
+/// path written in a reply. The serving PC keeps it inside the chat's project folder.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PanelPathArgs {
+    pub chat_id: String,
+    pub path: String,
+}
+
+/// Change stamps for the files a mirrored chat's viewer has open.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PanelStatArgs {
+    pub chat_id: String,
+    pub paths: Vec<String>,
+}
+
+/// One file's diff on the PC that runs the chat; `side` is `head`, `staged` or `unstaged`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PanelDiffArgs {
+    pub chat_id: String,
+    pub path: String,
+    pub side: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+}
+
+/// Stage or unstage one file of the chat's repository, on the PC that runs the chat.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PanelStageArgs {
+    pub chat_id: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -556,6 +597,26 @@ pub struct SnoozeArgs {
     /// Until (Unix ms); absent or null unsnoozes — the same rule as the local op.
     #[serde(default)]
     pub until: Option<i64>,
+}
+
+/// One read of the task board of the PC that runs the chat. `params` is the read the Tasks
+/// view asks for (action, column, project, cursor, requestId…) without the `chatId`; the
+/// serving PC runs it against its own saved board connection, unchanged. Reads only — the
+/// Tasks view never writes to the board.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoardReadArgs {
+    pub chat_id: String,
+    #[serde(flatten)]
+    pub params: Value,
+}
+
+/// Stop one board read still waiting on the PC that runs the chat.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BoardCancelArgs {
+    pub chat_id: String,
+    pub request_id: String,
 }
 
 /// The PC that runs a chat's defaults for new chats, as far as the model picker cares: the
@@ -616,6 +677,28 @@ pub enum Op {
     ContextOn(ChatIdArgs),
     /// The chat's project files matching a mention query, read on the PC that runs it. A read.
     QuickOpen(QuickOpenArgs),
+    /// The chat's project folder path, as the panel shows it. A read.
+    ChatFolder(ChatIdArgs),
+    /// One file or folder listing from the chat's project folder, read on the PC that runs it.
+    /// A read; the serving PC keeps the path inside the folder.
+    FileView(PanelPathArgs),
+    FileStat(PanelStatArgs),
+    /// The chat's repository changes, as the panel's Changes view shows them. A read.
+    Changes(ChatIdArgs),
+    Diff(PanelDiffArgs),
+    /// Stage or unstage one file of the chat's repository, on the PC that runs it.
+    Stage(PanelStageArgs),
+    Unstage(PanelStageArgs),
+    /// A ZIP's listing inside the chat's project folder. A read.
+    ArchiveList(PanelPathArgs),
+    /// A path written in a reply, resolved against the chat's project folder. A read.
+    PathResolve(PanelPathArgs),
+    /// Whether a task board is saved on the PC that runs the chat. A read.
+    BoardConnection(ChatIdArgs),
+    /// One read of that PC's task board, for the Tasks view. A read.
+    BoardRead(BoardReadArgs),
+    /// Stop one board read that view no longer waits for. A read.
+    BoardCancel(BoardCancelArgs),
     /// Start loading the chat's model on its own PC (the first keystroke of a local chat).
     Warm(ChatIdArgs),
     ToolStop(ToolStopArgs),
@@ -690,6 +773,24 @@ impl Op {
             "verbosity_set" => Op::VerbositySet(args(a)?),
             "context_on" => Op::ContextOn(args(a)?),
             "quick_open" => Op::QuickOpen(args(a)?),
+            "chat_folder" => Op::ChatFolder(args(a)?),
+            "file_view" => Op::FileView(args(a)?),
+            "file_stat" => Op::FileStat(args(a)?),
+            "changes" => Op::Changes(args(a)?),
+            "diff" => Op::Diff(args(a)?),
+            "stage" => Op::Stage(args(a)?),
+            "unstage" => Op::Unstage(args(a)?),
+            "archive_list" => Op::ArchiveList(args(a)?),
+            "path_resolve" => Op::PathResolve(args(a)?),
+            "board_connection" => Op::BoardConnection(args(a)?),
+            "board_read" => {
+                let p: BoardReadArgs = args(a)?;
+                if p.params.get("action").and_then(Value::as_str).is_none() {
+                    return Err(WireError::bad_args("A board read names an action."));
+                }
+                Op::BoardRead(p)
+            }
+            "board_cancel" => Op::BoardCancel(args(a)?),
             "warm" => Op::Warm(args(a)?),
             "tool_stop" => Op::ToolStop(args(a)?),
             "submission" => Op::Submission(args(a)?),
@@ -729,6 +830,8 @@ impl Op {
                 | Op::MoveProfile(_)
                 | Op::SetPermission(_)
                 | Op::VerbositySet(_)
+                | Op::Stage(_)
+                | Op::Unstage(_)
                 | Op::Warm(_)
                 | Op::ToolStop(_)
                 | Op::Submission(_)

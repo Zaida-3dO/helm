@@ -1944,6 +1944,8 @@ dependencies = [
  "helm-consent",
  "helm-core",
  "helm-ipc",
+ "helm-panel",
+ "helm-platform",
  "hex",
  "log",
  "rusqlite",

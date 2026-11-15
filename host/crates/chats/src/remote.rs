@@ -9,7 +9,7 @@
 //! |---|---|
 //! | `chat_get`, `transcript_page` | the mirror (and the device that runs the chat, for older pages) |
 //! | `chat_send`, `chat_stop`, `interaction_answer`, `chat_set_model`, `chat_rename`, `chat_archive`, `chat_restore` | the device that runs the chat |
-//! | `chat_fork`, `chat_compact`, `chat_roll_over`, `usage_cost`, `chat_export_markdown`, `chat_organize`, `unread_mark`, `chat_mute`, `chat_set_permission_mode`, `chat_verbosity_get`/`set`, `chat_warm`, `tool_stop`, `checkpoint_info`, `attention_snooze`/`address`, `panel_context_get`, `quick_open` | the same op on the device that runs the chat |
+//! | `chat_fork`, `chat_compact`, `chat_roll_over`, `usage_cost`, `chat_export_markdown`, `chat_organize`, `unread_mark`, `chat_mute`, `chat_set_permission_mode`, `chat_verbosity_get`/`set`, `chat_warm`, `tool_stop`, `checkpoint_info`, `attention_snooze`/`address`, `panel_context_get`, `quick_open`, `chat_folder`, `file_read`, `dir_list`, `file_stat`, `archive_list`, `path_resolve`, `changes`, `diff`, `changes_stage`, `changes_unstage` | the same op on the device that runs the chat (panel paths stay inside the chat's project folder there) |
 //! | `draft_save` | the mirror alone: a draft never leaves this PC |
 //! | `title_suggest`, `autocomplete_suggest`, `skills_list` | quietly, with an empty answer |
 //! | `model_catalogue` with a `deviceUid` | the models that device last said it offers |
@@ -149,7 +149,19 @@ async fn route(
         | "checkpoint_info"
         | "attention_snooze"
         | "attention_address"
-        | "chat_warm" => remote.chat_op(&op, args).await,
+        | "chat_warm"
+        // The side panel around a chat: the same ops, run on the device that runs the chat,
+        // kept inside that chat's project folder there.
+        | "chat_folder"
+        | "file_read"
+        | "dir_list"
+        | "file_stat"
+        | "archive_list"
+        | "path_resolve"
+        | "changes"
+        | "diff"
+        | "changes_stage"
+        | "changes_unstage" => remote.chat_op(&op, args).await,
         // Nothing to suggest or list for a chat that runs somewhere else.
         "title_suggest" => Ok(json!({ "title": "", "titles": [] })),
         "autocomplete_suggest" => Ok(json!({ "completion": "", "retryAfterMs": null })),

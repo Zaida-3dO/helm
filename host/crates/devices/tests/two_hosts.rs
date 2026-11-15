@@ -647,7 +647,41 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         ("verbosity_get", json!({"chatId": "c1"})),
         ("verbosity_set", json!({"chatId": "c1", "level": "high"})),
         ("context_on", json!({"chatId": "c1"})),
-        ("quick_open", json!({"chatId": "c1", "query": "main"})),
+        (
+            "quick_open",
+            json!({"chatId": "c1", "query": "main", "reload": true}),
+        ),
+        // The side panel around the chat, and the task board of the PC that runs it.
+        ("chat_folder", json!({"chatId": "c1"})),
+        (
+            "file_view",
+            json!({"chatId": "c1", "path": "/work/src/main.rs"}),
+        ),
+        (
+            "file_stat",
+            json!({"chatId": "c1", "paths": ["/work/a.rs", "/work/gone.rs"]}),
+        ),
+        (
+            "archive_list",
+            json!({"chatId": "c1", "path": "/work/x.zip"}),
+        ),
+        (
+            "path_resolve",
+            json!({"chatId": "c1", "path": "src/main.rs"}),
+        ),
+        ("changes", json!({"chatId": "c1"})),
+        (
+            "diff",
+            json!({"chatId": "c1", "path": "a.rs", "side": "unstaged"}),
+        ),
+        ("stage", json!({"chatId": "c1", "path": "a.rs"})),
+        ("unstage", json!({"chatId": "c1", "path": "a.rs"})),
+        ("board_connection", json!({"chatId": "c1"})),
+        (
+            "board_read",
+            json!({"chatId": "c1", "action": "projects", "requestId": "tr-1", "timeoutMs": 5000}),
+        ),
+        ("board_cancel", json!({"chatId": "c1", "requestId": "tr-1"})),
         ("warm", json!({"chatId": "c1"})),
         ("tool_stop", json!({"chatId": "c1", "toolCallId": "t-1"})),
         (
@@ -674,6 +708,28 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         assert_eq!(st.verbosity_set[0].level.as_deref(), Some("high"));
         assert_eq!(st.context_asked, ["c1"]);
         assert_eq!(st.quick_opened[0].query, "main");
+        assert!(st.quick_opened[0].reload);
+        assert_eq!(st.folders_asked, ["c1"]);
+        assert_eq!(
+            st.panel_reads.iter().map(|(op, _)| *op).collect::<Vec<_>>(),
+            [
+                "file_read",
+                "file_stat",
+                "archive_list",
+                "path_resolve",
+                "changes",
+                "diff"
+            ]
+        );
+        // The stage pair arrives with the path and which way it went; a `from` rides along when given.
+        assert_eq!(st.stages.len(), 2);
+        assert!(st.stages[0].1 && !st.stages[1].1);
+        assert_eq!(st.stages[0].0.path, "a.rs");
+        assert_eq!(st.boards_connection_for, ["c1"]);
+        assert_eq!(st.boards_read[0].params["action"], "projects");
+        // The chat the call named does not stay inside the board parameters.
+        assert!(st.boards_read[0].params.get("chatId").is_none());
+        assert_eq!(st.boards_cancelled[0].request_id, "tr-1");
         assert_eq!(st.warmed, ["c1"]);
         assert_eq!(st.tool_stopped[0].tool_call_id, "t-1");
         assert_eq!(st.submissions[0].action, "withdraw");
@@ -705,6 +761,30 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         ("attention", json!({"chatIds": ["c1"]})),
         ("item_links", json!({"chatIds": ["c1"]})),
         ("defaults_get", json!({"chatId": "c1"})),
+        // The panel and board reads answer with the switch off too: watching a chat includes
+        // looking at its files and its board.
+        ("chat_folder", json!({"chatId": "c1"})),
+        ("file_view", json!({"chatId": "c1", "path": "/work/a.rs"})),
+        (
+            "file_stat",
+            json!({"chatId": "c1", "paths": ["/work/a.rs"]}),
+        ),
+        (
+            "archive_list",
+            json!({"chatId": "c1", "path": "/work/x.zip"}),
+        ),
+        ("path_resolve", json!({"chatId": "c1", "path": "a.rs"})),
+        ("changes", json!({"chatId": "c1"})),
+        (
+            "diff",
+            json!({"chatId": "c1", "path": "a.rs", "side": "head"}),
+        ),
+        ("board_connection", json!({"chatId": "c1"})),
+        (
+            "board_read",
+            json!({"chatId": "c1", "action": "ready", "requestId": "tr-2", "timeoutMs": 5000}),
+        ),
+        ("board_cancel", json!({"chatId": "c1", "requestId": "tr-2"})),
     ] {
         assert!(
             b.rpc.call("dev-a", op, args).await.is_ok(),
@@ -723,6 +803,8 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         ("snooze", json!({"chatId": "c1", "until": 9})),
         ("address", json!({"chatId": "c1"})),
         ("defaults_set", json!({"chatId": "c1", "model": "sonnet"})),
+        ("stage", json!({"chatId": "c1", "path": "a.rs"})),
+        ("unstage", json!({"chatId": "c1", "path": "a.rs"})),
     ] {
         let e = b.rpc.call("dev-a", op, args).await.unwrap_err();
         assert_eq!(e.code, code::NOT_ALLOWED, "{op}");
@@ -1084,6 +1166,30 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
             "the local organize handler ran for a copied chat",
         ))
     });
+    // Some rows below call ops registered by crates this test does not link. The names must
+    // be known for the interceptor to answer them; none may run locally for a copied chat.
+    for name in [
+        "chat_verbosity_get",
+        "chat_verbosity_set",
+        "panel_context_get",
+        "quick_open",
+        "chat_folder",
+        "file_read",
+        "dir_list",
+        "file_stat",
+        "archive_list",
+        "path_resolve",
+        "changes",
+        "diff",
+        "changes_stage",
+        "changes_unstage",
+    ] {
+        ops.blocking(name, OpClass::Blocking, move |_, _| {
+            Err(ApiError::internal(
+                "the local handler ran for a copied chat",
+            ))
+        });
+    }
     let api = Dispatcher::new(
         ops,
         OpCtx {
@@ -1349,6 +1455,84 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
             json!({"chatId": "c1", "query": "main"}),
             Ok(json!({"mode": "files", "items": [{ "path": "src/main.ts" }], "partial": false})),
         ),
+        // The side panel around a copied chat, and the task board of the PC that runs it:
+        // each is answered there, and the answer has the shape the panel and the Tasks view
+        // expect. Staging answers with the Changes view, not the chat record.
+        (
+            "chat_folder",
+            json!({"chatId": "c1"}),
+            Ok(json!({ "path": "/work" })),
+        ),
+        (
+            "file_read",
+            json!({"chatId": "c1", "path": "/work/src/main.ts"}),
+            Ok(
+                json!({"path": "/work/src/main.ts", "kind": "text", "size": 5, "text": "one\n", "truncated": false}),
+            ),
+        ),
+        (
+            "dir_list",
+            json!({"chatId": "c1", "path": "/work/src"}),
+            Ok(
+                json!({"path": "/work/src", "kind": "text", "size": 5, "text": "one\n", "truncated": false}),
+            ),
+        ),
+        (
+            "file_stat",
+            json!({"chatId": "c1", "paths": ["/work/src/main.ts", "/work/gone.ts"]}),
+            Ok(json!([null, null])),
+        ),
+        (
+            "archive_list",
+            json!({"chatId": "c1", "path": "/work/x.zip"}),
+            Ok(json!({"op": "archive_list", "args": {"chatId": "c1", "path": "/work/x.zip"}})),
+        ),
+        (
+            "path_resolve",
+            json!({"chatId": "c1", "path": "src/main.ts"}),
+            Ok(json!({"op": "path_resolve", "args": {"chatId": "c1", "path": "src/main.ts"}})),
+        ),
+        (
+            "changes",
+            json!({"chatId": "c1"}),
+            Ok(json!({"repoTop": "/work", "branch": "main", "records": [], "truncated": false})),
+        ),
+        (
+            "diff",
+            json!({"chatId": "c1", "path": "a.ts", "side": "unstaged"}),
+            Ok(json!({"patch": "", "fullContext": false, "truncated": false})),
+        ),
+        (
+            "changes_stage",
+            json!({"chatId": "c1", "path": "a.ts"}),
+            Ok(
+                json!({"changes": {"repoTop": "/work", "branch": "main", "records": [], "truncated": false}, "noop": false}),
+            ),
+        ),
+        (
+            "changes_unstage",
+            json!({"chatId": "c1", "path": "a.ts", "from": "head"}),
+            Ok(
+                json!({"changes": {"repoTop": "/work", "branch": "main", "records": [], "truncated": false}, "noop": false}),
+            ),
+        ),
+        (
+            "devices_board_connection",
+            json!({"chatId": "c1"}),
+            Ok(json!({"url": "https://board.example", "hasToken": true})),
+        ),
+        (
+            "devices_board_read",
+            json!({"chatId": "c1", "action": "projects", "requestId": "tr-1", "timeoutMs": 5000}),
+            Ok(
+                json!({"action": "projects", "data": {"projects": [{"id": "p1", "title": "Work"}], "complete": true}}),
+            ),
+        ),
+        (
+            "devices_board_cancel",
+            json!({"chatId": "c1", "requestId": "tr-1"}),
+            Ok(json!({"cancelled": true})),
+        ),
         (
             "tool_stop",
             json!({"chatId": "c1", "toolCallId": "t-9"}),
@@ -1379,7 +1563,7 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         (
             "devices_composer_defaults",
             json!({"chatId": "c1", "patch": {"model": "opus", "responseVerbosity": "high"}}),
-            Ok(json!({"model": "opus", "effort": "high", "responseVerbosity": "high"})),
+            Ok(json!({"model": "opus", "responseVerbosity": "high"})),
         ),
         (
             "devices_item_links",
@@ -1407,7 +1591,7 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         let got = api.call_host(op, args).await;
         match want {
             Ok(v) if v.is_null() => assert!(got.is_ok(), "{op}: {got:?}"),
-            Ok(v) => assert_eq!(got.unwrap(), v, "{op}"),
+            Ok(v) => assert_eq!(got.unwrap_or_else(|e| panic!("{op}: {e}")), v),
             Err(m) => assert_eq!(got.unwrap_err().message, m, "{op}"),
         }
     }
@@ -1441,6 +1625,29 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         assert_eq!(st.item_links_for[0], ["c1".to_owned()]);
         assert_eq!(st.snoozed[0].until, Some(50));
         assert_eq!(st.addressed, ["c1"]);
+        // The panel reads all arrived as the panel's own ops; `dir_list` is answered by the
+        // file-view read, as it is here. Staging came through as the stage pair, and the
+        // board reads named the chat outside the board's own parameters, not inside them.
+        assert_eq!(st.folders_asked, ["c1"]);
+        assert_eq!(
+            st.panel_reads.iter().map(|(op, _)| *op).collect::<Vec<_>>(),
+            [
+                "file_read",
+                "file_read",
+                "file_stat",
+                "archive_list",
+                "path_resolve",
+                "changes",
+                "diff"
+            ]
+        );
+        assert_eq!(st.stages.len(), 2);
+        assert!(st.stages[0].1 && !st.stages[1].1);
+        assert_eq!(st.stages[1].0.from.as_deref(), Some("head"));
+        assert_eq!(st.boards_connection_for, ["c1"]);
+        assert_eq!(st.boards_read[0].chat_id, "c1");
+        assert!(st.boards_read[0].params.get("chatId").is_none());
+        assert_eq!(st.boards_cancelled[0].request_id, "tr-1");
     }
     let rec =
         b.db.snapshot(|tx| {
@@ -1702,6 +1909,10 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
     ));
     let mut ops = OpRegistry::new();
     helm_chats::register_ops(&mut ops);
+    helm_panel::register_ops(&mut ops);
+    ops.blocking("board_connection_get", OpClass::Blocking, |_, _| {
+        Ok(json!({ "url": "http://127.0.0.1:9/secret-board", "hasToken": true }))
+    });
     let api = Dispatcher::new(
         ops,
         OpCtx {
@@ -1753,6 +1964,101 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
         .to_value();
     assert_eq!(plain["projectName"], "Work");
     assert!(plain.get("boardId").is_none(), "{plain}");
+
+    // The side panel around a chat that runs here, read from another PC: the files of a real
+    // folder on disk, through the real panel ops. Everything stays inside the chat's project
+    // folder; anything past it is refused in words, however the path is written.
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(work.join("src")).unwrap();
+    std::fs::write(work.join("src/main.ts"), "one\n").unwrap();
+    let away = dir.path().join("away");
+    std::fs::create_dir_all(&away).unwrap();
+    std::fs::write(away.join("secret.txt"), "not yours").unwrap();
+    db.write(|tx| {
+        tx.execute(
+            "INSERT INTO projects (id, kind, name, path, color, created_at)
+             VALUES ('proj-w', 'folder', 'Repo', ?1, 'green', 0)",
+            [work.to_string_lossy().to_string()],
+        )?;
+        tx.execute(
+            "INSERT INTO chats (id, project_id, created_at, updated_at) VALUES ('panel-1', 'proj-w', 0, 0)",
+            [],
+        )?;
+        Ok::<_, rusqlite::Error>(())
+    })
+    .unwrap();
+    let inside = work.join("src/main.ts").to_string_lossy().into_owned();
+    let out = away.join("secret.txt").to_string_lossy().into_owned();
+    let view = |op: &'static str, args: serde_json::Value| {
+        port.panel_read(helm_devices::serve::PanelRead { local_op: op, args })
+    };
+    let got = view("file_read", json!({ "chatId": "panel-1", "path": inside }))
+        .await
+        .unwrap();
+    assert_eq!(
+        (got["kind"].as_str(), got["text"].as_str()),
+        (Some("text"), Some("one\n"))
+    );
+    let e = view(
+        "file_read",
+        json!({ "chatId": "panel-1", "path": out.clone() }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        (e.code.as_str(), e.message.as_str()),
+        ("refused", "That path is outside the chat's project folder.")
+    );
+    // The way out written into an inside path is refused the same way, and so is a change stamp
+    // for a file outside the folder.
+    let sneaky = format!(
+        "{}{}..{}away{}secret.txt",
+        work.to_string_lossy(),
+        std::path::MAIN_SEPARATOR,
+        std::path::MAIN_SEPARATOR,
+        std::path::MAIN_SEPARATOR
+    );
+    let e = view("file_read", json!({ "chatId": "panel-1", "path": sneaky }))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, "refused");
+    let e = view(
+        "file_stat",
+        json!({ "chatId": "panel-1", "paths": [out.clone()] }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, "refused");
+    let workp = work.to_string_lossy().into_owned();
+    assert_eq!(
+        port.chat_folder("panel-1".to_owned()).await.unwrap()["path"]
+            .as_str()
+            .unwrap(),
+        workp
+    );
+    // The board connection of this PC answers without its address: the watcher learns only
+    // that a board is set up. (The board ops belong to a crate this test does not link, so
+    // `board_connection_get` is stood in for — the address it hands back must not cross.)
+    let conn = port.board_connection("panel-1".to_owned()).await.unwrap();
+    assert_eq!(
+        (conn["url"].as_str(), conn["hasToken"].as_bool()),
+        (Some("board"), Some(true))
+    );
+    assert!(!conn.to_string().contains("9/secret-board"), "{conn}");
+    // Quick Open: a watcher's search never names a file outside the chat's project folder.
+    let q = port
+        .quick_open(helm_devices::wire::QuickOpenArgs {
+            chat_id: "panel-1".to_owned(),
+            query: "main".to_owned(),
+            reload: false,
+        })
+        .await
+        .unwrap();
+    assert!(q["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|it| !it["path"].as_str().unwrap_or_default().contains("away")));
 
     // The catalogue op failing (here: no profile folder for it to read) is logged, not fatal:
     // the hello still answers, with no catalogue.
@@ -2054,6 +2360,30 @@ async fn one_pc_acts_as_each_of_its_profiles() {
             "the local organize handler ran for a copied chat",
         ))
     });
+    // Some rows below call ops registered by crates this test does not link. The names must
+    // be known for the interceptor to answer them; none may run locally for a copied chat.
+    for name in [
+        "chat_verbosity_get",
+        "chat_verbosity_set",
+        "panel_context_get",
+        "quick_open",
+        "chat_folder",
+        "file_read",
+        "dir_list",
+        "file_stat",
+        "archive_list",
+        "path_resolve",
+        "changes",
+        "diff",
+        "changes_stage",
+        "changes_unstage",
+    ] {
+        ops.blocking(name, OpClass::Blocking, move |_, _| {
+            Err(ApiError::internal(
+                "the local handler ran for a copied chat",
+            ))
+        });
+    }
     let api = Dispatcher::new(
         ops,
         OpCtx {
