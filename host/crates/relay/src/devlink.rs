@@ -318,6 +318,7 @@ pub fn attach(dispatcher: &Arc<helm_ipc::Dispatcher>) {
         let down = mirror.clone();
         link.on_down(move || down.line_down());
         routes.attach(Arc::new(mirror.clone()));
+        tap.attach_mirror(mirror.clone());
         slot.attach(mirror);
     }
     tap.attach(service.clone());
