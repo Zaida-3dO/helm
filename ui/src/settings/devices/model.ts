@@ -22,6 +22,14 @@ export function presence(d: Pick<DeviceRow, 'online' | 'lastSeenAt'>, now: numbe
   return unit(Math.floor(ago / DAY), 'day');
 }
 
+/** Who a computer acts for on the hub: "Pat, Sam". Falls back to the one person it was made
+ *  for when its report carries no list (an older PC that has not announced its profiles). */
+export function peopleLine(d: Pick<DeviceRow, 'person' | 'people'>): string {
+  const names = (d.people ?? []).map((p) => p.person).filter((n) => n);
+  if (names.length) return names.join(', ');
+  return d.person ?? 'Unknown person';
+}
+
 /** Whether a typed name can be saved (1 to 40 characters once trimmed). */
 export function nameOk(name: string): boolean {
   const n = name.trim();

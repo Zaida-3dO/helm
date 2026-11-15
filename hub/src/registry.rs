@@ -88,6 +88,18 @@ pub struct Paired {
     pub client: ClientRow,
 }
 
+/// One Telegram account and the person it belongs to.
+#[derive(Debug, Clone)]
+pub struct TelegramLink {
+    pub telegram_id: i64,
+    pub person_id: i64,
+    /// What Telegram calls the account, when it gave one.
+    pub handle: Option<String>,
+    pub linked_at: String,
+    /// `env` for an id the hub's settings list, `link` for one the person linked themselves.
+    pub source: String,
+}
+
 /// How long a pairing code works.
 pub const PAIR_CODE_MINUTES: i64 = 15;
 pub const MAX_NAME: usize = 64;
@@ -114,6 +126,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS clients_machine
 CREATE TABLE IF NOT EXISTS acts_for (
     client_id INTEGER NOT NULL REFERENCES clients(id),
     person_id INTEGER NOT NULL REFERENCES people(id),
+    source    TEXT NOT NULL DEFAULT 'admin',
     PRIMARY KEY (client_id, person_id)
 );
 CREATE TABLE IF NOT EXISTS pairings (
@@ -124,6 +137,21 @@ CREATE TABLE IF NOT EXISTS pairings (
     created_at   TEXT NOT NULL,
     expires_ms   INTEGER NOT NULL,
     used_at      TEXT
+);
+CREATE TABLE IF NOT EXISTS routes (
+    person_id INTEGER NOT NULL REFERENCES people(id),
+    channel   TEXT NOT NULL,
+    client_id INTEGER NOT NULL REFERENCES clients(id),
+    PRIMARY KEY (person_id, channel)
+);
+CREATE TABLE IF NOT EXISTS telegram_users (
+    telegram_id INTEGER PRIMARY KEY,
+    person_id   INTEGER NOT NULL REFERENCES people(id),
+    handle      TEXT,
+    linked_at   TEXT NOT NULL,
+    -- 'env' for an id the hub's own settings list, 'link' for one the person linked
+    -- themselves. The first is rewritten from the settings on every start; the second stays.
+    source      TEXT NOT NULL DEFAULT 'link'
 );
 "#;
 
@@ -186,6 +214,25 @@ impl Registry {
                 "ALTER TABLE pairings ADD COLUMN acts_for TEXT NOT NULL DEFAULT '';",
             )?;
         }
+        // A registry made before a Helm could announce its people gains the acts-for source.
+        let has_source = conn
+            .prepare("SELECT 1 FROM pragma_table_info('acts_for') WHERE name = 'source'")?
+            .exists([])?;
+        if !has_source {
+            conn.execute_batch(
+                "ALTER TABLE acts_for ADD COLUMN source TEXT NOT NULL DEFAULT 'admin';",
+            )?;
+        }
+        // A registry made before a person could link their own account gains the link's source,
+        // which is what lets the settings revoke the ids they no longer list.
+        let has_link_source = conn
+            .prepare("SELECT 1 FROM pragma_table_info('telegram_users') WHERE name = 'source'")?
+            .exists([])?;
+        if !has_link_source {
+            conn.execute_batch(
+                "ALTER TABLE telegram_users ADD COLUMN source TEXT NOT NULL DEFAULT 'env';",
+            )?;
+        }
         Ok(Registry { conn })
     }
 
@@ -193,18 +240,26 @@ impl Registry {
 
     /// The person called `name`, made if there is none. Names are unique ignoring case.
     pub fn ensure_person(&mut self, name: &str) -> Result<Person> {
+        Ok(self.ensure_person_created(name)?.0)
+    }
+
+    /// [`Self::ensure_person`], saying whether this call is the one that made the person.
+    pub fn ensure_person_created(&mut self, name: &str) -> Result<(Person, bool)> {
         let name = clean_name(name, "a person's name")?;
         if let Some(p) = self.person_by_name(&name)? {
-            return Ok(p);
+            return Ok((p, false));
         }
         self.conn.execute(
             &format!("INSERT INTO people (name, created_at) VALUES (?1, {NOW})"),
             [&name],
         )?;
-        Ok(Person {
-            id: self.conn.last_insert_rowid(),
-            name,
-        })
+        Ok((
+            Person {
+                id: self.conn.last_insert_rowid(),
+                name,
+            },
+            true,
+        ))
     }
 
     pub fn person_by_name(&self, name: &str) -> Result<Option<Person>> {
@@ -640,12 +695,23 @@ impl Registry {
             "UPDATE pairings SET person_id = ?2 WHERE person_id = ?1",
             params![from.id, into.id],
         )?;
+        // A grant made by an admin outlives a merge: where the machine already had a row for the
+        // person that stays, an admin source wins over one the machine announced.
         tx.execute(
-            "INSERT OR IGNORE INTO acts_for (client_id, person_id)
-             SELECT client_id, ?2 FROM acts_for WHERE person_id = ?1",
+            "INSERT INTO acts_for (client_id, person_id, source)
+             SELECT client_id, ?2, source FROM acts_for WHERE person_id = ?1
+             ON CONFLICT(client_id, person_id) DO UPDATE SET
+                 source = CASE WHEN acts_for.source = 'admin' THEN 'admin' ELSE excluded.source END",
             params![from.id, into.id],
         )?;
         tx.execute("DELETE FROM acts_for WHERE person_id = ?1", [from.id])?;
+        tx.execute("DELETE FROM routes WHERE person_id = ?1", [from.id])?;
+        // A linked Telegram account keeps working: it moves to the person that stays.
+        tx.execute(
+            "UPDATE OR IGNORE telegram_users SET person_id = ?2 WHERE person_id = ?1",
+            params![from.id, into.id],
+        )?;
+        tx.execute("DELETE FROM telegram_users WHERE person_id = ?1", [from.id])?;
         tx.execute("DELETE FROM people WHERE id = ?1", [from.id])?;
         tx.commit()?;
         Ok(Merged {
@@ -678,12 +744,16 @@ impl Registry {
     }
 
     /// Let the machine `client_id` act for `person` (a name or an id), or stop it (`allow`
-    /// false). Returns the person.
+    /// false). Returns the person. Rows set this way are `admin` rows.
     pub fn set_acts_for(&mut self, client_id: i64, person: &str, allow: bool) -> Result<Person> {
         let person = self.find_person(person)?;
         if allow {
             self.conn.execute(
-                "INSERT OR IGNORE INTO acts_for (client_id, person_id) VALUES (?1, ?2)",
+                // The source is rewritten, not only inserted: if the machine had already
+                // announced this person, the row must stop being one the machine may take away
+                // with its next announcement.
+                "INSERT INTO acts_for (client_id, person_id, source) VALUES (?1, ?2, 'admin')
+                 ON CONFLICT(client_id, person_id) DO UPDATE SET source = 'admin'",
                 params![client_id, person.id],
             )?;
         } else {
@@ -695,14 +765,241 @@ impl Registry {
         Ok(person)
     }
 
-    /// The other people the machine `client_id` may act for, by name.
-    pub fn acts_for(&self, client_id: i64) -> Result<Vec<String>> {
+    /// The people the machine `client_id`'s last `device` frame announced it acts for: its
+    /// device rows, replaced whole, are set aside and the announced ones put in their place.
+    /// `admin` rows (from `helm-hub client acts-for` or a pairing code) are never touched, and
+    /// the client's own person never needs a row, so it is skipped. Returns the ids it passed
+    /// over because no such person exists.
+    pub fn set_device_people(&mut self, client_id: i64, people: &[i64]) -> Result<Vec<i64>> {
+        let me = self
+            .client_by_id(client_id)?
+            .ok_or_else(|| RegistryError::NotFound("the client vanished".into()))?;
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM acts_for WHERE client_id = ?1 AND source = 'device'",
+            [client_id],
+        )?;
+        let mut unknown = Vec::new();
+        for id in people {
+            if *id == me.person_id {
+                continue;
+            }
+            let exists = tx
+                .query_row("SELECT 1 FROM people WHERE id = ?1", [id], |_| Ok(()))
+                .optional()?
+                .is_some();
+            if exists {
+                tx.execute(
+                    "INSERT OR IGNORE INTO acts_for (client_id, person_id, source)
+                     VALUES (?1, ?2, 'device')",
+                    params![client_id, id],
+                )?;
+            } else {
+                unknown.push(*id);
+            }
+        }
+        tx.commit()?;
+        Ok(unknown)
+    }
+
+    /// The other people the machine `client_id` may act for, each with where the allowance
+    /// came from (`admin` or `device`).
+    pub fn acts_for(&self, client_id: i64) -> Result<Vec<(String, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT p.name FROM acts_for a JOIN people p ON p.id = a.person_id
+            "SELECT p.name, a.source FROM acts_for a JOIN people p ON p.id = a.person_id
              WHERE a.client_id = ?1 ORDER BY p.name",
         )?;
-        let rows = stmt.query_map([client_id], |r| r.get(0))?;
+        let rows = stmt.query_map([client_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Every person each machine acts for — its own person first, then its acts-for rows —
+    /// keyed by client id, for the `devices` list.
+    pub fn device_people(&self) -> Result<std::collections::HashMap<i64, Vec<Person>>> {
+        let mut out: std::collections::HashMap<i64, Vec<Person>> = self
+            .clients()?
+            .into_iter()
+            .map(|c| {
+                (
+                    c.id,
+                    vec![Person {
+                        id: c.person_id,
+                        name: c.person,
+                    }],
+                )
+            })
+            .collect();
+        let mut stmt = self.conn.prepare(
+            "SELECT a.client_id, p.id, p.name FROM acts_for a JOIN people p ON p.id = a.person_id
+             ORDER BY a.client_id, p.id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                Person {
+                    id: r.get(1)?,
+                    name: r.get(2)?,
+                },
+            ))
+        })?;
+        let rows = rows.collect::<std::result::Result<Vec<(i64, Person)>, _>>()?;
+        for (client_id, person) in rows {
+            if let Some(list) = out.get_mut(&client_id) {
+                if list.first().is_none_or(|own| own.id != person.id) {
+                    list.push(person);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    // ---- channel routing ----
+
+    /// The machine the person `person_id` pinned for `channel` (a [`crate::relay::Channel`]
+    /// label), if any. The pin survives a hub restart; whether the machine is still a live
+    /// candidate is for [`crate::lines::Lines::route_for`] to decide.
+    pub fn pinned_client(&self, person_id: i64, channel: &str) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT client_id FROM routes WHERE person_id = ?1 AND channel = ?2",
+                params![person_id, channel],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Pin `client_id` as the machine that receives `person_id`'s `channel`.
+    pub fn pin_route(&mut self, person_id: i64, channel: &str, client_id: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO routes (person_id, channel, client_id) VALUES (?1, ?2, ?3)",
+            params![person_id, channel, client_id],
+        )?;
+        Ok(())
+    }
+
+    /// Drop the person's pin for `channel`, returning to automatic routing.
+    pub fn clear_route(&mut self, person_id: i64, channel: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM routes WHERE person_id = ?1 AND channel = ?2",
+            params![person_id, channel],
+        )?;
+        Ok(())
+    }
+
+    // ---- Telegram accounts ----
+
+    /// Every Telegram account linked to a person on this hub. This is the bot's allow-list: an
+    /// id that is not here gets nothing at all.
+    pub fn telegram_links(&self) -> Result<Vec<TelegramLink>> {
+        let mut st = self.conn.prepare(
+            "SELECT telegram_id, person_id, handle, linked_at, source FROM telegram_users
+             ORDER BY telegram_id",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok(TelegramLink {
+                telegram_id: r.get(0)?,
+                person_id: r.get(1)?,
+                handle: r.get(2)?,
+                linked_at: r.get(3)?,
+                source: r.get(4)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// The person a Telegram account belongs to, if it is linked at all.
+    pub fn telegram_link(&self, telegram_id: i64) -> Result<Option<TelegramLink>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT telegram_id, person_id, handle, linked_at, source FROM telegram_users
+                 WHERE telegram_id = ?1",
+                [telegram_id],
+                |r| {
+                    Ok(TelegramLink {
+                        telegram_id: r.get(0)?,
+                        person_id: r.get(1)?,
+                        handle: r.get(2)?,
+                        linked_at: r.get(3)?,
+                        source: r.get(4)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Link a Telegram account to a person, replacing whoever had it before. `handle` is what
+    /// Telegram calls the account, when it says. `source` is `env` for an id the hub's settings
+    /// list and `link` for one a person linked themselves; see [`Self::prune_env_links`].
+    pub fn link_telegram(
+        &mut self,
+        telegram_id: i64,
+        person_id: i64,
+        handle: Option<&str>,
+        source: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            &format!(
+                "INSERT INTO telegram_users (telegram_id, person_id, handle, linked_at, source)
+                 VALUES (?1, ?2, ?3, {NOW}, ?4)
+                 ON CONFLICT(telegram_id) DO UPDATE SET person_id = ?2,
+                     handle = COALESCE(?3, handle), source = ?4"
+            ),
+            params![telegram_id, person_id, handle, source],
+        )?;
+        Ok(())
+    }
+
+    /// Drop every link the hub's settings made for an id they no longer list, and return how many
+    /// went. Taking an id out of `HUB_TELEGRAM_ALLOWED_USERS` is how an account is cut off, so the
+    /// row written on an earlier start must not outlive the setting that wrote it. A link the
+    /// person made themselves is nobody's to revoke this way.
+    pub fn prune_env_links(&mut self, keep: &[i64]) -> Result<usize> {
+        if keep.is_empty() {
+            return Ok(self
+                .conn
+                .execute("DELETE FROM telegram_users WHERE source = 'env'", [])?);
+        }
+        let marks = vec!["?"; keep.len()].join(",");
+        Ok(self.conn.execute(
+            &format!(
+                "DELETE FROM telegram_users WHERE source = 'env' AND telegram_id NOT IN ({marks})"
+            ),
+            rusqlite::params_from_iter(keep),
+        )?)
+    }
+
+    /// Unlink a Telegram account whoever it belongs to, for the hub's own admin command. Returns
+    /// the person it was linked to.
+    pub fn unlink_telegram_by_id(&mut self, telegram_id: i64) -> Result<Option<i64>> {
+        let person = self
+            .conn
+            .query_row(
+                "SELECT person_id FROM telegram_users WHERE telegram_id = ?1",
+                [telegram_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(person) = person else {
+            return Ok(None);
+        };
+        self.conn.execute(
+            "DELETE FROM telegram_users WHERE telegram_id = ?1",
+            [telegram_id],
+        )?;
+        Ok(Some(person))
+    }
+
+    /// Unlink a Telegram account. Only the link of `person_id` is removed: another person's
+    /// account is nobody else's to drop.
+    pub fn unlink_telegram(&mut self, telegram_id: i64, person_id: i64) -> Result<bool> {
+        let n = self.conn.execute(
+            "DELETE FROM telegram_users WHERE telegram_id = ?1 AND person_id = ?2",
+            params![telegram_id, person_id],
+        )?;
+        Ok(n > 0)
     }
 
     // ---- pairing ----
@@ -812,8 +1109,8 @@ impl Registry {
         for other in acts_for.split(',').filter_map(|id| id.parse::<i64>().ok()) {
             // A person removed since the code was made is passed over.
             self.conn.execute(
-                "INSERT OR IGNORE INTO acts_for (client_id, person_id)
-                 SELECT ?1, id FROM people WHERE id = ?2",
+                "INSERT OR IGNORE INTO acts_for (client_id, person_id, source)
+                 SELECT ?1, id, 'admin' FROM people WHERE id = ?2",
                 params![paired.client.id, other],
             )?;
         }
@@ -875,8 +1172,8 @@ fn new_token() -> String {
 }
 
 /// Eight characters from [`CODE_ALPHABET`]. The alphabet has 32 symbols, so a random byte maps
-/// onto it without bias.
-fn new_code() -> String {
+/// onto it without bias. Also what the Telegram link codes are made of.
+pub(crate) fn new_code() -> String {
     let (a, b) = (
         uuid::Uuid::new_v4().into_bytes(),
         uuid::Uuid::new_v4().into_bytes(),
@@ -1039,6 +1336,109 @@ mod tests {
         r.add_client("Ivy", "PC", &scopes).unwrap();
         assert!(r.merge_person("Ivy", "Sam").is_err());
         assert!(r.merge_person("Sam", "sam").is_err(), "not into themselves");
+    }
+
+    #[test]
+    fn announced_people_replace_only_device_rows_and_pins_survive() {
+        let mut r = Registry::open_in_memory().unwrap();
+        let scopes = Scopes::parse_list(crate::auth::DEFAULT_PAIRED_SCOPES).unwrap();
+        let (sam, kit, ivy) = (
+            r.ensure_person("Sam").unwrap().id,
+            r.ensure_person("Kit").unwrap().id,
+            r.ensure_person("Ivy").unwrap().id,
+        );
+        let pc = r.add_client("Sam", "pc", &scopes).unwrap().client.id;
+
+        // A device announcement adds rows of source `device`, skipping the machine's own
+        // person and unknown ids.
+        let unknown = r.set_device_people(pc, &[kit, sam, 999]).unwrap();
+        assert_eq!(unknown, vec![999]);
+        assert!(r.may_act_for(pc, kit) && !r.may_act_for(pc, ivy));
+        assert_eq!(
+            r.acts_for(pc).unwrap(),
+            vec![("Kit".into(), "device".into())]
+        );
+
+        // An `admin` row survives; the device rows are replaced whole.
+        r.set_acts_for(pc, "Ivy", true).unwrap();
+        r.set_device_people(pc, &[ivy]).unwrap();
+        assert_eq!(
+            r.acts_for(pc).unwrap(),
+            vec![("Ivy".into(), "admin".into())],
+            "the admin row stays and the Kit device row is gone"
+        );
+        assert!(r.may_act_for(pc, ivy));
+        // Announcing nobody drops the device rows; the admin row stays.
+        r.set_device_people(pc, &[kit]).unwrap();
+        r.set_device_people(pc, &[]).unwrap();
+        assert!(!r.may_act_for(pc, kit));
+        assert!(r.may_act_for(pc, ivy));
+        assert!(r.may_act_for(pc, sam), "its own person always");
+
+        // The people a device shows in the list: its own person first.
+        let people = r.device_people().unwrap().remove(&pc).unwrap();
+        assert_eq!(
+            people.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            ["Sam", "Ivy"]
+        );
+
+        // Allowing someone the machine had already announced turns that row into an admin one, so
+        // the next announcement cannot take the grant away again.
+        r.set_acts_for(pc, "Ivy", false).unwrap();
+        r.set_device_people(pc, &[kit]).unwrap();
+        assert_eq!(
+            r.acts_for(pc).unwrap(),
+            vec![("Kit".into(), "device".into())]
+        );
+        r.set_acts_for(pc, "Kit", true).unwrap();
+        assert_eq!(
+            r.acts_for(pc).unwrap(),
+            vec![("Kit".into(), "admin".into())],
+            "the grant became an admin one, not a second row"
+        );
+        r.set_device_people(pc, &[]).unwrap();
+        assert!(
+            r.may_act_for(pc, kit),
+            "an announcement that named nobody took the admin grant away"
+        );
+
+        // A merge keeps the admin source where the machine already had a row for the person that
+        // stays.
+        r.set_device_people(pc, &[ivy]).unwrap();
+        r.merge_person("Kit", "Ivy").unwrap();
+        assert_eq!(
+            r.acts_for(pc).unwrap(),
+            vec![("Ivy".into(), "admin".into())],
+            "the merged grant came out as the device row"
+        );
+
+        // Pins survive a reopen of the same file, and a merge drops the folded person's.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reg.db");
+        {
+            let mut disk = Registry::open(&path).unwrap();
+            let sam = disk.ensure_person("Sam").unwrap().id;
+            let pc = disk.add_client("Sam", "pc2", &scopes).unwrap().client.id;
+            disk.pin_route(sam, "telegram", pc).unwrap();
+            assert_eq!(disk.pinned_client(sam, "telegram").unwrap(), Some(pc));
+            disk.clear_route(sam, "voice").unwrap();
+            assert_eq!(disk.pinned_client(sam, "voice").unwrap(), None);
+        }
+        let mut disk = Registry::open(&path).unwrap();
+        let sam_id = disk.find_person("Sam").unwrap().id;
+        assert!(
+            disk.pinned_client(sam_id, "telegram").unwrap().is_some(),
+            "a pin survives a reopen"
+        );
+        let kit = disk.ensure_person("Kit").unwrap().id;
+        disk.pin_route(kit, "app", disk.find_client("pc2", None).unwrap().id)
+            .unwrap();
+        disk.merge_person("Kit", "Sam").unwrap();
+        assert_eq!(
+            disk.pinned_client(kit, "app").unwrap(),
+            None,
+            "the folded person's pins go with them"
+        );
     }
 
     #[test]

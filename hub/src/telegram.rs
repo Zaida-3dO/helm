@@ -10,15 +10,31 @@
 //!   `update_id` once (a forwarder's retry, or the two inputs overlapping).
 //!   `/helm <text>` is read as `<text>`, so a forwarder on a shared bot can
 //!   route Helm's messages by that one command.
-//! - **One bot, several people.** `HUB_TELEGRAM_ALLOWED_USERS` entries may name a person
-//!   (`<telegram id>:<person>`). Each person gets a [`Bridge`] of their own: their messages go
-//!   to that person's most recently active line, and the replies, status edits and approval
-//!   buttons go back to that person's Telegram user only. An id with no person belongs to the
-//!   hub's legacy person (the owner). [`Telegram`] hands each update to the bridge that allows
-//!   its sender.
+//! - **One bot, several people.** Each person gets a [`Bridge`] of their own: their messages go
+//!   to that person's own Telegram user only, and down the line [`Lines::route_for`] picks for
+//!   them (the PC they chose with `/pc`, else the one that took their last message, else their
+//!   own PCs). [`Telegram`] hands each update to the bridge that allows its sender.
+//! - **Who is allowed, and who they are.** The allow-list is the hub's `telegram_users` table:
+//!   every Telegram id linked to a person. It starts from `HUB_TELEGRAM_ALLOWED_USERS`
+//!   (`<telegram id>:<person>`; an id with no person belongs to the hub's legacy person), which
+//!   stays valid and wins for the ids it lists, and grows when a person links their own account
+//!   from Helm (below). A person with no bridge yet gets one the moment their first account is
+//!   linked.
+//! - **Linking a person's own account.** Helm asks for a link (`tg_link`, see `relay.rs`); the
+//!   hub answers a `t.me/<bot>?start=<code>` address and the person taps it once on their phone.
+//!   The code — one use, [`LINK_CODE_MINUTES`] minutes, the pairing code's alphabet — is what
+//!   proves which Telegram account is the person's: without it anyone at any PC could point a
+//!   person's replies at a stranger's Telegram. A wrong, used or expired code gets the same
+//!   silence as any stranger; a right one binds the account, moves it off whoever had it, and
+//!   answers "Linked to Helm as <name>." `tg_unlink` removes a link again, `tg_status` says
+//!   whether there is one.
+//! - **Which PC receives a person.** `/pc` lists the PCs that can take their Telegram and marks
+//!   the one that does; `/pc <name>` pins that PC, `/pc auto` leaves it to the hub. The pin is
+//!   the hub's to keep (see `Lines::pin`), and survives a restart.
 //! - **Deny by default.** A message whose sender is not on the allow-list is
 //!   dropped: nothing is forwarded to Helm and nothing is sent back, so the bot
-//!   does not even confirm it exists.
+//!   does not even confirm it exists. The one exception is a private `/start <code>` whose code
+//!   is a live link code: that is how an account joins the allow-list.
 //! - **Private chats only.** A message in a group is dropped too, even from an
 //!   allowed user: replies and live status go to the chat the user last wrote
 //!   in, and in a group other members would read them.
@@ -75,16 +91,18 @@
 //!
 //! The queue and the waiting asks live in memory: a container restart drops them.
 
+use crate::auth::digest;
 use crate::images;
 use crate::lines::{Lines, PersonRoute, PersonUpstream};
-use crate::relay::{valid_ask_id, Line, Route, Upstream, OFFLINE};
+use crate::registry::{new_code, normalize_code};
+use crate::relay::{valid_ask_id, Channel, Line, Route, Upstream, OFFLINE};
 use crate::stt::{agent_with, blocking, Stt, Transcribe};
 use base64::Engine as _;
 use serde_json::{json, Value};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 pub use crate::stt::{SttConfig, VoiceFuture, STT_CONNECT, STT_TIMEOUT};
@@ -150,6 +168,9 @@ pub const MAX_ASKS: usize = 50;
 pub const MAX_OPTION: usize = 40;
 /// An ask's text leaves room in the message for the line that closes it.
 pub const MAX_ASK_TEXT: usize = MAX_TEXT - 100;
+/// How long a link code works: long enough to tap the link a person was sent, short enough that a
+/// forgotten one is not a standing invitation.
+pub const LINK_CODE_MINUTES: i64 = 15;
 
 pub const QUEUED: &str =
     "Helm is offline. Queued; it will be delivered when Helm reconnects. /cancel drops the queue.";
@@ -172,6 +193,33 @@ pub const STILL_TRANSCRIBING: &str = "Still transcribing your voice note…";
 pub const TAP_SENT: &str = "Sent to Helm";
 pub const TAP_OFFLINE: &str = "Helm is offline; nothing was sent.";
 pub const TAP_STALE: &str = "This request is no longer waiting.";
+/// The `/pc` answers.
+pub const PC_NONE: &str = "No PC can take your Telegram right now. Open Helm on the PC you want \
+                           and turn on \"Take my Telegram on this PC\" in its settings.";
+pub const PC_CURRENT: &str = "Your Telegram goes to: ";
+pub const PC_PINNED: &str = " (pinned by you)";
+pub const PC_AUTO: &str = "Other PCs that could take it: ";
+pub const PC_SET: &str = "Your Telegram now goes to ";
+pub const PC_CLEARED: &str = "Your Telegram goes to whichever PC Helm picks.";
+pub const PC_UNKNOWN: &str = "No PC by that name can take your Telegram. /pc lists the ones \
+                              that can.";
+pub const PC_ROUTING_OFF: &str = "This hub cannot choose a PC for your Telegram.";
+/// What a person is told once their own account is bound to them.
+pub const LINKED: &str = "Linked to Helm as ";
+/// Why a link question cannot be answered here at all.
+pub const NO_BOT: &str = "this hub has no Telegram bot";
+
+/// The answer to a `tg_link` / `tg_unlink` / `tg_status` from a hub that has no bot. It carries
+/// the id the question was asked with and the matching result type, so the profile can say why
+/// rather than wait for its own timeout.
+pub fn no_bot_answer(u: &Upstream) -> Value {
+    match u {
+        Upstream::TgAdmin { id, op, .. } => json!({
+            "type": format!("tg_{op}_result"), "id": id.clone(), "ok": false, "error": NO_BOT,
+        }),
+        _ => json!({}),
+    }
+}
 
 pub type ApiFuture<'a> = Pin<Box<dyn Future<Output = Result<Value, ApiError>> + Send + 'a>>;
 
@@ -576,6 +624,9 @@ struct Ask {
     message_id: i64,
     text: String,
     options: Vec<String>,
+    /// The machine that asked, and the connection it asked on: the tap goes back to that
+    /// machine, since it is the one holding the card, whoever else carries the person's Telegram.
+    origin: Option<(i64, u64)>,
 }
 
 #[derive(Default)]
@@ -633,7 +684,14 @@ impl Handled {
 pub struct Bridge {
     api: Arc<dyn TelegramApi>,
     line: Arc<dyn Route>,
-    allowed: Vec<i64>,
+    /// The Telegram ids this bridge answers, which are the accounts linked to this bridge's
+    /// person. Grows when another of their accounts is linked.
+    allowed: Mutex<Vec<i64>>,
+    /// The hub person this bridge speaks for, and the lines to route them. `None` for a bridge
+    /// made without the household (a test, a single-machine hub): its frames name no person and
+    /// `/pc` is not offered.
+    person: Option<i64>,
+    household_lines: Option<Arc<Lines>>,
     lifetime_ms: i64,
     queue_max: usize,
     receive: Receive,
@@ -651,9 +709,9 @@ pub struct Bridge {
     transcribing: tokio::sync::Semaphore,
     /// How long a transcription runs before the chat is told it is still going.
     slow_after: Duration,
-    /// Every person's bridge of this bot (this one too), so the files they hold share one
-    /// budget. Filled once the bridges are made.
-    household: Arc<OnceLock<Vec<Weak<Bridge>>>>,
+    /// Every other bridge of this bot, so the files they hold share one budget. Grows when a
+    /// link makes another bridge.
+    siblings: Arc<Mutex<Vec<Weak<Bridge>>>>,
 }
 
 pub fn now_ms() -> i64 {
@@ -926,7 +984,9 @@ impl Bridge {
         Bridge {
             api,
             line,
-            allowed: cfg.allowed.clone(),
+            allowed: Mutex::new(cfg.allowed.clone()),
+            person: None,
+            household_lines: None,
             lifetime_ms: cfg.queue_lifetime.as_millis() as i64,
             queue_max: cfg.queue_max,
             receive: cfg.receive,
@@ -937,17 +997,90 @@ impl Bridge {
             downloads: tokio::sync::Semaphore::new(MAX_DOWNLOADS),
             transcribing: tokio::sync::Semaphore::new(1),
             slow_after: SLOW_AFTER,
-            household: Arc::new(OnceLock::new()),
+            siblings: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Say who this bridge speaks for, so its frames name that person and `/pc` can route them.
+    pub fn with_person(mut self, person: i64, lines: Arc<Lines>) -> Self {
+        self.person = Some(person);
+        self.household_lines = Some(lines);
+        self
+    }
+
+    /// The person this bridge speaks for, when it knows.
+    pub fn person_id(&self) -> Option<i64> {
+        self.person
+    }
+
+    /// Whether Telegram account `id` is one of this bridge's people's accounts.
+    pub fn allows(&self, id: i64) -> bool {
+        self.allowed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(&id)
+    }
+
+    /// Let this bridge answer another of its person's accounts.
+    pub fn allow(&self, id: i64) {
+        let mut allowed = self.allowed.lock().unwrap_or_else(|p| p.into_inner());
+        if !allowed.contains(&id) {
+            allowed.push(id);
+        }
+    }
+
+    /// Stop answering an account that has been unlinked (or moved to another person). It loses
+    /// everything the bridge owed that chat: its place as the chat answers and alerts go to, the
+    /// one live status message, and any ask buttons still waiting for a tap. Until this was done,
+    /// an unlinked phone kept receiving that person's answers.
+    pub fn unallow(&self, id: i64) {
+        self.allowed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|a| *a != id);
+        let mut st = self.st();
+        if st.reply_chat == Some(id) {
+            st.reply_chat = None;
+            st.status_id = None;
+            st.status_text = None;
+            st.pending_status = None;
+        }
+        st.asks.retain(|ask| ask.chat != id);
+    }
+
+    /// The connection a frame came up on, as `(client, generation)`, for an answer that must go
+    /// back to the machine that asked.
+    fn origin(&self, client: i64) -> Option<(i64, u64)> {
+        match &self.household_lines {
+            Some(lines) => lines
+                .get(client)
+                .and_then(|line| line.generation().map(|gen| (client, gen))),
+            None => self.line.generation().map(|gen| (0, gen)),
+        }
+    }
+
+    /// The line of the connection `generation` on `client`, while that very connection is up.
+    fn origin_line(&self, client: i64, generation: u64) -> Option<Arc<Line>> {
+        self.household_lines
+            .as_ref()?
+            .get(client)
+            .filter(|line| line.generation() == Some(generation))
+    }
+
+    /// `personId` for a frame this bridge sends down the line.
+    fn tag(&self, frame: &mut Value) {
+        if let Some(p) = self.person {
+            frame["personId"] = json!(p.to_string());
         }
     }
 
     /// What the other people's bridges hold of [`MAX_QUEUED_BYTES`]. Each is locked on its own,
     /// never together with this one's state.
     fn held_elsewhere(&self) -> usize {
-        self.household
-            .get()
-            .into_iter()
-            .flatten()
+        self.siblings
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
             .filter_map(Weak::upgrade)
             .filter(|b| !std::ptr::eq(b.as_ref(), self))
             .map(|b| b.st().queue.iter().map(Queued::held).sum::<usize>())
@@ -977,9 +1110,16 @@ impl Bridge {
     }
 
     /// The chat replies and status go to: the last allowed chat, else the first allowed user's
-    /// private chat (whose id is the user id).
-    fn reply_chat(&self) -> i64 {
-        self.st().reply_chat.unwrap_or(self.allowed[0])
+    /// private chat (whose id is the user id). `None` only for a bridge whose person has no
+    /// linked account at all, which has nobody to answer.
+    fn reply_chat(&self) -> Option<i64> {
+        self.st().reply_chat.or_else(|| {
+            self.allowed
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .first()
+                .copied()
+        })
     }
 
     pub fn queued_len(&self) -> usize {
@@ -1034,7 +1174,7 @@ impl Bridge {
         };
         let from = msg.pointer("/from/id").and_then(Value::as_i64);
         // Deny by default: only a sender on the allow-list gets anything at all.
-        if !from.is_some_and(|f| self.allowed.contains(&f)) {
+        if !from.is_some_and(|f| self.allows(f)) {
             return Handled::Ignored;
         }
         let Some(chat) = msg.pointer("/chat/id").and_then(Value::as_i64) else {
@@ -1082,8 +1222,17 @@ impl Bridge {
                 self.reply(chat, &text).await;
                 return Handled::Command;
             }
+            Some("/pc") => {
+                let rest = text
+                    .split_once(char::is_whitespace)
+                    .map(|(_, r)| r.trim().to_owned());
+                self.on_pc(chat, rest.as_deref()).await;
+                return Handled::Command;
+            }
             Some("/stop") => {
-                let sent = self.line.send(&json!({ "type": "telegram_stop" }));
+                let mut frame = json!({ "type": "telegram_stop" });
+                self.tag(&mut frame);
+                let sent = self.line.send(&frame);
                 let text = if sent {
                     "Stopping the running turn."
                 } else {
@@ -1180,6 +1329,61 @@ impl Bridge {
             "Helm is offline and the queue is full, so this message was not kept.",
         )
         .await;
+    }
+
+    /// `/pc`: the PCs that can take this person's Telegram and the one that does. `/pc <name>`
+    /// pins one, `/pc auto` hands the choice back to the hub.
+    async fn on_pc(&self, chat: i64, arg: Option<&str>) {
+        let (Some(person), Some(lines)) = (self.person, self.household_lines.as_ref()) else {
+            self.reply(chat, PC_ROUTING_OFF).await;
+            return;
+        };
+        let candidates = lines.candidate_lines(person, Channel::Telegram);
+        if let Some(name) = arg.filter(|a| !a.is_empty()) {
+            if name.eq_ignore_ascii_case("auto") {
+                lines.clear_pin(person, Channel::Telegram);
+                self.reply(chat, PC_CLEARED).await;
+                return;
+            }
+            // The person's own machine wins when two PCs carry the same name.
+            match lines.find_by_name(person, Channel::Telegram, name) {
+                Some((client_id, machine, _)) => {
+                    if lines.pin(person, Channel::Telegram, client_id) {
+                        self.reply(chat, &format!("{PC_SET}{machine}.")).await;
+                    } else {
+                        self.reply(chat, PC_ROUTING_OFF).await;
+                    }
+                }
+                None => self.reply(chat, PC_UNKNOWN).await,
+            }
+            return;
+        }
+        if candidates.is_empty() {
+            self.reply(chat, PC_NONE).await;
+            return;
+        }
+        let current = lines.route_for(person, Channel::Telegram);
+        let mut text = String::from(PC_CURRENT);
+        let mut others: Vec<String> = Vec::new();
+        for (client_id, machine, line) in &candidates {
+            let here = current.as_ref().is_some_and(|c| Arc::ptr_eq(c, line));
+            if here {
+                text.push_str(machine);
+                if lines.registry().lock().is_ok_and(|r| {
+                    r.pinned_client(person, "telegram").ok().flatten() == Some(*client_id)
+                }) {
+                    text.push_str(PC_PINNED);
+                }
+                text.push('.');
+            } else {
+                others.push(machine.clone());
+            }
+        }
+        if !others.is_empty() {
+            text.push_str(&format!(" {PC_AUTO}{}.", others.join(", ")));
+        }
+        text.push_str(" /pc <name> chooses one, /pc auto lets Helm pick.");
+        self.reply(chat, &text).await;
     }
 
     /// Send what may go, and say whether message `id` went with it. A message that stays behind
@@ -1634,6 +1838,7 @@ impl Bridge {
                 if !q.files.is_empty() {
                     frame["files"] = list(&q.files);
                 }
+                self.tag(&mut frame);
                 let on = *q.sent_on.get_or_insert(gen);
                 q.sent_down_ms = now;
                 (frame, on)
@@ -1662,20 +1867,18 @@ impl Bridge {
                 self.reply(chat, QUEUED).await;
             }
         }
+        let mut notices: Vec<String> = Vec::new();
         if expired > 0 {
-            let chat = self.reply_chat();
-            let text = if expired == 1 {
+            notices.push(if expired == 1 {
                 "1 queued message expired before Helm reconnected and was dropped.".to_owned()
             } else {
                 format!(
                     "{expired} queued messages expired before Helm reconnected and were dropped."
                 )
-            };
-            self.reply(chat, &text).await;
+            });
         }
         if gave_up > 0 {
-            let chat = self.reply_chat();
-            let text = if gave_up == 1 {
+            notices.push(if gave_up == 1 {
                 "1 message with files was dropped: its files did not finish arriving in time."
                     .to_owned()
             } else {
@@ -1683,20 +1886,22 @@ impl Bridge {
                     "{gave_up} messages with files were dropped: their files did not finish \
                      arriving in time."
                 )
-            };
-            self.reply(chat, &text).await;
+            });
         }
         if undelivered > 0 {
-            let chat = self.reply_chat();
-            let text = if undelivered == 1 {
+            notices.push(if undelivered == 1 {
                 "1 message could not be delivered to Helm in time and was dropped.".to_owned()
             } else {
                 format!(
                     "{undelivered} messages could not be delivered to Helm in time and were \
                      dropped."
                 )
-            };
-            self.reply(chat, &text).await;
+            });
+        }
+        if let Some(chat) = self.reply_chat() {
+            for text in notices {
+                self.reply(chat, &text).await;
+            }
         }
         sent
     }
@@ -1735,7 +1940,9 @@ impl Bridge {
             self.st().pending_status = None;
             return;
         }
-        let chat = self.reply_chat();
+        let Some(chat) = self.reply_chat() else {
+            return;
+        };
         let r = match id {
             None => self.send(chat, &text, true).await,
             Some(mid) => {
@@ -1767,7 +1974,9 @@ impl Bridge {
     /// The turn's answer: a new message (so the phone notifies), then the status message goes.
     pub async fn on_final(&self, text: &str) {
         let _g = self.ops.lock().await;
-        let chat = self.reply_chat();
+        let Some(chat) = self.reply_chat() else {
+            return;
+        };
         let status = {
             let mut st = self.st();
             st.pending_status = None;
@@ -1801,7 +2010,9 @@ impl Bridge {
     /// answer it leaves the live status message where it is, since a turn may still be running.
     pub async fn on_notify(&self, text: &str) {
         let _g = self.ops.lock().await;
-        let chat = self.reply_chat();
+        let Some(chat) = self.reply_chat() else {
+            return;
+        };
         for piece in split_text(text.trim(), MAX_TEXT) {
             if let Err(e) = self.send(chat, &piece, false).await {
                 eprintln!("telegram: alert failed: {}", e.description);
@@ -1811,12 +2022,14 @@ impl Bridge {
 
     /// An approval ask: a new (notifying) message with one button per option, one per row. An id
     /// already on the phone is not sent twice.
-    pub async fn on_ask(&self, id: &str, text: &str, options: &[String]) {
+    pub async fn on_ask(&self, client: i64, id: &str, text: &str, options: &[String]) {
         let _g = self.ops.lock().await;
         if self.st().asks.iter().any(|a| a.id == id) {
             return;
         }
-        let chat = self.reply_chat();
+        let Some(chat) = self.reply_chat() else {
+            return;
+        };
         let text = cut(text.trim(), MAX_ASK_TEXT);
         let options: Vec<String> = options
             .iter()
@@ -1848,6 +2061,7 @@ impl Bridge {
                     message_id,
                     text,
                     options,
+                    origin: self.origin(client),
                 });
             }
             Ok(None) => eprintln!("telegram: the ask was sent but no message id came back"),
@@ -1892,7 +2106,7 @@ impl Bridge {
     /// goes to Helm once, as `telegram_answer`.
     async fn on_button(&self, q: &Value) -> Handled {
         let from = q.pointer("/from/id").and_then(Value::as_i64);
-        if !from.is_some_and(|f| self.allowed.contains(&f)) {
+        if !from.is_some_and(|f| self.allows(f)) {
             return Handled::Ignored;
         }
         let chat = q.pointer("/message/chat/id").and_then(Value::as_i64);
@@ -1928,10 +2142,18 @@ impl Bridge {
             self.answer_query(query, None).await;
             return Handled::Button;
         };
-        if !self
-            .line
-            .send(&json!({ "type": "telegram_answer", "id": id, "index": index }))
-        {
+        let mut frame = json!({ "type": "telegram_answer", "id": id, "index": index });
+        self.tag(&mut frame);
+        // Back to the machine that asked, while that very connection is up; the routed one only
+        // when it is not.
+        let asked = ask
+            .origin
+            .and_then(|(client, gen)| self.origin_line(client, gen));
+        let sent = match asked {
+            Some(line) => line.send(&frame),
+            None => self.line.send(&frame),
+        };
+        if !sent {
             // Nothing reached Helm, so the buttons stay for another try.
             self.answer_query(query, Some(TAP_OFFLINE)).await;
             return Handled::Button;
@@ -1943,14 +2165,16 @@ impl Bridge {
         Handled::Button
     }
 
-    /// Handle one frame Helm sent up the line.
-    pub async fn on_upstream(&self, u: Upstream) {
+    /// Handle one frame `client` sent up its line.
+    pub async fn on_upstream(&self, client: i64, u: Upstream) {
         match u {
             Upstream::TelegramAck(id) => self.on_ack(&id),
             Upstream::TelegramStatus(t) => self.on_status(&t),
             Upstream::TelegramFinal(t) => self.on_final(&t).await,
             Upstream::TelegramNotify(t) => self.on_notify(&t).await,
-            Upstream::TelegramAsk { id, text, options } => self.on_ask(&id, &text, &options).await,
+            Upstream::TelegramAsk { id, text, options } => {
+                self.on_ask(client, &id, &text, &options).await;
+            }
             Upstream::TelegramAskDone { id, text } => self.on_ask_done(&id, &text).await,
             // Household questions are answered where the line is kept, and the voice frames go
             // to the voice bridge; neither reaches this one.
@@ -1964,7 +2188,10 @@ impl Bridge {
             | Upstream::Dev { .. }
             | Upstream::DevPush { .. }
             | Upstream::KnPull { .. }
-            | Upstream::KnPut { .. } => {}
+            | Upstream::KnPut { .. }
+            | Upstream::PersonEnsure { .. }
+            | Upstream::RoutePin { .. }
+            | Upstream::TgAdmin { .. } => {}
         }
     }
 
@@ -1986,7 +2213,7 @@ impl Bridge {
     /// unless another service that already runs the bot posts them.
     pub async fn run(
         self: Arc<Self>,
-        mut upstream: tokio::sync::mpsc::UnboundedReceiver<Upstream>,
+        mut upstream: tokio::sync::mpsc::UnboundedReceiver<(i64, Upstream)>,
     ) {
         if let Err(e) = self.identify().await {
             eprintln!("telegram: getMe failed: {}", e.description);
@@ -1994,8 +2221,8 @@ impl Bridge {
         self.start_ticks();
         let up = self.clone();
         tokio::spawn(async move {
-            while let Some(u) = upstream.recv().await {
-                up.on_upstream(u).await;
+            while let Some((client, u)) = upstream.recv().await {
+                up.on_upstream(client, u).await;
             }
         });
         if self.receive == Receive::Off {
@@ -2056,14 +2283,39 @@ impl Poller {
     }
 }
 
-/// The bot for the whole household: one [`Bridge`] per person who has a Telegram user, sharing
-/// one bot and one poll. An update goes to the bridge that allows its sender, and what a
-/// person's machines send up goes to that person's bridge.
+/// The bot for the whole household: one [`Bridge`] per person who has a Telegram account linked
+/// to them, sharing one bot and one poll. An update goes to the bridge that allows its sender, and
+/// what a person's machines send up goes to that person's bridge. The allow-list is the hub's
+/// table of linked accounts, so a person linked since the hub started has a bridge too: a link
+/// that names someone with none makes one on the spot.
 pub struct Telegram {
     api: Arc<dyn TelegramApi>,
     receive: Receive,
     /// `(person id, bridge)`.
-    bridges: Vec<(i64, Arc<Bridge>)>,
+    bridges: Mutex<Vec<(i64, Arc<Bridge>)>>,
+    /// What it takes to make a bridge for a person a link adds. `None` for a bot built around one
+    /// bridge (a test, a hub with no household): such a bot cannot gain a person.
+    make: Option<BotMaker>,
+    /// A link Helm asked for and the person has not tapped yet: the code's digest to
+    /// `(person id, expires_ms)`. In memory only: a hub that restarts answers the tap the way it
+    /// answers a stranger, and the person asks Helm for another link.
+    codes: Mutex<HashMap<[u8; 32], (i64, i64)>>,
+    /// The bot's own username (`getMe`), for the address a link is offered on.
+    bot_name: Mutex<Option<String>>,
+}
+
+/// Everything a new bridge needs, kept so the bot can grow.
+struct BotMaker {
+    lines: Arc<Lines>,
+    cfg: TelegramConfig,
+    /// The bridges of this bot, so a new one shares the file budget at once and copies what the
+    /// others fetch (files, recordings).
+    siblings: Arc<Mutex<Vec<Weak<Bridge>>>>,
+}
+
+/// How long a link code the person has been offered still works.
+pub fn link_code_lifetime_ms() -> i64 {
+    LINK_CODE_MINUTES * 60_000
 }
 
 impl Telegram {
@@ -2075,7 +2327,10 @@ impl Telegram {
         Telegram {
             api,
             receive,
-            bridges,
+            bridges: Mutex::new(bridges),
+            make: None,
+            codes: Mutex::new(HashMap::new()),
+            bot_name: Mutex::new(None),
         }
     }
 
@@ -2084,12 +2339,19 @@ impl Telegram {
         Telegram {
             api: bridge.api.clone(),
             receive: bridge.receive,
-            bridges: vec![(0, bridge)],
+            bridges: Mutex::new(vec![(0, bridge)]),
+            make: None,
+            codes: Mutex::new(HashMap::new()),
+            bot_name: Mutex::new(None),
         }
     }
 
-    /// One bridge per person. `resolve` turns a person's name into their id (making the person
-    /// if needed); ids that name nobody belong to `owner`. `decorate` adds files and voice.
+    /// One bridge per person who has a linked Telegram account, from the hub's table.
+    ///
+    /// `seed_links` first writes what `HUB_TELEGRAM_ALLOWED_USERS` says into that table, which is
+    /// why the environment stays valid and wins for the ids it lists; a person named there is made
+    /// if the hub has never heard of them (`resolve`), and an id with no person belongs to
+    /// `owner`. `decorate` adds files and voice to each bridge.
     pub fn build(
         api: Arc<dyn TelegramApi>,
         lines: &Arc<Lines>,
@@ -2098,63 +2360,402 @@ impl Telegram {
         resolve: &mut dyn FnMut(&str) -> Result<i64, String>,
         decorate: &dyn Fn(Bridge) -> Bridge,
     ) -> Result<Telegram, String> {
-        let mut groups: Vec<(i64, Vec<i64>)> = Vec::new();
-        let mut add = |person: i64, id: i64| match groups.iter_mut().find(|(p, _)| *p == person) {
-            Some((_, ids)) => ids.push(id),
-            None => groups.push((person, vec![id])),
-        };
-        for (id, name) in &cfg.people {
-            add(resolve(name)?, *id);
+        let links = Self::seed_links(lines, cfg, owner, resolve)?;
+        let siblings = Arc::new(Mutex::new(Vec::new()));
+        let mut groups: HashMap<i64, Vec<i64>> = HashMap::new();
+        for link in &links {
+            groups
+                .entry(link.person_id)
+                .or_default()
+                .push(link.telegram_id);
         }
-        for id in &cfg.allowed {
-            if !cfg.people.iter().any(|(named, _)| named == id) {
-                add(owner, *id);
-            }
+        let mut people: Vec<i64> = groups.keys().copied().collect();
+        people.sort_unstable();
+        let mut bridges: Vec<(i64, Arc<Bridge>)> = Vec::new();
+        for person in people {
+            let mut ids = groups.remove(&person).unwrap_or_default();
+            ids.sort_unstable();
+            let c = TelegramConfig {
+                allowed: ids,
+                people: Vec::new(),
+                ..cfg.clone()
+            };
+            let route = Arc::new(PersonRoute::new(lines.clone(), person));
+            let mut bridge = (decorate)(Bridge::with_route(api.clone(), route, &c))
+                .with_person(person, lines.clone());
+            bridge.siblings = siblings.clone();
+            let bridge = Arc::new(bridge);
+            siblings
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(Arc::downgrade(&bridge));
+            bridges.push((person, bridge));
         }
-        let household = Arc::new(OnceLock::new());
-        let bridges: Vec<(i64, Arc<Bridge>)> = groups
-            .into_iter()
-            .map(|(person, ids)| {
-                let c = TelegramConfig {
-                    allowed: ids,
-                    people: Vec::new(),
-                    ..cfg.clone()
-                };
-                let route = Arc::new(PersonRoute::new(lines.clone(), person));
-                let mut bridge = decorate(Bridge::with_route(api.clone(), route, &c));
-                bridge.household = household.clone();
-                (person, Arc::new(bridge))
-            })
-            .collect();
-        let _ = household.set(bridges.iter().map(|(_, b)| Arc::downgrade(b)).collect());
-        Ok(Telegram::new(api, cfg.receive, bridges))
+        Ok(Telegram {
+            api,
+            receive: cfg.receive,
+            bridges: Mutex::new(bridges),
+            make: Some(BotMaker {
+                lines: lines.clone(),
+                cfg: cfg.clone(),
+                siblings,
+            }),
+            codes: Mutex::new(HashMap::new()),
+            bot_name: Mutex::new(None),
+        })
     }
 
-    /// The bridge that allows an update's sender, if any does.
-    fn bridge_of(&self, update: &Value) -> Option<&Arc<Bridge>> {
+    /// Write what the environment lists into the hub's table of Telegram accounts (the listed ids
+    /// win over anything the table held) and read back the whole list, which is the allow-list.
+    fn seed_links(
+        lines: &Arc<Lines>,
+        cfg: &TelegramConfig,
+        owner: i64,
+        resolve: &mut dyn FnMut(&str) -> Result<i64, String>,
+    ) -> Result<Vec<crate::registry::TelegramLink>, String> {
+        let named: HashMap<i64, String> = cfg.people.iter().cloned().collect();
+        // Every person is resolved before the registry is locked: `resolve` locks it itself.
+        let mut wanted: Vec<(i64, i64)> = Vec::new();
+        for id in &cfg.allowed {
+            let person = match named.get(id) {
+                Some(name) => resolve(name)?,
+                None => owner,
+            };
+            wanted.push((*id, person));
+        }
+        let mut reg = lines
+            .registry()
+            .lock()
+            .map_err(|_| "the registry is unavailable".to_owned())?;
+        let held = reg.telegram_links().map_err(|e| e.to_string())?;
+        for (id, person) in &wanted {
+            let was = held.iter().find(|l| l.telegram_id == *id);
+            // An id the settings list wins, so say when that overrides a link the person made, or
+            // moves an account that was left with someone else.
+            if was.is_some_and(|l| l.source != "env" || l.person_id != *person) {
+                let name = reg
+                    .person_by_id(*person)
+                    .ok()
+                    .flatten()
+                    .map(|p| p.name)
+                    .unwrap_or_else(|| person.to_string());
+                eprintln!(
+                    "telegram: the settings put account {id} with {name}, overriding its earlier link"
+                );
+            }
+            reg.link_telegram(*id, *person, None, "env")
+                .map_err(|e| e.to_string())?;
+        }
+        // An id taken out of the settings is cut off: a row from an earlier start must not
+        // outlive the setting that wrote it.
+        let ids: Vec<i64> = wanted.iter().map(|(id, _)| *id).collect();
+        let pruned = reg.prune_env_links(&ids).map_err(|e| e.to_string())?;
+        if pruned > 0 {
+            eprintln!(
+                "telegram: {pruned} account(s) no longer listed in the settings were unlinked"
+            );
+        }
+        reg.telegram_links().map_err(|e| e.to_string())
+    }
+
+    /// Tell the lines where this bot is, so a profile's `tg_link`, `tg_unlink` and `tg_status` can
+    /// be answered on the line that asked. [`Telegram::run`] does this itself.
+    pub fn attach(self: &Arc<Self>) {
+        if let Some(make) = &self.make {
+            make.lines.bind_telegram(self);
+        }
+    }
+
+    /// Learn the bot's own address (`getMe`) and hold it for the link answers. [`Telegram::run`]
+    /// does this itself; a caller that never runs the bot (a test, a forwarder-only hub) can too.
+    pub async fn prime(&self) {
+        for (_, b) in self.all_bridges() {
+            if let Err(e) = b.identify().await {
+                eprintln!("telegram: getMe failed: {}", e.description);
+            }
+            if let Some(name) = b.st().bot_name.clone() {
+                *self.bot_name.lock().unwrap_or_else(|p| p.into_inner()) = Some(name);
+            }
+        }
+    }
+
+    /// The bridge that allows Telegram account `sender`, if any does.
+    fn bridge_of(&self, sender: i64) -> Option<Arc<Bridge>> {
+        self.bridges
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .find(|(_, b)| b.allows(sender))
+            .map(|(_, b)| b.clone())
+    }
+
+    /// Every bridge, as they stand now.
+    fn all_bridges(&self) -> Vec<(i64, Arc<Bridge>)> {
+        self.bridges
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// The bot's username, from the bridges' own `getMe`, or `None` while none has answered.
+    fn bot_username(&self) -> Option<String> {
+        {
+            let held = self.bot_name.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(name) = held.as_ref() {
+                return Some(name.clone());
+            }
+        }
+        let name = self
+            .all_bridges()
+            .into_iter()
+            .find_map(|(_, b)| b.st().bot_name.clone())?;
+        *self.bot_name.lock().unwrap_or_else(|p| p.into_inner()) = Some(name.clone());
+        Some(name)
+    }
+
+    // ----- a person's own link -----
+
+    /// The answer to a profile's `tg_link`, `tg_unlink` or `tg_status`, for the line that asked.
+    /// Only a PC that acts for that person may ask about them.
+    pub fn answer_admin(&self, lines: &Lines, client_id: i64, u: &Upstream) -> Value {
+        let Upstream::TgAdmin { id, op, person_id } = u else {
+            return json!({});
+        };
+        let refused = |why: &str| json!({ "type": format!("tg_{op}_result"), "id": id, "ok": false, "error": why });
+        if self.make.is_none() {
+            return refused(NO_BOT);
+        }
+        let Ok(person) = person_id.trim().parse::<i64>() else {
+            return refused("that person is not known to this hub");
+        };
+        if !lines.may_act_as(client_id, person) {
+            return refused("this PC does not act for that person");
+        }
+        let mut reg = match lines.registry().lock() {
+            Ok(r) => r,
+            Err(_) => return refused("the registry is unavailable"),
+        };
+        match op.as_str() {
+            "link" => {
+                // Know the answer is deliverable before keeping a code: a refusal must not
+                // leave one stored.
+                let name = match self.bot_username() {
+                    Some(name) => name,
+                    None => {
+                        return refused(
+                            "the hub does not know its bot's own address yet: try again",
+                        )
+                    }
+                };
+                let code = new_code();
+                let expires = now_ms() + link_code_lifetime_ms();
+                let mut codes = self.codes.lock().unwrap_or_else(|p| p.into_inner());
+                // Only the newest code for this person stands, and nothing already
+                // out of date is kept: a person who keeps asking cannot pile up codes.
+                codes.retain(|_, (who, at)| *who != person || *at >= now_ms());
+                codes.insert(digest(&code), (person, expires));
+                json!({
+                    "type": "tg_link_result", "id": id, "ok": true,
+                    "url": format!("https://t.me/{name}?start={code}"),
+                    "expiresAt": expires,
+                })
+            }
+            "unlink" => {
+                let ids: Vec<i64> = match reg.telegram_links() {
+                    Ok(links) => links
+                        .into_iter()
+                        .filter(|l| l.person_id == person)
+                        .map(|l| l.telegram_id)
+                        .collect(),
+                    Err(e) => return refused(&e.to_string()),
+                };
+                let mut gone = 0;
+                for account in &ids {
+                    match reg.unlink_telegram(*account, person) {
+                        Ok(true) => gone += 1,
+                        Ok(false) => {}
+                        Err(e) => return refused(&e.to_string()),
+                    }
+                }
+                drop(reg);
+                for (p, b) in self.all_bridges() {
+                    if p == person {
+                        for account in &ids {
+                            b.unallow(*account);
+                        }
+                    }
+                }
+                json!({ "type": "tg_unlink_result", "id": id, "ok": true, "unlinked": gone })
+            }
+            "status" => {
+                let link = match reg.telegram_links() {
+                    Ok(links) => links.into_iter().find(|l| l.person_id == person),
+                    Err(e) => return refused(&e.to_string()),
+                };
+                drop(reg);
+                match link {
+                    Some(link) => json!({
+                        "type": "tg_status_result", "id": id, "ok": true, "linked": true,
+                        "telegramId": link.telegram_id.to_string(),
+                        "handle": link.handle,
+                    }),
+                    None => {
+                        json!({ "type": "tg_status_result", "id": id, "ok": true, "linked": false })
+                    }
+                }
+            }
+            other => refused(&format!("unknown Telegram op {other:?}")),
+        }
+    }
+
+    /// A private `/start <code>` whose code is one the hub offered: the person proving which
+    /// Telegram account is theirs. Binds the account to that person, moving it off whoever had it,
+    /// and answers on the spot. `None` when this is not such an update, which is the ordinary
+    /// silence: a wrong, used or expired code is answered exactly like a stranger.
+    async fn try_link(&self, update: &Value) -> Option<Handled> {
+        let msg = update.get("message")?;
+        if msg.pointer("/chat/type").and_then(Value::as_str) != Some("private") {
+            return None;
+        }
+        let from = msg.pointer("/from/id").and_then(Value::as_i64)?;
+        let chat = msg.pointer("/chat/id").and_then(Value::as_i64)?;
+        let text = msg.get("text").and_then(Value::as_str)?;
+        let (word, rest) = text.trim().split_once(char::is_whitespace)?;
+        let rest = rest.trim();
+        if word.split('@').next() != Some("/start") || rest.is_empty() {
+            return None;
+        }
+        let code = normalize_code(rest)?;
+        let hash = digest(&code);
+        let now = now_ms();
+        let person = {
+            let mut codes = self.codes.lock().unwrap_or_else(|p| p.into_inner());
+            codes.retain(|_, (_, expires)| *expires >= now);
+            codes.remove(&hash).map(|(person, _)| person)?
+        };
+        let handle = msg
+            .pointer("/from/username")
+            .and_then(Value::as_str)
+            .map(|u| format!("@{}", u.trim_start_matches('@')));
+        let name = {
+            let mut reg = self.registry_lock()?;
+            reg.link_telegram(from, person, handle.as_deref(), "link")
+                .ok()?;
+            reg.person_by_id(person).ok()??
+        }
+        .name;
+        // The account answers one bridge only: whoever held it lets go, and the person's bridge
+        // takes it — made here if this is their first linked account.
+        for (_, b) in self.all_bridges() {
+            if b.allows(from) {
+                b.unallow(from);
+            }
+        }
+        self.add_bridge(person, from).await?;
+        self.reply_link(chat, &format!("{LINKED}{name}.")).await;
+        Some(Handled::Command)
+    }
+
+    fn registry_lock(&self) -> Option<std::sync::MutexGuard<'_, crate::registry::Registry>> {
+        let make = self.make.as_ref()?;
+        make.lines.registry().lock().ok()
+    }
+
+    /// The bridge of `person`, given another account of theirs; made when they had none, and
+    /// asked for the bot's own address before it is handed out, so the first message that goes
+    /// down it already names the bot. `None` when this bot cannot make bridges.
+    async fn add_bridge(&self, person: i64, telegram_id: i64) -> Option<Arc<Bridge>> {
+        let make = self.make.as_ref()?;
+        // The list is held only while the new bridge is built: asking the bot for its own
+        // address happens after the lock is let go.
+        let bridge = {
+            let mut bridges = self.bridges.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some((_, b)) = bridges.iter().find(|(p, _)| *p == person) {
+                b.allow(telegram_id);
+                return Some(b.clone());
+            }
+            let c = TelegramConfig {
+                allowed: vec![telegram_id],
+                people: Vec::new(),
+                ..make.cfg.clone()
+            };
+            let route = Arc::new(PersonRoute::new(make.lines.clone(), person));
+            let mut bridge = Bridge::with_route(self.api.clone(), route, &c)
+                .with_person(person, make.lines.clone());
+            // Files and recordings are the bot's own settings, not each person's: the new bridge
+            // fetches what the others do.
+            if let Some((_, one)) = bridges.iter().find(|(p, _)| *p != person) {
+                if let Some(voice) = one.voice.clone() {
+                    bridge = bridge.with_voice(voice);
+                }
+                if let Some(files) = one.files.clone() {
+                    bridge = bridge.with_files(files);
+                }
+            }
+            bridge.siblings = make.siblings.clone();
+            let bridge = Arc::new(bridge);
+            make.siblings
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(Arc::downgrade(&bridge));
+            bridges.push((person, bridge.clone()));
+            bridge
+        };
+        if let Err(e) = bridge.identify().await {
+            eprintln!("telegram: getMe failed: {}", e.description);
+        }
+        bridge.start_ticks();
+        Some(bridge)
+    }
+
+    async fn reply_link(&self, chat: i64, text: &str) {
+        if let Err(e) = self
+            .api
+            .call(
+                "sendMessage",
+                json!({ "chat_id": chat, "text": text, "disable_notification": false }),
+            )
+            .await
+        {
+            eprintln!("telegram: the link answer failed: {}", e.description);
+        }
+    }
+
+    // ----- updates and frames -----
+
+    /// One update, from `getUpdates` or posted to `/telegram/update`. A sender nobody allows gets
+    /// nothing, as before — unless they arrive with a link code, which is how an account joins.
+    pub async fn on_update(&self, update: &Value, now: i64) -> Handled {
+        if let Some(done) = self.try_link(update).await {
+            return done;
+        }
         let sender = update
             .pointer("/message/from/id")
             .or_else(|| update.pointer("/callback_query/from/id"))
-            .and_then(Value::as_i64)?;
-        self.bridges
-            .iter()
-            .find(|(_, b)| b.allowed.contains(&sender))
-            .map(|(_, b)| b)
-    }
-
-    /// One update, from `getUpdates` or posted to `/telegram/update`. A sender nobody allows gets
-    /// nothing, as before.
-    pub async fn on_update(&self, update: &Value, now: i64) -> Handled {
-        match self.bridge_of(update) {
+            .and_then(Value::as_i64);
+        match sender.and_then(|s| self.bridge_of(s)) {
             Some(b) => b.on_update(update, now).await,
             None => Handled::Ignored,
         }
     }
 
     /// Handle one frame a person's machine sent up.
-    pub async fn on_upstream(&self, person: i64, u: Upstream) {
-        if let Some((_, b)) = self.bridges.iter().find(|(p, _)| *p == person) {
-            b.on_upstream(u).await;
+    pub async fn on_upstream(&self, person: i64, client: i64, u: Upstream) {
+        let bridge = self
+            .bridges
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .find(|(p, _)| *p == person)
+            .map(|(_, b)| b.clone());
+        match bridge {
+            Some(b) => b.on_upstream(client, u).await,
+            // A person with a frame but no bridge has no linked Telegram account: there is nobody
+            // to send it to.
+            None if u.takes_person() => {
+                eprintln!("telegram: a frame for person {person} had no bridge to take it");
+            }
+            None => {}
         }
     }
 
@@ -2164,16 +2765,15 @@ impl Telegram {
         self: Arc<Self>,
         mut upstream: tokio::sync::mpsc::UnboundedReceiver<PersonUpstream>,
     ) {
-        for (_, b) in &self.bridges {
-            if let Err(e) = b.identify().await {
-                eprintln!("telegram: getMe failed: {}", e.description);
-            }
+        self.attach();
+        self.prime().await;
+        for (_, b) in self.all_bridges() {
             b.start_ticks();
         }
         let me = self.clone();
         tokio::spawn(async move {
-            while let Some((person, u)) = upstream.recv().await {
-                me.on_upstream(person, u).await;
+            while let Some((person, client, u)) = upstream.recv().await {
+                me.on_upstream(person, client, u).await;
             }
         });
         if self.receive == Receive::Off {

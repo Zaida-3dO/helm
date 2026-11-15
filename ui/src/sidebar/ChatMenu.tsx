@@ -16,6 +16,9 @@ import { sidebarUndo } from './undo.ts';
 import { CostDialog } from '../usage/CostDialog.tsx';
 import { getDefaultBoard } from '../newchat/boards.ts';
 import { moveChatToProfile, profileChoices, profilesStoreFor, shareChatWith, shareChoices } from '../profiles/index.ts';
+import type { DeviceInfo, RemoteChatRecord } from '../devices/api.ts';
+import { devicesStoreFor } from '../devices/store.ts';
+import { remoteProfileChoices, remoteProject, remoteRow, remoteShareChoices } from '../devices/model.ts';
 
 // Errors go to the shell's toast slot, where the user sees them.
 const showError = (text: string) => toast.show({ kind: 'error', text });
@@ -37,44 +40,71 @@ export function ChatMenu({ chatId }: { chatId: string | null }) {
     if (!chatId) return;
     try {
       const [rows, projects, boards] = await Promise.all([pops.rows([chatId]), pops.list(false, true), getDefaultBoard(shell.api)]);
-      const row: SidebarRow | undefined = rows[0];
-      if (!row) return;
-      const siblings = (await pops.page(row.archived ? 'archived' : 'projects', undefined, row.groupProjectId)).rows;
+      let row: SidebarRow | undefined = rows[0];
+      let siblings: SidebarRow[] = [];
+      // A chat that runs on another device: the mirror answers `chat_get` for it, and its
+      // group and profiles are that device's. The menu is the same; the ops route over the wire.
+      let copy: RemoteChatRecord | undefined;
+      let device: DeviceInfo | null = null;
+      let shownProjects = projects as ProjectNode[];
+      let hidden = boards.hiddenBoardIds;
+      if (!row) {
+        copy = (await shell.api<{ chat: RemoteChatRecord }>('chat_get', { chatId })).chat;
+        const hostUid = copy.hostDeviceId;
+        device = devicesStoreFor(shell.api, shell.bus).snapshot.list?.devices.find((d) => d.uid === hostUid) ?? null;
+        if (!device) return;
+        row = remoteRow(copy, false);
+        shownProjects = (await devicesStoreFor(shell.api, shell.bus).ops.projects(device.uid)).map((p) => remoteProject(p, 0));
+      } else {
+        siblings = (await pops.page(row.archived ? 'archived' : 'projects', undefined, row.groupProjectId)).rows;
+      }
+      const r = row;
       const items = withChatIcons(chatMenuItems(
         {
-          row,
-          projects: projects as ProjectNode[],
-          hidden: boards.hiddenBoardIds,
+          row: r,
+          projects: shownProjects,
+          hidden,
           siblings,
           heightOf: () => 0,
           depthOf: (id) => siblings.find((s) => s.chatId === id)?.depth ?? 0,
           expanded: false,
-          view: row.archived ? 'archived' : 'projects',
-          profiles: profileChoices(profilesStoreFor(shell.api, shell.bus).snapshot, row.chatId, siblings),
-          shares: shareChoices(profilesStoreFor(shell.api, shell.bus).snapshot, row.chatId, [row, ...siblings]),
+          view: r.archived ? 'archived' : 'projects',
+          profiles: copy && device ? remoteProfileChoices(device, copy) : profileChoices(profilesStoreFor(shell.api, shell.bus).snapshot, r.chatId, siblings),
+          shares: copy && device ? remoteShareChoices(device, copy) : shareChoices(profilesStoreFor(shell.api, shell.bus).snapshot, r.chatId, [r, ...siblings]),
         },
         {
-          fork: () => void act.fork(row),
-          rename: () => setPrompt({ title: 'Rename chat', label: 'Title', value: row.title, suggestFor: row.chatId, onSave: (t) => act.renameChat(row, t) }),
-          compact: () => void compactChat(shell.ops, row.chatId, showError),
-          rollOver: () => setConfirm(rollOverConfirm(row.title, () => rollOverChat(shell.ops, row.chatId, showError))),
-          cost: () => setCost(row.chatId),
-          exportMarkdown: () => void exportChatMarkdown(shell.api, row.chatId, showError),
-          moveTo: (id) => void act.moveTo(row, id),
-          moveToProfile: (id) => moveChatToProfile(profilesStoreFor(shell.api, shell.bus), row.chatId, id, showError),
-          shareWith: (id) => {
-            const store = profilesStoreFor(shell.api, shell.bus);
-            shareChatWith(store, row.chatId, shareChoices(store.snapshot, row.chatId, [row, ...siblings]), id, showError);
+          fork: () => void act.fork(r),
+          rename: () => setPrompt({ title: 'Rename chat', label: 'Title', value: r.title, suggestFor: r.chatId, onSave: (t) => act.renameChat(r, t) }),
+          compact: () => void compactChat(shell.ops, r.chatId, showError),
+          rollOver: () => setConfirm(rollOverConfirm(r.title, () => rollOverChat(shell.ops, r.chatId, showError))),
+          cost: () => setCost(r.chatId),
+          exportMarkdown: () => void exportChatMarkdown(shell.api, r.chatId, showError),
+          moveTo: (id) => void act.moveTo(r, id),
+          moveToProfile: (id) => {
+            if (copy && device) {
+              void devicesStoreFor(shell.api, shell.bus).ops.moveProfile({ chatId: r.chatId, profileId: id }).catch((e) => showError(String((e as Error)?.message ?? e)));
+              return;
+            }
+            moveChatToProfile(profilesStoreFor(shell.api, shell.bus), r.chatId, id, showError);
           },
-          nestUnder: (id) => void act.nestUnder(row, id),
-          topLevel: () => void act.topLevel(row),
+          shareWith: (id) => {
+            if (copy && device) {
+              const shared = !(copy.sharedWithPeople ?? []).includes(id);
+              void devicesStoreFor(shell.api, shell.bus).ops.shareChat({ chatId: r.chatId, personId: id, shared }).catch((e) => showError(String((e as Error)?.message ?? e)));
+              return;
+            }
+            const store = profilesStoreFor(shell.api, shell.bus);
+            shareChatWith(store, r.chatId, shareChoices(store.snapshot, r.chatId, [r, ...siblings]), id, showError);
+          },
+          nestUnder: (id) => void act.nestUnder(r, id),
+          topLevel: () => void act.topLevel(r),
           toggleChildren: () => undefined,
-          markUnread: () => void act.markUnread(row),
-          pin: (p) => void act.pin(row, p),
-          mute: (m) => void act.mute(row, m),
-          archive: () => void act.archive(row),
-          restore: () => void act.restore(row),
-          remove: () => setConfirm(deleteChatConfirm(row, () => act.remove(row))),
+          markUnread: () => void act.markUnread(r),
+          pin: (p) => void act.pin(r, p),
+          mute: (m) => void act.mute(r, m),
+          archive: () => void act.archive(r),
+          restore: () => void act.restore(r),
+          remove: () => setConfirm(deleteChatConfirm(r, () => act.remove(r))),
         },
       ).filter((i) => i.id !== 'children'));
       setMenu({ x, y, items });

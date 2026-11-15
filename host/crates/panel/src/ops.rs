@@ -137,8 +137,13 @@ fn stamp_of(path: &std::path::Path) -> Option<FileStamp> {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct StatArgs {
+    /// The chat whose files these are. The panel itself works by path; the name is carried so a
+    /// chat that runs on another device can answer the same call there.
+    #[serde(default)]
+    #[allow(dead_code)]
+    chat_id: Option<String>,
     paths: Vec<String>,
 }
 

@@ -8,6 +8,7 @@
 
 import type { ChatOps } from '../api/ops.ts';
 import type { Submission, ThreadState } from '../api/types.ts';
+import type { RemoteChatOps } from '../api/devices.ts';
 import { Glyph } from '../transcript/icons.tsx';
 import { MessageImages } from '../transcript/MessageImages.tsx';
 import { MessageRefs } from '../transcript/MessageRefs.tsx';
@@ -19,8 +20,11 @@ export interface QueueListProps {
   thread: ThreadState | null;
   ops: ChatOps;
   chatId: string;
-  /** A chat on another device: its queue shows, but Withdraw and Recover are done there. */
+  /** A chat on another device whose host cannot take queue actions right now: the queue shows
+   * unchanged. With a live host pass `devOps` instead and the actions cross the wire. */
   readOnly?: boolean;
+  /** A chat on another device, and its live host answers: Withdraw and Recover travel there. */
+  devOps?: RemoteChatOps;
   /** Why an unread message waits (`waitReason`). */
   reason?: string;
 }
@@ -29,19 +33,24 @@ const DEFAULT_CAPS = { withdraw: false, deliverNow: false, stopTool: false, comp
 
 /** Withdraw and Recover: the host moves the text into the stored draft and sends a `chat` event
  * with the newer draft revision, which the composer picks up. The message's images and files
- * go back to the chat's unstaged set, and restore() stages them in the composer from there. */
-function queueAction(ops: ChatOps, chatId: string) {
+ * go back to the chat's unstaged set, and restore() stages them in the composer from there.
+ * For a chat that runs on another PC the action travels there; Withdraw and Recover put the message's own
+ * text into this PC's composer (the pictures already sit on the other PC, next to the chat). */
+function queueAction(ops: ChatOps, chatId: string, devOps?: RemoteChatOps) {
   return (s: Submission, action: 'withdraw' | 'recover') =>
-    ops
-      .submissionAction(s.id, action)
+    (devOps ? devOps.submissionAction(chatId, s.id, action) : ops.submissionAction(s.id, action))
       .then(() => {
-        composerApi(chatId).restore();
+        if (devOps) {
+          composerApi(chatId).insert(s.text);
+        } else {
+          composerApi(chatId).restore();
+        }
       })
       .catch(() => undefined);
 }
 
-export function QueueItem({ item, ops, chatId, readOnly = false }: { item: InFlightView; ops: ChatOps; chatId: string; readOnly?: boolean }) {
-  const act = queueAction(ops, chatId);
+export function QueueItem({ item, ops, chatId, readOnly = false, devOps }: { item: InFlightView; ops: ChatOps; chatId: string; readOnly?: boolean; devOps?: RemoteChatOps }) {
+  const act = queueAction(ops, chatId, devOps);
   const { submission: s, state, label, reason, tone, actions } = item;
   return (
     <div className={`queue-item q-${state} tone-${tone}`} data-testid="queue-item" data-state={state} data-tone={tone} data-submission={s.id}>
@@ -80,13 +89,13 @@ export function inFlightItems(pending: Submission[], thread: ThreadState | null,
   return inFlightView(pending, { capabilities: thread?.capabilities ?? DEFAULT_CAPS, reason });
 }
 
-export function QueueList({ pending, thread, ops, chatId, readOnly = false, reason }: QueueListProps) {
+export function QueueList({ pending, thread, ops, chatId, readOnly = false, devOps, reason }: QueueListProps) {
   const items = inFlightItems(pending, thread, reason);
   if (!items.length) return null;
   return (
     <div className="queue" data-testid="queue">
       {items.map((item) => (
-        <QueueItem key={item.submission.id} item={item} ops={ops} chatId={chatId} readOnly={readOnly} />
+        <QueueItem key={item.submission.id} item={item} ops={ops} chatId={chatId} readOnly={readOnly} devOps={devOps} />
       ))}
     </div>
   );

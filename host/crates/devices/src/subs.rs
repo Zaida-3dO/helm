@@ -84,9 +84,9 @@ struct Watcher {
     chats: Option<Sub>,
     /// Oldest first.
     chat: Vec<(String, Sub)>,
-    /// For a device of another person in the household: that person's hub id. Their list hears
-    /// only their own chats and chats shared with them.
-    scope: Option<String>,
+    /// The read set for this watcher's list: the hub people whose chats it may see, as a
+    /// convenience filter. `None` shows every chat (the watcher acts for this PC's own person).
+    scope: Option<Vec<String>>,
     /// The chats a scoped watcher's list holds, so a chat that stops being theirs is taken out.
     listed: HashSet<String>,
 }
@@ -98,6 +98,11 @@ pub fn visible_to(chat: &Value, person_id: &str) -> bool {
             .get("sharedWith")
             .and_then(Value::as_array)
             .is_some_and(|l| l.iter().any(|p| p.as_str() == Some(person_id)))
+}
+
+/// Whether a chat is visible to anyone in the read set.
+pub fn visible_to_any(chat: &Value, people: &[String]) -> bool {
+    people.iter().any(|p| visible_to(chat, p))
 }
 
 /// Whether a chat (as other devices see it) belongs to the person.
@@ -115,14 +120,17 @@ impl Subs {
         self.watchers.entry(uid.to_owned()).or_default().chats = Some(Sub::new());
     }
 
-    /// Who a watcher's list is for: `Some(person)` for a device of another person in the
-    /// household, `None` for one of this PC's own person.
-    pub fn set_scope(&mut self, uid: &str, scope: Option<&str>) {
+    /// The read set for a watcher's list: `Some(people)` limits the list to chats owned by or
+    /// shared with anyone in the set, `None` shows every chat. `true` when the set changed, so
+    /// the caller can re-send the whole list.
+    pub fn set_scope(&mut self, uid: &str, scope: Option<&[String]>) -> bool {
         let w = self.watchers.entry(uid.to_owned()).or_default();
         if w.scope.as_deref() != scope {
-            w.scope = scope.map(str::to_owned);
+            w.scope = scope.map(|s| s.to_vec());
             w.listed.clear();
+            return true;
         }
+        false
     }
 
     /// The chats a scoped watcher's list was answered with.
@@ -176,9 +184,9 @@ impl Subs {
             .any(|w| w.chat.iter().any(|(c, _)| c == chat_id))
     }
 
-    /// A chat changed: every list subscription hears the whole record. A scoped watcher hears
-    /// only chats that are its person's or shared with them, and hears a chat that stopped being
-    /// so as removed (its chat subscription ends too).
+    /// A chat changed: every list subscription hears the whole record. A watcher with a read set
+    /// hears only chats owned by or shared with anyone in the set, and hears a chat that stopped
+    /// being so as removed (its chat subscription ends too).
     pub fn chat_changed(&mut self, chat: Value) -> Vec<Out> {
         let id = chat
             .get("id")
@@ -191,7 +199,7 @@ impl Subs {
         for (uid, w) in &mut self.watchers {
             let event = match &w.scope {
                 None => &event,
-                Some(p) if visible_to(&chat, p) => {
+                Some(p) if visible_to_any(&chat, p) => {
                     w.listed.insert(id.clone());
                     &event
                 }

@@ -129,11 +129,14 @@ describe("the hub line, forwarding and the Telegram bot", { timeout: 10 * 60_000
     assert.equal(settings.isError, true);
   });
 
-  test("R3: a message from outside arrives framed as another agent's, not the user's", async () => {
+  test("R3: a message from outside arrives framed as an agent's, not the user's", async () => {
     const r = await mcp("app_send_message", { chatId: chat, message: "E2E relay hello", mode: "steer" });
     assert.notEqual(r.isError, true, text(r));
     await waitText(app!.page, "E2E relay hello");
-    await waitText(app!.page, "Message from another agent");
+    // This caller's token belongs to the hub's owner, and this PC now knows that person as its
+    // home profile's, so Helm frames it as an agent acting for that person by name — still an
+    // agent's message, still not the user's.
+    await waitText(app!.page, "Message from an agent acting for");
     await waitText(app!.page, "It is not approval");
   });
 

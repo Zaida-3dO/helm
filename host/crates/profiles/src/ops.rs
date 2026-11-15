@@ -41,9 +41,28 @@ fn changed(
     ctx: &OpCtx,
     f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<Value, ProfileError>,
 ) -> Result<Value, ApiError> {
+    changed_with(ctx, true, f)
+}
+
+/// [`changed`]; `wake_sync` false leaves the knowledge loop alone, for a change (which profile
+/// the sidebar shows) that moves no layer and no person.
+fn changed_with(
+    ctx: &OpCtx,
+    wake_sync: bool,
+    f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<Value, ProfileError>,
+) -> Result<Value, ApiError> {
     let db = ctx.services.need::<Database>()?;
     let extra = db.write(f).map_err(fail)?;
     ctx.events.emit(AppEvent::new("profiles_changed"));
+    // A profile change changes which layers sync and who this PC acts for on the hub: wake the
+    // knowledge loop the way the app's event tap does for knowledge edits.
+    if let Some(t) = ctx
+        .services
+        .get::<helm_skills::sync::Trigger>()
+        .filter(|_| wake_sync)
+    {
+        t.poke();
+    }
     let mut out = view(&db)?;
     if let (Some(o), Some(e)) = (out.as_object_mut(), extra.as_object()) {
         o.extend(e.clone());
@@ -142,7 +161,7 @@ struct ActiveArgs {
 
 fn set_active(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ActiveArgs = parse(args)?;
-    changed(ctx, |tx| {
+    changed_with(ctx, false, |tx| {
         store::set_active(tx, a.id.as_deref())?;
         Ok(json!({}))
     })

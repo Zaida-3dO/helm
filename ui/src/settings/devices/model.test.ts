@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DeviceRow } from './api.ts';
-import { nameOk, otherDevices, presence } from './model.ts';
+import { nameOk, otherDevices, peopleLine, presence } from './model.ts';
 
 const NOW = Date.parse('2026-11-10T12:00:00Z');
 const ago = (ms: number) => new Date(NOW - ms).toISOString();
@@ -29,4 +29,14 @@ test('devices: presence in plain words, the name rule and the order of the list'
   const row = (uid: string, name: string, online: boolean, isSelf = false): DeviceRow => ({ uid, name, person: null, online, lastSeenAt: null, run: true, isSelf });
   const list = [row('s', 'Studio', false), row('me', 'Desk', true, true), row('l', 'Laptop', true), row('a', 'Attic', false)];
   assert.deepEqual(otherDevices(list).map((d) => d.uid), ['l', 'a', 's']);
+
+  // The people line names everyone a computer acts for; an older report without the list falls back.
+  const ppl: [Pick<DeviceRow, 'person' | 'people'>, string][] = [
+    [{ person: 'Pat', people: [{ personId: 'p', person: 'Pat' }, { personId: 'q', person: 'Sam' }] }, 'Pat, Sam'],
+    [{ person: 'Pat', people: [] }, 'Pat'],
+    [{ person: 'Pat' }, 'Pat'],
+    [{ person: null, people: [{ personId: 'p', person: '' }] }, 'Unknown person'],
+    [{ person: null }, 'Unknown person'],
+  ];
+  for (const [d, want] of ppl) assert.equal(peopleLine(d), want);
 });

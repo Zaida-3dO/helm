@@ -14,13 +14,14 @@ import { resolveKey, sendLabel, sendTooltip, stopTooltip, type KeyContext, type 
 import { Button } from '../ui/controls.tsx';
 import { IconAttach, IconChat, IconFileText as IconFile, IconFolder, IconFolderPlus, IconSparkles, IconX } from '../ui/icons.tsx';
 import { SetupBanner, useRuntimeCheck } from './SetupBanner.tsx';
-import { ContextStatus } from './ContextStatus.tsx';
+import { ContextStatus, ContextStatusRemote } from './ContextStatus.tsx';
 import { useShell } from '../shell/context.ts';
-import { addRef, dropLandsIn, parseFileDrop, roomLeft, type AttachedRef } from './refs.ts';
+import { addRef, dropLandsIn, parseFileDrop, pathName, roomLeft, type AttachedRef } from './refs.ts';
 import { ModelPicker } from './ModelPicker.tsx';
 import { isLocalModel } from './modelEffort.ts';
 import { PermissionChip } from './PermissionChip.tsx';
 import { bytesToBase64, isAnimated, refusal, unstagedOnly, type Attached } from './attachments.ts';
+import { deviceOps } from '../devices/api.ts';
 import { bytesFromBase64 } from '../transcript/messageImages.ts';
 import { Recall } from './recall.ts';
 import { ImageViewer } from '../transcript/ImageViewer.tsx';
@@ -59,7 +60,6 @@ export interface ComposerProps {
   remote?: RemoteComposer | null;
 }
 
-const NO_REMOTE_FILES = 'Images and files can’t be sent to a chat on another device yet.';
 
 const uid = () => globalThis.crypto.randomUUID();
 
@@ -75,6 +75,10 @@ export function isBusy(status: ChatRecord['status']): boolean {
 }
 
 export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, registerSetText, recall = [], autocomplete = false, remote = null }: ComposerProps) {
+  const shell = useShell();
+  // For a chat that runs on another PC, attachments are staged with the device op; the send
+  // carries them across by itself.
+  const devOps = useMemo(() => deviceOps(shell.api), [shell.api]);
   const editor = useRef<EditorHandle>(null);
   const [error, setError] = useState<string | null>(null);
   // A send the device never confirmed: it may have arrived, so the text stays and nothing is resent.
@@ -151,10 +155,6 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   useEffect(() => () => attachedRef.current.forEach((a) => URL.revokeObjectURL(a.url)), []);
   const addFiles = useCallback(
     async (files: File[]) => {
-      if (remote) {
-        setError(NO_REMOTE_FILES);
-        return;
-      }
       for (const f of files) {
         if (roomLeft(attachedRef.current.length, refsRef.current.length) === 0) {
           setError('A message can carry at most 20 attachments.');
@@ -171,8 +171,10 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
             setError(`${f.name || 'This image'} is animated. Only still images can be pasted; attach an animation as a file with the paperclip.`);
             continue;
           }
-          const r = await ops.attach(chat.id, f.name || 'image', f.type, bytesToBase64(bytes));
-          const a: Attached = { id: r.attachmentId, name: f.name || 'image', size: f.size, url: URL.createObjectURL(f) };
+          const id = remote
+            ? (await devOps.attach({ chatId: chat.id, kind: 'image', name: f.name || 'image', mime: f.type, data: bytesToBase64(bytes) })).attachmentId
+            : (await ops.attach(chat.id, f.name || 'image', f.type, bytesToBase64(bytes))).attachmentId;
+          const a: Attached = { id, name: f.name || 'image', size: f.size, url: URL.createObjectURL(f) };
           attachedRef.current = [...attachedRef.current, a];
           setAttached(attachedRef.current);
         } catch (e) {
@@ -180,7 +182,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
         }
       }
     },
-    [ops, chat.id, remote],
+    [ops, devOps, chat.id, remote],
   );
   // Files, folders and chats by reference.
   const [refs, setRefs] = useState<AttachedRef[]>([]);
@@ -188,25 +190,32 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   refsRef.current = refs;
   const addRefs = useCallback(
     async (kind: 'path' | 'chat', targets: string[]) => {
-      if (remote) {
-        setError(NO_REMOTE_FILES);
-        return;
-      }
       for (const t of targets) {
         if (roomLeft(attachedRef.current.length, refsRef.current.length) === 0) {
           setError('A message can carry at most 20 attachments.');
           return;
         }
+        // A chat on another PC cannot point at a chat that runs on this one yet; files can.
+        if (remote && kind === 'chat') {
+          setError('A chat on another device cannot reference a chat on this PC yet.');
+          continue;
+        }
         try {
-          const r = await ops.attachRef(chat.id, kind, t);
-          refsRef.current = addRef(refsRef.current, { id: r.attachmentId, kind: r.kind, name: r.name, target: t });
+          if (remote) {
+            const name = pathName(t);
+            const r = await devOps.attach({ chatId: chat.id, kind: 'file', name, path: t });
+            refsRef.current = addRef(refsRef.current, { id: r.attachmentId, kind: 'file', name, target: t });
+          } else {
+            const r = await ops.attachRef(chat.id, kind, t);
+            refsRef.current = addRef(refsRef.current, { id: r.attachmentId, kind: r.kind, name: r.name, target: t });
+          }
           setRefs(refsRef.current);
         } catch (e) {
           setError(e instanceof ApiError ? e.message : String(e));
         }
       }
     },
-    [ops, chat.id, remote],
+    [ops, devOps, chat.id, remote],
   );
   const pickFiles = async () => {
     setError(null);
@@ -233,15 +242,21 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
     async (text: string) => {
       try {
         const name = pastedFileName(text);
-        const r = await ops.attachText(chat.id, name, text);
-        refsRef.current = addRef(refsRef.current, { id: r.attachmentId, kind: r.kind, name: r.name, target: r.target });
+        if (remote) {
+          // The words are staged on this PC and cross with the send as a plain-text file.
+          const r = await devOps.attach({ chatId: chat.id, kind: 'text', name, text });
+          refsRef.current = addRef(refsRef.current, { id: r.attachmentId, kind: 'file', name, target: name });
+        } else {
+          const r = await ops.attachText(chat.id, name, text);
+          refsRef.current = addRef(refsRef.current, { id: r.attachmentId, kind: r.kind, name: r.name, target: r.target });
+        }
         setRefs(refsRef.current);
       } catch (e) {
         setError(`${e instanceof ApiError ? e.message : String(e)} The text was pasted into the message instead.`);
         editor.current?.insert(text);
       }
     },
-    [ops, chat.id],
+    [ops, devOps, chat.id, remote],
   );
   const onPasteData = useCallback(
     (data: DataTransfer): string | true | null => {
@@ -249,7 +264,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
       if ([...data.files].some((f) => f.type.startsWith('image/'))) return null;
       const text = data.getData('text/plain');
       if (!text) return null;
-      if (!remote && isLongPaste(text) && roomLeft(attachedRef.current.length, refsRef.current.length) > 0) {
+      if (isLongPaste(text) && roomLeft(attachedRef.current.length, refsRef.current.length) > 0) {
         setError(null);
         void attachPasted(text);
         return true;
@@ -259,7 +274,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
     },
     [attachPasted, remote],
   );
-  const full = !!remote || roomLeft(attached.length, refs.length) === 0;
+  const full = roomLeft(attached.length, refs.length) === 0;
   // Stage what the host holds unstaged for this chat: images and files staged before this window
   // opened (a restart), and the ones a taken-back send (withdrawn, recovered, refused, or never
   // sent at all) gave back. Ids already shown are left alone, so this never doubles an attachment.
@@ -294,7 +309,6 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   // with paths; a chat row dragged from the sidebar is read from the sidebar's drag markers.
   const box = useRef<HTMLDivElement>(null);
   const [dropHint, setDropHint] = useState<{ kind: 'files' } | { kind: 'chat'; title: string } | null>(null);
-  const shell = useShell();
   const boxRect = () => box.current?.getBoundingClientRect() ?? null;
   useEffect(
     () =>
@@ -350,7 +364,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   // Taking one out also drops it on the host, or it would be staged again the next time this chat
   // opens and go out with the next send.
   const discard = (id: string) => {
-    ops.discardAttachment(chat.id, id).catch(() => {
+    (remote ? devOps.discard(chat.id, id) : ops.discardAttachment(chat.id, id)).catch(() => {
       // Not reachable: it only stays staged on the host, as it was before.
     });
   };
@@ -538,8 +552,9 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   const [mentionShut, setMentionShut] = useState<string | null>(null);
   const mentionQuery = mention?.query ?? '';
   useEffect(() => {
-    // Files are looked up on this PC; a chat on another device has its own.
-    if (!mentionQuery || remote) {
+    // For a chat that runs on another PC the same lookup runs there: the `quick_open` op is
+    // answered by the device that runs the chat, so the hits are its project's files.
+    if (!mentionQuery) {
       setMentionHits(null);
       return;
     }
@@ -558,7 +573,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
       live = false;
       clearTimeout(t);
     };
-  }, [mentionQuery, remote, panel, chat.id]);
+  }, [mentionQuery, panel, chat.id]);
   const mentionOpen = mention !== null && mentionHits !== null && mentionHits.q === mention.query && mentionHits.items.length > 0 && mentionShut !== draftText;
   const pickMention = (item: QuickItem) => {
     const text = editor.current?.getText() ?? '';
@@ -651,8 +666,10 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   const onChange = useCallback(
     (text: string) => {
       // The first keystroke in a local chat starts loading its model now (host-side rules keep
-      // this to once between turns, at most once every five minutes); a later send joins it.
-      if (!remote && !prevText.current.trim() && text.trim() && isLocalModel(chat.model)) {
+      // this to once between turns, at most once every five minutes); a later send joins it. A
+      // chat that runs on another PC warms the model there — the loading note shows from its
+      // own state, and a refusal (switch off, device down) is not worth showing while typing.
+      if (!prevText.current.trim() && text.trim() && isLocalModel(chat.model)) {
         void ops.warm(chat.id).catch(() => undefined);
       }
       prevText.current = text;
@@ -839,7 +856,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
             ))}
           </div>
         )}
-        {!remote && <ContextStatus chatId={chat.id} />}
+        {remote ? <ContextStatusRemote api={shell.api} chatId={chat.id} /> : <ContextStatus chatId={chat.id} />}
         {offBy && (
           <span className="visually-hidden" data-testid="composer-remote-blocked">
             {offBy}
@@ -872,7 +889,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
         <div className="composer-bar">
           <div className="composer-selects">
             <ModelPicker chat={chat} ops={ops} loading={checking} deviceUid={remote?.deviceUid} />
-            {!remote && <PermissionChip chatId={chat.id} mode={thread?.permissionMode ?? null} busy={busy} ops={ops} />}
+            <PermissionChip chatId={chat.id} mode={thread?.permissionMode ?? null} busy={busy} ops={ops} />
             {toolbarStart.map((a) => (
               <span key={a.id} className="composer-accessory" data-accessory={a.id}>
                 {a.render(actx)}
@@ -890,7 +907,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
               variant="icon"
               className="composer-attach"
               label="Attach files or folders"
-              title={remote ? 'Images and files can’t be sent to a chat on another device yet' : full ? 'A message can carry at most 20 attachments' : 'Attach files or folders · up to 20, including images'}
+              title={full ? 'A message can carry at most 20 attachments' : 'Attach files or folders · up to 20, including images'}
               disabled={full}
               aria-haspopup="menu"
               aria-expanded={attachMenu !== null}

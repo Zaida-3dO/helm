@@ -21,8 +21,16 @@ use serde_json::Value;
 use std::sync::{Arc, OnceLock};
 
 /// Where the user may answer from. Slice by slice more surfaces call [`decide_and_apply`]; each
-/// names itself here.
-pub const SURFACES: &[&str] = &["app"];
+/// names itself here: `app` for this PC's main window, `device:<name>` for another device of the
+/// household answering a card of a chat that runs here.
+pub const SURFACES: &[&str] = &["app", "device:"];
+
+/// Whether `via` names a surface that may answer.
+fn surface_ok(via: &str) -> bool {
+    SURFACES
+        .iter()
+        .any(|s| via.starts_with(s) && (s.ends_with(':') || via == *s))
+}
 
 /// One approved request, as its applier sees it.
 pub struct ApplyJob<'a> {
@@ -81,7 +89,7 @@ pub fn decide_and_apply(
     args: &ConsentDecideArgs,
     via: &str,
 ) -> Result<Decided, ApiError> {
-    if !SURFACES.contains(&via) {
+    if !surface_ok(via) {
         return Err(ApiError::bad_args("Unknown place to answer from."));
     }
     let db = services.need::<Database>()?;

@@ -33,6 +33,8 @@
 //! | `devices_chats` | blocking | `{deviceUid, profileId?, archived?, offset?, limit? (≤ 200)}` → `{chats, projects: [{id, name, colour, kind}], more}`; for another device the chats are read from the copy and carry `personId`, `sharedWithPeople`, `projectName`, `needsAttention`; event `devices_chats_changed {deviceUid}` |
 //! | `devices_create_chat` | async | `{deviceUid, projectId, model?, effort?}` → `{chatId}`: starts the chat for the active profile's person on that device, then opens it here |
 //! | `devices_open_chat` | async | `{chatId}` → `{}`: listen to a copied chat; its rows arrive as `chat`, `thread`, `pending`, `message` and `refresh` events |
+//! | `devices_attach` | async | `{chatId, kind, name, mime?, data?, path?}` → `{attachmentId}`: stage a picture (base64) or a file (path on this PC) for the next message to a chat that runs on another device; the send names the ids |
+//! | `devices_discard` | blocking | `{chatId, attachmentId}` → `{}`: take back a staged attachment |
 //!
 //! `model_catalogue` also takes `deviceUid` (the models that device last reported). Every other
 //! chat op that names a copied chat is answered by [`route`] (see `helm_chats::remote`).
@@ -41,11 +43,13 @@
 //! typed by hand from the table above: there is no Rust type to generate bindings from. The
 //! serialised types in [`wire`] are the device-to-device frames, which the UI never sees.
 //!
-//! What another device may ask of this one (`wire::Op`): `hello`, `chats_sub`, `chat_sub`,
-//! `chat_unsub`, `chats_unsub`, `page` (reads, which need only the pairing), and `send`, `stop`,
-//! `answer`, `create`, `set_model`, `rename`, `archive`, `share` (which need the switch "Let other
-//! devices use chats on this PC"). Consent, settings, projects, files and the rest are refused:
-//! they stay with whoever is at this PC.
+//! What another device may ask of this one (`wire::Op`): reads — `hello`, `chats_sub`, `chat_sub`,
+//! `chat_unsub`, `chats_unsub`, `page`, the panel reads of the chat's project folder (`file_view`,
+//! `file_stat`, `changes`, `diff`, `archive_list`, `path_resolve`, `chat_folder`, `quick_open`)
+//! and the task-board reads (`board_connection`, `board_read`, `board_cancel`) — need only the
+//! pairing; everything that changes something (`send`, `stop`, `answer`, `create`, `set_model`,
+//! `rename`, `archive`, `share`, staging, and the rest) also needs the switch "Let other devices
+//! use chats on this PC". Panel paths never leave the chat's project folder.
 
 pub mod host;
 pub mod identity;
@@ -80,8 +84,13 @@ pub fn register_services(
     // Chats that run on other devices: where the mirror attaches, and the check that sends the
     // ops naming such a chat to it.
     services.insert(std::sync::Arc::new(mirror::MirrorSlot::default()));
+    let slot = std::sync::Arc::new(helm_chats::remote::RemoteSlot::default());
+    services.insert(slot.clone());
+    // Host tools leave changes to chats that run elsewhere to the user.
     services.insert(std::sync::Arc::new(
-        helm_chats::remote::RemoteSlot::default(),
+        helm_hosttools::registry::RemoteChatGuard(std::sync::Arc::new(move |id| {
+            slot.get().is_some_and(|r| r.owns(id).is_some())
+        })),
     ));
     services.insert(std::sync::Arc::new(helm_ipc::OpIntercept(
         std::sync::Arc::new(helm_chats::remote::Routes),

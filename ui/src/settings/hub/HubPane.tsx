@@ -4,19 +4,23 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { LocalModelInfo } from '../../api/types.ts';
-import { hubOps, type HubConnection, type HubConnectionSave, type LineState, type TelegramSettings } from '../../api/hub.ts';
+import { hubOps, type HubConnection, type HubConnectionSave, type LineState, type TelegramLink, type TelegramLinkOffer, type TelegramSettings } from '../../api/hub.ts';
+import { profilesOps, type ProfileSummary } from '../../api/profiles.ts';
 import { localModelChoices } from '../../composer/modelEffort.ts';
 import { useShell } from '../../shell/context.ts';
 import { Button, Checkbox, Picker, SettingRow, TextInput } from '../../ui/index.ts';
 import { SETTINGS_DIALOG } from '../SettingsDialog.tsx';
 import { EFFORT_OPTIONS } from '../runtime/model.ts';
 import { compactCount } from '../../transcript/rowMeta.ts';
+import { defaultProfileId, linkLine, linkable, profileChoices } from './channelScope.ts';
 import { HubPairing } from './HubPairing.tsx';
 import { VoiceBlock } from './VoiceBlock.tsx';
 import './hub.css';
 
 /** How often the pane re-reads the line's state while it is open. */
 const POLL_MS = 2000;
+/** How often the pane asks the hub whether an offered Telegram link has been tapped. */
+const LINK_POLL_MS = 4000;
 
 const STATE_TEXT: Record<LineState, string> = {
   off: 'Not set up',
@@ -89,6 +93,7 @@ function effortChoices(saved: string | null): { value: string; title: string; su
 export function HubPane() {
   const shell = useShell();
   const ops = useMemo(() => hubOps(shell.api), [shell.api]);
+  const prof = useMemo(() => profilesOps(shell.api), [shell.api]);
   const [conn, setConn] = useState<HubConnection | null>(null);
   const [draft, setDraft] = useState<HubConnectionSave>({});
   const [tg, setTg] = useState<TelegramSettings | null>(null);
@@ -96,11 +101,83 @@ export function HubPane() {
   const [models, setModels] = useState<{ id: string; name: string; description?: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // The Telegram and Voice sections speak for one profile at a time; every read and save below
+  // names it, so each person on this PC sets up their own channels.
+  const [people, setPeople] = useState<ProfileSummary[] | null>(null);
+  const [profileId, setProfileId] = useState<string | null>(null);
+  const [link, setLink] = useState<TelegramLink | null>(null);
+  const [offer, setOffer] = useState<TelegramLinkOffer | null>(null);
+  const [pinNote, setPinNote] = useState<string | null>(null);
 
   const showTelegram = useCallback((t: TelegramSettings) => {
     setTg(t);
     setLimits({ hours: String(t.maxAgeHours), ktokens: String(Math.round(t.maxTokens / 1000)) });
   }, []);
+
+  const readTelegram = useCallback(
+    (pid: string) =>
+      void ops
+        .telegram({ profileId: pid })
+        .then(showTelegram)
+        .catch((e: unknown) => setError(errorText(e))),
+    [ops, showTelegram],
+  );
+
+  useEffect(() => {
+    let live = true;
+    const read = () =>
+      void prof
+        .list()
+        .then((v) => {
+          if (!live) return;
+          setPeople(v.profiles);
+          setProfileId((cur) => (cur && v.profiles.some((p) => p.id === cur) ? cur : defaultProfileId(v.profiles, v.activeId)));
+        })
+        .catch(() => undefined);
+    read();
+    // A profile made, renamed or linked somewhere: the picker follows.
+    const off = shell.bus.on('profiles_changed', read);
+    return () => {
+      live = false;
+      off();
+    };
+  }, [prof, shell]);
+
+  // Telegram and voice state, and the hub's answer about this profile's Telegram account.
+  useEffect(() => {
+    if (!profileId) return;
+    let live = true;
+    readTelegram(profileId);
+    // A hub that cannot answer (no line, no bot) reads as not linked; the reason goes to the
+    // error line below the pane.
+    void ops
+      .tgStatus({ profileId })
+      .then((l) => live && setLink(l))
+      .catch(() => live && setLink({ linked: false }));
+    const off = shell.bus.on('relay_telegram', () => live && readTelegram(profileId));
+    return () => {
+      live = false;
+      off();
+    };
+  }, [ops, shell, profileId, readTelegram]);
+
+  // While a link offer is open, watch for the phone tapping it: the account links on the hub.
+  useEffect(() => {
+    if (!offer || !profileId) return;
+    const t = setInterval(() => {
+      void ops
+        .tgStatus({ profileId })
+        .then((l) => {
+          setLink(l);
+          if (l.linked) {
+            setOffer(null);
+            readTelegram(profileId);
+          }
+        })
+        .catch(() => undefined);
+    }, LINK_POLL_MS);
+    return () => clearInterval(t);
+  }, [ops, offer, profileId, readTelegram]);
 
   useEffect(() => {
     let live = true;
@@ -111,24 +188,15 @@ export function HubPane() {
         .catch((e: unknown) => live && setError(errorText(e)));
     read();
     const t = setInterval(read, POLL_MS);
-    void ops
-      .telegram()
-      .then((t) => live && showTelegram(t))
-      .catch((e: unknown) => live && setError(errorText(e)));
     void shell
       .api<{ models: { id: string; name: string; description?: string }[]; local?: LocalModelInfo[] }>('model_catalogue', { harness: 'claude' })
       .then((c) => live && setModels([...c.models, ...localModelChoices(c.local)]))
       .catch(() => undefined);
-    // A chat that changes the policy through its settings tools: re-read so the pickers follow.
-    const off = shell.bus.on('relay_telegram', () =>
-      void ops.telegram().then((t) => live && showTelegram(t)).catch(() => undefined),
-    );
     return () => {
       live = false;
       clearInterval(t);
-      off();
     };
-  }, [ops, shell, showTelegram]);
+  }, [ops, shell]);
 
   const run = async <T,>(p: Promise<T>, then: (v: T) => void) => {
     setBusy(true);
@@ -154,11 +222,29 @@ export function HubPane() {
   const limitsValid = Number.isInteger(hours) && hours >= 1 && hours <= 720 && Number.isInteger(ktokens) && ktokens >= 10 && ktokens <= 5000;
   const limitsChanged = tg !== null && (hours !== tg.maxAgeHours || ktokens * 1000 !== tg.maxTokens);
   const telegramModels = useMemo(() => modelChoices(models, tg?.model ?? null), [models, tg?.model]);
+  const current = people?.find((p) => p.id === profileId);
+  const canLink = linkable(current);
 
-  /** Save one of the new-chat defaults; empty string means back to unset (the app default). */
-  const saveTelegram = (patch: Partial<Pick<TelegramSettings, 'model' | 'effort'>>) => {
-    if (!tg) return;
-    void run(ops.saveTelegram({ ...tg, ...patch }), showTelegram);
+  /** Save one of the new-chat defaults or a switch; empty string means back to unset (the app default). */
+  const saveTelegram = (patch: Partial<Pick<TelegramSettings, 'model' | 'effort' | 'takeTelegram'>>) => {
+    if (!tg || !profileId) return;
+    void run(ops.saveTelegram({ ...tg, ...patch, profileId }), showTelegram);
+  };
+
+  const linkTelegram = () => {
+    if (!profileId) return;
+    void run(ops.tgLink({ profileId }), (r) => setOffer(r));
+  };
+  const unlinkTelegram = () => {
+    if (!profileId) return;
+    void run(
+      ops.tgUnlink({ profileId }),
+      () => void ops.tgStatus({ profileId }).then(setLink).catch(() => undefined),
+    );
+  };
+  const pinTelegram = () => {
+    if (!profileId) return;
+    void run(ops.routePin({ profileId, channel: 'telegram' }), () => setPinNote('Asked the hub to start your Telegram on this PC.'));
   };
 
   return (
@@ -200,7 +286,58 @@ export function HubPane() {
 
       <HubPairing />
 
+      {people && people.length > 1 && (
+        <SettingRow
+          testId="hub-profile"
+          title="Profile"
+          description="Telegram and voice are set up per profile: each profile is its own person on the hub, with its own account and its own switches."
+        >
+          <Picker
+            settings
+            label="Profile"
+            testId="hub-profile-picker"
+            value={profileId ?? ''}
+            options={profileChoices(people)}
+            disabled={busy}
+            onChange={(v) => {
+              setProfileId(v);
+              setLink(null);
+              setOffer(null);
+              setPinNote(null);
+            }}
+          />
+        </SettingRow>
+      )}
+
       <h3 className="hub-heading">Telegram</h3>
+      <SettingRow
+        testId="hub-telegram-link"
+        title="Telegram account"
+        description={
+          canLink
+            ? 'Link this profile’s person’s Telegram account so the bot knows whose messages are whose. One tap on the phone: Helm shows a link, you tap it there.'
+            : 'This profile has no person on the hub yet: link it to a person first (Settings → Profiles).'
+        }
+      >
+        <span data-testid="hub-telegram-link-state">{linkLine(link)}</span>
+        {canLink && !link?.linked && (
+          <Button variant="secondary" disabled={busy || !!offer} onClick={linkTelegram}>
+            Link Telegram
+          </Button>
+        )}
+        {canLink && link?.linked && (
+          <Button variant="text" disabled={busy} onClick={unlinkTelegram}>
+            Unlink
+          </Button>
+        )}
+      </SettingRow>
+      {offer && (
+        <div className="hub-offer" data-testid="hub-telegram-link-offer">
+          Open this on the phone holding the Telegram account — the code stops working at{' '}
+          {offer.expiresAt ? `${new Date(offer.expiresAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}:` : 'soon:'}
+          <code className="hub-offer-url">{offer.url}</code>
+        </div>
+      )}
       <SettingRow
         testId="hub-telegram-chat"
         title="Telegram chat"
@@ -222,7 +359,7 @@ export function HubPane() {
             >
               Open {tg.chat.title}
             </Button>
-            <Button variant="text" data-testid="hub-telegram-reset" disabled={busy} onClick={() => void run(ops.resetTelegram(), showTelegram)}>
+            <Button variant="text" data-testid="hub-telegram-reset" disabled={busy} onClick={() => profileId && void run(ops.resetTelegram({ profileId }), showTelegram)}>
               Start a new chat
             </Button>
           </>
@@ -257,7 +394,7 @@ export function HubPane() {
             />
             k tokens
           </label>
-          <Button variant="secondary" disabled={busy || !limitsValid || !limitsChanged} onClick={() => tg && void run(ops.saveTelegram({ ...tg, maxAgeHours: hours, maxTokens: ktokens * 1000 }), showTelegram)}>
+          <Button variant="secondary" disabled={busy || !limitsValid || !limitsChanged} onClick={() => tg && profileId && void run(ops.saveTelegram({ ...tg, maxAgeHours: hours, maxTokens: ktokens * 1000, profileId }), showTelegram)}>
             Save
           </Button>
         </SettingRow>
@@ -341,7 +478,38 @@ export function HubPane() {
           />
         </SettingRow>
       )}
-      <VoiceBlock />
+      {tg && (
+        <SettingRow
+          testId="hub-telegram-take"
+          title="Take my Telegram on this PC"
+          description="Off, this PC never receives this person's Telegram, even while it is the only one up. On, it joins the PCs that may carry it. The PC of the home profile takes it unless you switch it off."
+        >
+          <Checkbox
+            checked={tg.takeTelegram}
+            disabled={busy}
+            aria-label="Take my Telegram on this PC"
+            data-testid="hub-telegram-take-box"
+            onChange={(on) => saveTelegram({ takeTelegram: on })}
+          />
+        </SettingRow>
+      )}
+      {tg && (
+        <SettingRow
+          testId="hub-telegram-route"
+          title="Where my Telegram goes"
+          description="A conversation stays on the PC that took its last message while that PC is up. Pinning asks the hub to start the next one here instead (this PC must take it, above); the bot's /pc command shows and changes the same thing."
+        >
+          <Button variant="secondary" disabled={busy || !canLink || !tg?.takeTelegram} onClick={pinTelegram}>
+            Use this PC
+          </Button>
+          {pinNote && (
+            <span data-testid="hub-telegram-pinned" className="hub-state">
+              {pinNote}
+            </span>
+          )}
+        </SettingRow>
+      )}
+      <VoiceBlock profileId={profileId} />
       {error && (
         <div className="ui-field-error" role="alert" data-testid="hub-error">
           {error}

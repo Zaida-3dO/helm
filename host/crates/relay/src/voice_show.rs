@@ -470,17 +470,25 @@ impl Shown {
     }
 }
 
-/// Whether `caller` is the chat the voice screen talks to.
-pub fn is_voice_chat(profile_dir: &Path, caller: &str) -> bool {
-    voice::load_tag(&voice::tag_path(profile_dir)).is_some_and(|t| t.chat_id == caller)
+/// Whether `caller` is the voice chat of any profile on this PC.
+pub fn is_voice_chat(db: &helm_core::db::Database, profile_dir: &Path, caller: &str) -> bool {
+    crate::people::migrate(profile_dir, db);
+    db.snapshot(|tx| helm_profiles::store::list(tx))
+        .unwrap_or_default()
+        .into_iter()
+        .any(|p| {
+            let paths = crate::people::voice_paths(profile_dir, &p.id);
+            voice::load_tag(&paths.tag).is_some_and(|t| t.chat_id == caller)
+        })
 }
 
 fn show(ctx: &ToolCtx, a: Value) -> ToolResult {
     let profile = ctx.services.get::<Profile>();
-    if !profile
-        .as_ref()
-        .is_some_and(|p| is_voice_chat(&p.dir, &ctx.caller_chat_id))
-    {
+    let db = ctx.services.get::<helm_core::db::Database>();
+    if !match (&profile, db) {
+        (Some(p), Some(db)) => is_voice_chat(&db, &p.dir, &ctx.caller_chat_id),
+        _ => false,
+    } {
         return Err(refused(
             "app_voice_show works only in the voice chat, the one the phone's voice screen talks to.",
         ));
@@ -869,9 +877,13 @@ mod tests {
                    "title": "Docs", "url": "https://example.com"})
         );
 
-        // Only the chat the voice screen talks to may call the tool.
+        // Only the chat the voice screen talks to may call the tool — in any profile's tag.
         let dir = tempfile::tempdir().unwrap();
-        assert!(!is_voice_chat(dir.path(), "c1"), "no voice chat yet");
+        let mut reg = helm_core::db::MigrationRegistry::new();
+        helm_chats::register_migrations(&mut reg);
+        helm_profiles::register_migrations(&mut reg);
+        let db = helm_core::db::Database::open(&dir.path().join("t.db"), &reg).unwrap();
+        assert!(!is_voice_chat(&db, dir.path(), "c1"), "no voice chat yet");
         let tag = voice::VoiceTag {
             chat_id: "c1".into(),
             started_at: 0,
@@ -880,8 +892,17 @@ mod tests {
             conversation: "x".into(),
             primed: true,
         };
-        voice::save_tag(&voice::tag_path(dir.path()), Some(&tag)).unwrap();
-        assert!(is_voice_chat(dir.path(), "c1"));
-        assert!(!is_voice_chat(dir.path(), "c2"));
+        let pid = db
+            .snapshot(|tx| helm_profiles::store::home(tx))
+            .unwrap()
+            .unwrap()
+            .id;
+        voice::save_tag(
+            &crate::people::voice_paths(dir.path(), &pid).tag,
+            Some(&tag),
+        )
+        .unwrap();
+        assert!(is_voice_chat(&db, dir.path(), "c1"));
+        assert!(!is_voice_chat(&db, dir.path(), "c2"));
     }
 }

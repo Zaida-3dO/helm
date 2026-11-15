@@ -1938,10 +1938,15 @@ dependencies = [
 name = "helm-devices"
 version = "2.0.4"
 dependencies = [
+ "base64 0.22.1",
  "getrandom 0.3.4",
  "helm-chats",
+ "helm-consent",
  "helm-core",
+ "helm-hosttools",
  "helm-ipc",
+ "helm-panel",
+ "helm-platform",
  "hex",
  "log",
  "rusqlite",
@@ -2181,6 +2186,7 @@ dependencies = [
  "helm-core",
  "helm-devices",
  "helm-ipc",
+ "helm-skills",
  "helm-workers",
  "log",
  "rusqlite",
@@ -2201,6 +2207,7 @@ dependencies = [
  "helm-hosttools",
  "helm-ipc",
  "helm-platform",
+ "helm-profiles",
  "helm-standup",
  "helm-workers",
  "helm-worktrees",

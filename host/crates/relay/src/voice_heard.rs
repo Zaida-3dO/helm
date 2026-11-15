@@ -87,6 +87,11 @@ pub fn path(profile_dir: &Path) -> PathBuf {
     profile_dir.join("relay").join("voice-heard.json")
 }
 
+/// One profile's store, beside its voice tag and policy.
+pub fn path_in(person_dir: &Path) -> PathBuf {
+    person_dir.join("voice-heard.json")
+}
+
 /// Up to [`LEAD_WORDS`] words of `text`, made safe to put between quotes inside one bracketed
 /// line, with an ellipsis when there were more.
 pub fn lead_of(text: &str) -> String {

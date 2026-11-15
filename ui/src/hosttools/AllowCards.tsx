@@ -39,9 +39,11 @@ function Inert({ text, label }: { text: string; label: string }) {
   );
 }
 
-export function AllowCards({ chatId }: { chatId: string }) {
+export function AllowCards({ chatId, remote = false }: { chatId: string; remote?: boolean }) {
   const shell = useShell();
-  const ops = useMemo(() => consentOps(shell.api), [shell.api]);
+  // A chat that runs on another device answers over the wire; the settle gate, the trusted-event
+  // check and the one-decide-in-flight rule are the same either way.
+  const ops = useMemo(() => consentOps(shell.api, remote ? chatId : undefined), [shell.api, remote, chatId]);
   const [cards, setCards] = useState<ConsentRequest[]>([]);
   const [minutes, setMinutes] = useState<Record<string, number>>({});
   const [notes, setNotes] = useState<Record<string, string>>({});
@@ -55,7 +57,7 @@ export function AllowCards({ chatId }: { chatId: string }) {
   const refetch = useCallback(() => {
     ops
       .list(chatId)
-      .then((l) => setCards(l.pending))
+      .then((l) => setCards(Array.isArray(l.pending) ? l.pending : []))
       .catch((e: unknown) => setError(message(e)));
   }, [ops, chatId]);
 

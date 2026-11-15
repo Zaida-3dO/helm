@@ -19,6 +19,8 @@ export interface AccessoryContext {
   busy: boolean;
   /** True when the editor holds no text. */
   draftEmpty: boolean;
+  /** True for a chat that runs on another device: the copy here answers over the wire. */
+  remote?: boolean;
 }
 
 export interface ComposerAccessory {

@@ -3,7 +3,8 @@
 //! The one place Helm decides that an agent's step counts as the user's own consent. Two proofs:
 //!
 //! - **An Allow grant**: a request the user's click on the card in the main window moved to
-//!   `allowed` ([`store::decide`], reached only through the `consent_decide` op). Bound to one
+//!   `allowed` ([`store::decide`], reached through the main window's `consent_decide` op, or for a chat served to another
+//!   device through that PC's own decide path, which checks the chat). Bound to one
 //!   chat, one allow kind and the SHA-256 of a canonical target the host builds itself;
 //!   single-use; 30 minutes by default (the agent may ask 5–120, the user may pick 5–240).
 //! - **The user's words**: a message the user typed in this chat that is exactly the step's fixed
@@ -29,7 +30,7 @@
 //! [`apply::decide_and_apply`], the one decide path every surface calls, spends the grant and
 //! runs the kind's [`apply::Applier`] under the maintenance lock. Two columns serve them:
 //! `outcome` (what applying did, sent to the agent as the decision note) and `decided_via`
-//! (where the user answered; `app` for this PC's main window). Upkeep holds an applying
+//! (where the user answered; `app` for this PC's main window, `device:<name>` for another device). Upkeep holds an applying
 //! request's note until its outcome is written, or reports after ten minutes that Helm stopped
 //! while applying.
 

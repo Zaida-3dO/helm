@@ -475,6 +475,7 @@ async fn what_helm_answers_comes_back_and_a_dropped_line_may_or_may_not_have_run
             "app_stop_chat",
             &json!({}),
             Duration::from_millis(50),
+            None,
         )
         .await;
     match late {

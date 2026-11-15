@@ -62,6 +62,22 @@ export interface TelegramSettings {
   model: string | null;
   /** The effort a new Telegram chat starts with; `null`: the same as any other new chat. */
   effort: string | null;
+  /** Whether this PC takes this profile's person's Telegram (default: on for the home profile). */
+  takeTelegram: boolean;
+}
+
+/** One profile's Telegram account on the hub, as the link row shows it. */
+export interface TelegramLink {
+  linked: boolean;
+  /** The bot's handle, e.g. `@myhelm` — set when linked and the hub knows the bot's name. */
+  handle?: string | null;
+}
+
+/** What `relay_tg_link` answered: the one-tap address and when its code stops working. */
+export interface TelegramLinkOffer {
+  url: string;
+  /** Epoch milliseconds; the code stops working then. */
+  expiresAt: number;
 }
 
 /** What the attention watch wakes the voice chat for. */
@@ -88,6 +104,17 @@ export interface VoiceSettings {
   maxAgeHours: number;
   maxTokens: number;
   watch: VoiceWatch;
+  /** Whether this PC takes this profile's person's voice (default: on for the home profile). */
+  takeVoice: boolean;
+}
+
+/** The profile a channel op acts on; absent: the home profile (the host's own default). */
+export interface ChannelScope {
+  profileId?: string | null;
+}
+
+function scope(s: ChannelScope): { profileId?: string } {
+  return s.profileId ? { profileId: s.profileId } : {};
 }
 
 export function hubOps(api: Api) {
@@ -96,9 +123,9 @@ export function hubOps(api: Api) {
     /** Trade a one-time code for this PC's token; sets up the line and the memory server. */
     pair: (a: { address: string; fallback?: string; code: string }) => api<HubPairResult>('hub_pair', a),
     saveConnection: (a: HubConnectionSave) => api<HubConnection>('relay_connection_save', a),
-    telegram: () => api<TelegramSettings>('relay_telegram_get', {}),
+    telegram: (s: ChannelScope = {}) => api<TelegramSettings>('relay_telegram_get', scope(s)),
     saveTelegram: (
-      s: Pick<TelegramSettings, 'maxAgeHours' | 'maxTokens' | 'awayAlerts' | 'approvals' | 'remoteAnswers' | 'model' | 'effort'>,
+      s: Pick<TelegramSettings, 'maxAgeHours' | 'maxTokens' | 'awayAlerts' | 'approvals' | 'remoteAnswers' | 'model' | 'effort' | 'takeTelegram'> & ChannelScope,
     ) =>
       api<TelegramSettings>('relay_telegram_save', {
         maxAgeHours: s.maxAgeHours,
@@ -108,10 +135,12 @@ export function hubOps(api: Api) {
         remoteAnswers: s.remoteAnswers,
         model: s.model,
         effort: s.effort,
+        takeTelegram: s.takeTelegram,
+        ...scope(s),
       }),
-    resetTelegram: () => api<TelegramSettings>('relay_telegram_reset', {}),
-    voice: () => api<VoiceSettings>('relay_voice_get', {}),
-    saveVoice: (s: Omit<VoiceSettings, 'chat'>) =>
+    resetTelegram: (s: ChannelScope = {}) => api<TelegramSettings>('relay_telegram_reset', scope(s)),
+    voice: (s: ChannelScope = {}) => api<VoiceSettings>('relay_voice_get', scope(s)),
+    saveVoice: (s: Omit<VoiceSettings, 'chat'> & ChannelScope) =>
       api<VoiceSettings>('relay_voice_save', {
         model: s.model,
         effort: s.effort,
@@ -119,7 +148,17 @@ export function hubOps(api: Api) {
         maxAgeHours: s.maxAgeHours,
         maxTokens: s.maxTokens,
         watch: s.watch,
+        takeVoice: s.takeVoice,
+        ...scope(s),
       }),
-    resetVoice: () => api<VoiceSettings>('relay_voice_reset', {}),
+    resetVoice: (s: ChannelScope = {}) => api<VoiceSettings>('relay_voice_reset', scope(s)),
+    /** Ask the hub for a one-tap address that links this profile's person's Telegram account. */
+    tgLink: (s: ChannelScope = {}) => api<TelegramLinkOffer>('relay_tg_link', scope(s)),
+    /** Whether the profile's person already has a linked Telegram account, and the bot's handle. */
+    tgStatus: (s: ChannelScope = {}) => api<TelegramLink>('relay_tg_status', scope(s)),
+    /** Drop the profile's person's Telegram link from the hub. */
+    tgUnlink: (s: ChannelScope = {}) => api<{ unlinked: number }>('relay_tg_unlink', scope(s)),
+    /** Ask the hub to send this profile's person's channel to this PC ("Use this PC"). */
+    routePin: (s: ChannelScope & { channel: 'telegram' | 'voice' }) => api<{ pinned: boolean }>('relay_route_pin', { ...scope(s), channel: s.channel }),
   };
 }

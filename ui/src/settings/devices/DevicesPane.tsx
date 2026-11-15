@@ -8,7 +8,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useShell } from '../../shell/context.ts';
 import { Button, Checkbox, SettingRow, TextInput } from '../../ui/index.ts';
 import { devicesOps, HOUSEHOLD_RUN_KEY, RUN_FROM_OTHERS_KEY, type DeviceRow } from './api.ts';
-import { nameOk, NAME_MAX, otherDevices, presence } from './model.ts';
+import { nameOk, NAME_MAX, otherDevices, peopleLine, presence } from './model.ts';
 import './devices.css';
 
 function errorText(e: unknown): string {
@@ -171,7 +171,7 @@ export function DevicesPane() {
                 <span className={`dv-dot${d.online ? ' on' : ''}`} aria-hidden="true" /> {d.name}
               </>
             }
-            description={`${d.person ?? 'Unknown person'} · ${presence(d, now)}`}
+            description={`Acts for: ${peopleLine(d)} · ${presence(d, now)}`}
           >
             <span className="dv-run" data-testid={`device-run-${d.uid}`}>
               Can run chats there: {d.run ? 'yes' : 'no'}

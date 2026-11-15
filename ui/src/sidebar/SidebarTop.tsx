@@ -40,6 +40,8 @@ export interface SidebarTopProps {
   onSearch?: () => void;
   onAttention: () => void;
   onOpenChat: (chatId: string) => void;
+  /** The open chat's id when it runs on another PC: Tasks then shows that PC's board. */
+  remoteChatId?: string | null;
 }
 
 function useCommand(id: string): (() => void) | null {
@@ -56,13 +58,13 @@ export function flaggedBadge(attention: AttentionSummary | null): string {
   return n > 99 ? '99+' : countText(attention);
 }
 
-export function SidebarTop({ api, bus, attention, inboxOpen, onNewChat, onSearch, onAttention, onOpenChat }: SidebarTopProps) {
+export function SidebarTop({ api, bus, attention, inboxOpen, onNewChat, onSearch, onAttention, onOpenChat, remoteChatId }: SidebarTopProps) {
   const hide = useCommand(SIDEBAR_TOGGLE);
   const hideChord = useChord(SIDEBAR_TOGGLE);
   const newChord = useChord(NEW_CHAT_COMMAND);
   const searchChord = useChord(SEARCH_COMMAND);
   const count = inboxCount(attention);
-  const tasks = useTasksEntry(api, bus);
+  const tasks = useTasksEntry(api, bus, remoteChatId);
   const schedules = useSchedulesEntry(api, bus, onOpenChat);
   const [saved, setSaved] = useState<string[]>(() => readOrder());
 

@@ -45,7 +45,7 @@ use helm_core::db::Database;
 use helm_hosttools::OpInvoker;
 use rusqlite::OptionalExtension;
 use serde_json::json;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -60,24 +60,25 @@ pub const START_WAIT_MS: i64 = 120_000;
 const BUSY_RETRY: Duration = Duration::from_secs(20);
 
 /// Where the status and final answer go: the line in the app, a recorder in tests.
+/// `person` is the hub person the exchange is for (`""`: nobody named, the hub's own default).
 pub trait Upstream: Send + Sync {
-    fn status(&self, text: &str);
+    fn status(&self, person: &str, text: &str);
     /// The turn's answer, as a new message. `false` when it was not sent (the line is down);
     /// the mirror then tries it again and tells the chat, so the agent can act on it.
-    fn final_answer(&self, text: &str) -> bool;
+    fn final_answer(&self, person: &str, text: &str) -> bool;
     /// A note to the phone that leaves the live status alone.
-    fn notify(&self, _text: &str) {}
+    fn notify(&self, _person: &str, _text: &str) {}
 }
 
 impl Upstream for LineHandle {
-    fn status(&self, text: &str) {
-        self.telegram_status(text)
+    fn status(&self, person: &str, text: &str) {
+        self.telegram_status(person, text)
     }
-    fn final_answer(&self, text: &str) -> bool {
-        self.telegram_final(text)
+    fn final_answer(&self, person: &str, text: &str) -> bool {
+        self.telegram_final(person, text)
     }
-    fn notify(&self, text: &str) {
-        self.telegram_notify(text);
+    fn notify(&self, person: &str, text: &str) {
+        self.telegram_notify(person, text);
     }
 }
 
@@ -267,6 +268,8 @@ pub(crate) struct RealPort<'a> {
     /// Set by `create` when the saved model or effort could not be used and the chat opened on
     /// the app default: what the chat and the phone are told, in plain words.
     pub(crate) ignored: Mutex<Option<String>>,
+    /// The profile a new chat is kept to, once created. `None` leaves it unassigned.
+    pub(crate) profile_id: Option<String>,
 }
 
 /// Whether the chat is archived and the tokens it has used; `None` when it no longer exists.
@@ -323,12 +326,21 @@ pub struct TelegramView {
     pub model: Option<String>,
     /// The effort a new Telegram chat opens with; `None`: the same as any other new chat.
     pub effort: Option<String>,
+    /// Whether this PC takes this person's Telegram (the switch, or its default: on for the
+    /// home profile, off for the others).
+    pub take_telegram: bool,
 }
 
-pub fn telegram_view(db: &Database, profile_dir: &std::path::Path, now: i64) -> TelegramView {
-    let file = telegram::load_file(&telegram::policy_path(profile_dir));
+pub fn telegram_view(
+    db: &Database,
+    profile_dir: &std::path::Path,
+    profile_id: &str,
+    now: i64,
+) -> TelegramView {
+    let paths = crate::people::telegram_paths(profile_dir, profile_id);
+    let file = telegram::load_file(&paths.policy);
     let policy = file.check().unwrap_or_default();
-    let chat = telegram::load_tag(&telegram::tag_path(profile_dir)).and_then(|tag| {
+    let chat = telegram::load_tag(&paths.tag).and_then(|tag| {
         let facts = chat_facts(db, &tag.chat_id);
         if telegram::expired(&tag, facts, &policy, now).is_some() {
             return None;
@@ -355,6 +367,11 @@ pub fn telegram_view(db: &Database, profile_dir: &std::path::Path, now: i64) -> 
         })
     });
     let (model, effort) = file.new_chat();
+    let is_home = db
+        .snapshot(|tx| helm_profiles::store::home(tx))
+        .ok()
+        .flatten()
+        .is_some_and(|h| h.id == profile_id);
     TelegramView {
         chat,
         max_age_hours: file.max_age_hours,
@@ -364,6 +381,7 @@ pub fn telegram_view(db: &Database, profile_dir: &std::path::Path, now: i64) -> 
         remote_answers: file.remote_answers,
         model: model.map(str::to_owned),
         effort: effort.map(str::to_owned),
+        take_telegram: telegram::takes_telegram(&file, is_home),
     }
 }
 
@@ -453,6 +471,22 @@ impl ChatPort for RealPort<'_> {
             .ok_or("chat_create answered no id")?
             .to_owned();
         helm_chats::titles::rename(self.rt, &id, title).map_err(|e| e.message)?;
+        // A channel chat belongs to the profile that runs the channel: the chat's owner decides
+        // who may see it, who the away alerts route to, and which profile its next message lands
+        // in. A refused assignment is not worth losing the chat over: it stays unassigned and
+        // the next delivery finds it by its tag as usual.
+        if let Some(pid) = &self.profile_id {
+            if let Err(e) = self.handle.block_on(self.ops.invoke(
+                "profiles_assign_chats",
+                json!({ "chatIds": [&id], "profileId": pid }),
+            )) {
+                log::warn!(
+                    "relay: the new {} chat could not be kept to its profile: {}",
+                    self.label,
+                    e.message
+                );
+            }
+        }
         Ok(id)
     }
 }
@@ -519,17 +553,25 @@ pub(crate) fn max_row(db: &Database, chat: &str) -> i64 {
     .unwrap_or(0)
 }
 
-/// Everything a delivery needs, cloned into the blocking pool.
+/// Everything a delivery needs, cloned into the blocking pool. All of it is for one profile:
+/// its channel files, its folder, and the hub person its frames carry (`""` when the profile
+/// has no person yet).
 #[derive(Clone)]
 pub struct Ctx {
     pub rt: ChatRuntime,
     pub db: Arc<Database>,
     pub ops: Arc<dyn OpInvoker>,
     pub handle: tokio::runtime::Handle,
+    /// The local profile this exchange belongs to.
+    pub profile_id: String,
+    /// The hub person of that profile, or `""` when it is not linked yet.
+    pub person: String,
     pub tag_path: PathBuf,
     /// The folder new Telegram chats start in.
     pub folder: String,
     pub policy: TagPolicy,
+    /// This profile's policy file, for a re-read while a mirror runs.
+    pub policy_path: PathBuf,
     /// The model and effort saved for a new Telegram chat; `None` each: the new-chat default.
     pub new_chat_model: Option<String>,
     pub new_chat_effort: Option<String>,
@@ -592,6 +634,7 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
         new_chat_model: c.new_chat_model.clone(),
         new_chat_effort: c.new_chat_effort.clone(),
         ignored: Mutex::new(None),
+        profile_id: Some(c.profile_id.clone()),
     };
     let (chat, _created) =
         telegram::active_chat(&c.tag_path, &port, &c.policy, msg.bot.as_deref(), now)?;
@@ -891,6 +934,7 @@ pub async fn mirror(
     rt: ChatRuntime,
     db: Arc<Database>,
     up: Arc<dyn Upstream>,
+    person: String,
     chat: String,
     baseline: i64,
     policy: PathBuf,
@@ -914,9 +958,9 @@ pub async fn mirror(
         };
         for out in m.step(&s, helm_core::now_ms()) {
             match out {
-                Up::Status(t) => up.status(&t),
+                Up::Status(t) => up.status(&person, &t),
                 Up::Final(t) => {
-                    let ok = up.final_answer(&t);
+                    let ok = up.final_answer(&person, &t);
                     m.ack(&t, ok);
                     if !late.offered(ok, helm_core::now_ms()) {
                         continue;
@@ -987,8 +1031,11 @@ pub struct ChatSink {
     up: OnceLock<Arc<dyn Upstream>>,
     profile_dir: PathBuf,
     serial: tokio::sync::Mutex<()>,
-    answered: Arc<Mutex<VecDeque<String>>>,
-    watching: Mutex<Option<(String, tokio::task::JoinHandle<()>)>>,
+    /// Hub ids that answered a question, per profile id, so a resend does not answer twice
+    /// (or turn into a prompt). Built from each profile's file on the first message for it.
+    answered: Mutex<std::collections::HashMap<String, Arc<Mutex<VecDeque<String>>>>>,
+    /// The mirror task watching each chat, by chat id.
+    watching: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     /// Approvals asked on Telegram and not yet answered ([`crate::approve`]).
     pub asks: crate::approve::Asks,
 }
@@ -1004,16 +1051,15 @@ pub(crate) fn plain_path(p: &std::path::Path) -> String {
 
 impl ChatSink {
     pub fn new(exec: Arc<AppExecutor>, profile_dir: PathBuf) -> Self {
-        let answered = telegram::load_answered(&telegram::answered_path(&profile_dir));
         ChatSink {
             exec,
             ops: OnceLock::new(),
             up: OnceLock::new(),
             profile_dir,
             serial: tokio::sync::Mutex::new(()),
-            answered: Arc::new(Mutex::new(answered)),
+            answered: Mutex::new(HashMap::new()),
             asks: crate::approve::Asks::default(),
-            watching: Mutex::new(None),
+            watching: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1025,7 +1071,9 @@ impl ChatSink {
         let _ = self.up.set(up);
     }
 
-    pub(crate) fn ctx(&self) -> Result<Ctx, String> {
+    /// The delivery context for the profile that runs the channel of hub person `person`
+    /// (`None`: an older hub's frame, the home profile).
+    pub(crate) fn ctx(&self, person: Option<&str>) -> Result<Ctx, String> {
         let w = self
             .exec
             .wiring()
@@ -1042,46 +1090,61 @@ impl ChatSink {
             .services
             .get::<Database>()
             .ok_or("Helm's database is not available.")?;
+        crate::people::migrate(&self.profile_dir, &db);
+        let profile = crate::people::profile_for(&db, person)?;
+        let paths = crate::people::telegram_paths(&self.profile_dir, &profile.id);
         // Read once per delivery, so a change in Settings applies to the next message.
-        let file = telegram::load_file(&telegram::policy_path(&self.profile_dir));
+        let file = telegram::load_file(&paths.policy);
         let (model, effort) = file.new_chat();
+        let answered = self
+            .answered
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(profile.id.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(telegram::load_answered(&paths.answered))))
+            .clone();
         Ok(Ctx {
             rt: (*rt).clone(),
             db,
             ops,
             handle: tokio::runtime::Handle::current(),
-            tag_path: telegram::tag_path(&self.profile_dir),
-            folder: plain_path(&self.profile_dir.join("telegram")),
+            person: profile.hub_person_id.unwrap_or_default(),
+            profile_id: profile.id,
+            tag_path: paths.tag,
+            folder: plain_path(&paths.folder),
             policy: file.check().unwrap_or_default(),
+            policy_path: paths.policy,
             new_chat_model: model.map(str::to_owned),
             new_chat_effort: effort.map(str::to_owned),
-            answered: self.answered.clone(),
-            answered_path: telegram::answered_path(&self.profile_dir),
-            sent_path: telegram::sent_path(&self.profile_dir),
+            answered,
+            answered_path: paths.answered,
+            sent_path: paths.sent,
         })
     }
 
-    /// Watch `chat` unless it is already being watched.
+    /// Watch `chat` for its profile unless it is already being watched. One task per chat; a
+    /// new exchange in a watched chat reuses the task, a chat whose task ended gets a new one.
     fn watch(&self, c: &Ctx, chat: &str, baseline: i64) {
         let Some(up) = self.up.get().cloned() else {
             return;
         };
         let mut w = self.watching.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some((id, h)) = w.as_ref() {
-            if id == chat && !h.is_finished() {
+        if let Some(h) = w.get(chat) {
+            if !h.is_finished() {
                 return;
             }
-            h.abort();
         }
+        w.retain(|_, h| !h.is_finished());
         let task = c.handle.spawn(mirror(
             c.rt.clone(),
             c.db.clone(),
             up,
+            c.person.clone(),
             chat.to_owned(),
             baseline,
-            telegram::policy_path(&self.profile_dir),
+            c.policy_path.clone(),
         ));
-        *w = Some((chat.to_owned(), task));
+        w.insert(chat.to_owned(), task);
     }
 }
 
@@ -1090,7 +1153,7 @@ impl TelegramSink for ChatSink {
         Box::pin(async move {
             // One at a time: two messages with no tag must not start two chats.
             let _turn = self.serial.lock().await;
-            let c = self.ctx()?;
+            let c = self.ctx(msg.person.as_deref())?;
             let c2 = c.clone();
             let placed = tokio::task::spawn_blocking(move || place(&c2, &msg, helm_core::now_ms()))
                 .await
@@ -1105,7 +1168,7 @@ impl TelegramSink for ChatSink {
                     // The phone is told too: the first message of a chat that opened without its
                     // saved model would otherwise be answered by a model nobody chose.
                     if let (Some(why), Some(up)) = (ignored, self.up.get()) {
-                        up.notify(&why);
+                        up.notify(&c.person, &why);
                     }
                     (chat, baseline)
                 }
@@ -1115,7 +1178,7 @@ impl TelegramSink for ChatSink {
                     value,
                 } => {
                     if let Some(up) = self.up.get() {
-                        up.final_answer(&telegram::render_answered(&value));
+                        up.final_answer(&c.person, &telegram::render_answered(&value));
                     }
                     (chat, baseline)
                 }
@@ -1125,9 +1188,11 @@ impl TelegramSink for ChatSink {
         })
     }
 
-    fn stop<'a>(&'a self) -> BoxFut<'a, ()> {
+    fn stop<'a>(&'a self, person: Option<String>) -> BoxFut<'a, ()> {
         Box::pin(async move {
-            let Ok(c) = self.ctx() else { return };
+            let Ok(c) = self.ctx(person.as_deref()) else {
+                return;
+            };
             let Some(tag) = telegram::load_tag(&c.tag_path) else {
                 return;
             };
@@ -1141,28 +1206,43 @@ impl TelegramSink for ChatSink {
         })
     }
 
-    fn answer<'a>(&'a self, id: String, index: usize) -> BoxFut<'a, ()> {
+    fn answer<'a>(&'a self, person: Option<String>, id: String, index: usize) -> BoxFut<'a, ()> {
         Box::pin(async move {
             let Some(up) = self.up.get().cloned() else {
                 return;
             };
+            let who = person.clone().unwrap_or_default();
             let Some(ask) = self.asks.take(&id, index) else {
-                up.notify("That request is no longer waiting, so your tap was not used.");
+                up.notify(
+                    &who,
+                    "That request is no longer waiting, so your tap was not used.",
+                );
                 return;
             };
+            // The tap must come from the person the question was asked of.
+            if ask.person != who {
+                up.notify(
+                    &who,
+                    "That request was not asked of you, so your tap was not used.",
+                );
+                return;
+            }
             let label = ask.options[index].clone();
             let nothing =
                 format!("Your \"{label}\" was not used: that request is no longer waiting.");
-            if !telegram::load_approvals(&telegram::policy_path(&self.profile_dir)) {
-                up.notify(&format!(
-                    "Your \"{label}\" was not used: approving from Telegram is off in Helm."
-                ));
-                return;
-            }
-            let Ok(c) = self.ctx() else {
-                up.notify(&nothing);
+            let Ok(c) = self.ctx(person.as_deref()) else {
+                up.notify(&who, &nothing);
                 return;
             };
+            if !telegram::load_approvals(&c.policy_path) {
+                up.notify(
+                    &c.person,
+                    &format!(
+                        "Your \"{label}\" was not used: approving from Telegram is off in Helm."
+                    ),
+                );
+                return;
+            }
             if let Some(question) = &ask.question {
                 // A chat's own question: the tapped option goes back to it as a note from Helm.
                 let note = crate::approve::answer_note(&id, question, &label);
@@ -1182,7 +1262,10 @@ impl TelegramSink for ChatSink {
                         helm_chats::types::ContextKind::Telegram,
                         &format!("Answered from Telegram: {label}"),
                     ),
-                    Err(e) => up.notify(&format!("Helm could not pass it on: {}", e.message)),
+                    Err(e) => up.notify(
+                        &c.person,
+                        &format!("Helm could not pass it on: {}", e.message),
+                    ),
                 }
                 return;
             }
@@ -1201,10 +1284,11 @@ impl TelegramSink for ChatSink {
             .await
             {
                 Ok(()) => {}
-                Err(AnswerError::Gone) => up.notify(&nothing),
-                Err(AnswerError::Failed(why)) => up.notify(&format!(
-                    "Your \"{label}\" was not used: Helm could not answer it ({why})."
-                )),
+                Err(AnswerError::Gone) => up.notify(&c.person, &nothing),
+                Err(AnswerError::Failed(why)) => up.notify(
+                    &c.person,
+                    &format!("Your \"{label}\" was not used: Helm could not answer it ({why})."),
+                ),
             }
         })
     }

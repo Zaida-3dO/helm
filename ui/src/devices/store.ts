@@ -5,7 +5,7 @@
 import type { Api } from '../api/client.ts';
 import type { EventBus } from '../api/events.ts';
 import type { ProjectNode, SidebarRow } from '../api/projects.ts';
-import { deviceOps, type DeviceInfo, type DeviceOps, type DevicesList, type RemoteChatRecord, type RemoteProject } from './api.ts';
+import { ALL_DEVICES, deviceOps, type DeviceInfo, type DeviceOps, type DevicesList, type RemoteChatRecord, type RemoteProject } from './api.ts';
 import { remoteDevice, remoteList, resolveSelected } from './model.ts';
 
 type Listener = () => void;
@@ -20,15 +20,17 @@ export interface DevicesSnapshot {
   list: DevicesList | null;
   /** The stored choice, as the host has it. */
   stored: string | null;
-  /** The computer whose chats show: the stored choice, or this PC when that one is gone. */
+  /** The computer whose chats show: the stored choice, this PC when that one is gone, or `all`. */
   selected: string | null;
-  /** The selected computer when it is not this one. */
+  /** The selected computer when it is not this one (and not "every computer"). */
   remote: DeviceInfo | null;
+  /** True when the choice is every computer on the hub, this one included. */
+  allDevices: boolean;
   /** This computer's uid, read once, so a chat that runs elsewhere is known even while the list is missing. */
   selfUid: string | null;
 }
 
-const EMPTY: DevicesSnapshot = { loaded: false, list: null, stored: null, selected: null, remote: null, selfUid: null };
+const EMPTY: DevicesSnapshot = { loaded: false, list: null, stored: null, selected: null, remote: null, allDevices: false, selfUid: null };
 
 export interface DevicesDeps {
   api: Api;
@@ -63,7 +65,7 @@ export class DevicesStore {
   private set(patch: { loaded?: boolean; list?: DevicesList | null; stored?: string | null; selfUid?: string | null }): void {
     const next = { ...this.snap, ...patch };
     const selected = resolveSelected(next.stored, next.list);
-    this.snap = { ...next, selected, remote: remoteDevice(next.list, selected) };
+    this.snap = { ...next, selected, remote: remoteDevice(next.list, selected), allDevices: selected === ALL_DEVICES };
     for (const l of [...this.listeners]) l();
   }
 
@@ -140,18 +142,24 @@ export const REMOTE_PAGE = 200;
 export interface RemoteListSnapshot {
   rows: SidebarRow[];
   projects: ProjectNode[];
+  /** Each shown chat and the computer it runs on, for a merged view that also holds local chats. */
+  hosts: ReadonlyMap<string, string>;
+  /** The full records behind the rows, for the chat menu (who a chat belongs to and is shared with). */
+  chats: ReadonlyMap<string, RemoteChatRecord>;
   more: boolean;
   loading: boolean;
   error: string | null;
 }
 
 export interface RemoteQuery {
+  /** One computer, or `all` for every computer this PC keeps a copy of. */
   deviceUid: string;
-  profileId: string;
+  /** The profile whose chats show; null asks for every person's. */
+  profileId: string | null;
   archived: boolean;
 }
 
-const BLANK: RemoteListSnapshot = { rows: [], projects: [], more: false, loading: false, error: null };
+const BLANK: RemoteListSnapshot = { rows: [], projects: [], hosts: new Map(), chats: new Map(), more: false, loading: false, error: null };
 
 /** The chats of one other computer for one profile, a page at a time. */
 export class RemoteList {
@@ -181,7 +189,11 @@ export class RemoteList {
 
   private publish(patch: Partial<RemoteListSnapshot>, rebuild = false): void {
     const built = rebuild ? remoteList([...this.chats.values()], [...this.projects.values()]) : null;
-    this.snap = { ...this.snap, ...patch, ...(built ?? {}) };
+    const hosts = rebuild
+      ? new Map([...this.chats].map(([id, c]) => [id, c.hostDeviceId ?? this.query?.deviceUid ?? '']))
+      : null;
+    const chats = rebuild ? new Map(this.chats) : null;
+    this.snap = { ...this.snap, ...patch, ...(built ?? {}), ...(hosts ? { hosts } : {}), ...(chats ? { chats } : {}) };
     for (const l of [...this.listeners]) l();
   }
 

@@ -150,17 +150,83 @@ pub fn view(w: &Waiting, on: bool) -> Option<Value> {
     None
 }
 
+/// One profile's Remote-page settings: which profile, and where its switch is kept.
+struct RemoteChannel {
+    profile_id: String,
+    /// The hub person this channel answers for; empty while no profile is linked to one.
+    person: String,
+    policy_path: std::path::PathBuf,
+}
+
+/// The profile the Remote page acts for: hub person `person` (`None`: the home profile, as on
+/// an older hub).
+fn channel(
+    profile_dir: &std::path::Path,
+    db: &helm_core::db::Database,
+    person: Option<&str>,
+) -> Result<RemoteChannel, ToolFailure> {
+    crate::people::migrate(profile_dir, db);
+    let p = crate::people::profile_for(db, person).map_err(refused)?;
+    Ok(RemoteChannel {
+        policy_path: crate::people::telegram_paths(profile_dir, &p.id).policy,
+        profile_id: p.id,
+        person: p.hub_person_id.unwrap_or_default(),
+    })
+}
+
+/// Whether the profile that owns `chat_id` lets the Remote page answer its prompts. A chat with
+/// no owner on this PC (or one that cannot be read) follows the calling person's own switch.
+pub(crate) fn owner_switch(
+    profile_dir: &std::path::Path,
+    db: &helm_core::db::Database,
+    chat_id: &str,
+    fallback: &std::path::Path,
+) -> bool {
+    let owner: Option<String> = db
+        .snapshot(|tx| {
+            use rusqlite::OptionalExtension;
+            tx.query_row(
+                "SELECT NULLIF(profile_id, '') FROM chats WHERE id = ?1",
+                [chat_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()
+        })
+        .ok()
+        .flatten()
+        .flatten();
+    let path = match owner {
+        Some(id) => crate::people::telegram_paths(profile_dir, &id).policy,
+        None => fallback.to_path_buf(),
+    };
+    telegram::load_remote_answers(&path)
+}
+
 /// `app_list_waiting`: the prompts that wait, in the attention summary's order. The summary has
 /// no cap on chats that wait on the user, so neither has this list (only [`MAX_LISTED`] prompts).
-pub fn list_waiting(w: &Wiring) -> Result<Value, ToolFailure> {
+/// The page acts for hub person `person` (`None`: the home profile, as on an older hub); it sees
+/// the chats of that profile, or all of them when the page asked with `all`.
+pub fn list_waiting(w: &Wiring, person: Option<&str>, all: bool) -> Result<Value, ToolFailure> {
     let rt = w
         .services
         .get::<ChatRuntime>()
         .ok_or_else(|| refused("Helm's chats are not available."))?;
-    let on = w
-        .services
-        .get::<Profile>()
-        .is_some_and(|p| telegram::load_remote_answers(&telegram::policy_path(&p.dir)));
+    let (profile, db) = match (
+        w.services.get::<Profile>(),
+        w.services.get::<helm_core::db::Database>(),
+    ) {
+        (Some(p), Some(db)) => (p, db),
+        _ => return Err(refused("Helm is still starting.")),
+    };
+    let ch = channel(&profile.dir, &db, person)?;
+    let on = telegram::load_remote_answers(&ch.policy_path);
+    let visible: Option<std::collections::HashSet<String>> = (!all)
+        .then(|| {
+            db.snapshot(|tx| helm_profiles::store::chat_ids_for(tx, &ch.profile_id))
+                .ok()
+                .map(|v| v.into_iter().collect())
+        })
+        .flatten();
     let summary = rt
         .attention()
         .map_err(|_| refused("What waits could not be read."))?;
@@ -172,6 +238,9 @@ pub fn list_waiting(w: &Wiring) -> Result<Value, ToolFailure> {
         ) {
             continue;
         }
+        if visible.as_ref().is_some_and(|v| !v.contains(&r.chat_id)) {
+            continue;
+        }
         let Some(t) = rt.live_thread(&r.chat_id) else {
             continue;
         };
@@ -179,9 +248,12 @@ pub fn list_waiting(w: &Wiring) -> Result<Value, ToolFailure> {
             let w = Waiting {
                 chat_id: r.chat_id.clone(),
                 chat_title: r.title.clone(),
+                person: ch.person.clone(),
                 interaction,
             };
-            if let Some(v) = view(&w, on) {
+            // Whether a prompt may be answered from the page is its chat owner's switch.
+            let open = owner_switch(&profile.dir, &db, &r.chat_id, &ch.policy_path);
+            if let Some(v) = view(&w, open) {
                 waiting.push(v);
                 if waiting.len() >= MAX_LISTED {
                     break 'rows;
@@ -228,6 +300,7 @@ pub fn plan(
     let w = Waiting {
         chat_id: chat_id.to_owned(),
         chat_title: title.to_owned(),
+        person: String::new(),
         interaction: i.clone(),
     };
     if let Some(o) = approve::offer(&w) {
@@ -306,16 +379,26 @@ pub fn plan(
     })
 }
 
-/// `app_answer_waiting`, after the gate has checked the argument shapes.
-pub async fn answer(w: &Wiring, answered: &Answered, args: &Value) -> Result<Value, ToolFailure> {
-    let profile = w
-        .services
-        .get::<Profile>()
-        .ok_or_else(|| refused("Helm's profile is not available."))?;
-    if !telegram::load_remote_answers(&telegram::policy_path(&profile.dir)) {
+/// `app_answer_waiting`, after the gate has checked the argument shapes. It acts for the same
+/// person the listing was for: their profile's switch decides whether answering is open.
+pub async fn answer(
+    w: &Wiring,
+    answered: &Answered,
+    args: &Value,
+    person: Option<&str>,
+) -> Result<Value, ToolFailure> {
+    let (profile, db) = match (
+        w.services.get::<Profile>(),
+        w.services.get::<helm_core::db::Database>(),
+    ) {
+        (Some(p), Some(db)) => (p, db),
+        _ => return Err(refused("Helm is still starting.")),
+    };
+    let ch = channel(&profile.dir, &db, person)?;
+    let chat = args["chatId"].as_str().unwrap_or("");
+    if !owner_switch(&profile.dir, &db, chat, &ch.policy_path) {
         return Err(refused(SWITCH_OFF));
     }
-    let chat = args["chatId"].as_str().unwrap_or("");
     let request = args["requestId"].as_str().unwrap_or("");
     let index = args["index"].as_u64().map(|n| n as usize);
     let label = args["label"].as_str();
@@ -351,7 +434,7 @@ pub async fn answer(w: &Wiring, answered: &Answered, args: &Value) -> Result<Val
             "That request was answered a moment ago, so nothing more was sent.",
         ));
     }
-    let c = match sink.ctx() {
+    let c = match sink.ctx(person) {
         Ok(c) => c,
         Err(e) => {
             answered.release(chat, request);
@@ -419,6 +502,7 @@ mod tests {
         Waiting {
             chat_id: "c1".into(),
             chat_title: "Docs".into(),
+            person: String::new(),
             interaction: i,
         }
     }

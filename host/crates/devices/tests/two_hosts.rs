@@ -11,11 +11,15 @@ use helm_chats::types::{
 use helm_core::db::{Database, MigrationRegistry};
 use helm_devices::host::HostPort;
 use helm_devices::link::{DeviceLink, MemLink, MemRouter, Rpc};
-use helm_devices::mirror::{self, Mirror, PeopleSync};
+use helm_devices::mirror::{self, ChatView, Mirror, MirrorSlot, PeopleSync, WhoFilter};
 use helm_devices::testing::{fake_interaction, fake_record, fake_row, FakePort};
-use helm_devices::wire::{code, DeviceFrame, Frame, Push};
+use helm_devices::wire::{code, DeviceFrame, DevicePerson, Frame, Push};
 use helm_devices::{ChatPort, Service};
-use helm_ipc::{Dispatcher, OpCtx, OpIntercept, OpRegistry, RecordingSink, Services};
+use helm_ipc::{
+    ApiError, AppEvent, Dispatcher, OpClass, OpCtx, OpIntercept, OpRegistry, RecordingSink,
+    Services,
+};
+use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -66,6 +70,7 @@ impl Watcher {
             uid: uid.to_owned(),
             name: self.name.clone(),
             run: true,
+            people: Vec::new(),
         }));
     }
 
@@ -131,6 +136,9 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
     assert_eq!(hello["device"]["name"], "Desk");
     assert_eq!(hello["people"][0]["personId"], "person-a");
     assert_eq!(hello["projects"][0]["path"], "/work");
+    // The hello also names this device's profiles, so another window can offer "Move to profile".
+    assert_eq!(hello["profiles"][0]["profileId"], "profile-local");
+    assert_eq!(hello["profiles"][0]["personId"], "person-a");
 
     // What the hub and the host refuse, in one table.
     let big = "x".repeat(2 * 1024 * 1024);
@@ -142,7 +150,7 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
             "dev-a",
             "consent_decide",
             json!({"id": "x"}),
-            code::REFUSED,
+            code::BAD_ARGS,
         ),
         (
             &b,
@@ -179,13 +187,6 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
             "rename",
             json!({"chatId": "c1", "title": big}),
             code::TOO_LARGE,
-        ),
-        (
-            &b,
-            "dev-a",
-            "create",
-            json!({"personId": "nobody", "projectId": "proj-1"}),
-            code::UNKNOWN_PERSON,
         ),
     ];
     for (w, to, op, args, want) in refused {
@@ -365,14 +366,36 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
             .unwrap(),
         json!({"chatId": "new-1"})
     );
+    // A chat made from afar belongs to the acting person: the hub's verified person replaces
+    // whatever name the request carried.
+    assert_eq!(
+        b.rpc
+            .call(
+                "dev-a",
+                "create",
+                json!({"personId": "nobody", "projectId": "proj-1"})
+            )
+            .await
+            .unwrap(),
+        json!({"chatId": "new-2"})
+    );
+    assert_eq!(
+        port.st()
+            .created
+            .iter()
+            .map(|c| c.person_id.as_str())
+            .collect::<Vec<_>>(),
+        ["person-a", "person-a"]
+    );
     b.rpc
         .call("dev-a", "stop", json!({"chatId": "c1"}))
         .await
         .unwrap();
     assert_eq!(port.st().stopped, ["c1".to_owned()]);
 
-    // Answers: a question, a plan and a tool permission may be answered from afar, with the
-    // words the request shows; a trust prompt, a secret, a doctored label or a second answer may not.
+    // Answers: every waiting request may be answered from afar — a question, a plan, a tool
+    // permission, a trust prompt, a secret input — with the words the request shows; a doctored
+    // label or a second answer may not.
     let secret: Interaction = Interaction {
         secret: Some(true),
         ..fake_interaction("c1", "secret", Meth::Input, Some(Att::Question), None)
@@ -438,13 +461,13 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
             )),
             "trust",
             json!({"confirmed": true, "label": "Allow"}),
-            Some(code::REFUSED),
+            None,
         ),
         (
             Some(secret),
             "secret",
-            json!({"value": "x", "label": "Token"}),
-            Some(code::REFUSED),
+            json!({"value": "hunter2", "label": "Token"}),
+            None,
         ),
         (
             Some(fake_interaction(
@@ -503,7 +526,291 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         .iter()
         .map(|a| a.request_id.clone())
         .collect();
-    assert_eq!(answered, ["perm", "plan", "pick"]);
+    assert_eq!(answered, ["perm", "plan", "trust", "secret", "pick"]);
+
+    // The run switch gates the waiting requests too: with it off a question cannot be
+    // answered from another PC, and putting it back lets the answer through.
+    port.put_interaction(fake_interaction(
+        "c1",
+        "off",
+        Meth::Select,
+        Some(Att::Question),
+        Some(&["A", "B"]),
+    ));
+    port.set_run(false);
+    let e = b
+        .rpc
+        .call(
+            "dev-a",
+            "answer",
+            json!({"chatId": "c1", "requestId": "off", "value": "A", "label": "A"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, code::NOT_ALLOWED);
+    port.set_run(true);
+    b.rpc
+        .call(
+            "dev-a",
+            "answer",
+            json!({"chatId": "c1", "requestId": "off", "value": "A", "label": "A"}),
+        )
+        .await
+        .unwrap();
+
+    // The chat menu's actions ride the same wire: each is answered, and the chat takes it once.
+    let menu: Vec<(&str, Value, Value)> = vec![
+        (
+            "fork",
+            json!({"chatId": "c1", "forkId": "f-1"}),
+            json!({"id": "c1-copy", "revision": 9}),
+        ),
+        ("compact", json!({"chatId": "c1"}), json!(null)),
+        (
+            "roll_over",
+            json!({"chatId": "c1", "model": "opus", "effort": "high"}),
+            json!({"started": true}),
+        ),
+        (
+            "cost",
+            json!({"chatId": "c1"}),
+            json!({"chatId": "c1", "totalTokens": 1234}),
+        ),
+        (
+            "export_markdown",
+            json!({"chatId": "c1"}),
+            json!({"messages": 3, "path": "c1.md"}),
+        ),
+        (
+            "organize",
+            json!({"chatId": "c1", "pinned": true, "parentChatId": null, "toEnd": true}),
+            json!([{ "chatId": "c1", "groupProjectId": "proj-1", "position": 3, "pinned": true, "parentChatId": null }]),
+        ),
+        ("mark_unread", json!({"chatId": "c1"}), json!({})),
+        ("mute", json!({"chatId": "c1", "muted": true}), json!({})),
+        (
+            "move_profile",
+            json!({"chatId": "c1", "profileId": "profile-p"}),
+            json!({}),
+        ),
+    ];
+    for (op, args, want) in &menu {
+        assert_eq!(
+            &b.rpc.call("dev-a", op, args.clone()).await.unwrap(),
+            want,
+            "{op}"
+        );
+    }
+    {
+        let st = port.st();
+        assert_eq!(st.forked, [("c1".to_owned(), "f-1".to_owned())]);
+        assert_eq!(st.compacted, ["c1"]);
+        assert_eq!(st.rolled_over.len(), 1);
+        assert_eq!(st.rolled_over[0].effort.as_deref(), Some("high"));
+        assert_eq!(st.cost_for, ["c1"]);
+        assert_eq!(st.exported, ["c1"]);
+        assert_eq!(st.organized.len(), 1);
+        // An explicit null parent crosses as such: the chat moves to top level.
+        assert_eq!(st.organized[0].parent_chat_id, Some(None));
+        assert_eq!(st.organized[0].pinned, Some(true));
+        assert_eq!(st.unread_marked, ["c1"]);
+        assert_eq!(st.muted.len(), 1);
+        assert!(st.muted[0].muted);
+        assert_eq!(st.profiles_moved.len(), 1);
+    }
+    // The run switch gates the menu actions like it gates a send — but cost is a read, so it
+    // answers with the switch off too.
+    port.set_run(false);
+    for (op, args, _) in &menu {
+        let got = b.rpc.call("dev-a", op, args.clone()).await;
+        if *op == "cost" {
+            assert!(got.is_ok(), "{op} is a read");
+        } else {
+            assert_eq!(got.unwrap_err().code, code::NOT_ALLOWED, "{op}");
+        }
+    }
+    port.set_run(true);
+    // The `sidebar` news of a move, pin or reorder reaches watchers as a fresh copy of the chat,
+    // which is the only news such a change sends.
+    let heard = b.heard("chats").len();
+    host.observe(&AppEvent::new("sidebar").with("chatIds", json!(["c1"])));
+    until(|| b.heard("chats").len() == heard + 1).await;
+    assert_eq!(b.heard("chats")[heard].event["chat"]["id"], "c1");
+
+    // What the composer and the chat view ask of a chat that runs on another PC: the permission
+    // pick, the reply length, the side-panel eye, the @ mentions, warming, stopping one running
+    // tool, withdrawing and recovering a queued message, the checkpoint read, the flags and item
+    // links beside the chat, and the new-chat defaults of the PC that runs it. Each is answered
+    // there, and the recorder says which function ran.
+    let view: Vec<(&str, Value)> = vec![
+        ("set_permission", json!({"chatId": "c1", "mode": "plan"})),
+        ("verbosity_get", json!({"chatId": "c1"})),
+        ("verbosity_set", json!({"chatId": "c1", "level": "high"})),
+        ("context_on", json!({"chatId": "c1"})),
+        (
+            "quick_open",
+            json!({"chatId": "c1", "query": "main", "reload": true}),
+        ),
+        // The side panel around the chat, and the task board of the PC that runs it.
+        ("chat_folder", json!({"chatId": "c1"})),
+        (
+            "file_view",
+            json!({"chatId": "c1", "path": "/work/src/main.rs"}),
+        ),
+        (
+            "file_stat",
+            json!({"chatId": "c1", "paths": ["/work/a.rs", "/work/gone.rs"]}),
+        ),
+        (
+            "archive_list",
+            json!({"chatId": "c1", "path": "/work/x.zip"}),
+        ),
+        (
+            "path_resolve",
+            json!({"chatId": "c1", "path": "src/main.rs"}),
+        ),
+        ("changes", json!({"chatId": "c1"})),
+        (
+            "diff",
+            json!({"chatId": "c1", "path": "a.rs", "side": "unstaged"}),
+        ),
+        ("stage", json!({"chatId": "c1", "path": "a.rs"})),
+        ("unstage", json!({"chatId": "c1", "path": "a.rs"})),
+        ("board_connection", json!({"chatId": "c1"})),
+        (
+            "board_read",
+            json!({"chatId": "c1", "action": "projects", "requestId": "tr-1", "timeoutMs": 5000}),
+        ),
+        ("board_cancel", json!({"chatId": "c1", "requestId": "tr-1"})),
+        ("warm", json!({"chatId": "c1"})),
+        ("tool_stop", json!({"chatId": "c1", "toolCallId": "t-1"})),
+        (
+            "submission",
+            json!({"chatId": "c1", "submissionId": "s-1", "action": "withdraw"}),
+        ),
+        ("checkpoint", json!({"chatId": "c1", "messageId": 2})),
+        ("attention", json!({"chatIds": ["c1"]})),
+        ("item_links", json!({"chatIds": ["c1"]})),
+        ("snooze", json!({"chatId": "c1", "until": 123})),
+        ("address", json!({"chatId": "c1"})),
+        ("defaults_get", json!({"chatId": "c1"})),
+        (
+            "defaults_set",
+            json!({"chatId": "c1", "model": "opus", "responseVerbosity": "high"}),
+        ),
+    ];
+    for (op, args) in &view {
+        assert!(b.rpc.call("dev-a", op, args.clone()).await.is_ok(), "{op}");
+    }
+    {
+        let st = port.st();
+        assert_eq!(st.permission_set[0].mode, "plan");
+        assert_eq!(st.verbosity_set[0].level.as_deref(), Some("high"));
+        assert_eq!(st.context_asked, ["c1"]);
+        assert_eq!(st.quick_opened[0].query, "main");
+        assert!(st.quick_opened[0].reload);
+        assert_eq!(st.folders_asked, ["c1"]);
+        assert_eq!(
+            st.panel_reads.iter().map(|(op, _)| *op).collect::<Vec<_>>(),
+            [
+                "file_read",
+                "file_stat",
+                "archive_list",
+                "path_resolve",
+                "changes",
+                "diff"
+            ]
+        );
+        // The stage pair arrives with the path and which way it went; a `from` rides along when given.
+        assert_eq!(st.stages.len(), 2);
+        assert!(st.stages[0].1 && !st.stages[1].1);
+        assert_eq!(st.stages[0].0.path, "a.rs");
+        assert_eq!(st.boards_connection_for, ["c1"]);
+        assert_eq!(st.boards_read[0].params["action"], "projects");
+        // The chat the call named does not stay inside the board parameters.
+        assert!(st.boards_read[0].params.get("chatId").is_none());
+        assert_eq!(st.boards_cancelled[0].request_id, "tr-1");
+        assert_eq!(st.warmed, ["c1"]);
+        assert_eq!(st.tool_stopped[0].tool_call_id, "t-1");
+        assert_eq!(st.submissions[0].action, "withdraw");
+        assert_eq!(st.checkpoint_for[0].message_id, 2);
+        assert_eq!(st.item_links_for[0], ["c1".to_owned()]);
+        assert_eq!(st.snoozed[0].until, Some(123));
+        assert_eq!(st.addressed, ["c1"]);
+        assert_eq!(st.defaults_saved.as_ref().unwrap()["model"], "opus");
+    }
+    // A queued action other than withdraw or recover is refused at the wire.
+    let e = b
+        .rpc
+        .call(
+            "dev-a",
+            "submission",
+            json!({"chatId": "c1", "submissionId": "s-3", "action": "delete"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, code::BAD_ARGS);
+    // Reads answer with the run switch off; every write — including each of the new ones — does
+    // not. The switch covers every op that runs or changes a chat from another PC.
+    port.set_run(false);
+    for (op, args) in [
+        ("verbosity_get", json!({"chatId": "c1"})),
+        ("context_on", json!({"chatId": "c1"})),
+        ("checkpoint", json!({"chatId": "c1", "messageId": 2})),
+        ("attention", json!({"chatIds": ["c1"]})),
+        ("item_links", json!({"chatIds": ["c1"]})),
+        ("defaults_get", json!({"chatId": "c1"})),
+        // The folder's name and the board answer with the switch off too.
+        ("chat_folder", json!({"chatId": "c1"})),
+        ("board_connection", json!({"chatId": "c1"})),
+        (
+            "board_read",
+            json!({"chatId": "c1", "action": "ready", "requestId": "tr-2", "timeoutMs": 5000}),
+        ),
+        ("board_cancel", json!({"chatId": "c1", "requestId": "tr-2"})),
+    ] {
+        assert!(
+            b.rpc.call("dev-a", op, args).await.is_ok(),
+            "{op} is a read"
+        );
+    }
+    for (op, args) in [
+        ("set_permission", json!({"chatId": "c1", "mode": "plan"})),
+        // It reads this PC's disk, so it needs the switch even though it changes nothing.
+        ("quick_open", json!({"chatId": "c1", "query": "x"})),
+        // So does every read of the project folder's files and changes.
+        ("file_view", json!({"chatId": "c1", "path": "/work/a.rs"})),
+        (
+            "file_stat",
+            json!({"chatId": "c1", "paths": ["/work/a.rs"]}),
+        ),
+        (
+            "archive_list",
+            json!({"chatId": "c1", "path": "/work/x.zip"}),
+        ),
+        ("path_resolve", json!({"chatId": "c1", "path": "a.rs"})),
+        ("changes", json!({"chatId": "c1"})),
+        (
+            "diff",
+            json!({"chatId": "c1", "path": "a.rs", "side": "head"}),
+        ),
+        ("verbosity_set", json!({"chatId": "c1", "level": "low"})),
+        ("warm", json!({"chatId": "c1"})),
+        ("tool_stop", json!({"chatId": "c1", "toolCallId": "t-2"})),
+        (
+            "submission",
+            json!({"chatId": "c1", "submissionId": "s-2", "action": "recover"}),
+        ),
+        ("snooze", json!({"chatId": "c1", "until": 9})),
+        ("address", json!({"chatId": "c1"})),
+        ("defaults_set", json!({"chatId": "c1", "model": "sonnet"})),
+        ("stage", json!({"chatId": "c1", "path": "a.rs"})),
+        ("unstage", json!({"chatId": "c1", "path": "a.rs"})),
+    ] {
+        let e = b.rpc.call("dev-a", op, args).await.unwrap_err();
+        assert_eq!(e.code, code::NOT_ALLOWED, "{op}");
+    }
+    port.set_run(true);
 
     // A device that drops off the hub loses its subscriptions, and asks again when it is back.
     assert!(host.watchers().contains(&"dev-b".to_owned()));
@@ -528,6 +835,140 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
     assert!(host.watchers().contains(&"dev-b".to_owned()));
 }
 
+#[tokio::test(start_paused = true)]
+async fn allow_cards_show_on_every_pc_and_the_first_answer_wins() {
+    let router = MemRouter::new();
+    let port = Arc::new(FakePort::new("dev-a", "Desk"));
+    port.add_chat("c1", "First", 10);
+    let link_a = router.connect("dev-a", Some("person-a"), Some("Alex"), true);
+    let host = Service::new(port.clone(), link_a, tokio::runtime::Handle::current());
+    host.announce();
+    let laptop = Watcher::new(&router, "dev-b", "Laptop", true);
+    let tablet = Watcher::new(&router, "dev-c", "Tablet", true);
+    settle().await;
+
+    let card = |id: &str| {
+        json!({
+            "id": id, "kind": "test-step", "label": "Step",
+            "summary": format!("Do {id}"), "state": "pending", "grantMinutes": 30,
+        })
+    };
+    let decide =
+        |id: &str| json!({"chatId": "c1", "requestId": id, "decision": "deny", "note": "no"});
+    let cards_changed = || AppEvent::new("consent").with("chatId", "c1");
+
+    // A card already waiting on the chat is seen by every PC when it opens the chat.
+    port.put_consent("c1", card("r1"));
+    let sub = laptop
+        .rpc
+        .call("dev-a", "chat_sub", json!({"chatId": "c1", "since": 0}))
+        .await
+        .unwrap();
+    assert_eq!(sub["consent"].as_array().unwrap().len(), 1);
+    assert_eq!(sub["consent"][0]["id"], "r1");
+    tablet
+        .rpc
+        .call("dev-a", "chat_sub", json!({"chatId": "c1", "since": 0}))
+        .await
+        .unwrap();
+
+    // A new card reaches every PC holding the chat at once.
+    port.put_consent("c1", card("r2"));
+    host.observe(&cards_changed());
+    until(|| laptop.heard("chat:c1").len() == 1 && tablet.heard("chat:c1").len() == 1).await;
+    for w in [&laptop, &tablet] {
+        let push = &w.heard("chat:c1")[0];
+        assert_eq!(push.event["kind"], "consent");
+        assert_eq!(push.event["pending"].as_array().unwrap().len(), 2);
+    }
+
+    // Answered from one PC: the store on the PC that runs the chat takes the decision and names
+    // the device, and the card leaves the list everywhere.
+    laptop
+        .rpc
+        .call("dev-a", "consent_decide", decide("r2"))
+        .await
+        .unwrap();
+    assert_eq!(
+        port.st().consents,
+        [(
+            "c1".to_owned(),
+            "r2".to_owned(),
+            "deny".to_owned(),
+            "device:Laptop".to_owned()
+        )]
+    );
+    // The card states read from afar too: a tool row's chip on a copy asks for them so it
+    // can say Allowed or Refused as one does on a chat that runs here.
+    let states = laptop
+        .rpc
+        .call("dev-a", "consent_states", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    let seen: Vec<(String, String)> = states["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            (
+                s["id"].as_str().unwrap().to_owned(),
+                s["state"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("r1".to_owned(), "pending".to_owned()),
+            ("r2".to_owned(), "denied".to_owned())
+        ]
+    );
+
+    // A second answer to the same card is refused: the first one won.
+    let e = tablet
+        .rpc
+        .call("dev-a", "consent_decide", decide("r2"))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, "conflict");
+
+    // Answered on the host PC itself: the window's own click moves the same store, and the
+    // service's consent event closes the card on the other PCs.
+    port.st()
+        .consent
+        .get_mut("c1")
+        .unwrap()
+        .retain(|c| c["id"] != "r1");
+    host.observe(&cards_changed());
+    until(|| laptop.heard("chat:c1").len() == 2 && tablet.heard("chat:c1").len() == 2).await;
+    for w in [&laptop, &tablet] {
+        assert!(w.heard("chat:c1")[1].event["pending"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    // The only gate is the switch: with it off, a decision from another PC is refused; reads and
+    // pushes keep working, and putting it back lets the answer through.
+    port.put_consent("c1", card("r3"));
+    host.observe(&cards_changed());
+    until(|| laptop.heard("chat:c1").len() == 3 && tablet.heard("chat:c1").len() == 3).await;
+    port.set_run(false);
+    let e = tablet
+        .rpc
+        .call("dev-a", "consent_decide", decide("r3"))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, code::NOT_ALLOWED);
+    port.set_run(true);
+    tablet
+        .rpc
+        .call("dev-a", "consent_decide", decide("r3"))
+        .await
+        .unwrap();
+    assert_eq!(port.st().consents.len(), 2);
+}
+
 /// A device that only watches: its own database, its end of the hub, and the events it raises.
 struct Side {
     mirror: Mirror,
@@ -537,14 +978,25 @@ struct Side {
     _dir: tempfile::TempDir,
 }
 
-fn side(router: &MemRouter, uid: &str, name: &str, people: Option<Arc<PeopleSync>>) -> Side {
+fn side(
+    router: &MemRouter,
+    uid: &str,
+    name: &str,
+    people: Option<Arc<PeopleSync>>,
+    person: &str,
+    person_name: &str,
+    act_for: &[(&str, bool, bool)],
+) -> Side {
     let dir = tempfile::tempdir().unwrap();
     let mut reg = MigrationRegistry::new();
     helm_devices::register_migrations(&mut reg);
     let db = Arc::new(Database::open(&dir.path().join("watcher.sqlite3"), &reg).unwrap());
     db.write(|tx| tx.execute("UPDATE device_self SET uid = ?1", [uid]))
         .unwrap();
-    let link = router.connect(uid, Some("person-a"), Some("Alex"), true);
+    let link = router.connect(uid, Some(person), Some(person_name), true);
+    if !act_for.is_empty() {
+        link.set_people(act_for.iter().map(|(p, _, _)| (*p).to_owned()).collect());
+    }
     let sink = Arc::new(RecordingSink::default());
     let mirror = Mirror::new(
         db.clone(),
@@ -557,6 +1009,14 @@ fn side(router: &MemRouter, uid: &str, name: &str, people: Option<Arc<PeopleSync
         uid: uid.to_owned(),
         name: name.to_owned(),
         run: true,
+        people: act_for
+            .iter()
+            .map(|(p, telegram, voice)| DevicePerson {
+                person_id: (*p).to_owned(),
+                telegram: *telegram,
+                voice: *voice,
+            })
+            .collect(),
     }));
     Side {
         mirror,
@@ -584,6 +1044,29 @@ fn rows_of(s: &Side, chat: &str) -> Vec<(i64, String)> {
                 r["text"].as_str().unwrap().to_owned(),
             )
         })
+        .collect()
+}
+
+/// The ids of the requests waiting in this PC's copy of a chat's thread state.
+fn copied_interactions(s: &Side, chat: &str) -> Vec<String> {
+    let stored =
+        s.db.snapshot(|tx| {
+            tx.query_row(
+                "SELECT thread FROM mirror_chats WHERE chat_id = ?1",
+                [chat],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()
+        })
+        .unwrap()
+        .flatten();
+    stored
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|t| t.get("interactions").cloned())
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|i| i["id"].as_str().map(str::to_owned))
         .collect()
 }
 
@@ -628,7 +1111,15 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
             .extend(list.iter().map(|p| p.name.clone()));
         true
     }));
-    let b = side(&router, "dev-b", "Laptop", Some(hook));
+    let b = side(
+        &router,
+        "dev-b",
+        "Laptop",
+        Some(hook),
+        "person-a",
+        "Alex",
+        &[],
+    );
 
     // The list arrives by itself once the hub shows the device up; the hub's people become
     // profiles, and the device reads as live.
@@ -658,13 +1149,48 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
 
     // The ops the window uses, through the dispatcher, with the check that routes them.
     let mut services = Services::new();
+    services.insert(b.db.clone());
     let routes = Arc::new(RemoteSlot::default());
     routes.attach(Arc::new(b.mirror.clone()));
     services.insert(routes);
     services.insert(Arc::new(OpIntercept(Arc::new(Routes))));
+    let slot = Arc::new(MirrorSlot::default());
+    slot.attach(b.mirror.clone());
+    services.insert(slot);
     let mut ops = OpRegistry::new();
     helm_chats::register_ops(&mut ops);
     helm_devices::register_ops(&mut ops);
+    // `chat_organize` is registered by a crate this test does not link. The name must be
+    // known for the interceptor to answer it; the handler must never run for a copied chat.
+    ops.blocking("chat_organize", OpClass::Maintenance, |_, _| {
+        Err(ApiError::internal(
+            "the local organize handler ran for a copied chat",
+        ))
+    });
+    // Some rows below call ops registered by crates this test does not link. The names must
+    // be known for the interceptor to answer them; none may run locally for a copied chat.
+    for name in [
+        "chat_verbosity_get",
+        "chat_verbosity_set",
+        "panel_context_get",
+        "quick_open",
+        "chat_folder",
+        "file_read",
+        "dir_list",
+        "file_stat",
+        "archive_list",
+        "path_resolve",
+        "changes",
+        "diff",
+        "changes_stage",
+        "changes_unstage",
+    ] {
+        ops.blocking(name, OpClass::Blocking, move |_, _| {
+            Err(ApiError::internal(
+                "the local handler ran for a copied chat",
+            ))
+        });
+    }
     let api = Dispatcher::new(
         ops,
         OpCtx {
@@ -700,6 +1226,184 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
     assert_eq!(rows_of(&b, "c1")[1], (2, "world!".to_owned()));
     assert!(b.sink.kinds().iter().any(|k| k == "message"));
 
+    // Allow cards ride the copy: a changed card list is kept here, the window hears the same
+    // consent event it would for a chat that runs here, and this PC can answer the card over
+    // the wire.
+    port.put_consent(
+        "c1",
+        json!({"id": "r1", "kind": "test-step", "state": "pending", "grantMinutes": 30}),
+    );
+    host.observe(&AppEvent::new("consent").with("chatId", "c1"));
+    until(|| b.sink.kinds().iter().any(|k| k == "consent")).await;
+    let cards = api
+        .call_host("devices_consent_list", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    assert_eq!(cards["pending"].as_array().unwrap().len(), 1);
+    // A copy made from an older device holds no card list (null); the window still gets a list.
+    b.db.write(|tx| {
+        tx.execute(
+            "UPDATE mirror_chats SET consent = 'null' WHERE chat_id = 'c1'",
+            [],
+        )
+    })
+    .unwrap();
+    let old = api
+        .call_host("devices_consent_list", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    assert_eq!(old["pending"], json!([]));
+    api.call_host(
+        "devices_consent_decide",
+        json!({"chatId": "c1", "requestId": "r1", "decision": "allow", "grantMinutes": 15}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        port.st().consents,
+        [(
+            "c1".to_owned(),
+            "r1".to_owned(),
+            "allow".to_owned(),
+            "device:Laptop".to_owned()
+        )]
+    );
+    // The state read travels to the copy's window as well: its tool chip says Allowed.
+    let states = api
+        .call_host("devices_consent_state", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    let r1 = states["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "r1")
+        .unwrap();
+    assert_eq!(r1["state"], "allowed");
+
+    // The host's answer closes the card on this PC too, on the same event.
+    host.observe(&AppEvent::new("consent").with("chatId", "c1"));
+    until(|| b.sink.kinds().iter().filter(|k| *k == "consent").count() >= 2).await;
+    let cards = api
+        .call_host("devices_consent_list", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    assert!(cards["pending"].as_array().unwrap().is_empty());
+
+    // Every kind of request a chat raises and waits on reaches the copy and can be answered
+    // from this PC: a tool permission, a question, a plan approval, a trust prompt and a
+    // secret input. Each answer reaches the chat on the PC that runs it, and the thread
+    // event it raises there closes the card back here.
+    let kinds: Vec<(&str, Interaction, Value)> = vec![
+        (
+            "a tool permission",
+            fake_interaction("c1", "k-perm", Meth::Confirm, Some(Att::Approval), None),
+            json!({"confirmed": true}),
+        ),
+        (
+            "a question",
+            fake_interaction(
+                "c1",
+                "k-ask",
+                Meth::Select,
+                Some(Att::Question),
+                Some(&["A", "B"]),
+            ),
+            json!({"value": "A"}),
+        ),
+        (
+            "a plan approval",
+            fake_interaction(
+                "c1",
+                "k-plan",
+                Meth::Select,
+                Some(Att::Plan),
+                Some(&["Approve plan", "Keep planning"]),
+            ),
+            json!({"value": "Approve plan", "confirmed": true}),
+        ),
+        (
+            "a trust prompt",
+            fake_interaction("c1", "k-trust", Meth::Confirm, Some(Att::Trust), None),
+            json!({"confirmed": true}),
+        ),
+        (
+            "a secret input",
+            Interaction {
+                secret: Some(true),
+                ..fake_interaction("c1", "k-secret", Meth::Input, Some(Att::Question), None)
+            },
+            json!({"value": "hunter2"}),
+        ),
+    ];
+    for (what, waiting, extra) in kinds {
+        port.put_interaction(waiting.clone());
+        host.observe(
+            &AppEvent::new("thread")
+                .with("chatId", "c1")
+                .with("thread", json!({ "interactions": [waiting.clone()] })),
+        );
+        until(|| copied_interactions(&b, "c1") == vec![waiting.id.clone()]).await;
+        let mut args = json!({"chatId": "c1", "requestId": waiting.id});
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let got = api.call_host("interaction_answer", args).await;
+        assert!(got.is_ok(), "{what}: {got:?}");
+        host.observe(
+            &AppEvent::new("thread")
+                .with("chatId", "c1")
+                .with("thread", json!({ "interactions": [] })),
+        );
+        until(|| copied_interactions(&b, "c1").is_empty()).await;
+    }
+    let answered_from_copy: Vec<_> = port
+        .st()
+        .answered
+        .iter()
+        .map(|a| a.request_id.clone())
+        .collect();
+    assert_eq!(
+        answered_from_copy,
+        ["k-perm", "k-ask", "k-plan", "k-trust", "k-secret"]
+    );
+
+    // The waiting-card count lives in the copy too, so the sidebar's needs-you mark can count
+    // it: a question waiting on the far PC puts a count and a mark on the copy's record, and
+    // closing the card clears both.
+    let copy_state = || {
+        b.db.snapshot(|tx| {
+            tx.query_row(
+                "SELECT record FROM mirror_chats WHERE chat_id = 'c1'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+        })
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .map(|v| (v["waitingCards"].as_i64(), v["needsAttention"].as_bool()))
+    };
+    let waiting = fake_interaction(
+        "c1",
+        "wait-1",
+        Meth::Select,
+        Some(Att::Question),
+        Some(&["A", "B"]),
+    );
+    port.put_interaction(waiting.clone());
+    host.observe(
+        &AppEvent::new("thread")
+            .with("chatId", "c1")
+            .with("thread", json!({ "interactions": [waiting] })),
+    );
+    until(|| copy_state() == Some((Some(1), Some(true)))).await;
+    host.observe(
+        &AppEvent::new("thread")
+            .with("chatId", "c1")
+            .with("thread", json!({ "interactions": [] })),
+    );
+    until(|| copy_state() == Some((Some(0), Some(false)))).await;
+
     // Every chat op on a copied chat: answered from the copy, sent to the device, answered
     // quietly, or refused with the sentence that says where to do it.
     let elsewhere = "This chat runs on Desk. Do that there.";
@@ -717,7 +1421,178 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
             json!({"harness": "claude", "deviceUid": "dev-a"}),
             Ok(json!({"models": []})),
         ),
-        ("chat_fork", json!({"chatId": "c1"}), Err(elsewhere)),
+        (
+            "chat_fork",
+            json!({"chatId": "c1", "forkId": "f-1"}),
+            Ok(json!(null)),
+        ),
+        ("chat_compact", json!({"chatId": "c1"}), Ok(json!(null))),
+        (
+            "chat_roll_over",
+            json!({"chatId": "c1", "model": "sonnet"}),
+            Ok(json!(null)),
+        ),
+        (
+            "chat_mute",
+            json!({"chatId": "c1", "muted": true}),
+            Ok(json!(null)),
+        ),
+        ("unread_mark", json!({"chatId": "c1"}), Ok(json!(null))),
+        (
+            "chat_organize",
+            json!({"chatId": "c1", "pinned": true, "parentChatId": null}),
+            Ok(json!([])),
+        ),
+        // The composer and chat view: each travels to the PC that runs the chat.
+        (
+            "chat_set_permission_mode",
+            json!({"chatId": "c1", "mode": "plan"}),
+            Ok(json!(null)),
+        ),
+        (
+            "chat_verbosity_get",
+            json!({"chatId": "c1"}),
+            Ok(json!({"level": "low", "own": false, "default": "low"})),
+        ),
+        (
+            "chat_verbosity_set",
+            json!({"chatId": "c1", "level": "high"}),
+            Ok(json!({"level": "high", "own": true, "default": "low"})),
+        ),
+        (
+            "panel_context_get",
+            json!({"chatId": "c1"}),
+            Ok(json!({"on": false})),
+        ),
+        (
+            "quick_open",
+            json!({"chatId": "c1", "query": "main"}),
+            Ok(json!({"mode": "files", "items": [{ "path": "src/main.ts" }], "partial": false})),
+        ),
+        // The side panel around a copied chat, and the task board of the PC that runs it:
+        // each is answered there, and the answer has the shape the panel and the Tasks view
+        // expect. Staging answers with the Changes view, not the chat record.
+        (
+            "chat_folder",
+            json!({"chatId": "c1"}),
+            Ok(json!({ "path": "/work" })),
+        ),
+        (
+            "file_read",
+            json!({"chatId": "c1", "path": "/work/src/main.ts"}),
+            Ok(
+                json!({"path": "/work/src/main.ts", "kind": "text", "size": 5, "text": "one\n", "truncated": false}),
+            ),
+        ),
+        (
+            "dir_list",
+            json!({"chatId": "c1", "path": "/work/src"}),
+            Ok(
+                json!({"path": "/work/src", "kind": "text", "size": 5, "text": "one\n", "truncated": false}),
+            ),
+        ),
+        (
+            "file_stat",
+            json!({"chatId": "c1", "paths": ["/work/src/main.ts", "/work/gone.ts"]}),
+            Ok(json!([null, null])),
+        ),
+        (
+            "archive_list",
+            json!({"chatId": "c1", "path": "/work/x.zip"}),
+            Ok(json!({"op": "archive_list", "args": {"chatId": "c1", "path": "/work/x.zip"}})),
+        ),
+        (
+            "path_resolve",
+            json!({"chatId": "c1", "path": "src/main.ts"}),
+            Ok(json!({"op": "path_resolve", "args": {"chatId": "c1", "path": "src/main.ts"}})),
+        ),
+        (
+            "changes",
+            json!({"chatId": "c1"}),
+            Ok(json!({"repoTop": "/work", "branch": "main", "records": [], "truncated": false})),
+        ),
+        (
+            "diff",
+            json!({"chatId": "c1", "path": "a.ts", "side": "unstaged"}),
+            Ok(json!({"patch": "", "fullContext": false, "truncated": false})),
+        ),
+        (
+            "changes_stage",
+            json!({"chatId": "c1", "path": "a.ts"}),
+            Ok(
+                json!({"changes": {"repoTop": "/work", "branch": "main", "records": [], "truncated": false}, "noop": false}),
+            ),
+        ),
+        (
+            "changes_unstage",
+            json!({"chatId": "c1", "path": "a.ts", "from": "head"}),
+            Ok(
+                json!({"changes": {"repoTop": "/work", "branch": "main", "records": [], "truncated": false}, "noop": false}),
+            ),
+        ),
+        (
+            "devices_board_connection",
+            json!({"chatId": "c1"}),
+            Ok(json!({"url": "https://board.example", "hasToken": true})),
+        ),
+        (
+            "devices_board_read",
+            json!({"chatId": "c1", "action": "projects", "requestId": "tr-1", "timeoutMs": 5000}),
+            Ok(
+                json!({"action": "projects", "data": {"projects": [{"id": "p1", "title": "Work"}], "complete": true}}),
+            ),
+        ),
+        (
+            "devices_board_cancel",
+            json!({"chatId": "c1", "requestId": "tr-1"}),
+            Ok(json!({"cancelled": true})),
+        ),
+        (
+            "tool_stop",
+            json!({"chatId": "c1", "toolCallId": "t-9"}),
+            Ok(json!({"stopped": true})),
+        ),
+        (
+            "checkpoint_info",
+            json!({"chatId": "c1", "messageId": 2}),
+            Ok(
+                json!({"chatId": "c1", "text": "back to here", "userMessages": 1, "files": [], "filesRestored": false}),
+            ),
+        ),
+        (
+            "attention_snooze",
+            json!({"chatId": "c1", "until": 50}),
+            Ok(json!(null)),
+        ),
+        (
+            "attention_address",
+            json!({"chatId": "c1"}),
+            Ok(json!(null)),
+        ),
+        (
+            "devices_submission_action",
+            json!({"chatId": "c1", "submissionId": "s-1", "action": "withdraw"}),
+            Ok(json!(null)),
+        ),
+        (
+            "devices_composer_defaults",
+            json!({"chatId": "c1", "patch": {"model": "opus", "responseVerbosity": "high"}}),
+            Ok(json!({"model": "opus", "effort": "high", "responseVerbosity": "high"})),
+        ),
+        (
+            "devices_item_links",
+            json!({"chatIds": ["c1"]}),
+            Ok(
+                json!({"links": [{ "chatId": "c1", "itemId": "item-7", "title": "Task seven", "main": true }], "unreachable": []}),
+            ),
+        ),
+        (
+            "devices_attention",
+            json!({"chatIds": ["c1"]}),
+            Ok(
+                json!({"needsYou": [], "flagged": [{ "chatId": "c1", "kind": "idle", "reason": "quiet but unfinished" }], "unreachable": []}),
+            ),
+        ),
         ("chat_delete", json!({"chatId": "c1"}), Err(elsewhere)),
         ("message_edit_open", json!({"chatId": "c1"}), Err(elsewhere)),
         (
@@ -730,7 +1605,11 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         let got = api.call_host(op, args).await;
         match want {
             Ok(v) if v.is_null() => assert!(got.is_ok(), "{op}: {got:?}"),
-            Ok(v) => assert_eq!(got.unwrap(), v, "{op}"),
+            Ok(v) => assert_eq!(
+                got.clone().unwrap_or_else(|e| panic!("{op}: {e}")),
+                v,
+                "{op}"
+            ),
             Err(m) => assert_eq!(got.unwrap_err().message, m, "{op}"),
         }
     }
@@ -740,6 +1619,86 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         .await
         .unwrap_err();
     assert!(!own.message.contains("runs on"), "{own:?}");
+    // The menu ops reached the device once each, and the copy shows the change at once.
+    {
+        let st = port.st();
+        assert_eq!(st.forked, [("c1".to_owned(), "f-1".to_owned())]);
+        assert_eq!(st.compacted, ["c1"]);
+        assert_eq!(st.rolled_over.len(), 1);
+        assert_eq!(st.rolled_over[0].model.as_deref(), Some("sonnet"));
+        assert_eq!(st.unread_marked, ["c1"]);
+        assert!(st.muted.iter().all(|m| m.muted) && st.muted.len() == 1);
+        assert_eq!(st.organized.len(), 1);
+        assert_eq!(st.organized[0].parent_chat_id, Some(None));
+        assert_eq!(st.permission_set[0].mode, "plan");
+        assert_eq!(st.verbosity_set[0].level.as_deref(), Some("high"));
+        assert_eq!(st.context_asked, ["c1"]);
+        assert_eq!(st.quick_opened[0].query, "main");
+        // Warming now travels too: a chat typed into from afar warms the model on its own PC.
+        assert_eq!(st.warmed, ["c1"]);
+        assert_eq!(st.tool_stopped[0].tool_call_id, "t-9");
+        assert_eq!(st.checkpoint_for[0].message_id, 2);
+        assert_eq!(st.submissions[0].action, "withdraw");
+        assert_eq!(st.defaults_saved.as_ref().unwrap()["model"], "opus");
+        assert_eq!(st.item_links_for[0], ["c1".to_owned()]);
+        assert_eq!(st.snoozed[0].until, Some(50));
+        assert_eq!(st.addressed, ["c1"]);
+        // The panel reads all arrived as the panel's own ops; `dir_list` is answered by the
+        // file-view read, as it is here. Staging came through as the stage pair, and the
+        // board reads named the chat outside the board's own parameters, not inside them.
+        assert_eq!(st.folders_asked, ["c1"]);
+        assert_eq!(
+            st.panel_reads.iter().map(|(op, _)| *op).collect::<Vec<_>>(),
+            [
+                "file_read",
+                "file_read",
+                "file_stat",
+                "archive_list",
+                "path_resolve",
+                "changes",
+                "diff"
+            ]
+        );
+        assert_eq!(st.stages.len(), 2);
+        assert!(st.stages[0].1 && !st.stages[1].1);
+        assert_eq!(st.stages[1].0.from.as_deref(), Some("head"));
+        assert_eq!(st.boards_connection_for, ["c1"]);
+        assert_eq!(st.boards_read[0].chat_id, "c1");
+        assert!(st.boards_read[0].params.get("chatId").is_none());
+        assert_eq!(st.boards_cancelled[0].request_id, "tr-1");
+    }
+    // A fork answers with the new chat's record, and the copy holds it at once, so the control
+    // that opens it finds it.
+    let forked = api
+        .call_host("chat_fork", json!({"chatId": "c1", "forkId": "f-2"}))
+        .await
+        .unwrap();
+    assert_eq!(forked["id"], "c1-copy");
+    assert!(b
+        .db
+        .snapshot(|tx| tx.query_row(
+            "SELECT 1 FROM mirror_chats WHERE chat_id = 'c1-copy'",
+            [],
+            |_| Ok(())
+        ))
+        .is_ok());
+    let rec =
+        b.db.snapshot(|tx| {
+            tx.query_row(
+                "SELECT record FROM mirror_chats WHERE chat_id = 'c1'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+        })
+        .unwrap();
+    let rec: Value = serde_json::from_str(&rec).unwrap();
+    assert_eq!(
+        (rec["muted"].as_bool(), rec["pinned"].as_bool()),
+        (Some(true), Some(true)),
+        "the copy shows the mute and the pin without waiting for a push"
+    );
+    assert_eq!(rec["position"], 3);
+    assert!(rec["parentChatId"].is_null());
 
     // A send reaches the device once, as the person's own words.
     let id = "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b5a";
@@ -750,6 +1709,114 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         port.st().sent,
         [("c1".to_owned(), id.to_owned(), "hi".to_owned())]
     );
+
+    // A picture and a file ride with a message: staged on this PC, they cross in ordered
+    // chunks and reach the chat on the PC that runs it just as a local attachment would.
+    let stage = b.db.path().parent().unwrap().join("mirror-attachments");
+    std::fs::create_dir_all(&stage).unwrap();
+    let img: Vec<u8> = (0..650_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(stage.join("att-img"), &img).unwrap();
+    std::fs::write(stage.join("att-text"), b"a long paste").unwrap();
+    let note = b.db.path().with_file_name("big-note.txt");
+    let note_bytes: Vec<u8> = (0..700_004u32).map(|i| b'a' + (i % 26) as u8).collect();
+    std::fs::write(&note, &note_bytes).unwrap();
+    b.db.write(|tx| {
+        tx.execute(
+            "INSERT INTO mirror_attachments(id, chat_id, kind, name, mime, target, bytes, created_at)
+             VALUES ('att-img', 'c1', 'image', 'shot.png', 'image/png', 'att-img', ?1, 1)",
+            [img.len() as i64],
+        )?;
+        tx.execute(
+            "INSERT INTO mirror_attachments(id, chat_id, kind, name, mime, target, bytes, created_at)
+             VALUES ('att-file', 'c1', 'file', 'big-note.txt', '', ?1, ?2, 2)",
+            rusqlite::params![note.to_str().unwrap(), note_bytes.len() as i64],
+        )?;
+        tx.execute(
+            "INSERT INTO mirror_attachments(id, chat_id, kind, name, mime, target, bytes, created_at)
+             VALUES ('att-text', 'c1', 'text', 'Pasted text.txt', 'text/plain', 'att-text', 12, 3)",
+            [],
+        )?;
+        Ok::<_, rusqlite::Error>(())
+    })
+    .unwrap();
+    let with_files = api
+        .call_host(
+            "chat_send",
+            json!({
+                "chatId": "c1",
+                "submissionId": "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b5b",
+                "text": "look",
+                "action": "default",
+                "draftRevision": 0,
+                "attachments": ["att-img", "att-file", "att-text"],
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(with_files["submission"]["state"], "accepted");
+    {
+        let st = port.st();
+        let files = st.sent_files.last().unwrap();
+        assert_eq!(files.len(), 3);
+        // A pasted text crosses as a plain-text file.
+        assert_eq!(
+            (files[2].kind.as_str(), files[2].mime.as_str()),
+            ("file", "text/plain")
+        );
+        assert_eq!(
+            (
+                files[0].kind.as_str(),
+                files[0].name.as_str(),
+                files[0].mime.as_str()
+            ),
+            ("image", "shot.png", "image/png")
+        );
+        assert_eq!(files[0].bytes, img);
+        assert_eq!(
+            (files[1].kind.as_str(), files[1].name.as_str()),
+            ("file", "big-note.txt")
+        );
+        assert_eq!(files[1].bytes, note_bytes);
+    }
+    // Spent by the send: the rows and the picture are gone from this PC.
+    assert_eq!(count(&b, "SELECT COUNT(*) FROM mirror_attachments"), 0);
+    assert!(!stage.join("att-img").exists());
+    // A chip taken out is taken back on this PC too: the row and the saved picture go.
+    std::fs::write(stage.join("att-gone"), b"x").unwrap();
+    b.db.write(|tx| {
+        tx.execute(
+            "INSERT INTO mirror_attachments(id, chat_id, kind, name, mime, target, bytes, created_at)
+             VALUES ('att-gone', 'c1', 'image', 'x.png', 'image/png', 'att-gone', 1, 1)",
+            [],
+        )
+    })
+    .unwrap();
+    api.call_host(
+        "devices_discard",
+        json!({"chatId": "c1", "attachmentId": "att-gone"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(count(&b, "SELECT COUNT(*) FROM mirror_attachments"), 0);
+    assert!(!stage.join("att-gone").exists());
+    // An id that is no longer staged is refused in words, before any second copy moves.
+    let e = api
+        .call_host(
+            "chat_send",
+            json!({
+                "chatId": "c1",
+                "submissionId": "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b5c",
+                "text": "again",
+                "action": "default",
+                "draftRevision": 0,
+                "attachments": ["att-img"],
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, "refused");
+    assert_eq!(port.st().sent.len(), 2);
+
     // Its switch off: read-only, said in words, nothing sent.
     port.set_run(false);
     host.announce();
@@ -776,7 +1843,7 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         e.message.starts_with("Desk is offline (last seen "),
         "{e:?}"
     );
-    assert_eq!(port.st().sent.len(), 1);
+    assert_eq!(port.st().sent.len(), 2);
     let page = api
         .call_host("transcript_page", json!({"chatId": "c1"}))
         .await
@@ -800,7 +1867,7 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         .await
         .unwrap();
     assert_eq!(got["chat"]["draft"], "note");
-    assert_eq!(port.st().sent.len(), 1);
+    assert_eq!(port.st().sent.len(), 2);
     // This PC's own line down reads differently.
     b.mirror.line_down();
     b.link.set_up(false);
@@ -813,6 +1880,7 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         uid: "dev-b".into(),
         name: "Laptop".into(),
         run: true,
+        people: Vec::new(),
     }));
 
     // The device returns: the copy catches up from the revision it holds, without repeats.
@@ -885,7 +1953,11 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
             "CREATE TABLE profiles (id TEXT PRIMARY KEY, hub_person_id TEXT, name TEXT, colour TEXT, about TEXT);
              INSERT INTO profiles VALUES ('p-a', 'person-a', 'Alex', 'red', '');
              INSERT INTO projects (id, kind, name, path, color, created_at)
-             VALUES ('proj-1', 'folder', 'Work', '/work', 'blue', 0);",
+             VALUES ('proj-1', 'folder', 'Work', '/work', 'blue', 0),
+                    ('brd-1', 'board', 'Task board', NULL, '#ff0000', 0);
+             -- chat_groups belongs to the projects crate; stand in just enough of it.
+             CREATE TABLE chat_groups (chat_id TEXT PRIMARY KEY, project_id TEXT NOT NULL);
+             INSERT INTO chat_groups VALUES ('boarded', 'brd-1');",
         )
     })
     .unwrap();
@@ -899,6 +1971,10 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
     ));
     let mut ops = OpRegistry::new();
     helm_chats::register_ops(&mut ops);
+    helm_panel::register_ops(&mut ops);
+    ops.blocking("board_connection_get", OpClass::Blocking, |_, _| {
+        Ok(json!({ "url": "http://127.0.0.1:9/secret-board", "hasToken": true }))
+    });
     let api = Dispatcher::new(
         ops,
         OpCtx {
@@ -907,11 +1983,157 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
         },
         false,
     );
-    let hello = HostPort::new(Arc::new(api)).hello().await.unwrap();
+    let port = HostPort::new(Arc::new(api));
+    let hello = port.hello().await.unwrap();
     assert!(!hello.device.uid.is_empty());
     assert_eq!(hello.people[0].person_id, "person-a");
-    assert_eq!(hello.projects[0].path, "/work");
+    let folder = hello
+        .projects
+        .iter()
+        .find(|p| p.kind == "folder")
+        .expect("the hello carries folders");
+    assert_eq!(
+        (folder.name.as_str(), folder.path.as_str()),
+        ("Work", "/work")
+    );
+    // Boards travel in the hello too, with an empty path and their own colour.
+    let board = hello
+        .projects
+        .iter()
+        .find(|p| p.kind == "board")
+        .expect("the hello carries boards");
+    assert_eq!(
+        (board.id.as_str(), board.name.as_str()),
+        ("brd-1", "Task board")
+    );
+    assert_eq!(
+        (board.colour.as_str(), board.path.as_str()),
+        ("#ff0000", "")
+    );
     assert_eq!(hello.catalogue.expect("a catalogue")["harness"], "claude");
+
+    // A chat shown under a board travels with that board; a chat with no board keeps its
+    // folder alone.
+    let shown = port
+        .remote_chat(fake_record("boarded", "Boarded", 3))
+        .to_value();
+    assert_eq!(shown["boardId"], "brd-1");
+    assert_eq!(shown["boardName"], "Task board");
+    assert_eq!(shown["boardColour"], "#ff0000");
+    assert_eq!(shown["projectName"], "Work");
+    let plain = port
+        .remote_chat(fake_record("c-plain", "Plain", 3))
+        .to_value();
+    assert_eq!(plain["projectName"], "Work");
+    assert!(plain.get("boardId").is_none(), "{plain}");
+
+    // The side panel around a chat that runs here, read from another PC: the files of a real
+    // folder on disk, through the real panel ops. Everything stays inside the chat's project
+    // folder; anything past it is refused in words, however the path is written.
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(work.join("src")).unwrap();
+    std::fs::write(work.join("src/main.ts"), "one\n").unwrap();
+    let away = dir.path().join("away");
+    std::fs::create_dir_all(&away).unwrap();
+    std::fs::write(away.join("secret.txt"), "not yours").unwrap();
+    db.write(|tx| {
+        tx.execute(
+            "INSERT INTO projects (id, kind, name, path, color, created_at)
+             VALUES ('proj-w', 'folder', 'Repo', ?1, 'green', 0)",
+            [work.to_string_lossy().to_string()],
+        )?;
+        tx.execute(
+            "INSERT INTO chats (id, project_id, created_at, updated_at) VALUES ('panel-1', 'proj-w', 0, 0)",
+            [],
+        )?;
+        Ok::<_, rusqlite::Error>(())
+    })
+    .unwrap();
+    let inside = work.join("src/main.ts").to_string_lossy().into_owned();
+    let out = away.join("secret.txt").to_string_lossy().into_owned();
+    let view = |op: &'static str, args: serde_json::Value| {
+        port.panel_read(helm_devices::serve::PanelRead { local_op: op, args })
+    };
+    let got = view("file_read", json!({ "chatId": "panel-1", "path": inside }))
+        .await
+        .unwrap();
+    assert_eq!(
+        (got["kind"].as_str(), got["text"].as_str()),
+        (Some("text"), Some("one\n"))
+    );
+    let e = view(
+        "file_read",
+        json!({ "chatId": "panel-1", "path": out.clone() }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        (e.code.as_str(), e.message.as_str()),
+        ("refused", "That path is outside the chat's project folder.")
+    );
+    // The way out written into an inside path is refused the same way, and so is a change stamp
+    // for a file outside the folder.
+    let sneaky = format!(
+        "{}{}..{}away{}secret.txt",
+        work.to_string_lossy(),
+        std::path::MAIN_SEPARATOR,
+        std::path::MAIN_SEPARATOR,
+        std::path::MAIN_SEPARATOR
+    );
+    let e = view("file_read", json!({ "chatId": "panel-1", "path": sneaky }))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, "refused");
+    let e = view(
+        "file_stat",
+        json!({ "chatId": "panel-1", "paths": [out.clone()] }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, "refused");
+    let workp = work.to_string_lossy().into_owned();
+    assert_eq!(
+        port.chat_folder("panel-1".to_owned()).await.unwrap()["path"]
+            .as_str()
+            .unwrap(),
+        workp
+    );
+    // The board connection of this PC answers without its address: the watcher learns only
+    // that a board is set up. (The board ops belong to a crate this test does not link, so
+    // `board_connection_get` is stood in for — the address it hands back must not cross.)
+    let conn = port.board_connection("panel-1".to_owned()).await.unwrap();
+    assert_eq!(
+        (conn["url"].as_str(), conn["hasToken"].as_bool()),
+        (Some("board"), Some(true))
+    );
+    assert!(!conn.to_string().contains("9/secret-board"), "{conn}");
+    // Quick Open: a watcher's search never names a file outside the chat's project folder.
+    let q = port
+        .quick_open(helm_devices::wire::QuickOpenArgs {
+            chat_id: "panel-1".to_owned(),
+            query: "main".to_owned(),
+            reload: false,
+        })
+        .await
+        .unwrap();
+    assert!(q["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|it| !it["path"].as_str().unwrap_or_default().contains("away")));
+    // A path-shaped mention answers nothing from afar: only the fuzzy search under the chat's
+    // folder does.
+    for query in ["C:\\", "~/", "../..", "./x", "/etc/", "a/b"] {
+        let q = port
+            .quick_open(helm_devices::wire::QuickOpenArgs {
+                chat_id: "panel-1".to_owned(),
+                query: query.to_owned(),
+                reload: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(q["items"].as_array().unwrap().len(), 0, "{query}");
+    }
 
     // The catalogue op failing (here: no profile folder for it to read) is logged, not fatal:
     // the hello still answers, with no catalogue.
@@ -933,7 +2155,7 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_household_member_sees_and_runs_only_their_own_and_shared_chats() {
+async fn a_household_member_gets_their_own_view_of_the_list_but_is_refused_nothing() {
     let router = MemRouter::new();
     let port = Arc::new(FakePort::new("dev-a", "Desk"));
     port.st().people.push("person-b".to_owned());
@@ -1015,19 +2237,17 @@ async fn a_household_member_sees_and_runs_only_their_own_and_shared_chats() {
         json!({"chatId": chat, "clientId": format!("7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b{n:02x}"),
                "text": "hi", "mode": "steer"})
     };
+    // Nothing is refused for being someone else's chat: the person marks who acts, not what
+    // they may touch.
     let cases: Vec<(&str, Value, Option<&str>)> = vec![
         ("chat_sub", json!({"chatId": "hers", "since": 0}), None),
         ("chat_sub", json!({"chatId": "shared", "since": 0}), None),
-        (
-            "chat_sub",
-            json!({"chatId": "mine", "since": 0}),
-            Some(code::NOT_FOUND),
-        ),
-        ("page", json!({"chatId": "mine"}), Some(code::NOT_FOUND)),
+        ("chat_sub", json!({"chatId": "mine", "since": 0}), None),
+        ("page", json!({"chatId": "mine"}), None),
         ("send", send("hers", 1), None),
         ("send", send("shared", 2), None),
-        ("send", send("mine", 3), Some(code::NOT_FOUND)),
-        ("stop", json!({"chatId": "mine"}), Some(code::NOT_FOUND)),
+        ("send", send("mine", 3), None),
+        ("stop", json!({"chatId": "mine"}), None),
         (
             "answer",
             json!({"chatId": "hers", "requestId": "q1", "value": "A", "label": "A"}),
@@ -1036,9 +2256,9 @@ async fn a_household_member_sees_and_runs_only_their_own_and_shared_chats() {
         (
             "answer",
             json!({"chatId": "shared", "requestId": "q2", "value": "A", "label": "A"}),
-            Some(code::REFUSED),
+            None,
         ),
-        ("consent_decide", json!({"id": "x"}), Some(code::REFUSED)),
+        ("consent_decide", json!({"id": "x"}), Some(code::BAD_ARGS)),
         (
             "create",
             json!({"personId": "person-a", "projectId": "proj-1"}),
@@ -1054,18 +2274,96 @@ async fn a_household_member_sees_and_runs_only_their_own_and_shared_chats() {
     }
     {
         let st = port.st();
-        // Her words on her own chat are hers; on a shared chat they arrive marked as hers.
-        assert_eq!(st.sent_from, [None, Some("Sam".to_owned())]);
+        // Her words on her own chat are hers; on anyone's chat they arrive marked as hers.
+        assert_eq!(
+            st.sent_from,
+            [None, Some("Sam".to_owned()), Some("Sam".to_owned())]
+        );
         assert_eq!(
             st.answered
                 .iter()
                 .map(|a| a.request_id.as_str())
                 .collect::<Vec<_>>(),
-            ["q1"]
+            ["q1", "q2"]
         );
         // A chat she starts is hers, whoever she names.
         assert_eq!(st.created[0].person_id, "person-b");
     }
+    // She cannot hand a chat that is neither hers nor shared with her to a profile or share it
+    // (that would make it read as hers), nor change this PC's new-chat defaults.
+    port.add_chat_of("his", "Pat's", 16, "person-a", &[]);
+    for (op, args, ok) in [
+        (
+            "move_profile",
+            json!({"chatId": "his", "profileId": "p"}),
+            false,
+        ),
+        (
+            "share",
+            json!({"chatId": "his", "personId": "person-b", "shared": true}),
+            false,
+        ),
+        (
+            "move_profile",
+            json!({"chatId": "hers", "profileId": "p"}),
+            true,
+        ),
+        // A chat merely shared with her: she can leave it, not move it or change its sharing.
+        (
+            "share",
+            json!({"chatId": "shared", "personId": "person-b", "shared": false}),
+            true,
+        ),
+        (
+            "share",
+            json!({"chatId": "shared", "personId": "person-a", "shared": false}),
+            false,
+        ),
+        (
+            "move_profile",
+            json!({"chatId": "shared", "profileId": "p"}),
+            false,
+        ),
+        (
+            "defaults_set",
+            json!({"chatId": "hers", "model": "opus"}),
+            false,
+        ),
+    ] {
+        let got = sam.rpc.call("dev-a", op, args).await;
+        match ok {
+            true => assert!(got.is_ok(), "{op}: {got:?}"),
+            false => assert_eq!(got.unwrap_err().code, code::NOT_ALLOWED, "{op}"),
+        }
+    }
+    assert_eq!(port.st().profiles_moved.len(), 1);
+
+    // A card for a change Helm applies itself (settings, pairing, the update folder) can only
+    // be approved by this PC's own person; a plain card is answerable by anyone with the chat.
+    for (id, applying) in [("ap1", true), ("ap2", true), ("pl1", false)] {
+        port.put_consent(
+            "hers",
+            json!({"id": id, "kind": "k", "label": "L", "summary": "s", "state": "pending",
+                   "grantMinutes": 30, "applying": applying}),
+        );
+    }
+    let decide = |id: &str| json!({"chatId": "hers", "requestId": id, "decision": "allow"});
+    let e = sam
+        .rpc
+        .call("dev-a", "consent_decide", decide("ap1"))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, code::NOT_ALLOWED);
+    assert!(own
+        .rpc
+        .call("dev-a", "consent_decide", decide("ap2"))
+        .await
+        .is_ok());
+    assert!(sam
+        .rpc
+        .call("dev-a", "consent_decide", decide("pl1"))
+        .await
+        .is_ok());
 
     // With the household switch off she is refused, even reading; the owner's devices are not.
     port.set_household(false);
@@ -1073,10 +2371,72 @@ async fn a_household_member_sees_and_runs_only_their_own_and_shared_chats() {
     assert_eq!(e.code, code::NOT_ALLOWED);
     assert!(own.rpc.call("dev-a", "hello", json!({})).await.is_ok());
     port.set_household(true);
-    // Someone with no profile on this PC is refused.
+    // The switch for other devices gates a household member's run ops too: with it off, every op
+    // that runs or changes a chat is refused, card answers and uploads included; reads stay.
+    port.set_run(false);
+    for (op, args) in [
+        (
+            "consent_decide",
+            json!({"chatId": "hers", "requestId": "r", "decision": "allow"}),
+        ),
+        ("send", send("hers", 9)),
+        (
+            "attach_put",
+            json!({"chatId": "hers", "uploadId": "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b99", "seq": 0, "eof": true, "data": "", "kind": "file", "name": "a.txt", "mime": ""}),
+        ),
+        ("stop", json!({"chatId": "hers"})),
+    ] {
+        let e = sam.rpc.call("dev-a", op, args).await.unwrap_err();
+        assert_eq!(e.code, code::NOT_ALLOWED, "{op}");
+    }
+    assert!(sam.rpc.call("dev-a", "hello", json!({})).await.is_ok());
+    port.set_run(true);
+
+    // Uploads belong to the device that began them, and one device may hold only so much.
+    use base64::Engine as _;
+    let chunk = base64::engine::general_purpose::STANDARD.encode(vec![7u8; 640 * 1024]);
+    let part = |id: &str, seq: u32, eof: bool| {
+        json!({"chatId": "hers", "uploadId": id, "seq": seq, "eof": eof, "data": chunk,
+               "kind": "file", "name": "a.bin", "mime": ""})
+    };
+    let (u1, u2, u3) = (
+        "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b01",
+        "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b02",
+        "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b03",
+    );
+    sam.rpc
+        .call("dev-a", "attach_put", part(u1, 0, false))
+        .await
+        .unwrap();
+    let e = own
+        .rpc
+        .call("dev-a", "attach_put", part(u1, 1, false))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, code::REFUSED);
+    for id in [u1, u2] {
+        let start = if id == u1 { 1 } else { 0 };
+        for seq in start..40 {
+            sam.rpc
+                .call("dev-a", "attach_put", part(id, seq, seq == 39))
+                .await
+                .unwrap();
+        }
+    }
+    let e = sam
+        .rpc
+        .call("dev-a", "attach_put", part(u3, 0, true))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, code::REFUSED);
+    own.rpc
+        .call("dev-a", "attach_put", part(u3, 0, true))
+        .await
+        .unwrap();
+    // A person this PC has no profile for is still served: the switch is per household, not
+    // per person.
     port.st().people.retain(|p| p != "person-b");
-    let e = sam.rpc.call("dev-a", "hello", json!({})).await.unwrap_err();
-    assert_eq!(e.code, code::NOT_ALLOWED);
+    assert!(sam.rpc.call("dev-a", "hello", json!({})).await.is_ok());
 
     // A PC paired with no person answers no one.
     let lone = Arc::new(FakePort::new("dev-l", "Lone"));
@@ -1088,4 +2448,288 @@ async fn a_household_member_sees_and_runs_only_their_own_and_shared_chats() {
         let e = w.rpc.call("dev-l", "hello", json!({})).await.unwrap_err();
         assert_eq!(e.code, code::NOT_ALLOWED);
     }
+}
+
+/// One PC, both of its people: the copy on the other side holds every chat of the PC, not
+/// just the watcher's own person's; each chat op is run by the person the window is showing;
+/// a chat started from afar belongs to the acting person; words on someone else's chat are
+/// framed; and a PC that never announced a person cannot act for them.
+#[tokio::test(start_paused = true)]
+async fn one_pc_acts_as_each_of_its_profiles() {
+    let router = MemRouter::new();
+    let port = Arc::new(FakePort::new("dev-d", "Desk"));
+    port.st().people = vec!["person-p".to_owned(), "person-s".to_owned()];
+    port.announce_people(&[("person-p", true, true), ("person-s", false, false)]);
+    port.add_chat_of("own-p", "Pat's chat", 10, "person-p", &[]);
+    port.add_chat_of("own-s", "Sam's chat on the desk", 11, "person-s", &[]);
+    port.put_interaction(fake_interaction(
+        "own-s",
+        "q1",
+        Meth::Select,
+        Some(Att::Question),
+        Some(&["A", "B"]),
+    ));
+    let link_d = router.connect("dev-d", Some("person-p"), Some("Pat"), true);
+    let host = Service::new(port.clone(), link_d, tokio::runtime::Handle::current());
+    host.announce();
+
+    // The laptop's home person is Sam, and it also acts for Pat; it announced both.
+    let b = side(
+        &router,
+        "dev-l",
+        "Laptop",
+        None,
+        "person-s",
+        "Sam",
+        &[("person-s", true, true), ("person-p", false, false)],
+    );
+    b.db.write(|tx| {
+        tx.execute_batch(
+            "CREATE TABLE profiles (id TEXT PRIMARY KEY, hub_person_id TEXT, name TEXT,
+                        colour TEXT, about TEXT, is_home INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO profiles VALUES ('p-s', 'person-s', 'Sam', 'red', '', 1);
+             INSERT INTO profiles VALUES ('p-p', 'person-p', 'Pat', 'blue', '', 0);
+             CREATE TABLE IF NOT EXISTS preferences (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        )
+    })
+    .unwrap();
+    let rpc = Rpc::new(b.link.clone());
+    let sorted = |v: &[Value]| -> Vec<String> {
+        let mut ids: Vec<String> = v
+            .iter()
+            .map(|c| c["id"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        ids.sort();
+        ids
+    };
+
+    // The hello names the people the desk acts for, and the device list repeats them.
+    let hello = rpc.call("dev-d", "hello", json!({})).await.unwrap();
+    assert_eq!(
+        hello["people"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["personId"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["person-p", "person-s"]
+    );
+    let d = device_row(&b, "dev-d");
+    assert_eq!(
+        d["people"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["personId"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["person-p", "person-s"]
+    );
+
+    // The copy holds every chat of the desk: Pat's chat shares nothing with Sam, yet it
+    // arrives, because the read acts for everyone this PC covers — and that set includes
+    // the desk's own person, so the list comes unfiltered.
+    until(|| b.mirror.owner("own-p").is_some() && b.mirror.owner("own-s").is_some()).await;
+    let for_s =
+        b.db.snapshot(|tx| mirror::mirror_chat_list(tx, "dev-d", Some("p-s"), false))
+            .unwrap();
+    let for_p =
+        b.db.snapshot(|tx| mirror::mirror_chat_list(tx, "dev-d", Some("p-p"), false))
+            .unwrap();
+    let every =
+        b.db.snapshot(|tx| mirror::mirror_chat_list(tx, "dev-d", None, false))
+            .unwrap();
+    assert_eq!(sorted(&for_s), ["own-s"]);
+    assert_eq!(sorted(&for_p), ["own-p"]);
+    assert_eq!(sorted(&every), ["own-p", "own-s"]);
+    // A view widened on purpose shows what every profile's own view chooses to hide; the
+    // copy held it all along.
+    let wide = ChatView {
+        who: WhoFilter::Any,
+        device: Some("dev-d".to_owned()),
+    };
+    let wide_list =
+        b.db.snapshot(|tx| mirror::chats_for_view(tx, &wide, false))
+            .unwrap();
+    assert_eq!(sorted(&wide_list), ["own-p", "own-s"]);
+
+    // The ops the window uses, through the dispatcher, with the check that routes them.
+    let mut services = Services::new();
+    services.insert(b.db.clone());
+    let routes = Arc::new(RemoteSlot::default());
+    routes.attach(Arc::new(b.mirror.clone()));
+    services.insert(routes);
+    services.insert(Arc::new(OpIntercept(Arc::new(Routes))));
+    let slot = Arc::new(MirrorSlot::default());
+    slot.attach(b.mirror.clone());
+    services.insert(slot);
+    let mut ops = OpRegistry::new();
+    helm_chats::register_ops(&mut ops);
+    helm_devices::register_ops(&mut ops);
+    // `chat_organize` is registered by a crate this test does not link. The name must be
+    // known for the interceptor to answer it; the handler must never run for a copied chat.
+    ops.blocking("chat_organize", OpClass::Maintenance, |_, _| {
+        Err(ApiError::internal(
+            "the local organize handler ran for a copied chat",
+        ))
+    });
+    // Some rows below call ops registered by crates this test does not link. The names must
+    // be known for the interceptor to answer them; none may run locally for a copied chat.
+    for name in [
+        "chat_verbosity_get",
+        "chat_verbosity_set",
+        "panel_context_get",
+        "quick_open",
+        "chat_folder",
+        "file_read",
+        "dir_list",
+        "file_stat",
+        "archive_list",
+        "path_resolve",
+        "changes",
+        "diff",
+        "changes_stage",
+        "changes_unstage",
+    ] {
+        ops.blocking(name, OpClass::Blocking, move |_, _| {
+            Err(ApiError::internal(
+                "the local handler ran for a copied chat",
+            ))
+        });
+    }
+    let api = Dispatcher::new(
+        ops,
+        OpCtx {
+            services: Arc::new(services),
+            events: b.sink.clone(),
+        },
+        false,
+    );
+
+    // As Pat: a chat started from afar belongs to Pat, whoever the request named; and
+    // Pat's own words on Pat's chat arrive unframed.
+    b.db.write(|tx| helm_core::prefs::set_raw(tx, "activeProfile", &json!("p-p")))
+        .unwrap();
+    let got = rpc
+        .call_as(
+            "dev-d",
+            "create",
+            json!({"personId": "person-s", "projectId": "proj-1"}),
+            &["person-p".to_owned()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(got["chatId"], "new-1");
+    assert_eq!(port.st().created[0].person_id, "person-p");
+    let send = |id: &str| {
+        json!({"chatId": "own-p", "submissionId": id, "text": "hi",
+               "action": "steer", "draftRevision": 0})
+    };
+    api.call_host("chat_send", send("7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b01"))
+        .await
+        .unwrap();
+    // Switch the window to Sam: the same chat, now acted for by Sam — the same words
+    // arrive marked as Sam's, never as Pat's.
+    b.db.write(|tx| helm_core::prefs::set_raw(tx, "activeProfile", &json!("p-s")))
+        .unwrap();
+    api.call_host("chat_send", send("7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b02"))
+        .await
+        .unwrap();
+    assert_eq!(port.st().sent_from, [None, Some("Sam".to_owned())]);
+    // Back to Pat: Sam's waiting request, answered from the laptop as Pat.
+    b.db.write(|tx| helm_core::prefs::set_raw(tx, "activeProfile", &json!("p-p")))
+        .unwrap();
+    api.call_host("chat_get", json!({"chatId": "own-s"}))
+        .await
+        .unwrap();
+    until(|| {
+        b.db.snapshot(|tx| {
+            Ok::<_, rusqlite::Error>(
+                tx.query_row(
+                    "SELECT thread FROM mirror_chats WHERE chat_id = 'own-s'",
+                    [],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+                .flatten()
+                .is_some_and(|t| t.contains("\"q1\"")),
+            )
+        })
+        .unwrap()
+    })
+    .await;
+    api.call_host(
+        "interaction_answer",
+        json!({"chatId": "own-s", "requestId": "q1", "value": "A"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        port.st()
+            .answered
+            .iter()
+            .map(|a| a.request_id.as_str())
+            .collect::<Vec<_>>(),
+        ["q1"]
+    );
+
+    // A PC that never announced Pat cannot act for them: the hub turns the call away and
+    // nothing reaches the desk.
+    let x = Watcher::of(&router, "pc-x", "Gale", true, "person-x", "Gale");
+    let e = x
+        .rpc
+        .call_as("dev-d", "hello", json!({}), &["person-p".to_owned()])
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, code::NOT_ALLOWED);
+    assert_eq!(port.st().created.len(), 1);
+}
+
+/// A profile linked after the first sync widens the copy: the app's event tap, handed the
+/// mirror, asks the other PC again with the wider read set, and the chat of the new person
+/// arrives without the hub line dropping.
+#[tokio::test(start_paused = true)]
+async fn a_profile_linked_later_brings_its_chats_into_the_copy() {
+    let router = MemRouter::new();
+    let port = Arc::new(FakePort::new("dev-d", "Desk"));
+    port.st().people = vec!["person-p".to_owned(), "person-s".to_owned()];
+    port.add_chat_of("own-s", "Sam's chat", 10, "person-s", &[]);
+    port.add_chat_of("own-t", "Tia's chat", 11, "person-t", &[]);
+    let link_d = router.connect("dev-d", Some("person-p"), Some("Pat"), true);
+    let host = Service::new(port.clone(), link_d, tokio::runtime::Handle::current());
+    host.announce();
+    let b = side(
+        &router,
+        "dev-l",
+        "Laptop",
+        None,
+        "person-s",
+        "Sam",
+        &[("person-s", true, true)],
+    );
+    until(|| b.mirror.owner("own-s").is_some()).await;
+    assert!(b.mirror.owner("own-t").is_none());
+
+    // The laptop now announces Tia as well; the tap hears the profile change.
+    b.link
+        .set_people(vec!["person-s".to_owned(), "person-t".to_owned()]);
+    b.link.send(Frame::Device(DeviceFrame {
+        uid: "dev-l".to_owned(),
+        name: "Laptop".to_owned(),
+        run: true,
+        people: ["person-s", "person-t"]
+            .iter()
+            .map(|p| DevicePerson {
+                person_id: (*p).to_owned(),
+                telegram: false,
+                voice: false,
+            })
+            .collect(),
+    }));
+    settle().await;
+    let tap = helm_devices::EventTap::default();
+    tap.attach_mirror(b.mirror.clone());
+    tap.observe(&AppEvent::new("profiles_changed"));
+    until(|| b.mirror.owner("own-t").is_some()).await;
 }

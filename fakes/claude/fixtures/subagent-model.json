@@ -1,0 +1,9 @@
+{
+  "description": "An Agent call in a local chat: the sub-agent model guard's PreToolUse hook_callback for it, then the turn ends.",
+  "steps": [
+    { "await": { "type": "user" }, "as": "p" },
+    { "init": {} },
+    { "hook": { "toolUseId": "sa1", "tool": "Agent", "input": { "subagent_type": "coder", "model": "opus" }, "callback": "helm-subagent-model" }, "as": "hk" },
+    { "result": "done" }
+  ]
+}

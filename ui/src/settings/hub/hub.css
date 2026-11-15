@@ -41,3 +41,18 @@
 .hub-limit input {
   width: 64px;
 }
+
+.hub-offer {
+  margin: 4px 0 8px;
+  font-size: 12px;
+  color: var(--secondary);
+}
+
+.hub-offer-url {
+  display: block;
+  margin-top: 4px;
+  padding: 6px 8px;
+  font-size: 12px;
+  word-break: break-all;
+  user-select: all;
+}

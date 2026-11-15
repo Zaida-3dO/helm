@@ -64,6 +64,11 @@ function verbosityTitle(level: string | null): string {
   return VERBOSITY_OPTIONS.find((o) => o.value === level)?.title ?? '';
 }
 
+/** The reply length a picker shows when the device's saved default is all that is known. */
+function defaultsAsSettings(d: { model?: string | null; effort?: string; responseVerbosity?: string }): RuntimeSettings {
+  return { model: d.model ?? null, effort: d.effort ?? null, responseVerbosity: d.responseVerbosity ?? null } as RuntimeSettings;
+}
+
 /** The chat's model and effort picker. A chat can change its model at any time; where the host
  *  says the conversation will not fit the chosen model's window, the offer beside the error rolls
  *  the chat over into it. */
@@ -72,17 +77,20 @@ export function ModelPicker({ chat, ops, loading = false, deviceUid }: { chat: C
   const [verbosity, setVerbosity] = useState<{ level: string; own: boolean } | null>(null);
   const [saved, setSaved] = useState<RuntimeSettings | null>(null);
   useEffect(() => {
-    // The reply length and the saved default belong to the PC the chat runs on: not read for a chat on another device.
-    if (deviceUid) return;
+    // The reply length and the saved default belong to the PC the chat runs on. For a chat there
+    // the same `chat_verbosity_get` answers over the wire (intercepted read), and the saved
+    // default is read with `devices_composer_defaults`.
     let live = true;
     shell
       .api<{ level: string; own: boolean }>('chat_verbosity_get', { chatId: chat.id })
       .then((v) => live && setVerbosity(v))
       .catch(() => undefined);
-    shell
-      .api<RuntimeSettings>('runtime_settings_get', {})
-      .then((s) => live && setSaved(s))
-      .catch(() => undefined);
+    const readSaved = deviceUid
+      ? remoteChatOps(shell.api)
+          .composerDefaults(chat.id)
+          .then((d) => defaultsAsSettings(d))
+      : shell.api<RuntimeSettings>('runtime_settings_get', {});
+    readSaved.then((s) => live && setSaved(s)).catch(() => undefined);
     return () => {
       live = false;
     };
@@ -105,14 +113,20 @@ export function ModelPicker({ chat, ops, loading = false, deviceUid }: { chat: C
     makeDefault: chat.model
       ? {
           isDefault,
-          save: () =>
-            shell
-              .api<RuntimeSettings>('runtime_settings_save', {
-                model: chat.model,
-                ...(chat.effort ? { effort: chat.effort } : {}),
-                ...(verbosity ? { responseVerbosity: verbosity.level } : {}),
-              })
-              .then(setSaved),
+          // "Set as default for new chats" changes the default on the PC that runs the chat,
+          // not on this one.
+          save: () => {
+            const patch = {
+              ...(chat.model ? { model: chat.model } : {}),
+              ...(chat.effort ? { effort: chat.effort } : {}),
+              ...(verbosity ? { responseVerbosity: verbosity.level } : {}),
+            };
+            return deviceUid
+              ? remoteChatOps(shell.api)
+                  .composerDefaults(chat.id, patch)
+                  .then((d) => setSaved(defaultsAsSettings(d)))
+              : shell.api<RuntimeSettings>('runtime_settings_save', patch).then(setSaved);
+          },
         }
       : undefined,
   };
@@ -160,7 +174,8 @@ function ModelEffortPicker({
   settingsRow?: boolean;
   /** The app is still checking its runtimes: the chip says so, muted, instead of a model name. */
   loading?: boolean;
-  /** The chat runs on another device: its models, and nothing that belongs to this PC (reply length, the saved default, the local servers). */
+  /** The chat runs on another device: its models, reply length and saved default are read and set
+   * there, over the wire; the local servers and this PC's own default are left out. */
   deviceUid?: string;
 }) {
   const shell = useShell();
@@ -301,7 +316,7 @@ function ModelEffortPicker({
           const dir = e.key === 'ArrowRight' ? 1 : -1;
           if (e.altKey) {
             const next = stepEffort(LEVELS, source.verbosity ?? 'low', dir);
-            if (!deviceUid && next !== source.verbosity) setLength(next);
+            if (next !== source.verbosity) setLength(next);
           } else {
             setEffortDraft((x) => stepEffort(efforts, x || effort, dir));
           }
@@ -407,7 +422,6 @@ function ModelEffortPicker({
                 </span>
                 <span className="model-picker-effort-value">{stopLabel(effortDraft || effort)}</span>
               </div>
-              {!deviceUid && (
               <div className="model-picker-verbosity" data-testid="verbosity-picker">
                 <span className="model-picker-caption">Replies</span>
                 <Segmented<string>
@@ -431,9 +445,8 @@ function ModelEffortPicker({
                   </button>
                 )}
               </div>
-              )}
-              {!deviceUid && source.verbosityNote && <div className="model-picker-note">{source.verbosityNote}</div>}
-              {!deviceUid && source.makeDefault && (
+              {source.verbosityNote && <div className="model-picker-note">{source.verbosityNote}</div>}
+              {source.makeDefault && (
                 <div className="model-picker-default">
                   <button
                     type="button"

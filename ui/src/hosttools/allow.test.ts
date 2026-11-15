@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { inertLines, summaryParts } from './inert.ts';
 import { SETTLE_MS, SettleGate } from './settle.ts';
+import { consentOps } from '../api/consent.ts';
 
 const r = (y = 10) => ({ x: 10, y, width: 80, height: 28 });
 
@@ -56,4 +57,25 @@ test('a card shows its title, then each further line as its own row, so a field 
   );
   assert.deepEqual(summaryParts({ summary: 'One line', appliesOnAllow: false }), { title: 'One line', changes: [] });
   assert.deepEqual(summaryParts({ summary: '', appliesOnAllow: true }), { title: '', changes: [] });
+});
+
+test("a mirrored chat reads its cards from this PC's copy and decides over the wire", async () => {
+  const calls: Array<[string, unknown]> = [];
+  const api = ((op: string, args: unknown) => {
+    calls.push([op, args]);
+    return Promise.resolve({ pending: [] });
+  }) as never;
+  const local = consentOps(api);
+  await local.list('c1');
+  await local.decide({ requestId: 'r1', decision: 'allow', grantMinutes: 30, note: null });
+  const remote = consentOps(api, 'c9');
+  await remote.list('c9');
+  await remote.decide({ requestId: 'r2', decision: 'deny', grantMinutes: null, note: 'later' });
+  assert.deepEqual(calls[0], ['consent_list', { chatId: 'c1' }]);
+  assert.equal((calls[1]![1] as { requestId?: string }).requestId, 'r1');
+  assert.deepEqual(calls[2], ['devices_consent_list', { chatId: 'c9' }]);
+  assert.deepEqual(calls[3], [
+    'devices_consent_decide',
+    { requestId: 'r2', decision: 'deny', grantMinutes: null, note: 'later', chatId: 'c9' },
+  ]);
 });

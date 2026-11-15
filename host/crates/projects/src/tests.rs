@@ -967,6 +967,99 @@ fn dragging_a_chat_onto_a_group_writes_chat_groups_and_never_moves_where_it_runs
 }
 
 #[test]
+fn group_counts_follow_the_profile_the_sidebar_shows() {
+    let (_d, db) = temp_db();
+    let board = board_project(&db, "b-1", "Board one");
+    // A store with no profiles yet counts every chat (nothing to filter by).
+    let early = chat_in(&db, "C:/w/app", 0);
+    assert_eq!(node(&db, &board).chat_count, 0); // not on the board yet
+    db.write(|tx| {
+        helm_profiles::store::init(tx).unwrap();
+        helm_profiles::store::ensure_home(tx, 1).unwrap();
+        helm_profiles::store::create(tx, "Pat", None, None, 1).unwrap();
+        Ok::<(), rusqlite::Error>(())
+    })
+    .unwrap();
+    let pat = db
+        .snapshot(|tx| {
+            Ok::<_, rusqlite::Error>(
+                helm_profiles::store::list(tx)?
+                    .into_iter()
+                    .find(|p| !p.is_home)
+                    .map(|p| p.id),
+            )
+        })
+        .unwrap()
+        .unwrap();
+    let home = db
+        .snapshot(|tx| helm_profiles::store::home(tx))
+        .unwrap()
+        .unwrap()
+        .id;
+    let (owned_home, shared_out, shared_in, unowned) = (
+        chat_in(&db, "C:/w/app", 1),
+        chat_in(&db, "C:/w/app", 2),
+        chat_in(&db, "C:/w/app", 3),
+        chat_in(&db, "C:/w/app", 4),
+    );
+    for c in [&early, &owned_home, &shared_out, &shared_in, &unowned] {
+        organize(
+            &db,
+            ChatOrganizeArgs {
+                chat_id: c.clone(),
+                group_project_id: Some(board.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    // Pat owns shared_in (created for home, then moved), shares in shared_out (owned by home),
+    // and never sees owned_home or the unowned chat (unowned ones stay with home).
+    db.write(|tx| {
+        helm_profiles::store::assign(tx, std::slice::from_ref(&shared_in), &pat).unwrap();
+        helm_profiles::store::share(tx, std::slice::from_ref(&shared_out), &pat, true).unwrap();
+        tx.execute("UPDATE chats SET profile_id = '' WHERE id = ?1", [&unowned])
+            .unwrap();
+        Ok::<(), rusqlite::Error>(())
+    })
+    .unwrap();
+    let active = |id: Option<&str>| {
+        db.write(|tx| {
+            helm_profiles::store::set_active(tx, id).unwrap();
+            Ok::<(), rusqlite::Error>(())
+        })
+        .unwrap();
+    };
+    active(Some(&home));
+    assert_eq!(
+        node(&db, &board).chat_count,
+        4,
+        "home sees its own, its shared, and the unowned"
+    );
+    active(Some(&pat));
+    assert_eq!(
+        node(&db, &board).chat_count,
+        2,
+        "Pat sees only its own and what is shared with it"
+    );
+    active(None);
+    assert_eq!(
+        node(&db, &board).chat_count,
+        5,
+        "all profiles sees every chat"
+    );
+    // An archived chat leaves every count.
+    db.write(|tx| {
+        tx.execute("UPDATE chats SET archived = 1 WHERE id = ?1", [&shared_in])
+            .unwrap();
+        Ok::<(), rusqlite::Error>(())
+    })
+    .unwrap();
+    active(Some(&pat));
+    assert_eq!(node(&db, &board).chat_count, 1);
+}
+
+#[test]
 fn reorder_stays_within_the_group_and_pin_state() {
     let (_d, db) = temp_db();
     let a = chat_in(&db, "C:/w/app", 1);

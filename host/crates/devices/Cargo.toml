@@ -10,11 +10,16 @@ publish.workspace = true
 helm-core.workspace = true
 helm-ipc.workspace = true
 helm-chats.workspace = true
+helm-hosttools = { path = "../hosttools" }
+helm-consent = { path = "../consent" }
+helm-panel = { path = "../panel" }
+helm-platform.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true
 hex.workspace = true
 getrandom = "0.3"
+base64 = "0.22"
 log.workspace = true
 tokio.workspace = true
 uuid.workspace = true

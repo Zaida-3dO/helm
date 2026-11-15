@@ -3,6 +3,7 @@
 import { flushSync } from 'react-dom';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { ChatOps } from './api/ops.ts';
+import { remoteChatOps } from './api/devices.ts';
 import type { MessageRow } from './api/types.ts';
 import { HOME_SEND_BEHAVIOR } from './api/types.ts';
 import { FlagNote } from './attention/index.ts';
@@ -64,8 +65,10 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
 
   useEffect(() => store.watch(chatId), [store, chatId]);
   const shell = useShell();
-  // A chat on another device is read from this PC's copy; what only the host can do is left alone.
+  // A chat on another device is read from this PC's copy; what only the host can do travels
+  // there as a device-to-device call, answered by the same functions the local UI uses.
   const remote = useRemoteChat(shell.api, shell.bus, view.chat);
+  const devOps = useMemo(() => remoteChatOps(shell.api), [shell]);
   // Pictures on disk named in replies and tool cards come from the host.
   useEffect(() => setLocalImageLoader((path) => shell.api<{ mime: string; bytes: string }>('local_image_get', { path })), [shell]);
   // Transcript element toggles, read once and followed on change.
@@ -171,7 +174,15 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
   const latestAssistantId = useMemo(() => [...view.rows].reverse().find((r) => r.role === 'assistant')?.id ?? null, [view.rows]);
   const interactionOpen = (thread?.interactions.length ?? 0) > 0;
   const mentionRepo = useMentionRepo(shell.api, remote ? undefined : chat?.cwd);
-  const queue = useMemo(() => (view.hasNewer ? undefined : { pending: view.pending, thread, ops, readOnly: !!remote }), [view.hasNewer, view.pending, thread, ops, remote]);
+  const queue = useMemo(
+    () =>
+      view.hasNewer
+        ? undefined
+        : remote
+          ? { pending: view.pending, thread, ops, devOps, readOnly: !remote.state.live }
+          : { pending: view.pending, thread, ops, readOnly: false },
+    [view.hasNewer, view.pending, thread, ops, devOps, remote],
+  );
   const ctx: RowContext = useMemo(
     () => ({
       chatId,
@@ -198,7 +209,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       },
       onCancelEdit: () => setEditing(null),
       canStopTool: (row: MessageRow) =>
-        !remote && behavior.toolStop && Boolean(thread?.capabilities.stopTool) && Boolean(row.details?.stoppable) && row.status === 'streaming',
+        behavior.toolStop && Boolean(thread?.capabilities.stopTool) && Boolean(row.details?.stoppable) && row.status === 'streaming',
       onStopTool: stopTool,
       // Every link click goes through the panel's gate, which validates it before acting and
       // shows any refusal in the shell's toast slot itself.
@@ -395,9 +406,11 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
         busy={busy}
         onRollOver={() => setRollConfirm(rollOverConfirm(chat.title, () => rollOverChat(ops, chatId, (m) => setNotice(m))))}
       />
-      {!remote && accessoriesAt('consent').map((a) => (
+      {/* Allow cards show on every device that has the chat open, the host PC included; on a
+          mirrored chat the answer travels to the PC that runs it, and the first answer wins. */}
+      {accessoriesAt('consent').map((a) => (
         <div key={a.id} className="composer-accessory" data-accessory={a.id}>
-          {a.render({ chat, thread, busy, draftEmpty: !chat.draft })}
+          {a.render({ chat, thread, busy, draftEmpty: !chat.draft, remote: !!remote })}
         </div>
       ))}
       {accessoriesAt('dock').map((a) => (
@@ -405,12 +418,12 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
           {a.render({ chat, thread, busy, draftEmpty: !chat.draft })}
         </div>
       ))}
-      {!chat.sideSourceId && !remote && <FlagNote chatId={chatId} ops={ops} />}
+      {!chat.sideSourceId && <FlagNote chatId={chatId} ops={ops} devOps={remote ? devOps : undefined} />}
       {/* A transcript that is not at its newest page cannot end with them, so they stack here. */}
-      {view.hasNewer && <QueueList pending={view.pending} thread={thread} ops={ops} chatId={chatId} readOnly={!!remote} reason={waitReason(view.rows)} />}
+      {view.hasNewer && <QueueList pending={view.pending} thread={thread} ops={ops} chatId={chatId} readOnly={remote ? !remote.state.live : false} devOps={remote ? devOps : undefined} reason={waitReason(view.rows)} />}
       </div>
       {/* The activity line sits directly on the box, below the in-flight messages. */}
-      {thread && <ActivityDock chat={chat} thread={thread} turnStartedAt={turnStartedAt} onStopTool={remote ? undefined : stopTool} rows={view.hasNewer ? undefined : view.rows} runEndedAt={view.lastRunEndedAt} />}
+      {thread && <ActivityDock chat={chat} thread={thread} turnStartedAt={turnStartedAt} onStopTool={stopTool} rows={view.hasNewer ? undefined : view.rows} runEndedAt={view.lastRunEndedAt} />}
       <Composer
         recall={recallPrompts(view.rows)}
         autocomplete={autocompleteOn}

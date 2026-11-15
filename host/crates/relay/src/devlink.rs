@@ -10,17 +10,25 @@
 //! the household switches on every new line.
 
 use crate::client::{Client, DeviceSink, LineHandle, LineState};
+use crate::{telegram, voice};
 use helm_chats::ChatRuntime;
 use helm_devices::host::HostPort;
-use helm_devices::link::{DeviceLink, FrameCb};
-use helm_devices::wire::Frame;
+use helm_devices::link::{BoxFut, DeviceLink, FrameCb};
+use helm_devices::serve::{ChatPort, ChatState, PortResult, SentFile};
+use helm_devices::wire::{
+    AnswerArgs, ArchiveArgs, ConsentDecideArgs, CreateArgs, DeviceInfo, DevicePerson, ForkArgs,
+    Frame, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, RemoteChat, RenameArgs, RollOverArgs,
+    SetModelArgs, ShareArgs,
+};
 use helm_devices::{EventTap, Service};
 use serde_json::Value;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 type Hook = Arc<dyn Fn() + Send + Sync>;
 type Cb = Arc<dyn Fn(Frame) + Send + Sync>;
 type PersonFn = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+type PeopleFn = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
@@ -30,6 +38,9 @@ pub struct HubLink {
     line: Arc<LineHandle>,
     /// Reads the hub person this machine is paired as from the saved connection.
     read_person: PersonFn,
+    /// Reads the hub people of this install's linked profiles, the home profile's first: who
+    /// this PC acts for.
+    read_people: PeopleFn,
     /// That person, read when the link was made and again on every new line (a new pairing
     /// always brings a new line).
     person: Mutex<Option<String>>,
@@ -41,11 +52,16 @@ pub struct HubLink {
 }
 
 impl HubLink {
-    pub fn new(line: Arc<LineHandle>, read_person: PersonFn) -> Arc<HubLink> {
+    pub fn new(
+        line: Arc<LineHandle>,
+        read_person: PersonFn,
+        read_people: PeopleFn,
+    ) -> Arc<HubLink> {
         let person = read_person();
         Arc::new(HubLink {
             line,
             read_person,
+            read_people,
             person: Mutex::new(person),
             frames: Mutex::new(Vec::new()),
             ups: Mutex::new(Vec::new()),
@@ -80,6 +96,18 @@ impl DeviceLink for HubLink {
     fn person_id(&self) -> Option<String> {
         lock(&self.person).clone()
     }
+
+    /// The hub people this PC acts for, read from the profiles table as it is now — a profile
+    /// linked or removed since the line came up counts at once. With no profiles table yet the
+    /// line's own person is all there is, as before.
+    fn people(&self) -> Vec<String> {
+        let people = (self.read_people)();
+        if people.is_empty() {
+            self.person_id().into_iter().collect()
+        } else {
+            people
+        }
+    }
 }
 
 impl DeviceSink for HubLink {
@@ -111,6 +139,235 @@ impl DeviceSink for HubLink {
     }
 }
 
+/// The host port with this crate's channel claims bolted on. The plain port reads the profiles
+/// table only, so its Telegram and voice claims are the defaults (the home profile's on, the
+/// others' off); this answers `people` from each profile's own policy files, which is what the
+/// switches in Settings → Hub actually set. Everything else goes straight through.
+struct ChannelPort {
+    port: Arc<HostPort>,
+    db: Arc<helm_core::db::Database>,
+    profile_dir: PathBuf,
+}
+
+impl ChatPort for ChannelPort {
+    fn people(&self) -> Vec<DevicePerson> {
+        let rows = match self
+            .db
+            .snapshot(|tx| helm_profiles::store::linked_claims(tx))
+        {
+            Ok(rows) => rows,
+            Err(_) => return Vec::new(),
+        };
+        crate::people::migrate(&self.profile_dir, &self.db);
+        rows.into_iter()
+            .map(|(profile_id, person_id, is_home)| {
+                let tg = crate::people::telegram_paths(&self.profile_dir, &profile_id);
+                let vo = crate::people::voice_paths(&self.profile_dir, &profile_id);
+                DevicePerson {
+                    person_id,
+                    telegram: telegram::takes_telegram(&telegram::load_file(&tg.policy), is_home),
+                    voice: voice::takes_voice(&voice::load_file(&vo.policy), is_home),
+                }
+            })
+            .collect()
+    }
+
+    fn device(&self) -> DeviceInfo {
+        self.port.device()
+    }
+    fn run_allowed(&self) -> bool {
+        self.port.run_allowed()
+    }
+    fn household_run(&self) -> bool {
+        self.port.household_run()
+    }
+    fn hello(&self) -> BoxFut<'_, PortResult<Hello>> {
+        self.port.hello()
+    }
+    fn remote_chat(&self, record: helm_chats::types::ChatRecord) -> RemoteChat {
+        self.port.remote_chat(record)
+    }
+    fn chats(&self, since: i64) -> BoxFut<'_, PortResult<(Vec<RemoteChat>, i64)>> {
+        self.port.chats(since)
+    }
+    fn chat(&self, chat_id: String) -> BoxFut<'_, PortResult<ChatState>> {
+        self.port.chat(chat_id)
+    }
+    fn rows_since(
+        &self,
+        chat_id: String,
+        since: i64,
+        limit: i64,
+    ) -> BoxFut<'_, PortResult<(Vec<helm_chats::types::MessageRow>, bool)>> {
+        self.port.rows_since(chat_id, since, limit)
+    }
+    fn page(
+        &self,
+        chat_id: String,
+        before: Option<i64>,
+        limit: usize,
+    ) -> BoxFut<'_, PortResult<Value>> {
+        self.port.page(chat_id, before, limit)
+    }
+    fn claim_send(&self, client_id: &str, chat_id: &str) -> PortResult<bool> {
+        self.port.claim_send(client_id, chat_id)
+    }
+    fn release_send(&self, client_id: &str) {
+        self.port.release_send(client_id)
+    }
+    fn send(
+        &self,
+        chat_id: String,
+        client_id: String,
+        text: String,
+        from: Option<String>,
+        files: Vec<SentFile>,
+    ) -> BoxFut<'_, PortResult<()>> {
+        self.port.send(chat_id, client_id, text, from, files)
+    }
+    fn stop(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
+        self.port.stop(chat_id)
+    }
+    fn answer(&self, a: AnswerArgs) -> BoxFut<'_, PortResult<()>> {
+        self.port.answer(a)
+    }
+    fn consent(&self, chat_id: String) -> BoxFut<'_, PortResult<Vec<Value>>> {
+        self.port.consent(chat_id)
+    }
+    fn consent_decide(
+        &self,
+        a: ConsentDecideArgs,
+        via: String,
+        household: bool,
+    ) -> BoxFut<'_, PortResult<()>> {
+        self.port.consent_decide(a, via, household)
+    }
+    fn consent_states(&self, chat_id: String) -> BoxFut<'_, PortResult<Vec<Value>>> {
+        self.port.consent_states(chat_id)
+    }
+    fn create(&self, a: CreateArgs) -> BoxFut<'_, PortResult<String>> {
+        self.port.create(a)
+    }
+    fn set_model(&self, a: SetModelArgs) -> BoxFut<'_, PortResult<()>> {
+        self.port.set_model(a)
+    }
+    fn rename(&self, a: RenameArgs) -> BoxFut<'_, PortResult<()>> {
+        self.port.rename(a)
+    }
+    fn archive(&self, a: ArchiveArgs) -> BoxFut<'_, PortResult<()>> {
+        self.port.archive(a)
+    }
+    fn share(&self, a: ShareArgs) -> BoxFut<'_, PortResult<()>> {
+        self.port.share(a)
+    }
+    fn fork(&self, a: ForkArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.port.fork(a)
+    }
+    fn compact(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
+        self.port.compact(chat_id)
+    }
+    fn roll_over(&self, a: RollOverArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.port.roll_over(a)
+    }
+    fn cost(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        self.port.cost(chat_id)
+    }
+    fn export_markdown(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        self.port.export_markdown(chat_id)
+    }
+    fn organize(&self, a: OrganizeArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.port.organize(a)
+    }
+    fn mark_unread(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
+        self.port.mark_unread(chat_id)
+    }
+    fn set_muted(&self, a: MuteArgs) -> BoxFut<'_, PortResult<()>> {
+        self.port.set_muted(a)
+    }
+    fn move_profile(&self, a: MoveProfileArgs) -> BoxFut<'_, PortResult<()>> {
+        self.port.move_profile(a)
+    }
+    fn set_permission(
+        &self,
+        a: helm_devices::wire::SetPermissionArgs,
+    ) -> BoxFut<'_, PortResult<()>> {
+        self.port.set_permission(a)
+    }
+    fn verbosity_get(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        self.port.verbosity_get(chat_id)
+    }
+    fn verbosity_set(
+        &self,
+        a: helm_devices::wire::VerbositySetArgs,
+    ) -> BoxFut<'_, PortResult<Value>> {
+        self.port.verbosity_set(a)
+    }
+    fn context_on(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        self.port.context_on(chat_id)
+    }
+    fn quick_open(&self, a: helm_devices::wire::QuickOpenArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.port.quick_open(a)
+    }
+    fn chat_folder(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        self.port.chat_folder(chat_id)
+    }
+    fn panel_read(&self, a: helm_devices::serve::PanelRead) -> BoxFut<'_, PortResult<Value>> {
+        self.port.panel_read(a)
+    }
+    fn panel_stage(
+        &self,
+        a: helm_devices::wire::PanelStageArgs,
+        stage: bool,
+    ) -> BoxFut<'_, PortResult<Value>> {
+        self.port.panel_stage(a, stage)
+    }
+    fn board_connection(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        self.port.board_connection(chat_id)
+    }
+    fn board_read(&self, a: helm_devices::wire::BoardReadArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.port.board_read(a)
+    }
+    fn board_cancel(
+        &self,
+        a: helm_devices::wire::BoardCancelArgs,
+    ) -> BoxFut<'_, PortResult<Value>> {
+        self.port.board_cancel(a)
+    }
+    fn warm(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
+        self.port.warm(chat_id)
+    }
+    fn tool_stop(&self, a: helm_devices::wire::ToolStopArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.port.tool_stop(a)
+    }
+    fn submission(&self, a: helm_devices::wire::SubmissionArgs) -> BoxFut<'_, PortResult<()>> {
+        self.port.submission(a)
+    }
+    fn checkpoint(&self, a: helm_devices::wire::CheckpointArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.port.checkpoint(a)
+    }
+    fn attention_rows(&self, chat_ids: Vec<String>) -> BoxFut<'_, PortResult<Value>> {
+        self.port.attention_rows(chat_ids)
+    }
+    fn item_links(&self, chat_ids: Vec<String>) -> BoxFut<'_, PortResult<Value>> {
+        self.port.item_links(chat_ids)
+    }
+    fn snooze(&self, a: helm_devices::wire::SnoozeArgs) -> BoxFut<'_, PortResult<()>> {
+        self.port.snooze(a)
+    }
+    fn address(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
+        self.port.address(chat_id)
+    }
+    fn defaults_get(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        self.port.defaults_get(chat_id)
+    }
+    fn defaults_set(&self, a: helm_devices::wire::DefaultsArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.port.defaults_set(a)
+    }
+    fn chat_brief(&self, chat_id: String) -> BoxFut<'_, PortResult<Option<RemoteChat>>> {
+        self.port.chat_brief(chat_id)
+    }
+}
+
 /// Start answering other devices: needs the relay client, the app's event tap and the chat
 /// runtime among the services, and the op dispatcher for what changes a chat.
 pub fn attach(dispatcher: &Arc<helm_ipc::Dispatcher>) {
@@ -124,12 +381,34 @@ pub fn attach(dispatcher: &Arc<helm_ipc::Dispatcher>) {
     };
     let line = client.handle();
     let reader = client.clone();
-    let link = HubLink::new(line.clone(), Arc::new(move || reader.paired_person()));
-    let service = Service::new(
-        HostPort::new(dispatcher.clone()),
-        link.clone(),
-        rt.handle().clone(),
+    let read_people: PeopleFn = match services.get::<helm_core::db::Database>() {
+        Some(db) => {
+            let db = db.clone();
+            Arc::new(move || {
+                db.snapshot(|tx| helm_profiles::store::linked_person_ids(tx))
+                    .unwrap_or_default()
+            }) as PeopleFn
+        }
+        None => Arc::new(Vec::new),
+    };
+    let link = HubLink::new(
+        line.clone(),
+        Arc::new(move || reader.paired_person()),
+        read_people,
     );
+    let port: Arc<dyn ChatPort> = match (
+        services.get::<helm_core::db::Database>(),
+        services.get::<helm_core::profile::Profile>(),
+    ) {
+        (Some(db), Some(prof)) => Arc::new(ChannelPort {
+            port: HostPort::new(dispatcher.clone()),
+            db: db.clone(),
+            profile_dir: prof.dir.clone(),
+        }),
+        // Without the profiles table the plain port answers with the old single-person claim.
+        _ => HostPort::new(dispatcher.clone()),
+    };
+    let service = Service::new(port, link.clone(), rt.handle().clone());
     let announce = service.clone();
     link.on_up(move || announce.announce());
     // The watching side: this PC's copy of the other devices' chats, and the routing of the
@@ -151,6 +430,7 @@ pub fn attach(dispatcher: &Arc<helm_ipc::Dispatcher>) {
         let down = mirror.clone();
         link.on_down(move || down.line_down());
         routes.attach(Arc::new(mirror.clone()));
+        tap.attach_mirror(mirror.clone());
         slot.attach(mirror);
     }
     tap.attach(service.clone());

@@ -4,7 +4,7 @@ import { ApiError, type Api } from '../api/client.ts';
 import { EventBus } from '../api/events.ts';
 import { chat } from '../dev/fixtures.ts';
 import type { DeviceChats, DeviceInfo, DevicesList, RemoteChatRecord } from './api.ts';
-import { menuLabel, menuOrder, remoteDevice, remoteList, resolveSelected, scopeNote, showToggle, stateText } from './model.ts';
+import { menuLabel, menuOrder, remoteDevice, remoteList, remoteProfileChoices, remoteShareChoices, resolveSelected, scopeNote, showToggle, stateText } from './model.ts';
 import { DevicesStore, RemoteList } from './store.ts';
 import { composerFor, remoteChatState, remoteHostOf, seenText, unconfirmedText, waitingForApproval } from './state.ts';
 
@@ -34,6 +34,9 @@ test('which device shows: the stored choice, this PC when that one is gone, and 
   assert.deepEqual([resolveSelected('lap', l), resolveSelected('gone', l), resolveSelected(null, l), resolveSelected('lap', null)], ['lap', 'me', 'me', null]);
   assert.equal(remoteDevice(l, 'lap')?.name, 'Laptop');
   assert.deepEqual([remoteDevice(l, 'me'), remoteDevice(l, null), remoteDevice(null, 'lap'), remoteDevice(l, 'gone')], [null, null, null, null]);
+  // "Every computer" stands while there is another one to merge in, and falls back to this PC alone.
+  assert.deepEqual([resolveSelected('all', l), resolveSelected('all', list())], ['all', 'me']);
+  assert.equal(remoteDevice(l, 'all'), null, 'no single computer is picked');
   // The toggle needs another device to switch to.
   assert.deepEqual([showToggle(l), showToggle(list()), showToggle(null)], [true, false, false]);
   // This PC first, the others A to Z regardless of case.
@@ -50,8 +53,10 @@ test("another device's chats become rows and projects: groups made for projects 
   const chats = [
     record('c1', { projectId: 'p1' }),
     record('c2', { projectId: 'p1', parentChatId: 'c1', unread: { markToken: 'm', completionId: null }, pinned: true }),
-    record('c3', { projectId: 'px', projectName: 'Side', projectColour: 'blue', status: 'running', model: 'local/qwen' }),
+    record('c3', { projectId: 'px', projectName: 'Side', projectColour: 'blue', status: 'running', model: 'local/qwen', position: 5 }),
     record('c4', { projectId: 'p1', archived: true, draft: 'half a thought' }),
+    record('c5', { projectId: 'p1', boardId: 'b1', boardName: 'All boards', boardColour: 'green' }),
+    record('c6', { projectId: 'p1', boardId: 'p1' }),
   ];
   const { rows, projects } = remoteList(chats, [{ id: 'p1', name: 'Shop', colour: null, kind: 'board' }]);
   assert.deepEqual(rows.map((r) => [r.chatId, r.groupProjectId, r.hasChildren, r.attention]), [
@@ -59,12 +64,38 @@ test("another device's chats become rows and projects: groups made for projects 
     ['c2', 'p1', false, 'unread'],
     ['c3', 'px', false, 'running'],
     ['c4', 'p1', false, null],
+    ['c5', 'b1', false, null],
+    ['c6', 'p1', false, null],
   ]);
   assert.deepEqual([rows[2]!.local, rows[3]!.hasDraft, rows[3]!.archived], [true, true, true]);
+  assert.deepEqual([rows[2]!.position, rows[0]!.position], [5, null], 'the manual order set on its home PC travels');
+  assert.deepEqual([rows[4]!.folderProjectId, rows[4]!.folderPath], ['p1', 'C:/w/p1'], 'the board groups the row, the folder still says where it runs');
   assert.deepEqual(projects.map((p) => [p.id, p.name, p.kind, p.colour, p.chatCount]), [
-    ['p1', 'Shop', 'board', null, 2],
+    ['p1', 'Shop', 'board', null, 3],
     ['px', 'Side', 'folder', 'blue', 1],
+    // A board the computer did not list gets a group made from what the chat carries; one it did list is not doubled.
+    ['b1', 'All boards', 'board', 'green', 1],
   ]);
+});
+
+test("a chat menu on another device's chat: that device's profiles, with the owner's ticked, and its people for sharing, without the owner", () => {
+  const d = device('lap', 'Laptop', {
+    people: [{ personId: 'per-a', person: 'Alex' }, { personId: 'per-b', person: 'Betty' }],
+    profiles: [
+      { profileId: 'pr-a', name: 'Alex', personId: 'per-a' },
+      { profileId: 'pr-b', name: 'Betty', personId: null },
+      { profileId: 'pr-c', name: 'Spare' },
+    ],
+  });
+  const c = record('c1', { personId: 'per-a', sharedWithPeople: ['per-b'] });
+  assert.deepEqual(remoteProfileChoices(d, c), [
+    { id: 'pr-a', name: 'Alex', current: true },
+    { id: 'pr-b', name: 'Betty', current: false },
+    { id: 'pr-c', name: 'Spare', current: false },
+  ]);
+  assert.deepEqual(remoteShareChoices(d, c), [{ id: 'per-b', name: 'Betty', shared: true }], 'the owner is left out; the tick follows sharedWithPeople');
+  // A hello that named none: empty lists, so the menu shows no entry for them.
+  assert.deepEqual([remoteProfileChoices(device('x', 'X'), c), remoteShareChoices(device('x', 'X'), c)], [[], []]);
 });
 
 /** A scripted host for the store: the devices on the hub, the stored choice, and the choices saved. */
@@ -142,7 +173,7 @@ test("another device's chat list pages, refreshes from the first page, and ignor
   const asked: { offset?: number; limit?: number; archived?: boolean }[] = [];
   let gate: (() => void) | null = null;
   const ops = {
-    chats: async (a: { deviceUid: string; profileId: string; archived?: boolean; offset?: number; limit?: number }): Promise<DeviceChats> => {
+    chats: async (a: { deviceUid: string; profileId: string | null; archived?: boolean; offset?: number; limit?: number }): Promise<DeviceChats> => {
       asked.push({ offset: a.offset, limit: a.limit, archived: a.archived });
       if (a.profileId === 'slow') {
         await new Promise<void>((r) => (gate = r));
@@ -157,6 +188,8 @@ test("another device's chat list pages, refreshes from the first page, and ignor
   const rl = new RemoteList(ops);
   await rl.load({ deviceUid: 'lap', profileId: 'prof', archived: false });
   assert.deepEqual([rl.snapshot.rows.map((r) => r.chatId), rl.snapshot.more, rl.snapshot.loading], [['c0', 'c1'], true, false]);
+  // Each row knows the computer it runs on, so a merged view can tell its own chats from those.
+  assert.deepEqual([...rl.snapshot.hosts], [['c0', 'lap'], ['c1', 'lap']]);
   await rl.loadMore();
   assert.deepEqual(rl.snapshot.rows.map((r) => r.chatId), ['c0', 'c1', 'c2', 'c3'], 'the next page starts after the rows held');
   assert.deepEqual(asked.map((a) => a.offset), [0, 2]);

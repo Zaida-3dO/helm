@@ -9,11 +9,16 @@
 // `transcript_page`, `chat_send`, `chat_stop`, `interaction_answer`, `chat_set_model`,
 // `chat_rename`, `chat_archive`, `chat_restore`, `draft_save`) work on its id unchanged, and the
 // host raises the same `chat`, `thread`, `message`, `pending`, `refresh` and `chat_removed`
-// events for it. Every other op that names such a chat is refused with "This chat runs on {device}.
-// Do that there." (`chat_warm`, `title_suggest`, `autocomplete_suggest` and `skills_list` answer
-// empty instead).
+// events for it. The panel ops that name the chat (`chat_folder`, `file_read`, `dir_list`,
+// `file_stat`, `archive_list`, `path_resolve`, `changes`, `diff`, `changes_stage`,
+// `changes_unstage`, `quick_open`) answer on the PC that runs the chat, kept inside that chat's
+// project folder there. Everything else that names such a chat is refused with "This chat runs on
+// {device}. Do that there." (`title_suggest`, `autocomplete_suggest` and `skills_list` answer
+// empty instead; `chat_warm` and the composer and chat-view actions travel to the PC that runs the chat.)
 
 import type { Api } from './client.ts';
+import type { AttentionKind } from './generated/AttentionKind.ts';
+import type { ItemLink } from './itemlinks.ts';
 import type { ModelCatalogue } from './types.ts';
 
 /** How a device reads to the person (`devices_list`). */
@@ -47,6 +52,19 @@ export function remoteChatOps(api: Api) {
     open: (chatId: string) => api<Record<string, never>>('devices_open_chat', { chatId }),
     /** The models another device last said it offers (Claude and its local models). */
     catalogue: (deviceUid: string) => api<ModelCatalogue>('model_catalogue', { harness: 'claude', deviceUid }),
+    /** Withdraw or recover one queued message of a chat that runs on another PC. */
+    submissionAction: (chatId: string, submissionId: string, action: 'withdraw' | 'recover') =>
+      api<Record<string, never>>('devices_submission_action', { chatId, submissionId, action }),
+    /** The PC that runs the chat's new-chat model/effort/reply-length; read, or saved with a patch. */
+    composerDefaults: (
+      chatId: string,
+      patch?: { model?: string; effort?: string; responseVerbosity?: string },
+    ) => api<{ model?: string | null; effort?: string; responseVerbosity?: string }>('devices_composer_defaults', { chatId, ...(patch ? { patch } : {}) }),
+    /** Board-item links of chats that run on other PCs, read from the PCs that run them. Same
+     * shape as the local `item_links_for_chats`, so the sidebar can merge the two. */
+    itemLinks: (chatIds: string[]) => api<{ links: ItemLink[] }>('devices_item_links', { chatIds }),
+    /** Needs-you and flag rows of chats that run on other PCs. */
+    attention: (chatIds: string[]) => api<{ needsYou: { chatId: string; kind: AttentionKind; reason: string }[]; flagged: { chatId: string; kind: AttentionKind; reason: string }[] }>('devices_attention', { chatIds }),
   };
 }
 

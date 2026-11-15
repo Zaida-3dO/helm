@@ -42,6 +42,22 @@ impl ToolCtx {
         let Some(ops) = &self.ops else {
             return Err(ToolError::refused("This tool is not available here."));
         };
+        // A change to a chat that runs on another PC would be made as the person the sidebar
+        // shows, not the person the calling chat belongs to: an agent leaves those to the user.
+        if CHANGES_A_CHAT.contains(&op)
+            && args
+                .get("chatId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| {
+                    self.services
+                        .get::<RemoteChatGuard>()
+                        .is_some_and(|g| (g.0)(id))
+                })
+        {
+            return Err(ToolError::refused(
+                "That chat runs on another PC: change it from there, or ask the user to.",
+            ));
+        }
         ops.invoke(op, args)
             .await
             .map_err(|e| match e.code.as_str() {
@@ -50,6 +66,24 @@ impl ToolCtx {
             })
     }
 }
+
+/// Says whether a chat id belongs to a chat that runs on another PC (installed by the app).
+pub struct RemoteChatGuard(pub Arc<dyn Fn(&str) -> bool + Send + Sync>);
+
+/// The ops through which a host tool changes one chat, named by `chatId`.
+const CHANGES_A_CHAT: &[&str] = &[
+    "attention_address",
+    "attention_snooze",
+    "chat_archive",
+    "chat_delete",
+    "chat_fork",
+    "chat_mute",
+    "chat_organize",
+    "chat_rename",
+    "chat_restore",
+    "chat_set_model",
+    "chat_stop",
+];
 
 /// Runs `api` ops for host tools (the op dispatcher, past its window check).
 pub trait OpInvoker: Send + Sync {

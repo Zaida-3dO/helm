@@ -8,7 +8,7 @@ import type { LocalModelInfo } from '../../api/types.ts';
 import { hubOps, type VoiceSettings, type VoiceWatch } from '../../api/hub.ts';
 import { localModelChoices } from '../../composer/modelEffort.ts';
 import { useShell } from '../../shell/context.ts';
-import { Button, Picker, SettingRow } from '../../ui/index.ts';
+import { Button, Checkbox, Picker, SettingRow } from '../../ui/index.ts';
 import { SETTINGS_DIALOG } from '../SettingsDialog.tsx';
 import { EFFORT_OPTIONS } from '../runtime/model.ts';
 import { compactCount } from '../../transcript/rowMeta.ts';
@@ -45,7 +45,7 @@ function effortChoices(saved: string): Choice[] {
   return out;
 }
 
-export function VoiceBlock() {
+export function VoiceBlock({ profileId }: { profileId: string | null }) {
   const shell = useShell();
   const ops = useMemo(() => hubOps(shell.api), [shell.api]);
   const [voice, setVoice] = useState<VoiceSettings | null>(null);
@@ -53,6 +53,7 @@ export function VoiceBlock() {
   const [models, setModels] = useState<{ id: string; name: string; description?: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [pinNote, setPinNote] = useState<string | null>(null);
 
   const show = useCallback((v: VoiceSettings) => {
     setVoice(v);
@@ -60,10 +61,12 @@ export function VoiceBlock() {
   }, []);
 
   useEffect(() => {
+    if (!profileId) return;
+    setPinNote(null);
     let live = true;
     const read = () =>
       void ops
-        .voice()
+        .voice({ profileId })
         .then((v) => live && show(v))
         .catch((e: unknown) => live && setError(errorText(e)));
     read();
@@ -77,7 +80,7 @@ export function VoiceBlock() {
       live = false;
       off();
     };
-  }, [ops, shell, show]);
+  }, [ops, shell, profileId, show]);
 
   const run = async (p: Promise<VoiceSettings>) => {
     setBusy(true);
@@ -92,7 +95,22 @@ export function VoiceBlock() {
   };
 
   const save = (patch: Partial<Omit<VoiceSettings, 'chat'>>) => {
-    if (voice) void run(ops.saveVoice({ ...voice, ...patch }));
+    if (voice && profileId) void run(ops.saveVoice({ ...voice, ...patch, profileId }));
+  };
+
+  /** Ask the hub to start this person's voice sessions on this PC (the bot can change it back). */
+  const pin = async () => {
+    if (!profileId) return;
+    setBusy(true);
+    try {
+      await ops.routePin({ profileId, channel: 'voice' });
+      setPinNote('Asked the hub to start your voice turns on this PC.');
+      setError(null);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const minutes = Number(idle);
@@ -124,7 +142,7 @@ export function VoiceBlock() {
             >
               Open {voice.chat.title}
             </Button>
-            <Button variant="text" data-testid="hub-voice-reset" disabled={busy} onClick={() => void run(ops.resetVoice())}>
+            <Button variant="text" data-testid="hub-voice-reset" disabled={busy} onClick={() => profileId && void run(ops.resetVoice({ profileId }))}>
               Start a new chat
             </Button>
           </>
@@ -191,6 +209,37 @@ export function VoiceBlock() {
             disabled={busy}
             onChange={(v) => save({ watch: v as VoiceWatch })}
           />
+        </SettingRow>
+      )}
+      {voice && (
+        <SettingRow
+          testId="hub-voice-take"
+          title="Take my voice on this PC"
+          description="Off, this PC never receives this person's voice turns, even while it is the only one up. On, it joins the PCs that may carry them. The PC of the home profile takes it unless you switch it off."
+        >
+          <Checkbox
+            checked={voice.takeVoice}
+            disabled={busy}
+            aria-label="Take my voice on this PC"
+            data-testid="hub-voice-take-box"
+            onChange={(on) => save({ takeVoice: on })}
+          />
+        </SettingRow>
+      )}
+      {voice && (
+        <SettingRow
+          testId="hub-voice-route"
+          title="Where my voice goes"
+          description="A voice session stays on the PC it started on. Pinning asks the hub to send the next one here instead (this PC must take it, above)."
+        >
+          <Button variant="secondary" disabled={busy || !profileId || !voice.takeVoice} data-testid="hub-voice-route-pin" onClick={() => void pin()}>
+            Use this PC
+          </Button>
+          {pinNote && (
+            <span data-testid="hub-voice-pinned" className="hub-state">
+              {pinNote}
+            </span>
+          )}
         </SettingRow>
       )}
       {error && (

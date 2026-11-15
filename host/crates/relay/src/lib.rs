@@ -40,6 +40,11 @@
 //! `relay_telegram_reset` (drop the tag, so the next message starts a new chat). The same policy
 //! reaches chats through [`agent_settings`]: the `telegram` key of `app_get_settings` and
 //! `app_update_settings`, where chats may change only the new chat's model and effort.
+//! Per profile the hub is asked about its Telegram account: `relay_tg_link` (a one-tap link the
+//! person taps on their phone), `relay_tg_status` (linked, and the handle) and `relay_tg_unlink`;
+//! `relay_route_pin` asks the hub to send one of the profile's person's channels (telegram or
+//! voice) to this PC. Each names its profile with `{profileId}` (absent: the home profile) and
+//! needs that profile to be linked to a person on the hub.
 //!
 //! The voice chat (Settings → Hub's Voice block): `relay_voice_get` → [`voice_sink::VoiceView`]
 //! (the chat the phone talks to, the model and effort a new voice chat opens with, the idle, age
@@ -78,6 +83,7 @@ pub mod hub_view;
 pub mod knowledge_line;
 pub mod notify;
 pub mod pair;
+pub mod people;
 pub mod remote;
 pub mod setup;
 pub mod sink;
@@ -95,7 +101,7 @@ use helm_core::credentials::CredentialStore;
 use helm_core::profile::Profile;
 use helm_ipc::{ApiError, EventSink, OpClass, OpCtx, OpRegistry, Services};
 use helm_platform::Platform;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::sync::Arc;
 
 pub fn credentials(profile: &Profile, platform: &Platform) -> CredentialStore {
@@ -120,7 +126,7 @@ fn line_state(ctx: &OpCtx) -> &'static str {
 }
 
 /// The line and its executor, as shared services. Needs the profile and platform already in place.
-pub fn register_services(services: &mut Services, _events: &Arc<dyn EventSink>) {
+pub fn register_services(services: &mut Services, events: &Arc<dyn EventSink>) {
     let (Some(profile), Some(platform)) = (services.get::<Profile>(), services.get::<Platform>())
     else {
         log::warn!("relay: no profile or platform; the hub line stays off");
@@ -141,9 +147,29 @@ pub fn register_services(services: &mut Services, _events: &Arc<dyn EventSink>) 
     sink.attach_line(client.handle());
     voice.attach_line(client.handle());
     client.attach_voice(voice.clone());
-    // The household switches the user last chose (all off until they choose).
+    // A frame naming a hub person is only this PC's business when a profile of theirs is
+    // linked here (the home profile's person always is).
     if let Some(db) = services.get::<helm_core::db::Database>() {
         client.restore_sharing(household::load(&db));
+        let db_check = Arc::clone(&db);
+        client.set_person_check(Arc::new(move |p: &str| {
+            db_check
+                .snapshot(|tx| helm_profiles::store::profile_for_person(tx, p).map(|o| o.is_some()))
+                .unwrap_or(false)
+        }));
+        // The hub's welcome names the person this line acts as. Pairing links the home
+        // profile to that person; a line configured with a token never pairs, so the
+        // welcome is where the link happens, but only for a home profile that has no person yet.
+        let db_link = Arc::clone(&db);
+        let events = events.clone();
+        client.set_home_link(Arc::new(move |p: &str, name: &str| {
+            let linked = db_link
+                .write(|tx| people::home_link(tx, p, name))
+                .unwrap_or(false);
+            if linked {
+                events.emit(helm_ipc::AppEvent::new("profiles_changed"));
+            }
+        }));
     }
     services.insert(sink);
     services.insert(voice.shown());
@@ -171,13 +197,22 @@ pub fn start(handle: &tokio::runtime::Handle, ctx: &OpCtx, tools: Arc<helm_hostt
     let line = client.handle();
     knowledge_line::start(handle, ctx, &client);
     handle.spawn(client.run_supervised());
-    if let (Some(rt), Some(afk), Some(profile), Some(sink)) = (
+    if let (Some(rt), Some(db), Some(afk), Some(profile), Some(sink)) = (
         ctx.services.get::<helm_chats::ChatRuntime>(),
+        ctx.services.get::<helm_core::db::Database>(),
         ctx.services.get::<helm_afk::AfkService>(),
         ctx.services.get::<Profile>(),
         ctx.services.get::<sink::ChatSink>(),
     ) {
-        notify::watch_away(handle, (*rt).clone(), afk, line, sink, profile.dir.clone());
+        notify::watch_away(
+            handle,
+            (*rt).clone(),
+            db,
+            afk,
+            line,
+            sink,
+            profile.dir.clone(),
+        );
     }
     if let (Some(watch), Some(voice)) = (
         ctx.services.get::<voice_watch::VoiceWatch>(),
@@ -225,7 +260,11 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("relay_telegram_reset", OpClass::Blocking, telegram_reset)
         .blocking("relay_voice_get", OpClass::Blocking, voice_get)
         .blocking("relay_voice_save", OpClass::Blocking, voice_save)
-        .blocking("relay_voice_reset", OpClass::Blocking, voice_reset);
+        .blocking("relay_voice_reset", OpClass::Blocking, voice_reset)
+        .async_op("relay_tg_link", tg_link)
+        .async_op("relay_tg_status", tg_status)
+        .async_op("relay_tg_unlink", tg_unlink)
+        .async_op("relay_route_pin", route_pin);
     pair::register_ops(reg);
     household::register_ops(reg);
 }
@@ -260,66 +299,210 @@ fn connection_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     to_value(&config::view(&saved, line_state(ctx)))
 }
 
-fn telegram_view(ctx: &OpCtx) -> Result<Value, ApiError> {
+/// The profile a channel op acts on: `{profileId}` when it names one that exists here, else
+/// the home profile. Each linked profile keeps its own Telegram and voice files and switches;
+/// the settings window says which profile it is showing.
+fn channel_profile(ctx: &OpCtx, args: &Value) -> Result<String, ApiError> {
+    let db = ctx.services.need::<helm_core::db::Database>()?;
+    // A Settings op may be the first thing to read the channel files after a start.
+    if let Some(profile) = ctx.services.get::<Profile>() {
+        people::migrate(&profile.dir, &db);
+    }
+    let named = args
+        .get("profileId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match named {
+        None => db
+            .snapshot(|tx| helm_profiles::store::home(tx))
+            .ok()
+            .flatten()
+            .map(|p| p.id)
+            .ok_or_else(|| ApiError::internal("Helm has no home profile yet.")),
+        Some(wanted) => db
+            .snapshot(|tx| helm_profiles::store::get(tx, wanted))
+            .ok()
+            .flatten()
+            .map(|p| p.id)
+            .ok_or_else(|| ApiError::bad_args("There is no profile with that id.")),
+    }
+}
+
+/// The hub person a channel op acts on: the profile from [`channel_profile`], linked to a person
+/// on the hub. An unlinked profile gets one plain sentence — the settings pane says so too.
+fn channel_person(ctx: &OpCtx, args: &Value) -> Result<String, ApiError> {
+    let pid = channel_profile(ctx, args)?;
+    let db = ctx.services.need::<helm_core::db::Database>()?;
+    db.snapshot(|tx| helm_profiles::store::get(tx, &pid))
+        .ok()
+        .flatten()
+        .and_then(|p| p.hub_person_id)
+        .ok_or_else(|| ApiError::bad_args("This profile has no person on the hub yet."))
+}
+
+/// Ask the hub one thing about the profile's Telegram account (`tg_link`, `tg_status` or
+/// `tg_unlink`) and wait for the answer that carries the same id. The hub's frame, passed on.
+async fn tg_ask(ctx: &OpCtx, kind: &str, args: &Value) -> Result<Value, ApiError> {
+    let person = channel_person(ctx, args)?;
+    let line = ctx
+        .services
+        .get::<client::LineHandle>()
+        .ok_or_else(|| ApiError::new("unavailable", "Helm is not connected to the hub."))?;
+    line.request(json!({ "type": kind, "personId": person }))
+        .await
+        .map_err(|e| ApiError::new("unavailable", e))
+}
+
+/// `relay_tg_link`: ask the hub for a one-tap link the person taps on their phone. The hub
+/// answers with the address and when the code behind it stops working.
+async fn tg_link(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let v = tg_ask(&ctx, "tg_link", &args).await?;
+    Ok(json!({
+        "url": v.get("url").cloned().unwrap_or(Value::Null),
+        "expiresAt": v.get("expiresAt").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+/// `relay_tg_status`: whether this profile's hub person has a linked Telegram account, and the
+/// bot's handle if so.
+async fn tg_status(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let v = tg_ask(&ctx, "tg_status", &args).await?;
+    let linked = v.get("linked").and_then(Value::as_bool).unwrap_or(false);
+    let mut out = json!({ "linked": linked });
+    if linked {
+        if let Some(h) = v.get("handle") {
+            out["handle"] = h.clone();
+        }
+    }
+    Ok(out)
+}
+
+/// `relay_tg_unlink`: drop this profile's hub person's Telegram link from the hub.
+async fn tg_unlink(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let v = tg_ask(&ctx, "tg_unlink", &args).await?;
+    Ok(json!({ "unlinked": v.get("unlinked").cloned().unwrap_or(Value::Null) }))
+}
+
+/// `relay_route_pin`: ask the hub to send this profile's person's channel to this PC from now on
+/// (`channel`: `telegram` or `voice`). The hub keeps the pin; the bot's own command hands the
+/// choice back.
+async fn route_pin(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let person = channel_person(&ctx, &args)?;
+    let channel = args
+        .get("channel")
+        .and_then(Value::as_str)
+        .filter(|c| *c == "telegram" || *c == "voice")
+        .ok_or_else(|| ApiError::bad_args("Expected channel to be telegram or voice."))?;
+    let line = ctx
+        .services
+        .get::<client::LineHandle>()
+        .ok_or_else(|| ApiError::new("unavailable", "Helm is not connected to the hub."))?;
+    if !line.route_pin(&person, channel) {
+        return Err(ApiError::new(
+            "unavailable",
+            "Helm is not connected to the hub.",
+        ));
+    }
+    Ok(json!({ "pinned": true }))
+}
+
+fn telegram_view(ctx: &OpCtx, args: &Value) -> Result<Value, ApiError> {
     let profile = ctx.services.need::<Profile>()?;
     let db = ctx.services.need::<helm_core::db::Database>()?;
-    to_value(&sink::telegram_view(&db, &profile.dir, helm_core::now_ms()))
-}
-
-fn telegram_get(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
-    telegram_view(ctx)
-}
-
-fn telegram_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
-    let f: telegram::PolicyFile = serde_json::from_value(args).map_err(|_| {
-        ApiError::bad_args(
-            "Expected maxAgeHours, maxTokens, awayAlerts, approvals, remoteAnswers, and optional model and effort.",
-        )
-    })?;
-    f.check().map_err(ApiError::bad_args)?;
-    let profile = ctx.services.need::<Profile>()?;
-    telegram::save_policy(&telegram::policy_path(&profile.dir), f)
-        .map_err(|_| ApiError::internal("The Telegram limits could not be saved."))?;
-    telegram_view(ctx)
-}
-
-fn telegram_reset(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
-    let profile = ctx.services.need::<Profile>()?;
-    telegram::save_tag(&telegram::tag_path(&profile.dir), None)
-        .map_err(|_| ApiError::internal("The Telegram chat tag could not be removed."))?;
-    telegram_view(ctx)
-}
-
-fn voice_view(ctx: &OpCtx) -> Result<Value, ApiError> {
-    let profile = ctx.services.need::<Profile>()?;
-    let db = ctx.services.need::<helm_core::db::Database>()?;
-    to_value(&voice_sink::voice_view(
+    let pid = channel_profile(ctx, args)?;
+    to_value(&sink::telegram_view(
         &db,
         &profile.dir,
+        &pid,
         helm_core::now_ms(),
     ))
 }
 
-fn voice_get(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
-    voice_view(ctx)
+fn telegram_get(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    telegram_view(ctx, &args)
 }
 
-fn voice_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
-    let f: voice::PolicyFile = serde_json::from_value(args).map_err(|_| {
+/// The arguments of a save without `profileId`, which names the profile and is not a setting.
+fn without_profile(args: &Value) -> Value {
+    let mut a = args.clone();
+    if let Some(o) = a.as_object_mut() {
+        o.remove("profileId");
+    }
+    a
+}
+
+fn telegram_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let f: telegram::PolicyFile = serde_json::from_value(without_profile(&args)).map_err(|_| {
         ApiError::bad_args(
-            "Expected model, effort, idleMinutes, maxAgeHours, maxTokens and watch (off, flags or flags+done).",
+            "Expected maxAgeHours, maxTokens, awayAlerts, approvals, remoteAnswers, takeTelegram, and optional model and effort.",
         )
     })?;
     f.check().map_err(ApiError::bad_args)?;
     let profile = ctx.services.need::<Profile>()?;
-    voice::save_policy(&voice::policy_path(&profile.dir), &f)
-        .map_err(|_| ApiError::internal("The voice limits could not be saved."))?;
-    voice_view(ctx)
+    let pid = channel_profile(ctx, &args)?;
+    let paths = people::telegram_paths(&profile.dir, &pid);
+    let took = telegram::load_file(&paths.policy).take_telegram;
+    let takes = f.take_telegram;
+    telegram::save_policy(&paths.policy, f)
+        .map_err(|_| ApiError::internal("The Telegram limits could not be saved."))?;
+    if took != takes {
+        // The hub routes by what this PC last said it takes: say it again now.
+        ctx.events.emit(helm_ipc::AppEvent::new("device_changed"));
+    }
+    telegram_view(ctx, &args)
 }
 
-fn voice_reset(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
+fn telegram_reset(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let profile = ctx.services.need::<Profile>()?;
-    voice::save_tag(&voice::tag_path(&profile.dir), None)
+    let pid = channel_profile(ctx, &args)?;
+    let paths = people::telegram_paths(&profile.dir, &pid);
+    telegram::save_tag(&paths.tag, None)
+        .map_err(|_| ApiError::internal("The Telegram chat tag could not be removed."))?;
+    telegram_view(ctx, &args)
+}
+
+fn voice_view(ctx: &OpCtx, args: &Value) -> Result<Value, ApiError> {
+    let profile = ctx.services.need::<Profile>()?;
+    let db = ctx.services.need::<helm_core::db::Database>()?;
+    let pid = channel_profile(ctx, args)?;
+    to_value(&voice_sink::voice_view(
+        &db,
+        &profile.dir,
+        &pid,
+        helm_core::now_ms(),
+    ))
+}
+
+fn voice_get(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    voice_view(ctx, &args)
+}
+
+fn voice_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let f: voice::PolicyFile = serde_json::from_value(without_profile(&args)).map_err(|_| {
+        ApiError::bad_args(
+            "Expected model, effort, idleMinutes, maxAgeHours, maxTokens, watch (off, flags or flags+done) and takeVoice.",
+        )
+    })?;
+    f.check().map_err(ApiError::bad_args)?;
+    let profile = ctx.services.need::<Profile>()?;
+    let pid = channel_profile(ctx, &args)?;
+    let paths = people::voice_paths(&profile.dir, &pid);
+    let took = voice::load_file(&paths.policy).take_voice;
+    let takes = f.take_voice;
+    voice::save_policy(&paths.policy, &f)
+        .map_err(|_| ApiError::internal("The voice limits could not be saved."))?;
+    if took != takes {
+        ctx.events.emit(helm_ipc::AppEvent::new("device_changed"));
+    }
+    voice_view(ctx, &args)
+}
+
+fn voice_reset(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let profile = ctx.services.need::<Profile>()?;
+    let pid = channel_profile(ctx, &args)?;
+    let paths = people::voice_paths(&profile.dir, &pid);
+    voice::save_tag(&paths.tag, None)
         .map_err(|_| ApiError::internal("The voice chat tag could not be removed."))?;
-    voice_view(ctx)
+    voice_view(ctx, &args)
 }

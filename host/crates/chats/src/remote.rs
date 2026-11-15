@@ -9,8 +9,9 @@
 //! |---|---|
 //! | `chat_get`, `transcript_page` | the mirror (and the device that runs the chat, for older pages) |
 //! | `chat_send`, `chat_stop`, `interaction_answer`, `chat_set_model`, `chat_rename`, `chat_archive`, `chat_restore` | the device that runs the chat |
+//! | `chat_fork`, `chat_compact`, `chat_roll_over`, `usage_cost`, `chat_export_markdown`, `chat_organize`, `unread_mark`, `chat_mute`, `chat_set_permission_mode`, `chat_verbosity_get`/`set`, `chat_warm`, `tool_stop`, `checkpoint_info`, `attention_snooze`/`address`, `panel_context_get`, `quick_open`, `chat_folder`, `file_read`, `dir_list`, `file_stat`, `archive_list`, `path_resolve`, `changes`, `diff`, `changes_stage`, `changes_unstage` | the same op on the device that runs the chat (panel paths stay inside the chat's project folder there) |
 //! | `draft_save` | the mirror alone: a draft never leaves this PC |
-//! | `chat_warm`, `title_suggest`, `autocomplete_suggest`, `skills_list` | quietly, with an empty answer |
+//! | `title_suggest`, `autocomplete_suggest`, `skills_list` | quietly, with an empty answer |
 //! | `model_catalogue` with a `deviceUid` | the models that device last said it offers |
 //! | any other op that names a mirror chat | refused: "This chat runs on {device}. Do that there." |
 //!
@@ -46,6 +47,12 @@ pub trait RemoteChats: Send + Sync {
     fn page(&self, args: TranscriptPageArgs) -> Fut<Res>;
     /// `{submission, chat}` as `chat_send` answers.
     fn send(&self, args: ChatSendArgs) -> Fut<Res>;
+    /// The same send, as the named hub person instead of the person the sidebar shows: a call
+    /// from a chat or from outside acts as its own person. `None` is [`Self::send`].
+    fn send_as(&self, args: ChatSendArgs, person: Option<String>) -> Fut<Res> {
+        let _ = person;
+        self.send(args)
+    }
     fn stop(&self, chat_id: String) -> Fut<Res>;
     fn answer(&self, args: InteractionAnswerArgs) -> Fut<Res>;
     /// The updated chat record, for each of the three that change one.
@@ -54,6 +61,9 @@ pub trait RemoteChats: Send + Sync {
     fn archive(&self, chat_id: String, archived: bool) -> Fut<Res>;
     /// Keep a draft on this PC only.
     fn draft_save(&self, args: DraftSaveArgs) -> Fut<Res>;
+    /// Carry a local op across the wire to the device that runs the chat, answering with what it
+    /// answers. `args` already names the chat; `op` is one of the ops the chat menu runs.
+    fn chat_op(&self, op: &str, args: Value) -> Fut<Res>;
     /// The model catalogue another device last reported.
     fn catalogue(&self, device_uid: String) -> Fut<Res>;
 }
@@ -126,8 +136,39 @@ async fn route(
         "chat_archive" => remote.archive(chat_id, true).await,
         "chat_restore" => remote.archive(chat_id, false).await,
         "draft_save" => remote.draft_save(parse(args)?).await,
-        // Nothing to warm, suggest or list for a chat that runs somewhere else.
-        "chat_warm" => Ok(Value::Null),
+        // The chat menu's other actions: the same op, run on the device that runs the chat.
+        "chat_fork"
+        | "chat_compact"
+        | "chat_roll_over"
+        | "usage_cost"
+        | "chat_export_markdown"
+        | "chat_organize"
+        | "unread_mark"
+        | "chat_mute"
+        // The composer's picks and the chat view's actions, applied where the chat runs.
+        | "chat_set_permission_mode"
+        | "chat_verbosity_get"
+        | "chat_verbosity_set"
+        | "panel_context_get"
+        | "quick_open"
+        | "tool_stop"
+        | "checkpoint_info"
+        | "attention_snooze"
+        | "attention_address"
+        | "chat_warm"
+        // The side panel around a chat: the same ops, run on the device that runs the chat,
+        // kept inside that chat's project folder there.
+        | "chat_folder"
+        | "file_read"
+        | "dir_list"
+        | "file_stat"
+        | "archive_list"
+        | "path_resolve"
+        | "changes"
+        | "diff"
+        | "changes_stage"
+        | "changes_unstage" => remote.chat_op(&op, args).await,
+        // Nothing to suggest or list for a chat that runs somewhere else.
         "title_suggest" => Ok(json!({ "title": "", "titles": [] })),
         "autocomplete_suggest" => Ok(json!({ "completion": "", "retryAfterMs": null })),
         "skills_list" => Ok(json!([])),
