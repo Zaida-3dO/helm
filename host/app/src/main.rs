@@ -43,13 +43,40 @@ async fn api(
         .await
 }
 
-fn main() -> ExitCode {
+/// Debug builds log to the console. Release builds have no console under
+/// `windows_subsystem = "windows"`; their log is written once the profile is known (see
+/// [`init_host_log`]), and a failure before that shows as a dialog anyway.
+fn init_logging() {
+    #[cfg(debug_assertions)]
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+}
+
+/// Release builds: the host's own log to a rolling file in the profile's `diagnostics`
+/// folder, the same size-capped one-older-file shape as the other diagnostics logs.
+/// Lines never carry tokens or codes.
+fn init_host_log(profile: &Profile) {
+    #[cfg(not(debug_assertions))]
+    {
+        let path = profile.path("diagnostics").join("host.log");
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+            .target(env_logger::Target::Pipe(Box::new(
+                helm_core::hostlog::RollingFile::new(&path),
+            )))
+            .init();
+        log::info!("host log: {}", path.display());
+    }
+    #[cfg(debug_assertions)]
+    let _ = profile;
+}
+
+fn main() -> ExitCode {
+    init_logging();
     let platform = Platform::native();
     let profile = match profile::resolve_profile_dir().and_then(|d| Profile::open(&d)) {
         Ok(p) => p,
         Err(e) => return fatal(&platform, &format!("Helm could not open its profile: {e}")),
     };
+    init_host_log(&profile);
     let lock = match profile.lock() {
         Ok(LockOutcome::Acquired(lock)) => lock,
         Ok(LockOutcome::AlreadyRunning) => {
