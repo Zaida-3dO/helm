@@ -42,6 +42,7 @@ pub fn ops(reg: &mut OpRegistry) {
     crate::pet::register_ops(reg);
     crate::petworld::register_ops(reg);
     helm_dictation::register_ops(reg);
+    helm_memindex::register_ops(reg);
 }
 
 pub fn migrations(reg: &mut MigrationRegistry) {
@@ -69,6 +70,7 @@ pub fn migrations(reg: &mut MigrationRegistry) {
     helm_pages::register_migrations(reg);
     helm_devices::register_migrations(reg);
     helm_dictation::register_migrations(reg);
+    helm_memindex::register_migrations(reg);
 }
 
 /// Shared services a crate adds for op handlers (`ctx.services.need::<T>()`), called once at
@@ -96,6 +98,10 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     helm_governor::register_services(services, events);
     helm_localmodels::register_services(services, events);
     helm_relay::register_services(services, events);
+    // The memory indexer drives the hub's search index over that line.
+    if let Some(line) = services.get::<helm_relay::index_line::IndexLine>() {
+        helm_memindex::register_services(services, events, line);
+    }
     // Graphics memory is kept free for speech-to-text only once it is set up: a dictation server
     // saved, or the phone's voice screen used with this PC.
     if let (Some(local), Some(db), Some(profile)) = (
@@ -265,6 +271,7 @@ pub fn host_tools() -> helm_hosttools::HostToolRegistry {
     helm_webtools::register_host_tools(&mut reg);
     helm_skills::register_host_tools(&mut reg);
     helm_dictation::register_host_tools(&mut reg);
+    helm_memindex::register_host_tools(&mut reg);
     reg
 }
 
@@ -313,6 +320,8 @@ pub fn attach_host_tools(
     helm_waits::start(runtime, &dispatcher.ctx().services);
     // Saved items: the reminder sweep, five seconds at worst.
     helm_saved::start(runtime, &dispatcher.ctx().services);
+    // Memory indexing: the thread that keeps the hub's search index current (off until switched on).
+    helm_memindex::start(&dispatcher.ctx().services);
 }
 
 /// The consent upkeep: every minute, and at once after a decision,
@@ -424,6 +433,7 @@ pub fn allow_kinds() -> helm_consent::AllowKinds {
     helm_workflow::register_allow_kinds(&mut k);
     helm_relay::register_allow_kinds(&mut k);
     helm_mcp::gmail::register_allow_kinds(&mut k);
+    helm_memindex::register_allow_kinds(&mut k);
     k
 }
 
@@ -588,6 +598,7 @@ mod host_tool_tests {
             "app_remove_rule",
             "app_add_skill",
             "app_remove_skill",
+            "app_memory_index",
         ];
         assert_eq!(names(Default::default()), base);
         let delta = |k: helm_hosttools::LaunchKeys| -> Vec<String> {

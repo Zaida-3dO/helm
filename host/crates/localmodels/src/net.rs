@@ -14,6 +14,8 @@ pub const SLOT: Duration = Duration::from_secs(5);
 pub const MANAGE: Duration = Duration::from_secs(15);
 /// Making a variant of a model (a metadata change, but it reads the model).
 pub const CREATE: Duration = Duration::from_secs(120);
+/// Embedding one batch of texts; the first one may have to load the model.
+pub const EMBED: Duration = Duration::from_secs(120);
 /// Loading a model into memory.
 pub const LOAD: Duration = Duration::from_secs(300);
 

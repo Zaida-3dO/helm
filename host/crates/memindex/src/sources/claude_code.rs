@@ -157,11 +157,14 @@ struct Turn {
     anchor: String,
 }
 
-/// The joined `text` blocks of a record's `message.content`.
+/// The text of a record's `message.content`: the string itself (how a typed prompt is stored),
+/// or the first `text` block of a list.
 fn message_text(record: &Value) -> &str {
-    record
-        .get("message")
-        .and_then(|m| m.get("content"))
+    let content = record.get("message").and_then(|m| m.get("content"));
+    if let Some(s) = content.and_then(Value::as_str) {
+        return s;
+    }
+    content
         .and_then(Value::as_array)
         .and_then(|blocks| {
             blocks
@@ -174,7 +177,7 @@ fn message_text(record: &Value) -> &str {
 }
 
 /// The record's timestamp (`YYYY-MM-DDTHH:MM:SS[.mmm]Z`, UTC) in Unix milliseconds.
-fn record_ts(record: &Value) -> Option<i64> {
+pub(crate) fn record_ts(record: &Value) -> Option<i64> {
     let s = record.get("timestamp").and_then(Value::as_str)?;
     let (date, rest) = s.split_once('T')?;
     let day = super::days_from_civil(
@@ -265,6 +268,13 @@ mod tests {
         assert_eq!(
             d.chunks[1].at,
             super::super::days_from_civil(2026, 1, 1) * 86_400_000 + 500
+        );
+
+        // a typed prompt is stored as a plain string
+        let typed = r#"{"type":"user","uuid":"u9","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"typed prompt"}}"#;
+        assert_eq!(
+            build_session_doc("s", typed).unwrap().chunks[1].text,
+            "typed prompt"
         );
 
         // a file with no asked turn is nothing to index

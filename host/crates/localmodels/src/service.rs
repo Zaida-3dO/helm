@@ -1219,6 +1219,56 @@ impl LocalService {
         }
     }
 
+    /// Embed `texts` with `model` on the Ollama server `server_id`: one vector per text, in order.
+    /// Refused with the lock's sentence while the card is reserved; an unreachable server, a
+    /// model it does not have, or an answer of the wrong shape is a plain sentence. The call
+    /// holds the same gate a model load does, so an unload never runs under it.
+    pub fn embed(
+        &self,
+        server_id: &str,
+        model: &str,
+        texts: &[String],
+    ) -> Result<Vec<Vec<f32>>, String> {
+        let _loading = read(&self.gate);
+        self.refuse_if_locked()?;
+        let st = self.settings();
+        let s = st
+            .servers
+            .iter()
+            .find(|s| s.id == server_id && s.enabled)
+            .ok_or("That embedding server is not set up.")?;
+        if s.kind != LocalServerKind::Ollama {
+            return Err(format!("{} cannot embed text.", s.name));
+        }
+        let conn = self.conn_or_say(s)?;
+        let vectors = srv::ollama_embed(&self.http, &conn, model, texts).map_err(|e| match e {
+            CallError::Status(404, _) => {
+                format!("{} does not have the model {model}.", s.name)
+            }
+            other => other.say(&s.name, &s.base_url),
+        })?;
+        if vectors.len() != texts.len() {
+            return Err(format!("{} sent back the wrong number of vectors.", s.name));
+        }
+        Ok(vectors)
+    }
+
+    /// Whether a chat on a local model is answering a turn now. Background work such as indexing
+    /// waits while one is.
+    pub fn local_chat_busy(&self) -> bool {
+        self.db
+            .snapshot(|tx| {
+                tx.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM chats
+                     WHERE provider IS NOT NULL AND archived = 0
+                       AND status IN ('starting', 'running', 'stopping'))",
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )
+            })
+            .unwrap_or(false)
+    }
+
     /// The lock as the top bar and Settings show it.
     pub fn lock_view(&self) -> LockView {
         let st = self.settings();

@@ -43,6 +43,7 @@
     "app_mcp_call",
     "app_mcp_oauth_header",
     "app_mcp_tools",
+    "app_memory_index",
     "app_offer_options",
     "app_open_chat",
     "app_orchestrator_on",
