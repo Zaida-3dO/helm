@@ -653,7 +653,7 @@ describe("visual sweep", { timeout: 20 * 60_000 }, () => {
     await page().setViewportSize({ width: 1280, height: 800 }).catch(() => undefined);
   });
 
-  test("width sweep: one-line controls neither wrap nor clip; a toast leaves a dialog's close button clear", async () => {
+  test("width sweep: one-line controls neither wrap nor clip; a toast leaves a dialog's close button and foot clear", async () => {
     // A finished turn, so the chat has an activity dock to measure.
     await newChat(page(), scratchDir("helm-w5v-sweep-"));
     await send(page(), "a reply for the width sweep");
@@ -677,14 +677,25 @@ describe("visual sweep", { timeout: 20 * 60_000 }, () => {
       measured[`sweep/${width}`] = bad;
       assert.deepEqual(bad, [], `at ${width} px`);
     }
-    // At 760 px: a real toast (archiving a chat) is up while Settings opens; its close button takes the click.
+    // At 760 x 700: a real toast (archiving a chat) is up while Settings opens; its close button takes
+    // the click, and the toast and the dialog do not overlap at all (a short window put it over the foot).
     await page().setViewportSize({ width: 1280, height: 800 }).catch(() => undefined);
     // The bar's chat actions show on hover; a DOM click needs none.
     await page().locator(tid("topbar-archive")).dispatchEvent("click");
-    await page().setViewportSize({ width: 760, height: 800 }).catch(() => undefined);
+    await page().setViewportSize({ width: 760, height: 700 }).catch(() => undefined);
     await page().keyboard.press("Control+Comma");
     await page().waitForSelector(tid("settings"), { timeout: 10_000 });
     await page().waitForSelector(tid("toast-slot"), { timeout: 2_000 });
+    const boxes = await page().evaluate(() => {
+      const box = (s: string) => {
+        const r = document.querySelector(s)?.getBoundingClientRect();
+        return r ? { l: r.left, t: r.top, r: r.right, b: r.bottom } : null;
+      };
+      return { toast: box("[data-testid=toast-slot] > *"), dialog: box(".ui-backdrop:not(.clear) .ui-dialog") };
+    });
+    const { toast, dialog } = boxes;
+    assert.ok(toast && dialog, "a toast and a dialog are both up");
+    assert.ok(toast.l >= dialog.r || toast.r <= dialog.l || toast.t >= dialog.b || toast.b <= dialog.t, `the toast is clear of the dialog: ${JSON.stringify(boxes)}`);
     const close = (await page().locator(`${tid("settings")} [aria-label="Close dialog"]`).boundingBox())!;
     const at = { x: close.x + close.width / 2, y: close.y + close.height / 2 };
     const hit = await page().evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest("button")?.getAttribute("aria-label") ?? null, at);

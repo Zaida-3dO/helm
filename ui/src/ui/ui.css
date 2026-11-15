@@ -847,6 +847,14 @@ body:has(> .ui-backdrop:not(.clear)) .shell-main > .ui-toast-slot.ui-toast-slot-
   top: auto;
   bottom: 70px;
 }
+/* And while a toast is up the dialog stops above it, so the toast never covers the dialog's foot
+   (its buttons, or the last rows of a list) in a short window. */
+body:has(.shell-main > .ui-toast-slot):has(> .ui-backdrop:not(.clear)) > .ui-backdrop:not(.clear) {
+  padding-bottom: 90px;
+}
+body:has(.shell-main > .ui-toast-slot-settings):has(> .ui-backdrop:not(.clear)) > .ui-backdrop:not(.clear) {
+  padding-bottom: 144px;
+}
 
 /* Settings rows. */
 .setting-row {
