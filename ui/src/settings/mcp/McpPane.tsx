@@ -10,7 +10,7 @@ import { IconCheck, IconWarning } from '../../ui/icons.tsx';
 import { WheelMark } from '../../ui/status/index.ts';
 import { GoogleAccounts, SetUpOnce } from './GoogleAccounts.tsx';
 import { googleOps, isGoogleServer } from './google.ts';
-import { WAITING_NOTE, connectLabel, isOAuthServer, oauthOps, type OAuthStatus } from './oauth.ts';
+import { WAITING_NOTE, canDisconnect, connectLabel, isOAuthServer, oauthOps, type OAuthStatus } from './oauth.ts';
 import { blankServer, draftFromPreset, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable } from './readiness.ts';
 
 type Refs = { [key in string]?: ValueRef };
@@ -314,6 +314,22 @@ export function McpPane() {
       .catch((e: unknown) => setSignInNote((w) => ({ ...w, [id]: errorText(e) })));
   };
 
+  /** Forget the kept sign-in for one saved server (the next use asks to sign in again). */
+  const disconnect = (id: string) => {
+    oauth
+      .forget(id)
+      .then(() => {
+        setOauthState((o) => ({ ...o, [id]: { connected: false } }));
+        setSignInNote((w) => {
+          const n = { ...w };
+          delete n[id];
+          return n;
+        });
+        reloadStatus();
+      })
+      .catch((e: unknown) => setSignInNote((w) => ({ ...w, [id]: errorText(e) })));
+  };
+
   useEffect(() => {
     reload();
     reloadStatus();
@@ -386,7 +402,8 @@ export function McpPane() {
           {servers.map((s) => {
             const r = serverReadiness(s, status[s.id], presets, oauthState[s.id]);
             const signInLabel = isOAuthServer(s) ? connectLabel(oauthState[s.id], status[s.id]?.state) : undefined;
-            const waiting = signInNote[s.id] !== undefined;
+            // An empty note is a sign-in that is open; a worded one is what went wrong.
+            const waiting = signInNote[s.id] === '';
             return (
               <li key={s.id} className="mcp-server" data-testid={`mcp-server-${s.id}`} data-state={r.state}>
                 <div className="mcp-server-main">
@@ -411,13 +428,18 @@ export function McpPane() {
                     {waiting ? 'Waiting…' : signInLabel}
                   </Button>
                 )}
+                {isOAuthServer(s) && canDisconnect(oauthState[s.id]) && (
+                  <Button className="mcp-act" data-testid={`mcp-oauth-disconnect-${s.id}`} disabled={busy || waiting} onClick={() => disconnect(s.id)}>
+                    Disconnect
+                  </Button>
+                )}
                 <Button className="mcp-act" onClick={() => setDraft({ server: structuredClone(s), isNew: false })}>
                   Edit
                 </Button>
                 <Button className="mcp-act" disabled={busy} onClick={() => void run(() => ops.remove(s.id, revision))}>
                   Remove
                 </Button>
-                {waiting && (
+                {signInNote[s.id] !== undefined && (
                   <p className="mcp-test" data-testid={`mcp-oauth-note-${s.id}`} data-state={signInNote[s.id] ? 'failed' : 'running'} role="status">
                     {signInNote[s.id] ? signInNote[s.id] : (<><WheelMark size={14} state="working" /> {WAITING_NOTE}</>)}
                   </p>
@@ -456,7 +478,7 @@ export function McpPane() {
               !draft.isNew && isOAuthServer(draft.server)
                 ? {
                     label: connectLabel(oauthState[draft.server.id], status[draft.server.id]?.state) ?? 'Sign in again',
-                    waiting: signInNote[draft.server.id] !== undefined,
+                    waiting: signInNote[draft.server.id] === '',
                     connect: () => startSignIn(draft.server.id),
                   }
                 : undefined
