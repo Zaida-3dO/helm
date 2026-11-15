@@ -37,6 +37,11 @@ pub struct Cfg {
     pub wrong_resource: bool,
     /// The authorization-server document names a different issuer than the address it sits at.
     pub wrong_issuer: bool,
+    /// Answer Google's own addresses (`/o/oauth2/v2/auth`, `/oauth2/token`) and enforce what
+    /// Google's sign-in page is picky about (an offline `access_type`, a `consent` in `prompt`).
+    pub google_shape: bool,
+    /// The token answer for a sign-in code carries an `id_token` whose email claim is this.
+    pub id_email: Option<String>,
 }
 
 #[derive(Clone)]
@@ -59,6 +64,8 @@ struct State {
     last_redirect: Option<String>,
     /// Client ids this server handed out, with the redirect addresses each was registered for.
     registered: HashMap<String, Vec<String>>,
+    /// The query of the last accepted sign-in-page request (empty for a server that never saw one).
+    authorize: HashMap<String, String>,
 }
 
 pub struct Fake {
@@ -79,6 +86,7 @@ impl Fake {
             refreshes_served: 0,
             last_redirect: None,
             registered: HashMap::new(),
+            authorize: HashMap::new(),
         }));
         let serve_state = state.clone();
         let serve_base = base.clone();
@@ -117,6 +125,11 @@ impl Fake {
 
     pub fn resource_url(&self) -> String {
         format!("{}/mcp", self.base)
+    }
+
+    /// The query parameters of the last sign-in-page request the fake accepted.
+    pub fn authorize_params(&self) -> HashMap<String, String> {
+        self.state.lock().unwrap().authorize.clone()
     }
 }
 
@@ -183,6 +196,9 @@ fn respond(stream: &mut impl Write, req: &Req, base: &str, cfg: &Cfg, state: &Mu
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/authorize") => authorize(stream, req, cfg, state),
         ("POST", "/token") => token(stream, req, cfg, state),
+        // Google's own addresses (only reached when the caller points its fixed endpoints here).
+        ("GET", "/o/oauth2/v2/auth") => authorize(stream, req, cfg, state),
+        ("POST", "/oauth2/token") => token(stream, req, cfg, state),
         ("POST", "/register") => {
             if cfg.no_register {
                 return send(stream, "404 Not Found", "application/json", "");
@@ -287,7 +303,11 @@ fn authorize(stream: &mut impl Write, req: &Req, cfg: &Cfg, state: &Mutex<State>
         && cfg
             .expect_client
             .as_ref()
-            .is_none_or(|(id, _)| q.get("client_id").map(String::as_str) == Some(id.as_str()));
+            .is_none_or(|(id, _)| q.get("client_id").map(String::as_str) == Some(id.as_str()))
+        && (!cfg.google_shape
+            || (q.get("access_type").map(String::as_str) == Some("offline")
+                && q.get("prompt")
+                    .is_some_and(|p| p.split_whitespace().any(|w| w == "consent"))));
     // A client id this server handed out may only come back on an address it was registered
     // with, compared exactly (an id the person entered is not checked here).
     let registered_ok = {
@@ -308,6 +328,7 @@ fn authorize(stream: &mut impl Write, req: &Req, cfg: &Cfg, state: &Mutex<State>
     let code = {
         let mut st = state.lock().unwrap();
         st.last_redirect = q.get("redirect_uri").cloned();
+        st.authorize = q.clone();
         st.codes_issued += 1;
         let code = format!("code-{}", st.codes_issued);
         let grant = Grant {
@@ -409,7 +430,32 @@ fn token(stream: &mut impl Write, req: &Req, cfg: &Cfg, state: &Mutex<State>) {
     if refreshed && cfg.no_refresh_echo {
         body.as_object_mut().unwrap().remove("refresh_token");
     }
+    // Google sends an id_token only with the sign-in code, never with a refresh; its signature
+    // is never verified by anything here, so a fake one is enough.
+    if !refreshed && grant_type == "authorization_code" {
+        if let Some(email) = &cfg.id_email {
+            let aud = p.get("client_id").map(String::as_str).unwrap_or("");
+            body["id_token"] = json!(id_token(email, aud));
+        }
+    }
     send(stream, "200 OK", "application/json", &body.to_string());
+}
+
+/// A three-part JWT whose payload carries this email; the signature is decoration.
+fn id_token(email: &str, audience: &str) -> String {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let header = b64.encode(br#"{"alg":"RS256","kid":"fake"}"#);
+    let payload = b64.encode(
+        json!({
+            "iss": "https://accounts.google.com",
+            "email": email,
+            "email_verified": true,
+            "aud": audience
+        })
+        .to_string(),
+    );
+    format!("{header}.{payload}.fakesignature")
 }
 
 fn refused(stream: &mut impl Write, reason: &str) {
