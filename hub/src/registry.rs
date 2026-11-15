@@ -114,6 +114,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS clients_machine
 CREATE TABLE IF NOT EXISTS acts_for (
     client_id INTEGER NOT NULL REFERENCES clients(id),
     person_id INTEGER NOT NULL REFERENCES people(id),
+    source    TEXT NOT NULL DEFAULT 'admin',
     PRIMARY KEY (client_id, person_id)
 );
 CREATE TABLE IF NOT EXISTS pairings (
@@ -124,6 +125,12 @@ CREATE TABLE IF NOT EXISTS pairings (
     created_at   TEXT NOT NULL,
     expires_ms   INTEGER NOT NULL,
     used_at      TEXT
+);
+CREATE TABLE IF NOT EXISTS routes (
+    person_id INTEGER NOT NULL REFERENCES people(id),
+    channel   TEXT NOT NULL,
+    client_id INTEGER NOT NULL REFERENCES clients(id),
+    PRIMARY KEY (person_id, channel)
 );
 "#;
 
@@ -186,6 +193,15 @@ impl Registry {
                 "ALTER TABLE pairings ADD COLUMN acts_for TEXT NOT NULL DEFAULT '';",
             )?;
         }
+        // A registry made before a Helm could announce its people gains the acts-for source.
+        let has_source = conn
+            .prepare("SELECT 1 FROM pragma_table_info('acts_for') WHERE name = 'source'")?
+            .exists([])?;
+        if !has_source {
+            conn.execute_batch(
+                "ALTER TABLE acts_for ADD COLUMN source TEXT NOT NULL DEFAULT 'admin';",
+            )?;
+        }
         Ok(Registry { conn })
     }
 
@@ -193,18 +209,26 @@ impl Registry {
 
     /// The person called `name`, made if there is none. Names are unique ignoring case.
     pub fn ensure_person(&mut self, name: &str) -> Result<Person> {
+        Ok(self.ensure_person_created(name)?.0)
+    }
+
+    /// [`Self::ensure_person`], saying whether this call is the one that made the person.
+    pub fn ensure_person_created(&mut self, name: &str) -> Result<(Person, bool)> {
         let name = clean_name(name, "a person's name")?;
         if let Some(p) = self.person_by_name(&name)? {
-            return Ok(p);
+            return Ok((p, false));
         }
         self.conn.execute(
             &format!("INSERT INTO people (name, created_at) VALUES (?1, {NOW})"),
             [&name],
         )?;
-        Ok(Person {
-            id: self.conn.last_insert_rowid(),
-            name,
-        })
+        Ok((
+            Person {
+                id: self.conn.last_insert_rowid(),
+                name,
+            },
+            true,
+        ))
     }
 
     pub fn person_by_name(&self, name: &str) -> Result<Option<Person>> {
@@ -641,11 +665,12 @@ impl Registry {
             params![from.id, into.id],
         )?;
         tx.execute(
-            "INSERT OR IGNORE INTO acts_for (client_id, person_id)
-             SELECT client_id, ?2 FROM acts_for WHERE person_id = ?1",
+            "INSERT OR IGNORE INTO acts_for (client_id, person_id, source)
+             SELECT client_id, ?2, source FROM acts_for WHERE person_id = ?1",
             params![from.id, into.id],
         )?;
         tx.execute("DELETE FROM acts_for WHERE person_id = ?1", [from.id])?;
+        tx.execute("DELETE FROM routes WHERE person_id = ?1", [from.id])?;
         tx.execute("DELETE FROM people WHERE id = ?1", [from.id])?;
         tx.commit()?;
         Ok(Merged {
@@ -678,12 +703,12 @@ impl Registry {
     }
 
     /// Let the machine `client_id` act for `person` (a name or an id), or stop it (`allow`
-    /// false). Returns the person.
+    /// false). Returns the person. Rows set this way are `admin` rows.
     pub fn set_acts_for(&mut self, client_id: i64, person: &str, allow: bool) -> Result<Person> {
         let person = self.find_person(person)?;
         if allow {
             self.conn.execute(
-                "INSERT OR IGNORE INTO acts_for (client_id, person_id) VALUES (?1, ?2)",
+                "INSERT OR IGNORE INTO acts_for (client_id, person_id, source) VALUES (?1, ?2, 'admin')",
                 params![client_id, person.id],
             )?;
         } else {
@@ -695,14 +720,126 @@ impl Registry {
         Ok(person)
     }
 
-    /// The other people the machine `client_id` may act for, by name.
-    pub fn acts_for(&self, client_id: i64) -> Result<Vec<String>> {
+    /// The people the machine `client_id`'s last `device` frame announced it acts for: its
+    /// device rows, replaced whole, are set aside and the announced ones put in their place.
+    /// `admin` rows (from `helm-hub client acts-for` or a pairing code) are never touched, and
+    /// the client's own person never needs a row, so it is skipped. Returns the ids it passed
+    /// over because no such person exists.
+    pub fn set_device_people(&mut self, client_id: i64, people: &[i64]) -> Result<Vec<i64>> {
+        let me = self
+            .client_by_id(client_id)?
+            .ok_or_else(|| RegistryError::NotFound("the client vanished".into()))?;
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM acts_for WHERE client_id = ?1 AND source = 'device'",
+            [client_id],
+        )?;
+        let mut unknown = Vec::new();
+        for id in people {
+            if *id == me.person_id {
+                continue;
+            }
+            let exists = tx
+                .query_row("SELECT 1 FROM people WHERE id = ?1", [id], |_| Ok(()))
+                .optional()?
+                .is_some();
+            if exists {
+                tx.execute(
+                    "INSERT OR IGNORE INTO acts_for (client_id, person_id, source)
+                     VALUES (?1, ?2, 'device')",
+                    params![client_id, id],
+                )?;
+            } else {
+                unknown.push(*id);
+            }
+        }
+        tx.commit()?;
+        Ok(unknown)
+    }
+
+    /// The other people the machine `client_id` may act for, each with where the allowance
+    /// came from (`admin` or `device`).
+    pub fn acts_for(&self, client_id: i64) -> Result<Vec<(String, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT p.name FROM acts_for a JOIN people p ON p.id = a.person_id
+            "SELECT p.name, a.source FROM acts_for a JOIN people p ON p.id = a.person_id
              WHERE a.client_id = ?1 ORDER BY p.name",
         )?;
-        let rows = stmt.query_map([client_id], |r| r.get(0))?;
+        let rows = stmt.query_map([client_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Every person each machine acts for — its own person first, then its acts-for rows —
+    /// keyed by client id, for the `devices` list.
+    pub fn device_people(&self) -> Result<std::collections::HashMap<i64, Vec<Person>>> {
+        let mut out: std::collections::HashMap<i64, Vec<Person>> = self
+            .clients()?
+            .into_iter()
+            .map(|c| {
+                (
+                    c.id,
+                    vec![Person {
+                        id: c.person_id,
+                        name: c.person,
+                    }],
+                )
+            })
+            .collect();
+        let mut stmt = self.conn.prepare(
+            "SELECT a.client_id, p.id, p.name FROM acts_for a JOIN people p ON p.id = a.person_id
+             ORDER BY a.client_id, p.id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                Person {
+                    id: r.get(1)?,
+                    name: r.get(2)?,
+                },
+            ))
+        })?;
+        let rows = rows.collect::<std::result::Result<Vec<(i64, Person)>, _>>()?;
+        for (client_id, person) in rows {
+            if let Some(list) = out.get_mut(&client_id) {
+                if list.first().is_none_or(|own| own.id != person.id) {
+                    list.push(person);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    // ---- channel routing ----
+
+    /// The machine the person `person_id` pinned for `channel` (a [`crate::relay::Channel`]
+    /// label), if any. The pin survives a hub restart; whether the machine is still a live
+    /// candidate is for [`crate::lines::Lines::route_for`] to decide.
+    pub fn pinned_client(&self, person_id: i64, channel: &str) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT client_id FROM routes WHERE person_id = ?1 AND channel = ?2",
+                params![person_id, channel],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Pin `client_id` as the machine that receives `person_id`'s `channel`.
+    pub fn pin_route(&mut self, person_id: i64, channel: &str, client_id: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO routes (person_id, channel, client_id) VALUES (?1, ?2, ?3)",
+            params![person_id, channel, client_id],
+        )?;
+        Ok(())
+    }
+
+    /// Drop the person's pin for `channel`, returning to automatic routing.
+    pub fn clear_route(&mut self, person_id: i64, channel: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM routes WHERE person_id = ?1 AND channel = ?2",
+            params![person_id, channel],
+        )?;
+        Ok(())
     }
 
     // ---- pairing ----
@@ -812,8 +949,8 @@ impl Registry {
         for other in acts_for.split(',').filter_map(|id| id.parse::<i64>().ok()) {
             // A person removed since the code was made is passed over.
             self.conn.execute(
-                "INSERT OR IGNORE INTO acts_for (client_id, person_id)
-                 SELECT ?1, id FROM people WHERE id = ?2",
+                "INSERT OR IGNORE INTO acts_for (client_id, person_id, source)
+                 SELECT ?1, id, 'admin' FROM people WHERE id = ?2",
                 params![paired.client.id, other],
             )?;
         }
@@ -1039,6 +1176,79 @@ mod tests {
         r.add_client("Ivy", "PC", &scopes).unwrap();
         assert!(r.merge_person("Ivy", "Sam").is_err());
         assert!(r.merge_person("Sam", "sam").is_err(), "not into themselves");
+    }
+
+    #[test]
+    fn announced_people_replace_only_device_rows_and_pins_survive() {
+        let mut r = Registry::open_in_memory().unwrap();
+        let scopes = Scopes::parse_list(crate::auth::DEFAULT_PAIRED_SCOPES).unwrap();
+        let (sam, kit, ivy) = (
+            r.ensure_person("Sam").unwrap().id,
+            r.ensure_person("Kit").unwrap().id,
+            r.ensure_person("Ivy").unwrap().id,
+        );
+        let pc = r.add_client("Sam", "pc", &scopes).unwrap().client.id;
+
+        // A device announcement adds rows of source `device`, skipping the machine's own
+        // person and unknown ids.
+        let unknown = r.set_device_people(pc, &[kit, sam, 999]).unwrap();
+        assert_eq!(unknown, vec![999]);
+        assert!(r.may_act_for(pc, kit) && !r.may_act_for(pc, ivy));
+        assert_eq!(
+            r.acts_for(pc).unwrap(),
+            vec![("Kit".into(), "device".into())]
+        );
+
+        // An `admin` row survives; the device rows are replaced whole.
+        r.set_acts_for(pc, "Ivy", true).unwrap();
+        r.set_device_people(pc, &[ivy]).unwrap();
+        assert_eq!(
+            r.acts_for(pc).unwrap(),
+            vec![("Ivy".into(), "admin".into())],
+            "the admin row stays and the Kit device row is gone"
+        );
+        assert!(r.may_act_for(pc, ivy));
+        // Announcing nobody drops the device rows; the admin row stays.
+        r.set_device_people(pc, &[kit]).unwrap();
+        r.set_device_people(pc, &[]).unwrap();
+        assert!(!r.may_act_for(pc, kit));
+        assert!(r.may_act_for(pc, ivy));
+        assert!(r.may_act_for(pc, sam), "its own person always");
+
+        // The people a device shows in the list: its own person first.
+        let people = r.device_people().unwrap().remove(&pc).unwrap();
+        assert_eq!(
+            people.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            ["Sam", "Ivy"]
+        );
+
+        // Pins survive a reopen of the same file, and a merge drops the folded person's.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reg.db");
+        {
+            let mut disk = Registry::open(&path).unwrap();
+            let sam = disk.ensure_person("Sam").unwrap().id;
+            let pc = disk.add_client("Sam", "pc2", &scopes).unwrap().client.id;
+            disk.pin_route(sam, "telegram", pc).unwrap();
+            assert_eq!(disk.pinned_client(sam, "telegram").unwrap(), Some(pc));
+            disk.clear_route(sam, "voice").unwrap();
+            assert_eq!(disk.pinned_client(sam, "voice").unwrap(), None);
+        }
+        let mut disk = Registry::open(&path).unwrap();
+        let sam_id = disk.find_person("Sam").unwrap().id;
+        assert!(
+            disk.pinned_client(sam_id, "telegram").unwrap().is_some(),
+            "a pin survives a reopen"
+        );
+        let kit = disk.ensure_person("Kit").unwrap().id;
+        disk.pin_route(kit, "app", disk.find_client("pc2", None).unwrap().id)
+            .unwrap();
+        disk.merge_person("Kit", "Sam").unwrap();
+        assert_eq!(
+            disk.pinned_client(kit, "app").unwrap(),
+            None,
+            "the folded person's pins go with them"
+        );
     }
 
     #[test]

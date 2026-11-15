@@ -78,6 +78,7 @@ pub mod hub_view;
 pub mod knowledge_line;
 pub mod notify;
 pub mod pair;
+pub mod people;
 pub mod remote;
 pub mod setup;
 pub mod sink;
@@ -141,9 +142,15 @@ pub fn register_services(services: &mut Services, _events: &Arc<dyn EventSink>) 
     sink.attach_line(client.handle());
     voice.attach_line(client.handle());
     client.attach_voice(voice.clone());
-    // The household switches the user last chose (all off until they choose).
+    // A frame naming a hub person is only this PC's business when a profile of theirs is
+    // linked here (the home profile's person always is).
     if let Some(db) = services.get::<helm_core::db::Database>() {
         client.restore_sharing(household::load(&db));
+        let db = db.clone();
+        client.set_person_check(Arc::new(move |p: &str| {
+            db.snapshot(|tx| helm_profiles::store::profile_for_person(tx, p).map(|o| o.is_some()))
+                .unwrap_or(false)
+        }));
     }
     services.insert(sink);
     services.insert(voice.shown());
@@ -171,13 +178,22 @@ pub fn start(handle: &tokio::runtime::Handle, ctx: &OpCtx, tools: Arc<helm_hostt
     let line = client.handle();
     knowledge_line::start(handle, ctx, &client);
     handle.spawn(client.run_supervised());
-    if let (Some(rt), Some(afk), Some(profile), Some(sink)) = (
+    if let (Some(rt), Some(db), Some(afk), Some(profile), Some(sink)) = (
         ctx.services.get::<helm_chats::ChatRuntime>(),
+        ctx.services.get::<helm_core::db::Database>(),
         ctx.services.get::<helm_afk::AfkService>(),
         ctx.services.get::<Profile>(),
         ctx.services.get::<sink::ChatSink>(),
     ) {
-        notify::watch_away(handle, (*rt).clone(), afk, line, sink, profile.dir.clone());
+        notify::watch_away(
+            handle,
+            (*rt).clone(),
+            db,
+            afk,
+            line,
+            sink,
+            profile.dir.clone(),
+        );
     }
     if let (Some(watch), Some(voice)) = (
         ctx.services.get::<voice_watch::VoiceWatch>(),
@@ -260,66 +276,108 @@ fn connection_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     to_value(&config::view(&saved, line_state(ctx)))
 }
 
-fn telegram_view(ctx: &OpCtx) -> Result<Value, ApiError> {
+/// The profile a channel op acts on: `{profileId}` when it names one that exists here, else
+/// the home profile. Each linked profile keeps its own Telegram and voice files and switches;
+/// the settings window says which profile it is showing.
+fn channel_profile(ctx: &OpCtx, args: &Value) -> Result<String, ApiError> {
+    let db = ctx.services.need::<helm_core::db::Database>()?;
+    let named = args
+        .get("profileId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match named {
+        None => db
+            .snapshot(|tx| helm_profiles::store::home(tx))
+            .ok()
+            .flatten()
+            .map(|p| p.id)
+            .ok_or_else(|| ApiError::internal("Helm has no home profile yet.")),
+        Some(wanted) => db
+            .snapshot(|tx| helm_profiles::store::get(tx, wanted))
+            .ok()
+            .flatten()
+            .map(|p| p.id)
+            .ok_or_else(|| ApiError::bad_args("There is no profile with that id.")),
+    }
+}
+
+fn telegram_view(ctx: &OpCtx, args: &Value) -> Result<Value, ApiError> {
     let profile = ctx.services.need::<Profile>()?;
     let db = ctx.services.need::<helm_core::db::Database>()?;
-    to_value(&sink::telegram_view(&db, &profile.dir, helm_core::now_ms()))
-}
-
-fn telegram_get(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
-    telegram_view(ctx)
-}
-
-fn telegram_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
-    let f: telegram::PolicyFile = serde_json::from_value(args).map_err(|_| {
-        ApiError::bad_args(
-            "Expected maxAgeHours, maxTokens, awayAlerts, approvals, remoteAnswers, and optional model and effort.",
-        )
-    })?;
-    f.check().map_err(ApiError::bad_args)?;
-    let profile = ctx.services.need::<Profile>()?;
-    telegram::save_policy(&telegram::policy_path(&profile.dir), f)
-        .map_err(|_| ApiError::internal("The Telegram limits could not be saved."))?;
-    telegram_view(ctx)
-}
-
-fn telegram_reset(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
-    let profile = ctx.services.need::<Profile>()?;
-    telegram::save_tag(&telegram::tag_path(&profile.dir), None)
-        .map_err(|_| ApiError::internal("The Telegram chat tag could not be removed."))?;
-    telegram_view(ctx)
-}
-
-fn voice_view(ctx: &OpCtx) -> Result<Value, ApiError> {
-    let profile = ctx.services.need::<Profile>()?;
-    let db = ctx.services.need::<helm_core::db::Database>()?;
-    to_value(&voice_sink::voice_view(
+    let pid = channel_profile(ctx, args)?;
+    to_value(&sink::telegram_view(
         &db,
         &profile.dir,
+        &pid,
         helm_core::now_ms(),
     ))
 }
 
-fn voice_get(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
-    voice_view(ctx)
+fn telegram_get(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    telegram_view(ctx, &args)
 }
 
-fn voice_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
-    let f: voice::PolicyFile = serde_json::from_value(args).map_err(|_| {
+fn telegram_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let f: telegram::PolicyFile = serde_json::from_value(args.clone()).map_err(|_| {
         ApiError::bad_args(
-            "Expected model, effort, idleMinutes, maxAgeHours, maxTokens and watch (off, flags or flags+done).",
+            "Expected maxAgeHours, maxTokens, awayAlerts, approvals, remoteAnswers, takeTelegram, and optional model and effort.",
         )
     })?;
     f.check().map_err(ApiError::bad_args)?;
     let profile = ctx.services.need::<Profile>()?;
-    voice::save_policy(&voice::policy_path(&profile.dir), &f)
-        .map_err(|_| ApiError::internal("The voice limits could not be saved."))?;
-    voice_view(ctx)
+    let pid = channel_profile(ctx, &args)?;
+    let paths = people::telegram_paths(&profile.dir, &pid);
+    telegram::save_policy(&paths.policy, f)
+        .map_err(|_| ApiError::internal("The Telegram limits could not be saved."))?;
+    telegram_view(ctx, &args)
 }
 
-fn voice_reset(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
+fn telegram_reset(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let profile = ctx.services.need::<Profile>()?;
-    voice::save_tag(&voice::tag_path(&profile.dir), None)
+    let pid = channel_profile(ctx, &args)?;
+    let paths = people::telegram_paths(&profile.dir, &pid);
+    telegram::save_tag(&paths.tag, None)
+        .map_err(|_| ApiError::internal("The Telegram chat tag could not be removed."))?;
+    telegram_view(ctx, &args)
+}
+
+fn voice_view(ctx: &OpCtx, args: &Value) -> Result<Value, ApiError> {
+    let profile = ctx.services.need::<Profile>()?;
+    let db = ctx.services.need::<helm_core::db::Database>()?;
+    let pid = channel_profile(ctx, args)?;
+    to_value(&voice_sink::voice_view(
+        &db,
+        &profile.dir,
+        &pid,
+        helm_core::now_ms(),
+    ))
+}
+
+fn voice_get(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    voice_view(ctx, &args)
+}
+
+fn voice_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let f: voice::PolicyFile = serde_json::from_value(args.clone()).map_err(|_| {
+        ApiError::bad_args(
+            "Expected model, effort, idleMinutes, maxAgeHours, maxTokens, watch (off, flags or flags+done) and takeVoice.",
+        )
+    })?;
+    f.check().map_err(ApiError::bad_args)?;
+    let profile = ctx.services.need::<Profile>()?;
+    let pid = channel_profile(ctx, &args)?;
+    let paths = people::voice_paths(&profile.dir, &pid);
+    voice::save_policy(&paths.policy, &f)
+        .map_err(|_| ApiError::internal("The voice limits could not be saved."))?;
+    voice_view(ctx, &args)
+}
+
+fn voice_reset(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let profile = ctx.services.need::<Profile>()?;
+    let pid = channel_profile(ctx, &args)?;
+    let paths = people::voice_paths(&profile.dir, &pid);
+    voice::save_tag(&paths.tag, None)
         .map_err(|_| ApiError::internal("The voice chat tag could not be removed."))?;
-    voice_view(ctx)
+    voice_view(ctx, &args)
 }

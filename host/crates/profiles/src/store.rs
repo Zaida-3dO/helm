@@ -595,6 +595,92 @@ pub fn chat_owner_profile(conn: &Connection, chat_id: &str) -> Option<String> {
     profile_of_chat(conn, chat_id).ok().flatten().map(|p| p.id)
 }
 
+/// The profile linked to a hub person, when one is.
+pub fn profile_for_person(conn: &Connection, person_id: &str) -> rusqlite::Result<Option<Profile>> {
+    conn.query_row(
+        &format!("SELECT {COLS} FROM profiles WHERE hub_person_id = ?1"),
+        [person_id],
+        row,
+    )
+    .optional()
+}
+
+/// The hub person ids of the profiles that are linked to one, the home profile's first.
+/// This is who the PC acts for.
+pub fn linked_person_ids(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    conn.prepare(
+        "SELECT hub_person_id FROM profiles WHERE hub_person_id IS NOT NULL AND hub_person_id <> ''
+         ORDER BY is_home DESC, created_at, rowid",
+    )?
+    .query_map([], |r| r.get(0))?
+    .collect()
+}
+
+/// The linked profiles as the device frame announces them: profile id, hub person and the home
+/// flag, the home profile's first. The channel switches are read per profile from that profile's
+/// own policy files by whoever assembles the frame.
+pub fn linked_claims(conn: &Connection) -> rusqlite::Result<Vec<(String, String, bool)>> {
+    conn.prepare(
+        "SELECT id, hub_person_id, is_home FROM profiles
+         WHERE hub_person_id IS NOT NULL AND hub_person_id <> ''
+         ORDER BY is_home DESC, created_at, rowid",
+    )?
+    .query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)? != 0,
+        ))
+    })?
+    .collect()
+}
+
+/// The profiles that have a name of their own but no hub person — the ones that ask the hub for
+/// a person to be their own. The unnamed home placeholder is not one: pairing names and links it.
+pub fn unlinked_named(conn: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
+    conn.prepare(
+        "SELECT id, name FROM profiles
+         WHERE (hub_person_id IS NULL OR hub_person_id = '') AND needs_name = 0
+         ORDER BY is_home DESC, created_at, rowid",
+    )?
+    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+    .collect()
+}
+
+/// The chats a hub person sees: those their profile owns, those shared with it, and (for the
+/// home profile) any chat still without an owner. Nobody linked means nobody's chats.
+pub fn visible_to_person(conn: &Connection, person_id: &str) -> Result<Vec<String>, ProfileError> {
+    let p = profile_for_person(conn, person_id)?
+        .ok_or_else(|| ProfileError::Bad("That hub person has no profile here.".into()))?;
+    chat_ids_for(conn, &p.id)
+}
+
+/// The chats any person in `person_ids` sees — the union, without repeats. One helper serves
+/// the household read scopes, the outside lists and the Telegram tools: what a person's
+/// Telegram, Remote page or app-tool call sees by default, and what a watcher's copy of
+/// another device holds for the profiles this PC has.
+pub fn chats_of_person(
+    conn: &Connection,
+    person_ids: &[String],
+) -> Result<Vec<String>, ProfileError> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for p in person_ids {
+        for id in visible_to_person(conn, p)? {
+            if seen.insert(id.clone()) {
+                out.push(id);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Whether a profile takes a person's Telegram or voice on this PC when its policy says
+/// nothing: the home profile takes them, every other profile starts off.
+pub fn channel_default(is_home: bool) -> bool {
+    is_home
+}
+
 /// Link the home profile to the hub person this machine was paired as. A home profile that is
 /// still the unnamed placeholder takes the person's name (when it is a usable name no other
 /// profile has). A different profile holding the same link loses it first.
@@ -994,6 +1080,70 @@ mod tests {
             fill_identity(tx)?;
             assert_eq!(column(tx, "a", "profile_id"), h.id);
             assert_eq!(column(tx, "a", "host_device_id"), device);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn the_linked_people_see_their_own_and_shared_chats_and_the_home_goes_first() {
+        let (_d, db) = temp_db();
+        db.write(|tx| -> Result<_, ProfileError> {
+            let home = home(tx)?.expect("made at open");
+            update(
+                tx,
+                &home.id,
+                Patch {
+                    hub_person_id: Some(Some("7".into())),
+                    ..Default::default()
+                },
+            )?;
+            let other = create(tx, "Second", None, Some("9"), 2)?;
+            chat(tx, "c1", None, false); // home's
+            chat(tx, "c2", None, false);
+            assign(tx, &["c2".into()], &other.id)?;
+            share(tx, &["c1".into()], &other.id, true)?;
+            let third = create(tx, "Third", None, None, 3)?;
+            // The home person is first; an unlinked profile is not in the list at all.
+            assert_eq!(linked_person_ids(tx)?, ["7", "9"]);
+            // The claims list names the profile each person is carried for, home first; the
+            // ensure list holds every named profile still without a hub person.
+            let claims = linked_claims(tx)?;
+            assert_eq!(
+                claims
+                    .iter()
+                    .map(|(_, p, _)| p.as_str())
+                    .collect::<Vec<_>>(),
+                ["7", "9"]
+            );
+            assert_eq!(claims[0], (home.id.clone(), "7".into(), true));
+            assert_eq!(claims[1], (other.id.clone(), "9".into(), false));
+            assert_eq!(
+                unlinked_named(tx)?,
+                [(third.id.clone(), "Third".to_owned())]
+            );
+            // Each person sees their own and what is shared with them; a chat assigned to
+            // another profile leaves the home's own view.
+            assert_eq!(visible_to_person(tx, "7")?, ["c1"]);
+            let mut nine = visible_to_person(tx, "9")?;
+            nine.sort();
+            assert_eq!(nine, ["c1", "c2"]);
+            // The union has no repeats, and an unknown person adds nothing of their own.
+            assert_eq!(chats_of_person(tx, &["7".into(), "9".into()])?.len(), 2);
+            assert!(visible_to_person(tx, "nope").is_err());
+            // Unlinking leaves the person with nobody: the PC stops acting for them.
+            update(
+                tx,
+                &other.id,
+                Patch {
+                    hub_person_id: Some(None),
+                    ..Default::default()
+                },
+            )?;
+            assert_eq!(linked_person_ids(tx)?, ["7"]);
+            assert_eq!(unlinked_named(tx)?.len(), 2);
+            assert!(chats_of_person(tx, &["9".into()]).is_err());
+            assert!(channel_default(true) && !channel_default(false));
             Ok(())
         })
         .unwrap();

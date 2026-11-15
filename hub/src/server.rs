@@ -299,13 +299,28 @@ async fn answer(
                     .pointer("/params/arguments")
                     .cloned()
                     .unwrap_or_else(|| json!({}));
-                // `machine` picks one of the caller's computers; Helm never sees it.
+                // `machine` picks one of the caller's computers; Helm never sees it. The
+                // caller's own person is the one it acts as here: an app token belongs to a
+                // person and opens no window onto another's.
                 let machine = args
                     .as_object_mut()
                     .and_then(|o| o.remove("machine"))
                     .and_then(|v| v.as_str().map(str::to_owned));
-                let result = match state.lines.pick(client.person_id, machine.as_deref()) {
-                    Some(line) => apptools::call(&line, &client.name, name, &args).await,
+                let line = match machine.as_deref() {
+                    Some(name) => state.lines.named_candidate(
+                        client.person_id,
+                        name,
+                        crate::relay::Channel::App,
+                    ),
+                    None => state
+                        .lines
+                        .route_for(client.person_id, crate::relay::Channel::App),
+                };
+                let result = match line {
+                    Some(line) => {
+                        apptools::call(&line, &client.name, name, &args, Some(client.person_id))
+                            .await
+                    }
                     None => apptools::offline_result(),
                 };
                 return Ok(Some(

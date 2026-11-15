@@ -733,7 +733,9 @@ async fn devices_see_each_other_and_calls_pushes_and_refusals_pass_between_them(
             assert_eq!(
                 c["from"],
                 json!({ "uid": LAPTOP, "name": "Laptop", "personId": bea_person.to_string(),
-                        "person": "Bea" })
+                        "person": "Bea",
+                        "people": [{"personId": bea_person.to_string(), "person": "Bea"}],
+                        "machinePersonId": bea_person.to_string() })
             );
             assert_ne!(c["id"], "c1");
             let r = json!({ "type": "dev_result", "id": c["id"], "ok": true,

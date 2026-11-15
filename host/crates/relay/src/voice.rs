@@ -93,6 +93,10 @@ pub struct PolicyFile {
     /// What the attention watch wakes the chat for.
     #[serde(default)]
     pub watch: WatchLevel,
+    /// Whether this PC takes its person's voice ("Take my voice on this PC"). `None`: the
+    /// default — the home profile takes it, every other profile starts off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub take_voice: Option<bool>,
 }
 
 fn default_model() -> String {
@@ -120,6 +124,7 @@ impl Default for PolicyFile {
             max_age_hours: default_age(),
             max_tokens: default_tokens(),
             watch: WatchLevel::default(),
+            take_voice: None,
         }
     }
 }
@@ -176,6 +181,23 @@ impl PolicyFile {
 
 pub fn policy_path(profile_dir: &Path) -> PathBuf {
     profile_dir.join("relay").join("voice-policy.json")
+}
+
+/// One profile's voice files: its tag and policy, the store of what the phone heard, and the
+/// folder its chats start in.
+#[derive(Clone)]
+pub struct Paths {
+    pub tag: PathBuf,
+    pub policy: PathBuf,
+    pub heard: PathBuf,
+    pub folder: PathBuf,
+}
+
+/// Whether this PC takes its person's voice: what the switch says, or the default — on for
+/// the home profile, off for every other.
+pub fn takes_voice(f: &PolicyFile, is_home: bool) -> bool {
+    f.take_voice
+        .unwrap_or_else(|| helm_profiles::store::channel_default(is_home))
 }
 
 /// The saved settings, or the defaults when none are saved (or the file is unreadable).

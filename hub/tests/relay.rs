@@ -317,10 +317,11 @@ async fn the_hub_list_is_checked_again_at_the_call() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     line.attach(tx);
     let _welcome = rx.try_recv().unwrap();
-    let v = helm_hub::apptools::call(&line, "remote", "app_update_settings", &json!({})).await;
+    let v =
+        helm_hub::apptools::call(&line, "remote", "app_update_settings", &json!({}), None).await;
     assert_eq!(v["isError"], true);
     assert!(rx.try_recv().is_err(), "nothing went down the line");
-    let v = helm_hub::apptools::call(&line, "remote", "app_list_chats", &json!([1])).await;
+    let v = helm_hub::apptools::call(&line, "remote", "app_list_chats", &json!([1]), None).await;
     assert_eq!(v["isError"], true, "arguments must be an object");
     assert!(rx.try_recv().is_err());
 }

@@ -76,6 +76,10 @@ pub struct PolicyFile {
     /// other new chat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Whether this PC takes its person's Telegram ("Take my Telegram on this PC"). `None`:
+    /// the default — the home profile takes it, every other profile starts off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub take_telegram: Option<bool>,
 }
 
 impl PolicyFile {
@@ -103,6 +107,7 @@ impl Default for PolicyFile {
             remote_answers: false,
             model: None,
             effort: None,
+            take_telegram: None,
         }
     }
 }
@@ -125,6 +130,29 @@ impl PolicyFile {
 
 pub fn policy_path(profile_dir: &Path) -> PathBuf {
     profile_dir.join("relay").join("telegram-policy.json")
+}
+
+/// One profile's Telegram files: its tag, policy, answered ids and sent notes, and the folder
+/// its pictures and files are saved in.
+#[derive(Clone)]
+pub struct Paths {
+    pub tag: PathBuf,
+    pub policy: PathBuf,
+    pub answered: PathBuf,
+    pub sent: PathBuf,
+    pub attachments: PathBuf,
+}
+
+/// The folder one profile's Telegram attachments are saved in.
+pub fn attachments_dir(profile_dir: &Path, profile_id: &str) -> PathBuf {
+    profile_dir.join("telegram").join(profile_id)
+}
+
+/// Whether this PC takes its person's Telegram: what the switch says, or the default —
+/// on for the home profile, off for every other.
+pub fn takes_telegram(f: &PolicyFile, is_home: bool) -> bool {
+    f.take_telegram
+        .unwrap_or_else(|| helm_profiles::store::channel_default(is_home))
 }
 
 /// The saved settings, or the defaults when none are saved (or the file is unreadable).
@@ -718,6 +746,7 @@ mod tests {
             away_alerts: false,
             approvals: true,
             remote_answers: true,
+            take_telegram: Some(false),
             model: Some("model-one".into()),
             effort: Some("medium".into()),
         };
@@ -732,6 +761,7 @@ mod tests {
                 away_alerts: true,
                 approvals: false,
                 remote_answers: false,
+                take_telegram: None,
                 model: None,
                 effort: None,
             };

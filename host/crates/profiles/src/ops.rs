@@ -44,6 +44,11 @@ fn changed(
     let db = ctx.services.need::<Database>()?;
     let extra = db.write(f).map_err(fail)?;
     ctx.events.emit(AppEvent::new("profiles_changed"));
+    // A profile change changes which layers sync and who this PC acts for on the hub: wake the
+    // knowledge loop the way the app's event tap does for knowledge edits.
+    if let Some(t) = ctx.services.get::<helm_skills::sync::Trigger>() {
+        t.poke();
+    }
     let mut out = view(&db)?;
     if let (Some(o), Some(e)) = (out.as_object_mut(), extra.as_object()) {
         o.extend(e.clone());

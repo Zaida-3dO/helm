@@ -6,7 +6,7 @@
 //! into an awaitable call.
 
 use crate::wire::{
-    code, iso_utc, Caller, DeviceFrame, Frame, PeerDevice, WireError, MAX_FRAME_BYTES,
+    code, iso_utc, Caller, DeviceFrame, Frame, PeerDevice, PersonRef, WireError, MAX_FRAME_BYTES,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -29,9 +29,14 @@ pub trait DeviceLink: Send + Sync {
     fn subscribe(&self, cb: FrameCb);
     /// Whether the line to the hub is up.
     fn up(&self) -> bool;
-    /// The hub person this machine is paired as, if it is paired with one. A request from a
-    /// device of another person is a household request, scoped to that person's own chats.
+    /// The hub person this machine is paired as (its home person), if it is paired with one.
     fn person_id(&self) -> Option<String>;
+    /// The hub people this PC acts for, one per linked profile, the home person first. Reads
+    /// carry them so the other side's copy holds the chats of every profile here. A line that
+    /// does not track profiles answers with the paired person alone.
+    fn people(&self) -> Vec<String> {
+        self.person_id().into_iter().collect()
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -100,7 +105,19 @@ impl Rpc {
     /// Ask the device `to` to run `op`. Fails at once while the line is down, and with the
     /// hub's `offline`, `timeout`, `scope` or `too_large` or the device's own error otherwise.
     pub async fn call(&self, to: &str, op: &str, args: Value) -> Result<Value, WireError> {
-        self.request(to, op, args, None).await
+        self.request(to, op, args, &[], None).await
+    }
+
+    /// As [`Rpc::call`], naming in `act` the people the call acts for (the acting person
+    /// first, then anyone whose chats a read may cover).
+    pub async fn call_as(
+        &self,
+        to: &str,
+        op: &str,
+        args: Value,
+        act: &[String],
+    ) -> Result<Value, WireError> {
+        self.request(to, op, args, act, None).await
     }
 
     /// As [`Rpc::call`], and `arrival` runs the moment the result comes down the line, before
@@ -113,7 +130,21 @@ impl Rpc {
         args: Value,
         arrival: impl FnOnce() + Send + 'static,
     ) -> Result<Value, WireError> {
-        self.request(to, op, args, Some(Box::new(arrival))).await
+        self.request(to, op, args, &[], Some(Box::new(arrival)))
+            .await
+    }
+
+    /// As [`Rpc::call_then`], naming in `act` the people the call acts for.
+    pub async fn call_then_as(
+        &self,
+        to: &str,
+        op: &str,
+        args: Value,
+        act: &[String],
+        arrival: impl FnOnce() + Send + 'static,
+    ) -> Result<Value, WireError> {
+        self.request(to, op, args, act, Some(Box::new(arrival)))
+            .await
     }
 
     async fn request(
@@ -121,6 +152,7 @@ impl Rpc {
         to: &str,
         op: &str,
         args: Value,
+        act: &[String],
         arrival: Option<Arrival>,
     ) -> Result<Value, WireError> {
         if !self.link.up() {
@@ -137,6 +169,7 @@ impl Rpc {
             to: to.to_owned(),
             op: op.to_owned(),
             args,
+            act_as: act.to_vec(),
         });
         if !sent {
             lock(&self.pending).remove(&id);
@@ -188,6 +221,8 @@ struct Entry {
     up: bool,
     last_seen_ms: Option<i64>,
     tx: mpsc::UnboundedSender<Frame>,
+    /// The hub people this device last announced acting for, as its `device` frame said them.
+    announced: Vec<String>,
 }
 
 #[derive(Default)]
@@ -196,6 +231,8 @@ struct State {
     /// Requests in flight: the hub's id → (the asking device, the asker's own id).
     calls: HashMap<String, (String, String)>,
     next: u64,
+    /// Hub people the hub knows, by id (as the connected devices introduced them).
+    people: BTreeMap<String, String>,
 }
 
 impl State {
@@ -220,6 +257,14 @@ impl State {
                         online: o.up,
                         last_seen_at: o.last_seen_ms.map(iso_utc),
                         run: o.run,
+                        people: o
+                            .announced
+                            .iter()
+                            .map(|p| PersonRef {
+                                person_id: p.clone(),
+                                person: self.people.get(p).cloned().unwrap_or_default(),
+                            })
+                            .collect(),
                         is_self: ouid == uid,
                     })
                     .collect();
@@ -270,8 +315,14 @@ impl MemRouter {
                     up: true,
                     last_seen_ms: None,
                     tx,
+                    announced: Vec::new(),
                 },
             );
+            if let (Some(p), Some(n)) = (person_id, person) {
+                st.people
+                    .entry(p.to_owned())
+                    .or_insert_with(|| n.to_owned());
+            }
         }
         let cbs2 = cbs.clone();
         tokio::spawn(async move {
@@ -285,35 +336,44 @@ impl MemRouter {
             router: self.clone(),
             uid: uid.to_owned(),
             person_id: person_id.map(str::to_owned),
+            people: Mutex::new(person_id.map(str::to_owned).into_iter().collect()),
             cbs,
         })
     }
 
     fn handle(&self, from: &str, frame: Frame) -> bool {
         let mut st = lock(&self.0);
-        let Some((peer, caller)) = st.links.get(from).filter(|e| e.up).map(|e| {
-            (
-                e.peer,
-                Caller {
-                    uid: from.to_owned(),
-                    name: e.name.clone(),
-                    person_id: e.person_id.clone(),
-                    person: e.person.clone(),
-                },
-            )
-        }) else {
+        let Some(peer) = st.links.get(from).filter(|e| e.up).map(|e| e.peer) else {
             return false;
         };
         match frame {
-            Frame::Device(DeviceFrame { uid: _, name, run }) => {
+            Frame::Device(DeviceFrame {
+                uid: _,
+                name,
+                run,
+                people,
+            }) => {
                 if let Some(me) = st.links.get_mut(from) {
                     me.name = name;
                     me.run = run;
                     me.known = true;
+                    // The announced people replace the device's previous set; unknown ids are
+                    // kept but unnamed, as a hub would log and skip them.
+                    me.announced = people
+                        .into_iter()
+                        .map(|p| p.person_id)
+                        .filter(|p| !p.is_empty())
+                        .collect();
                 }
                 st.broadcast();
             }
-            Frame::Dev { id, to, op, args } => {
+            Frame::Dev {
+                id,
+                to,
+                op,
+                args,
+                act_as,
+            } => {
                 if !peer {
                     st.fail(
                         from,
@@ -327,6 +387,63 @@ impl MemRouter {
                     st.fail(from, &id, code::OFFLINE, "That device is offline.");
                     return true;
                 }
+                // The sender may only name people it acts for: its own person, or ones it
+                // announced. Any other entry: the whole call is refused and nothing is sent on.
+                let entry = match st.links.get(from) {
+                    Some(e) => e,
+                    None => return false,
+                };
+                let own = entry.person_id.clone().filter(|p| !p.is_empty());
+                let refused = act_as.iter().find(|p| {
+                    Some(p.as_str()) != own.as_deref() && !entry.announced.iter().any(|a| a == *p)
+                });
+                if refused.is_some() {
+                    st.fail(
+                        from,
+                        &id,
+                        code::NOT_ALLOWED,
+                        "This PC does not act for that person.",
+                    );
+                    return true;
+                }
+                let caller = Caller {
+                    uid: from.to_owned(),
+                    name: entry.name.clone(),
+                    person_id: act_as.first().cloned().or_else(|| own.clone()),
+                    person: act_as
+                        .first()
+                        .map(|p| {
+                            st.people.get(p).cloned().or_else(|| {
+                                own.as_deref()
+                                    .filter(|o| *o == p)
+                                    .and_then(|_| entry.person.clone())
+                            })
+                        })
+                        .unwrap_or_else(|| entry.person.clone()),
+                    people: {
+                        let list: Vec<String> = if act_as.is_empty() {
+                            own.iter().cloned().collect()
+                        } else {
+                            act_as.clone()
+                        };
+                        list.into_iter()
+                            .map(|p| PersonRef {
+                                person: st
+                                    .people
+                                    .get(&p)
+                                    .cloned()
+                                    .or_else(|| {
+                                        own.as_deref()
+                                            .filter(|o| *o == p)
+                                            .and_then(|_| entry.person.clone())
+                                    })
+                                    .unwrap_or_default(),
+                                person_id: p,
+                            })
+                            .collect()
+                    },
+                    machine_person_id: own,
+                };
                 let hub_id = format!("hub-{}", st.next);
                 st.next += 1;
                 let call = Frame::DevCall {
@@ -414,6 +531,8 @@ pub struct MemLink {
     router: MemRouter,
     uid: String,
     person_id: Option<String>,
+    /// The hub people this end's PC acts for, home first — what `people()` answers.
+    people: Mutex<Vec<String>>,
     cbs: Arc<Mutex<Vec<FrameCb>>>,
 }
 
@@ -421,6 +540,11 @@ impl MemLink {
     /// Drop the line or bring it back; the others hear about it in `devices`.
     pub fn set_up(&self, up: bool) {
         self.router.set_up(&self.uid, up);
+    }
+
+    /// The hub people this end's PC acts for, home first (what `DeviceLink::people` answers).
+    pub fn set_people(&self, people: Vec<String>) {
+        *lock(&self.people) = people;
     }
 }
 
@@ -439,5 +563,9 @@ impl DeviceLink for MemLink {
 
     fn person_id(&self) -> Option<String> {
         self.person_id.clone()
+    }
+
+    fn people(&self) -> Vec<String> {
+        lock(&self.people).clone()
     }
 }

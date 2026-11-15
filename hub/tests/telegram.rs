@@ -826,10 +826,20 @@ async fn receive_off_never_polls_but_still_names_the_bot() {
     assert!(parse_receive(Some("webhook")).is_err());
     for (receive, polls) in [(Receive::Poll, true), (Receive::Off, false)] {
         let api = Arc::new(FakeApi::default());
-        let (line, up) = Line::new();
+        let (line, mut raw) = Line::new();
+        // The bridge consumes checked upstream frames; a small task strips the person tag the
+        // line puts on each one, as the relay's forwarder does.
+        let (tx_up, rx_up) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some((_person, u)) = raw.recv().await {
+                if tx_up.send(u).is_err() {
+                    break;
+                }
+            }
+        });
         let c = TelegramConfig { receive, ..cfg() };
         let bridge = Arc::new(Bridge::new(api.clone(), Arc::new(line), &c));
-        let run = tokio::spawn(bridge.run(up));
+        let run = tokio::spawn(bridge.run(rx_up));
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }
