@@ -102,8 +102,15 @@ pub fn is_remote_callable(name: &str) -> bool {
     is_forwarded(name) || REMOTE_ONLY.contains(&name)
 }
 
-/// Run one forwarded call and shape the MCP tool result.
-pub async fn call(line: &Line, client: &str, name: &str, args: &Value) -> Value {
+/// Run one forwarded call and shape the MCP tool result. `person` names the hub person the
+/// call acts as; the hub only ever passes the caller's own person for these tokens.
+pub async fn call(
+    line: &Line,
+    client: &str,
+    name: &str,
+    args: &Value,
+    person: Option<i64>,
+) -> Value {
     if !is_forwarded(name) {
         return error(format!("unknown tool {name:?}"));
     }
@@ -115,7 +122,7 @@ pub async fn call(line: &Line, client: &str, name: &str, args: &Value) -> Value 
     } else {
         args.clone()
     };
-    match line.call(client, name, &args).await {
+    match line.call(client, name, &args, person).await {
         CallOutcome::Ok(v) => {
             // structuredContent must be an object.
             let v = if v.is_object() {

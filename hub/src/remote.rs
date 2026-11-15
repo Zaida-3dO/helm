@@ -4,7 +4,8 @@
 //!   the hub. They hold no secret and are open, because a browser cannot send a header when it
 //!   opens a page; the page asks for its token and keeps it only for the browser tab.
 //! - `POST /remote/api/call` with `{"name": "...", "args": {...}, "machine": "..."}`: one call to
-//!   Helm down a relay line of the token's own person, with a `remote`-scope token. Only the Helm
+//!   Helm down a relay line that may act for the token's own person, with a `remote`-scope token
+//!   (the pick follows [`crate::lines::Lines::route_for`]). Only the Helm
 //!   tools the hub already forwards, plus the page's own two (`app_list_waiting`,
 //!   `app_answer_waiting`), are accepted; Helm checks every call again on the PC, and the hub
 //!   stamps each one `"scope": "remote"` so that the PC can tell the page from any other caller.
@@ -218,18 +219,28 @@ pub async fn call(State(state): State<Arc<AppState>>, headers: HeaderMap, body: 
     } else {
         asked.args
     };
-    // Only the token's own person's computers: the same rule as every other route.
+    // Only computers that may act for the token's own person (its own PCs and any PC that
+    // announced it): the same rule as every other route. A named machine must be one of them.
     let mut machines: Vec<String> = state
         .lines
-        .up_lines_of(client.person_id)
-        .into_iter()
-        .map(|(name, _)| name)
-        .collect();
+        .candidate_names(client.person_id, crate::relay::Channel::App);
     machines.sort();
     let started = Instant::now();
-    let (line, outcome) = match state.lines.pick(client.person_id, asked.machine.as_deref()) {
+    let chosen = match asked.machine.as_deref() {
+        Some(name) => {
+            state
+                .lines
+                .named_candidate(client.person_id, name, crate::relay::Channel::App)
+        }
+        None => state
+            .lines
+            .route_for(client.person_id, crate::relay::Channel::App),
+    };
+    let (line, outcome) = match chosen {
         Some(line) => {
-            let outcome = line.call_remote(&client.name, &asked.name, &args).await;
+            let outcome = line
+                .call_remote(&client.name, &asked.name, &args, Some(client.person_id))
+                .await;
             (line.is_up(), outcome)
         }
         None => (false, CallOutcome::Offline),
