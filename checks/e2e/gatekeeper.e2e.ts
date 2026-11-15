@@ -6,7 +6,9 @@
 //   - escalated: the card stays with the gate's brief and counts in attention; the user answers
 //     it, and Settings → Gatekeeper → History shows both records;
 //   - hang: a helper that never answers lets the card through as a normal one once the helper's
-//     time runs out (about a minute: the app has no shorter setting for it).
+//     time runs out. The run shortens the hold with HELM_TEST_GATE_HOLD_MS, so this check takes
+//     seconds rather than the normal minute and a half; and it turns the gate on with
+//     HELM_TEST_GATE, since a run on the fake claude has it off by default.
 //
 // Run: `npm run build:debug` at the root, then `npm run e2e -w checks`.
 
@@ -50,6 +52,8 @@ describe("The question gate: decided, escalated and timed-out cards", { timeout:
     app = await launchApp(profile, {
       env: {
         HELM_TEST_CLAUDE: JSON.stringify({ command: process.execPath, args: [FAKE_CLAUDE, path.join(FIX, "gatekeeper.json")] }),
+        HELM_TEST_GATE: "on",
+        HELM_TEST_GATE_HOLD_MS: "9000",
         CLAUDE_CONFIG_DIR: claudeDir,
         FAKE_CLAUDE_LOG: path.join(profile, "fake-claude.log"),
       },
@@ -127,8 +131,9 @@ describe("The question gate: decided, escalated and timed-out cards", { timeout:
       // While the gate holds it, the card says so quietly and is not counted.
       await page().waitForSelector(tid("gate-line", '[data-state="checking"]'), { timeout: 30_000 });
       assert.equal(await needsYou(chat), false, "a held card is not counted");
-      // The helper's own time runs out well inside the hold; the card is then a normal one.
-      await page().waitForSelector(tid("gate-line", '[data-state="failed"]'), { timeout: 100_000 });
+      // The helper's own time runs out well inside the shortened hold; the card is then a
+      // normal one.
+      await page().waitForSelector(tid("gate-line", '[data-state="failed"]'), { timeout: 20_000 });
       await until("the released card counted in attention", () => needsYou(chat), 20_000);
       const failed = await until("a failed record", async () => (await gateRows("failed")).find((r) => r.chatId === chat));
       assert.equal(failed.verdict, "failed");
