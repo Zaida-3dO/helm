@@ -34,6 +34,9 @@ test('which device shows: the stored choice, this PC when that one is gone, and 
   assert.deepEqual([resolveSelected('lap', l), resolveSelected('gone', l), resolveSelected(null, l), resolveSelected('lap', null)], ['lap', 'me', 'me', null]);
   assert.equal(remoteDevice(l, 'lap')?.name, 'Laptop');
   assert.deepEqual([remoteDevice(l, 'me'), remoteDevice(l, null), remoteDevice(null, 'lap'), remoteDevice(l, 'gone')], [null, null, null, null]);
+  // "Every computer" stands while there is another one to merge in, and falls back to this PC alone.
+  assert.deepEqual([resolveSelected('all', l), resolveSelected('all', list())], ['all', 'me']);
+  assert.equal(remoteDevice(l, 'all'), null, 'no single computer is picked');
   // The toggle needs another device to switch to.
   assert.deepEqual([showToggle(l), showToggle(list()), showToggle(null)], [true, false, false]);
   // This PC first, the others A to Z regardless of case.
@@ -52,6 +55,8 @@ test("another device's chats become rows and projects: groups made for projects 
     record('c2', { projectId: 'p1', parentChatId: 'c1', unread: { markToken: 'm', completionId: null }, pinned: true }),
     record('c3', { projectId: 'px', projectName: 'Side', projectColour: 'blue', status: 'running', model: 'local/qwen' }),
     record('c4', { projectId: 'p1', archived: true, draft: 'half a thought' }),
+    record('c5', { projectId: 'p1', boardId: 'b1', boardName: 'All boards', boardColour: 'green' }),
+    record('c6', { projectId: 'p1', boardId: 'p1' }),
   ];
   const { rows, projects } = remoteList(chats, [{ id: 'p1', name: 'Shop', colour: null, kind: 'board' }]);
   assert.deepEqual(rows.map((r) => [r.chatId, r.groupProjectId, r.hasChildren, r.attention]), [
@@ -59,11 +64,16 @@ test("another device's chats become rows and projects: groups made for projects 
     ['c2', 'p1', false, 'unread'],
     ['c3', 'px', false, 'running'],
     ['c4', 'p1', false, null],
+    ['c5', 'b1', false, null],
+    ['c6', 'p1', false, null],
   ]);
   assert.deepEqual([rows[2]!.local, rows[3]!.hasDraft, rows[3]!.archived], [true, true, true]);
+  assert.deepEqual([rows[4]!.folderProjectId, rows[4]!.folderPath], ['p1', 'C:/w/p1'], 'the board groups the row, the folder still says where it runs');
   assert.deepEqual(projects.map((p) => [p.id, p.name, p.kind, p.colour, p.chatCount]), [
-    ['p1', 'Shop', 'board', null, 2],
+    ['p1', 'Shop', 'board', null, 3],
     ['px', 'Side', 'folder', 'blue', 1],
+    // A board the computer did not list gets a group made from what the chat carries; one it did list is not doubled.
+    ['b1', 'All boards', 'board', 'green', 1],
   ]);
 });
 
@@ -142,7 +152,7 @@ test("another device's chat list pages, refreshes from the first page, and ignor
   const asked: { offset?: number; limit?: number; archived?: boolean }[] = [];
   let gate: (() => void) | null = null;
   const ops = {
-    chats: async (a: { deviceUid: string; profileId: string; archived?: boolean; offset?: number; limit?: number }): Promise<DeviceChats> => {
+    chats: async (a: { deviceUid: string; profileId: string | null; archived?: boolean; offset?: number; limit?: number }): Promise<DeviceChats> => {
       asked.push({ offset: a.offset, limit: a.limit, archived: a.archived });
       if (a.profileId === 'slow') {
         await new Promise<void>((r) => (gate = r));
@@ -157,6 +167,8 @@ test("another device's chat list pages, refreshes from the first page, and ignor
   const rl = new RemoteList(ops);
   await rl.load({ deviceUid: 'lap', profileId: 'prof', archived: false });
   assert.deepEqual([rl.snapshot.rows.map((r) => r.chatId), rl.snapshot.more, rl.snapshot.loading], [['c0', 'c1'], true, false]);
+  // Each row knows the computer it runs on, so a merged view can tell its own chats from those.
+  assert.deepEqual([...rl.snapshot.hosts], [['c0', 'lap'], ['c1', 'lap']]);
   await rl.loadMore();
   assert.deepEqual(rl.snapshot.rows.map((r) => r.chatId), ['c0', 'c1', 'c2', 'c3'], 'the next page starts after the rows held');
   assert.deepEqual(asked.map((a) => a.offset), [0, 2]);

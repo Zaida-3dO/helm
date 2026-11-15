@@ -6,7 +6,7 @@ import type { ProjectNode, SidebarRow } from '../api/projects.ts';
 import { isLocalModelId } from '../state/localModel.ts';
 import { rowAttention } from '../sidebar/status.ts';
 import { lastSeenMs } from '../profiles/model.ts';
-import type { DeviceInfo, DevicesList, RemoteChatRecord, RemoteProject } from './api.ts';
+import { ALL_DEVICES, type DeviceInfo, type DevicesList, type RemoteChatRecord, type RemoteProject } from './api.ts';
 
 /**
  * The computer whose chats show: the stored choice when that computer is still on the hub, else
@@ -14,12 +14,13 @@ import type { DeviceInfo, DevicesList, RemoteChatRecord, RemoteProject } from '.
  */
 export function resolveSelected(stored: string | null, list: DevicesList | null): string | null {
   if (!list) return null;
+  if (stored === ALL_DEVICES) return list.devices.some((d) => d.uid !== list.self) ? ALL_DEVICES : list.self;
   return stored !== null && list.devices.some((d) => d.uid === stored) ? stored : list.self;
 }
 
-/** The selected computer when it is not this one. */
+/** The selected computer when it is not this one and not "every computer". */
 export function remoteDevice(list: DevicesList | null, selected: string | null): DeviceInfo | null {
-  if (!list || selected === null || selected === list.self) return null;
+  if (!list || selected === null || selected === list.self || selected === ALL_DEVICES) return null;
   return list.devices.find((d) => d.uid === selected) ?? null;
 }
 
@@ -80,13 +81,14 @@ export function remoteProject(p: RemoteProject, chatCount: number, createdAt = 0
   };
 }
 
-/** One of another computer's chats as a sidebar row. */
+/** One of another computer's chats as a sidebar row. It sits under the board it shows under
+ *  there when it has one, and under its folder when it has none. */
 export function remoteRow(c: RemoteChatRecord, hasChildren: boolean): SidebarRow {
   const unread = c.unread.markToken !== null || c.unread.completionId !== null;
   return {
     chatId: c.id,
     title: c.title,
-    groupProjectId: c.projectId,
+    groupProjectId: c.boardId ?? c.projectId,
     folderProjectId: c.projectId,
     folderPath: c.cwd,
     depth: 0,
@@ -112,7 +114,8 @@ export function remoteRow(c: RemoteChatRecord, hasChildren: boolean): SidebarRow
 
 /**
  * The rows and projects for another computer's chats. A chat whose project the computer did not
- * list gets one made from the name the chat carries, so no chat is left without a group.
+ * list gets one made from the name the chat carries, so no chat is left without a group — the
+ * same for the board it shows under.
  */
 export function remoteList(chats: readonly RemoteChatRecord[], projects: readonly RemoteProject[]): { rows: SidebarRow[]; projects: ProjectNode[] } {
   const parents = new Set(chats.map((c) => c.parentChatId).filter((p): p is string => !!p));
@@ -120,6 +123,7 @@ export function remoteList(chats: readonly RemoteChatRecord[], projects: readonl
   const known = new Map(projects.map((p) => [p.id, p]));
   for (const c of chats) {
     if (!known.has(c.projectId)) known.set(c.projectId, { id: c.projectId, name: c.projectName ?? 'Chats', colour: c.projectColour ?? null, kind: 'folder' });
+    if (c.boardId && !known.has(c.boardId)) known.set(c.boardId, { id: c.boardId, name: c.boardName ?? 'Boards', colour: c.boardColour ?? null, kind: 'board' });
   }
   const counts = new Map<string, number>();
   for (const r of rows) if (!r.archived) counts.set(r.groupProjectId, (counts.get(r.groupProjectId) ?? 0) + 1);

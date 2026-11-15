@@ -6,6 +6,8 @@ import { changedBy, changeText, describeValue, keyTitle, parseChanges } from './
 import { parseNameList } from './applied.ts';
 import { stepZoom } from './generalOptions.ts';
 import { pairedLine } from './hub/pairedLine.ts';
+import { defaultProfileId, linkLine, linkable, profileChoices } from './hub/channelScope.ts';
+import type { ProfileSummary } from '../api/profiles.ts';
 
 test('send behaviour reads a stored difference and writes back only what differs from the defaults', () => {
   assert.deepEqual(parseSendBehavior(null), HOME_SEND_BEHAVIOR);
@@ -71,4 +73,30 @@ test('the hub pairing line tells the real state, and an unreadable connection on
     [{ ...base, personName: '', hasToken: false, state: 'off', configProblem: 'x' }, "The saved hub connection can't be read"],
   ];
   for (const [conn, want] of rows) assert.equal(pairedLine(conn), want);
+});
+
+test('the hub pane picks which profile its channels speak for, and words the Telegram link row', () => {
+  const p = (id: string, name: string, over: Partial<ProfileSummary> = {}): ProfileSummary => ({
+    id, name, colour: '#888', hubPersonId: 'person-p', isHome: false, chats: 0, running: 0, attention: 0, ...over,
+  });
+  const home = p('home', 'Pat', { isHome: true });
+  const other = p('other', 'Sam');
+  const plain = p('plain', 'Ann', { hubPersonId: null });
+  // The profile the sidebar shows stands while it exists; otherwise the home one; otherwise the first.
+  assert.deepEqual(
+    [defaultProfileId([other, home], 'other'), defaultProfileId([other, home], 'gone'), defaultProfileId([other, home], null), defaultProfileId([other, home], ''), defaultProfileId([], null)],
+    ['other', 'home', 'home', 'home', null],
+  );
+  // Home first, the rest by name; a profile not yet linked to a person on the hub says so.
+  assert.deepEqual(profileChoices([other, home, plain]).map((c) => [c.value, c.title, c.subtitle]), [
+    ['home', 'Pat', 'This PC’s home profile'],
+    ['plain', 'Ann', 'Not linked to a person on the hub yet'],
+    ['other', 'Sam', undefined],
+  ]);
+  assert.deepEqual(
+    [linkLine(null), linkLine({ linked: false }), linkLine({ linked: true, handle: '@demo_bot' }), linkLine({ linked: true })],
+    ['Checking…', 'Not linked', 'Linked as @demo_bot', 'Linked'],
+  );
+  // Only a profile that is a person on the hub can link a Telegram account.
+  assert.deepEqual([linkable(other), linkable(plain), linkable(undefined)], [true, false, false]);
 });

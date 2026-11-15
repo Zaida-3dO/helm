@@ -15,8 +15,28 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
   const set = { lanUrl: pairedAtStart(), fallbackUrl: false, token: pairedAtStart() };
   let who: { personName: string; machineName: string } | null = pairedAtStart() ? { personName: 'Alex', machineName: 'Desk PC' } : null;
   let since = 0;
-  const tg: TelegramSettings = { chat: null, maxAgeHours: 24, maxTokens: 400_000, awayAlerts: true, approvals: false, remoteAnswers: false, model: null, effort: null };
-  const voice: VoiceSettings = { chat: null, model: 'claude-sonnet-5-5', effort: 'low', idleMinutes: 240, maxAgeHours: 24, maxTokens: 300_000, watch: 'flags' };
+  // Per-profile policy and link state, keyed as the host keys it (absent profile: "home").
+  const scope = (a: Record<string, unknown>) => (typeof a.profileId === 'string' && a.profileId ? a.profileId : 'home');
+  interface ProfileState {
+    tg: TelegramSettings;
+    voice: VoiceSettings;
+    linked: boolean;
+    pinned: string[];
+  }
+  const profiles = new Map<string, ProfileState>();
+  const state = (id: string): ProfileState => {
+    let p = profiles.get(id);
+    if (!p) {
+      p = {
+        tg: { chat: null, maxAgeHours: 24, maxTokens: 400_000, awayAlerts: true, approvals: false, remoteAnswers: false, model: null, effort: null, takeTelegram: id === 'home' },
+        voice: { chat: null, model: 'claude-sonnet-5-5', effort: 'low', idleMinutes: 240, maxAgeHours: 24, maxTokens: 300_000, watch: 'flags', takeVoice: id === 'home' },
+        linked: false,
+        pinned: [],
+      };
+      profiles.set(id, p);
+    }
+    return p;
+  };
   const view = (): HubConnection => ({
     hasAddress: set.lanUrl,
     hasFallback: set.fallbackUrl,
@@ -50,38 +70,76 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         ctx.emit({ kind: 'profiles_changed' });
         return { connection: view(), personId: 'p-self', personName: who.personName, machineId: 'm1', machineName: who.machineName, memoryServer: 'hub-memory', profileId: 'prof-home' };
       }
-      case 'relay_telegram_get':
-        if (!tg.chat) {
+      case 'relay_telegram_get': {
+        const st = state(scope(a));
+        if (!st.tg.chat) {
           const first = (ctx.call('chat_list', {}) as { id: string; title: string }[])[0];
-          if (first) tg.chat = { id: first.id, title: first.title, startedAt: Date.now() - 3_600_000, tokensUsed: 12_400 };
+          if (first) st.tg.chat = { id: first.id, title: first.title, startedAt: Date.now() - 3_600_000, tokensUsed: 12_400 };
         }
-        return tg;
-      case 'relay_telegram_save':
-        tg.maxAgeHours = Number(a.maxAgeHours);
-        tg.maxTokens = Number(a.maxTokens);
-        tg.awayAlerts = a.awayAlerts !== false;
-        tg.approvals = a.approvals === true;
-        tg.remoteAnswers = a.remoteAnswers === true;
+        return st.tg;
+      }
+      case 'relay_telegram_save': {
+        const st = state(scope(a));
+        st.tg.maxAgeHours = Number(a.maxAgeHours);
+        st.tg.maxTokens = Number(a.maxTokens);
+        st.tg.awayAlerts = a.awayAlerts !== false;
+        st.tg.approvals = a.approvals === true;
+        st.tg.remoteAnswers = a.remoteAnswers === true;
         // Blank or missing counts as unset, as the host reads it.
-        tg.model = typeof a.model === 'string' && a.model.trim() ? a.model.trim() : null;
-        tg.effort = typeof a.effort === 'string' && a.effort.trim() ? a.effort.trim() : null;
-        return tg;
-      case 'relay_telegram_reset':
-        tg.chat = null;
-        return tg;
+        st.tg.model = typeof a.model === 'string' && a.model.trim() ? a.model.trim() : null;
+        st.tg.effort = typeof a.effort === 'string' && a.effort.trim() ? a.effort.trim() : null;
+        if (typeof a.takeTelegram === 'boolean') st.tg.takeTelegram = a.takeTelegram;
+        return st.tg;
+      }
+      case 'relay_telegram_reset': {
+        const st = state(scope(a));
+        st.tg.chat = null;
+        return st.tg;
+      }
       case 'relay_voice_get':
-        return voice;
-      case 'relay_voice_save':
-        voice.model = typeof a.model === 'string' ? a.model.trim() : '';
-        voice.effort = typeof a.effort === 'string' ? a.effort.trim() : '';
-        voice.idleMinutes = Number(a.idleMinutes);
-        voice.maxAgeHours = Number(a.maxAgeHours);
-        voice.maxTokens = Number(a.maxTokens);
-        voice.watch = a.watch === 'off' || a.watch === 'flags+done' ? a.watch : 'flags';
-        return voice;
-      case 'relay_voice_reset':
-        voice.chat = null;
-        return voice;
+        return state(scope(a)).voice;
+      case 'relay_voice_save': {
+        const v = state(scope(a)).voice;
+        v.model = typeof a.model === 'string' ? a.model.trim() : '';
+        v.effort = typeof a.effort === 'string' ? a.effort.trim() : '';
+        v.idleMinutes = Number(a.idleMinutes);
+        v.maxAgeHours = Number(a.maxAgeHours);
+        v.maxTokens = Number(a.maxTokens);
+        v.watch = a.watch === 'off' || a.watch === 'flags+done' ? a.watch : 'flags';
+        if (typeof a.takeVoice === 'boolean') v.takeVoice = a.takeVoice;
+        return v;
+      }
+      case 'relay_voice_reset': {
+        const st = state(scope(a));
+        st.voice.chat = null;
+        return st.voice;
+      }
+      case 'relay_tg_link': {
+        const st = state(scope(a));
+        if (st.linked) throw new ApiError('refused', 'This profile’s person is already linked.');
+        // The phone "taps" after four seconds, so the pane's link row shows the linked state.
+        setTimeout(() => {
+          st.linked = true;
+        }, 4000);
+        return { url: 'https://t.me/helm_demo_bot?start=DEMO0001', expiresAt: Date.now() + 15 * 60_000 };
+      }
+      case 'relay_tg_status': {
+        const st = state(scope(a));
+        return st.linked ? { linked: true, handle: '@helm_demo_bot' } : { linked: false };
+      }
+      case 'relay_tg_unlink': {
+        const st = state(scope(a));
+        const had = st.linked;
+        st.linked = false;
+        return { unlinked: had ? 1 : 0 };
+      }
+      case 'relay_route_pin': {
+        const st = state(scope(a));
+        const channel = a.channel === 'voice' ? 'voice' : a.channel === 'telegram' ? 'telegram' : null;
+        if (!channel) throw new ApiError('bad_args', 'Expected channel to be telegram or voice.');
+        if (!st.pinned.includes(channel)) st.pinned.push(channel);
+        return { pinned: true };
+      }
       default:
         throw new ApiError('unknown_op', op);
     }

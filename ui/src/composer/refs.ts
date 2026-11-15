@@ -41,6 +41,12 @@ export function dropLandsIn(box: Box | null, x: number, y: number, ratio: number
   return cx >= box.left && cx <= box.right && cy >= box.top && cy <= box.bottom;
 }
 
+/** The last segment of a path, Windows or unix separators. */
+export function pathName(p: string): string {
+  const cut = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+  return cut >= 0 ? p.slice(cut + 1) : p;
+}
+
 /** A `file_drop` event's fields, checked. */
 export interface FileDrop {
   phase: 'enter' | 'over' | 'drop' | 'leave';
