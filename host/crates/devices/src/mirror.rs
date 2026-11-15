@@ -443,12 +443,16 @@ pub(crate) fn staged_dir(db_path: &std::path::Path) -> std::path::PathBuf {
         .join("mirror-attachments")
 }
 
+/// How long a staged attachment waits for its send before it is let go.
+const STAGED_TTL_MS: i64 = 24 * 60 * 60 * 1000;
+
 /// Forget staged attachments whose chat is no longer a copy here, and picture files nothing
 /// names any more. Runs after the copy of a device's chats is brought up to date.
 fn prune_staged(tx: &Transaction<'_>, db_path: &std::path::Path) -> rusqlite::Result<()> {
     tx.execute(
-        "DELETE FROM mirror_attachments WHERE chat_id NOT IN (SELECT chat_id FROM mirror_chats)",
-        [],
+        "DELETE FROM mirror_attachments WHERE chat_id NOT IN (SELECT chat_id FROM mirror_chats)
+            OR created_at < ?1",
+        [helm_core::now_ms() - STAGED_TTL_MS],
     )?;
     let kept: Vec<String> = {
         let mut q =
@@ -459,7 +463,14 @@ fn prune_staged(tx: &Transaction<'_>, db_path: &std::path::Path) -> rusqlite::Re
     if let Ok(rd) = std::fs::read_dir(staged_dir(db_path)) {
         for e in rd.flatten() {
             if let Some(n) = e.path().file_name().and_then(|n| n.to_str()) {
-                if !kept.iter().any(|k| k == n) {
+                // A file saved a moment ago may be waiting for its row to be written.
+                let fresh = e
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age < std::time::Duration::from_secs(60));
+                if !fresh && !kept.iter().any(|k| k == n) {
                     let _ = std::fs::remove_file(e.path());
                 }
             }

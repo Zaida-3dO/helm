@@ -83,6 +83,8 @@ export function deviceOps(api: Api) {
      *  another PC; the id rides the send like a local attachment id. */
     attach: (a: { chatId: string; kind: 'image' | 'file' | 'text'; name: string; mime?: string; data?: string; path?: string; text?: string }) =>
       api<{ attachmentId: string }>('devices_attach', a),
+    /** Take back one staged attachment of a chat that runs on another PC. */
+    discard: (chatId: string, attachmentId: string) => api<unknown>('devices_discard', { chatId, attachmentId }),
     /** The projects a computer last said it has (every one, not only those holding chats shown to this profile). */
     projects: (deviceUid: string) => api<DeviceChats>('devices_chats', { deviceUid, limit: 1 }).then((r) => r.projects),
     createChat: (a: { deviceUid: string; projectId: string; model?: string; effort?: string }) => api<{ chatId: string }>('devices_create_chat', a),

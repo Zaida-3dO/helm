@@ -1199,6 +1199,24 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
     // Spent by the send: the rows and the picture are gone from this PC.
     assert_eq!(count(&b, "SELECT COUNT(*) FROM mirror_attachments"), 0);
     assert!(!stage.join("att-img").exists());
+    // A chip taken out is taken back on this PC too: the row and the saved picture go.
+    std::fs::write(stage.join("att-gone"), b"x").unwrap();
+    b.db.write(|tx| {
+        tx.execute(
+            "INSERT INTO mirror_attachments(id, chat_id, kind, name, mime, target, bytes, created_at)
+             VALUES ('att-gone', 'c1', 'image', 'x.png', 'image/png', 'att-gone', 1, 1)",
+            [],
+        )
+    })
+    .unwrap();
+    api.call_host(
+        "devices_discard",
+        json!({"chatId": "c1", "attachmentId": "att-gone"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(count(&b, "SELECT COUNT(*) FROM mirror_attachments"), 0);
+    assert!(!stage.join("att-gone").exists());
     // An id that is no longer staged is refused in words, before any second copy moves.
     let e = api
         .call_host(
