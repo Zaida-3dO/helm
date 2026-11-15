@@ -137,7 +137,12 @@ pub trait ChatPort: Send + Sync {
     fn consent(&self, chat_id: String) -> BoxFut<'_, PortResult<Vec<Value>>>;
     /// Answer an Allow card from another device, naming that device for the record. The consent
     /// store decides by compare-and-set: the first answer wins, a second is refused.
-    fn consent_decide(&self, a: ConsentDecideArgs, via: String) -> BoxFut<'_, PortResult<()>>;
+    fn consent_decide(
+        &self,
+        a: ConsentDecideArgs,
+        via: String,
+        household: bool,
+    ) -> BoxFut<'_, PortResult<()>>;
     /// Where a chat's Allow requests stand — id, state and outcome only, pending and recently
     /// decided. A watcher reads this to make a tool row's chip say Allowed or Refused too.
     fn consent_states(&self, chat_id: String) -> BoxFut<'_, PortResult<Vec<Value>>>;
@@ -755,7 +760,10 @@ impl Inner {
                     ));
                 }
                 let via = device_via(from);
-                self.port.consent_decide(a, via).await?;
+                // A change Helm applies itself (settings, pairing, update folder) is for this PC's
+                // own person; another person in the household may answer plain cards only.
+                let household = matches!(asker, Asker::Household { .. });
+                self.port.consent_decide(a, via, household).await?;
                 done(json!({}))
             }
             Op::ConsentStates(a) => {

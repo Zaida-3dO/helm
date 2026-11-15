@@ -731,7 +731,12 @@ impl ChatPort for HostPort {
         })
     }
 
-    fn consent_decide(&self, a: ConsentDecideArgs, via: String) -> BoxFut<'_, PortResult<()>> {
+    fn consent_decide(
+        &self,
+        a: ConsentDecideArgs,
+        via: String,
+        household: bool,
+    ) -> BoxFut<'_, PortResult<()>> {
         Box::pin(async move {
             self.here(&a.chat_id)?;
             let decision = match a.decision.as_str() {
@@ -758,6 +763,18 @@ impl ChatPort for HostPort {
                 .any(|c| c.id == a.request_id)
             {
                 return Err(WireError::not_found());
+            }
+            if household
+                && list
+                    .pending
+                    .iter()
+                    .chain(&list.decided)
+                    .any(|c| c.id == a.request_id && kinds.applier(&c.kind).is_some())
+            {
+                return Err(WireError::new(
+                    code::NOT_ALLOWED,
+                    "A change to this PC's own settings can only be approved by its own person.",
+                ));
             }
             let args = helm_consent::ConsentDecideArgs {
                 request_id: a.request_id,

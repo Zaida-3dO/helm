@@ -2327,6 +2327,33 @@ async fn a_household_member_gets_their_own_view_of_the_list_but_is_refused_nothi
     }
     assert_eq!(port.st().profiles_moved.len(), 1);
 
+    // A card for a change Helm applies itself (settings, pairing, the update folder) can only
+    // be approved by this PC's own person; a plain card is answerable by anyone with the chat.
+    for (id, applying) in [("ap1", true), ("ap2", true), ("pl1", false)] {
+        port.put_consent(
+            "hers",
+            json!({"id": id, "kind": "k", "label": "L", "summary": "s", "state": "pending",
+                   "grantMinutes": 30, "applying": applying}),
+        );
+    }
+    let decide = |id: &str| json!({"chatId": "hers", "requestId": id, "decision": "allow"});
+    let e = sam
+        .rpc
+        .call("dev-a", "consent_decide", decide("ap1"))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, code::NOT_ALLOWED);
+    assert!(own
+        .rpc
+        .call("dev-a", "consent_decide", decide("ap2"))
+        .await
+        .is_ok());
+    assert!(sam
+        .rpc
+        .call("dev-a", "consent_decide", decide("pl1"))
+        .await
+        .is_ok());
+
     // With the household switch off she is refused, even reading; the owner's devices are not.
     port.set_household(false);
     let e = sam.rpc.call("dev-a", "hello", json!({})).await.unwrap_err();

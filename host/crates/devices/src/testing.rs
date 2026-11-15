@@ -448,8 +448,22 @@ impl ChatPort for FakePort {
         ready(Ok(st.consent.get(&chat_id).cloned().unwrap_or_default()))
     }
 
-    fn consent_decide(&self, a: ConsentDecideArgs, via: String) -> BoxFut<'_, PortResult<()>> {
+    fn consent_decide(
+        &self,
+        a: ConsentDecideArgs,
+        via: String,
+        household: bool,
+    ) -> BoxFut<'_, PortResult<()>> {
         let mut st = self.st();
+        // A card marked `applying` stands for a kind Helm applies itself.
+        if household
+            && st.consent.get(&a.chat_id).is_some_and(|l| {
+                l.iter()
+                    .any(|c| c["id"].as_str() == Some(&a.request_id) && c["applying"] == true)
+            })
+        {
+            return ready(Err(WireError::not_allowed()));
+        }
         // One compare-and-set out of pending, as the consent store does: a second answer to
         // the same card is refused, and the card leaves the list.
         let list = st.consent.entry(a.chat_id.clone()).or_default();
