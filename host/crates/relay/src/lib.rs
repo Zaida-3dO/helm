@@ -101,7 +101,7 @@ use helm_core::credentials::CredentialStore;
 use helm_core::profile::Profile;
 use helm_ipc::{ApiError, EventSink, OpClass, OpCtx, OpRegistry, Services};
 use helm_platform::Platform;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::sync::Arc;
 
 pub fn credentials(profile: &Profile, platform: &Platform) -> CredentialStore {

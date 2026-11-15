@@ -1594,6 +1594,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_hub_answers_the_telegram_link_requests_and_a_route_pin_goes_up_at_once() {
+        let (url, hub) = fake_hub().await;
+        let c = client(
+            (&url, ""),
+            Arc::new(Exec::default()),
+            Arc::new(Sink::default()),
+        );
+        let task = tokio::spawn(c.clone().run());
+        let (_, mut ws) = hub.await.unwrap();
+        let send = |v: Value| Message::Text(v.to_string().into());
+        next(&mut ws).await; // the switches are the first thing the hub hears
+
+        // Asking about the account: the frame goes up with an id, and the answer that carries
+        // that id comes back to the asker as the hub sent it.
+        let h = c.handle();
+        let ask = tokio::spawn(async move {
+            h.request(json!({ "type": "tg_status", "personId": "person-p" }))
+                .await
+        });
+        let req = next(&mut ws).await;
+        assert_eq!(
+            (req["type"].as_str(), req["personId"].as_str()),
+            (Some("tg_status"), Some("person-p"))
+        );
+        ws.send(send(
+            json!({"type": "tg_status_result", "id": req["id"], "ok": true, "linked": true, "handle": "@demo_bot"}),
+        ))
+        .await
+        .unwrap();
+        let a = ask.await.unwrap().unwrap();
+        assert_eq!(
+            (a["linked"].as_bool(), a["handle"].as_str()),
+            (Some(true), Some("@demo_bot"))
+        );
+
+        // The hub's own refusal comes back as its words, not as a timeout.
+        let h = c.handle();
+        let ask = tokio::spawn(async move {
+            h.request(json!({ "type": "tg_link", "personId": "person-p" }))
+                .await
+        });
+        let req = next(&mut ws).await;
+        assert_eq!(req["type"].as_str(), Some("tg_link"));
+        ws.send(send(
+            json!({"type": "tg_link_result", "id": req["id"], "ok": false, "error": "That account already has a link."}),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            ask.await.unwrap(),
+            Err("That account already has a link.".to_owned())
+        );
+
+        // "Use this PC": the pin is fire and forget, and it names the person and the channel.
+        assert!(c.handle().route_pin("person-p", "telegram"));
+        assert_eq!(
+            next(&mut ws).await,
+            json!({"type": "route_pin", "personId": "person-p", "channel": "telegram"})
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn an_undelivered_telegram_message_is_not_acknowledged() {
         let (url, hub) = fake_hub().await;
         let sink = Arc::new(Sink {
