@@ -19,7 +19,7 @@
 //!   stored, so a refused send never uses up the allowance.
 //! - **`app_list_waiting` and `app_answer_waiting`** are for the hub's Remote page and are served
 //!   by [`crate::remote`]; the answer is refused unless the switch in Settings → Hub is on. A
-//!   message from the page is framed as the user's own ([`crate::gate::remote_frame`]).
+//!   message from the page is framed as the user's own (by name when the hub named the person; [`crate::gate::remote_frame`]).
 //! - **Household calls** (another person's Helm, through the hub) run the same way as
 //!   `peer:<person>` ([`AppExecutor::run_peer`]): the list answers with the shared fields only,
 //!   a chat page leaves the folder out, and a message arrives framed as another person's
@@ -50,6 +50,15 @@ pub struct Wiring {
     pub services: Arc<Services>,
     pub events: Arc<dyn EventSink>,
     pub tools: Arc<HostTools>,
+}
+
+/// Who a relayed send acts as when the chat runs on another PC.
+#[derive(Clone, Copy)]
+enum SendAs<'a> {
+    /// The hub person the call was stamped for (none from an older hub: the default applies).
+    Person(Option<&'a str>),
+    /// A household peer: not one of this PC's people, so it cannot reach a chat on a third PC.
+    Peer,
 }
 
 /// One stored relayed send: when, the outside caller, the target chat.
@@ -150,6 +159,7 @@ impl AppExecutor {
         &self,
         w: &Wiring,
         caller: &str,
+        as_person: SendAs<'_>,
         args: &Value,
         framed: &(dyn Fn(&str) -> String + Sync),
     ) -> Result<Value, ToolFailure> {
@@ -176,7 +186,9 @@ impl AppExecutor {
         let Some((title, archived)) = target else {
             // Not a chat that runs here: if this PC keeps a copy of one that runs on another
             // paired PC, the message crosses to it like any other cross-PC send.
-            return self.send_to_other_pc(w, caller, to, args, framed).await;
+            return self
+                .send_to_other_pc(w, caller, as_person, to, args, framed)
+                .await;
         };
         if archived {
             return Err(refused("That chat is archived."));
@@ -220,10 +232,18 @@ impl AppExecutor {
         &self,
         w: &Wiring,
         caller: &str,
+        as_person: SendAs<'_>,
         to: &str,
         args: &Value,
         framed: &(dyn Fn(&str) -> String + Sync),
     ) -> Result<Value, ToolFailure> {
+        let SendAs::Person(person) = as_person else {
+            // A household peer is not one of this PC's people; the other PC would read the
+            // message as someone else's. It reaches only the chats that run here.
+            return Err(refused(
+                "That chat runs on another PC; household callers can only reach chats that run here.",
+            ));
+        };
         let remote = w
             .services
             .get::<helm_chats::remote::RemoteSlot>()
@@ -271,17 +291,20 @@ impl AppExecutor {
         };
         let text = framed(args["message"].as_str().unwrap_or(""));
         if let Err(e) = remote
-            .send(helm_chats::types::ChatSendArgs {
-                chat_id: to.to_owned(),
-                submission_id: uuid::Uuid::new_v4().to_string(),
-                text,
-                action: helm_chats::types::SendAction::Steer,
-                draft_revision: 0,
-                // Never the composer's: an outside send does not touch the draft on the other PC.
-                origin: Some(helm_chats::types::SendOrigin::Action),
-                attachments: None,
-                context: None,
-            })
+            .send_as(
+                helm_chats::types::ChatSendArgs {
+                    chat_id: to.to_owned(),
+                    submission_id: uuid::Uuid::new_v4().to_string(),
+                    text,
+                    action: helm_chats::types::SendAction::Steer,
+                    draft_revision: 0,
+                    // Never the composer's: an outside send does not touch the draft on the other PC.
+                    origin: Some(helm_chats::types::SendOrigin::Action),
+                    attachments: None,
+                    context: None,
+                },
+                person.map(str::to_owned),
+            )
             .await
         {
             let mut back = self.sends.lock().unwrap_or_else(|p| p.into_inner());
@@ -439,11 +462,22 @@ impl AppExecutor {
         r
     }
 
+    /// The name of the profile a hub-stamped person is on this PC, for a frame.
+    fn person_name(w: &Wiring, person: Option<&str>) -> Option<String> {
+        let p = person?;
+        let db = w.services.get::<helm_core::db::Database>()?;
+        crate::people::profile_for(&db, Some(p))
+            .ok()
+            .map(|pr| pr.name)
+    }
+
     async fn peer(&self, w: &Wiring, person: &str, call: Admitted) -> Result<Value, ToolFailure> {
         if call.tool == "app_send_message" {
             let key = format!("peer:{person}");
             return self
-                .send_message(w, &key, &call.args, &|b| household::frame(person, b))
+                .send_message(w, &key, SendAs::Peer, &call.args, &|b| {
+                    household::frame(person, b)
+                })
                 .await;
         }
         let tool = call.tool.clone();
@@ -476,23 +510,21 @@ impl Executor for AppExecutor {
             match tool.as_str() {
                 // The Remote page's messages are the user's own words, and say so.
                 "app_send_message" if remote => {
-                    self.send_message(w, caller, &call.args, &gate::remote_frame)
+                    let named = Self::person_name(w, person);
+                    let framed = |b: &str| gate::remote_frame(named.as_deref(), b);
+                    self.send_message(w, caller, SendAs::Person(person), &call.args, &framed)
                         .await
                 }
                 "app_send_message" => {
                     // A call the hub verified for one of this PC's linked people is framed as
                     // acting for them, by name; otherwise it is the plain outside-agent frame.
-                    let named = person.and_then(|p| {
-                        w.services
-                            .get::<helm_core::db::Database>()
-                            .and_then(|db| crate::people::profile_for(&db, Some(p)).ok())
-                            .map(|pr| pr.name)
-                    });
+                    let named = Self::person_name(w, person);
                     let framed = |b: &str| match &named {
                         Some(n) => gate::person_frame(n, b),
                         None => gate::frame(caller, b),
                     };
-                    self.send_message(w, caller, &call.args, &framed).await
+                    self.send_message(w, caller, SendAs::Person(person), &call.args, &framed)
+                        .await
                 }
                 // The gate has already refused these for any other caller; this is the second wall.
                 "app_list_waiting" | "app_answer_waiting" if !remote => Err(refused(
@@ -503,9 +535,27 @@ impl Executor for AppExecutor {
                     crate::remote::answer(w, &self.answered, &call.args, person).await
                 }
                 _ => {
+                    let mut call = call;
+                    let lists_chats = tool == "app_list_chats";
+                    // A chat list is the calling person's own unless they say otherwise: the
+                    // person goes into the tool's own filter, so paging counts only their chats.
+                    // A person or `all` the caller named is theirs to ask for, and a call with
+                    // no person to name is cut down after the fact.
+                    let own_list = lists_chats
+                        && !all
+                        && call.args.get("person").is_none()
+                        && person.is_some_and(|p| !p.trim().is_empty());
+                    if own_list {
+                        if let (Some(p), Some(a)) = (person, call.args.as_object_mut()) {
+                            a.insert("person".to_owned(), Value::from(p.trim().to_lowercase()));
+                        }
+                    }
+                    let named_person = lists_chats && call.args.get("person").is_some();
                     let r = self.dispatch(w, caller, call).await?;
-                    // Lists answer with only the calling person's chats, unless they asked for all.
-                    if all || !matches!(tool.as_str(), "app_list_chats" | "app_list_attention") {
+                    if all
+                        || named_person
+                        || !matches!(tool.as_str(), "app_list_chats" | "app_list_attention")
+                    {
                         return Ok(r);
                     }
                     Ok(Self::filter_visible(r, &Self::visible_ids(w, person)))

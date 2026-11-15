@@ -253,6 +253,8 @@ export class SidebarData {
       bus.on('chat', (e) => this.chat(e.chat as ChatRecord)),
       bus.on('attention', (e) => this.attention(e.summary as AttentionSummary)),
       bus.on('chat_removed', (e) => void this.refetch([String(e.chatId)])),
+      // The chat counts behind the boards follow the profile on show.
+      bus.on('profiles_changed', () => void this.loadProjects()),
       bus.on('board_sync', (e) => {
         this.setSync(e.state as BoardSyncState);
         void this.loadProjects();

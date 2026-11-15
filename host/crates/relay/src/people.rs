@@ -88,7 +88,9 @@ pub fn migrate(profile_dir: &Path, db: &Database) {
         if let Ok(entries) = std::fs::read_dir(&old_att) {
             for entry in entries.flatten() {
                 let from = entry.path();
-                if from == new_att {
+                // Only the old layout's plain files move; every folder here is another
+                // profile's own attachment folder (or the home's new one) and stays.
+                if from == new_att || !from.is_file() {
                     continue;
                 }
                 match std::fs::rename(&from, new_att.join(entry.file_name())) {
@@ -169,6 +171,10 @@ mod tests {
         let old_att = prof.join("telegram");
         std::fs::create_dir_all(&old_att).unwrap();
         std::fs::write(old_att.join("pic.png"), "p").unwrap();
+        // Another profile's attachment folder must stay put on a later start.
+        let other = old_att.join("other-profile");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("img.png"), "o").unwrap();
         migrate(&prof, &db);
         migrate(&prof, &db); // second call: nothing left to do, nothing moved twice
         let home = db.snapshot(|tx| store::home(tx)).unwrap().unwrap();
@@ -182,6 +188,7 @@ mod tests {
             att.join("pic.png").is_file(),
             "the attachments did not move"
         );
+        assert!(other.join("img.png").is_file(), "another folder was moved");
         assert!(
             !old_att.join("pic.png").exists(),
             "left behind in the old folder"

@@ -461,8 +461,11 @@ fn look(rt: &ChatRuntime, afk: &helm_afk::AfkService, db: &Database, dir: &Path)
     let away = afk.open_source().is_some();
     let any_alerts = chans.iter().any(|c| c.policy.away_alerts);
     let any_approvals = chans.iter().any(|c| c.policy.approvals);
-    let owner: std::collections::HashMap<String, String> = db
-        .snapshot(|tx| {
+    // Which profile owns each chat matters only to an alert or an ask; otherwise skip the scan.
+    let owner: std::collections::HashMap<String, String> = if !(any_alerts || any_approvals) {
+        Default::default()
+    } else {
+        db.snapshot(|tx| {
             let mut st = tx.prepare(
                 "SELECT c.id, COALESCE(NULLIF(c.profile_id, ''), (SELECT id FROM profiles WHERE is_home = 1)) \
                  FROM chats c",
@@ -477,7 +480,8 @@ fn look(rt: &ChatRuntime, afk: &helm_afk::AfkService, db: &Database, dir: &Path)
             }
             Ok::<_, rusqlite::Error>(m)
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+    };
     let summary = (away && (any_alerts || any_approvals) || any_approvals)
         .then(|| rt.attention().ok())
         .flatten();

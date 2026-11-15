@@ -142,7 +142,13 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const remote = dev.remote;
   const allDevices = dev.allDevices;
   const { snap: other, loadMore: loadMoreRemote } = useRemoteList(api, bus, remote?.uid ?? (allDevices ? ALL_DEVICES : null), activeProfile, archived);
-  const shownRows = remote ? other.rows : allDevices ? [...localRows, ...other.rows] : localRows;
+  // A chat this PC runs is listed once, even when this PC's copy of the list holds it too.
+  const shownRows = useMemo(() => {
+    if (remote) return other.rows;
+    if (!allDevices) return localRows;
+    const mine = new Set(localRows.map((r) => r.chatId));
+    return [...localRows, ...other.rows.filter((r) => !mine.has(r.chatId))];
+  }, [remote, allDevices, other.rows, localRows]);
   // Another device's groups collapse on this screen only: its projects are not ours to change.
   const [remoteShut, setRemoteShut] = useState<ReadonlySet<string>>(() => new Set());
   const remoteProjectIds = useMemo(() => new Set(other.projects.map((p) => p.id)), [other.projects]);
@@ -157,12 +163,20 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [remote, allDevices, other.projects, remoteShut, snap.projects]);
   // A row or group that runs on another computer: read here, changed there.
+  // One object per (name, online) so a row's props stay equal between renders and ChatRow's memo holds.
+  const remoteTags = useRef(new Map<string, { name: string; online: boolean }>());
+  const tagOf = (name: string, online: boolean) => {
+    const key = `${online ? 1 : 0}${name}`;
+    let t = remoteTags.current.get(key);
+    if (!t) remoteTags.current.set(key, (t = { name, online }));
+    return t;
+  };
   const remoteOfRow = (chatId: string): { name: string; online: boolean } | null => {
-    if (remote) return { name: remote.name, online: remote.online };
+    if (remote) return tagOf(remote.name, remote.online);
     const uid = other.hosts.get(chatId);
     if (!uid) return null;
     const d = dev.list?.devices.find((x) => x.uid === uid);
-    return d ? { name: d.name, online: d.online } : { name: 'Another device', online: false };
+    return d ? tagOf(d.name, d.online) : tagOf('Another device', false);
   };
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());

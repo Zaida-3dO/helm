@@ -394,6 +394,15 @@ impl Mirror {
     /// them, else the home profile's person. A profile with no hub person yet (before the first
     /// sync pass lines it up) is refused in words.
     fn acting(&self, chat_id: &str) -> Result<String, ApiError> {
+        self.acting_as(chat_id, None)
+    }
+
+    /// [`Self::acting`], except that a caller who names the person they act for (a tool call
+    /// from a chat, an outside call the hub stamped) is that person whoever the sidebar shows.
+    fn acting_as(&self, chat_id: &str, named: Option<&str>) -> Result<String, ApiError> {
+        if let Some(p) = named.map(str::trim).filter(|p| !p.is_empty()) {
+            return Ok(p.to_owned());
+        }
         let chat_person = self
             .inner
             .db
@@ -677,6 +686,10 @@ impl RemoteChats for Mirror {
     }
 
     fn send(&self, a: ChatSendArgs) -> Fut<Res> {
+        self.send_as(a, None)
+    }
+
+    fn send_as(&self, a: ChatSendArgs, person: Option<String>) -> Fut<Res> {
         let m = self.clone();
         Box::pin(async move {
             let device = m.device_of(&a.chat_id)?;
@@ -689,7 +702,7 @@ impl RemoteChats for Mirror {
             }
             let steer = a.action != SendAction::Default;
             // Never sent a second time from here: an unconfirmed send is the person's call.
-            let act = [m.acting(&a.chat_id)?];
+            let act = [m.acting_as(&a.chat_id, person.as_deref())?];
             // The files cross to that PC first, chunk by chunk; the send names the ids they
             // arrived under. A refused upload stops here, before any words move.
             let staged = m.staged_attachments(&a.chat_id, &ids)?;

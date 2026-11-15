@@ -405,8 +405,17 @@ fn telegram_get(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     telegram_view(ctx, &args)
 }
 
+/// The arguments of a save without `profileId`, which names the profile and is not a setting.
+fn without_profile(args: &Value) -> Value {
+    let mut a = args.clone();
+    if let Some(o) = a.as_object_mut() {
+        o.remove("profileId");
+    }
+    a
+}
+
 fn telegram_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
-    let f: telegram::PolicyFile = serde_json::from_value(args.clone()).map_err(|_| {
+    let f: telegram::PolicyFile = serde_json::from_value(without_profile(&args)).map_err(|_| {
         ApiError::bad_args(
             "Expected maxAgeHours, maxTokens, awayAlerts, approvals, remoteAnswers, takeTelegram, and optional model and effort.",
         )
@@ -415,8 +424,14 @@ fn telegram_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let profile = ctx.services.need::<Profile>()?;
     let pid = channel_profile(ctx, &args)?;
     let paths = people::telegram_paths(&profile.dir, &pid);
+    let took = telegram::load_file(&paths.policy).take_telegram;
+    let takes = f.take_telegram;
     telegram::save_policy(&paths.policy, f)
         .map_err(|_| ApiError::internal("The Telegram limits could not be saved."))?;
+    if took != takes {
+        // The hub routes by what this PC last said it takes: say it again now.
+        ctx.events.emit(helm_ipc::AppEvent::new("device_changed"));
+    }
     telegram_view(ctx, &args)
 }
 
@@ -446,7 +461,7 @@ fn voice_get(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
 }
 
 fn voice_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
-    let f: voice::PolicyFile = serde_json::from_value(args.clone()).map_err(|_| {
+    let f: voice::PolicyFile = serde_json::from_value(without_profile(&args)).map_err(|_| {
         ApiError::bad_args(
             "Expected model, effort, idleMinutes, maxAgeHours, maxTokens, watch (off, flags or flags+done) and takeVoice.",
         )
@@ -455,8 +470,13 @@ fn voice_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let profile = ctx.services.need::<Profile>()?;
     let pid = channel_profile(ctx, &args)?;
     let paths = people::voice_paths(&profile.dir, &pid);
+    let took = voice::load_file(&paths.policy).take_voice;
+    let takes = f.take_voice;
     voice::save_policy(&paths.policy, &f)
         .map_err(|_| ApiError::internal("The voice limits could not be saved."))?;
+    if took != takes {
+        ctx.events.emit(helm_ipc::AppEvent::new("device_changed"));
+    }
     voice_view(ctx, &args)
 }
 
