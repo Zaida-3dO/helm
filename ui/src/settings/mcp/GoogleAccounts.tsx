@@ -111,12 +111,16 @@ export function GoogleAccountsDialog({
     }
   };
 
-  const saveClient = (clientId: string, secret: string) =>
-    void attempt(async () => {
+  const saveClient = async (clientId: string, secret: string) => {
+    let saved = false;
+    await attempt(async () => {
       const c = await ops.clientSet(clientId, secret);
       setConfigured(c.configured);
       setNotice('Sign-in client saved.');
+      saved = c.configured;
     });
+    return saved;
+  };
 
   // One button, no address to type: Google shows its own account chooser.
   const add = () =>

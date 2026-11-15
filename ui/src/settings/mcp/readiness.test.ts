@@ -101,6 +101,12 @@ test('a browser sign-in save keeps the marker and only the client values that ar
   assert.deepEqual(withClient.transport.oauth, { clientId: 'cid' }, 'blank client parts drop away');
   const kept = toSaveable({ ...base, transport: { ...base.transport, oauth: { clientId: 'cid', clientSecret: { kind: 'literal', secretId: `lit_${'b'.repeat(32)}` } } } });
   assert.deepEqual(kept.transport.oauth, { clientId: 'cid', clientSecret: { kind: 'literal', secretId: `lit_${'b'.repeat(32)}` } }, 'a saved secret rides back by id, never re-sent');
+  // The box keeps the saved id while it is edited: a typed value replaces the saved secret, and a
+  // box typed into and cleared again keeps it.
+  const secretId = `lit_${'b'.repeat(32)}`;
+  const withSecret = (value: string) => toSaveable({ ...base, transport: { ...base.transport, oauth: { clientSecret: { kind: 'literal', value, secretId } } } }).transport.oauth;
+  assert.deepEqual(withSecret('typed'), { clientSecret: { kind: 'literal', value: 'typed' } }, 'a typed value replaces the saved one');
+  assert.deepEqual(withSecret(''), { clientSecret: { kind: 'literal', secretId } }, 'a cleared box keeps the saved one');
 });
 
 test('the unencrypted warning shows for plain http off this computer only', () => {

@@ -16,7 +16,8 @@ export function GoogleClientSetup({
   /** Whether a client is already saved for this profile. The values themselves never appear. */
   configured: boolean | null;
   busy: boolean;
-  onSave: (clientId: string, secret: string) => void;
+  /** Resolves to whether the client was saved. */
+  onSave: (clientId: string, secret: string) => Promise<boolean>;
   onOpenLink: (url: string) => void;
 }) {
   const [clientId, setClientId] = useState('');
@@ -24,6 +25,14 @@ export function GoogleClientSetup({
   // Once saved, the form folds away; a change re-opens it over the saved client.
   const [changing, setChanging] = useState(false);
   const showForm = configured !== true || changing;
+  // What was typed leaves this component's memory as soon as it is saved, so "Change client"
+  // starts blank.
+  const save = async () => {
+    if (!(await onSave(clientId, secret))) return;
+    setClientId('');
+    setSecret('');
+    setChanging(false);
+  };
   return (
     <section className="google-client" data-testid="google-client" data-state={configured === null ? 'loading' : configured ? 'saved' : 'unset'}>
       <p className="mcp-help">
@@ -69,12 +78,12 @@ export function GoogleClientSetup({
               value={secret}
               onChange={(e) => setSecret(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && clientLooksSet(clientId, secret) && !busy) onSave(clientId, secret);
+                if (e.key === 'Enter' && clientLooksSet(clientId, secret) && !busy) void save();
               }}
             />
           </label>
           <div className="mcp-actions">
-            <Button variant="primary" data-testid="google-client-save" disabled={busy || !clientLooksSet(clientId, secret)} onClick={() => onSave(clientId, secret)}>
+            <Button variant="primary" data-testid="google-client-save" disabled={busy || !clientLooksSet(clientId, secret)} onClick={() => void save()}>
               Save client
             </Button>
             {changing && <Button onClick={() => setChanging(false)}>Never mind</Button>}

@@ -224,7 +224,16 @@ function Editor({
                   autoComplete="off"
                   placeholder={t.oauth.clientSecret?.kind === 'literal' && t.oauth.clientSecret.secretId ? 'Saved; type to replace' : 'Usually left empty'}
                   value={t.oauth.clientSecret?.kind === 'literal' ? t.oauth.clientSecret.value ?? '' : ''}
-                  onChange={(e) => setT({ oauth: { ...t.oauth, clientSecret: { kind: 'literal', value: e.target.value } } })}
+                  onChange={(e) =>
+                    // The saved secret's id stays while the box is edited: a typed value replaces it
+                    // at save, and clearing the box again keeps the saved one.
+                    setT({
+                      oauth: {
+                        ...t.oauth,
+                        clientSecret: { kind: 'literal', value: e.target.value, secretId: t.oauth?.clientSecret?.kind === 'literal' ? t.oauth.clientSecret.secretId : undefined },
+                      },
+                    })
+                  }
                 />
               </label>
             </div>
