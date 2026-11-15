@@ -1084,6 +1084,28 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
             "the local organize handler ran for a copied chat",
         ))
     });
+    // The same for the composer and view ops, whose real handlers live in crates this
+    // test does not link (the reply-length pair, the side-panel eye and Quick Open).
+    ops.blocking("chat_verbosity_get", OpClass::Blocking, |_, _| {
+        Err(ApiError::internal(
+            "the local verbosity handler ran for a copied chat",
+        ))
+    });
+    ops.blocking("chat_verbosity_set", OpClass::Maintenance, |_, _| {
+        Err(ApiError::internal(
+            "the local verbosity handler ran for a copied chat",
+        ))
+    });
+    ops.blocking("panel_context_get", OpClass::Blocking, |_, _| {
+        Err(ApiError::internal(
+            "the local context handler ran for a copied chat",
+        ))
+    });
+    ops.blocking("quick_open", OpClass::Heavy, |_, _| {
+        Err(ApiError::internal(
+            "the local quick-open handler ran for a copied chat",
+        ))
+    });
     let api = Dispatcher::new(
         ops,
         OpCtx {
@@ -1420,7 +1442,7 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         let got = api.call_host(op, args).await;
         match want {
             Ok(v) if v.is_null() => assert!(got.is_ok(), "{op}: {got:?}"),
-            Ok(v) => assert_eq!(got.unwrap(), v, "{op}"),
+            Ok(v) => assert_eq!(got.clone().unwrap_or_else(|e| panic!("{op}: {e}")), v, "{op}"),
             Err(m) => assert_eq!(got.unwrap_err().message, m, "{op}"),
         }
     }
@@ -2156,6 +2178,28 @@ async fn one_pc_acts_as_each_of_its_profiles() {
     ops.blocking("chat_organize", OpClass::Maintenance, |_, _| {
         Err(ApiError::internal(
             "the local organize handler ran for a copied chat",
+        ))
+    });
+    // The same for the composer and view ops, whose real handlers live in crates this
+    // test does not link (the reply-length pair, the side-panel eye and Quick Open).
+    ops.blocking("chat_verbosity_get", OpClass::Blocking, |_, _| {
+        Err(ApiError::internal(
+            "the local verbosity handler ran for a copied chat",
+        ))
+    });
+    ops.blocking("chat_verbosity_set", OpClass::Maintenance, |_, _| {
+        Err(ApiError::internal(
+            "the local verbosity handler ran for a copied chat",
+        ))
+    });
+    ops.blocking("panel_context_get", OpClass::Blocking, |_, _| {
+        Err(ApiError::internal(
+            "the local context handler ran for a copied chat",
+        ))
+    });
+    ops.blocking("quick_open", OpClass::Heavy, |_, _| {
+        Err(ApiError::internal(
+            "the local quick-open handler ran for a copied chat",
         ))
     });
     let api = Dispatcher::new(

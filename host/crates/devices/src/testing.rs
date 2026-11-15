@@ -733,6 +733,7 @@ impl ChatPort for FakePort {
         self.st().defaults_saved = Some(saved.clone());
         ready(Ok(json!({
             "model": saved.get("model").cloned().unwrap_or(Value::Null),
+            "effort": saved.get("effort").cloned().unwrap_or(json!("high")),
             "responseVerbosity": saved.get("responseVerbosity").cloned().unwrap_or(json!("low")),
         })))
     }

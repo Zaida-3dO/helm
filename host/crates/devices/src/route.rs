@@ -1180,6 +1180,15 @@ impl RemoteChats for Mirror {
                 m.apply_organize(&chat_id, &device, &rows);
                 return Ok(json!([]));
             }
+            // Two ops change nothing in this copy, and the caller reads the far PC's own
+            // answer back: the reply-length picker wants the level, and the stop chip wants
+            // what stopped. Hand their answers straight through instead of the copy.
+            if matches!(op.as_str(), "chat_verbosity_set" | "tool_stop") {
+                m.check_live(&device)?;
+                let act = m.acting(&chat_id)?;
+                let wire = if op == "tool_stop" { "tool_stop" } else { "verbosity_set" };
+                return m.ask_as(&device, wire, args, "that change", &[act]).await;
+            }
             let wire = match op.as_str() {
                 "chat_fork" => "fork",
                 "chat_compact" => "compact",
@@ -1188,9 +1197,7 @@ impl RemoteChats for Mirror {
                 "unread_mark" => "mark_unread",
                 "chat_mute" => "mute",
                 "chat_set_permission_mode" => "set_permission",
-                "chat_verbosity_set" => "verbosity_set",
                 "chat_warm" => "warm",
-                "tool_stop" => "tool_stop",
                 "attention_snooze" => "snooze",
                 "attention_address" => "address",
                 _ => return Err(helm_chats::remote::elsewhere(&m.device_name(&device))),
