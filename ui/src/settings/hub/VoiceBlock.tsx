@@ -104,7 +104,7 @@ export function VoiceBlock({ profileId }: { profileId: string | null }) {
     setBusy(true);
     try {
       await ops.routePin({ profileId, channel: 'voice' });
-      setPinNote('Your voice turns now start on this PC.');
+      setPinNote('Asked the hub to start your voice turns on this PC.');
       setError(null);
     } catch (e) {
       setError(errorText(e));
@@ -215,7 +215,7 @@ export function VoiceBlock({ profileId }: { profileId: string | null }) {
         <SettingRow
           testId="hub-voice-take"
           title="Take my voice on this PC"
-          description="Off, this PC never receives this person's voice turns, even while it is the only one up. On, it joins the PCs that may carry them. Your own PC always does; this switch is for the others."
+          description="Off, this PC never receives this person's voice turns, even while it is the only one up. On, it joins the PCs that may carry them. The PC of the home profile takes it unless you switch it off."
         >
           <Checkbox
             checked={voice.takeVoice}
@@ -230,9 +230,9 @@ export function VoiceBlock({ profileId }: { profileId: string | null }) {
         <SettingRow
           testId="hub-voice-route"
           title="Where my voice goes"
-          description="A voice session stays on the PC it started on. Pinning sends the next one here instead."
+          description="A voice session stays on the PC it started on. Pinning asks the hub to send the next one here instead (this PC must take it, above)."
         >
-          <Button variant="secondary" disabled={busy || !profileId} data-testid="hub-voice-route-pin" onClick={() => void pin()}>
+          <Button variant="secondary" disabled={busy || !profileId || !voice.takeVoice} data-testid="hub-voice-route-pin" onClick={() => void pin()}>
             Use this PC
           </Button>
           {pinNote && (

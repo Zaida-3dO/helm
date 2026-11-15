@@ -244,7 +244,7 @@ export function HubPane() {
   };
   const pinTelegram = () => {
     if (!profileId) return;
-    void run(ops.routePin({ profileId, channel: 'telegram' }), () => setPinNote('Your Telegram now starts on this PC.'));
+    void run(ops.routePin({ profileId, channel: 'telegram' }), () => setPinNote('Asked the hub to start your Telegram on this PC.'));
   };
 
   return (
@@ -334,7 +334,7 @@ export function HubPane() {
       {offer && (
         <div className="hub-offer" data-testid="hub-telegram-link-offer">
           Open this on the phone holding the Telegram account — the code stops working at{' '}
-          {new Date(offer.expiresAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}:
+          {offer.expiresAt ? `${new Date(offer.expiresAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}:` : 'soon:'}
           <code className="hub-offer-url">{offer.url}</code>
         </div>
       )}
@@ -482,7 +482,7 @@ export function HubPane() {
         <SettingRow
           testId="hub-telegram-take"
           title="Take my Telegram on this PC"
-          description="Off, this PC never receives this person's Telegram, even while it is the only one up. On, it joins the PCs that may carry it. Your own PC always does; this switch is for the others."
+          description="Off, this PC never receives this person's Telegram, even while it is the only one up. On, it joins the PCs that may carry it. The PC of the home profile takes it unless you switch it off."
         >
           <Checkbox
             checked={tg.takeTelegram}
@@ -497,9 +497,9 @@ export function HubPane() {
         <SettingRow
           testId="hub-telegram-route"
           title="Where my Telegram goes"
-          description="A conversation stays on the PC that took its last message while that PC is up. Pinning starts the next one here instead; the bot's /pc command shows and changes the same thing."
+          description="A conversation stays on the PC that took its last message while that PC is up. Pinning asks the hub to start the next one here instead (this PC must take it, above); the bot's /pc command shows and changes the same thing."
         >
-          <Button variant="secondary" disabled={busy || !canLink} onClick={pinTelegram}>
+          <Button variant="secondary" disabled={busy || !canLink || !tg?.takeTelegram} onClick={pinTelegram}>
             Use this PC
           </Button>
           {pinNote && (
