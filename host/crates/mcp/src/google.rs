@@ -445,24 +445,36 @@ fn runs_workspace_mcp(args: &[String]) -> bool {
         .is_some_and(|a| a == "workspace-mcp" || a.starts_with("workspace-mcp=="))
 }
 
-/// `args` with every Gmail value of every `--permissions` flag (either spelling) replaced by one:
-/// `gmail:readonly` when the arguments name nothing but that, `gmail:drafts` otherwise (any
-/// other level, an unknown one, or none at all). Rewritten, not read, so no spelling of the flag
-/// can leave a card-less send in the bridge. The flags the bridge refuses beside a permission
-/// level go too.
+/// Whether an argument can name the bridge's `--permissions` flag. The bridge parses its
+/// arguments with Python's argparse, which accepts any unambiguous abbreviation: `--perm`,
+/// `--permis`, `--permission` and each with a `=value` all mean the same flag, so recognising
+/// only the full spelling would let a shorter one slip past the clamp.
+fn names_permissions(a: &str) -> bool {
+    a.starts_with("--perm")
+}
+
+/// `args` with every Gmail value of every flag that names `--permissions` (any abbreviation,
+/// either spelling) replaced by one: `gmail:readonly` when the arguments name nothing but that
+/// (alone or with `--read-only`), `gmail:drafts` otherwise (any other level, an unknown one, or
+/// none at all). Rewritten, not read, so no spelling of the flag can leave a card-less send in
+/// the bridge. The flags the bridge refuses beside a permission level go too.
 fn clamp_gmail(args: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(args.len() + 2);
     let mut gmail: Vec<&str> = Vec::new();
     let mut in_values = false;
     for a in args {
-        if let Some(v) = a.strip_prefix("--permissions=") {
-            in_values = false;
-            if v.starts_with("gmail:") {
-                gmail.push(v);
-                continue;
+        if names_permissions(a) {
+            if let Some((_, v)) = a.split_once('=') {
+                in_values = false;
+                if v.starts_with("gmail:") {
+                    gmail.push(v);
+                    continue;
+                }
+            } else {
+                in_values = true;
             }
         } else if a.starts_with("--") {
-            in_values = a == "--permissions";
+            in_values = false;
         } else if in_values && a.starts_with("gmail:") {
             gmail.push(a);
             continue;
@@ -470,18 +482,25 @@ fn clamp_gmail(args: &[String]) -> Vec<String> {
         out.push(a.clone());
     }
     // The clamped value goes into the first flag (kept even when its own values were all
-    // Gmail's); any later flag left with no values at all goes.
-    let first = out.iter().position(|a| a == "--permissions");
+    // Gmail's); any later flag left with no values at all goes. A flag written with its value
+    // attached (`--perm=calendar:readonly`) is never bare.
+    let first = out
+        .iter()
+        .position(|a| names_permissions(a) && !a.contains('='));
     let mut i = first.map_or(0, |f| f + 1);
     while i < out.len() {
-        let bare = out[i] == "--permissions" && out.get(i + 1).is_none_or(|n| n.starts_with("--"));
+        let bare = out[i].starts_with("--perm")
+            && !out[i].contains('=')
+            && out.get(i + 1).is_none_or(|n| n.starts_with("--"));
         if bare {
             out.remove(i);
         } else {
             i += 1;
         }
     }
-    let level = if !gmail.is_empty() && gmail.iter().all(|v| *v == "gmail:readonly") {
+    let read_only = args.iter().any(|a| a == "--read-only");
+    let level = if gmail.iter().all(|v| *v == "gmail:readonly") && (!gmail.is_empty() || read_only)
+    {
         GooglePermission::Readonly
     } else {
         GooglePermission::Drafts
@@ -547,9 +566,12 @@ fn free_port() -> Option<u16> {
 
 // ---- the permission level -------------------------------------------------------------------
 
-/// The slice of `args` that holds the `--permissions` values, if the flag is there.
+/// The slice of `args` that holds the `--permissions` values, if the flag is there (any
+/// abbreviation that names it — see [`names_permissions`]).
 fn permission_span(args: &[String]) -> Option<std::ops::Range<usize>> {
-    let i = args.iter().position(|a| a == "--permissions")?;
+    let i = args
+        .iter()
+        .position(|a| names_permissions(a) && !a.contains('='))?;
     let end = args[i + 1..]
         .iter()
         .position(|a| a.starts_with("--"))
@@ -563,16 +585,19 @@ pub fn permission_of(args: &[String]) -> Option<GooglePermission> {
         let found = args[span].iter().find(|a| a.starts_with("gmail:"))?;
         return GooglePermission::from_flag(found);
     }
-    let joined = args.iter().find_map(|a| a.strip_prefix("--permissions="))?;
+    let joined = args.iter().find_map(|a| {
+        names_permissions(a)
+            .then(|| a.split_once('='))
+            .flatten()
+            .map(|(_, v)| v)
+    })?;
     GooglePermission::from_flag(joined)
 }
 
 /// `args` without `--tools` (and its values) and `--read-only` when `--permissions` is there:
 /// the server will not start with both.
 pub fn without_tool_flags(args: &[String]) -> Vec<String> {
-    let has_permissions = args
-        .iter()
-        .any(|a| a == "--permissions" || a.starts_with("--permissions="));
+    let has_permissions = args.iter().any(|a| names_permissions(a));
     if !has_permissions {
         return args.to_vec();
     }
@@ -602,10 +627,12 @@ pub fn with_permission(args: &[String], level: GooglePermission) -> Vec<String> 
             Some(k) => out[k] = want,
             None => out.insert(span.end, want),
         }
-    } else if let Some(i) = args
-        .iter()
-        .position(|a| a.starts_with("--permissions=gmail:"))
-    {
+    } else if let Some(i) = args.iter().position(|a| {
+        names_permissions(a)
+            .then(|| a.split_once('='))
+            .flatten()
+            .is_some_and(|(_, v)| v.starts_with("gmail:"))
+    }) {
         out[i] = format!("--permissions={want}");
     } else {
         out.push("--permissions".into());
@@ -971,7 +998,10 @@ fn google_server(ctx: &OpCtx, id: &str) -> Result<(Arc<McpStore>, McpServer), Ap
 
 /// Whether a stored Google server still carries its own client secrets in its env — the only
 /// shape that keeps the external bridge program. A server created after the per-profile client
-/// has no client env and is served by Helm's own tools.
+/// has no client env and is served by Helm's own tools. This reads the stored entry; only the
+/// resolve (`prepare`) sees whether an environment variable or file reference really resolves.
+/// A named-but-missing one therefore reads as a bridge here and is served by Helm in the
+/// worker — the difference only shows as dialog wording for a hand-edited, broken legacy entry.
 pub fn keeps_bridge(server: &McpServer) -> bool {
     runs_workspace_mcp(&server.transport.args)
         && [CLIENT_ID_ENV, CLIENT_SECRET_ENV].iter().all(|k| {
@@ -1695,13 +1725,14 @@ mod tests {
     }
 
     /// The legacy bridge never offers a card-less send, whatever shape the saved arguments take:
-    /// every Gmail value of every `--permissions` flag is rewritten to the one clamped level
-    /// (read-only stays read-only; anything else, or nothing, becomes drafts).
+    /// every Gmail value of every flag that names `--permissions` — full spelling or any
+    /// abbreviation argparse accepts — is rewritten to the one clamped level (read-only stays
+    /// read-only, alone or beside `--read-only`; anything else, or nothing, becomes drafts).
     #[test]
     fn the_legacy_bridge_is_clamped_by_rewriting_every_shape() {
         let d = tempfile::tempdir().unwrap();
         let st = store(d.path());
-        let cases: [(&[&str], &[&str]); 13] = [
+        let cases: [(&[&str], &[&str]); 17] = [
             (
                 &["workspace-mcp", "--permissions", "gmail:send"],
                 &["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"],
@@ -1803,6 +1834,28 @@ mod tests {
                     "--read-only",
                 ],
                 &["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"],
+            ),
+            (
+                &[
+                    "workspace-mcp",
+                    "--permissions",
+                    "gmail:drafts",
+                    "--permission",
+                    "gmail:send",
+                ],
+                &["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"],
+            ),
+            (
+                &["workspace-mcp", "--perm=gmail:send"],
+                &["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"],
+            ),
+            (
+                &["workspace-mcp", "--permis", "gmail:full"],
+                &["workspace-mcp==2.4.2", "--permis", "gmail:drafts"],
+            ),
+            (
+                &["workspace-mcp", "--read-only"],
+                &["workspace-mcp==2.4.2", "--permissions", "gmail:readonly"],
             ),
         ];
         for (saved, want) in cases {

@@ -743,7 +743,7 @@ fn send_tool(ctx: &ToolCtx, args: Value) -> ToolResult {
     // A message of that size can still go out as a draft.
     if m.to.len() + m.cc.len() > MAX_SEND_RECIPIENTS {
         return Err(ToolError::refused(format!(
-            "A send covers at most {MAX_SEND_RECIPIENTS} recipients in total (to and cc              together); make it a draft instead, or send to fewer."
+            "A send covers at most {MAX_SEND_RECIPIENTS} recipients in total (to and cc together); make it a draft instead, or send to fewer."
         )));
     }
     if m.to.iter().chain(&m.cc).any(|a| a.len() > MAX_SEND_ADDRESS) {
@@ -804,7 +804,7 @@ fn consent_gate(ctx: &ToolCtx, args: &Value, target: &Value) -> Result<(), ToolE
         .ok_or_else(|| ToolError::refused("Consent is not available."))?;
     if arg_str(args, "userQuote").is_some() {
         return Err(ToolError::refused(
-            "Typed words never approve a send: only the user's own click on an Allow card can.              File the card with app_request_allow and ask the user to approve it.",
+            "Typed words never approve a send: only the user's own click on an Allow card can. File the card with app_request_allow and ask the user to approve it.",
         ));
     }
     let grant = arg_str(args, "grant").is_some();
@@ -822,7 +822,7 @@ fn consent_gate(ctx: &ToolCtx, args: &Value, target: &Value) -> Result<(), ToolE
             } else {
                 match helm_consent::store::record_ask(tx, &kinds, &chat, SEND_KIND, &target, now) {
                     Ok(()) => {
-                        let body = "Sending that message needs the user's permission: file an                                     Allow card with app_request_allow and ask the user to approve                                     it.";
+                        let body = "Sending that message needs the user's permission: file an Allow card with app_request_allow and ask the user to approve it.";
                         Err(helm_consent::store::with_allow_hint(
                             tx, &kinds, &chat, SEND_KIND, &target, body,
                         )
