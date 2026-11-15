@@ -3,11 +3,16 @@
 //
 // The frame is `<iframe sandbox="allow-scripts">` with no `allow-same-origin`, so
 // the page has an opaque origin and no way to reach this page, Helm's IPC, cookies or storage. It
-// loads from the `helmpage` scheme under a random per-open address. It is offline until the globe
-// is switched on; that switch belongs to this open only (it is not saved) and changing it ends the
-// session and starts another, so the page reloads from its saved state. Where the web view cannot
-// keep an offline page's scripts off the network (the host tells, per open), an offline page is
-// shown without scripts and says so, with the globe as the way to run them.
+// loads from the `helmpage` scheme under a random per-open address. It is offline until the network
+// is allowed (the page's own notice offers it when the page tried, and the bar's menu has it); that
+// switch belongs to this open only (it is not saved) and changing it ends the session and starts
+// another, so the page reloads from its saved state. Where the web view cannot keep an offline
+// page's scripts off the network (the host tells, per open), an offline page is shown without
+// scripts and says so, with allowing the network as the way to run them.
+//
+// The bar keeps one button, Reload, which is what a page needs day to day. The rest are rare and
+// sit in its "…" menu: the network switch, adding to or removing from the Pages list, sending the
+// page's messages to the chat in view, and resetting its storage.
 //
 // The frame is read and polled only while the tab is shown. A rewrite of the file by an agent
 // shows up as a new revision at the next poll and the frame reloads in place, with its saved
@@ -19,9 +24,9 @@ import type { Api } from '../api/client.ts';
 import type { ChatRecord } from '../api/types.ts';
 import { composerApi } from '../composer/slots.ts';
 import { sendActionText } from '../actions/send.ts';
-import { ConfirmDialog, toast } from '../ui/index.ts';
-import type { ConfirmSpec } from '../ui/index.ts';
-import { IconBrowser, IconChat, IconPin, IconRefresh, IconTrash, IconUnpin, IconX } from '../ui/icons.tsx';
+import { Button, ConfirmDialog, ContextMenu, toast } from '../ui/index.ts';
+import type { ConfirmSpec, MenuItem } from '../ui/index.ts';
+import { IconMore, IconRefresh, IconX } from '../ui/icons.tsx';
 import { pageOps } from './api.ts';
 import type { PageSession, PinnedPage } from './api.ts';
 import { PageBridge } from './bridge.ts';
@@ -72,6 +77,8 @@ export function PageFrame({ api, path, chatId, visible, onTitle }: PageFrameProp
   const [pending, setPending] = useState<Pending | null>(null);
   const [confirm, setConfirm] = useState<ConfirmSpec | null>(null);
   const [linkedName, setLinkedName] = useState<string | null>(null);
+  const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
+  const moreRef = useRef<HTMLButtonElement>(null);
 
   const frameEl = useRef<HTMLIFrameElement>(null);
   const bridge = useRef<PageBridge | null>(null);
@@ -352,49 +359,43 @@ export function PageFrame({ api, path, chatId, visible, onTitle }: PageFrameProp
   }
 
   const canLinkHere = Boolean(pin && chatId && pin.chatId !== chatId);
+  const menuItems: MenuItem[] = [
+    { id: 'network', label: 'Allow network for this open', checked: network, onSelect: () => setNetwork((n) => !n) },
+    { id: 'pin', label: pin ? 'Remove from Pages' : 'Add to Pages', onSelect: togglePin },
+    ...(canLinkHere ? [{ id: 'link-chat', label: 'Send its messages to this chat', onSelect: linkHere }] : []),
+    { id: 'reset', label: 'Reset page storage…', danger: true, separator: true, onSelect: resetStorage },
+  ];
   return (
     <div className="pg-root" data-testid="page-frame-root" data-network={network ? 'on' : 'off'} data-scripts={session.scripts ? 'on' : 'off'}>
       <div className="pg-toolbar" role="toolbar" aria-label="Page controls">
         <span className="pg-name" title={session.path}>
           {session.title}
         </span>
-        <button type="button" className="pg-btn" aria-label="Reload page" title="Reload the page file" onClick={reload} data-testid="page-reload">
+        <Button variant="icon" label="Reload page" title="Reload the page file" onClick={reload} data-testid="page-reload">
           <IconRefresh size={14} />
-        </button>
-        <button
-          type="button"
-          className="pg-btn"
-          aria-pressed={network}
-          aria-label={network ? 'Turn page network off' : 'Allow page network'}
-          title={network ? 'The page can use the internet over HTTPS. Click to turn off.' : 'Allow this open of the page to load HTTPS libraries and data'}
-          onClick={() => setNetwork((n) => !n)}
-          data-testid="page-network"
+        </Button>
+        <Button
+          ref={moreRef}
+          variant="icon"
+          label="More page actions"
+          aria-haspopup="menu"
+          aria-expanded={menuAt !== null}
+          onClick={() => {
+            const r = moreRef.current?.getBoundingClientRect();
+            setMenuAt(menuAt ? null : { x: r ? r.right - 230 : 0, y: r ? r.bottom + 4 : 0 });
+          }}
+          data-testid="page-more"
         >
-          <IconBrowser size={14} />
-        </button>
-        <button
-          type="button"
-          className="pg-btn"
-          aria-pressed={Boolean(pin)}
-          aria-label={pin ? 'Unpin page' : 'Pin page'}
-          title={pin ? 'Remove from the Pages list' : 'Add to the Pages list'}
-          onClick={togglePin}
-          data-testid="page-pin"
-        >
-          {pin ? <IconUnpin size={14} /> : <IconPin size={14} />}
-        </button>
-        {canLinkHere && (
-          <button type="button" className="pg-btn" aria-label="Send this page’s messages to the chat in view" title="Send this page’s messages to the chat in view" onClick={linkHere} data-testid="page-link-chat">
-            <IconChat size={14} />
-          </button>
-        )}
-        <button type="button" className="pg-btn" aria-label="Reset page storage" title="Reset page storage" onClick={resetStorage} data-testid="page-reset">
-          <IconTrash size={14} />
-        </button>
+          <IconMore size={14} />
+        </Button>
       </div>
+      {menuAt && <ContextMenu x={menuAt.x} y={menuAt.y} label="Page actions" testId="page-menu" items={menuItems} onClose={() => setMenuAt(null)} />}
       {network && (
         <div className="pg-notice" data-testid="page-network-notice">
-          HTTPS network enabled for this open. The page can send and receive data over the internet.
+          HTTPS network enabled for this open. The page can send and receive data over the internet.{' '}
+          <button type="button" className="pg-link" onClick={() => setNetwork(false)} data-testid="page-network-off">
+            Turn off
+          </button>
         </div>
       )}
       {!session.scripts && (
@@ -407,7 +408,10 @@ export function PageFrame({ api, path, chatId, visible, onTitle }: PageFrameProp
       )}
       {!network && blocked && (
         <div className="pg-notice" data-testid="page-network-hint">
-          The page tried to use the network. Use the globe button to allow it for this open.
+          The page tried to use the network.{' '}
+          <button type="button" className="pg-link" onClick={() => setNetwork(true)} data-testid="page-network-allow">
+            Allow it for this open
+          </button>
         </div>
       )}
       {gone && <div className="pg-notice">The page file is gone. This is the last copy that was read.</div>}
@@ -415,9 +419,9 @@ export function PageFrame({ api, path, chatId, visible, onTitle }: PageFrameProp
       {runtimeError && (
         <div className="pg-error" role="alert" data-testid="page-runtime-error">
           <span>{runtimeError}</span>
-          <button type="button" className="pg-btn" aria-label="Dismiss page error" onClick={() => setRuntimeError(null)}>
+          <Button variant="icon" label="Dismiss page error" onClick={() => setRuntimeError(null)}>
             <IconX size={12} />
-          </button>
+          </Button>
         </div>
       )}
       <iframe

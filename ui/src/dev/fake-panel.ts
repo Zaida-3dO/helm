@@ -91,6 +91,7 @@ export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
     { id: 'pg1', profileId: '', path: `${FAKE_ROOT}\\pages\\budget\\page.html`, title: 'Budget', chatId: null, pinnedAt: 1 },
     { id: 'pg2', profileId: '', path: `${FAKE_ROOT}\\notes\\weekly-plans\\garden\\planting-calendar.html`, title: 'Planting calendar for the spring beds and the greenhouse', chatId: null, pinnedAt: 2 },
   ];
+  let pageSeq = 0;
   // A made-up working tree: one staged, one partly staged, one untracked file and a conflict.
   let records = [
     { path: 'src/app.ts', status: 'M', section: 'staged', partial: false, added: 2, removed: 1 },
@@ -236,6 +237,30 @@ export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
       }
       case 'page_list':
         return { pages: pinned };
+      // A page opens onto a blank frame, so its tab, its bar and its menu can be looked at here.
+      case 'page_open': {
+        const path = String(args.path ?? '');
+        const network = args.network === true;
+        pageSeq += 1;
+        const name = path.split('\\').pop() ?? 'page.html';
+        return { session: `s${pageSeq}`, channel: `c${pageSeq}`, url: 'about:blank', path, key: path.toLowerCase(), title: name, network, scripts: true, revision: 1, size: 0, state: null, stateRevision: 0, pins: pinned.filter((x) => x.path === path) };
+      }
+      case 'page_reload':
+        return { session: args.session, channel: 'c', url: 'about:blank', path: '', key: '', title: 'page.html', network: false, scripts: true, revision: 1, size: 0 };
+      case 'page_status':
+        return { revision: 1, changed: false, missing: false, error: null };
+      case 'page_close':
+        return { closed: true };
+      case 'page_state_save':
+      case 'page_state_reset':
+        return { revision: 1 };
+      case 'page_pin': {
+        const page = { id: `pg${Date.now()}`, profileId: '', path: String(args.path ?? ''), title: String(args.path ?? '').split('\\').pop() ?? 'page', chatId: null, pinnedAt: Date.now() };
+        pinned = [...pinned, page];
+        return { page, created: true };
+      }
+      case 'page_link_chat':
+        return { linked: true };
       case 'page_unpin':
         pinned = pinned.filter((p) => p.id !== args.id);
         return { removed: true };
@@ -248,5 +273,5 @@ export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         throw new ApiError('refused', 'This operation is not available here.');
     }
   };
-  return { prefixes: ['file_', 'archive_list', 'dir_list', 'default_handler', 'chat_folder', 'panel_tabs_', 'path_resolve', 'quick_open', 'changes', 'diff', 'vault_', 'panel_context_', 'review_comment_', 'review_turns', 'review_turn_diff', 'page_list', 'page_unpin'], handler };
+  return { prefixes: ['file_', 'archive_list', 'dir_list', 'default_handler', 'chat_folder', 'panel_tabs_', 'path_resolve', 'quick_open', 'changes', 'diff', 'vault_', 'panel_context_', 'review_comment_', 'review_turns', 'review_turn_diff', 'page_'], handler };
 }
