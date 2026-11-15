@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ComponentType } from 'react';
 import { actionOps, type ActionButton, type ActionSet } from '../api/actions.ts';
 import { useShell } from '../shell/context.ts';
-import { shouldFold, titleRoom } from '../topbar/fold.ts';
+import { crumbsFixedWidth, shouldFold, titleRoom } from '../topbar/fold.ts';
 import { Button, ContextMenu, type MenuItem } from '../ui/index.ts';
 import { IconActions, IconChevronDown, IconHand, IconInfo, IconNewChat, IconPower, IconRefresh, IconRocket, type IconProps } from '../ui/icons.tsx';
 import { onActionsChanged } from './changes.ts';
@@ -95,8 +95,9 @@ export function ActionRow({ chatId }: ActionRowProps) {
       const w = row.getBoundingClientRect().width;
       if (folded) widths.current.folded = w;
       else widths.current.inline = w;
-      const room = titleRoom(crumbs.getBoundingClientRect().width, bar.scrollWidth, bar.clientWidth);
-      const next = shouldFold(folded, room, widths.current.inline, widths.current.folded);
+      const room = titleRoom(crumbs.getBoundingClientRect().width, crumbsFixedWidth(crumbs), bar.scrollWidth, bar.clientWidth);
+      // A bar that has shed its optional parts for the title keeps the row folded until it takes them back.
+      const next = bar.dataset.shed === 'true' || shouldFold(folded, room, widths.current.inline, widths.current.folded);
       if (next !== folded) {
         setMenuAt(null);
         setFolded(next);
@@ -106,7 +107,14 @@ export function ActionRow({ chatId }: ActionRowProps) {
     const ro = new ResizeObserver(check);
     ro.observe(bar);
     if (row.parentElement) ro.observe(row.parentElement);
-    return () => ro.disconnect();
+    // The breadcrumb's fixed parts come and go without the bar changing size (the local-model
+    // chip shows only while a turn runs), so its children are watched too.
+    const mo = new MutationObserver(check);
+    mo.observe(crumbs, { childList: true });
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+    };
   }, [folded, set]);
 
   if (!set) return notice ? <div className="action-row-notice error">{notice}</div> : null;

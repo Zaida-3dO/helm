@@ -1,11 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { MIN_TITLE_ROOM, UNFOLD_SLACK, shouldFold, titleRoom, topBarTier } from './fold.ts';
+import { MIN_TITLE_ROOM, UNFOLD_SLACK, shedTier, shouldFold, titleRoom, topBarTier } from './fold.ts';
 
-test('the title room is the breadcrumb width, less any overflow of the bar', () => {
-  assert.equal(titleRoom(225, 1120, 1120), 225);
-  assert.equal(titleRoom(0, 1000, 740), -260);
-  assert.equal(titleRoom(40, 739, 740), 40, 'no overflow counts as none');
+test('the title room is the breadcrumb width, less its fixed parts and any overflow of the bar', () => {
+  assert.equal(titleRoom(225, 0, 1120, 1120), 225);
+  assert.equal(titleRoom(0, 0, 1000, 740), -260);
+  assert.equal(titleRoom(40, 0, 739, 740), 40, 'no overflow counts as none');
+  assert.equal(titleRoom(225, 106, 1120, 1120), 119, 'the folder glyph, chevron and local-model chip are not room for the title');
+  assert.equal(titleRoom(225, 106, 1150, 1120), 89);
 });
 
 test('an unfolded row folds once the title would get less than the minimum', () => {
@@ -30,4 +32,8 @@ test('a folded row whose inline width was never measured stays folded', () => {
 test('the bar sheds its optional parts as its width shrinks', () => {
   const tiers = [1440, 900, 899, 640, 639, 544, 440, 439, 320].map(topBarTier);
   assert.deepEqual(tiers, ['wide', 'wide', 'mid', 'mid', 'narrow', 'narrow', 'narrow', 'tight', 'tight']);
+});
+
+test('a bar that sheds for its title drops to the narrow tier, never widens', () => {
+  assert.deepEqual((['wide', 'mid', 'narrow', 'tight'] as const).map(shedTier), ['narrow', 'narrow', 'narrow', 'tight']);
 });

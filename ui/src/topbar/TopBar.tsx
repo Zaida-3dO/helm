@@ -24,7 +24,7 @@ import { UsageMeter } from '../usage/UsageMeter.tsx';
 import { isBusy } from '../sidebar/status.ts';
 import { LOCAL_WORKING_LABEL, isLocalModelId, localWaitLabel } from '../state/localModel.ts';
 import { CaptionButtons, dragHandlers } from './caption.tsx';
-import { topBarTier, type TopBarTier } from './fold.ts';
+import { crumbsFixedWidth, MIN_TITLE_ROOM, optionalWidth, shedTier, shouldFold, titleRoom, topBarTier, type TopBarTier } from './fold.ts';
 import { folderLabel, RenameEdit } from './label.ts';
 
 export interface TopBarProps {
@@ -88,22 +88,50 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
   const panelHint = useHint('Toggle inspector', 'panel.toggle');
   const showSidebarHint = useHint('Show sidebar', 'sidebar.toggle');
   // The bar sheds optional parts as the main pane narrows, so the title and the window buttons
-  // always fit (they used to be pushed under the side panel).
+  // always fit (they used to be pushed under the side panel). The width alone does not know what
+  // else is in the bar (the show-sidebar button, a local-model chip), so the bar also sheds them
+  // early when the title would be left too little room, and takes them back once they fit again
+  // with room to spare.
   const barRef = useRef<HTMLElement | null>(null);
-  const [tier, setTier] = useState<TopBarTier>('wide');
+  const [widthTier, setWidthTier] = useState<TopBarTier>('wide');
+  const [shed, setShed] = useState(false);
+  // The buttons' width before they were shed: what taking them back would cost the title.
+  const fullWidth = useRef(0);
+  const tier = shed ? shedTier(widthTier) : widthTier;
   useLayoutEffect(() => {
     const el = barRef.current;
-    if (!el) return;
-    const measure = () => setTier(topBarTier(el.getBoundingClientRect().width));
+    const crumbs = el?.querySelector<HTMLElement>('.crumbs');
+    const actions = el?.querySelector<HTMLElement>('.topbar-actions');
+    if (!el || !crumbs || !actions) return;
+    const measure = () => {
+      // A new width tier is laid out before the title's room is judged (this runs again then).
+      const wt = topBarTier(el.getBoundingClientRect().width);
+      if (wt !== widthTier) return setWidthTier(wt);
+      const now = actions.getBoundingClientRect().width;
+      if (!shed) fullWidth.current = now;
+      const room = titleRoom(crumbs.getBoundingClientRect().width, crumbsFixedWidth(crumbs), el.scrollWidth, el.clientWidth);
+      // The action row folds first; the bar sheds only after that, and only when there is something
+      // to shed. While shed, the row stays folded (see ActionRow), so taking the parts back is
+      // measured against the same folded row.
+      const rowFolded = !actions.querySelector('.action-row:not([data-folded])');
+      const next = shed ? shouldFold(true, room, fullWidth.current, now) : room < MIN_TITLE_ROOM && rowFolded && optionalWidth(el) > 0;
+      if (next !== shed) setShed(next);
+    };
     measure();
     const ro = new ResizeObserver(measure);
     ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
+    ro.observe(actions);
+    const mo = new MutationObserver(measure);
+    mo.observe(crumbs, { childList: true });
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+    };
+  }, [shed, widthTier]);
   const sidebarVisible = useSyncExternalStore(sidebarLayout.subscribe, () => sidebarLayout.get().visible);
   return (
     <>
-      <header ref={barRef} className="topbar" data-testid="topbar" data-tier={tier} {...dragHandlers()}>
+      <header ref={barRef} className="topbar" data-testid="topbar" data-tier={tier} data-shed={shed ? 'true' : undefined} {...dragHandlers()}>
         {!sidebarVisible && (
           <Button variant="icon" label={showSidebarHint} data-testid="show-sidebar" onClick={() => sidebarLayout.setVisible(true)}>
             <IconPanelLeft size={16} />

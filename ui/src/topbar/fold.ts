@@ -1,10 +1,13 @@
 // When the top bar's action buttons fold into one "Actions" menu. The breadcrumb is the bar's only flexible part (flex 1, basis 0), so its width is the
-// bar's free space; when the bar's content overflows, the overflow is negative free space. The
-// row folds once the breadcrumb would get less than MIN_TITLE_ROOM, and unfolds only when the
-// inline buttons would fit again with a little to spare, so a resize near the edge does not flap.
+// bar's free space; when the bar's content overflows, the overflow is negative free space. Only
+// the project name and the title give way inside it; its fixed parts (the folder glyph, the
+// chevron, the muted mark, the local-model chip) are not room for the title, so they are taken
+// off. The row folds once the project and title would get less than MIN_TITLE_ROOM, and unfolds
+// only when the inline buttons would fit again with a little to spare, so a resize near the edge
+// does not flap.
 
-/** Pixels the breadcrumb (project › title) keeps before the action buttons fold. */
-export const MIN_TITLE_ROOM = 150;
+/** Pixels the project name and title keep before the action buttons fold. */
+export const MIN_TITLE_ROOM = 120;
 /** Extra room needed to unfold, so the row does not flip back and forth at the threshold. */
 export const UNFOLD_SLACK = 12;
 
@@ -18,9 +21,16 @@ export function topBarTier(width: number): TopBarTier {
   return width >= 900 ? 'wide' : width >= 640 ? 'mid' : width >= 440 ? 'narrow' : 'tight';
 }
 
-/** The breadcrumb's real room: its width less however far the bar's content overflows. */
-export function titleRoom(crumbsWidth: number, barScrollWidth: number, barClientWidth: number): number {
-  return crumbsWidth - Math.max(0, barScrollWidth - barClientWidth);
+/** A tier that also sheds the optional parts: used when the title would be left too little room
+ *  at the bar's own tier (a window just narrow enough to hide the sidebar, a busy local chat). */
+export function shedTier(tier: TopBarTier): TopBarTier {
+  return tier === 'wide' || tier === 'mid' ? 'narrow' : tier;
+}
+
+/** The title's real room: the breadcrumb's width less its fixed parts (`fixedWidth`, gaps included)
+ *  and however far the bar's content overflows. */
+export function titleRoom(crumbsWidth: number, fixedWidth: number, barScrollWidth: number, barClientWidth: number): number {
+  return crumbsWidth - fixedWidth - Math.max(0, barScrollWidth - barClientWidth);
 }
 
 /**
@@ -31,4 +41,27 @@ export function shouldFold(folded: boolean, room: number, inlineWidth: number, f
   if (!folded) return room < min;
   if (inlineWidth <= 0) return true;
   return room - (inlineWidth - foldedWidth) < min + UNFOLD_SLACK;
+}
+
+/** The breadcrumb's parts that never give way, each with the gap after it. */
+export function crumbsFixedWidth(crumbs: HTMLElement): number {
+  const gap = parseFloat(getComputedStyle(crumbs).columnGap) || 0;
+  let sum = 0;
+  for (const el of crumbs.querySelectorAll<HTMLElement>(':scope > .crumb-folder, :scope > .crumb-chevron, :scope > .crumb-muted, :scope > .crumb-status')) {
+    sum += el.getBoundingClientRect().width + (parseFloat(getComputedStyle(el).marginLeft) || 0) + gap;
+  }
+  return sum;
+}
+
+/** The width the bar's optional parts (the usage meter, Fork, Pin, Archive) take now, gaps included. */
+export function optionalWidth(bar: HTMLElement): number {
+  const actions = bar.querySelector<HTMLElement>('.topbar-actions');
+  if (!actions) return 0;
+  const gap = parseFloat(getComputedStyle(actions).columnGap) || 0;
+  let sum = 0;
+  for (const el of actions.querySelectorAll<HTMLElement>(':scope > .usage-meter, :scope > .topbar-quick > *')) {
+    const w = el.getBoundingClientRect().width;
+    if (w > 0) sum += w + gap;
+  }
+  return sum;
 }
