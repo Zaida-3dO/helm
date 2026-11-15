@@ -989,7 +989,11 @@ fn send_canonical(_tx: &Transaction<'_>, _chat: &str, target: &Value) -> Result<
     if let Some(t) = &thread_id {
         details.push(format!("In thread: {t}"));
     }
-    details.push(format!("Body starts: {}", body_excerpt(&body)));
+    details.push(format!(
+        "Body ({} characters) starts: {}",
+        body.chars().count(),
+        body_excerpt(&body)
+    ));
     Ok(Canonical {
         target: canonical,
         summary,
@@ -1905,7 +1909,7 @@ mod tests {
                     "To: zed@y.org",
                     "Cc: bob@y.org",
                     "Subject: Re: Weekly",
-                    "Body starts: Line one Line two"
+                    "Body (17 characters) starts: Line one Line two"
                 ]
             );
             assert_eq!(c.target["threadId"], Value::Null);
@@ -1920,7 +1924,7 @@ mod tests {
             assert!(one.fixed_form.is_empty());
             assert_eq!(one.target["threadId"], "t-1", "the thread is bound");
             assert!(one.details.iter().any(|l| l == "In thread: t-1"));
-            assert!(one.details.iter().any(|l| l == "Body starts: b"));
+            assert!(one.details.iter().any(|l| l == "Body (1 characters) starts: b"));
             // Caps and malformed targets.
             let long_subject = "x".repeat(201);
             let big_body = "x".repeat(MAX_BODY_BYTES + 1);
@@ -2023,8 +2027,11 @@ mod tests {
             "the full subject is on the card"
         );
         assert!(
-            r.summary.contains("Body starts: Open the attachment"),
-            "the body's start is on the card"
+            r.summary.contains(&format!(
+                "Body ({} characters) starts: Open the attachment",
+                body.chars().count()
+            )),
+            "the body's length and start are on the card"
         );
         assert!(
             !r.summary.contains("endword"),
@@ -2055,14 +2062,16 @@ mod tests {
         let longest: Vec<String> = ['a', 'b', 'c', 'd', 'e'].map(addr).to_vec();
         assert!(longest.iter().all(|a| a.len() == MAX_SEND_ADDRESS));
         let subject = format!("S{}END", "u".repeat(MAX_SEND_SUBJECT - 4));
+        // The longest body the tool takes: its length is on the card, and the card still fits.
+        let body = "b ".repeat(MAX_BODY_BYTES / 2);
         let msg = json!({"account": "me@x.com", "to": &longest[..3], "cc": &longest[3..],
-                         "subject": subject, "body": "b ".repeat(400)});
+                         "subject": subject, "body": body});
         let err = call(&e, SEND, msg.clone()).unwrap_err();
         assert!(err.contains("Allow card"), "{err}");
         // The card the user is shown for exactly that target.
         let target = json!({
             "account": "me@x.com", "to": &longest[..3], "cc": &longest[3..],
-            "subject": subject, "body": "b ".repeat(400), "threadId": "thread-0123456789"
+            "subject": subject, "body": body, "threadId": "thread-0123456789"
         });
         let request = |target: &Value| {
             helm_consent::store::request(
@@ -2093,7 +2102,12 @@ mod tests {
             "{}",
             r.summary
         );
-        assert!(r.summary.contains("Body starts: b b"), "{}", r.summary);
+        assert!(
+            r.summary
+                .contains(&format!("Body ({} characters) starts: b b", MAX_BODY_BYTES)),
+            "{}",
+            r.summary
+        );
         assert!(
             r.summary.contains("In thread: thread-0123456789"),
             "{}",
