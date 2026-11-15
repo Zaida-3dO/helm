@@ -670,7 +670,7 @@ async fn allow_cards_show_on_every_pc_and_the_first_answer_wins() {
         .call("dev-a", "consent_decide", decide("r2"))
         .await
         .unwrap_err();
-    assert_eq!(e.code, code::REFUSED);
+    assert_eq!(e.code, "conflict");
 
     // Answered on the host PC itself: the window's own click moves the same store, and the
     // service's consent event closes the card on the other PCs.

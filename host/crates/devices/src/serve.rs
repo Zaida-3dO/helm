@@ -401,6 +401,7 @@ impl Inner {
             }
             // A card appeared, closed or expired: watchers holding the chat hear the whole
             // pending set again, so any device's card shows the same list at the same time.
+            "consent" if !lock(&self.subs).watching_chat(&chat_id) => Vec::new(),
             "consent" => {
                 let cards = match self.port.consent(chat_id.clone()).await {
                     Ok(mut cards) => {
