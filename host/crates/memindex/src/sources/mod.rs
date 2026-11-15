@@ -6,6 +6,7 @@
 //! never talks to the hub, and never looks at the clock. The caller (the indexer) decides
 //! which files are sources at all, keeps the cursors, and pushes the result.
 
+pub mod chat_logs;
 pub mod chat_turns;
 pub mod claude_code;
 pub mod markdown;
