@@ -36,8 +36,14 @@ const LEGACY: [&str; 7] = [
 /// on disk: each file moves only when its place in the new layout is still free. A file with
 /// no home profile to move into stays where it is and is tried again on the next use.
 pub fn migrate(profile_dir: &Path, db: &Database) {
-    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if DONE.load(std::sync::atomic::Ordering::SeqCst) {
+    static DONE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    let done = DONE.get_or_init(std::sync::Mutex::default);
+    if done
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .contains(profile_dir)
+    {
         return;
     }
     let home: Option<String> = db
@@ -48,6 +54,10 @@ pub fn migrate(profile_dir: &Path, db: &Database) {
     let Some(home) = home else {
         return;
     };
+    done
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(profile_dir.to_path_buf());
     let to = person_dir(profile_dir, &home);
     let relay = profile_dir.join("relay");
     for name in LEGACY {
@@ -71,16 +81,26 @@ pub fn migrate(profile_dir: &Path, db: &Database) {
         }
     }
     // The attachment folder: the pictures and files of the old single Telegram chat belong to
-    // the home profile now. It is renamed whole, and only when the new one is not taken.
+    // the home profile now. The new folder sits inside the old one (`telegram/<id>`), so the
+    // old entries move into it one by one rather than the folder being renamed whole.
     let old_att = profile_dir.join("telegram");
     let new_att = telegram::attachments_dir(profile_dir, &home);
-    if old_att.is_dir() && !new_att.exists() {
-        if let Some(parent) = new_att.parent() {
-            let _ = std::fs::create_dir_all(parent);
+    if old_att.is_dir() {
+        if std::fs::create_dir_all(&new_att).is_ok() {
+            if let Ok(entries) = std::fs::read_dir(&old_att) {
+                for entry in entries.flatten() {
+                    let from = entry.path();
+                    if from == new_att {
+                        continue;
+                    }
+                    match std::fs::rename(&from, new_att.join(entry.file_name())) {
+                        Ok(()) => {}
+                        Err(_) => log::warn!("relay: an attachment could not be moved"),
+                    }
+                }
+            }
         }
-        let _ = std::fs::rename(&old_att, &new_att);
     }
-    DONE.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// The Telegram files of one profile.
@@ -124,5 +144,69 @@ pub fn profile_for(
             .ok()
             .flatten()
             .ok_or_else(|| "This PC has no profile for that person.".to_owned()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use helm_core::db::MigrationRegistry;
+
+    fn db_in(dir: &Path) -> helm_core::db::Database {
+        let mut reg = MigrationRegistry::new();
+        helm_chats::register_migrations(&mut reg);
+        helm_profiles::register_migrations(&mut reg);
+        helm_core::db::Database::open(&dir.join("t.db"), &reg).unwrap()
+    }
+
+    #[test]
+    fn the_single_person_files_move_into_the_home_folder_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db_in(dir.path());
+        let prof = dir.path().join("prof");
+        let relay = prof.join("relay");
+        std::fs::create_dir_all(&relay).unwrap();
+        for name in LEGACY {
+            std::fs::write(relay.join(name), "x").unwrap();
+        }
+        let old_att = prof.join("telegram");
+        std::fs::create_dir_all(&old_att).unwrap();
+        std::fs::write(old_att.join("pic.png"), "p").unwrap();
+        migrate(&prof, &db);
+        migrate(&prof, &db); // second call: nothing left to do, nothing moved twice
+        let home = db.snapshot(|tx| store::home(tx)).unwrap().unwrap();
+        let to = person_dir(&prof, &home.id);
+        for name in LEGACY {
+            assert!(to.join(name).is_file(), "{name} did not move");
+            assert!(!relay.join(name).exists(), "{name} was left behind");
+        }
+        let att = telegram::attachments_dir(&prof, &home.id);
+        assert!(att.join("pic.png").is_file(), "the attachments did not move");
+        assert!(!old_att.join("pic.png").exists(), "left behind in the old folder");
+    }
+
+    #[test]
+    fn a_frames_person_resolves_to_its_profile_or_the_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db_in(dir.path());
+        let second = db
+            .write(|tx| -> Result<String, helm_profiles::store::ProfileError> {
+                let home = store::home(tx)?.expect("made at open");
+                store::update(
+                    tx,
+                    &home.id,
+                    helm_profiles::store::Patch {
+                        hub_person_id: Some(Some("7".into())),
+                        ..Default::default()
+                    },
+                )?;
+                Ok(store::create(tx, "Second", None, Some("9"), 2)?.id)
+            })
+            .unwrap();
+        let home = db.snapshot(|tx| store::home(tx)).unwrap().unwrap();
+        assert_eq!(profile_for(&db, None).unwrap().id, home.id);
+        assert_eq!(profile_for(&db, Some("7")).unwrap().id, home.id);
+        assert_eq!(profile_for(&db, Some("9")).unwrap().id, second);
+        assert!(profile_for(&db, Some("nope")).is_err());
     }
 }

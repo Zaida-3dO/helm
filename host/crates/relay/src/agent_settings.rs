@@ -42,7 +42,7 @@ const MAX_MODEL_CHARS: usize = 120;
 const EFFORT_LIST: &str = "low, medium, high, xhigh or max";
 
 pub struct TelegramPolicy {
-    path: PathBuf,
+    dir: PathBuf,
 }
 
 /// The extension to register as a [`helm_hosttools::SettingsExtensions`] entry. It owns both
@@ -50,10 +50,10 @@ pub struct TelegramPolicy {
 pub fn settings_extension(profile_dir: &std::path::Path) -> std::sync::Arc<dyn SettingsExtension> {
     std::sync::Arc::new(Both {
         telegram: TelegramPolicy {
-            path: telegram::policy_path(profile_dir),
+            dir: profile_dir.to_path_buf(),
         },
         voice: VoicePolicy {
-            path: voice::policy_path(profile_dir),
+            dir: profile_dir.to_path_buf(),
         },
     })
 }
@@ -231,6 +231,28 @@ fn options() -> Value {
     })
 }
 
+impl TelegramPolicy {
+    /// Settings shows one Telegram policy — the home person's. It lives in the home profile's
+    /// folder under `relay/people/`; the file the single-person builds left straight under
+    /// `relay/` is still read until it moves there, and a fresh PC writes the new place.
+    fn policy_path(&self, tx: &Transaction<'_>) -> PathBuf {
+        let per = helm_profiles::store::home(tx)
+            .ok()
+            .flatten()
+            .map(|h| crate::people::telegram_paths(&self.dir, &h.id).policy)
+            .unwrap_or_else(|| telegram::policy_path(&self.dir));
+        if per.is_file() {
+            return per;
+        }
+        let legacy = telegram::policy_path(&self.dir);
+        if legacy.is_file() {
+            legacy
+        } else {
+            per
+        }
+    }
+}
+
 impl SettingsExtension for TelegramPolicy {
     fn keys(&self) -> Vec<&'static str> {
         vec![KEY]
@@ -240,17 +262,18 @@ impl SettingsExtension for TelegramPolicy {
         (key == KEY).then(options)
     }
 
-    fn read(&self, _tx: &Transaction<'_>, _key: &str) -> Value {
-        as_json(&telegram::load_file(&self.path))
+    fn read(&self, tx: &Transaction<'_>, _key: &str) -> Value {
+        as_json(&telegram::load_file(&self.policy_path(tx)))
     }
 
     fn apply(
         &self,
-        _tx: &Transaction<'_>,
+        tx: &Transaction<'_>,
         _key: &str,
         value: &Value,
     ) -> Result<(Value, Value), String> {
-        let before = as_json(&telegram::load_file(&self.path));
+        let path = self.policy_path(tx);
+        let before = as_json(&telegram::load_file(&path));
         let mut wanted = if value.is_null() {
             reset_changeable(&before)
         } else if value.is_object() {
@@ -283,14 +306,14 @@ impl SettingsExtension for TelegramPolicy {
                 "{KEY}.{path} is yours to change only: ask the user to change it in {PAGE}. You may change model and effort."
             ));
         }
-        telegram::save_policy(&self.path, merged).map_err(io_err)?;
+        telegram::save_policy(&path, merged).map_err(io_err)?;
         Ok((before, after))
     }
 
-    fn restore(&self, _tx: &Transaction<'_>, _key: &str, value: &Value) -> Result<(), String> {
+    fn restore(&self, tx: &Transaction<'_>, _key: &str, value: &Value) -> Result<(), String> {
         let f = from_json(value)?;
         f.check()?;
-        telegram::save_policy(&self.path, f).map_err(io_err)
+        telegram::save_policy(&self.policy_path(tx), f).map_err(io_err)
     }
 
     fn changed_event(&self, _key: &str) -> AppEvent {
@@ -304,7 +327,7 @@ pub const VOICE_KEY: &str = "voice";
 const VOICE_EVENT: &str = "relay_voice";
 
 pub struct VoicePolicy {
-    path: PathBuf,
+    dir: PathBuf,
 }
 
 fn voice_json(f: &voice::PolicyFile) -> Value {
@@ -364,6 +387,28 @@ fn voice_options() -> Value {
     })
 }
 
+impl VoicePolicy {
+    /// Settings shows one voice policy — the home person's. As with Telegram, it lives in the
+    /// home profile's folder under `relay/people/`, with the older single-person file read
+    /// until it moves there.
+    fn voice_path(&self, tx: &Transaction<'_>) -> PathBuf {
+        let per = helm_profiles::store::home(tx)
+            .ok()
+            .flatten()
+            .map(|h| crate::people::voice_paths(&self.dir, &h.id).policy)
+            .unwrap_or_else(|| voice::policy_path(&self.dir));
+        if per.is_file() {
+            return per;
+        }
+        let legacy = voice::policy_path(&self.dir);
+        if legacy.is_file() {
+            legacy
+        } else {
+            per
+        }
+    }
+}
+
 impl SettingsExtension for VoicePolicy {
     fn keys(&self) -> Vec<&'static str> {
         vec![VOICE_KEY]
@@ -373,17 +418,18 @@ impl SettingsExtension for VoicePolicy {
         (key == VOICE_KEY).then(voice_options)
     }
 
-    fn read(&self, _tx: &Transaction<'_>, _key: &str) -> Value {
-        voice_json(&voice::load_file(&self.path))
+    fn read(&self, tx: &Transaction<'_>, _key: &str) -> Value {
+        voice_json(&voice::load_file(&self.voice_path(tx)))
     }
 
     fn apply(
         &self,
-        _tx: &Transaction<'_>,
+        tx: &Transaction<'_>,
         _key: &str,
         value: &Value,
     ) -> Result<(Value, Value), String> {
-        let before = voice_json(&voice::load_file(&self.path));
+        let file = self.voice_path(tx);
+        let before = voice_json(&voice::load_file(&file));
         let mut wanted = if value.is_null() {
             reset_changeable(&before)
         } else if value.is_object() {
@@ -413,14 +459,14 @@ impl SettingsExtension for VoicePolicy {
                 "{VOICE_KEY}.{path} is yours to change only: ask the user to change it in {PAGE}. You may change model and effort."
             ));
         }
-        voice::save_policy(&self.path, &merged).map_err(voice_io_err)?;
+        voice::save_policy(&file, &merged).map_err(voice_io_err)?;
         Ok((before, after))
     }
 
-    fn restore(&self, _tx: &Transaction<'_>, _key: &str, value: &Value) -> Result<(), String> {
+    fn restore(&self, tx: &Transaction<'_>, _key: &str, value: &Value) -> Result<(), String> {
         let f = voice_from_json(value)?;
         f.check()?;
-        voice::save_policy(&self.path, &f).map_err(voice_io_err)
+        voice::save_policy(&self.voice_path(tx), &f).map_err(voice_io_err)
     }
 
     fn changed_event(&self, _key: &str) -> AppEvent {
@@ -449,7 +495,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(&dir.path().join("t.sqlite3"), &MigrationRegistry::new()).unwrap();
         let ext = TelegramPolicy {
-            path: telegram::policy_path(&dir.path().join("prof")),
+            dir: dir.path().join("prof"),
         };
         Env { db, ext, dir }
     }
@@ -505,7 +551,7 @@ mod tests {
         assert_eq!(after["model"], json!("local/strata/qwen-small"));
         assert_eq!(after["effort"], json!("low"));
         // What the file itself holds, as the page would read it back.
-        let saved = telegram::load_file(&e.ext.path);
+        let saved = telegram::load_file(&telegram::policy_path(&e.dir.path().join("prof")));
         assert_eq!(
             saved.new_chat(),
             (Some("local/strata/qwen-small"), Some("low"))
@@ -555,7 +601,7 @@ mod tests {
             err.contains("remoteAnswers") && err.contains("Settings > Hub"),
             "{err}"
         );
-        assert!(!telegram::load_file(&e.ext.path).remote_answers);
+        assert!(!telegram::load_file(&telegram::policy_path(&e.dir.path().join("prof"))).remote_answers);
         assert!(e
             .apply(json!({"approvals": false, "maxAgeHours": 48}))
             .unwrap_err()
@@ -564,7 +610,7 @@ mod tests {
             .apply(json!({"approvals": false, "model": "opus"}))
             .is_ok_and(|(_, a)| a["model"] == json!("opus") && a["approvals"] == json!(false)));
         // Nothing was stored by the refused updates.
-        assert!(!telegram::load_file(&e.ext.path).approvals);
+        assert!(!telegram::load_file(&telegram::policy_path(&e.dir.path().join("prof"))).approvals);
 
         // The merged file goes through the page's own range checks all the same.
         assert!(e
@@ -581,7 +627,7 @@ mod tests {
 
         // The page's pickers save through the same file: a UI save still round-trips.
         telegram::save_policy(
-            &e.ext.path,
+            &telegram::policy_path(&e.dir.path().join("prof")),
             PolicyFile {
                 max_age_hours: 72,
                 max_tokens: 50_000,
@@ -635,7 +681,7 @@ mod tests {
     fn a_chat_sets_the_voice_chats_model_and_effort_only_and_undo_puts_them_back() {
         let e = env();
         let voice_ext = VoicePolicy {
-            path: voice::policy_path(&e.dir.path().join("prof")),
+            dir: e.dir.path().join("prof"),
         };
         let apply = |v: Value| {
             e.db.write(|tx| Ok::<_, rusqlite::Error>(voice_ext.apply(tx, VOICE_KEY, &v)))
@@ -673,7 +719,7 @@ mod tests {
             (Some("opus"), Some("high"))
         );
         assert_eq!(
-            voice::load_file(&voice_ext.path).new_chat(),
+            voice::load_file(&voice::policy_path(&e.dir.path().join("prof"))).new_chat(),
             (Some("opus"), Some("high"))
         );
         assert_eq!(read()["idleMinutes"], json!(240));
@@ -715,7 +761,7 @@ mod tests {
 
         // Blank means the app's usual setting; null puts the defaults back; undo restores.
         apply(json!({"model": "", "effort": ""})).unwrap();
-        assert_eq!(voice::load_file(&voice_ext.path).new_chat(), (None, None));
+        assert_eq!(voice::load_file(&voice::policy_path(&e.dir.path().join("prof"))).new_chat(), (None, None));
         let (before, after) = apply(json!(null)).unwrap();
         assert_eq!(after["model"], json!("claude-sonnet-5-5"));
         assert_eq!(after["effort"], json!("low"));

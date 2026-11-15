@@ -463,6 +463,18 @@ mod tests {
             assert_eq!(parse_put(&answer), want);
         }
 
+        // The answer to a person_ensure: the hub's id as a number or text; a refusal or
+        // anything unusable is no link at all.
+        for (answer, want) in [
+            (json!({"ok": true, "personId": 7}), Some("7")),
+            (json!({"ok": true, "personId": " 9 "}), Some("9")),
+            (json!({"ok": false, "error": "That name is taken."}), None),
+            (json!({"ok": true}), None),
+            (json!({"ok": true, "personId": ""}), None),
+        ] {
+            assert_eq!(link_answer(&answer).as_deref(), want);
+        }
+
         // A pull: files decoded, a deletion without a body, and an error as the hub's sentence.
         let pulled = parse_pull(&json!({
             "files": [

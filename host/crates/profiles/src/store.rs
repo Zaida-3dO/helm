@@ -1105,8 +1105,22 @@ mod tests {
             chat(tx, "c2", None, false);
             assign(tx, &["c2".into()], &other.id)?;
             share(tx, &["c1".into()], &other.id, true)?;
+            let third = create(tx, "Third", None, None, 3)?;
             // The home person is first; an unlinked profile is not in the list at all.
             assert_eq!(linked_person_ids(tx)?, ["7", "9"]);
+            // The claims list names the profile each person is carried for, home first; the
+            // ensure list holds every named profile still without a hub person.
+            let claims = linked_claims(tx)?;
+            assert_eq!(
+                claims.iter().map(|(_, p, _)| p.as_str()).collect::<Vec<_>>(),
+                ["7", "9"]
+            );
+            assert_eq!(claims[0], (home.id.clone(), "7".into(), true));
+            assert_eq!(claims[1], (other.id.clone(), "9".into(), false));
+            assert_eq!(
+                unlinked_named(tx)?,
+                [(third.id.clone(), "Third".to_owned())]
+            );
             // Each person sees their own and what is shared with them; a chat assigned to
             // another profile leaves the home's own view.
             assert_eq!(visible_to_person(tx, "7")?, ["c1"]);
@@ -1126,6 +1140,7 @@ mod tests {
                 },
             )?;
             assert_eq!(linked_person_ids(tx)?, ["7"]);
+            assert_eq!(unlinked_named(tx)?.len(), 2);
             assert!(chats_of_person(tx, &["9".into()]).is_err());
             assert!(channel_default(true) && !channel_default(false));
             Ok(())
