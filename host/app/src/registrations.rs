@@ -42,6 +42,7 @@ pub fn ops(reg: &mut OpRegistry) {
     crate::pet::register_ops(reg);
     crate::petworld::register_ops(reg);
     helm_dictation::register_ops(reg);
+    helm_memindex::register_ops(reg);
 }
 
 pub fn migrations(reg: &mut MigrationRegistry) {
@@ -69,6 +70,7 @@ pub fn migrations(reg: &mut MigrationRegistry) {
     helm_pages::register_migrations(reg);
     helm_devices::register_migrations(reg);
     helm_dictation::register_migrations(reg);
+    helm_memindex::register_migrations(reg);
 }
 
 /// Shared services a crate adds for op handlers (`ctx.services.need::<T>()`), called once at
@@ -96,6 +98,10 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     helm_governor::register_services(services, events);
     helm_localmodels::register_services(services, events);
     helm_relay::register_services(services, events);
+    // The memory indexer drives the hub's search index over that line.
+    if let Some(line) = services.get::<helm_relay::index_line::IndexLine>() {
+        helm_memindex::register_services(services, events, line);
+    }
     // Graphics memory is kept free for speech-to-text only once it is set up: a dictation server
     // saved, or the phone's voice screen used with this PC.
     if let (Some(local), Some(db), Some(profile)) = (
@@ -138,6 +144,12 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     if let Some(web) = services.get::<helm_webtools::WebSearch>() {
         extensions.push(helm_webtools::settings_extension(web));
     }
+    // What a chat may only stage for the user to approve: where the voice goes for dictation, and
+    // the governor that can stop chats.
+    extensions.push(helm_dictation::ext::settings_extension());
+    if let Some(governor) = services.get::<helm_governor::Governor>() {
+        extensions.push(helm_governor::ext::settings_extension(governor));
+    }
     // Servers a chat has opted in to plain http on the private network, with Undo.
     if let Some(store) = services.get::<helm_mcp::McpStore>() {
         extensions.push(helm_mcp::unencrypted::settings_extension(store));
@@ -145,6 +157,10 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     // The Telegram new-chat defaults: chats read the whole policy, change only model and effort.
     if let Some(profile) = services.get::<helm_core::profile::Profile>() {
         extensions.push(helm_relay::settings_extension(&profile.dir));
+        // The Claude Code launch switches kept in claude-runtime.json.
+        extensions.push(helm_chats::runtime_ext::settings_extension(
+            profile.dir.clone(),
+        ));
         // A chat's edits to the repository list, which Undo puts back.
         extensions.push(helm_projects::repo_undo::settings_extension(&profile.dir));
         // A chat's edits to the rules and skills, which Undo puts back.
@@ -153,6 +169,9 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     // Whether this PC is connected to the hub, read only (never the address, token or ids).
     extensions.extend(helm_relay::hub_view::settings_extension(services));
     services.insert(Arc::new(helm_hosttools::SettingsExtensions(extensions)));
+    // What the generic writer cannot know about a few preference keys' values.
+    let rules = crate::pref_rules::pref_rules(services);
+    services.insert(Arc::new(rules));
     services.insert(Arc::new(worker_lines()));
     // Other crates reach running workers through the chat runtime (helm_hosttools::lines).
     if let Some(rt) = services.get::<helm_chats::ChatRuntime>() {
@@ -265,6 +284,8 @@ pub fn host_tools() -> helm_hosttools::HostToolRegistry {
     helm_webtools::register_host_tools(&mut reg);
     helm_skills::register_host_tools(&mut reg);
     helm_dictation::register_host_tools(&mut reg);
+    helm_memindex::register_host_tools(&mut reg);
+    helm_projects::startup::register_host_tools(&mut reg);
     reg
 }
 
@@ -313,6 +334,8 @@ pub fn attach_host_tools(
     helm_waits::start(runtime, &dispatcher.ctx().services);
     // Saved items: the reminder sweep, five seconds at worst.
     helm_saved::start(runtime, &dispatcher.ctx().services);
+    // Memory indexing: the thread that keeps the hub's search index current (off until switched on).
+    helm_memindex::start(&dispatcher.ctx().services);
 }
 
 /// The consent upkeep: every minute, and at once after a decision,
@@ -424,6 +447,8 @@ pub fn allow_kinds() -> helm_consent::AllowKinds {
     helm_workflow::register_allow_kinds(&mut k);
     helm_relay::register_allow_kinds(&mut k);
     helm_mcp::gmail::register_allow_kinds(&mut k);
+    helm_memindex::register_allow_kinds(&mut k);
+    helm_projects::startup::register_allow_kinds(&mut k);
     k
 }
 
@@ -493,6 +518,10 @@ pub fn launch_contributors(
     let mut c = helm_workers::contrib::LaunchContributors::new();
     // Whose chat this is opens the system prompt, ahead of the addendum.
     c.add(Arc::new(helm_profiles::launch::WhoLaunch {
+        db: db.clone(),
+    }));
+    // Where the chat sits (its board and folder), and the switch for the startup Stop hook.
+    c.add(Arc::new(helm_projects::launch::ProjectLaunch {
         db: db.clone(),
     }));
     c.add(Arc::new(a));
@@ -588,6 +617,9 @@ mod host_tool_tests {
             "app_remove_rule",
             "app_add_skill",
             "app_remove_skill",
+            "app_memory_index",
+            "app_startup_done",
+            "app_project_startup",
         ];
         assert_eq!(names(Default::default()), base);
         let delta = |k: helm_hosttools::LaunchKeys| -> Vec<String> {

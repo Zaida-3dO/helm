@@ -95,14 +95,25 @@ as `const MY_KEY: PrefKey = PrefKey::classified("myKey");`. An unclassified name
 Write through `helm_core::prefs::set`; never write SQL against `preferences` (a test scans
 every host source file and allows only `prefs/store.rs`).
 
+**A new preference is agent-settable by default.** Classify it `Registry(Base)` and add its entry
+(shape, default, one sentence) to `hosttools/src/settings_options.rs`: chats then change it
+themselves with `app_update_settings`, with the Undo notice, and a test fails until the entry
+exists. Only two other classes exist, and each needs a one-line reason beside it. `High`: the change
+changes what runs, what agents may read or who may reach this PC, so a chat only stages it
+(`app_stage_settings`) and it applies after the user clicks Approve; it still needs its options
+entry, which is how the staged value is checked. `UserOnly`: no tool at all, for the few settings
+that change what approval means, and for secrets. Settings that are not preferences (an extension's
+keys, a file's) are classed in `NAMED` in `hosttools/src/settings_allow.rs`; a test in the app
+crate pins that every key has exactly one class and that every `High` one can be staged.
+
 ### Editor selection for agents
 
 `app_ide_context` (`crates/hosttools/src/ide.rs`) gives an agent the code editor's open file and
 selection. Helm never connects to the editor: the extension in `tools/vscode-editor-context` writes one
 JSON file per VS Code window to `<profile>/ide-context/` (see its README for what it holds and how to
 install it: copy the folder into `.vscode/extensions`, no build). The tool reads those files. It
-answers `available: false` with a reason when the user-only `ideContext` preference (Settings > Chat,
-off by default) is off, or when no file was written or touched in the last two minutes. Selections are cut
+answers `available: false` with a reason when the `ideContext` preference (Settings > Chat; a chat can only stage a change,
+for the user to approve; off by default) is off, or when no file was written or touched in the last two minutes. Selections are cut
 to 12 KiB each and the reply keeps to 40 KiB of selected text.
 
 ## Design decisions

@@ -16,6 +16,7 @@
 //! | [`boards`] | boards as where chats are shown: the default board, folders filled in on sync, the one-time move of chats onto boards, new board projects |
 //! | [`retitle`] | a board project renamed in Helm: the new title is written back to the board, and sent again after the next sync when it could not be |
 //! | [`tasks`] | the Tasks view's read-only board reads (`board_read`, `board_cancel`) |
+//! | [`launch`], [`startup`] | the project line in a chat's system prompt, and a project's startup instructions: carried by a chat's first message, reported with `app_startup_done` and held by the Stop hook until then |
 //! | [`repos`], [`repo_ops`], [`guard`] | the repository list, its ops and worktree status, and the git stand-in launch contributor |
 //! | [`repo_undo`] | the picture of the repository list a chat's edit is filed with, and Undo for it |
 //! | [`bindings`] | `ui/src/api/generated/projects/` |
@@ -24,6 +25,7 @@ pub mod bindings;
 pub mod board;
 pub mod boards;
 pub mod guard;
+pub mod launch;
 pub mod note;
 pub mod ops;
 pub mod repo_ops;
@@ -31,6 +33,7 @@ pub mod repo_undo;
 pub mod repos;
 pub mod retitle;
 pub mod schema;
+pub mod startup;
 pub mod store;
 pub mod tasks;
 pub mod types;

@@ -16,11 +16,11 @@
 //! - `model` and `effort` for new chats: the `newChat` preference (`{model, effort}`), read by
 //!   `chat_create` through [`new_chat_defaults`]; an unset effort is the catalogue's default.
 //! - `permissionMode`: the mode the user last picked with the composer's chip in any chat
-//!   ([`default_permission_mode`]), kept in the user-only preference `newChatPermissionMode` so no
-//!   chat can change it. A chat the user starts from the new-chat page starts in it, and it
+//!   ([`default_permission_mode`]), kept in the preference `newChatPermissionMode`, which a chat can
+//!   only stage for the user to approve. A chat the user starts from the new-chat page starts in it, and it
 //!   survives a restart. Unset, a chat starts in the launch mode (`skipPermissions`). A
 //!   `permissionMode` left inside `newChat` by an earlier version is ignored.
-//! - `responseVerbosity`: the user-only preference of that name (low by default).
+//! - `responseVerbosity`: the preference of that name (low by default).
 
 use crate::catalogue;
 use helm_core::db::Database;

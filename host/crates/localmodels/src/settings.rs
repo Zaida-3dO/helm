@@ -142,10 +142,10 @@ pub struct LocalSettings {
     /// Minutes after the last listed game closes before local models come back.
     pub game_lift_minutes: u32,
     /// A Windows scheduled task that restarts a model server: ended while local models are
-    /// unloaded, started again after. Set in Settings only, never by an agent.
+    /// unloaded, started again after. A chat only stages it, for the user to approve.
     pub restart_task: Option<String>,
     /// A file written while local models are unloaded, for the user's own restart script to
-    /// check. Set in Settings only, never by an agent.
+    /// check. A chat only stages it, for the user to approve.
     pub pause_file: Option<String>,
 }
 

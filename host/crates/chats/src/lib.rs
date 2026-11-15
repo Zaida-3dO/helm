@@ -76,6 +76,7 @@ pub mod output_save;
 pub mod remote;
 pub mod rollover;
 pub mod runtime;
+pub mod runtime_ext;
 pub mod runtime_settings;
 #[cfg(test)]
 mod runtime_tests;

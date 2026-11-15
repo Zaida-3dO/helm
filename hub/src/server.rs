@@ -7,6 +7,7 @@
 
 use crate::apptools;
 use crate::auth::{Client, Scope};
+use crate::embed::{self, QueryEmbedder};
 use crate::lines::Lines;
 use crate::mcp::{self, Options};
 use crate::registry::{Registry, RegistryError};
@@ -34,6 +35,8 @@ pub struct AppState {
     /// Shared with [`Lines`], which answers the household questions from it.
     pub registry: Arc<Mutex<Registry>>,
     pub options: Options,
+    /// Embeds a search query (the asker's PC, else the NAS server, else nobody).
+    pub embedder: Arc<QueryEmbedder>,
     /// Every connected machine's line.
     pub lines: Arc<Lines>,
     /// The Telegram bot, or `None` when it is off.
@@ -57,12 +60,23 @@ impl AppState {
             store: Mutex::new(store),
             registry,
             options,
+            embedder: Arc::new(QueryEmbedder::new(
+                lines.clone(),
+                None,
+                embed::DEFAULT_MODEL,
+            )),
             lines,
             telegram,
             voice: None,
             pair_limit: PairLimit::default(),
             remote: remote::Limiter::default(),
         }
+    }
+
+    /// The same state with this query embedder.
+    pub fn with_embedder(mut self, embedder: QueryEmbedder) -> Self {
+        self.embedder = Arc::new(embedder);
+        self
     }
 
     /// The same state with the voice line on.
@@ -285,7 +299,7 @@ async fn post_mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: 
 /// One JSON-RPC message: forwarded Helm tools go down one of the caller's own person's lines,
 /// without holding the store; everything else is the memory surface.
 async fn answer(
-    state: &AppState,
+    state: &Arc<AppState>,
     client: &Client,
     acted: Option<&Client>,
     m: &Value,
@@ -340,6 +354,19 @@ async fn answer(
     } else {
         Vec::new()
     };
+    // `memory_search` embeds the query and searches off the one async thread.
+    if method == Some("tools/call") && tool == Some("memory_search") {
+        if let Some(id) = m.get("id") {
+            let args = m
+                .pointer("/params/arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            let result = mcp::search_call(state, acted.unwrap_or(client), &people, &args).await;
+            return Ok(Some(
+                json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+            ));
+        }
+    }
     let reply = {
         let Ok(mut store) = state.store.lock() else {
             return Err(StatusCode::INTERNAL_SERVER_ERROR);

@@ -361,6 +361,30 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
             |n| !n.is_empty() && n.len() <= 128 && !n.starts_with('$'),
             "lists skill names without a leading $, each once",
         ),
+        "dictationMic" => match value.as_object() {
+            Some(m)
+                if m.len() == 2
+                    && m.get("uid")
+                        .and_then(Value::as_str)
+                        .is_some_and(|u| !u.is_empty() && u.len() <= 512)
+                    && m.get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|n| n.len() <= 256) =>
+            {
+                Ok(())
+            }
+            _ => Err(PrefError::Invalid {
+                key: k,
+                why: "is {uid (1 to 512 bytes), name (at most 256 bytes)}",
+            }),
+        },
+        "globalHotkey" => match value.as_str() {
+            Some(s) if s.len() <= 64 => Ok(()),
+            _ => Err(PrefError::Invalid {
+                key: k,
+                why: "must be a shortcut of at most 64 bytes, or empty",
+            }),
+        },
         "selection" => validate_selection(value),
         "appearance" => match value.as_str() {
             Some("system" | "light" | "dark") => Ok(()),

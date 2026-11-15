@@ -170,6 +170,8 @@ export interface ProjectMenuActions {
   changeIcon(): void;
   /** One line (at most 200 characters) that tells agents what the project is for. */
   editDescription(): void;
+  /** What every new chat on the project does first (several lines, at most 4,000 characters). */
+  editStartup(): void;
   /** Show what every chat inside has used. */
   cost(): void;
   nestUnder(projectId: string): void;
@@ -220,6 +222,11 @@ export function projectMenuItems(p: ProjectNode, all: ProjectNode[], a: ProjectM
     primaryFolderMenuItem(p),
     { id: 'icon', label: 'Change icon…', onSelect: a.changeIcon },
     { id: 'description', label: 'Edit description…', onSelect: a.editDescription },
+    {
+      id: 'startup',
+      label: p.startupInstructions ? 'Edit startup instructions… (set)' : 'Edit startup instructions…',
+      onSelect: a.editStartup,
+    },
     { id: 'cost', label: 'Cost…', onSelect: a.cost },
     {
       id: 'nest',

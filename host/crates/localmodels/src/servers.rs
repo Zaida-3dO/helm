@@ -214,6 +214,36 @@ pub fn ollama_load(h: &Http, c: &Conn, model: &str, minutes: u32) -> Result<(), 
     good(h.post(c, "/api/generate", &body, net::LOAD)?).map(|_| ())
 }
 
+/// One vector per text from Ollama's `/api/embed`, in order. A text over the model's window is
+/// cut by the server, not refused.
+pub fn ollama_embed(
+    h: &Http,
+    c: &Conn,
+    model: &str,
+    texts: &[String],
+) -> Result<Vec<Vec<f32>>, CallError> {
+    let body = json!({"model": model, "input": texts, "truncate": true});
+    let r = good(h.post(c, "/api/embed", &body, net::EMBED)?)?;
+    let v = r
+        .json()
+        .ok_or_else(|| CallError::Shape("not JSON".into()))?;
+    let rows = v
+        .get("embeddings")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CallError::Shape("no embeddings".into()))?;
+    rows.iter()
+        .map(|row| {
+            row.as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_f64().map(|f| f as f32))
+                        .collect()
+                })
+                .ok_or_else(|| CallError::Shape("a vector is not a list".into()))
+        })
+        .collect()
+}
+
 pub fn ollama_unload(h: &Http, c: &Conn, model: &str) -> Result<(), CallError> {
     let body = json!({"model": model, "keep_alive": 0, "stream": false});
     good(h.post(c, "/api/generate", &body, net::MANAGE)?).map(|_| ())

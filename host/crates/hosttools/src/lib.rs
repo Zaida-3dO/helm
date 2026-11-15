@@ -48,7 +48,7 @@ pub use registry::{
     CallOrigin, Changed, HostToolRegistry, OpInvoker, RegisteredTool, ToolCtx, ToolError,
     ToolFuture, ToolHandler, ToolResult,
 };
-pub use settings_ext::{SettingsExtension, SettingsExtensions};
+pub use settings_ext::{PrefRule, PrefRules, SettingsExtension, SettingsExtensions};
 pub use spec::{
     Availability, CatalogueEntry, Condition, LaunchKeys, McpLaunch, McpLaunchGate, McpLaunchSource,
     RequestLimit, ToolSpec, WebToolsGate, WebToolsSource, DEFAULT_TIMEOUT_MS, MAX_DESCRIPTION,

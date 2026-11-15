@@ -19,6 +19,7 @@ helm-devices = { path = "../devices" }
 helm-skills = { path = "../skills" }
 helm-consent = { path = "../consent" }
 helm-updates = { path = "../updates" }
+helm-memindex = { path = "../memindex" }
 tokio.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

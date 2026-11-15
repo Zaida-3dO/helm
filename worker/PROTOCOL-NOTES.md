@@ -516,3 +516,9 @@ beside the `PreToolUse` entries. When the main agent is about to stop, the CLI s
   `{decision:"block", reason}`; the agent reads the reason and carries on.
 - Any other answer, a failure or no answer in time: `{}`. The host also writes the "Needs you"
   row when it blocks, and that row is the fallback after the one block.
+
+The same Stop registration is also made when the launch carries `HELM_STARTUP_GATE=1` (the host
+sets it while a chat was told its project's startup instructions and has not reported them
+done), without the gates or their tool restrictions. The worker then asks `app_startup_turn_end`
+first, then `app_workflow_turn_end` when the gates are on; the first `{block: true, reason}`
+wins, and a question that fails is skipped.

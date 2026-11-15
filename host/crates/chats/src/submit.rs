@@ -274,7 +274,9 @@ pub fn chat_send(
             } else {
                 crate::attachments::refs_for(tx, &sid)?
             };
+            let startup = startup_context(rt, tx, &a.chat_id, &sid, now)?;
             let context_text: Vec<String> = [
+                startup,
                 block.map(|b| b.text),
                 crate::attachments::refs_section(&refs),
             ]
@@ -701,11 +703,17 @@ fn host_send_inner(
                 return Ok(Err(ApiError::new(code, r.message)));
             }
         }
-        // The files are listed for the agent beside the prompt, as data.
-        if let Some(section) = crate::attachments::refs_section(&refs) {
+        // The project's startup instructions, then the files listed for the agent beside the
+        // prompt, as data.
+        let startup = startup_context(rt, tx, s.chat_id, s.submission_id, now)?;
+        let context_text: Vec<String> = [startup, crate::attachments::refs_section(&refs)]
+            .into_iter()
+            .flatten()
+            .collect();
+        if !context_text.is_empty() {
             tx.execute(
                 "INSERT INTO submission_context(submission_id, text) VALUES (?1, ?2)",
-                params![s.submission_id, section],
+                params![s.submission_id, context_text.join("\n\n")],
             )?;
         }
         tx.execute(
@@ -730,6 +738,58 @@ fn host_send_inner(
     Ok(HostSent {
         delivered: dispatch,
     })
+}
+
+/// The project's startup instructions for a chat's first message: the hidden context to carry, with
+/// its one visible transcript line written. Only a chat that has not started is offered them, and
+/// the seam says whether this message is the one that carries them. A roll-over successor is told
+/// which chat it continues.
+fn startup_context(
+    rt: &ChatRuntime,
+    tx: &Transaction<'_>,
+    chat_id: &str,
+    submission_id: &str,
+    now: i64,
+) -> rusqlite::Result<Option<String>> {
+    let Some(seam) = rt.sh.startup.get() else {
+        return Ok(None);
+    };
+    let started: bool = tx.query_row(
+        &format!(
+            "SELECT {} FROM chats c WHERE c.id = ?1",
+            crate::local::STARTED_SQL
+        ),
+        [chat_id],
+        |r| r.get(0),
+    )?;
+    if started {
+        return Ok(None);
+    }
+    let predecessor: Option<String> = tx
+        .query_row(
+            "SELECT predecessor_id FROM chat_succession WHERE chat_id = ?1",
+            [chat_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(inj) = seam.first_send(tx, chat_id, submission_id, predecessor.as_deref())? else {
+        return Ok(None);
+    };
+    let row = RowWrite {
+        source_key: format!("c:startup:{submission_id}"),
+        role: "context",
+        text: inj.row,
+        thinking: String::new(),
+        tool_name: None,
+        tool_call_id: None,
+        status: "complete",
+        timestamp: now,
+        details: json!({"contextKind": "startup"}),
+        entry_id: None,
+        parent_id: None,
+    };
+    session_log::upsert_row(tx, &rt.sh.cfg.artifacts(), chat_id, &row, rt.clock().next())?;
+    Ok(Some(inj.context))
 }
 
 /// Send the restart continuation (origin `harness`, a plain prompt: it never interrupts and never

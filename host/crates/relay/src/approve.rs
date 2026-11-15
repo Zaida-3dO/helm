@@ -14,11 +14,19 @@
 //!   open Helm to allow it.
 //! - **Kept in step.** A request answered in Helm, withdrawn or ended has its buttons taken down.
 //!   The asks live in memory: after a restart a tap on an old one says it is no longer waiting.
+//! - **Staged settings changes too.** A request a chat staged for Helm to apply (the card that
+//!   says Approve and lists every change) is asked with Approve and Deny when approving from
+//!   Telegram is on and the user is away or talking to Helm over Telegram or voice. The tap goes
+//!   through the same one decision as the card in Helm, so whichever answers first wins and the
+//!   other is closed. The ask is Helm-issued, single use, expires with the request, and is
+//!   accepted only from the account of the person who owns the chat. When the lines do not fit in
+//!   one message only Deny is offered, with a note to open Helm.
 //! - **A chat may ask too.** `app_telegram_ask` puts a chat's own question to the user with
 //!   buttons ("May I merge and redeploy?"); the tapped option comes back to that chat as a note
 //!   from Helm saying it was tapped on the user's own Telegram account.
 
 use helm_chats::types::{Interaction, InteractionAttention, InteractionMethod};
+use helm_consent::{ConsentRequest, RequestState};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -40,6 +48,26 @@ pub struct Ask {
     pub yes: Option<String>,
     /// A chat's own question (`app_telegram_ask`); `None` for a waiting request.
     pub question: Option<String>,
+    /// A staged settings change awaiting Approve: `request_id` is the consent request's.
+    pub consent: bool,
+    /// When the ask stops being usable (ms since the epoch); `None` while its request waits.
+    pub expires_at: Option<i64>,
+}
+
+/// The two buttons of a staged settings change.
+pub const APPROVE: &str = "Approve";
+pub const DENY: &str = "Deny";
+/// The most characters of a staged change shown in full; a longer one offers only Deny.
+const CONSENT_FIT: usize = 3000;
+
+/// A staged settings change waiting for Approve, as the watcher found it.
+#[derive(Clone, Debug)]
+pub struct ConsentWaiting {
+    pub chat_id: String,
+    pub chat_title: String,
+    /// The hub person of the profile that owns the chat (`""`: none linked).
+    pub person: String,
+    pub request: ConsentRequest,
 }
 
 /// A request waiting in a chat, as the watcher found it.
@@ -205,8 +233,69 @@ pub fn offer(w: &Waiting) -> Option<Offer> {
             })
             .flatten(),
         question: None,
+        consent: false,
+        expires_at: None,
     };
     Some(Offer { ask, text, full })
+}
+
+/// The offer for a staged settings change: every line of what changes, then Approve and Deny.
+/// Nothing is allowed unseen: when the lines do not fit in one message only Deny is offered.
+pub fn consent_offer(w: &ConsentWaiting) -> Option<Offer> {
+    let r = &w.request;
+    if !r.applies_on_allow || r.state != RequestState::Pending {
+        return None;
+    }
+    let title = cut(w.chat_title.trim(), 60);
+    let who = if title.is_empty() {
+        "A Helm chat"
+    } else {
+        title.as_str()
+    };
+    let mut text = format!(
+        "{who} wants to change settings and needs your approval:\n{}",
+        r.summary.trim()
+    );
+    let full = text.chars().count() <= CONSENT_FIT;
+    let options = if full {
+        vec![APPROVE.to_owned(), DENY.to_owned()]
+    } else {
+        text = cut(&text, CONSENT_FIT);
+        text.push_str("\n\nToo long to show in full here: open Helm to approve it.");
+        vec![DENY.to_owned()]
+    };
+    let ask = Ask {
+        chat_id: w.chat_id.clone(),
+        person: w.person.clone(),
+        request_id: r.id.clone(),
+        method: InteractionMethod::Select,
+        plan: false,
+        options,
+        yes: full.then(|| APPROVE.to_owned()),
+        question: None,
+        consent: true,
+        expires_at: Some(r.expires_at),
+    };
+    Some(Offer { ask, text, full })
+}
+
+/// What the buttons of a staged change are told when its request left the waiting list: where it
+/// was answered, or that it expired.
+pub fn settled_note(r: Option<&ConsentRequest>, now: i64) -> String {
+    let Some(r) = r else {
+        return "No longer waiting: withdrawn.".into();
+    };
+    match (r.state, r.decided_via.as_deref()) {
+        (RequestState::Pending, _) if r.expires_at <= now => {
+            "Expired: it was not answered in time.".into()
+        }
+        (RequestState::Pending, _) => "Still waiting in Helm.".into(),
+        (_, Some("telegram")) => "Answered on Telegram.".into(),
+        (_, Some("app")) => "Answered in Helm.".into(),
+        (_, Some(v)) if v.starts_with("device:") => "Answered on another device.".into(),
+        (RequestState::Expired, _) => "Expired: it was not answered in time.".into(),
+        _ => "No longer waiting.".into(),
+    }
 }
 
 /// Whether choosing `label` lets something happen (as opposed to refusing it).
@@ -251,7 +340,9 @@ impl Asks {
         let gone: Vec<(String, String)> = m
             .iter()
             .filter(|(_, a)| {
-                a.question.is_none() && !live.contains(&(a.chat_id.as_str(), a.request_id.as_str()))
+                a.question.is_none()
+                    && !a.consent
+                    && !live.contains(&(a.chat_id.as_str(), a.request_id.as_str()))
             })
             .map(|(id, a)| (id.clone(), a.person.clone()))
             .collect();
@@ -282,6 +373,61 @@ impl Asks {
         step
     }
 
+    /// One look at the staged settings changes that wait: ask what is new, and take down the asks
+    /// of requests that are no longer pending, each with its note from `settled` (by request id).
+    pub fn step_consent(
+        &self,
+        waiting: &[ConsentWaiting],
+        settled: &HashMap<String, String>,
+        mut new_id: impl FnMut() -> String,
+    ) -> Step {
+        let mut m = self.map();
+        let mut step = Step::default();
+        let gone: Vec<(String, String, String)> = m
+            .iter()
+            .filter(|(_, a)| a.consent && !waiting.iter().any(|w| w.request.id == a.request_id))
+            .map(|(id, a)| {
+                let note = settled
+                    .get(&a.request_id)
+                    .cloned()
+                    .unwrap_or_else(|| "No longer waiting.".into());
+                (id.clone(), a.person.clone(), note)
+            })
+            .collect();
+        for (id, person, note) in gone {
+            m.remove(&id);
+            step.done.push((id, person, note));
+        }
+        for w in waiting {
+            if m.values()
+                .any(|a| a.consent && a.request_id == w.request.id)
+            {
+                continue;
+            }
+            let Some(o) = consent_offer(w) else {
+                continue;
+            };
+            let id = new_id();
+            step.ask.push((
+                id.clone(),
+                o.ask.person.clone(),
+                o.text,
+                o.ask.options.clone(),
+            ));
+            m.insert(id, o.ask);
+        }
+        step
+    }
+
+    /// The consent request ids that have an open ask.
+    pub fn consent_ids(&self) -> Vec<String> {
+        self.map()
+            .values()
+            .filter(|a| a.consent)
+            .map(|a| a.request_id.clone())
+            .collect()
+    }
+
     /// A chat's own question, put to the user with buttons. Kept until a tap or a restart.
     pub fn add_question(
         &self,
@@ -302,6 +448,8 @@ impl Asks {
                 options,
                 yes: None,
                 question: Some(question.to_owned()),
+                consent: false,
+                expires_at: None,
             },
         );
     }
@@ -327,11 +475,66 @@ impl Asks {
         ids
     }
 
-    /// The user's tap. Single use: the ask is gone afterwards, whatever the outcome.
-    pub fn take(&self, id: &str, index: usize) -> Option<Ask> {
-        let ask = self.map().remove(id)?;
-        (index < ask.options.len()).then_some(ask)
+    /// The user's tap, from the account of `who` (the hub person the hub vouches for). Single
+    /// use: once the ask is accepted, refused as expired or found to have no such button, it is
+    /// gone. A tap from another person's account leaves it alone, so it cannot burn the ask.
+    pub fn tap(&self, id: &str, index: usize, who: &str, now: i64) -> Tap {
+        let mut m = self.map();
+        match m.get(id) {
+            None => return Tap::Gone,
+            Some(a) if a.person != who => return Tap::Foreign,
+            Some(_) => {}
+        }
+        let Some(ask) = m.remove(id) else {
+            return Tap::Gone;
+        };
+        if ask.expires_at.is_some_and(|e| e <= now) {
+            return Tap::Expired;
+        }
+        if index >= ask.options.len() {
+            return Tap::Gone;
+        }
+        Tap::Taken(ask)
     }
+}
+
+/// What a tap found.
+#[derive(Debug, PartialEq)]
+pub enum Tap {
+    /// The ask is accepted (and spent).
+    Taken(Ask),
+    /// No such open ask: never issued, already used, taken down, or lost with a restart.
+    Gone,
+    /// The ask belongs to another person.
+    Foreign,
+    /// The ask's time was up.
+    Expired,
+}
+
+/// Answer a staged settings change from the button at `index` through the one decision path the
+/// card in Helm uses. The first answer wins; a later one is a `conflict`.
+pub fn decide_consent(
+    services: &std::sync::Arc<helm_ipc::Services>,
+    events: &std::sync::Arc<dyn helm_ipc::EventSink>,
+    ask: &Ask,
+    index: usize,
+) -> Result<helm_consent::apply::Decided, helm_ipc::ApiError> {
+    let decision = if ask.options.get(index).map(String::as_str) == Some(APPROVE) {
+        helm_consent::Decision::Allow
+    } else {
+        helm_consent::Decision::Deny
+    };
+    helm_consent::decide_and_apply(
+        services,
+        events,
+        &helm_consent::ConsentDecideArgs {
+            request_id: ask.request_id.clone(),
+            decision,
+            grant_minutes: None,
+            note: None,
+        },
+        "telegram",
+    )
 }
 
 /// The note a chat gets when the user taps an option of its question.
@@ -381,6 +584,14 @@ mod tests {
             answer: None,
             prefill: None,
             gate: None,
+        }
+    }
+
+    /// A tap from the person the asks are for, long before anything expires.
+    fn take(asks: &Asks, id: &str, index: usize) -> Option<Ask> {
+        match asks.tap(id, index, "p7", 0) {
+            Tap::Taken(a) => Some(a),
+            _ => None,
         }
     }
 
@@ -450,13 +661,13 @@ mod tests {
         assert_eq!(s.done.len(), 1);
         assert_eq!(s.done[0].0, "ask2");
         // A tap: an index past the buttons answers nothing; a good one answers once.
-        assert!(asks.take("nope", 0).is_none());
-        let ask = asks.take("ask1", 0).unwrap();
+        assert!(take(&asks, "nope", 0).is_none());
+        let ask = take(&asks, "ask1", 0).unwrap();
         assert_eq!(
             answer_args(&ask, 0),
             json!({"chatId": "c1", "requestId": "r1", "value": "Allow once"})
         );
-        assert!(asks.take("ask1", 0).is_none(), "single use");
+        assert!(take(&asks, "ask1", 0).is_none(), "single use");
         // Confirmations and plans answer as the card does.
         let confirm = Ask {
             method: Confirm,
@@ -495,8 +706,307 @@ mod tests {
         );
         assert!(asks.step(&[], new_id).done.is_empty());
         assert!(asks.clear(false).is_empty());
-        let q = asks.take("q1", 0).unwrap();
+        let q = take(&asks, "q1", 0).unwrap();
         assert_eq!(q.question.as_deref(), Some("Merge and redeploy?"));
         assert!(answer_note("q1", "Merge and redeploy?", "Yes").contains("tapped \"Yes\""));
+    }
+
+    struct Recorder(Mutex<Vec<String>>);
+
+    impl helm_consent::Applier for Recorder {
+        fn apply(&self, job: &helm_consent::ApplyJob<'_>) -> String {
+            self.0.lock().unwrap().push(job.request_id.to_owned());
+            "Done: changed.".into()
+        }
+        fn staged_with(&self) -> &'static str {
+            "app_stage_test"
+        }
+    }
+
+    fn staged_kind() -> helm_consent::AllowKind {
+        fn canonical(
+            _: &rusqlite::Transaction<'_>,
+            _: &str,
+            t: &Value,
+        ) -> Result<helm_consent::Canonical, String> {
+            let name = t["name"].as_str().ok_or("name")?;
+            Ok(helm_consent::Canonical {
+                target: json!({ "name": name }),
+                summary: format!("Change 1 setting\nName: none → {name}"),
+                fixed_form: String::new(),
+                details: vec![],
+            })
+        }
+        helm_consent::AllowKind {
+            id: "test_apply",
+            label: "Change settings",
+            accepts_words: false,
+            canonical,
+        }
+    }
+
+    fn kind_of(t: &Tap) -> &'static str {
+        match t {
+            Tap::Taken(_) => "taken",
+            Tap::Gone => "gone",
+            Tap::Foreign => "foreign",
+            Tap::Expired => "expired",
+        }
+    }
+
+    /// The right account of the person who owns the chat taps Approve or Deny on the ask for a
+    /// staged settings change; the first answer, there or in Helm, wins, and the loser is told.
+    #[test]
+    fn a_staged_change_is_approved_once_by_the_owner_and_the_first_answer_wins() {
+        struct Row {
+            case: &'static str,
+            /// The hub person whose account taps.
+            who: &'static str,
+            /// How late the tap comes after the ask's expiry (`None`: in time).
+            late: Option<i64>,
+            /// The button: 0 is Approve (or Deny when only Deny is offered).
+            index: usize,
+            /// Whether the details do not fit on the phone.
+            long: bool,
+            /// Answered in Helm before the tap.
+            app_first: bool,
+            tap: &'static str,
+            /// What deciding on the tap says: `ok`, `conflict` or `-` (no decision attempted).
+            decided: &'static str,
+            applied: usize,
+            state: RequestState,
+            note: &'static str,
+        }
+        let rows = [
+            Row {
+                case: "the owner approves",
+                who: "p7",
+                late: None,
+                index: 0,
+                long: false,
+                app_first: false,
+                tap: "taken",
+                decided: "ok",
+                applied: 1,
+                state: RequestState::Used,
+                note: "Answered on Telegram.",
+            },
+            Row {
+                case: "the owner denies",
+                who: "p7",
+                late: None,
+                index: 1,
+                long: false,
+                app_first: false,
+                tap: "taken",
+                decided: "ok",
+                applied: 0,
+                state: RequestState::Denied,
+                note: "Answered on Telegram.",
+            },
+            Row {
+                case: "another person's account",
+                who: "p8",
+                late: None,
+                index: 0,
+                long: false,
+                app_first: false,
+                tap: "foreign",
+                decided: "-",
+                applied: 0,
+                state: RequestState::Pending,
+                note: "Still waiting in Helm.",
+            },
+            Row {
+                case: "after the ask expired",
+                who: "p7",
+                late: Some(1),
+                index: 0,
+                long: false,
+                app_first: false,
+                tap: "expired",
+                decided: "-",
+                applied: 0,
+                state: RequestState::Pending,
+                note: "Still waiting in Helm.",
+            },
+            Row {
+                case: "answered in Helm first",
+                who: "p7",
+                late: None,
+                index: 0,
+                long: false,
+                app_first: true,
+                tap: "taken",
+                decided: "conflict",
+                applied: 1,
+                state: RequestState::Used,
+                note: "Answered in Helm.",
+            },
+            Row {
+                case: "too long to show: only Deny",
+                who: "p7",
+                late: None,
+                index: 0,
+                long: true,
+                app_first: false,
+                tap: "taken",
+                decided: "ok",
+                applied: 0,
+                state: RequestState::Denied,
+                note: "Answered on Telegram.",
+            },
+        ];
+        for row in rows {
+            let dir = tempfile::tempdir().unwrap();
+            let mut reg = helm_core::db::MigrationRegistry::new();
+            helm_chats::register_migrations(&mut reg);
+            helm_consent::register_migrations(&mut reg);
+            let db = std::sync::Arc::new(
+                helm_core::db::Database::open(&dir.path().join("t.db"), &reg).unwrap(),
+            );
+            db.write::<_, rusqlite::Error>(|tx| {
+                tx.execute(
+                    "INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 1)",
+                    [],
+                )?;
+                tx.execute(
+                    "INSERT INTO chats(id, project_id, created_at, updated_at) VALUES ('c1', 'p', 1, 1)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+            let applied = std::sync::Arc::new(Recorder(Mutex::new(vec![])));
+            let mut kinds = helm_consent::AllowKinds::new();
+            kinds.register_applying(staged_kind(), applied.clone());
+            let kinds = std::sync::Arc::new(kinds);
+            let mut services = helm_ipc::Services::new();
+            services.insert(db.clone());
+            services.insert(kinds.clone());
+            services.insert(std::sync::Arc::new(helm_consent::MaintenanceLock::default()));
+            let services = std::sync::Arc::new(services);
+            let events: std::sync::Arc<dyn helm_ipc::EventSink> =
+                std::sync::Arc::new(helm_ipc::RecordingSink::default());
+
+            let now = helm_core::now_ms();
+            let target = json!({ "name": "alpha" });
+            let request = helm_consent::store::request(
+                &db,
+                &kinds,
+                helm_consent::NewRequest {
+                    chat_id: "c1",
+                    kind: "test_apply",
+                    target: &target,
+                    reason: "The user asked.",
+                    evidence: "",
+                    grant_minutes: None,
+                    tool_use_id: None,
+                },
+                now,
+            )
+            .unwrap();
+            let mut shown = request.clone();
+            if row.long {
+                shown.summary = format!("Change 1 setting\n{}", "x".repeat(4000));
+            }
+            let waiting = [ConsentWaiting {
+                chat_id: "c1".into(),
+                chat_title: "Docs".into(),
+                person: "p7".into(),
+                request: shown,
+            }];
+            let asks = Asks::default();
+            let s = asks.step_consent(&waiting, &HashMap::new(), || "ask1".into());
+            let c = row.case;
+            assert_eq!(s.ask.len(), 1, "{c}");
+            assert_eq!(
+                s.ask[0].3,
+                if row.long {
+                    vec!["Deny"]
+                } else {
+                    vec!["Approve", "Deny"]
+                },
+                "{c}"
+            );
+            assert_eq!(
+                s.ask[0].2.ends_with("open Helm to approve it."),
+                row.long,
+                "{c}"
+            );
+            assert!(s.ask[0].2.contains("Name: none → alpha") || row.long, "{c}");
+            assert!(
+                asks.step_consent(&waiting, &HashMap::new(), || "ask2".into())
+                    .ask
+                    .is_empty(),
+                "{c}: asked once"
+            );
+
+            let decide_in_helm = || {
+                helm_consent::decide_and_apply(
+                    &services,
+                    &events,
+                    &helm_consent::ConsentDecideArgs {
+                        request_id: request.id.clone(),
+                        decision: helm_consent::Decision::Allow,
+                        grant_minutes: None,
+                        note: None,
+                    },
+                    "app",
+                )
+            };
+            if row.app_first {
+                decide_in_helm().unwrap().applying.unwrap().join().unwrap();
+            }
+            let at = request.expires_at + row.late.unwrap_or(-1_000);
+            let tapped = asks.tap("ask1", row.index, row.who, at);
+            assert_eq!(kind_of(&tapped), row.tap, "{c}");
+            if let Tap::Taken(ask) = tapped {
+                let r = decide_consent(&services, &events, &ask, row.index);
+                match (&r, row.decided) {
+                    (Ok(_), "ok") => {}
+                    (Err(e), "conflict") => assert_eq!(e.code, "conflict", "{c}"),
+                    _ => panic!("{c}: unexpected decision {:?}", r.as_ref().err()),
+                }
+                if let Ok(d) = r {
+                    if let Some(h) = d.applying {
+                        h.join().unwrap();
+                    }
+                }
+                // Single use: the same ask answers nothing again.
+                assert_eq!(
+                    kind_of(&asks.tap("ask1", row.index, row.who, at)),
+                    "gone",
+                    "{c}"
+                );
+            } else {
+                assert_eq!(row.decided, "-", "{c}");
+                // A tap that did not count may leave the ask for its owner, but never spends the
+                // request.
+                assert_eq!(
+                    asks.consent_ids().len(),
+                    usize::from(row.tap == "foreign"),
+                    "{c}"
+                );
+            }
+
+            assert_eq!(applied.0.lock().unwrap().len(), row.applied, "{c}");
+            let after = helm_consent::store::get(&db, &kinds, &request.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(after.state, row.state, "{c}");
+            // The buttons that remain come down with a note saying where it was answered.
+            let note = settled_note(Some(&after), request.expires_at - 1_000);
+            assert_eq!(note, row.note, "{c}");
+            if row.tap == "foreign" {
+                let s = asks.step_consent(
+                    &[],
+                    &HashMap::from([(request.id.clone(), note)]),
+                    String::new,
+                );
+                assert_eq!(s.done.len(), 1, "{c}");
+                assert_eq!(s.done[0].2, row.note, "{c}");
+            }
+        }
     }
 }

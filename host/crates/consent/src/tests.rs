@@ -734,7 +734,7 @@ fn an_applying_kind_applies_once_on_approve_and_reports_the_outcome() {
         store::spend_grant(tx, &e.kinds, "c0", "test_apply", &t("alpha"), "x", now)
     });
     assert!(spent.unwrap_err().0.contains("applies this itself"));
-    // Only the main window's surface is known.
+    // Only the named surfaces answer.
     assert!(crate::decide_and_apply(
         &services,
         &events,
@@ -744,7 +744,7 @@ fn an_applying_kind_applies_once_on_approve_and_reports_the_outcome() {
             grant_minutes: None,
             note: None,
         },
-        "telegram",
+        "sms",
     )
     .is_err());
 

@@ -173,8 +173,8 @@ pub struct ClaudeRuntime {
     pub shell_changes: bool,
     /// Run chats' agents, their tools and Helm's helpers at below-normal priority, so games and
     /// the rest of the PC stay responsive. On by default: a missing key means on. It reaches a
-    /// chat at its next worker start. It lives in this file, not in preferences, so no agent can
-    /// change it.
+    /// chat at its next worker start. It lives in this file, not in preferences; a chat
+    /// changes it through the settings tools.
     #[serde(default = "yes")]
     pub low_priority: bool,
 }

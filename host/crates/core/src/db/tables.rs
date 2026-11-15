@@ -53,6 +53,11 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("chat_triage", Data),
     ("chat_flags", Data),
     ("chat_turn_usage", Data),
+    // What a roll-over successor continues, and what a chat was told and reported of its project's
+    // startup instructions (the instructions themselves are a column of project_local).
+    ("chat_succession", Data),
+    ("chat_startup", Data),
+    ("chat_startup_sent", Data),
     ("agent_waits", Data),
     ("saved_items", Data),
     ("saved_item_notes", Data),
@@ -172,7 +177,7 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     // Local model servers: the addresses, switches and numbers around them.
     (
         "local_model_settings",
-        UserOnly("Which local model servers Helm uses is yours to set; chats may change only a few of its switches."),
+        UserOnly("Servers and their keys are yours to set; chats change some switches and stage the games, restart task and pause file."),
     ),
     // Which Ollama variants Helm made for chat windows; written and pruned by Helm alone.
     ("local_model_variants", Data),
@@ -221,6 +226,17 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     // Sealed pages: pins are made through app_pin_page; a page's saved state is its own.
     ("pinned_pages", Tool),
     ("page_state", Data),
+    // Memory indexing: what is uploaded to the hub's search index is the user's decision (agents
+    // go through app_memory_index and the Allow card); the doc rows are only a record of what was sent.
+    (
+        "memindex_sources",
+        UserOnly("What Helm indexes for memory search is yours to choose."),
+    ),
+    (
+        "memindex_settings",
+        UserOnly("Memory indexing's switches are yours to set."),
+    ),
+    ("memindex_docs", Data),
     // Dictation: which speech-to-text server the microphone button sends audio to.
     (
         "dictation_settings",

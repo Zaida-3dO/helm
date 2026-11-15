@@ -72,6 +72,9 @@ pub struct ConsentRequest {
     pub applies_on_allow: bool,
     /// For a request Helm applied: what happened, once it is done.
     pub outcome: Option<String>,
+    /// Where the user answered: `app` (this PC's window), `device:<name>` (another device) or
+    /// `telegram`. `None` while pending, and for a request that expired.
+    pub decided_via: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]

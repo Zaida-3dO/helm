@@ -86,7 +86,7 @@ const NOT_READ: &[&str] = &[
 
 /// Object keys where an update that names some fields keeps the others, instead of replacing the
 /// whole object.
-const MERGED: &[&str] = &["fontSizes", "sounds", "desktopPet"];
+const MERGED: &[&str] = &["fontSizes", "sounds", "desktopPet", "sendBehavior"];
 
 /// What the tools say about an unread key.
 const NOT_READ_NOTE: &str =
@@ -154,6 +154,11 @@ const LEVELS: Kind = Kind::Choice(&["zen", "standard", "brainrot"]);
 const PET_KINDS: Kind = Kind::Choice(&["puffin", "crab", "lantern"]);
 const PET_SIZES: Kind = Kind::Choice(&["s", "m", "l"]);
 const ANY_OBJECT: Kind = Kind::AnyObject;
+const ID_512: Kind = Kind::Text { max: 512 };
+const NAME_OR_NULL: Kind = Kind::TextOrNull { max: 200 };
+const SEND_MODE: Kind = Kind::Choice(&["asap", "interrupt"]);
+const WAIT_LIMIT: Kind = Kind::IntOrNull { min: 5, max: 3600 };
+const LONG_COMMANDS: Kind = Kind::Choice(&["off", "warn", "redirect"]);
 
 fn table() -> Vec<Entry> {
     vec![
@@ -454,6 +459,154 @@ fn table() -> Vec<Entry> {
             },
             default: || json!({}),
             about: "Keyboard shortcuts as {commandId: chord}; a null chord clears that shortcut. A chord Windows or the web view keeps (Alt+F4, F12, anything with the Windows key...) and one chord given to two commands are refused. Needs the all-settings switch.",
+        },
+        Entry {
+            key: "sidebarView",
+            kind: Kind::Choice(&["projects", "activity"]),
+            default: || json!("projects"),
+            about: "How the sidebar lists chats: by project, or by recent activity.",
+        },
+        Entry {
+            key: "terminalHeight",
+            kind: Kind::Int {
+                min: 80,
+                max: 4096,
+                step: 1,
+            },
+            default: null,
+            about: "Terminal dock height in pixels. Null uses Helm's own height.",
+        },
+        Entry {
+            key: "stallMinutes",
+            kind: Kind::Int {
+                min: 1,
+                max: 1440,
+                step: 1,
+            },
+            default: || json!(5),
+            about: "Minutes without output before a running chat shows as stalled.",
+        },
+        Entry {
+            key: "scrollOnSend",
+            kind: Kind::Bool,
+            default: || json!(true),
+            about: "Scroll the chat to the newest message when the user sends one.",
+        },
+        Entry {
+            key: "doubleShift",
+            kind: Kind::Bool,
+            default: || json!(true),
+            about: "Tapping Shift twice opens Go to file.",
+        },
+        Entry {
+            key: "sendBehavior",
+            kind: Kind::Fields(&[
+                ("mode", &SEND_MODE),
+                ("showChoices", &BOOL),
+                ("waitLimitSeconds", &WAIT_LIMIT),
+                ("toolStop", &BOOL),
+                ("longCommands", &LONG_COMMANDS),
+            ]),
+            default: || {
+                json!({"mode": "asap", "showChoices": true, "waitLimitSeconds": 30, "toolStop": true, "longCommands": "redirect"})
+            },
+            about: "How the user's own messages reach a running agent: mode asap sends at the next safe point and interrupt stops the agent first; showChoices offers the choice when a message is sent mid-turn; waitLimitSeconds (5 to 3600, or null for no limit) is how long a message waits; toolStop shows a per-tool Stop; longCommands (off, warn or redirect) says what happens to a shell command that runs long. Send only the fields to change: the others keep their values.",
+        },
+        Entry {
+            key: "responseVerbosity",
+            kind: Kind::Choice(&["low", "medium", "high"]),
+            default: || json!("low"),
+            about: "How long the agent's replies are, for chats that have not set their own.",
+        },
+        Entry {
+            key: "notifications",
+            kind: Kind::Choice(&["off", "native"]),
+            default: || json!("off"),
+            about: "Where notices about the user's chats appear: off, or native (system toasts).",
+        },
+        Entry {
+            key: "dictationMic",
+            kind: Kind::Fields(&[("uid", &ID_512), ("name", &STR_256)]),
+            default: null,
+            about: "The microphone dictation listens on: {uid, name} of a capture device. Null uses the system default.",
+        },
+        Entry {
+            key: "defaultBoard",
+            kind: Kind::Text { max: 200 },
+            default: null,
+            about: "The board chats with no other home are shown on: an open board's id, or \"ask\" to ask each time. Null uses the board named Life Admin.",
+        },
+        Entry {
+            key: "globalHotkey",
+            kind: Kind::Text { max: 64 },
+            default: || json!("Ctrl+Alt+H"),
+            about: "The system-wide shortcut that opens Helm from any app, such as \"Ctrl+Alt+H\": at least one modifier (F1 to F24 may stand alone) and one key. An empty string turns it off.",
+        },
+        Entry {
+            key: "terminalShell",
+            kind: Kind::Choice(&["pwsh", "powershell", "gitbash"]),
+            default: || json!("pwsh"),
+            about: "The shell the terminal dock runs: pwsh (PowerShell 7), powershell (Windows PowerShell) or gitbash.",
+        },
+        Entry {
+            key: "backgroundModel",
+            kind: Kind::Fields(&[("claude", &NAME_OR_NULL), ("local", &NAME_OR_NULL)]),
+            default: null,
+            about: "The model background jobs ask (titles, autocomplete, the idle check): {claude, local}, each a model name or null for the small default. They read the words of every chat.",
+        },
+        Entry {
+            key: "ideContext",
+            kind: Kind::Bool,
+            default: || json!(false),
+            about: "Whether agents may read the code editor's open file and selection.",
+        },
+        Entry {
+            key: "newChatPermissionMode",
+            kind: Kind::Choice(&["bypassPermissions", "default", "acceptEdits"]),
+            default: null,
+            about: "The permission mode chats the user starts from the new-chat page begin in. Null starts them in the launch mode.",
+        },
+        Entry {
+            key: "nativeMcp",
+            kind: Kind::Bool,
+            default: || json!(true),
+            about: "Whether chats load the user's own Claude Code MCP servers.",
+        },
+        Entry {
+            key: "mcpEnabled",
+            kind: Kind::Bool,
+            default: || json!(true),
+            about: "The MCP master switch. Off, no chat loads any MCP server.",
+        },
+        Entry {
+            key: "updateSource",
+            kind: Kind::TextOrNull { max: 260 },
+            default: null,
+            about: "The folder Helm looks in for a newer installer: an existing absolute folder (a drive path or a share), not a link. Null turns the folder off.",
+        },
+        Entry {
+            key: "githubPrView",
+            kind: Kind::Fields(&[("enabled", &BOOL)]),
+            default: || json!({"enabled": false}),
+            about: "Whether Helm reads and writes GitHub for the user, in the pull request view: {enabled: true or false}.",
+        },
+        Entry {
+            key: "householdSharing",
+            kind: Kind::Fields(&[("chats", &BOOL), ("transcripts", &BOOL), ("messages", &BOOL)]),
+            default: || json!({"chats": false, "transcripts": false, "messages": false}),
+            about: "What other people in the household may see of this install's chats: chats lists them, transcripts reads them (needs chats), messages sends to them (needs transcripts). A switch counts only while the one before it is on.",
+        },
+        Entry {
+            key: "deviceRunFromOthers",
+            kind: Kind::Bool,
+            default: || json!(true),
+            about: "Whether the user's other devices may run chats on this PC.",
+        },
+        Entry {
+            key: "deviceHouseholdRun",
+            kind: Kind::Bool,
+            default: || json!(true),
+            about: "Whether people in the household may run their own chats on this PC.",
         },
     ]
 }
@@ -770,13 +923,15 @@ pub fn check(key: &str, v: &Value) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings_allow::agent_keys;
+    use crate::settings_allow::{agent_keys, high_pref_keys};
 
     #[test]
     fn every_agent_key_has_an_entry_and_nothing_else_does() {
         let mut have = keys();
         have.sort_unstable();
+        // The keys a chat changes itself and the ones it may stage: both are checked here.
         let mut want = agent_keys(true);
+        want.extend(high_pref_keys());
         want.sort_unstable();
         assert_eq!(have, want);
     }

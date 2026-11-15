@@ -41,6 +41,8 @@ mod tests;
 mod tool;
 pub mod transcribe;
 
+pub mod ext;
+
 pub use ops::{View, EVENT};
 
 pub fn register_migrations(reg: &mut helm_core::db::MigrationRegistry) {

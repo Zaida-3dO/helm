@@ -20,6 +20,7 @@ function node(id: string, over: Partial<ProjectNode> = {}): ProjectNode {
     parentId: null,
     parentSource: null,
     description: null,
+    startupInstructions: null,
     icon: null,
     colour: null,
     pinned: false,
