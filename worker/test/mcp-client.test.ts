@@ -204,6 +204,27 @@ test("browser sign-in: every expiry is asked about, and refusals that land toget
   assert.ok(!JSON.stringify(h.lines).includes("Bearer t4"));
 });
 
+test("a host-served server is skipped quietly: no status, no tools, and it retires without a report", async () => {
+  const f = await startHttpFake({});
+  const h = harness();
+  open.push(h.bridge, { close: () => void f.close() });
+  h.bridge.configure({
+    revision: "r1",
+    servers: [httpServer("live", f.url), stdioServer("gone"), { id: "built_in", name: "Built in", transport: "stdio", command: "uvx", hostServed: true }],
+  });
+  await h.bridge.tools({ server: "live" });
+  await h.bridge.tools({ server: "gone" });
+  assert.ok(h.last("live"), "the live server reports normally");
+  assert.equal(h.last("built_in"), undefined, "a host-served server never gets a status row");
+  assert.ok(!JSON.stringify(h.lines).includes("built_in"), "no line at all names it");
+  await assert.rejects(h.bridge.tools({ server: "built_in" }), /No enabled MCP server/);
+  // An entry that turns host-served on the next edit retires quietly: no failure, no new row.
+  const goneBefore = h.lines.filter((l) => l.serverId === "gone").length;
+  h.bridge.configure({ revision: "r2", servers: [httpServer("live", f.url), { id: "gone", name: "Fake gone", transport: "stdio", command: "node", hostServed: true }] });
+  assert.equal(h.lines.filter((l) => l.serverId === "gone").length, goneBefore, "retiring adds nothing to its status");
+  await assert.rejects(h.bridge.tools({ server: "gone" }), /No enabled MCP server/);
+});
+
 test("startup timeout fails the server, and the next use tries again", async () => {
   const h = harness({ limits: { startupMs: 300 } });
   open.push(h.bridge);

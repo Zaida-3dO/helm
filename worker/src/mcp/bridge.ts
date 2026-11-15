@@ -280,7 +280,10 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
     configure(cfg: McpConfig) {
       if (closed) return;
       const next = new Map<string, ResolvedServer>();
-      for (const s of cfg.servers ?? []) if (s && typeof s.id === "string") next.set(s.id, s);
+      // A host-served server (a Google accounts entry without a client of its own) is never a
+      // process and never a failure: it gets no entry, no status row and no tools at all.
+      for (const s of cfg.servers ?? [])
+        if (s && typeof s.id === "string" && !s.hostServed) next.set(s.id, s);
       for (const [id, e] of entries) {
         if (!next.has(id)) {
           retire(e);

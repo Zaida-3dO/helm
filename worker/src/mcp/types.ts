@@ -24,6 +24,9 @@ export interface ResolvedServer {
   /** The server signs in through the browser. The bridge may ask the host once for a current
    * `Authorization` header when the server refuses the one it has. */
   oauth?: boolean;
+  /** The server's services are built into Helm: never start it, never report it, never list a
+   * tool for it — the host answers for it with its own tools. Skip it quietly. */
+  hostServed?: boolean;
 }
 
 /** A server Claude Code already loads natively: from the CLI's start-up report or a
