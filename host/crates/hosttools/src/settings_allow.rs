@@ -63,7 +63,11 @@ pub const NAMED: &[(&str, Risk, &str)] = &[
         "Helm writes this file while local models are unloaded, so you approve where.",
     ),
     // The Claude Code runtime switches (Settings > Runtime), kept in a file Helm's workers read.
-    ("shellChanges", Risk::Low, ""),
+    (
+        "shellChanges",
+        Risk::High,
+        "Keeps the record of what a chat's shell commands changed, so you approve switching it off.",
+    ),
     ("lowPriority", Risk::Low, ""),
     ("toolOutputCap", Risk::Low, ""),
     ("subagentSoftTurns", Risk::Low, ""),

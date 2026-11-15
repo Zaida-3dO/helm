@@ -6,7 +6,7 @@
 //!
 //! | Key | Value | Class |
 //! |---|---|---|
-//! | `shellChanges` | record which files shell commands change, for the turn's change card | chat changes it |
+//! | `shellChanges` | record which files shell commands change, for the turn's change card | needs approval |
 //! | `lowPriority` | run agents, their tools and Helm's helpers at below-normal priority | chat changes it |
 //! | `toolOutputCap` | cut very long outputs of Helm's own tools | chat changes it |
 //! | `subagentSoftTurns` | turns before a sub-agent is told to hand off, 20 to 1000 | chat changes it |
