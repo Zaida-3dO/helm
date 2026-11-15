@@ -27,41 +27,41 @@ pub fn parse(query: &str, now_ms: i64, utc_offset_minutes: i32) -> (String, Opti
     let offset_ms = utc_offset_minutes as i64 * 60_000;
     let now = civil_of(now_ms + offset_ms);
     let tokens = tokenize(query);
-    let Some((first, last, spec)) = find_phrase(&tokens) else {
+    let Some((first, last, phrase)) = find_phrase(&tokens) else {
         return (query.to_string(), None);
     };
-    let window = match spec {
-        Spec::Today => day_window(now, 0, offset_ms),
-        Spec::Yesterday => day_window(now, 1, offset_ms),
-        Spec::Week(back) => week_window(now, back, offset_ms),
-        Spec::MonthThis(back) => month_window(now, back, offset_ms, false),
-        Spec::YearThis => Window {
+    let window = match phrase {
+        Phrase::Today => day_window(now, 0, offset_ms),
+        Phrase::Yesterday => day_window(now, 1, offset_ms),
+        Phrase::Week(back) => week_window(now, back, offset_ms),
+        Phrase::MonthThis(back) => month_window(now, back, offset_ms, false),
+        Phrase::YearThis => Window {
             from_ms: at_midnight(civil(now.y, 1, 1), offset_ms),
             to_ms: at_midnight(civil(now.y + 1, 1, 1), offset_ms),
             vague: false,
         },
-        Spec::YearLast => Window {
+        Phrase::YearLast => Window {
             from_ms: at_midnight(civil(now.y - 1, 1, 1), offset_ms),
             to_ms: at_midnight(civil(now.y, 1, 1), offset_ms),
             vague: false,
         },
-        Spec::Recent => Window {
+        Phrase::Recent => Window {
             from_ms: now_ms - 30 * DAY_MS,
             to_ms: now_ms,
             vague: true,
         },
-        Spec::Ago(unit, n) => match unit {
+        Phrase::Ago(unit, n) => match unit {
             Unit::Days => day_window(now, n as i64, offset_ms),
             Unit::Weeks => week_window(now, n as i64, offset_ms),
             Unit::Months => month_window(now, n, offset_ms, false),
         },
-        Spec::VagueAgo(unit, few) => vague_ago_window(now_ms, unit, few, offset_ms),
-        Spec::MonthOfYear(y, m) => month_span(y, m, offset_ms, false),
-        Spec::GuessedMonth(m) => {
+        Phrase::VagueAgo(unit, few) => vague_ago_window(now_ms, unit, few, offset_ms),
+        Phrase::MonthOfYear(y, m) => month_span(y, m, offset_ms, false),
+        Phrase::GuessedMonth(m) => {
             let y = if m <= now.m { now.y } else { now.y - 1 };
             month_span(y, m, offset_ms, true)
         }
-        Spec::Date(c, month_only) => {
+        Phrase::Date(c, month_only) => {
             if month_only {
                 month_span(c.y, c.m, offset_ms, false)
             } else {
@@ -73,12 +73,12 @@ pub fn parse(query: &str, now_ms: i64, utc_offset_minutes: i32) -> (String, Opti
                 }
             }
         }
-        Spec::Since(c) => Window {
+        Phrase::Since(c) => Window {
             from_ms: at_midnight(c, offset_ms),
             to_ms: now_ms,
             vague: false,
         },
-        Spec::Before(c) => Window {
+        Phrase::Before(c) => Window {
             from_ms: i64::MIN,
             to_ms: at_midnight(c, offset_ms),
             vague: false,
@@ -243,7 +243,7 @@ fn vague_ago_window(now_ms: i64, unit: Unit, few: bool, offset_ms: i64) -> Windo
 
 /// The phrase shapes a token run can match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Spec {
+enum Phrase {
     Today,
     Yesterday,
     Week(i64),
@@ -406,42 +406,42 @@ fn unit_word(w: &str) -> Option<Unit> {
 }
 
 /// The left-most phrase wins; at one spot the longer reading wins.
-fn find_phrase(tokens: &[Token]) -> Option<(usize, usize, Spec)> {
+fn find_phrase(tokens: &[Token]) -> Option<(usize, usize, Phrase)> {
     (0..tokens.len()).find_map(|i| match_at(tokens, i))
 }
 
-fn match_at(tokens: &[Token], i: usize) -> Option<(usize, usize, Spec)> {
+fn match_at(tokens: &[Token], i: usize) -> Option<(usize, usize, Phrase)> {
     let w = tokens[i].word.as_str();
     let t = |j: usize| tokens.get(j).map(|x| x.word.as_str()).unwrap_or("");
     match w {
-        "today" => return Some((i, i, Spec::Today)),
-        "yesterday" => return Some((i, i, Spec::Yesterday)),
-        "recently" | "lately" => return Some((i, i, Spec::Recent)),
+        "today" => return Some((i, i, Phrase::Today)),
+        "yesterday" => return Some((i, i, Phrase::Yesterday)),
+        "recently" | "lately" => return Some((i, i, Phrase::Recent)),
         _ => {}
     }
     if (w == "this" || w == "last") && matches!(t(i + 1), "week" | "weeks") {
-        return Some((i, i + 1, Spec::Week(if w == "last" { 1 } else { 0 })));
+        return Some((i, i + 1, Phrase::Week(if w == "last" { 1 } else { 0 })));
     }
     if (w == "this" || w == "last") && matches!(t(i + 1), "month" | "months") {
-        return Some((i, i + 1, Spec::MonthThis(if w == "last" { 1 } else { 0 })));
+        return Some((i, i + 1, Phrase::MonthThis(if w == "last" { 1 } else { 0 })));
     }
     if w == "last" && t(i + 1) == "year" {
-        return Some((i, i + 1, Spec::YearLast));
+        return Some((i, i + 1, Phrase::YearLast));
     }
     if w == "this" && t(i + 1) == "year" {
-        return Some((i, i + 1, Spec::YearThis));
+        return Some((i, i + 1, Phrase::YearThis));
     }
     if w == "in" {
         if let Some(m) = month_name(t(i + 1)) {
             if let Some(y) = year_num(t(i + 2)) {
-                return Some((i, i + 2, Spec::MonthOfYear(y, m)));
+                return Some((i, i + 2, Phrase::MonthOfYear(y, m)));
             }
-            return Some((i, i + 1, Spec::GuessedMonth(m)));
+            return Some((i, i + 1, Phrase::GuessedMonth(m)));
         }
     }
     if let Some(m) = month_name(w) {
         if let Some(y) = year_num(t(i + 1)) {
-            return Some((i, i + 1, Spec::MonthOfYear(y, m)));
+            return Some((i, i + 1, Phrase::MonthOfYear(y, m)));
         }
     }
     if (w == "since" || w == "before") && !t(i + 1).is_empty() {
@@ -450,9 +450,9 @@ fn match_at(tokens: &[Token], i: usize) -> Option<(usize, usize, Spec)> {
                 i,
                 i + 1,
                 if w == "since" {
-                    Spec::Since(c)
+                    Phrase::Since(c)
                 } else {
-                    Spec::Before(c)
+                    Phrase::Before(c)
                 },
             ));
         }
@@ -460,7 +460,7 @@ fn match_at(tokens: &[Token], i: usize) -> Option<(usize, usize, Spec)> {
     if let Some(unit) = unit_word(t(i + 1)) {
         if let Some(n) = num_word(w) {
             if t(i + 2) == "ago" {
-                return Some((i, i + 2, Spec::Ago(unit, n)));
+                return Some((i, i + 2, Phrase::Ago(unit, n)));
             }
         }
     }
@@ -472,12 +472,12 @@ fn match_at(tokens: &[Token], i: usize) -> Option<(usize, usize, Spec)> {
         }
         if let Some(unit) = unit_word(t(j)) {
             if t(j + 1) == "ago" {
-                return Some((i, j + 1, Spec::VagueAgo(unit, few)));
+                return Some((i, j + 1, Phrase::VagueAgo(unit, few)));
             }
         }
     }
     if let Some((c, month_only)) = date_from_token(w) {
-        return Some((i, i, Spec::Date(c, month_only)));
+        return Some((i, i, Phrase::Date(c, month_only)));
     }
     None
 }
