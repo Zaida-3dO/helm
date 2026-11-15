@@ -41,6 +41,18 @@ pub trait SettingsExtension: Send + Sync {
         value: &Value,
     ) -> Result<(Value, Value), String>;
 
+    /// Like [`apply`](Self::apply), for a change the user has approved on a card
+    /// (`app_stage_settings`). A key (or a part of one) that a chat may only stage is accepted
+    /// here and refused by `apply`; the default is that nothing differs.
+    fn apply_approved(
+        &self,
+        tx: &Transaction<'_>,
+        key: &str,
+        value: &Value,
+    ) -> Result<(Value, Value), String> {
+        self.apply(tx, key, value)
+    }
+
     /// Put a value from an earlier [`apply`](Self::apply) back, for Undo.
     fn restore(&self, tx: &Transaction<'_>, key: &str, value: &Value) -> Result<(), String>;
 
@@ -57,6 +69,35 @@ pub trait SettingsExtension: Send + Sync {
     /// Called once the change (an update or an Undo) is committed, for work that must not run
     /// inside the transaction, such as waking a service that reads the new value.
     fn after_commit(&self, _key: &str) {}
+}
+
+/// A rule an owning crate adds for one preference key: what the generic writer cannot know about
+/// its value (a revision to bump, a board that must exist, a chord to normalise).
+pub trait PrefRule: Send + Sync {
+    fn key(&self) -> &'static str;
+
+    /// Check `value` (never null) against what is stored now and answer what to store. A refusal
+    /// is a sentence an agent can act on; nothing is stored.
+    fn prepare(
+        &self,
+        tx: &Transaction<'_>,
+        before: Option<&Value>,
+        value: &Value,
+    ) -> Result<Value, String>;
+
+    /// Called once the change (an update, an approval or an Undo) is committed, for work that
+    /// must not run inside the transaction. `after` is the stored value now.
+    fn after_commit(&self, _after: Option<&Value>) {}
+}
+
+/// The registered preference rules, one service.
+#[derive(Clone, Default)]
+pub struct PrefRules(pub Vec<Arc<dyn PrefRule>>);
+
+impl PrefRules {
+    pub fn for_key(&self, key: &str) -> Option<&Arc<dyn PrefRule>> {
+        self.0.iter().find(|r| r.key() == key)
+    }
 }
 
 /// The registered extensions, one service.
