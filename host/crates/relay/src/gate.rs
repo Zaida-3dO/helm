@@ -72,6 +72,7 @@ pub const TABLE: &[(&str, Class)] = &[
     ("app_list_chats", Class::Allowed),
     ("app_list_feedback", Class::Denied(LOCAL)),
     ("app_list_knowledge", Class::Denied(LOCAL)),
+    ("app_memory_index", Class::Denied(LOCAL)),
     ("app_list_mcp_servers", Class::Denied(MCP)),
     ("app_list_pages", Class::Denied(LOCAL)),
     ("app_list_projects", Class::Allowed),

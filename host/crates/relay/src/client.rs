@@ -21,6 +21,8 @@
 //!   hub never needs them answered.
 //! - `devices`, `dev_call`, `dev_result` and `dev_push`: the household's devices (`crate::devlink`).
 //!   They are handed to the [`DeviceSink`] as they came, and ignored until one is attached.
+//! - `ix_*` answers, `ix_embed` and `ix_trace`: the hub's search index (`crate::index_line`),
+//!   handed to the [`IndexSink`].
 //! - `kn_files`, `kn_put_result`, `kn_changed` and `person_result`: the household's knowledge
 //!   files and a asked-for hub person (`crate::knowledge_line`), handed to the [`KnowledgeSink`]
 //!   as they came and ignored until one
@@ -189,6 +191,18 @@ pub trait KnowledgeSink: Send + Sync {
     fn line_down(&self) {}
 }
 
+/// Where the hub's search-index frames go on the PC (`crate::index_line`).
+pub trait IndexSink: Send + Sync {
+    /// An `ix_*` frame, as the hub sent it: an answer to a request, or a question for this PC.
+    fn frame(&self, frame: Value);
+    /// The hub's welcome on a new line, with the features it offers.
+    fn welcome(&self, _features: Vec<String>) {}
+    /// A new line is up.
+    fn line_up(&self) {}
+    /// The line is gone.
+    fn line_down(&self) {}
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LineState {
     Off = 0,
@@ -244,6 +258,27 @@ const VOICE_KEPT: usize = 16;
 
 /// How long a household request may wait for the hub's answer.
 const PEER_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[cfg(test)]
+impl LineHandle {
+    /// A handle with no client behind it, and the receiving end of what is sent up it.
+    pub(crate) fn detached_for_tests() -> (Arc<LineHandle>, mpsc::UnboundedReceiver<(u64, Value)>) {
+        let (up, rx) = mpsc::unbounded_channel();
+        let h = LineHandle {
+            state: AtomicU8::new(LineState::Off as u8),
+            up,
+            generation: AtomicU64::new(ANY_LINE),
+            peers: Default::default(),
+            recent_voice: Default::default(),
+            last_refusal: Default::default(),
+        };
+        (Arc::new(h), rx)
+    }
+
+    pub(crate) fn set_online_for_tests(&self) {
+        self.set(LineState::Online);
+    }
+}
 
 impl LineHandle {
     pub fn state(&self) -> LineState {
@@ -478,6 +513,8 @@ pub struct Client {
     devices: std::sync::OnceLock<Arc<dyn DeviceSink>>,
     /// Where the hub's knowledge frames go; they are ignored until it is attached.
     knowledge: std::sync::OnceLock<Arc<dyn KnowledgeSink>>,
+    /// Where the hub's search-index frames go; they are ignored until it is attached.
+    index: std::sync::OnceLock<Arc<dyn IndexSink>>,
     /// Does this PC act for that hub person (a profile of theirs is linked here)? Set while
     /// the services are wired; until then every named person passes, as before.
     person_known: std::sync::OnceLock<PersonCheck>,
@@ -551,6 +588,7 @@ impl Client {
             voice: std::sync::OnceLock::new(),
             devices: std::sync::OnceLock::new(),
             knowledge: std::sync::OnceLock::new(),
+            index: std::sync::OnceLock::new(),
             person_known: std::sync::OnceLock::new(),
             home_link: std::sync::OnceLock::new(),
             handle: Arc::new(LineHandle {
@@ -593,6 +631,11 @@ impl Client {
     /// Give the line the sink for the hub's knowledge frames.
     pub fn attach_knowledge(&self, sink: Arc<dyn KnowledgeSink>) {
         let _ = self.knowledge.set(sink);
+    }
+
+    /// Give the line the sink for the hub's search-index frames.
+    pub fn attach_index(&self, sink: Arc<dyn IndexSink>) {
+        let _ = self.index.set(sink);
     }
 
     /// Tell the line which hub persons this PC acts for. A frame naming a person the check
@@ -781,6 +824,9 @@ impl Client {
         if let Some(k) = self.knowledge.get() {
             k.line_up();
         }
+        if let Some(i) = self.index.get() {
+            i.line_up();
+        }
         // Answers sent lately may have been lost with the old line; the hub stores each once.
         for v in self.handle.voice_to_reoffer() {
             let _ = out_tx.send(v);
@@ -832,6 +878,9 @@ impl Client {
         if let Some(k) = self.knowledge.get() {
             k.line_down();
         }
+        if let Some(i) = self.index.get() {
+            i.line_down();
+        }
     }
 
     fn on_frame(&self, text: &str, out: &mpsc::UnboundedSender<Value>) {
@@ -841,6 +890,18 @@ impl Client {
         let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
         match v.get("type").and_then(Value::as_str) {
             Some("welcome") => {
+                if let Some(i) = self.index.get() {
+                    let features = v
+                        .get("features")
+                        .and_then(Value::as_array)
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|f| f.as_str().map(str::to_owned))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    i.welcome(features);
+                }
                 // The hub says who this line acts as. A line set up with a token never went
                 // through the pairing op, so this is where the home profile learns its person.
                 let person = v.get("personId").and_then(|x| {
@@ -1096,6 +1157,14 @@ impl Client {
             Some("kn_files" | "kn_put_result" | "kn_changed" | "person_result") => {
                 if let Some(k) = self.knowledge.get() {
                     k.frame(v.clone());
+                }
+            }
+            Some(
+                "ix_state" | "ix_manifest_page" | "ix_put_result" | "ix_delete_result"
+                | "ix_pending_list" | "ix_vectors_result" | "ix_embed" | "ix_trace",
+            ) => {
+                if let Some(i) = self.index.get() {
+                    i.frame(v.clone());
                 }
             }
             Some("telegram_stop") => {

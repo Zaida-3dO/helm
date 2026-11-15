@@ -24,6 +24,7 @@
 //! | [`setup`] | `app_stage_settings`: a chat stages pairing, the update folder and the Devices switches; Helm applies them when the user clicks Approve |
 //! | [`household`] | other people's Helms through the hub: the three sharing switches, serving their calls, and asking theirs |
 //! | [`knowledge_line`] | the household's knowledge files over the line: pull and push, the hub's people as profiles, and the sync loop |
+//! | [`index_line`] | the hub's search index over the line: requests and their answers, and the hub's questions to this PC |
 //! | [`devlink`] | the household's devices over the line: the device crate's frames up and down, and the service that answers other devices |
 //!
 //! Wiring: [`register_services`] adds the line (its [`client::LineHandle`] and
@@ -80,6 +81,7 @@ pub mod exec;
 pub mod gate;
 pub mod household;
 pub mod hub_view;
+pub mod index_line;
 pub mod knowledge_line;
 pub mod notify;
 pub mod pair;
@@ -171,6 +173,10 @@ pub fn register_services(services: &mut Services, events: &Arc<dyn EventSink>) {
             }
         }));
     }
+    // The hub's search index: the memory indexer drives it, and answers what the hub asks.
+    let index = index_line::IndexLine::new(client.handle());
+    client.attach_index(Arc::new(index_line::IndexSinkHandle(index.clone())));
+    services.insert(index);
     services.insert(sink);
     services.insert(voice.shown());
     services.insert(voice);
