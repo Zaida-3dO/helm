@@ -144,6 +144,8 @@ export interface RemoteListSnapshot {
   projects: ProjectNode[];
   /** Each shown chat and the computer it runs on, for a merged view that also holds local chats. */
   hosts: ReadonlyMap<string, string>;
+  /** The full records behind the rows, for the chat menu (who a chat belongs to and is shared with). */
+  chats: ReadonlyMap<string, RemoteChatRecord>;
   more: boolean;
   loading: boolean;
   error: string | null;
@@ -157,7 +159,7 @@ export interface RemoteQuery {
   archived: boolean;
 }
 
-const BLANK: RemoteListSnapshot = { rows: [], projects: [], hosts: new Map(), more: false, loading: false, error: null };
+const BLANK: RemoteListSnapshot = { rows: [], projects: [], hosts: new Map(), chats: new Map(), more: false, loading: false, error: null };
 
 /** The chats of one other computer for one profile, a page at a time. */
 export class RemoteList {
@@ -190,7 +192,8 @@ export class RemoteList {
     const hosts = rebuild
       ? new Map([...this.chats].map(([id, c]) => [id, c.hostDeviceId ?? this.query?.deviceUid ?? '']))
       : null;
-    this.snap = { ...this.snap, ...patch, ...(built ?? {}), ...(hosts ? { hosts } : {}) };
+    const chats = rebuild ? new Map(this.chats) : null;
+    this.snap = { ...this.snap, ...patch, ...(built ?? {}), ...(hosts ? { hosts } : {}), ...(chats ? { chats } : {}) };
     for (const l of [...this.listeners]) l();
   }
 

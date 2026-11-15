@@ -105,11 +105,31 @@ export function remoteRow(c: RemoteChatRecord, hasChildren: boolean): SidebarRow
     hasDraft: c.draft.trim() !== '',
     lastActivityAt: c.lastActivityAt,
     archived: c.archived,
-    position: null,
+    // The manual order set on its home PC (drags there included), so the copy sorts the same.
+    position: c.position ?? null,
     createdAt: c.createdAt,
     updatedAt: c.updatedAt,
     revision: c.revision,
   };
+}
+
+/** The profiles on that computer, for "Move to profile" on one of its chats: the profile
+ *  linked to the chat's person is the current one. No entry when its hello listed none. */
+export function remoteProfileChoices(device: DeviceInfo, chat: RemoteChatRecord): { id: string; name: string; current: boolean }[] {
+  return (device.profiles ?? []).map((p) => ({
+    id: p.profileId,
+    name: p.name,
+    current: !!p.personId && !!chat.personId && p.personId === chat.personId,
+  }));
+}
+
+/** The people on that computer the chat can be shared with, ticked where it already is. The
+ *  person who owns it is left out; it is their chat. */
+export function remoteShareChoices(device: DeviceInfo, chat: RemoteChatRecord): { id: string; name: string; shared: boolean }[] {
+  const shared = new Set(chat.sharedWithPeople ?? []);
+  return (device.people ?? [])
+    .filter((p) => p.personId !== chat.personId)
+    .map((p) => ({ id: p.personId, name: p.person, shared: shared.has(p.personId) }));
 }
 
 /**
