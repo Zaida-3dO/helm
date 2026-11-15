@@ -103,7 +103,7 @@ describe("Settings → MCP", { timeout: 10 * 60_000 }, () => {
     assert.deepEqual(repo, []);
   });
 
-  test("M4: clicking a preset opens its editor in view, caret in the first field", async () => {
+  test("clicking a preset opens its editor in view, caret in the first field", async () => {
     try {
       await ensureMcpPane();
       await page().locator(tid("mcp-add-preset-home_assistant")).click();
@@ -122,7 +122,7 @@ describe("Settings → MCP", { timeout: 10 * 60_000 }, () => {
     }
   });
 
-  test("M5: the Google preset opens its accounts dialog, not the plain form", async () => {
+  test("the Google preset opens its accounts dialog, is served built in, and never doubles up", async () => {
     try {
       await ensureMcpPane();
       await page().locator(tid("mcp-add-preset-google_accounts")).click();
@@ -140,13 +140,22 @@ describe("Settings → MCP", { timeout: 10 * 60_000 }, () => {
       await page().waitForSelector(tid("mcp-google-google_accounts"), { timeout: 5_000 });
       await page().locator(tid("mcp-google-google_accounts")).click();
       await page().waitForSelector(tid("google-accounts-dialog"), { timeout: 5_000 });
+      await page().locator(tid("google-accounts-dialog")).getByRole("button", { name: "Close dialog" }).click();
+      // The row says what answers for it: Helm's own Gmail tools, no program of its own.
+      await page().waitForSelector(tid("mcp-status-google_accounts"), { timeout: 5_000 });
+      assert.match(String(await page().textContent(tid("mcp-status-google_accounts"))), /Built in: served by Helm/);
+      // Clicking the preset again opens that server's dialog rather than saving a second entry.
+      await page().locator(tid("mcp-add-preset-google_accounts")).click();
+      await page().waitForSelector(tid("google-accounts-dialog"), { timeout: 5_000 });
+      const after = (await api(page(), "mcp_config_get", {})) as { servers: { preset?: string }[] };
+      assert.equal(after.servers.filter((s) => s.preset === "google_accounts").length, 1, "the preset reopens the existing server");
     } finally {
       await shot(page(), OUT, "w4-mcp-google");
       await tidyPane();
     }
   });
 
-  test("M6: a browser-signed-in server shows its sign-in block in the editor", async () => {
+  test("a browser-signed-in server shows its sign-in block in the editor", async () => {
     const { revision } = (await api(page(), "mcp_config_get", {})) as { revision: string };
     await api(page(), "mcp_server_save", {
       revision,

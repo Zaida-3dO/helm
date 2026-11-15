@@ -74,9 +74,16 @@ export function mcpFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
   let googleClient = false;
   let googleSigningIn = false;
   const googleList = (): GoogleAccountList => {
-    const level = servers.find((x) => x.preset === 'google_accounts')?.transport.args?.find((x) => x.startsWith('gmail:'))?.slice(6);
+    const server = servers.find((x) => x.preset === 'google_accounts');
+    const level = server?.transport.args?.find((x) => x.startsWith('gmail:'))?.slice(6);
     const permission = (['readonly', 'drafts', 'send'] as GooglePermission[]).find((p) => p === level);
-    return { accounts: structuredClone(accounts), ...(permission ? { permission } : {}), uvFound: true, signingIn: googleSigningIn };
+    // Same rule as the host: only a server carrying its own client env keeps the bridge.
+    const bridge =
+      !!server &&
+      (server.transport.args?.[0] ?? '').startsWith('workspace-mcp') &&
+      !!server.transport.env?.GOOGLE_OAUTH_CLIENT_ID &&
+      !!server.transport.env?.GOOGLE_OAUTH_CLIENT_SECRET;
+    return { accounts: structuredClone(accounts), ...(permission ? { permission } : {}), uvFound: true, signingIn: googleSigningIn, hostServed: !bridge };
   };
   const check = (a: Record<string, unknown>) => {
     if (typeof a.revision === 'string' && a.revision !== revision()) throw new ApiError('conflict', 'The MCP settings changed since they were read.');

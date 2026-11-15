@@ -134,15 +134,33 @@ test('the Google preset drafts a program, its row ignores the environment, and t
   assert.equal(d.transport.command, 'uvx.exe');
   assert.deepEqual(d.transport.args?.slice(-2), ['--permissions', 'gmail:drafts'], 'new servers read and draft, never send');
   assert.deepEqual(toSaveable(d).transport.env, undefined, 'no environment secrets are drafted for the Google preset');
-  // The sign-in client is one per profile, kept by the host: the row never asks for environment values.
-  assert.equal(serverReadiness(toSaveable(d), undefined, [google]).state, 'ready');
+  // The sign-in client is one per profile, kept by the host: the row never asks for environment
+  // values, and it says Helm serves the server itself — no process, no connection.
+  const saved = toSaveable(d);
+  const plain = serverReadiness(saved, undefined, [google]);
+  assert.deepEqual([plain.state, plain.reason], ['ready', 'Built in: served by Helm.']);
+  // Only a server that carries its own client env keeps the bridge program (and its connection story).
+  const legacy: McpServer = {
+    ...saved,
+    transport: {
+      ...saved.transport,
+      env: {
+        GOOGLE_OAUTH_CLIENT_ID: { kind: 'environment', value: 'MY_ID' },
+        GOOGLE_OAUTH_CLIENT_SECRET: { kind: 'environment', value: 'MY_SECRET' },
+      },
+    },
+  };
+  assert.match(serverReadiness(legacy, undefined, [google]).reason, /connects when a chat/, 'a bridge server keeps the usual row');
+  assert.equal(serverReadiness(legacy, { serverId: saved.id, state: 'failed', error: 'uvx missing', at: 1 }, [google]).reason, 'uvx missing');
+  assert.equal(serverReadiness({ ...legacy, enabled: false }, undefined, [google]).state, 'off', 'off still wins');
 
-  const list = (over: Partial<GoogleAccountList> = {}): GoogleAccountList => ({ accounts: [], uvFound: true, signingIn: false, ...over });
+  const list = (over: Partial<GoogleAccountList> = {}): GoogleAccountList => ({ accounts: [], uvFound: true, signingIn: false, hostServed: false, ...over });
   assert.equal(blockState(null, null).kind, 'loading');
   assert.equal(blockState(list(), null).kind, 'loading', 'the client state is still unknown');
   const noUv = blockState(list({ uvFound: false }), false);
-  assert.ok(noUv.kind === 'no-uv' && /Install uv/.test(noUv.message), 'uv missing comes first');
+  assert.ok(noUv.kind === 'no-uv' && /Install uv/.test(noUv.message), 'uv missing comes first for a bridge server');
   assert.equal(blockState(list({ uvFound: false }), true).kind, 'no-uv');
+  assert.equal(blockState(list({ uvFound: false, hostServed: true }), false).kind, 'no-client', 'a host-served server needs no uv');
   assert.equal(blockState(list(), false).kind, 'no-client');
   assert.equal(blockState(list(), true).kind, 'empty');
   assert.equal(blockState(list({ accounts: [{ email: 'a@x.com' }], permission: 'drafts' }), true).kind, 'ready');
@@ -167,14 +185,19 @@ test('the client form enables Save only once both values are filled', () => {
   assert.equal(clientLooksSet('id', '   '), false);
 });
 
-test('a started sign-in is watched until a new address appears or three minutes pass', () => {
-  const w = { startedAt: 1_000, known: ['old@x.com'] };
-  const none = [{ email: 'old@x.com' }];
-  assert.equal(watchState(w, 1_000, []), 'waiting', 'no accounts is not a new one');
-  assert.equal(watchState(w, 1_000, none), 'waiting', 'an address that was already there is not new');
-  assert.equal(watchState(w, 1_000 + SIGN_IN_WINDOW_MS - 1, none), 'waiting');
-  assert.equal(watchState(w, 1_000 + SIGN_IN_WINDOW_MS, none), 'timeout');
-  assert.equal(watchState(w, 5_000, [...none, { email: 'NEW@gmail.com' }]), 'added', 'a new address is added');
-  assert.equal(watchState(w, 5_000, [{ email: 'old@x.com' }, { email: 'OLD@X.COM' }]), 'waiting', 'case and repeats do not make an address new');
-  assert.equal(watchState(w, 1_000 + SIGN_IN_WINDOW_MS * 2, [{ email: 'new@gmail.com' }]), 'added', 'an address that arrived in time is still added');
+test('a started sign-in is watched until a new address arrives, the host lets go, or the window ends', () => {
+  const w = { startedAt: 1_000, known: ['old@x.com'], sawSigningIn: true };
+  const watch = (over: Partial<GoogleAccountList> = {}): GoogleAccountList => ({ accounts: [{ email: 'old@x.com' }], uvFound: true, signingIn: true, hostServed: true, ...over });
+  assert.equal(watchState(w, 1_000, watch({ accounts: [] })), 'waiting', 'no accounts is not a new one');
+  assert.equal(watchState(w, 1_000, watch()), 'waiting', 'an address that was already there is not new');
+  assert.equal(watchState(w, 1_000 + SIGN_IN_WINDOW_MS - 1, watch()), 'waiting');
+  assert.equal(watchState(w, 1_000 + SIGN_IN_WINDOW_MS, watch()), 'timeout', 'the window matches the host listener (5 min)');
+  assert.equal(watchState(w, 5_000, watch({ accounts: [{ email: 'old@x.com' }, { email: 'NEW@gmail.com' }] })), 'added', 'a new address is added');
+  assert.equal(watchState(w, 5_000, watch({ accounts: [{ email: 'old@x.com' }, { email: 'OLD@X.COM' }] })), 'waiting', 'case and repeats do not make an address new');
+  assert.equal(watchState(w, 1_000 + SIGN_IN_WINDOW_MS * 2, watch({ accounts: [{ email: 'new@gmail.com' }] })), 'added', 'an address that arrived in time is still added');
+  // Cancel or Deny at Google ends the host's listener: the wait ends with it, not at the window.
+  assert.equal(watchState(w, 5_000, watch({ signingIn: false })), 'refused', 'the listener let go with no new address');
+  // A watch that never saw the listener open (a host restart mid-wait) still ends at the window.
+  assert.equal(watchState({ startedAt: 1_000, known: [], sawSigningIn: false }, 1_000, watch({ signingIn: false, accounts: [] })), 'waiting', 'the first quiet poll is not yet a refusal');
+  assert.equal(watchState({ startedAt: 1_000, known: [], sawSigningIn: false }, 1_000 + SIGN_IN_WINDOW_MS, watch({ signingIn: false, accounts: [] })), 'timeout');
 });

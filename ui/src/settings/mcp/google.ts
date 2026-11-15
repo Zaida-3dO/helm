@@ -11,9 +11,11 @@ export type { GoogleAccount, GoogleAccountList, GoogleClientState, GooglePermiss
 /** The preset a Google accounts server is made from. */
 export const GOOGLE_PRESET = 'google_accounts';
 
-/** How often the account list is read while a sign-in is open, and how long it is waited for. */
+/** How often the account list is read while a sign-in is open, and how long it is waited for.
+ * The window matches the host's own listener (5 minutes): the dialog never gives up before the
+ * host does, so "Add account again" is never answered with "A sign-in is already open". */
 export const POLL_MS = 2000;
-export const SIGN_IN_WINDOW_MS = 180_000;
+export const SIGN_IN_WINDOW_MS = 300_000;
 
 export const PERMISSION_OPTIONS: { value: GooglePermission; label: string }[] = [
   { value: 'readonly', label: 'Read only' },
@@ -31,6 +33,9 @@ export const SIGN_IN_NOTE = 'Your browser opens Google’s sign-in. Helm never s
 export const REMOVE_NOTE =
   'Helm forgets this account’s sign-in. To revoke it fully, remove Helm’s access at myaccount.google.com/permissions.';
 export const NEEDS_UV = 'Install uv (docs.astral.sh/uv) to run this server.';
+/** Sign-in asked for the scopes of the level that was picked at the time; changing the level
+ * does not re-ask Google, so each account has to sign in again to reach the new one. */
+export const RAISE_NOTE = 'Raising the level: sign each account in again.';
 export const UNVERIFIED_NOTE =
   'The “Google hasn’t verified this app” warning at sign-in is expected: the client belongs to you, not to Google. Choose Advanced, then Go to the app.';
 
@@ -49,7 +54,7 @@ export const CONSOLE_STEPS: ConsoleStep[] = [
     label: 'Set the audience to External, then publish the app (“In production”). While it is still “Testing”, Google ends each sign-in after 7 days.',
     url: 'https://console.cloud.google.com/auth/audience',
   },
-  { label: 'Under data access, add the scopes for reading, labelling and drafting mail (and sending, if you want that level).', url: 'https://console.cloud.google.com/auth/scopes' },
+  { label: 'Under data access, add the scopes for reading, labelling, drafting and modifying mail (and sending too, if you want that level).', url: 'https://console.cloud.google.com/auth/scopes' },
   { label: 'Create an OAuth client of type “Desktop app”, and copy its client id and secret into the two fields below.', url: 'https://console.cloud.google.com/auth/clients/create' },
 ];
 
@@ -75,6 +80,19 @@ export function isGoogleServer(s: McpServer): boolean {
   return s.preset === GOOGLE_PRESET;
 }
 
+/** The env names a legacy Google server kept its own sign-in client in. A server carrying them
+ * keeps the external bridge program; every other Google server is served by Helm's own tools,
+ * and the worker never starts a process for it. */
+export const GOOGLE_CLIENT_ENV = ['GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET'];
+
+export function keepsBridge(s: McpServer): boolean {
+  return (
+    s.transport.type === 'stdio' &&
+    (s.transport.args?.[0] ?? '').startsWith('workspace-mcp') &&
+    GOOGLE_CLIENT_ENV.every((k) => !!s.transport.env?.[k])
+  );
+}
+
 /** Both fields filled in, before the host's own stricter check. */
 export function clientLooksSet(clientId: string, secret: string): boolean {
   return clientId.trim().length > 0 && secret.trim().length > 0;
@@ -87,10 +105,12 @@ export type BlockState =
   | { kind: 'empty' }
   | { kind: 'ready' };
 
-/** What the dialog leads with: the first thing the user has to fix, else the accounts. */
+/** What the dialog leads with: the first thing the user has to fix, else the accounts. A
+ * host-served server needs no program of its own, so a missing `uvx` says nothing about it —
+ * only a legacy bridge server has to have one. */
 export function blockState(list: GoogleAccountList | null, clientConfigured: boolean | null): BlockState {
   if (!list || clientConfigured === null) return { kind: 'loading' };
-  if (!list.uvFound) return { kind: 'no-uv', message: NEEDS_UV };
+  if (!list.hostServed && !list.uvFound) return { kind: 'no-uv', message: NEEDS_UV };
   if (!clientConfigured) return { kind: 'no-client' };
   return list.accounts.length === 0 ? { kind: 'empty' } : { kind: 'ready' };
 }
@@ -99,12 +119,19 @@ export interface SignInWatch {
   startedAt: number;
   /** The addresses that were already there when the sign-in started, lower-cased. */
   known: string[];
+  /** True from the start: the host held its sign-in open the moment `add` returned. A poll that
+   * finds it false with no new address was a Cancel or a Deny at Google. */
+  sawSigningIn: boolean;
 }
 
-export type WatchState = 'waiting' | 'added' | 'timeout';
+export type WatchState = 'waiting' | 'added' | 'refused' | 'timeout';
 
-/** One poll of a started sign-in: an address new to the list arrived, the time ran out, or neither. */
-export function watchState(w: SignInWatch, now: number, accounts: { email: string }[]): WatchState {
-  if (accounts.some((a) => !w.known.includes(a.email.toLowerCase()))) return 'added';
+/** One poll of a started sign-in: an address new to the list arrived, the host's listener let
+ * go without one (Cancel or Deny at Google — the wait ends there, not at the window), the time
+ * ran out, or neither. */
+export function watchState(w: SignInWatch, now: number, list: GoogleAccountList): WatchState {
+  if (list.accounts.some((a) => !w.known.includes(a.email.toLowerCase()))) return 'added';
+  if (list.signingIn) w.sawSigningIn = true;
+  else if (w.sawSigningIn) return 'refused';
   return now - w.startedAt >= SIGN_IN_WINDOW_MS ? 'timeout' : 'waiting';
 }

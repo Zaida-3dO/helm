@@ -13,6 +13,7 @@ import {
   PERMISSION_HELP,
   PERMISSION_OPTIONS,
   POLL_MS,
+  RAISE_NOTE,
   REMOVE_NOTE,
   SIGN_IN_NOTE,
   blockState,
@@ -27,6 +28,10 @@ import {
 function errorText(e: unknown): string {
   return String((e as Error)?.message ?? e);
 }
+
+/** Sign-in asked for the scopes of the level picked then; a raise only takes effect once each
+ * account signs in again, so the change says so when it is a raise. */
+const LEVEL_RANK: Record<GooglePermission, number> = { readonly: 0, drafts: 1, send: 2 };
 
 export function GoogleAccountsDialog({
   server,
@@ -66,7 +71,8 @@ export function GoogleAccountsDialog({
     refresh();
   }, [refresh, server]);
 
-  // While a sign-in is open, read the list every 2 s until a new address shows up or 3 minutes pass.
+  // While a sign-in is open, read the list every 2 s until a new address shows up, the host's
+  // listener lets go (a Cancel or Deny at Google), or the 5-minute window ends.
   useEffect(() => {
     if (!watch) return;
     const timer = window.setInterval(() => {
@@ -74,12 +80,13 @@ export function GoogleAccountsDialog({
         .accounts(server.id)
         .then((l) => {
           setList(l);
-          const state = watchState(watch, Date.now(), l.accounts);
+          const state = watchState(watch, Date.now(), l);
           if (state === 'waiting') return;
           setWatch(null);
           setAuthUrl(null);
           if (state === 'added') setNotice('Account added.');
-          else setError('The sign-in did not finish in 3 minutes. Try Add account again.');
+          else if (state === 'refused') setError('That sign-in was not completed. Try Add account again.');
+          else setError('The sign-in did not finish in 5 minutes. Try Add account again.');
         })
         .catch(() => {});
     }, POLL_MS);
@@ -117,7 +124,11 @@ export function GoogleAccountsDialog({
       setAdding(true);
       const started = await ops.add(server.id);
       setAuthUrl(started.authUrl ?? null);
-      setWatch({ startedAt: Date.now(), known: (list?.accounts ?? []).map((a) => a.email.toLowerCase()) });
+      setWatch({
+        startedAt: Date.now(),
+        known: (list?.accounts ?? []).map((a) => a.email.toLowerCase()),
+        sawSigningIn: true,
+      });
     });
 
   const relabel = (a: GoogleAccount, value: string) => {
@@ -136,8 +147,10 @@ export function GoogleAccountsDialog({
 
   const setLevel = (level: GooglePermission) =>
     void attempt(async () => {
+      const raised = list?.permission != null && LEVEL_RANK[level] > LEVEL_RANK[list.permission];
       onSnapshot(await ops.permission(server.id, level));
       refresh();
+      if (raised) setNotice(RAISE_NOTE);
     });
 
   return (
@@ -212,8 +225,9 @@ export function GoogleAccountsDialog({
                 <p className="mcp-help" data-testid="google-permission-help">
                   {list.permission
                     ? PERMISSION_HELP[list.permission]
-                    : 'The server’s arguments set a level this picker does not offer. Choose one to replace it.'}{' '}
-                  Changing it restarts the server.
+                    : 'The server’s arguments set a level this picker does not offer. Choose one to replace it.'}
+                  {!list.hostServed && <> Changing it restarts the server.</>}{' '}
+                  {RAISE_NOTE}
                 </p>
               </>
             )}

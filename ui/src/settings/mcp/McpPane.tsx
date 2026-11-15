@@ -135,15 +135,13 @@ function Editor({
     <div className="mcp-editor" ref={box} data-testid="mcp-editor">
       <h4>{isNew ? 'Add a server' : `Edit ${draft.name}`}</h4>
       {preset && <p className="mcp-help">{preset.description}</p>}
-      {preset?.secretEnv?.length ? (
-        preset.id === GOOGLE_PRESET ? (
-          <p className="mcp-help">
-            Your Google sign-in client and accounts are set in the Google accounts dialog, not here. Leave Environment empty unless this server is an older
-            one that carries its own client.
-          </p>
-        ) : (
-          <p className="mcp-help">Under Environment, enter {preset.secretEnv.join(' and ')} as secrets.</p>
-        )
+      {preset?.id === GOOGLE_PRESET ? (
+        <p className="mcp-help">
+          Gmail is served by Helm itself: your sign-in client and accounts are set in the Google accounts dialog, not here. Leave Environment empty unless
+          this server is an older one that carries its own client.
+        </p>
+      ) : preset?.secretEnv?.length ? (
+        <p className="mcp-help">Under Environment, enter {preset.secretEnv.join(' and ')} as secrets.</p>
       ) : null}
       <label className="mcp-field">
         <span>Name</span>
@@ -425,14 +423,21 @@ export function McpPane() {
   const ids = servers.map((s) => s.id);
   const openLink = (url: string) => void shellOps(shell.api).openExternal(url).catch((e: unknown) => toast.show({ kind: 'error', text: errorText(e) }));
 
-  /** Clicking a preset must open its setup visibly: a Google server goes straight to its dialog (its draft has no choices to make), the rest to the editor. */
+  /** Clicking a preset must open its setup visibly: a Google server goes straight to its dialog
+   * (its draft has no choices to make) — and if one already exists, the preset opens that one
+   * rather than saving a second entry. The rest go to the editor. */
   const openPreset = (p: McpPreset) => {
-    const server = draftFromPreset(p, ids);
     if (p.id === GOOGLE_PRESET) {
+      const existing = servers.find(isGoogleServer);
+      if (existing) {
+        setGoogleDialog(existing.id);
+        return;
+      }
+      const server = draftFromPreset(p, ids);
       void run(() => ops.save(toSaveable(server), revision)).then((ok) => ok && setGoogleDialog(server.id));
       return;
     }
-    setDraft({ server, isNew: true });
+    setDraft({ server: draftFromPreset(p, ids), isNew: true });
   };
 
   const empty = pageReadiness(servers);
