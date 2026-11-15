@@ -240,6 +240,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         lastActivityAt: t,
         stalled: false,
         localAhead: null,
+        state: null,
         started: false,
         profileId: '',
         hostDeviceId: '',

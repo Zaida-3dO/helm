@@ -57,7 +57,7 @@ import { StarMark, WheelMark } from '../ui/status/index.ts';
 import { openNewChat, openPrimaryFolder } from '../newchat/index.ts';
 import { ProjectIcon, openIconPicker } from '../projects/index.ts';
 import { getDefaultBoard } from '../newchat/boards.ts';
-import { ATTENTION_LABEL, age, needsYouLabel, rowStatusLabel, trailingIndicator } from './status.ts';
+import { ATTENTION_LABEL, age, needsYouLabel, rowStateLabel, rowStatusLabel, trailingIndicator } from './status.ts';
 import { localWaitLabel } from '../state/localModel.ts';
 import { useSubagentsRunning } from '../transcript/subagents/counts.ts';
 import { startSyncTriggers, syncOnOpen, type SyncHost } from './sync.ts';
@@ -1240,6 +1240,7 @@ function ChatRow({
   // A chat whose own turn ended but whose subagents still run shows the wheel.
   const subagents = useSubagentsRunning(item.row.chatId);
   const r = subagents > 0 && item.row.attention !== 'running' ? { ...item.row, attention: 'running' as const } : item.row;
+  const chip = rowStateLabel(r.state);
   const colour = colourCss(project?.colour);
   const trailing = trailingIndicator(r.attention);
   const wrap = useRef<HTMLDivElement>(null);
@@ -1323,6 +1324,11 @@ function ChatRow({
         )}
         {!item.expanded && item.children > 0 && <span className="sb-agg">{item.children}</span>}
         {item.itemChip && <ItemChip item={item.itemChip} />}
+        {chip && (
+          <span className="sb-chip" data-kind={r.state?.kind} data-testid="chat-state-chip" title={chip}>
+            {chip}
+          </span>
+        )}
         {r.hasDraft && (
           <span className="sb-draft" role="img" aria-label="Unsent draft" title="Unsent draft">
             <IconEdit size={10} />

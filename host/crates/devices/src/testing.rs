@@ -46,6 +46,7 @@ pub fn fake_record(id: &str, title: &str, revision: i64) -> ChatRecord {
         last_activity_at: 1,
         stalled: false,
         local_ahead: None,
+        state: None,
         started: false,
         profile_id: "profile-local".to_owned(),
         host_device_id: "host".to_owned(),

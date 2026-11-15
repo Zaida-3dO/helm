@@ -103,6 +103,8 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
     ("terminalHeight", Registry(Base)),
     // Minutes without output before a running chat is stalled.
     ("stallMinutes", Registry(Base)),
+    // How many of our chats one local model server may carry at once (0 switches the cap off).
+    ("localChatCap", Registry(Base)),
     // Settings > Chat and Shell: how the user's own window and keyboard behave. A chat changes
     // these itself, with the Undo notice.
     ("scrollOnSend", Registry(Base)),
@@ -270,7 +272,7 @@ mod tests {
     fn the_tiers_and_the_floor() {
         let count =
             |want: fn(&PrefClass) -> bool| CLASSIFIED.iter().filter(|(_, c)| want(c)).count();
-        assert_eq!(count(|c| *c == Registry(Base)), 46);
+        assert_eq!(count(|c| *c == Registry(Base)), 47);
         assert_eq!(count(|c| *c == Registry(All)), 1);
         // The user-only floor is the one switch that governs what chats may change.
         let user: Vec<_> = CLASSIFIED

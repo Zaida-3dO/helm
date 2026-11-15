@@ -89,6 +89,9 @@ pub const DESKTOP_PET: PrefKey = PrefKey::classified("desktopPet");
 pub const KEYBINDINGS: PrefKey = PrefKey::classified("keybindings");
 /// Minutes without worker output before a running chat shows as stalled (1 to 1440, default 5).
 pub const STALL_MINUTES: PrefKey = PrefKey::classified("stallMinutes");
+/// How many of our chats one local model server may carry at once (0 to 12, default 3;
+/// 0 switches the cap off). A new local chat waits at its start while the cap is carried.
+pub const LOCAL_CHAT_CAP: PrefKey = PrefKey::classified("localChatCap");
 /// Transcript element toggles: `{tokens, turnTime, fileChanges, timeline}` each
 /// `shown` or `hidden`; strict on write, a missing key reads as shown.
 pub const CHAT_ELEMENTS: PrefKey = PrefKey::classified("chatElements");
@@ -133,6 +136,7 @@ pub const GENERIC_ALLOWLIST: &[PrefKey] = &[
     SOUNDS,
     KEYBINDINGS,
     STALL_MINUTES,
+    LOCAL_CHAT_CAP,
     CHAT_ELEMENTS,
     AUTOCOMPLETE,
     TASK_TRIAGE,
@@ -289,6 +293,7 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
         "inspectorWidth" => int_in(280, 4096, "must be 280 to 4096"),
         "terminalHeight" => int_in(80, 4096, "must be 80 to 4096"),
         "stallMinutes" => int_in(1, 1440, "must be 1 to 1440"),
+        "localChatCap" => int_in(0, 12, "must be 0 to 12"),
         "autocomplete" => match value.as_object() {
             Some(m) if m.len() == 1 && m.get("enabled").is_some_and(Value::is_boolean) => Ok(()),
             _ => Err(PrefError::Invalid {

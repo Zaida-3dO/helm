@@ -1103,6 +1103,7 @@ fn row_from(r: &Row<'_>, revision: i64) -> rusqlite::Result<RawRow> {
             stalled: false,
             local: false,
             local_ahead: None,
+            state: None,
             has_draft: false,
             profile_id: None,
             shared_with: None,
@@ -1268,6 +1269,7 @@ fn finish(
                 r.row.stalled = c.stalled;
                 r.row.local = c.model.as_deref().is_some_and(|m| m.starts_with("local/"));
                 r.row.local_ahead = c.local_ahead;
+                r.row.state = c.state.as_deref().cloned();
                 r.row.has_draft = !c.draft.trim().is_empty();
                 if !c.profile_id.is_empty() {
                     r.row.profile_id = Some(c.profile_id.clone());

@@ -12,6 +12,7 @@ export type {
   Capabilities,
   ChatEvent,
   ChatRecord,
+  ChatState,
   ChatStatus,
   Completion,
   ContextKind,
