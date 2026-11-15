@@ -929,7 +929,11 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
             "CREATE TABLE profiles (id TEXT PRIMARY KEY, hub_person_id TEXT, name TEXT, colour TEXT, about TEXT);
              INSERT INTO profiles VALUES ('p-a', 'person-a', 'Alex', 'red', '');
              INSERT INTO projects (id, kind, name, path, color, created_at)
-             VALUES ('proj-1', 'folder', 'Work', '/work', 'blue', 0);",
+             VALUES ('proj-1', 'folder', 'Work', '/work', 'blue', 0),
+                    ('brd-1', 'board', 'Task board', NULL, '#ff0000', 0);
+             -- chat_groups belongs to the projects crate; stand in just enough of it.
+             CREATE TABLE chat_groups (chat_id TEXT PRIMARY KEY, project_id TEXT NOT NULL);
+             INSERT INTO chat_groups VALUES ('boarded', 'brd-1');",
         )
     })
     .unwrap();
@@ -951,11 +955,49 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
         },
         false,
     );
-    let hello = HostPort::new(Arc::new(api)).hello().await.unwrap();
+    let port = HostPort::new(Arc::new(api));
+    let hello = port.hello().await.unwrap();
     assert!(!hello.device.uid.is_empty());
     assert_eq!(hello.people[0].person_id, "person-a");
-    assert_eq!(hello.projects[0].path, "/work");
+    let folder = hello
+        .projects
+        .iter()
+        .find(|p| p.kind == "folder")
+        .expect("the hello carries folders");
+    assert_eq!(
+        (folder.name.as_str(), folder.path.as_str()),
+        ("Work", "/work")
+    );
+    // Boards travel in the hello too, with an empty path and their own colour.
+    let board = hello
+        .projects
+        .iter()
+        .find(|p| p.kind == "board")
+        .expect("the hello carries boards");
+    assert_eq!(
+        (board.id.as_str(), board.name.as_str()),
+        ("brd-1", "Task board")
+    );
+    assert_eq!(
+        (board.colour.as_str(), board.path.as_str()),
+        ("#ff0000", "")
+    );
     assert_eq!(hello.catalogue.expect("a catalogue")["harness"], "claude");
+
+    // A chat shown under a board travels with that board; a chat with no board keeps its
+    // folder alone.
+    let shown = port
+        .remote_chat(fake_record("boarded", "Boarded", 3))
+        .to_value();
+    assert_eq!(shown["boardId"], "brd-1");
+    assert_eq!(shown["boardName"], "Task board");
+    assert_eq!(shown["boardColour"], "#ff0000");
+    assert_eq!(shown["projectName"], "Work");
+    let plain = port
+        .remote_chat(fake_record("c-plain", "Plain", 3))
+        .to_value();
+    assert_eq!(plain["projectName"], "Work");
+    assert!(plain.get("boardId").is_none(), "{plain}");
 
     // The catalogue op failing (here: no profile folder for it to read) is logged, not fatal:
     // the hello still answers, with no catalogue.

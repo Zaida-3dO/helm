@@ -163,20 +163,25 @@ impl HostPort {
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            // Folders that are not archived; the archive flag lives in a table of the projects
-            // crate, so a database without it lists every folder.
+            // Folders and boards that are not archived; the archive flag lives in a table of the
+            // projects crate, so a database without it lists every one. A board has no folder of
+            // its own, so its path travels empty.
             let projects = folders(
                 tx,
-                "SELECT p.id, p.name, COALESCE(p.color, ''), p.kind, p.path
+                "SELECT p.id, p.name, COALESCE(p.color, ''), p.kind, COALESCE(p.path, '')
                  FROM projects p LEFT JOIN project_local l ON l.project_id = p.id
-                 WHERE p.kind = 'folder' AND p.path IS NOT NULL AND COALESCE(l.archived, 0) = 0
+                 WHERE p.kind IN ('folder', 'board')
+                   AND (p.kind = 'board' OR p.path IS NOT NULL)
+                   AND COALESCE(l.archived, 0) = 0
                  ORDER BY p.name",
             )
             .or_else(|_| {
                 folders(
                     tx,
-                    "SELECT p.id, p.name, COALESCE(p.color, ''), p.kind, p.path
-                     FROM projects p WHERE p.kind = 'folder' AND p.path IS NOT NULL
+                    "SELECT p.id, p.name, COALESCE(p.color, ''), p.kind, COALESCE(p.path, '')
+                     FROM projects p
+                     WHERE p.kind IN ('folder', 'board')
+                       AND (p.kind = 'board' OR p.path IS NOT NULL)
                      ORDER BY p.name",
                 )
             })?;
@@ -296,7 +301,7 @@ impl ChatPort for HostPort {
     }
 
     fn remote_chat(&self, record: ChatRecord) -> RemoteChat {
-        let (person, shared, project) = self
+        let (person, shared, project, board) = self
             .db()
             .ok()
             .and_then(|db| {
@@ -314,11 +319,24 @@ impl ChatPort for HostPort {
                             |r| Ok((r.get(0)?, r.get(1)?)),
                         )
                         .optional()?;
-                    Ok::<_, rusqlite::Error>((person, shared, project))
+                    let board: Option<(String, String, String)> = tx
+                        .prepare(
+                            "SELECT b.id, b.name, COALESCE(b.color, '')
+                             FROM chat_groups g JOIN projects b ON b.id = g.project_id
+                             WHERE g.chat_id = ?1 AND b.kind = 'board'
+                             ORDER BY b.name",
+                        )
+                        .and_then(|mut st| {
+                            st.query_map([&record.id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                                .collect::<rusqlite::Result<Vec<_>>>()
+                        })
+                        .ok()
+                        .and_then(|rows| rows.into_iter().next());
+                    Ok::<_, rusqlite::Error>((person, shared, project, board))
                 })
                 .ok()
             })
-            .unwrap_or((None, Vec::new(), None));
+            .unwrap_or((None, Vec::new(), None, None));
         let (project_name, project_colour) = project.unwrap_or_default();
         let waiting = record.unread.completion_id.is_some()
             || self
@@ -326,14 +344,18 @@ impl ChatPort for HostPort {
                 .ok()
                 .and_then(|rt| rt.live_thread(&record.id))
                 .is_some_and(|t| !t.interactions.is_empty());
-        RemoteChat::from_record(
+        let chat = RemoteChat::from_record(
             &record,
             person,
             shared,
             &project_name,
             &project_colour,
             waiting,
-        )
+        );
+        match board {
+            Some((id, name, colour)) => chat.shown_on_board(&id, &name, &colour),
+            None => chat,
+        }
     }
 
     fn chats(&self, since: i64) -> BoxFut<'_, PortResult<(Vec<RemoteChat>, i64)>> {

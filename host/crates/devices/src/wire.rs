@@ -483,8 +483,10 @@ pub struct Hello {
 
 /// A chat as another device sees it: the chat record with the profile replaced by the person it
 /// belongs to (the hub's id, or `null` when that profile is not linked to one), `sharedWith` as
-/// person ids, and a few fields that spare the watcher a project lookup. The draft is the
-/// owner's own and is not sent.
+/// person ids, and a few fields that spare the watcher a project lookup — its folder's name and
+/// colour and, when the chat is shown under a board there, that board's id, name and colour as
+/// `boardId`, `boardName` and `boardColour`. A watcher groups by the board when it is set and by
+/// the folder when it is not. The draft is the owner's own and is not sent.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RemoteChat(pub Map<String, Value>);
@@ -517,6 +519,15 @@ impl RemoteChat {
         m.insert("projectColour".into(), json!(project_colour));
         m.insert("needsAttention".into(), json!(needs_attention));
         RemoteChat(m)
+    }
+
+    /// Say the board this chat is shown under on its home PC. A board groups chats of several
+    /// folders; a chat with no board keeps its folder, so the watcher groups by this when set.
+    pub fn shown_on_board(mut self, id: &str, name: &str, colour: &str) -> RemoteChat {
+        self.0.insert("boardId".into(), json!(id));
+        self.0.insert("boardName".into(), json!(name));
+        self.0.insert("boardColour".into(), json!(colour));
+        self
     }
 
     pub fn id(&self) -> &str {
