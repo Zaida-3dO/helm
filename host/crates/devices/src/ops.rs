@@ -80,10 +80,15 @@ fn devices_list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatsArgs {
+    /// The device whose chats show, or `all` for every device held on this PC.
     device_uid: String,
     /// The profile whose chats show (its own and those shared with it); none shows every chat.
     #[serde(default)]
     profile_id: Option<String>,
+    /// Widen the copy past the profile: `any` shows every person's chat; a person id shows
+    /// that person's. Absent keeps the profile's own view.
+    #[serde(default)]
+    who: Option<String>,
     #[serde(default)]
     archived: Option<bool>,
     #[serde(default)]
@@ -91,6 +96,9 @@ struct ChatsArgs {
     #[serde(default)]
     limit: Option<usize>,
 }
+
+/// A `deviceUid` naming every device this PC holds a copy of, instead of one.
+const ALL_DEVICES: &str = "all";
 
 /// The most chats one `devices_chats` page carries.
 const MAX_CHATS_PAGE: usize = 200;
@@ -110,7 +118,9 @@ fn project_rows(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
 }
 
 /// `devices_chats`: a page of a device's chats for a profile. This device's own come from the
-/// chats table; another's from this PC's copy of them.
+/// chats table; another's from this PC's copy of them. `deviceUid: "all"` and `who: "any"` (or a
+/// person id) are the sidebar's widened views over the copy: the copy always holds everything,
+/// the view only picks what shows.
 fn devices_chats(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ChatsArgs =
         serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
@@ -136,10 +146,23 @@ fn devices_chats(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                     .collect::<Vec<_>>();
                 Ok::<_, rusqlite::Error>((chats, project_rows(tx)?))
             } else {
-                Ok((
-                    mirror::mirror_chat_list(tx, &a.device_uid, a.profile_id.as_deref(), archived)?,
-                    mirror::mirror_projects(tx, &a.device_uid)?,
-                ))
+                // The copy holds every chat of every device; the view only chooses what shows.
+                let mut view = mirror::ChatView::for_profile(tx, a.profile_id.as_deref())?;
+                match a.who.as_deref() {
+                    Some("any") => view.who = mirror::WhoFilter::Any,
+                    Some(p) if !p.trim().is_empty() => {
+                        view.who = mirror::WhoFilter::Person(p.trim().to_owned())
+                    }
+                    _ => {}
+                }
+                let all_devices = a.device_uid == ALL_DEVICES;
+                view.device = (!all_devices).then(|| a.device_uid.clone());
+                let projects = if all_devices {
+                    mirror::mirror_projects_all(tx)?
+                } else {
+                    mirror::mirror_projects(tx, &a.device_uid)?
+                };
+                Ok((mirror::chats_for_view(tx, &view, archived)?, projects))
             }
         })
         .map_err(|e| ApiError::internal(e.to_string()))?;
@@ -246,7 +269,7 @@ async fn devices_open_chat(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AttachArgs {
     chat_id: String,
-    /// `image` or `file`.
+    /// `image`, `file` or `text`.
     kind: String,
     name: String,
     /// The image's mime type and bytes, base64 (an image).
@@ -257,6 +280,9 @@ struct AttachArgs {
     /// The file's path on this PC (a file): it is read when the message goes, not now.
     #[serde(default)]
     path: Option<String>,
+    /// The words themselves (a text): saved here under the id, sent as a plain-text file.
+    #[serde(default)]
+    text: Option<String>,
 }
 
 /// `devices_attach`: stage an image or a file on this PC for the next message to a chat that
@@ -333,8 +359,39 @@ async fn devices_attach(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
             stage_row(&db, &spec)?;
             Ok(json!({ "attachmentId": id }))
         }
+        "text" => {
+            // A long paste on a chat that runs elsewhere: the words become a plain-text file
+            // staged here, exactly what the composer's long-paste path does for a local chat.
+            let text = a
+                .text
+                .ok_or_else(|| ApiError::bad_args("A text comes with its words."))?;
+            if text.len() > helm_chats::attachments::MAX_FILE_BYTES {
+                return Err(ApiError::new("too_large", "A file can be at most 25 MB."));
+            }
+            let dir = mirror::staged_dir(db.path());
+            std::fs::create_dir_all(&dir)
+                .map_err(|_| ApiError::internal("The staged folder could not be made."))?;
+            std::fs::write(dir.join(&id), text.as_bytes())
+                .map_err(|_| ApiError::internal("The text could not be staged."))?;
+            let spec = Staged {
+                id: &id,
+                chat_id: &a.chat_id,
+                kind: "text",
+                name: &a.name,
+                mime: "text/plain",
+                target: &id,
+                bytes: text.len() as i64,
+            };
+            match stage_row(&db, &spec) {
+                Ok(()) => Ok(json!({ "attachmentId": id })),
+                Err(e) => {
+                    let _ = std::fs::remove_file(dir.join(&id));
+                    Err(e)
+                }
+            }
+        }
         other => Err(ApiError::bad_args(format!(
-            "kind must be image or file, not {other}."
+            "kind must be image, file or text, not {other}."
         ))),
     }
 }

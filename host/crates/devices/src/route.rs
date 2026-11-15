@@ -202,9 +202,9 @@ impl Mirror {
                     "A file sent to another device is at most 25 MB.",
                 ));
             }
-            // A picture was saved here when it was attached; a file stays where it is and is
-            // read anew, so it crosses as it stands when the message goes.
-            let path = if kind == "image" {
+            // A picture or a pasted text was saved here when it was attached; a file stays
+            // where it is and is read anew, so it crosses as it stands when the message goes.
+            let path = if kind == "image" || kind == "text" {
                 dir.join(&target)
             } else {
                 std::path::PathBuf::from(&target)
@@ -287,7 +287,7 @@ impl Mirror {
             Ok::<_, rusqlite::Error>(())
         });
         for f in staged {
-            if f.kind == "image" {
+            if f.kind == "image" || f.kind == "text" {
                 let _ = std::fs::remove_file(dir.join(&f.target));
             }
         }

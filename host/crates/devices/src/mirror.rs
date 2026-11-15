@@ -448,7 +448,8 @@ fn prune_staged(tx: &Transaction<'_>, db_path: &std::path::Path) -> rusqlite::Re
         [],
     )?;
     let kept: Vec<String> = {
-        let mut q = tx.prepare("SELECT target FROM mirror_attachments WHERE kind = 'image'")?;
+        let mut q =
+            tx.prepare("SELECT target FROM mirror_attachments WHERE kind IN ('image', 'text')")?;
         let rows = q.query_map([], |r| r.get::<_, String>(0))?;
         rows.collect::<rusqlite::Result<_>>()?
     };
@@ -1809,6 +1810,22 @@ pub fn mirror_projects(conn: &Connection, device: &str) -> rusqlite::Result<Vec<
         "SELECT project_id, name, colour, kind FROM mirror_projects WHERE device_uid = ?1 ORDER BY name",
     )?;
     let rows = q.query_map([device], |r| {
+        Ok(json!({
+            "id": r.get::<_, String>(0)?,
+            "name": r.get::<_, String>(1)?,
+            "colour": r.get::<_, String>(2)?,
+            "kind": r.get::<_, String>(3)?,
+        }))
+    })?;
+    rows.collect()
+}
+
+/// Every project of every device held here, for the all-devices view. Project ids are the
+/// other PCs' own ids, so one per device and never doubling.
+pub fn mirror_projects_all(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
+    let mut q =
+        conn.prepare("SELECT project_id, name, colour, kind FROM mirror_projects ORDER BY name")?;
+    let rows = q.query_map([], |r| {
         Ok(json!({
             "id": r.get::<_, String>(0)?,
             "name": r.get::<_, String>(1)?,
