@@ -1938,6 +1938,7 @@ dependencies = [
 name = "helm-devices"
 version = "2.0.4"
 dependencies = [
+ "base64 0.22.1",
  "getrandom 0.3.4",
  "helm-chats",
  "helm-core",

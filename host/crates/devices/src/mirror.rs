@@ -101,7 +101,19 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
          CREATE TABLE IF NOT EXISTS mirror_cursor (
              device_uid    TEXT PRIMARY KEY,
              chats_cursor  INTEGER NOT NULL DEFAULT 0
-         );",
+         );
+         CREATE TABLE IF NOT EXISTS mirror_attachments (
+             id         TEXT PRIMARY KEY,
+             chat_id    TEXT NOT NULL,
+             kind       TEXT NOT NULL,
+             name       TEXT NOT NULL,
+             mime       TEXT NOT NULL DEFAULT '',
+             target     TEXT NOT NULL,
+             bytes      INTEGER NOT NULL DEFAULT 0,
+             created_at INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS mirror_attachments_chat
+             ON mirror_attachments(chat_id, created_at);",
     )?;
     // A database from before the people column: gain it.
     let _ = tx.execute(
@@ -417,6 +429,39 @@ fn load_devices(conn: &Connection) -> rusqlite::Result<Vec<PeerDevice>> {
         })
     })?;
     rows.collect()
+}
+
+/// The folder on this PC where attachments staged for a send to another device are kept.
+/// Pictures live under their attachment id; a referenced file stays where it is.
+pub(crate) fn staged_dir(db_path: &std::path::Path) -> std::path::PathBuf {
+    db_path
+        .parent()
+        .unwrap_or(db_path)
+        .join("mirror-attachments")
+}
+
+/// Forget staged attachments whose chat is no longer a copy here, and picture files nothing
+/// names any more. Runs after the copy of a device's chats is brought up to date.
+fn prune_staged(tx: &Transaction<'_>, db_path: &std::path::Path) -> rusqlite::Result<()> {
+    tx.execute(
+        "DELETE FROM mirror_attachments WHERE chat_id NOT IN (SELECT chat_id FROM mirror_chats)",
+        [],
+    )?;
+    let kept: Vec<String> = {
+        let mut q = tx.prepare("SELECT target FROM mirror_attachments WHERE kind = 'image'")?;
+        let rows = q.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    if let Ok(rd) = std::fs::read_dir(staged_dir(db_path)) {
+        for e in rd.flatten() {
+            if let Some(n) = e.path().file_name().and_then(|n| n.to_str()) {
+                if !kept.iter().any(|k| k == n) {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Drop the rows of chats not opened for 30 days; the entries of the list stay.
@@ -1063,6 +1108,7 @@ impl Inner {
         let gone = self.db.write(|tx| {
             tx.execute("DELETE FROM mirror_rows WHERE chat_id = ?1", [chat_id])?;
             tx.execute("DELETE FROM mirror_chats WHERE chat_id = ?1", [chat_id])?;
+            prune_staged(tx, self.db.path())?;
             Ok::<_, rusqlite::Error>(())
         });
         if gone.is_ok() {
@@ -1104,6 +1150,8 @@ impl Inner {
                         tx.execute("DELETE FROM mirror_chats WHERE chat_id = ?1", [&id])?;
                     }
                 }
+                // Chats that went away take their staged attachments with them.
+                prune_staged(tx, self.db.path())?;
                 tx.execute(
                     "INSERT INTO mirror_cursor(device_uid, chats_cursor) VALUES (?1, ?2)
                      ON CONFLICT(device_uid) DO UPDATE SET chats_cursor = MAX(chats_cursor, excluded.chats_cursor)",
