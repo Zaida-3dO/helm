@@ -91,11 +91,24 @@ fn look_at_file(p: &std::path::Path) -> Option<FileObs> {
                 .unwrap_or(0),
         }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::read_dir(p.parent()?).ok().map(|_| FileObs {
-                exists: false,
-                len: 0,
-                modified_ms: 0,
-            })
+            // Walk up to the nearest ancestor folder that exists. The file is gone once one of
+            // them can be read — which covers a folder deleted whole, and a path in a folder
+            // that does not exist yet. An ancestor that exists but cannot be read (a down
+            // share, a permission problem) stays "could not look".
+            let mut d = p.parent()?;
+            loop {
+                match std::fs::read_dir(d) {
+                    Ok(_) => {
+                        return Some(FileObs {
+                            exists: false,
+                            len: 0,
+                            modified_ms: 0,
+                        })
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => d = d.parent()?,
+                    Err(_) => return None,
+                }
+            }
         }
         Err(_) => None,
     }
@@ -340,8 +353,18 @@ mod tests {
         assert!(seen.exists && seen.len == 2);
         let lost = dir.path().join("down").join("b.txt");
         assert!(
-            look_at_file(&lost).is_none(),
-            "its folder is missing too: could not look"
+            !look_at_file(&lost).unwrap().exists,
+            "its folder is missing too: the walk up reaches the readable temp folder, so gone"
+        );
+        let deep = dir.path().join("no").join("such").join("c.txt");
+        assert!(
+            !look_at_file(&deep).unwrap().exists,
+            "several missing folders deep still walk up to a readable one"
+        );
+        let inside_a_file = dir.path().join("a.txt").join("b.txt");
+        assert!(
+            look_at_file(&inside_a_file).is_none(),
+            "an ancestor that exists but is not a readable folder: could not look"
         );
         assert!(is_share_path("\\\\host\\share\\x") && is_share_path("//host/share/x"));
     }
