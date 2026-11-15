@@ -73,6 +73,30 @@ fn named(tx: &Transaction<'_>, project_id: &str) -> rusqlite::Result<Option<Name
     .optional()
 }
 
+/// The longest board or project name put into a chat's instructions (the description is already
+/// short).
+const MAX_NAME: usize = 80;
+
+/// Text a chat can rename, for a line of instructions: one line, no quote marks to close the
+/// frame early, and cut short. It is a label to read, not something to follow.
+fn quoted(text: &str, max: usize) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| match c {
+            '"' => '\'',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect();
+    let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > max {
+        let cut: String = flat.chars().take(max).collect();
+        format!("{}…", cut.trim_end())
+    } else {
+        flat
+    }
+}
+
 /// The line for a chat: its board and that board's description, else its folder project; and the
 /// folder it runs in. `None` for a chat Helm does not know.
 pub fn project_line(
@@ -103,9 +127,15 @@ pub fn project_line(
         (None, Some(f)) => ("the project", f),
         (None, None) => return Ok(None),
     };
-    let mut line = format!("This chat is on {kind} \"{}\"", project.name);
+    let mut line = format!(
+        "This chat is on {kind} \"{}\"",
+        quoted(&project.name, MAX_NAME)
+    );
     if let Some(d) = &project.description {
-        line.push_str(&format!(" ({d})"));
+        line.push_str(&format!(
+            " (described as \"{}\")",
+            quoted(d, crate::types::MAX_DESCRIPTION_CHARS)
+        ));
     }
     if !cwd.trim().is_empty() {
         line.push_str(&format!(" and runs in {}", cwd.trim()));

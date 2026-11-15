@@ -247,13 +247,14 @@ pub fn consent_offer(w: &ConsentWaiting) -> Option<Offer> {
         return None;
     }
     let title = cut(w.chat_title.trim(), 60);
+    // A chat's title is its own to rename: it is quoted, never the start of the sentence.
     let who = if title.is_empty() {
-        "A Helm chat"
+        "A Helm chat".to_owned()
     } else {
-        title.as_str()
+        format!("The chat \"{}\"", title.replace('"', "'"))
     };
     let mut text = format!(
-        "{who} wants to change settings and needs your approval:\n{}",
+        "{who} asks for this change and needs your approval:\n{}",
         r.summary.trim()
     );
     let full = text.chars().count() <= CONSENT_FIT;
@@ -519,6 +520,19 @@ pub fn decide_consent(
     ask: &Ask,
     index: usize,
 ) -> Result<helm_consent::apply::Decided, helm_ipc::ApiError> {
+    // A change to this PC is the PC owner's to approve, never a household member's, whatever
+    // account asked: only their own chats' changes are offered, and this checks it again.
+    if !services.get::<helm_core::db::Database>().is_some_and(|db| {
+        db.snapshot(|tx| {
+            Ok::<_, rusqlite::Error>(!helm_profiles::store::is_household_member(tx, &ask.chat_id))
+        })
+        .unwrap_or(false)
+    }) {
+        return Err(helm_ipc::ApiError::new(
+            "forbidden",
+            "Only this PC's owner can approve a change to it.",
+        ));
+    }
     let decision = if ask.options.get(index).map(String::as_str) == Some(APPROVE) {
         helm_consent::Decision::Allow
     } else {
@@ -770,8 +784,10 @@ mod tests {
             long: bool,
             /// Answered in Helm before the tap.
             app_first: bool,
+            /// The chat belongs to a household member's profile.
+            member: bool,
             tap: &'static str,
-            /// What deciding on the tap says: `ok`, `conflict` or `-` (no decision attempted).
+            /// What deciding on the tap says: `ok`, `conflict`, `forbidden` or `-` (no decision attempted).
             decided: &'static str,
             applied: usize,
             state: RequestState,
@@ -785,6 +801,7 @@ mod tests {
                 index: 0,
                 long: false,
                 app_first: false,
+                member: false,
                 tap: "taken",
                 decided: "ok",
                 applied: 1,
@@ -798,11 +815,26 @@ mod tests {
                 index: 1,
                 long: false,
                 app_first: false,
+                member: false,
                 tap: "taken",
                 decided: "ok",
                 applied: 0,
                 state: RequestState::Denied,
                 note: "Answered on Telegram.",
+            },
+            Row {
+                case: "a household member's chat, from their own account",
+                who: "p7",
+                late: None,
+                index: 0,
+                long: false,
+                app_first: false,
+                member: true,
+                tap: "taken",
+                decided: "forbidden",
+                applied: 0,
+                state: RequestState::Pending,
+                note: "Still waiting in Helm.",
             },
             Row {
                 case: "another person's account",
@@ -811,6 +843,7 @@ mod tests {
                 index: 0,
                 long: false,
                 app_first: false,
+                member: false,
                 tap: "foreign",
                 decided: "-",
                 applied: 0,
@@ -824,6 +857,7 @@ mod tests {
                 index: 0,
                 long: false,
                 app_first: false,
+                member: false,
                 tap: "expired",
                 decided: "-",
                 applied: 0,
@@ -837,6 +871,7 @@ mod tests {
                 index: 0,
                 long: false,
                 app_first: true,
+                member: false,
                 tap: "taken",
                 decided: "conflict",
                 applied: 1,
@@ -850,6 +885,7 @@ mod tests {
                 index: 0,
                 long: true,
                 app_first: false,
+                member: false,
                 tap: "taken",
                 decided: "ok",
                 applied: 0,
@@ -862,10 +898,11 @@ mod tests {
             let mut reg = helm_core::db::MigrationRegistry::new();
             helm_chats::register_migrations(&mut reg);
             helm_consent::register_migrations(&mut reg);
+            helm_profiles::register_migrations(&mut reg);
             let db = std::sync::Arc::new(
                 helm_core::db::Database::open(&dir.path().join("t.db"), &reg).unwrap(),
             );
-            db.write::<_, rusqlite::Error>(|tx| {
+            db.write::<_, helm_profiles::store::ProfileError>(|tx| {
                 tx.execute(
                     "INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 1)",
                     [],
@@ -874,6 +911,11 @@ mod tests {
                     "INSERT INTO chats(id, project_id, created_at, updated_at) VALUES ('c1', 'p', 1, 1)",
                     [],
                 )?;
+                helm_profiles::store::ensure_home(tx, 1)?;
+                if row.member {
+                    let alex = helm_profiles::store::create(tx, "Alex", None, Some("9"), 2)?;
+                    helm_profiles::store::assign(tx, &["c1".into()], &alex.id)?;
+                }
                 Ok(())
             })
             .unwrap();
@@ -966,6 +1008,7 @@ mod tests {
                 match (&r, row.decided) {
                     (Ok(_), "ok") => {}
                     (Err(e), "conflict") => assert_eq!(e.code, "conflict", "{c}"),
+                    (Err(e), "forbidden") => assert_eq!(e.code, "forbidden", "{c}"),
                     _ => panic!("{c}: unexpected decision {:?}", r.as_ref().err()),
                 }
                 if let Ok(d) = r {

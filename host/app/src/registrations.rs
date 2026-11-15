@@ -170,7 +170,7 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     extensions.extend(helm_relay::hub_view::settings_extension(services));
     services.insert(Arc::new(helm_hosttools::SettingsExtensions(extensions)));
     // What the generic writer cannot know about a few preference keys' values.
-    let rules = crate::pref_rules::pref_rules(services);
+    let rules = crate::pref_rules::pref_rules(services, events);
     services.insert(Arc::new(rules));
     services.insert(Arc::new(worker_lines()));
     // Other crates reach running workers through the chat runtime (helm_hosttools::lines).
