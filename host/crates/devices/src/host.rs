@@ -232,7 +232,10 @@ impl ChatPort for HostPort {
             let (people, projects) = self.people_and_projects()?;
             // The catalogue is a bonus: if the op fails the hello still stands, with no
             // catalogue, and the reader answers "that device's models are not known yet".
-            let catalogue = match self.op("model_catalogue", json!({ "harness": "claude" })).await {
+            let catalogue = match self
+                .op("model_catalogue", json!({ "harness": "claude" }))
+                .await
+            {
                 Ok(v) => Some(v),
                 Err(e) => {
                     log::warn!("devices: no model catalogue in the hello: {e}");

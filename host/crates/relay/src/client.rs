@@ -1637,7 +1637,11 @@ mod tests {
     async fn an_idle_line_says_enough_itself_to_survive_the_hubs_silence_window() {
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}/relay", l.local_addr().unwrap());
-        let c = client((&url, ""), Arc::new(Exec::default()), Arc::new(Sink::default()));
+        let c = client(
+            (&url, ""),
+            Arc::new(Exec::default()),
+            Arc::new(Sink::default()),
+        );
         // The production intervals, scaled: 30 s inside a 90 s hub window.
         c.set_intervals(Duration::from_millis(60), Duration::from_millis(600));
         let task = tokio::spawn(c.clone().run());
@@ -1656,12 +1660,17 @@ mod tests {
             match tokio::time::timeout(window, ws.next()).await {
                 Ok(Some(Ok(Message::Text(t)))) => {
                     let v: Value = serde_json::from_str(t.as_str()).unwrap();
-                    assert_eq!(v["type"], "sharing", "the keepalive is a frame the hub takes");
+                    assert_eq!(
+                        v["type"], "sharing",
+                        "the keepalive is a frame the hub takes"
+                    );
                     keepalives += 1;
                 }
                 // The hub's window passed with nothing from the line: it would have said
                 // "line silent, dropping it".
-                r => panic!("the hub would have dropped the line after {keepalives} keepalives: {r:?}"),
+                r => panic!(
+                    "the hub would have dropped the line after {keepalives} keepalives: {r:?}"
+                ),
             }
         }
         assert!(keepalives >= 12, "a frame about every 60 ms: {keepalives}");
