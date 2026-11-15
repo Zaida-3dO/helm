@@ -23,7 +23,7 @@ import { SHELL_CHANGES_HOOK_ID, ShellChangeCapture } from "./shellchanges.ts";
 import { StreamTranslator } from "./translate.ts";
 import { Attribution } from "../../hosttools/attribution.ts";
 import { fileSaver, DEFAULT_MAX_CHARS } from "../../hosttools/cap.ts";
-import { decideGate, decideStop, gateHook, gatesWanted, stopHook, WORKFLOW_GATE_HOOK_ID, WORKFLOW_STOP_HOOK_ID } from "./gates.ts";
+import { decideGate, decideStop, gateHook, gatesWanted, startupWanted, stopHook, WORKFLOW_GATE_HOOK_ID, WORKFLOW_STOP_HOOK_ID } from "./gates.ts";
 import { RequestChannel } from "../../hosttools/channel.ts";
 import { HostToolServer, SERVER_NAME, sdkMcpConfig, toolPrefix } from "../../hosttools/server.ts";
 import { planUsageFromRateLimit } from "../../usage/rateLimit.ts";
@@ -188,6 +188,9 @@ export class ClaudeDriver implements Driver {
   private readonly guard: LandingGuard | undefined;
   /** The host-tool channel, when the workflow's gates may act in this chat (gates.ts). */
   private readonly gateChannel: RequestChannel | undefined;
+  /** The channel the Stop hook asks on: set by either the workflow gates or the project's startup. */
+  private readonly stopChannel: RequestChannel | undefined;
+  private readonly stopAsks: { startup: boolean; workflow: boolean } = { startup: false, workflow: false };
   /** Finds the files each Bash call changed, when the launch asks for it and has a folder. */
   private readonly shellChanges: ShellChangeCapture | undefined;
   /** Refuses a sub-agent that asks for a Claude model in a local chat (local chats only). */
@@ -228,6 +231,9 @@ export class ClaudeDriver implements Driver {
         hostRequest: (operation, args, o) => channel.call(operation, args, { limitBytes: 8 * 1024, timeoutMs: o.timeoutMs, mutating: false, caller: { child: false } }),
       });
       if (gatesWanted(deps.env)) this.gateChannel = channel;
+      this.stopAsks.workflow = gatesWanted(deps.env);
+      this.stopAsks.startup = startupWanted(deps.env);
+      if (this.stopAsks.workflow || this.stopAsks.startup) this.stopChannel = channel;
       this.hostTools = new HostToolServer({
         bridge: asHostToolBridge(this.mcp),
         hostTools: launch.hostTools,
@@ -315,8 +321,8 @@ export class ClaudeDriver implements Driver {
     if (this.subagentModel) preToolUse.push({ matcher: SUBAGENT_MODEL_MATCHER, hookCallbackIds: [SUBAGENT_MODEL_HOOK_ID] });
     const hooks: Json = {};
     if (preToolUse.length > 0) hooks.PreToolUse = preToolUse;
-    // The turn-end check rides on the same switch as the gates: a chat the workflow may act in.
-    if (this.gateChannel) hooks.Stop = [stopHook()];
+    // The turn-end check: a chat the workflow may act in, or one that owes its project's startup.
+    if (this.stopChannel) hooks.Stop = [stopHook()];
     if (Object.keys(hooks).length > 0) initRequest.hooks = hooks;
     const init = await this.control(initRequest, this.limits.controlTimeoutMs);
     markLaunch("initialized");
@@ -816,8 +822,8 @@ export class ClaudeDriver implements Driver {
       void decideGate(this.gateChannel, input, child).then((r) => this.controlReply(requestId, r));
       return;
     }
-    if (req.callback_id === WORKFLOW_STOP_HOOK_ID && this.gateChannel) {
-      void decideStop(this.gateChannel, input).then((r) => this.controlReply(requestId, r));
+    if (req.callback_id === WORKFLOW_STOP_HOOK_ID && this.stopChannel) {
+      void decideStop(this.stopChannel, input, this.stopAsks).then((r) => this.controlReply(requestId, r));
       return;
     }
     if (req.callback_id === DUPLICATE_MCP_HOOK_ID) {
