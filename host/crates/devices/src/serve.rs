@@ -610,14 +610,20 @@ impl Inner {
         Ok(op)
     }
 
-    /// A household member may hand a chat to a profile or share it only when it is theirs or
-    /// shared with them; otherwise the move would make someone else's chat read as theirs.
-    async fn own_or_shared(&self, asker: &Asker, chat_id: &str) -> Result<(), WireError> {
+    /// A household member may hand a chat to a profile or change who it is shared with only
+    /// when it is theirs; a person it is merely shared with may only take themselves off it.
+    /// Otherwise the move would make someone else's chat read as theirs.
+    async fn owner_only(
+        &self,
+        asker: &Asker,
+        chat_id: &str,
+        leaving: bool,
+    ) -> Result<(), WireError> {
         let Asker::Household { person_id, .. } = asker else {
             return Ok(());
         };
         let chat = self.port.chat(chat_id.to_owned()).await?.chat.to_value();
-        if subs::visible_to(&chat, person_id) {
+        if subs::owned_by(&chat, person_id) || (leaving && subs::visible_to(&chat, person_id)) {
             Ok(())
         } else {
             Err(WireError::not_allowed())
@@ -780,7 +786,9 @@ impl Inner {
                 done(json!({}))
             }
             Op::Share(a) => {
-                self.own_or_shared(asker, &a.chat_id).await?;
+                let leaving = !a.shared
+                    && matches!(asker, Asker::Household { person_id, .. } if *person_id == a.person_id);
+                self.owner_only(asker, &a.chat_id, leaving).await?;
                 self.port.share(a).await?;
                 done(json!({}))
             }
@@ -802,7 +810,7 @@ impl Inner {
                 done(json!({}))
             }
             Op::MoveProfile(a) => {
-                self.own_or_shared(asker, &a.chat_id).await?;
+                self.owner_only(asker, &a.chat_id, false).await?;
                 self.port.move_profile(a).await?;
                 done(json!({}))
             }

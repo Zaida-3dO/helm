@@ -806,8 +806,9 @@ impl Op {
         })
     }
 
-    /// Whether the op changes something on the PC that runs the chat. These need the PC's
-    /// switch "Let other devices use chats on this PC"; reads need only the pairing.
+    /// Whether the op changes something on the PC that runs the chat, or reads this PC's disk
+    /// (the project folder's files and changes). These need the PC's switch "Let other devices
+    /// use chats on this PC"; the other reads need only the pairing.
     pub fn is_run(&self) -> bool {
         matches!(
             self,
@@ -840,6 +841,12 @@ impl Op {
                 | Op::Address(_)
                 | Op::DefaultsSet(_)
                 | Op::QuickOpen(_)
+                | Op::FileView(_)
+                | Op::FileStat(_)
+                | Op::Changes(_)
+                | Op::Diff(_)
+                | Op::ArchiveList(_)
+                | Op::PathResolve(_)
         )
     }
 }

@@ -66,6 +66,51 @@ fn inside(folder: &std::path::Path, path: &std::path::Path) -> bool {
     p == f || (p.starts_with(f) && matches!(p.as_bytes().get(f.len()), Some(b'/' | b'\\')))
 }
 
+/// A project folder too wide to show another device: a drive root, or the user's home folder
+/// or any folder that holds it. Everything under it would cross the line, keys included.
+fn too_broad(folder: &std::path::Path, home: Option<&std::path::Path>) -> bool {
+    folder.parent().is_none() || home.is_some_and(|h| inside(folder, h))
+}
+
+/// Well-known places credentials live, refused over the device line whatever the project
+/// folder: the sign-in and token stores, ssh and cloud keys, `.env` files, key files.
+fn secret_path(path: &std::path::Path) -> bool {
+    const DIRS: [&str; 7] = [
+        ".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".config",
+    ];
+    const FILES: [&str; 8] = [
+        ".credentials.json",
+        "credentials.json",
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+        "auth.json",
+        "token.json",
+        "secrets.json",
+    ];
+    let parts: Vec<String> = path
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+        .collect();
+    parts.iter().any(|p| DIRS.contains(&p.as_str()))
+        || parts.last().is_some_and(|n| {
+            FILES.contains(&n.as_str())
+                || n == ".env"
+                || n.starts_with(".env.")
+                || n.starts_with("id_rsa")
+                || n.starts_with("id_ed25519")
+                || n.starts_with("id_ecdsa")
+                || n.ends_with(".pem")
+                || n.ends_with(".ppk")
+        })
+}
+
+fn home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(Into::into)
+}
+
 fn person_of_profile(conn: &Connection, profile_id: &str) -> Option<String> {
     conn.query_row(
         "SELECT hub_person_id FROM profiles WHERE id = ?1",
@@ -190,8 +235,17 @@ impl HostPort {
             .flatten()
             .filter(|p| helm_panel::pathgate::check(p).is_ok());
         match path {
-            Some(p) => helm_panel::pathgate::check(&p)
-                .map_err(|r| WireError::new(code::REFUSED, r.message())),
+            Some(p) => {
+                let folder = helm_panel::pathgate::check(&p)
+                    .map_err(|r| WireError::new(code::REFUSED, r.message()))?;
+                if too_broad(&folder, home_dir().as_deref()) {
+                    return Err(WireError::new(
+                        code::REFUSED,
+                        "This chat's folder is too wide to open from another device. Open its files on its own PC.",
+                    ));
+                }
+                Ok(folder)
+            }
             None => Err(WireError::new(
                 code::NOT_FOUND,
                 "This chat has no project folder on this PC.",
@@ -212,7 +266,18 @@ impl HostPort {
                 "That path is outside the chat's project folder.",
             ));
         }
+        Self::not_secret(&path)?;
         Ok(path)
+    }
+
+    fn not_secret(path: &std::path::Path) -> PortResult<()> {
+        if secret_path(path) {
+            return Err(WireError::new(
+                code::REFUSED,
+                "That file holds credentials, so it isn't opened from another device.",
+            ));
+        }
+        Ok(())
     }
 
     /// A panel or board read's answer: small enough for one frame, pictures only within the
@@ -1096,9 +1161,10 @@ impl ChatPort for HostPort {
                 .await?;
             if let Some(items) = out.get_mut("items").and_then(Value::as_array_mut) {
                 items.retain(|it| {
-                    it.get("path")
-                        .and_then(Value::as_str)
-                        .is_some_and(|p| inside(&folder, std::path::Path::new(p)))
+                    it.get("path").and_then(Value::as_str).is_some_and(|p| {
+                        let p = std::path::Path::new(p);
+                        inside(&folder, p) && !secret_path(p)
+                    })
                 });
             }
             Self::fit_answer(out)
@@ -1124,7 +1190,10 @@ impl ChatPort for HostPort {
             let folder = self.project_folder(&chat_id)?;
             let mut args = args;
             match a.local_op {
-                "file_read" | "archive_list" | "path_resolve" => {
+                // The resolver takes the forms a reply writes (`src/a.ts`, `~/x`); only its
+                // answer is held to the folder, below.
+                "path_resolve" => {}
+                "file_read" | "archive_list" => {
                     let raw = args
                         .get("path")
                         .and_then(Value::as_str)
@@ -1164,7 +1233,8 @@ impl ChatPort for HostPort {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
-                if !inside(&folder, std::path::Path::new(&resolved)) {
+                let resolved = std::path::Path::new(&resolved);
+                if !inside(&folder, resolved) || secret_path(resolved) {
                     return Err(WireError::new(code::NOT_FOUND, "Not found."));
                 }
             }

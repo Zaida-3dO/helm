@@ -760,24 +760,8 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         ("attention", json!({"chatIds": ["c1"]})),
         ("item_links", json!({"chatIds": ["c1"]})),
         ("defaults_get", json!({"chatId": "c1"})),
-        // The panel and board reads answer with the switch off too: watching a chat includes
-        // looking at its files and its board.
+        // The folder's name and the board answer with the switch off too.
         ("chat_folder", json!({"chatId": "c1"})),
-        ("file_view", json!({"chatId": "c1", "path": "/work/a.rs"})),
-        (
-            "file_stat",
-            json!({"chatId": "c1", "paths": ["/work/a.rs"]}),
-        ),
-        (
-            "archive_list",
-            json!({"chatId": "c1", "path": "/work/x.zip"}),
-        ),
-        ("path_resolve", json!({"chatId": "c1", "path": "a.rs"})),
-        ("changes", json!({"chatId": "c1"})),
-        (
-            "diff",
-            json!({"chatId": "c1", "path": "a.rs", "side": "head"}),
-        ),
         ("board_connection", json!({"chatId": "c1"})),
         (
             "board_read",
@@ -794,6 +778,22 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         ("set_permission", json!({"chatId": "c1", "mode": "plan"})),
         // It reads this PC's disk, so it needs the switch even though it changes nothing.
         ("quick_open", json!({"chatId": "c1", "query": "x"})),
+        // So does every read of the project folder's files and changes.
+        ("file_view", json!({"chatId": "c1", "path": "/work/a.rs"})),
+        (
+            "file_stat",
+            json!({"chatId": "c1", "paths": ["/work/a.rs"]}),
+        ),
+        (
+            "archive_list",
+            json!({"chatId": "c1", "path": "/work/x.zip"}),
+        ),
+        ("path_resolve", json!({"chatId": "c1", "path": "a.rs"})),
+        ("changes", json!({"chatId": "c1"})),
+        (
+            "diff",
+            json!({"chatId": "c1", "path": "a.rs", "side": "head"}),
+        ),
         ("verbosity_set", json!({"chatId": "c1", "level": "low"})),
         ("warm", json!({"chatId": "c1"})),
         ("tool_stop", json!({"chatId": "c1", "toolCallId": "t-2"})),
@@ -2308,10 +2308,21 @@ async fn a_household_member_gets_their_own_view_of_the_list_but_is_refused_nothi
             json!({"chatId": "hers", "profileId": "p"}),
             true,
         ),
+        // A chat merely shared with her: she can leave it, not move it or change its sharing.
+        (
+            "share",
+            json!({"chatId": "shared", "personId": "person-b", "shared": false}),
+            true,
+        ),
         (
             "share",
             json!({"chatId": "shared", "personId": "person-a", "shared": false}),
-            true,
+            false,
+        ),
+        (
+            "move_profile",
+            json!({"chatId": "shared", "profileId": "p"}),
+            false,
         ),
         (
             "defaults_set",
