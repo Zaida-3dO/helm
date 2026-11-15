@@ -1442,7 +1442,11 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         let got = api.call_host(op, args).await;
         match want {
             Ok(v) if v.is_null() => assert!(got.is_ok(), "{op}: {got:?}"),
-            Ok(v) => assert_eq!(got.clone().unwrap_or_else(|e| panic!("{op}: {e}")), v, "{op}"),
+            Ok(v) => assert_eq!(
+                got.clone().unwrap_or_else(|e| panic!("{op}: {e}")),
+                v,
+                "{op}"
+            ),
             Err(m) => assert_eq!(got.unwrap_err().message, m, "{op}"),
         }
     }

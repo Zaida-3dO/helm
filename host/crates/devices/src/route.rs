@@ -1186,7 +1186,11 @@ impl RemoteChats for Mirror {
             if matches!(op.as_str(), "chat_verbosity_set" | "tool_stop") {
                 m.check_live(&device)?;
                 let act = m.acting(&chat_id)?;
-                let wire = if op == "tool_stop" { "tool_stop" } else { "verbosity_set" };
+                let wire = if op == "tool_stop" {
+                    "tool_stop"
+                } else {
+                    "verbosity_set"
+                };
                 return m.ask_as(&device, wire, args, "that change", &[act]).await;
             }
             let wire = match op.as_str() {
