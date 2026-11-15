@@ -197,6 +197,11 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
         "chat_shares",
         UserOnly("Which profiles a chat is shared with is yours to set."),
     ),
+    // A person the user unlinked or deleted stays so until they link them on purpose.
+    (
+        "declined_people",
+        UserOnly("Whether an unlinked person stays unlinked is yours to set."),
+    ),
     // Messages other devices sent here, kept a week so a repeat runs once.
     ("remote_sends", Data),
     // This PC's copy of the other devices of the household and the chats they run: what the hub
