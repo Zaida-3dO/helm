@@ -407,7 +407,9 @@ impl ChatPort for HostPort {
         Box::pin(async move {
             self.here(&chat_id)?;
             let rt = self.rt()?;
-            let submission_id = format!("remote-{client_id}");
+            // The sender's id is already a UUID (checked when the request arrived, and claimed so
+            // it is never sent twice); the worker takes nothing else as a submission id.
+            let submission_id = client_id;
             // The owner's own words count as typed by them; a household member's words on a chat
             // that is not theirs arrive as a message from them, never as approval.
             let (text, origin) = match from {
