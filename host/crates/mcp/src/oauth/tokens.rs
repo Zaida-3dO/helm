@@ -5,7 +5,7 @@
 //! appears in a `Debug`, a `Display` or an error string.
 
 use super::discovery::AuthServer;
-use super::loopback::form_encode;
+use super::loopback::{form_encode, form_encode_value};
 use super::{endpoint_allowed, OauthError};
 use base64::Engine as _;
 use helm_core::credentials::CredentialError;
@@ -70,6 +70,14 @@ pub struct StoredAuth {
     /// The protected resource the tokens were asked for, if any (they are only valid there).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<String>,
+    /// The sign-in service the tokens came from, as discovery found it at sign-in. A refresh goes
+    /// only to its token address, never to one found later from the server's current address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_server: Option<AuthServer>,
+    /// The redirect address a handed-out client id was registered with (none for a client id the
+    /// person entered), so a later sign-in can come back on the same one and reuse the id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registered_redirect: Option<String>,
     /// When the sign-in was stored, as seconds since the unix epoch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stored_at: Option<u64>,
@@ -81,6 +89,8 @@ impl std::fmt::Debug for StoredAuth {
             .field("client", &self.client)
             .field("tokens", &self.tokens)
             .field("resource", &self.resource)
+            .field("auth_server", &self.auth_server)
+            .field("registered_redirect", &self.registered_redirect)
             .field("stored_at", &self.stored_at)
             .finish()
     }
@@ -179,7 +189,13 @@ pub fn refresh(
     if let Some(r) = resource {
         pairs.push(("resource", r.to_owned()));
     }
-    token_request(agent, server, client, &pairs)
+    let mut tokens = token_request(agent, server, client, &pairs)?;
+    // A server that does not rotate refresh tokens leaves the field out of its answer: the one
+    // used keeps working, so it is kept rather than lost.
+    if tokens.refresh_token.as_deref().unwrap_or("").is_empty() {
+        tokens.refresh_token = Some(refresh_token.to_owned());
+    }
+    Ok(tokens)
 }
 
 fn token_request(
@@ -201,11 +217,16 @@ fn token_request(
         .header("Content-Type", "application/x-www-form-urlencoded")
         .header("Accept", "application/json");
     if let Some(secret) = &client.client_secret {
-        let pair = base64::engine::general_purpose::STANDARD
-            .encode(format!("{}:{}", client.client_id, secret));
+        // Both halves are form-encoded before they are joined (RFC 6749 section 2.3.1).
+        let pair = base64::engine::general_purpose::STANDARD.encode(format!(
+            "{}:{}",
+            form_encode_value(&client.client_id),
+            form_encode_value(secret)
+        ));
         req = req.header("Authorization", format!("Basic {pair}"));
     }
-    let mut res = match req.send(body) {
+    // A refusal is an answer with a body here: its standard error word is read from it.
+    let mut res = match req.config().http_status_as_error(false).build().send(body) {
         Ok(r) => r,
         Err(ureq::Error::StatusCode(code)) => return Err(token_refusal(code, None)),
         Err(_) => return Err(OauthError::Connection),

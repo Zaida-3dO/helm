@@ -6,7 +6,9 @@ use crate::admin;
 use crate::config::McpStore;
 use crate::oauth_ops;
 use crate::unencrypted;
-use helm_hosttools::{Condition, HostToolRegistry, ToolCtx, ToolError, ToolResult, ToolSpec};
+use helm_hosttools::{
+    Broadcaster, Condition, HostToolRegistry, ToolCtx, ToolError, ToolResult, ToolSpec,
+};
 use serde_json::{json, Value};
 
 pub fn register_host_tools(r: &mut HostToolRegistry) {
@@ -15,11 +17,15 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::read(
             oauth_ops::HEADER_TOOL,
-            "Worker-only: answers the current Authorization header for a server that signs in \
-             through the browser, refreshing it first. Chats and agents never see this tool.",
+            "Worker-only: hands the chat's worker the current Authorization header for a server \
+             that signs in through the browser, refreshing it first; the header reaches the \
+             worker on its own line, never in this answer. Chats and agents never see this tool.",
             json!({
                 "type": "object",
-                "properties": { "serverId": { "type": "string" } },
+                "properties": {
+                    "serverId": { "type": "string" },
+                    "refused": { "type": "string", "maxLength": 16 }
+                },
                 "required": ["serverId"],
                 "additionalProperties": false
             }),
@@ -77,8 +83,10 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
 }
 
 /// Answer the worker's header request. Every refusal happens before anything is sent, and no
-/// refusal names the token; the header itself travels only in this call's reply.
-fn oauth_header_tool(ctx: &ToolCtx, args: Value) -> ToolResult {
+/// refusal names the token. The header travels to the asking chat's worker on its stdin, as a
+/// line of its own; the reply to the call (which is written to a file the chat's agent could read)
+/// only says it was delivered.
+pub(crate) fn oauth_header_tool(ctx: &ToolCtx, args: Value) -> ToolResult {
     let id = args
         .get("serverId")
         .and_then(Value::as_str)
@@ -101,10 +109,21 @@ fn oauth_header_tool(ctx: &ToolCtx, args: Value) -> ToolResult {
     if !server.enabled {
         return Err(ToolError::refused("The server is turned off."));
     }
-    match oauth_ops::current_header(&store, &server) {
-        Ok(header) => Ok(json!({ "header": header })),
-        Err(why) => Err(ToolError::refused(why)),
+    // The first digits of the refused token's hash, when the worker names it.
+    let refused = args
+        .get("refused")
+        .and_then(Value::as_str)
+        .filter(|f| !f.is_empty() && f.len() <= 16 && f.bytes().all(|b| b.is_ascii_hexdigit()));
+    let header = oauth_ops::current_header(&store, &server, refused).map_err(ToolError::refused)?;
+    let line = json!({ "type": oauth_ops::HEADER_LINE, "serverId": id, "header": header });
+    let sent = ctx
+        .services
+        .get::<Broadcaster>()
+        .is_some_and(|b| b.0.send_to_worker(&ctx.caller_chat_id, &line));
+    if !sent {
+        return Err(ToolError::refused("The chat's worker is not running."));
     }
+    Ok(json!({ "delivered": true }))
 }
 
 #[cfg(test)]

@@ -119,8 +119,43 @@ impl std::fmt::Debug for Pending {
     }
 }
 
-/// Start a browser sign-in. `scopes` are asked for as one scope string; `resource` names the
-/// protected server the tokens should be valid at, when discovery found one.
+/// The listener a sign-in comes back to, bound before anything is registered or opened, so the
+/// address a client id is registered for is the very one the browser will use.
+pub struct Bound {
+    listener: Loopback,
+    state: String,
+}
+
+impl std::fmt::Debug for Bound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Bound")
+            .field("redirect_uri", &self.redirect_uri())
+            .finish()
+    }
+}
+
+impl Bound {
+    /// The exact address the browser is sent back to.
+    pub fn redirect_uri(&self) -> String {
+        self.listener.redirect_uri()
+    }
+
+    pub fn port(&self) -> u16 {
+        self.listener.port()
+    }
+}
+
+/// Listen on `127.0.0.1` for the sign-in's return, on `port` (0 for any free one), answering at
+/// `path`. Fails when that port is taken.
+pub fn bind(port: u16, path: &str) -> Result<Bound, OauthError> {
+    let state = pkce::random_state();
+    let listener =
+        Loopback::bind_at(&state, WAIT, port, path).map_err(|_| OauthError::Connection)?;
+    Ok(Bound { listener, state })
+}
+
+/// Start a browser sign-in on a free port. `scopes` are asked for as one scope string;
+/// `resource` names the protected server the tokens should be valid at, when discovery found one.
 pub fn begin(
     agent: &ureq::Agent,
     server: &AuthServer,
@@ -128,8 +163,26 @@ pub fn begin(
     scopes: &[String],
     resource: Option<&str>,
 ) -> Result<Pending, OauthError> {
-    let state = pkce::random_state();
-    let listener = Loopback::bind(&state, WAIT).map_err(|_| OauthError::Connection)?;
+    begin_on(
+        bind(0, "/callback")?,
+        agent,
+        server,
+        client,
+        scopes,
+        resource,
+    )
+}
+
+/// [`begin`] on a listener bound earlier (see [`bind`]).
+pub fn begin_on(
+    bound: Bound,
+    agent: &ureq::Agent,
+    server: &AuthServer,
+    client: &Client,
+    scopes: &[String],
+    resource: Option<&str>,
+) -> Result<Pending, OauthError> {
+    let Bound { listener, state } = bound;
     let redirect_uri = listener.redirect_uri();
     let verifier = pkce::random_verifier();
     let Ok(mut url) = Url::parse(&server.authorization_endpoint) else {
@@ -265,6 +318,8 @@ mod tests {
                 id_token: None,
             },
             resource: Some("https://mcp.example/mcp".into()),
+            auth_server: None,
+            registered_redirect: None,
             stored_at: None,
         }
     }
@@ -279,12 +334,15 @@ mod tests {
         let server = discover(&agent, &fake.resource_url(), None).unwrap();
         assert_eq!(server.token_endpoint, format!("{}/token", fake.base));
         assert!(server.registration_endpoint.is_some());
-        let client = register(&agent, &server, "http://127.0.0.1:1/callback").unwrap();
+        // The client id is registered for the very address the sign-in comes back on.
+        let bound = bind(0, "/callback").unwrap();
+        let client = register(&agent, &server, &bound.redirect_uri()).unwrap();
         assert_eq!(client.client_id, "fake-client-1");
         assert_eq!(client.client_secret.as_deref(), Some("fake-secret-9"));
 
         let scopes = ["read".to_owned(), "send".to_owned()];
-        let pending = begin(
+        let pending = begin_on(
+            bound,
             &agent,
             &server,
             &client,
@@ -321,6 +379,56 @@ mod tests {
             Some("fake-refresh-1"),
             "the same refresh token keeps working"
         );
+
+        // An address the client id was not registered for is refused at the sign-in page.
+        let elsewhere = register(&agent, &server, "http://127.0.0.1:1/callback").unwrap();
+        let pending = begin(&agent, &server, &elsewhere, &[], None).unwrap();
+        assert_eq!(raw_get(&pending.auth_url).0, 400);
+
+        // A server that never repeats the refresh token on a refresh: the one held is kept, so
+        // refreshing again later still works. A server that rotates them hands out a new one.
+        for (cfg, again) in [
+            (
+                Cfg {
+                    no_refresh_echo: true,
+                    ..Cfg::default()
+                },
+                "fake-refresh-1",
+            ),
+            (
+                Cfg {
+                    rotate_refresh: true,
+                    ..Cfg::default()
+                },
+                "fake-refresh-1.1",
+            ),
+        ] {
+            let fake = Fake::start(cfg);
+            let server = discover(&agent, &fake.resource_url(), None).unwrap();
+            let bound = bind(0, "/callback").unwrap();
+            let client = register(&agent, &server, &bound.redirect_uri()).unwrap();
+            let pending = begin_on(bound, &agent, &server, &client, &[], None).unwrap();
+            open_in_browser(&pending.auth_url);
+            let t0 = pending.finish_within(Duration::from_secs(5)).unwrap();
+            let r1 = refresh(
+                &agent,
+                &server,
+                &client,
+                t0.refresh_token.as_deref().unwrap(),
+                None,
+            )
+            .unwrap();
+            assert_eq!(r1.refresh_token.as_deref(), Some(again));
+            let r2 = refresh(
+                &agent,
+                &server,
+                &client,
+                r1.refresh_token.as_deref().unwrap(),
+                None,
+            )
+            .unwrap();
+            assert!(r2.refresh_token.is_some());
+        }
     }
 
     #[test]
@@ -354,6 +462,19 @@ mod tests {
             !said.contains("wrong") && !said.contains("pre-secret"),
             "{said}"
         );
+
+        // A secret with characters that form-encoding changes still matches: each half of the
+        // Basic header is encoded before the two are joined.
+        let fake = Fake::start(Cfg {
+            expect_client: Some(("pre-id".into(), "p:s+%x y".into())),
+            no_register: true,
+            ..Cfg::default()
+        });
+        let server = discover(&agent, &fake.resource_url(), None).unwrap();
+        let hard = Client::pre_registered("pre-id", Some("p:s+%x y"));
+        let pending = begin(&agent, &server, &hard, &[], None).unwrap();
+        open_in_browser(&pending.auth_url);
+        assert!(pending.finish_within(Duration::from_secs(5)).is_ok());
     }
 
     #[test]
@@ -463,6 +584,22 @@ mod tests {
             ..Cfg::default()
         });
         assert!(discover(&agent, &fake.resource_url(), None).is_err());
+        // A resource document about another server, or an authorization-server document that
+        // names another issuer, is not taken as this server's.
+        for cfg in [
+            Cfg {
+                wrong_resource: true,
+                ..Cfg::default()
+            },
+            Cfg {
+                wrong_issuer: true,
+                ..Cfg::default()
+            },
+        ] {
+            let fake = Fake::start(cfg);
+            let why = discover(&agent, &fake.resource_url(), None).unwrap_err();
+            assert!(format!("{why}").contains("not readable"), "{why}");
+        }
         // Nothing published at all: a plain refusal too.
         let fake = Fake::start(Cfg {
             no_prm: true,

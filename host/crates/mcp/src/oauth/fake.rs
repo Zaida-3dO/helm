@@ -29,6 +29,14 @@ pub struct Cfg {
     pub garble_metadata: bool,
     /// Publish documents larger than any reader should swallow.
     pub huge_metadata: bool,
+    /// A refresh answer leaves out the refresh token (a server that does not rotate them).
+    pub no_refresh_echo: bool,
+    /// Every refresh hands out a new refresh token and retires the one that was used.
+    pub rotate_refresh: bool,
+    /// The protected-resource document names a different server than the one asked about.
+    pub wrong_resource: bool,
+    /// The authorization-server document names a different issuer than the address it sits at.
+    pub wrong_issuer: bool,
 }
 
 #[derive(Clone)]
@@ -46,10 +54,16 @@ struct State {
     refreshes: HashMap<String, Grant>,
     codes_issued: u32,
     accesses_issued: u32,
+    refreshes_served: u32,
+    /// The `redirect_uri` of the last sign-in request that was accepted.
+    last_redirect: Option<String>,
+    /// Client ids this server handed out, with the redirect addresses each was registered for.
+    registered: HashMap<String, Vec<String>>,
 }
 
 pub struct Fake {
     pub base: String,
+    state: Arc<Mutex<State>>,
 }
 
 impl Fake {
@@ -62,6 +76,9 @@ impl Fake {
             refreshes: HashMap::new(),
             codes_issued: 0,
             accesses_issued: 0,
+            refreshes_served: 0,
+            last_redirect: None,
+            registered: HashMap::new(),
         }));
         let serve_state = state.clone();
         let serve_base = base.clone();
@@ -80,7 +97,22 @@ impl Fake {
                 let _ = stream.read_to_end(&mut rest);
             }
         });
-        Fake { base }
+        Fake { base, state }
+    }
+
+    /// How many refresh calls were answered.
+    pub fn refreshes_served(&self) -> u32 {
+        self.state.lock().unwrap().refreshes_served
+    }
+
+    /// The return address of the last sign-in request the fake accepted.
+    pub fn last_redirect(&self) -> Option<String> {
+        self.state.lock().unwrap().last_redirect.clone()
+    }
+
+    /// How many client ids were handed out.
+    pub fn registrations(&self) -> usize {
+        self.state.lock().unwrap().registered.len()
     }
 
     pub fn resource_url(&self) -> String {
@@ -155,12 +187,24 @@ fn respond(stream: &mut impl Write, req: &Req, base: &str, cfg: &Cfg, state: &Mu
             if cfg.no_register {
                 return send(stream, "404 Not Found", "application/json", "");
             }
+            let asked: serde_json::Value = serde_json::from_str(&req.body).unwrap_or_default();
+            let redirects: Vec<String> = asked["redirect_uris"]
+                .as_array()
+                .map(|l| {
+                    l.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut st = state.lock().unwrap();
+            let id = format!("fake-client-{}", st.registered.len() + 1);
+            st.registered.insert(id.clone(), redirects);
             send(
                 stream,
                 "200 OK",
                 "application/json",
                 &json!({
-                    "client_id": "fake-client-1",
+                    "client_id": id,
                     "client_secret": "fake-secret-9",
                     "token_endpoint_auth_method": "client_secret_basic"
                 })
@@ -173,7 +217,12 @@ fn respond(stream: &mut impl Write, req: &Req, base: &str, cfg: &Cfg, state: &Mu
             if cfg.no_prm {
                 return send(stream, "404 Not Found", "application/json", "");
             }
-            let doc = json!({"resource": format!("{base}/mcp"), "authorization_servers": [base]});
+            let resource = if cfg.wrong_resource {
+                format!("{base}/other")
+            } else {
+                format!("{base}/mcp")
+            };
+            let doc = json!({"resource": resource, "authorization_servers": [base]});
             metadata(stream, cfg, &doc.to_string())
         }
         // Documents for a server whose address carries a path keep it after the well-known part.
@@ -194,8 +243,13 @@ fn respond(stream: &mut impl Write, req: &Req, base: &str, cfg: &Cfg, state: &Mu
 }
 
 fn as_document(base: &str, cfg: &Cfg) -> String {
+    let issuer = if cfg.wrong_issuer {
+        "https://elsewhere.example".to_owned()
+    } else {
+        base.to_owned()
+    };
     let mut doc = json!({
-        "issuer": base,
+        "issuer": issuer,
         "authorization_endpoint": format!("{base}/authorize"),
         "token_endpoint": format!("{base}/token"),
         "response_types_supported": ["code"],
@@ -234,7 +288,16 @@ fn authorize(stream: &mut impl Write, req: &Req, cfg: &Cfg, state: &Mutex<State>
             .expect_client
             .as_ref()
             .is_none_or(|(id, _)| q.get("client_id").map(String::as_str) == Some(id.as_str()));
-    if !sane {
+    // A client id this server handed out may only come back on an address it was registered
+    // with, compared exactly (an id the person entered is not checked here).
+    let registered_ok = {
+        let st = state.lock().unwrap();
+        match q.get("client_id").and_then(|c| st.registered.get(c)) {
+            Some(list) => q.get("redirect_uri").is_some_and(|r| list.contains(r)),
+            None => true,
+        }
+    };
+    if !sane || !registered_ok {
         return send(
             stream,
             "400 Bad Request",
@@ -244,6 +307,7 @@ fn authorize(stream: &mut impl Write, req: &Req, cfg: &Cfg, state: &Mutex<State>
     }
     let code = {
         let mut st = state.lock().unwrap();
+        st.last_redirect = q.get("redirect_uri").cloned();
         st.codes_issued += 1;
         let code = format!("code-{}", st.codes_issued);
         let grant = Grant {
@@ -270,8 +334,8 @@ fn authorize(stream: &mut impl Write, req: &Req, cfg: &Cfg, state: &Mutex<State>
 fn token(stream: &mut impl Write, req: &Req, cfg: &Cfg, state: &Mutex<State>) {
     // The credentials, when the client is expected to have them.
     if let Some((id, secret)) = &cfg.expect_client {
-        let want = format!("{id}:{secret}");
-        if basic_pair(&req.headers).as_deref() != Some(want.as_str()) {
+        let want = (id.clone(), secret.clone());
+        if basic_pair(&req.headers) != Some(want) {
             return send(
                 stream,
                 "401 Unauthorized",
@@ -283,6 +347,7 @@ fn token(stream: &mut impl Write, req: &Req, cfg: &Cfg, state: &Mutex<State>) {
     let p = parse_query(&req.body);
     let grant_type = p.get("grant_type").map(String::as_str).unwrap_or("");
     let mut st = state.lock().unwrap();
+    let mut refreshed = false;
     let grant = match grant_type {
         "authorization_code" => {
             let Some(code) = p.get("code") else {
@@ -312,7 +377,19 @@ fn token(stream: &mut impl Write, req: &Req, cfg: &Cfg, state: &Mutex<State>) {
                 return refused(stream, "invalid_grant");
             };
             match st.refreshes.get(token).cloned() {
-                Some(grant) => grant,
+                Some(mut grant) => {
+                    st.refreshes_served += 1;
+                    if cfg.rotate_refresh {
+                        // The used token is retired; only the new one works from now on.
+                        st.refreshes.remove(token);
+                        grant.refresh_key =
+                            format!("{}.{}", grant.refresh_key, st.refreshes_served);
+                        st.refreshes
+                            .insert(grant.refresh_key.clone(), grant.clone());
+                    }
+                    refreshed = true;
+                    grant
+                }
                 None => return refused(stream, "invalid_grant"),
             }
         }
@@ -322,13 +399,16 @@ fn token(stream: &mut impl Write, req: &Req, cfg: &Cfg, state: &Mutex<State>) {
         return refused(stream, "invalid_grant");
     }
     st.accesses_issued += 1;
-    let body = json!({
+    let mut body = json!({
         "access_token": format!("fake-access-{}", st.accesses_issued),
         "token_type": "Bearer",
         "expires_in": 3600,
         "refresh_token": grant.refresh_key,
         "scope": grant.scope
     });
+    if refreshed && cfg.no_refresh_echo {
+        body.as_object_mut().unwrap().remove("refresh_token");
+    }
     send(stream, "200 OK", "application/json", &body.to_string());
 }
 
@@ -341,11 +421,15 @@ fn refused(stream: &mut impl Write, reason: &str) {
     );
 }
 
-fn basic_pair(headers: &HashMap<String, String>) -> Option<String> {
+/// The id and secret of a Basic header; each half is form-decoded after the split, as the
+/// standard says clients encode them.
+fn basic_pair(headers: &HashMap<String, String>) -> Option<(String, String)> {
     let b64 = headers.get("authorization")?.strip_prefix("Basic ")?;
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
-    String::from_utf8(bytes).ok()
+    let text = String::from_utf8(bytes).ok()?;
+    let (id, secret) = text.split_once(':')?;
+    Some((unescape(id), unescape(secret)))
 }
 
 fn parse_query(s: &str) -> HashMap<String, String> {
