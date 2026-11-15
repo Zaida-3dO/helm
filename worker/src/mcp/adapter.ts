@@ -88,6 +88,14 @@ export function applyConfigLine(bridge: McpBridge, cmd: Json): boolean {
   return true;
 }
 
+/** Applies an `mcp_oauth_header` line from the host: the answer to a header ask. Returns false when
+ * it is not one. The value is only handed on, never logged. */
+export function applyOauthHeaderLine(bridge: McpBridge, cmd: Json): boolean {
+  if (cmd.type !== "mcp_oauth_header" || typeof cmd.serverId !== "string" || typeof cmd.header !== "string") return false;
+  bridge.deliverOauthHeader(cmd.serverId, cmd.header);
+  return true;
+}
+
 /** The natively loaded servers from the CLI's `system/init` message (`mcp_servers: [{name,
  * status}]`), leaving out Helm's own and any that failed to connect. */
 export function nativeFromInit(init: Json): NativeServer[] {

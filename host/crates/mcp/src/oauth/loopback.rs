@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,6 +26,7 @@ pub enum CallbackError {
 
 pub struct Loopback {
     port: u16,
+    path: String,
     rx: mpsc::Receiver<Result<String, CallbackError>>,
     stop: Arc<AtomicBool>,
 }
@@ -36,47 +37,83 @@ impl Drop for Loopback {
     }
 }
 
+/// At most this many connections are being read at once; more are dropped unanswered.
+const MAX_OPEN: usize = 16;
+
 impl Loopback {
     /// Binds `127.0.0.1` on an ephemeral port and starts waiting for the callback whose `state`
     /// matches, giving up after `wait` from now.
     pub fn bind(state: &str, wait: Duration) -> std::io::Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0")?;
+        Self::bind_at(state, wait, 0, "/callback")
+    }
+
+    /// As [`Loopback::bind`], on a chosen `port` (0 for any) and answering at `path`.
+    pub fn bind_at(state: &str, wait: Duration, port: u16, path: &str) -> std::io::Result<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", port))?;
         listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
         let (tx, rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let state = state.to_owned();
+        let want_path = path.to_owned();
         std::thread::spawn(move || {
             let deadline = Instant::now() + wait;
-            let mut sent = false;
-            while !thread_stop.load(Ordering::SeqCst) {
+            // Set by the first connection that carried the right code; nothing else is accepted
+            // after it.
+            let done = Arc::new(AtomicBool::new(false));
+            let open = Arc::new(AtomicUsize::new(0));
+            while !thread_stop.load(Ordering::SeqCst)
+                && !done.load(Ordering::SeqCst)
+                && Instant::now() < deadline
+            {
                 match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        if let Some(code) = handle(&mut stream, &state) {
-                            // The code is sent at most once; the first matching callback wins.
-                            sent = tx.send(Ok(code)).is_ok();
-                            break;
+                    Ok((stream, _)) => {
+                        if open.fetch_add(1, Ordering::SeqCst) >= MAX_OPEN {
+                            open.fetch_sub(1, Ordering::SeqCst);
+                            continue;
                         }
+                        // Each connection is read on its own thread, so one that is slow to send
+                        // (a browser's spare socket) cannot hold up the real callback.
+                        let (state, want_path) = (state.clone(), want_path.clone());
+                        let (tx, done, open) = (tx.clone(), done.clone(), open.clone());
+                        std::thread::spawn(move || {
+                            let mut stream = stream;
+                            // An accepted socket inherits the listener's non-blocking mode on
+                            // some systems; reading needs it blocking (with a timeout).
+                            let _ = stream.set_nonblocking(false);
+                            if let Some(code) = handle(&mut stream, &state, &want_path) {
+                                // The code is sent at most once; the first matching callback wins.
+                                if !done.swap(true, Ordering::SeqCst) {
+                                    let _ = tx.send(Ok(code));
+                                }
+                            }
+                            open.fetch_sub(1, Ordering::SeqCst);
+                        });
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(50));
-                    }
-                    Err(_) => break,
-                }
-                if Instant::now() >= deadline {
-                    break;
+                    // Nothing waiting, or a connection that was reset before it was taken: keep
+                    // listening until the deadline either way.
+                    Err(_) => std::thread::sleep(Duration::from_millis(50)),
                 }
             }
-            if !sent {
+            if !done.load(Ordering::SeqCst) {
                 let _ = tx.send(Err(CallbackError::TimedOut));
             }
         });
-        Ok(Self { port, rx, stop })
+        Ok(Self {
+            port,
+            path: path.to_owned(),
+            rx,
+            stop,
+        })
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
     }
 
     pub fn redirect_uri(&self) -> String {
-        format!("http://127.0.0.1:{}/callback", self.port)
+        format!("http://127.0.0.1:{}{}", self.port, self.path)
     }
 
     /// Waits up to `budget` for the callback.
@@ -89,9 +126,9 @@ impl Loopback {
     }
 }
 
-/// Answers one request. Returns the authorization code when the path was `/callback` and the
+/// Answers one request. Returns the authorization code when the path was the callback one and the
 /// `state` matched; anything else gets a plain page and `None` (keep waiting).
-fn handle(stream: &mut TcpStream, expected_state: &str) -> Option<String> {
+fn handle(stream: &mut TcpStream, expected_state: &str, expected_path: &str) -> Option<String> {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     let mut head = Vec::new();
@@ -132,7 +169,7 @@ fn handle(stream: &mut TcpStream, expected_state: &str) -> Option<String> {
         Some((p, q)) => (p, q),
         None => (target, ""),
     };
-    if path != "/callback" {
+    if path != expected_path {
         page(
             stream,
             "404 Not Found",
@@ -229,26 +266,28 @@ pub(crate) fn percent_decode(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// Form-encoding a value: everything the query syntax would take literally passes through, the
-/// rest becomes `%XX`, and a space becomes `+`.
-pub(crate) fn form_encode(pairs: &[(&str, &str)]) -> String {
+/// Form-encoding one value: everything the query syntax would take literally passes through,
+/// the rest becomes `%XX`, and a space becomes `+`.
+pub(crate) fn form_encode_value(s: &str) -> String {
     const KEEP: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
-    let enc = |s: &str| -> String {
-        let mut out = String::new();
-        for b in s.as_bytes() {
-            if KEEP.contains(b) {
-                out.push(*b as char);
-            } else if *b == b' ' {
-                out.push('+');
-            } else {
-                out.push_str(&format!("%{b:02X}"));
-            }
+    let mut out = String::new();
+    for b in s.as_bytes() {
+        if KEEP.contains(b) {
+            out.push(*b as char);
+        } else if *b == b' ' {
+            out.push('+');
+        } else {
+            out.push_str(&format!("%{b:02X}"));
         }
-        out
-    };
+    }
+    out
+}
+
+/// Form-encoding a list of pairs (see [`form_encode_value`]).
+pub(crate) fn form_encode(pairs: &[(&str, &str)]) -> String {
     pairs
         .iter()
-        .map(|(k, v)| format!("{}={}", enc(k), enc(v)))
+        .map(|(k, v)| format!("{}={}", form_encode_value(k), form_encode_value(v)))
         .collect::<Vec<_>>()
         .join("&")
 }
@@ -279,6 +318,32 @@ mod tests {
         assert_eq!(lb.wait(Duration::from_secs(2)).unwrap(), "c 1");
         // The listener is gone: nothing more is accepted.
         assert!(lb.wait(Duration::from_millis(300)).is_err());
+
+        // A browser's spare socket that connects and says nothing neither holds up the real
+        // callback nor ends the wait, and a slow client that sends late still completes. The
+        // callback may also be answered at a chosen address.
+        let lb = Loopback::bind_at("s2", Duration::from_secs(10), 0, "/cb").unwrap();
+        assert_eq!(
+            lb.redirect_uri(),
+            format!("http://127.0.0.1:{}/cb", lb.port())
+        );
+        let addr = format!("127.0.0.1:{}", lb.port);
+        let idle = TcpStream::connect(&addr).unwrap();
+        let reset = TcpStream::connect(&addr).unwrap();
+        drop(reset);
+        let mut slow = TcpStream::connect(&addr).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        write!(
+            slow,
+            "GET /cb?code=late&state=s2 HTTP/1.1\r\nHost: x\r\n\r\n"
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        let _ = slow.set_read_timeout(Some(Duration::from_secs(5)));
+        let _ = slow.read_to_end(&mut out);
+        assert!(String::from_utf8_lossy(&out).contains("200 OK"));
+        assert_eq!(lb.wait(Duration::from_secs(2)).unwrap(), "late");
+        drop(idle);
     }
 
     #[test]

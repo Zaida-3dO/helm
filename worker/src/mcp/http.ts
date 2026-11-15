@@ -8,6 +8,7 @@
 // - The redirect rule (≤ 3, 307/308 only, same origin, no credentials or fragment) needs
 //   manual redirects.
 
+import { createHash } from "node:crypto";
 import dns from "node:dns";
 import http from "node:http";
 import https from "node:https";
@@ -120,10 +121,19 @@ interface RawResponse {
 export interface HttpOptions {
   limits: McpLimits;
   resolver?: Resolver;
-  /** For a server that signs in through the browser: asked once when the server refuses the
-   * header we have. Answers the current `Authorization` value, or undefined when there is none.
-   * The value never goes into a log line; the caller adds it to redaction. */
-  oauthHeader?: () => Promise<string | undefined>;
+  /** For a server that signs in through the browser: asked when the server refuses the header we
+   * have. `refused` is a short fingerprint of the token that was refused (see `tokenPrint`), so
+   * the host can tell a token that is already renewed from one that is not. Answers the current
+   * `Authorization` value, or undefined when there is none. The value never goes into a log
+   * line; the caller adds it to redaction. */
+  oauthHeader?: (refused: string | undefined) => Promise<string | undefined>;
+}
+
+/** The first 8 hex digits of the SHA-256 of the bearer token in an `Authorization` value: names a
+ * token to the host without sending it. */
+export function tokenPrint(header: string | undefined): string | undefined {
+  const m = header ? /^Bearer\s+(.+)$/i.exec(header) : null;
+  return m ? createHash("sha256").update(m[1]!).digest("hex").slice(0, 8) : undefined;
 }
 
 export class HttpTransport implements Transport {
@@ -132,8 +142,12 @@ export class HttpTransport implements Transport {
   private sessionId: string | undefined;
   private protocolVersion: string | undefined;
   private ended = false;
-  /** A browser-signed-in server gets one ask for a fresh header per transport. */
+  /** The host has been asked for a fresh header and no request has succeeded since: another
+   * refusal is the user's to fix, not worth another ask. A success clears it, so the next expiry
+   * is asked about again. */
   private oauthAsked = false;
+  /** The ask in flight, shared by every send refused meanwhile. */
+  private asking: Promise<string | undefined> | undefined;
   /** Set after a fresh header arrives: sent instead of the resolved one, on every later post. */
   private authOverride: string | undefined;
   private readonly origin: string;
@@ -210,16 +224,35 @@ export class HttpTransport implements Transport {
     }
   }
 
+  /** The `Authorization` value a post is sent with now. */
+  private authValue(): string | undefined {
+    if (this.authOverride !== undefined) return this.authOverride;
+    for (const [k, v] of Object.entries(this.server.headers ?? {})) if (k.toLowerCase() === "authorization") return v;
+    return undefined;
+  }
+
   async send(msg: Json, signal?: AbortSignal): Promise<void> {
     if (this.ended) throw new McpError(`${this.server.name} is not connected.`);
+    const used = this.authValue();
     try {
       await this.sendOnce(msg, signal);
     } catch (err) {
       // A server that signs in through the browser and refuses the header gets one ask to the
-      // host for a current one and one retry. A second refusal is the caller's to report.
-      if (err instanceof McpError && err.signin && this.server.oauth && !this.oauthAsked && this.opts.oauthHeader) {
-        this.oauthAsked = true;
-        const fresh = await this.opts.oauthHeader();
+      // host for a current one and one retry; sends refused while the ask is out share its
+      // answer, and one that was refused with a header that has since been replaced just retries
+      // with the new one. A refusal after that is the caller's to report; a request that
+      // succeeds makes the next expiry worth asking about again.
+      if (err instanceof McpError && err.signin && this.server.oauth && this.opts.oauthHeader) {
+        let fresh: string | undefined;
+        if (this.asking) fresh = await this.asking;
+        else if (this.authOverride !== undefined && this.authOverride !== used) fresh = this.authOverride;
+        else if (!this.oauthAsked) {
+          this.oauthAsked = true;
+          this.asking = this.opts.oauthHeader(tokenPrint(used)).finally(() => {
+            this.asking = undefined;
+          });
+          fresh = await this.asking;
+        }
         if (fresh) {
           this.authOverride = fresh;
           await this.sendOnce(msg, signal);
@@ -236,11 +269,19 @@ export class HttpTransport implements Transport {
     if (typeof sid === "string" && sid !== "") this.sessionId = sid;
     if (res.status === 202 || res.status === 204) {
       res.body.resume();
+      this.oauthAsked = false;
       return;
     }
-    if (res.status === 401 || res.status === 403) {
+    if (res.status === 401 || (res.status === 403 && !this.server.oauth)) {
       res.body.resume();
-      throw new McpError(`${this.server.name} refused the credentials (HTTP ${res.status}). Check its token in Settings → MCP.`, { signin: true });
+      // A browser sign-in is renewed by signing in again; any other credential is a token the
+      // user entered.
+      throw new McpError(
+        this.server.oauth
+          ? `${this.server.name} did not accept the sign-in (HTTP ${res.status}). Sign in again in Settings → MCP.`
+          : `${this.server.name} refused the credentials (HTTP ${res.status}). Check its token in Settings → MCP.`,
+        { signin: true },
+      );
     }
     if (res.status === 404 && this.sessionId) {
       res.body.resume();
@@ -249,8 +290,10 @@ export class HttpTransport implements Transport {
     }
     if (res.status < 200 || res.status >= 300) {
       res.body.resume();
+      // A refusal of what the sign-in allows (HTTP 403) is not cured by signing in again.
       throw new McpError(`${this.server.name} answered HTTP ${res.status}.`, { changed: "maybe" });
     }
+    this.oauthAsked = false;
     const type = String(res.headers["content-type"] ?? "").toLowerCase();
     if (type.startsWith("text/event-stream")) {
       await this.readSse(res.body, msg.id);

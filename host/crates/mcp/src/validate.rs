@@ -252,7 +252,10 @@ fn validate_redirect(raw: &str) -> Result<(), Invalid> {
         .host()
         .is_some_and(|h| class_host(&h) == HostClass::Loopback);
     let port_ok = matches!(u.port(), Some(0) | Some(1024..));
+    // The listener is on 127.0.0.1 and answers at one path, so the address must be exactly that
+    // (a name could resolve to another interface in the browser).
     if u.scheme() != "http"
+        || u.host_str() != Some("127.0.0.1")
         || !loopback
         || !port_ok
         || !u.username().is_empty()
@@ -261,7 +264,7 @@ fn validate_redirect(raw: &str) -> Result<(), Invalid> {
         || u.fragment().is_some()
     {
         return Err(bad(
-            "The OAuth redirect URI is loopback http with port 0 or 1024 and above, and no credentials, query or fragment.",
+            "The OAuth redirect URI is http://127.0.0.1 with port 0 or 1024 and above, and no credentials, query or fragment.",
         ));
     }
     Ok(())
@@ -361,6 +364,14 @@ pub fn validate_server(s: &McpServer) -> Result<(), Invalid> {
                 validate_ref(v, RefPlace::Header, &format!("Header {k}"))?;
             }
             if let Some(o) = &t.oauth {
+                if let Some(secret) = &o.client_secret {
+                    if secret.kind != RefKind::Literal {
+                        return Err(bad(
+                            "The OAuth client secret is entered as a literal value.",
+                        ));
+                    }
+                    validate_ref(secret, RefPlace::Header, "OAuth client secret")?;
+                }
                 for f in [&o.client_id, &o.scope].into_iter().flatten() {
                     if f.chars().count() > MAX_OAUTH_FIELD || has_control(f) {
                         return Err(bad(
@@ -667,6 +678,7 @@ mod tests {
             "https://127.0.0.1:5000/cb",
             "http://example.com:5000/cb",
             "http://127.0.0.1:5000/cb?x=1",
+            "http://localhost:5000/cb",
         ] {
             s.transport.oauth.as_mut().unwrap().redirect_uri = Some(bad_uri.into());
             assert!(validate_server(&s).is_err(), "{bad_uri}");

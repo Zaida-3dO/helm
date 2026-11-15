@@ -33,7 +33,9 @@ import {
   type ServerStatus,
 } from "./types.ts";
 
-/** The host-side tool that answers a current `Authorization` header for a browser-signed-in server. */
+/** The host-side tool that fetches a current `Authorization` header for a browser-signed-in server.
+ * Its answer says only that the header was sent: the header itself comes back on the worker's stdin
+ * as an `mcp_oauth_header` line (see `deliverOauthHeader`), so it never sits in a file. */
 const OAUTH_HEADER_OP = "app_mcp_oauth_header";
 
 export interface BridgeOptions {
@@ -55,6 +57,9 @@ export interface McpBridge {
    * takes precedence, so calls to Claude Code's copy are refused. */
   shadowing(nativeName: string): { id: string; name: string } | undefined;
   status(): ServerStatus[];
+  /** The host's `mcp_oauth_header` line: hands the fresh `Authorization` value to whoever asked for
+   * it for `serverId`. False when nothing was waiting (the value is dropped). */
+  deliverOauthHeader(serverId: string, header: string): boolean;
   /** Ids `app_mcp_tools` may name: every enabled server. */
   serverIds(): string[];
   tools(args: { server: string; query?: string }): Promise<DiscoveryResult>;
@@ -129,6 +134,27 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
   const slots = new Slots(limits.maxConcurrent);
   let native: NativeServer[] = [];
   let closed = false;
+  /** Header asks waiting for their `mcp_oauth_header` line, by server id. */
+  const headerWaiters = new Map<string, ((header: string | undefined) => void)[]>();
+
+  /** Start waiting for the host's header line for `serverId` (register before asking, so a line
+   * that beats the reply to the ask is not missed). */
+  const expectHeader = (serverId: string, ms: number): { done: Promise<string | undefined>; cancel: () => void } => {
+    let resolve!: (h: string | undefined) => void;
+    const done = new Promise<string | undefined>((r) => (resolve = r));
+    const list = headerWaiters.get(serverId) ?? [];
+    list.push(resolve);
+    headerWaiters.set(serverId, list);
+    const cancel = () => {
+      clearTimeout(timer);
+      const now = headerWaiters.get(serverId)?.filter((w) => w !== resolve) ?? [];
+      if (now.length) headerWaiters.set(serverId, now);
+      else headerWaiters.delete(serverId);
+      resolve(undefined);
+    };
+    const timer = setTimeout(cancel, ms);
+    return { done, cancel };
+  };
 
   const emit = (e: Entry, state: ServerState, extra: { error?: string; toolCount?: number } = {}) => {
     const st: ServerStatus = { serverId: e.server.id, state, at: now() };
@@ -172,9 +198,15 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
     const e = entries.get(s.id);
     const oauthHeader =
       s.oauth && opts.hostRequest && e
-        ? async (): Promise<string | undefined> => {
-            const r = await opts.hostRequest!(OAUTH_HEADER_OP, { serverId: s.id }, { timeoutMs: 30_000 });
-            const header = r.ok ? (r.result as Json | undefined)?.header : undefined;
+        ? async (refused?: string): Promise<string | undefined> => {
+            const waiting = expectHeader(s.id, 30_000);
+            let header: string | undefined;
+            try {
+              const r = await opts.hostRequest!(OAUTH_HEADER_OP, refused ? { serverId: s.id, refused } : { serverId: s.id }, { timeoutMs: 30_000 });
+              if (r.ok) header = await waiting.done;
+            } finally {
+              waiting.cancel();
+            }
             if (typeof header !== "string" || header === "") return undefined;
             // The fresh token joins this server's redaction before anything can echo it.
             e.red.add(header);
@@ -285,6 +317,14 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
 
     status() {
       return [...entries.values()].map((e) => e.status);
+    },
+
+    deliverOauthHeader(serverId: string, header: string) {
+      const list = headerWaiters.get(serverId);
+      if (!list?.length) return false;
+      headerWaiters.delete(serverId);
+      for (const w of list) w(header);
+      return true;
     },
 
     serverIds() {

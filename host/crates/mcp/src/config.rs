@@ -9,9 +9,9 @@
 use crate::types::*;
 use crate::validate::{validate_list, Invalid};
 use helm_core::credentials::CredentialStore;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 pub const FILE_NAME: &str = "mcp-servers.json";
 const FILE_VERSION: u32 = 1;
@@ -47,7 +47,7 @@ pub fn revision_of(servers: &[McpServer]) -> String {
     helm_core::sha256_hex(helm_core::revisions::canonical_json(&v).as_bytes())
 }
 
-fn identity(server_id: &str, secret_id: &str) -> String {
+pub(crate) fn identity(server_id: &str, secret_id: &str) -> String {
     format!("mcp-literal:{server_id}:{secret_id}")
 }
 
@@ -60,6 +60,8 @@ pub struct McpStore {
     creds: CredentialStore,
     lock: Mutex<()>,
     listeners: Mutex<Vec<Listener>>,
+    /// One lock per server id for refreshing its browser sign-in (see [`crate::oauth_ops`]).
+    refresh_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl McpStore {
@@ -70,7 +72,19 @@ impl McpStore {
             creds,
             lock: Mutex::new(()),
             listeners: Mutex::new(Vec::new()),
+            refresh_locks: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The lock a server's sign-in refreshes and saves take, so two callers never spend the
+    /// same refresh token.
+    pub(crate) fn refresh_lock(&self, server_id: &str) -> Arc<Mutex<()>> {
+        self.refresh_locks
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(server_id.to_owned())
+            .or_default()
+            .clone()
     }
 
     /// The credential store this profile uses, for the browser sign-ins [`crate::oauth_ops`]
@@ -196,6 +210,16 @@ impl McpStore {
             .filter(|id| !kept.contains(id))
             .collect();
         self.forget_all(&orphans);
+        // A browser sign-in belongs to one server at one address with one set of sign-in
+        // settings: removing the server, or changing either, forgets it.
+        for old in &before {
+            let same = after.iter().find(|n| n.id == old.id).is_some_and(|n| {
+                n.transport.url == old.transport.url && n.transport.oauth == old.transport.oauth
+            });
+            if !same {
+                crate::oauth_ops::forget_sign_in(&self.creds, &old.id);
+            }
+        }
         let revision = revision_of(&after);
         for l in self
             .listeners
@@ -301,7 +325,8 @@ impl McpStore {
 
     /// One draft server with its references resolved, for a connection test. A literal secret
     /// that was typed but not saved yet is used as typed; saved ones are read from the credential
-    /// store as usual.
+    /// store as usual. A browser sign-in is attached only when the draft is at the address the
+    /// sign-in was made for.
     pub fn resolve_draft(&self, s: &McpServer) -> ResolvedServer {
         self.resolve_one(s, &|k| std::env::var(k).ok(), None)
     }
@@ -399,7 +424,7 @@ impl McpStore {
         // joins the redaction set like any other resolved secret. Without a sign-in the server
         // reports as not connected, and no chat tries it without a credential.
         if out.oauth && out.error.is_none() {
-            match crate::oauth_ops::current_access(self, s, false) {
+            match crate::oauth_ops::current_access(self, s, crate::oauth_ops::Want::IfDue) {
                 Ok(access) => {
                     out.headers
                         .insert("Authorization".into(), format!("Bearer {access}"));
@@ -481,12 +506,19 @@ fn read_secret_file(path: &str) -> Result<String, String> {
 }
 
 pub(crate) fn refs(s: &McpServer) -> impl Iterator<Item = &ValueRef> {
-    s.transport.env.values().chain(s.transport.headers.values())
+    let t = &s.transport;
+    t.env
+        .values()
+        .chain(t.headers.values())
+        .chain(t.oauth.iter().filter_map(|o| o.client_secret.as_ref()))
 }
 
 fn refs_mut(s: &mut McpServer) -> impl Iterator<Item = &mut ValueRef> {
     let t = &mut s.transport;
-    t.env.values_mut().chain(t.headers.values_mut())
+    t.env
+        .values_mut()
+        .chain(t.headers.values_mut())
+        .chain(t.oauth.iter_mut().filter_map(|o| o.client_secret.as_mut()))
 }
 
 /// The header that tells the hub whose memories a chat's calls are for.

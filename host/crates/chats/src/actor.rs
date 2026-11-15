@@ -1329,6 +1329,10 @@ impl Actor {
 
     fn on_exit(&mut self, reason: String) {
         self.stop_ended = false;
+        crate::hostcalls::sweep_tools_dir(&crate::hostcalls::tools_dir(
+            &self.sh.cfg.profile_dir,
+            &self.chat_id,
+        ));
         self.link = None;
         self.link_closing = false;
         self.out = None;

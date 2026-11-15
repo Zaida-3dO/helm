@@ -35,6 +35,24 @@ pub fn tools_dir(profile_dir: &std::path::Path, chat_id: &str) -> PathBuf {
     profile_dir.join("workers").join(chat_id).join("tools")
 }
 
+/// Empty the chat's request folder: nothing a worker left there (a request, or an answer that was
+/// never picked up) outlives the worker. Called as a worker starts and when it ends.
+pub(crate) fn sweep_tools_dir(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let path = e.path();
+        // A link or junction is unlinked, never followed.
+        let real_dir = e.file_type().is_ok_and(|t| t.is_dir() && !t.is_symlink());
+        let _ = if real_dir {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path).or_else(|_| std::fs::remove_dir(&path))
+        };
+    }
+}
+
 /// A `chat_request` from this chat's worker.
 pub(crate) fn on_request(
     sh: &Arc<Shared>,
@@ -256,6 +274,13 @@ mod tests {
         let first = w.next().await;
         assert_eq!(first, json!({"type": "mcp_config", "revision": "r1"}));
 
+        // Leftovers in the request folder are swept (and a link in it is unlinked, not followed).
+        let stale =
+            tools_dir(&h.profile.path(""), &chat).join("00000000-0000-4000-8000-0000000000bb");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("response.json"), b"{}").unwrap();
+        sweep_tools_dir(&tools_dir(&h.profile.path(""), &chat));
+        assert!(!stale.exists());
         // A chat_request is answered in the request folder, with the caller from the host.
         let id = "00000000-0000-4000-8000-0000000000aa";
         let dir = tools_dir(&h.profile.path(""), &chat).join(id);

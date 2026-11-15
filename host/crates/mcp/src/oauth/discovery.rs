@@ -16,7 +16,7 @@ const AS_WELL_KNOWN: &str = ".well-known/oauth-authorization-server";
 const OIDC_WELL_KNOWN: &str = ".well-known/openid-configuration";
 
 /// Where a server's sign-in lives, as the server itself published it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AuthServer {
     pub issuer: String,
     pub authorization_endpoint: String,
@@ -52,12 +52,27 @@ pub fn discover(
     let mut issuer: Option<Url> = None;
     for prm_url in candidates {
         if let Some(doc) = get_json(agent, &prm_url)? {
+            // The document must be about this very server (RFC 9728 section 3.3): a resource
+            // document that names another one is not trusted for this address.
+            let names = doc.get("resource").and_then(|v| v.as_str());
+            if !names.is_some_and(|n| same_address(n, base.as_str())) {
+                return Err(OauthError::BadMetadata);
+            }
             issuer = resource_issuer(&doc)?;
             break;
         }
     }
-    // 2. No resource document: the server's own address is the authorization server.
-    let issuer = issuer.unwrap_or(base);
+    // 2. No resource document: the server's own origin is the authorization server.
+    let issuer = match issuer {
+        Some(i) => i,
+        None => {
+            let mut origin = base.clone();
+            origin.set_path("/");
+            origin.set_query(None);
+            origin.set_fragment(None);
+            origin
+        }
+    };
 
     // 3. The authorization server's document, falling back to the OpenID Connect one.
     let mut doc = get_json(agent, &well_known(&issuer, AS_WELL_KNOWN))?;
@@ -89,8 +104,22 @@ fn resource_issuer(doc: &serde_json::Value) -> Result<Option<Url>, OauthError> {
     Err(OauthError::BadMetadata)
 }
 
+/// Whether two addresses are the same place, ignoring a trailing slash.
+pub(crate) fn same_address(a: &str, b: &str) -> bool {
+    match (Url::parse(a), Url::parse(b)) {
+        (Ok(a), Ok(b)) => a.as_str().trim_end_matches('/') == b.as_str().trim_end_matches('/'),
+        _ => false,
+    }
+}
+
 /// The endpoints from an authorization server document (same shape in both families).
 fn as_server(doc: &serde_json::Value, issuer: &Url) -> Result<AuthServer, OauthError> {
+    // The document must name the issuer it was fetched for (RFC 8414 section 3.3), or a server
+    // could pass off another one's endpoints.
+    let named = doc.get("issuer").and_then(|v| v.as_str());
+    if !named.is_some_and(|n| same_address(n, issuer.as_str())) {
+        return Err(OauthError::BadMetadata);
+    }
     let field = |name: &str| -> Result<String, OauthError> {
         let raw = doc
             .get(name)
@@ -223,16 +252,24 @@ mod tests {
         );
         // Missing pieces, non-https endpoints and another host are clean refusals.
         for bad in [
-            serde_json::json!({"authorization_endpoint": "https://as.example/auth"}),
+            serde_json::json!({"issuer": "https://as.example", "authorization_endpoint": "https://as.example/auth"}),
             serde_json::json!({
+                "issuer": "https://as.example",
                 "authorization_endpoint": "http://as.example/auth",
                 "token_endpoint": "https://as.example/token"
             }),
             serde_json::json!({
+                "issuer": "https://as.example",
                 "authorization_endpoint": "https://elsewhere.example/auth",
                 "token_endpoint": "https://as.example/token"
             }),
             serde_json::json!("not an object"),
+            // A document that names another issuer than the one it was fetched for.
+            serde_json::json!({
+                "issuer": "https://elsewhere.example",
+                "authorization_endpoint": "https://as.example/auth",
+                "token_endpoint": "https://as.example/token"
+            }),
         ] {
             assert!(as_server(&bad, &issuer).is_err(), "{bad}");
         }

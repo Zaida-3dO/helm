@@ -131,6 +131,11 @@ export function serve(opts: ServeOptions): void {
         // The MCP client's configuration; no response is expected.
         if (!driver.hostLine?.(cmd)) diag("mcp_config ignored: no MCP client in this worker");
         return;
+      case "mcp_oauth_header":
+        // The answer to a header ask for a browser-signed-in server; no response is expected. The
+        // line carries a credential, so nothing of it is logged.
+        if (!driver.hostLine?.(cmd)) diag("mcp_oauth_header ignored: no MCP client in this worker");
+        return;
       case "set_permission_mode":
         // The composer's permission-mode pick; applied before the next prompt, no response.
         if (!driver.hostLine?.(cmd)) diag("set_permission_mode ignored: this worker has no permission modes");

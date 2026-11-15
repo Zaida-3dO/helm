@@ -25,7 +25,7 @@ import { decideGate, decideStop, gateHook, gatesWanted, stopHook, WORKFLOW_GATE_
 import { RequestChannel } from "../../hosttools/channel.ts";
 import { HostToolServer, SERVER_NAME, sdkMcpConfig, toolPrefix } from "../../hosttools/server.ts";
 import { planUsageFromRateLimit } from "../../usage/rateLimit.ts";
-import { applyConfigLine, asHostToolBridge, createMcpBridge, duplicateMcpRefusal, nativeFromInit, type McpBridge } from "../../mcp/index.ts";
+import { applyConfigLine, applyOauthHeaderLine, asHostToolBridge, createMcpBridge, duplicateMcpRefusal, nativeFromInit, type McpBridge } from "../../mcp/index.ts";
 
 /** The largest prompt text the worker will submit. */
 export const MAX_SUBMISSION_TEXT_BYTES = 2 * 1024 * 1024;
@@ -395,6 +395,7 @@ export class ClaudeDriver implements Driver {
   hostLine(cmd: Json): boolean {
     if (cmd.type === "set_permission_mode") return this.setPermissionMode(cmd);
     if (cmd.type === "guard_verdict") return this.guard?.onVerdict(cmd) ?? false;
+    if (cmd.type === "mcp_oauth_header") return this.mcp ? applyOauthHeaderLine(this.mcp, cmd) : false;
     return this.mcp ? applyConfigLine(this.mcp, cmd) : false;
   }
 
