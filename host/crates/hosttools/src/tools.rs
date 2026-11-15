@@ -198,6 +198,20 @@ async fn update_project(ctx: ToolCtx, a: Value) -> ToolResult {
         upd["name"] = json!(n);
         any = true;
     }
+    // One plain line of what the project is for; "none" or blank clears. The project op checks the
+    // length and the characters.
+    if let Some(d) = a.get("description") {
+        let d = d
+            .as_str()
+            .map(str::trim)
+            .ok_or_else(|| ToolError::refused("description must be text."))?;
+        upd["description"] = if d.eq_ignore_ascii_case("none") {
+            Value::Null
+        } else {
+            json!(d)
+        };
+        any = true;
+    }
     if let Some(p) = a.get("pinned").and_then(Value::as_bool) {
         upd["pinned"] = json!(p);
         any = true;
@@ -348,13 +362,14 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .async_tool(
         ToolSpec::write(
             "app_update_project",
-            format!("Rename, pin or unpin, recolour (a palette name, #rrggbb or none), give it an icon (an emoji, a library icon as lib:<name>, or none), archive or restore a project, or set a board's folder (primaryFolder: an absolute folder where the board's new chats start; it is added as a folder project when Helm has none over it). Archiving archives its chats; working ones are stopped in the background.{EXPLICIT}"),
+            format!("Rename, pin or unpin, recolour (a palette name, #rrggbb or none), describe it in one line (description, at most 200 characters; none clears), give it an icon (an emoji, a library icon as lib:<name>, or none), archive or restore a project, or set a board's folder (primaryFolder: an absolute folder where the board's new chats start; it is added as a folder project when Helm has none over it). Archiving archives its chats; working ones are stopped in the background.{EXPLICIT}"),
             obj(
                 json!({
                     "projectId": {"type": "string"},
                     "name": {"type": "string", "minLength": 1, "maxLength": 512},
                     "pinned": {"type": "boolean"},
                     "color": {"type": "string", "maxLength": 32},
+                    "description": {"type": "string", "maxLength": 200, "description": "One plain line telling chats and people what the project is for; none clears."},
                     "icon": {"type": "string", "maxLength": 128, "description": "An emoji, lib:<name> or none."},
                     "archived": {"type": "boolean"},
                     "primaryFolder": {"type": "string", "maxLength": 4096, "description": "For a board: the absolute folder its new chats start in."}

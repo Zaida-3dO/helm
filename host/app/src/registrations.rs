@@ -272,6 +272,7 @@ pub fn host_tools() -> helm_hosttools::HostToolRegistry {
     helm_skills::register_host_tools(&mut reg);
     helm_dictation::register_host_tools(&mut reg);
     helm_memindex::register_host_tools(&mut reg);
+    helm_projects::startup::register_host_tools(&mut reg);
     reg
 }
 
@@ -434,6 +435,7 @@ pub fn allow_kinds() -> helm_consent::AllowKinds {
     helm_relay::register_allow_kinds(&mut k);
     helm_mcp::gmail::register_allow_kinds(&mut k);
     helm_memindex::register_allow_kinds(&mut k);
+    helm_projects::startup::register_allow_kinds(&mut k);
     k
 }
 
@@ -503,6 +505,10 @@ pub fn launch_contributors(
     let mut c = helm_workers::contrib::LaunchContributors::new();
     // Whose chat this is opens the system prompt, ahead of the addendum.
     c.add(Arc::new(helm_profiles::launch::WhoLaunch {
+        db: db.clone(),
+    }));
+    // Where the chat sits (its board and folder), and the switch for the startup Stop hook.
+    c.add(Arc::new(helm_projects::launch::ProjectLaunch {
         db: db.clone(),
     }));
     c.add(Arc::new(a));
@@ -599,6 +605,8 @@ mod host_tool_tests {
             "app_add_skill",
             "app_remove_skill",
             "app_memory_index",
+            "app_startup_done",
+            "app_project_startup",
         ];
         assert_eq!(names(Default::default()), base);
         let delta = |k: helm_hosttools::LaunchKeys| -> Vec<String> {

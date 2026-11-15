@@ -11,6 +11,8 @@ use ts_rs::TS;
 
 /// The longest project description, in characters.
 pub const MAX_DESCRIPTION_CHARS: usize = 200;
+/// The longest startup instructions text, in characters.
+pub const MAX_STARTUP_CHARS: usize = 4_000;
 
 /// A project's kind: a folder project made in Helm, or a board project mirrored read-only from
 /// Agent Standup.
@@ -86,6 +88,9 @@ pub struct ProjectNode {
     /// One plain line telling agents and people what the project is for, at most
     /// [`MAX_DESCRIPTION_CHARS`] characters; `null` when there is none.
     pub description: Option<String>,
+    /// What every new chat on this project does first, at most [`MAX_STARTUP_CHARS`] characters
+    /// over several lines; `null` when there is none.
+    pub startup_instructions: Option<String>,
     /// A named colour or `#rrggbb`, lowercase.
     pub colour: Option<String>,
     pub pinned: bool,
@@ -304,6 +309,10 @@ pub struct ProjectUpdateArgs {
     #[serde(default, deserialize_with = "double_option")]
     #[ts(optional, type = "string | null")]
     pub description: Option<Option<String>>,
+    /// Several lines, at most [`MAX_STARTUP_CHARS`] characters; `null` or blank clears.
+    #[serde(default, deserialize_with = "double_option")]
+    #[ts(optional, type = "string | null")]
+    pub startup_instructions: Option<Option<String>>,
     #[serde(default)]
     #[ts(optional)]
     pub pinned: Option<bool>,

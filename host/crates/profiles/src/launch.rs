@@ -170,5 +170,43 @@ mod tests {
                 "You are working with Alex (their Helm profile). Likes short answers. This chat runs on {device} under that computer's Claude sign-in. Other people in this household: Sam. Their chats and memories are not yours to read unless Alex asks."
             )
         );
+
+        // Whatever started a chat (a schedule, Telegram or a chat's own tool all create it through
+        // the same store call), it is told who it works with: the person whose profile was
+        // active when it was made.
+        let make = |active: Option<&str>| {
+            db.write(|tx| -> Result<_, store::ProfileError> {
+                store::set_active(tx, active)?;
+                Ok(helm_chats::store::create_chat(
+                    tx,
+                    "C:/w/proj",
+                    None,
+                    None,
+                    5,
+                )?)
+            })
+            .unwrap()
+        };
+        let named = |id: &str| {
+            let t = db.snapshot(|tx| who_text(tx, id)).unwrap().unwrap();
+            t.strip_prefix("You are working with ")
+                .unwrap()
+                .split(' ')
+                .next()
+                .unwrap()
+                .to_owned()
+        };
+        let sam = db
+            .snapshot(|tx| store::list(tx))
+            .unwrap()
+            .into_iter()
+            .find(|p| p.name == "Sam")
+            .unwrap();
+        assert_eq!(named(&make(Some(&sam.id))), "Sam");
+        assert_eq!(
+            named(&make(None)),
+            "Alex",
+            "no choice means the home profile"
+        );
     }
 }

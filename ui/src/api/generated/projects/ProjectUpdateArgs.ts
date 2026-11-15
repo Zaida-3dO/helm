@@ -8,7 +8,11 @@ icon?: string | null, colour?: string | null,
 /**
  * One line, at most [`MAX_DESCRIPTION_CHARS`] characters; `null` or blank clears.
  */
-description?: string | null, pinned?: boolean, collapsed?: boolean, 
+description?: string | null, 
+/**
+ * Several lines, at most [`MAX_STARTUP_CHARS`] characters; `null` or blank clears.
+ */
+startupInstructions?: string | null, pinned?: boolean, collapsed?: boolean, 
 /**
  * Reorder within the sibling pin group: place before this project (`null` = last). Rewrites the
  * group's positions 0..n atomically; a no-op move writes nothing.
