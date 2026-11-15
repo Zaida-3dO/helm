@@ -114,7 +114,8 @@ pub fn knowledge_text(note: Option<&str>, hub_server: Option<&str>) -> Option<St
     if let Some(id) = hub_server.map(str::trim).filter(|i| !i.is_empty()) {
         parts.push(format!(
             "Shared memories are connected (MCP server {id}). When its memory_search tool is \
-             available, search it before non-trivial work for lessons and conventions that apply."
+             available, search it before non-trivial work for lessons and conventions that apply; \
+             cite hits by title and date, and read a hit in full before relying on it."
         ));
     }
     (!parts.is_empty()).then(|| parts.join("\n\n"))

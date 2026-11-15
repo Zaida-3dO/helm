@@ -116,11 +116,11 @@ pub fn presets() -> Vec<McpPreset> {
         preset(
             "helm_hub",
             "Helm hub memory",
-            "Shared memory on the Helm hub: keyword search over saved memories.",
+            "Shared memory on the Helm hub: hybrid search over memories, notes and chat history; dates in the query are understood.",
             "http://your-hub.example/mcp",
             true,
             &["memory_search"],
-            "The hub's memory search is keyword-only (no vectors in v1): search with the distinctive words a memory would contain.",
+            "Hybrid search over memories, notes and chat history; dates in the query are understood. Search with the user's own words, dates left in; cite hits by title and date; read a hit in full before relying on it.",
         ),
         google_accounts(),
     ]
