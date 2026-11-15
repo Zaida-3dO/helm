@@ -53,6 +53,11 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("chat_triage", Data),
     ("chat_flags", Data),
     ("chat_turn_usage", Data),
+    // What a roll-over successor continues, and what a chat was told and reported of its project's
+    // startup instructions (the instructions themselves are a column of project_local).
+    ("chat_succession", Data),
+    ("chat_startup", Data),
+    ("chat_startup_sent", Data),
     ("agent_waits", Data),
     ("saved_items", Data),
     ("saved_item_notes", Data),

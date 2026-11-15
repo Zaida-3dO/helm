@@ -21,6 +21,7 @@
 //! | `fork_carry` | a message fork's carried history, sent once with its first prompt ([`crate::fork`]) |
 //! | `chat_file_cleanup` | files a hard delete left behind, removed after commit and retried at startup ([`crate::delete`]) |
 //! | `submission_context` | the panel-context block a composer send carried |
+//! | `chat_succession` | a roll-over successor's predecessor, read when the successor's first message is sent ([`crate::rollover`]) |
 //! | `chat_turn_usage` | per turn: the tokens and cost it used, projected from the session log's `usage` entries ([`crate::turn_usage`]) |
 //! | view `chat_search_source` | the searchable message text the search crate indexes ([`crate::search_source`]) |
 //!
@@ -179,6 +180,10 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
          CREATE TABLE IF NOT EXISTS submission_context (
              submission_id  TEXT PRIMARY KEY REFERENCES submissions(id) ON DELETE CASCADE,
              text           TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS chat_succession (
+             chat_id         TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+             predecessor_id  TEXT NOT NULL
          );
          CREATE TABLE IF NOT EXISTS chat_turn_usage (
              chat_id             TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,

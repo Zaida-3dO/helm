@@ -98,6 +98,7 @@ const CONTEXT_LABEL: Record<string, string> = {
   afk: 'AFK',
   gatekeeper: 'Answered for you',
   interruption: 'Interruption',
+  startup: 'Startup',
 };
 
 function Thinking({ text, streaming, onLink }: { text: string; streaming: boolean; onLink: RowContext['onLink'] }) {

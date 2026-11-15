@@ -2365,6 +2365,97 @@ async fn composer_sends_carry_the_built_context_block() {
     assert_eq!(calls[1].1, 0, "before the first launch the generation is 0");
 }
 
+/// A chat that has not started is offered its project's startup text with its first message: the
+/// text rides the prompt ahead of the rest of the context, one visible line says so, a roll-over
+/// successor's predecessor is passed on, and a chat that has run is never asked again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_chats_first_message_carries_the_startup_text_and_a_started_chat_is_not_asked() {
+    use crate::types::SendOrigin;
+    struct Seam(Mutex<Vec<(String, Option<String>)>>);
+    impl crate::seams::StartupSeam for Seam {
+        fn first_send(
+            &self,
+            _tx: &rusqlite::Transaction<'_>,
+            _chat_id: &str,
+            submission_id: &str,
+            predecessor: Option<&str>,
+        ) -> rusqlite::Result<Option<crate::seams::StartupInjection>> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((submission_id.to_owned(), predecessor.map(Into::into)));
+            Ok(Some(crate::seams::StartupInjection {
+                context: "Startup: make a worktree.".into(),
+                row: "Startup instructions were added to this chat".into(),
+            }))
+        }
+    }
+    let mut h = harness();
+    let chat = h.create().await;
+    let seam = Arc::new(Seam(Mutex::new(vec![])));
+    h.rt.set_startup_seam(seam.clone());
+    h.rt.db()
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO chat_succession(chat_id, predecessor_id) VALUES (?1, 'old-chat')",
+                [&chat],
+            )
+        })
+        .unwrap();
+    let builder = crate::seams::SendContext(Arc::new(Ctx(Mutex::new(vec![]))));
+    let rt = h.rt.clone();
+    let (c2, b2) = (chat.clone(), builder.clone());
+    tokio::task::spawn_blocking(move || {
+        crate::submit::chat_send(
+            &rt,
+            send_args(&c2, SendOrigin::Composer, json!({"path": "src/a.rs"})),
+            Some(&b2),
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    assert_eq!(
+        p["context"], "Startup: make a worktree.\n\nLooking at: src/a.rs",
+        "the startup text comes first"
+    );
+    assert_eq!(
+        h.col("SELECT text FROM messages WHERE role = 'context' AND json_extract(details, '$.contextKind') = 'startup'"),
+        ["Startup instructions were added to this chat"]
+    );
+    ack(&w, &p).await;
+    w.emit(json!({"type": "agent_start"})).await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("idle", |h| h.status(&chat) == "idle").await;
+    let rt = h.rt.clone();
+    let c2 = chat.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::submit::chat_send(&rt, send_args(&c2, SendOrigin::Action, json!({})), None)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let p = w.expect("prompt").await;
+    assert!(
+        p.get("context").is_none(),
+        "a chat that has run carries no startup text"
+    );
+    assert_eq!(
+        seam.0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|c| c.1.clone())
+            .collect::<Vec<_>>(),
+        [Some("old-chat".to_owned())],
+        "asked once, with the predecessor"
+    );
+}
+
 /// An approval puts the chat in Needs you and on the badge; answering it takes it off.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn attention_follows_the_waiting_tracker() {

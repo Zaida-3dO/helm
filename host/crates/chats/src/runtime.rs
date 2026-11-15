@@ -647,6 +647,9 @@ pub(crate) struct Shared {
     pub host: std::sync::OnceLock<crate::hostcalls::HostSeam>,
     /// AFK's say over interactions and turns ([`crate::seams::AfkPolicy`]), installed once.
     pub afk: std::sync::OnceLock<Arc<dyn crate::seams::AfkPolicy>>,
+    /// A project's startup instructions for a chat's first message ([`crate::seams::StartupSeam`]),
+    /// installed once. Without it no message carries any.
+    pub startup: std::sync::OnceLock<Arc<dyn crate::seams::StartupSeam>>,
     /// The question gate ([`crate::seams::QuestionGate`]), installed once. Without it every card
     /// follows the normal path.
     pub gate: std::sync::OnceLock<Arc<dyn crate::seams::QuestionGate>>,
@@ -694,6 +697,7 @@ impl ChatRuntime {
                 autocomplete: Mutex::new(Default::default()),
                 host: std::sync::OnceLock::new(),
                 afk: std::sync::OnceLock::new(),
+                startup: std::sync::OnceLock::new(),
                 gate: std::sync::OnceLock::new(),
                 local: std::sync::OnceLock::new(),
                 local_queue: Mutex::new(HashMap::new()),
@@ -1013,6 +1017,14 @@ impl ChatRuntime {
     pub fn set_afk_policy(&self, p: Arc<dyn crate::seams::AfkPolicy>) {
         if self.sh.afk.set(p).is_err() {
             log::warn!("an AFK policy is already installed; keeping the first");
+        }
+    }
+
+    /// Install the project startup seam (once). Without it no first message carries startup
+    /// instructions.
+    pub fn set_startup_seam(&self, s: Arc<dyn crate::seams::StartupSeam>) {
+        if self.sh.startup.set(s).is_err() {
+            log::warn!("a startup seam is already installed; keeping the first");
         }
     }
 

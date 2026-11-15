@@ -261,6 +261,18 @@ async fn finish(
             chat.id
         );
     }
+    // Told before its first message goes out, so the project's startup carries on from this chat's.
+    if let Err(e) = rt.db().write(|tx| {
+        tx.execute(
+            "INSERT OR REPLACE INTO chat_succession(chat_id, predecessor_id) VALUES (?1, ?2)",
+            [&new_id, &chat.id],
+        )
+    }) {
+        log::warn!(
+            "roll over of {}: the successor's predecessor was not recorded: {e}",
+            chat.id
+        );
+    }
     let title: String = chat.title.chars().take(200).collect();
     let _ = crate::titles::rename(rt, &new_id, &format!("{title} (continued)"));
     let sent = crate::submit::chat_send(
