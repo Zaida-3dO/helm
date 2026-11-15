@@ -5,18 +5,20 @@
 //!
 //! - the step cannot be undone, or the model rates its risk high;
 //! - the model's confidence is below the bar from the settings;
-//! - the choice is not one of the offered labels, or is free text on a card that has no free
-//!   text box;
-//! - the question or the chosen option matches the hard-to-undo word list ([`hard_to_undo`]);
+//! - the choice is not one of the offered labels. A card's free-text box is for the user: the
+//!   gate never writes its own words back to the agent as their answer, so a steered judge
+//!   cannot hand the agent instructions;
+//! - the question, its header, the chosen option or that option's description matches the
+//!   hard-to-undo word list ([`hard_to_undo`]);
 //! - the chat runs on a local model: its words never go to Claude, and this build has no local
 //!   judge, so the card goes to the user as it is.
 //!
 //! "Merge" is deliberately not on the word list: low-risk work merges and is reviewed after;
 //! the landing guard and the review flow still govern the merge itself.
 //!
-//! [`Limiter`] holds the limits: at most two judgements at once and twenty waiting, sixty an
-//! hour; past any of them the card passes to the user. Three failures in ten minutes pause the
-//! gate for fifteen minutes.
+//! [`Limiter`] holds the limits: at most two judgements at once and twenty waiting their turn,
+//! sixty an hour; past any of them the card passes to the user. A waiting judgement starts only
+//! when a running one ends. Three failures in ten minutes pause the gate for fifteen minutes.
 
 use serde_json::Value;
 
@@ -97,8 +99,12 @@ pub struct ModelAnswer {
 pub struct CardFacts {
     /// The question in the user's terms (title and message joined), for the word list.
     pub question: String,
+    /// The card's short topic line, if it has one.
+    pub header: String,
     pub options: Vec<String>,
-    pub allow_other: bool,
+    /// Each option's description, in the options' order (empty where an option has none).
+    /// A question often keeps its substance here rather than in its labels.
+    pub descriptions: Vec<String>,
 }
 
 /// The decision for one answered card.
@@ -122,11 +128,14 @@ pub fn route(local_chat: bool, bar: f64, card: &CardFacts, a: &ModelAnswer) -> D
     if choice.is_empty() {
         return Decision::Escalate;
     }
-    let offered = card.options.iter().any(|o| o.trim() == choice);
-    if !offered && !card.allow_other {
+    let Some(at) = card.options.iter().position(|o| o.trim() == choice) else {
         return Decision::Escalate;
-    }
-    if hard_to_undo(&card.question) || hard_to_undo(choice) {
+    };
+    let description = card.descriptions.get(at).map(String::as_str).unwrap_or("");
+    if [card.question.as_str(), &card.header, choice, description]
+        .iter()
+        .any(|t| hard_to_undo(t))
+    {
         return Decision::Escalate;
     }
     Decision::Decide {
@@ -307,15 +316,22 @@ impl Limiter {
         Ok(slot)
     }
 
-    /// A judgement ended: give the slot back. A waiting job that starts its move takes the
-    /// waiting slot back and runs.
-    pub fn start_running(&mut self, slot: Slot) {
-        if slot == Slot::Waiting {
-            self.waiting = self.waiting.saturating_sub(1);
-            self.running += 1;
+    /// A waiting job asks to run. True when it may: a running slot was free, and it moved
+    /// from the waiting count to the running one. False leaves it waiting. A job admitted
+    /// straight into a running slot may always run.
+    pub fn start_running(&mut self, slot: Slot) -> bool {
+        match slot {
+            Slot::Running => true,
+            Slot::Waiting if self.running < MAX_RUNNING => {
+                self.waiting = self.waiting.saturating_sub(1);
+                self.running += 1;
+                true
+            }
+            Slot::Waiting => false,
         }
     }
 
+    /// A judgement ended: give the slot back.
     pub fn release(&mut self, slot: Slot) {
         match slot {
             Slot::Running => self.running = self.running.saturating_sub(1),
@@ -354,8 +370,9 @@ mod tests {
     fn card() -> CardFacts {
         CardFacts {
             question: "Which name should the new folder use?".into(),
+            header: "Folder".into(),
             options: vec!["reports".into(), "archive".into()],
-            allow_other: true,
+            descriptions: vec!["Next to the other reports".into(), String::new()],
         }
     }
 
@@ -413,18 +430,38 @@ mod tests {
                 },
             ),
             (
-                "a choice that is not an offered label, with no free-text box",
+                "a choice that is not an offered label",
+                |a, _| a.choice = Some("something else".into()),
+                Decision::Escalate,
+            ),
+            (
+                "free text never decides, even where the card has a box for it",
+                |a, _| a.choice = Some("write it down instead".into()),
+                Decision::Escalate,
+            ),
+            (
+                "the chosen option's description names dropping",
                 |a, c| {
-                    a.choice = Some("something else".into());
-                    c.allow_other = false;
+                    c.question = "Which cleanup?".into();
+                    c.options = vec!["Option A".into(), "Option B".into()];
+                    c.descriptions = vec!["drops the users table".into(), "keeps it".into()];
+                    a.choice = Some("Option A".into());
                 },
                 Decision::Escalate,
             ),
             (
-                "free text is allowed on a card that has the box",
-                |a, _| a.choice = Some("write it down instead".into()),
+                "the header names production",
+                |_, c| c.header = "Production".into(),
+                Decision::Escalate,
+            ),
+            (
+                "a hard word in an option not chosen leaves the choice alone",
+                |a, c| {
+                    c.descriptions = vec![String::new(), "deletes the old one".into()];
+                    a.choice = Some("reports".into());
+                },
                 Decision::Decide {
-                    choice: "write it down instead".into(),
+                    choice: "reports".into(),
                     reason: "The chat already writes its output there.".into(),
                     confidence: 0.8,
                     risk: Risk::Low,
@@ -522,9 +559,18 @@ mod tests {
             Err(PassReason::Limit),
             "and twenty is the most waiting"
         );
-        l.start_running(Slot::Waiting);
-        assert_eq!(l.running, MAX_RUNNING + 1, "the waiting job is now running");
-        assert_eq!(l.waiting, MAX_WAITING - 1);
+        assert!(
+            !l.start_running(Slot::Waiting),
+            "a waiting job never runs past the limit"
+        );
+        assert_eq!((l.running, l.waiting), (MAX_RUNNING, MAX_WAITING));
+        assert!(l.start_running(Slot::Running), "a running slot just runs");
+        l.release(Slot::Running);
+        assert!(
+            l.start_running(Slot::Waiting),
+            "a running job ended: the next waiting one takes its place"
+        );
+        assert_eq!((l.running, l.waiting), (MAX_RUNNING, MAX_WAITING - 1));
         l.running = 0;
         l.waiting = 0;
         l.starts.clear();

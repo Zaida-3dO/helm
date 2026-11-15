@@ -3,8 +3,8 @@
 //!
 //! | op | args | result |
 //! |---|---|---|
-//! | `gate_list` | `{filter?, query?, limit?}` | `{rows: GateAsk[]}` — `filter` is `all` (default), `decided`, `asked` (the ones kept for the user), `failed` or `review` (decided rows still waiting for the user's mark) |
-//! | `gate_review` | `{id, review, note?}` | mark a decided row `fine` or `should_have_asked`; an answered escalation may be marked `didnt_need_me` (note at most 300 characters) |
+//! | `gate_list` | `{filter?, query?, limit?}` | `{rows: GateAsk[]}` for the current person — `filter` is `all` (default), `decided`, `asked` (the ones kept for the user), `failed` or `review` (decided rows still waiting for the user's mark) |
+//! | `gate_review` | `{id, review, note?}` | mark a decided row `fine` or `should_have_asked`, or an escalated one `didnt_need_me` (note at most 300 characters); any other pairing is refused |
 //! | `gate_change_answer` | `{id, answer}` | the user's correction of a decided row; it goes into the chat as an Answer-origin message |
 //! | `gate_settings_get` | `{}` | the record for the current person, plus the pause state and the bar it implies |
 //! | `gate_settings_save` | `{settings}` | strict save, then the view |
@@ -70,25 +70,15 @@ fn view(ctx: &OpCtx) -> Result<Value, ApiError> {
 /// with none use the same fallback key.
 fn current_settings(ctx: &OpCtx) -> Result<GateSettings, ApiError> {
     let db = ctx.services.need::<helm_core::db::Database>()?;
-    db.snapshot(|tx| {
-        let profile = helm_core::prefs::read(tx, "activeProfile")
-            .and_then(|v| v.as_str().map(str::to_owned))
-            .unwrap_or_default();
-        crate::store::load_settings(tx, &profile)
-    })
-    .map_err(|e: rusqlite::Error| ApiError::internal(e.to_string()))
+    db.snapshot(|tx| crate::store::load_settings(tx, &crate::store::active_profile(tx)))
+        .map_err(|e: rusqlite::Error| ApiError::internal(e.to_string()))
 }
 
 fn save(ctx: &OpCtx, s: &GateSettings) -> Result<(), ApiError> {
     let db = ctx.services.need::<helm_core::db::Database>()?;
     let owned = s.clone();
-    db.write(|tx| {
-        let profile = helm_core::prefs::read(tx, "activeProfile")
-            .and_then(|v| v.as_str().map(str::to_owned))
-            .unwrap_or_default();
-        crate::store::save_settings(tx, &profile, &owned)
-    })
-    .map_err(|e: rusqlite::Error| ApiError::internal(e.to_string()))?;
+    db.write(|tx| crate::store::save_settings(tx, &crate::store::active_profile(tx), &owned))
+        .map_err(|e: rusqlite::Error| ApiError::internal(e.to_string()))?;
     ctx.events
         .emit(helm_ipc::AppEvent::new("gate").with("what", "settings"));
     Ok(())

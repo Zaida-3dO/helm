@@ -81,6 +81,11 @@ pub fn chat_profile(tx: &Transaction<'_>, chat_id: &str) -> String {
     if let Some(p) = of_chat.filter(|p| !p.is_empty()) {
         return p;
     }
+    active_profile(tx)
+}
+
+/// The person this PC is currently set to; the empty key when none is.
+pub fn active_profile(tx: &Transaction<'_>) -> String {
     helm_core::prefs::read(tx, "activeProfile")
         .and_then(|v| v.as_str().map(str::to_owned))
         .unwrap_or_default()
@@ -296,33 +301,59 @@ pub fn ask(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<Option<GateAsk>> 
 
 /// Filters for the list: `all`, `decided`, `asked` (the ones that reached the user), `failed`,
 /// and `review` — decided rows still waiting for their seven days or their verdict from the
-/// user. Search matches the question, the chat title, the choice and the reason.
+/// user. Search matches the question, the chat title, the choice and the reason, taking the
+/// words literally (`%` and `_` are not wildcards).
+///
+/// Only one person's rows come back, with the rows that belong to no one. A verdict that never
+/// reached its card (`withdrawn`: the card was closed before Helm answered) shows under `all`
+/// only, so the other filters never list a choice Helm did not make.
 pub fn list(
     tx: &Transaction<'_>,
+    profile_id: &str,
     filter: &str,
     query: &str,
     limit: i64,
     now: i64,
 ) -> rusqlite::Result<Vec<GateAsk>> {
     let where_ = match filter {
-        "decided" => "verdict = 'decided'",
-        "asked" => "verdict = 'escalated'",
-        "failed" => "verdict = 'failed'",
+        "decided" => "verdict = 'decided' AND state != 'withdrawn'",
+        "asked" => "verdict = 'escalated' AND state != 'withdrawn'",
+        "failed" => "verdict = 'failed' AND state != 'withdrawn'",
         "review" => "verdict = 'decided' AND state = 'open' AND review = 'pending'",
         _ => "1",
     };
     let q = query.trim();
-    let like = format!("%{q}%");
+    let like = if q.is_empty() {
+        String::new()
+    } else {
+        let escaped = q
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        format!("%{escaped}%")
+    };
     let sql = format!(
         "SELECT {COLS} FROM gate_asks WHERE {where_} \
-         AND (?1 = '' OR question LIKE ?1 OR chat_title LIKE ?1 \
-              OR COALESCE(choice, '') LIKE ?1 OR COALESCE(reason, '') LIKE ?1) \
+         AND (profile_id = ?4 OR profile_id = '') \
+         AND (?1 = '' OR question LIKE ?1 ESCAPE '\\' OR chat_title LIKE ?1 ESCAPE '\\' \
+              OR COALESCE(choice, '') LIKE ?1 ESCAPE '\\' \
+              OR COALESCE(reason, '') LIKE ?1 ESCAPE '\\') \
          AND asked_at >= ?3 \
          ORDER BY asked_at DESC LIMIT ?2"
     );
     let mut st = tx.prepare(&sql)?;
-    let rows = st.query_map(params![like, limit, now - RETENTION_MS], row)?;
+    let rows = st.query_map(params![like, limit, now - RETENTION_MS, profile_id], row)?;
     rows.collect()
+}
+
+/// Whether a review mark fits a verdict: "fine" and "should have asked me" mark a decision
+/// Helm made, "didn't need me" marks a question it handed to the user.
+pub fn mark_fits(verdict: &str, review: &str) -> bool {
+    match review {
+        "fine" | "should_have_asked" => verdict == "decided",
+        "didnt_need_me" => verdict == "escalated",
+        _ => false,
+    }
 }
 
 /// The user's marked examples for one person: at most six "should have asked me" (things the
@@ -362,21 +393,21 @@ pub fn examples(tx: &Transaction<'_>, profile_id: &str) -> rusqlite::Result<Vec<
     Ok(out)
 }
 
-/// Mark one decided row reviewed. False when the row is gone or was already marked.
+/// Mark one row reviewed, once, with a mark that fits its verdict ([`mark_fits`]). The row as
+/// it stands comes back either way; `None` when it is gone.
 pub fn review(
     tx: &Transaction<'_>,
     id: &str,
     review: &str,
     note: Option<&str>,
 ) -> rusqlite::Result<Option<GateAsk>> {
-    let changed = tx.execute(
+    tx.execute(
         "UPDATE gate_asks SET review = ?2, review_note = ?3
-         WHERE id = ?1 AND verdict IN ('decided', 'escalated') AND review = 'pending'",
+         WHERE id = ?1 AND review = 'pending'
+           AND ((?2 IN ('fine', 'should_have_asked') AND verdict = 'decided')
+                OR (?2 = 'didnt_need_me' AND verdict = 'escalated'))",
         params![id, review, note],
-    )? > 0;
-    if !changed {
-        return ask(tx, id);
-    }
+    )?;
     ask(tx, id)
 }
 
@@ -386,6 +417,15 @@ pub fn veto(tx: &Transaction<'_>, id: &str, now: i64) -> rusqlite::Result<bool> 
         "UPDATE gate_asks SET state = 'vetoed', answered_at = ?2
          WHERE id = ?1 AND verdict = 'decided' AND state IN ('open', 'kept')",
         params![id, now],
+    )? > 0)
+}
+
+/// Undo a [`veto`] whose correction never reached the chat: the row goes back to `was`.
+pub fn unveto(tx: &Transaction<'_>, id: &str, was: &str) -> rusqlite::Result<bool> {
+    Ok(tx.execute(
+        "UPDATE gate_asks SET state = ?2, answered_at = NULL
+         WHERE id = ?1 AND state = 'vetoed' AND ?2 IN ('open', 'kept')",
+        params![id, was],
     )? > 0)
 }
 
@@ -491,7 +531,9 @@ mod tests {
             .unwrap();
         assert!(!again, "the same (chat, request) never gets a second row");
         assert_eq!(
-            db.snapshot(|tx| list(tx, "all", "", 50, T0)).unwrap().len(),
+            db.snapshot(|tx| list(tx, "", "all", "", 50, T0))
+                .unwrap()
+                .len(),
             1
         );
 
@@ -588,7 +630,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            db.snapshot(|tx| list(tx, "review", "", 50, T0 + DAY))
+            db.snapshot(|tx| list(tx, "", "review", "", 50, T0 + DAY))
                 .unwrap()
                 .len(),
             1,
@@ -596,7 +638,7 @@ mod tests {
         );
         assert_eq!(db.write(|tx| mark_kept(tx, T0 + 8 * DAY)).unwrap(), 1);
         assert!(db
-            .snapshot(|tx| list(tx, "review", "", 50, T0 + 8 * DAY))
+            .snapshot(|tx| list(tx, "", "review", "", 50, T0 + 8 * DAY))
             .unwrap()
             .is_empty());
         assert!(db.write(|tx| veto(tx, "a2", T0 + 8 * DAY + 1)).unwrap());
@@ -660,19 +702,19 @@ mod tests {
 
         // List filters and search.
         assert_eq!(
-            db.snapshot(|tx| list(tx, "decided", "", 50, T0 + DAY))
+            db.snapshot(|tx| list(tx, "", "decided", "", 50, T0 + DAY))
                 .unwrap()
                 .len(),
             2
         );
         assert_eq!(
-            db.snapshot(|tx| list(tx, "asked", "", 50, T0 + DAY))
+            db.snapshot(|tx| list(tx, "", "asked", "", 50, T0 + DAY))
                 .unwrap()
                 .len(),
             1
         );
         assert_eq!(
-            db.snapshot(|tx| list(tx, "all", "Which file", 50, T0 + DAY))
+            db.snapshot(|tx| list(tx, "", "all", "Which file", 50, T0 + DAY))
                 .unwrap()
                 .len(),
             1,
@@ -712,6 +754,97 @@ mod tests {
         assert_eq!(
             db.snapshot(|tx| ask(tx, "a5")).unwrap().unwrap().verdict,
             "failed"
+        );
+
+        // A verdict that never reached its card is listed under "all" only.
+        db.write(|tx| {
+            open_ask(tx, "a6", "", &chat, "t", "req-6", "Which colour?", "{}", T0)?;
+            finish_ask(
+                tx,
+                "a6",
+                "decided",
+                None,
+                Some("claude"),
+                Some("sonnet"),
+                Some(0.9),
+                Some("low"),
+                Some("r"),
+                Some("Blue"),
+                None,
+                10,
+                "withdrawn",
+                None,
+                T0 + 10,
+            )?;
+            Ok::<(), rusqlite::Error>(())
+        })
+        .unwrap();
+        let ids = |filter: &str, q: &str, profile: &str| -> Vec<String> {
+            db.snapshot(|tx| list(tx, profile, filter, q, 50, T0 + DAY))
+                .unwrap()
+                .into_iter()
+                .map(|r| r.id)
+                .collect()
+        };
+        assert!(ids("all", "", "").contains(&"a6".to_owned()));
+        for filter in ["decided", "asked", "failed", "review"] {
+            assert!(
+                !ids(filter, "", "").contains(&"a6".to_owned()),
+                "a withdrawn row is not listed under {filter}"
+            );
+        }
+        // Search takes % and _ literally.
+        assert!(ids("all", "%", "").is_empty(), "no question holds a %");
+        assert!(ids("all", "_", "").is_empty(), "nor an underscore");
+        assert_eq!(ids("all", "Which colour", ""), ["a6"]);
+
+        // Each person sees their own rows and the ones that belong to no one.
+        db.write(|tx| {
+            open_ask(tx, "p1-a", "p1", &chat, "t", "req-p1", "Mine?", "{}", T0)?;
+            open_ask(tx, "p2-a", "p2", &chat, "t", "req-p2", "Theirs?", "{}", T0)?;
+            Ok::<(), rusqlite::Error>(())
+        })
+        .unwrap();
+        let p1 = ids("all", "", "p1");
+        assert!(p1.contains(&"p1-a".to_owned()) && p1.contains(&"a6".to_owned()));
+        assert!(!p1.contains(&"p2-a".to_owned()), "never another person's");
+        assert!(!ids("all", "", "").contains(&"p1-a".to_owned()));
+
+        // A mark has to fit the verdict.
+        for (verdict, mark, fits) in [
+            ("decided", "fine", true),
+            ("decided", "should_have_asked", true),
+            ("decided", "didnt_need_me", false),
+            ("escalated", "didnt_need_me", true),
+            ("escalated", "fine", false),
+            ("escalated", "should_have_asked", false),
+            ("failed", "fine", false),
+        ] {
+            assert_eq!(mark_fits(verdict, mark), fits, "{verdict} {mark}");
+        }
+        let unfit = db
+            .write(|tx| review(tx, "a6", "didnt_need_me", None))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            unfit.review, "pending",
+            "the store refuses a mark that does not fit"
+        );
+
+        // A change whose message never went out is put back.
+        assert!(
+            !db.write(|tx| veto(tx, "a6", T0)).unwrap(),
+            "a withdrawn row cannot be changed"
+        );
+        assert!(db.write(|tx| veto(tx, "a1", T0)).unwrap());
+        assert!(db.write(|tx| unveto(tx, "a1", "open")).unwrap());
+        assert_eq!(
+            db.snapshot(|tx| ask(tx, "a1")).unwrap().unwrap().state,
+            "open"
+        );
+        assert!(
+            !db.write(|tx| unveto(tx, "a1", "open")).unwrap(),
+            "only a vetoed row is put back"
         );
 
         // Settings save and load per person; another person gets the defaults.

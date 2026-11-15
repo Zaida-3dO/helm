@@ -370,7 +370,7 @@ impl H {
     /// Poll until `f` holds (the actor runs on its own task). The wait is generous: under a whole
     /// workspace's test load a tick-driven step can take well over a second.
     pub async fn until(&self, what: &str, f: impl Fn(&H) -> bool) {
-        for _ in 0..1_500 {
+        for _ in 0..3_000 {
             if f(self) {
                 return;
             }

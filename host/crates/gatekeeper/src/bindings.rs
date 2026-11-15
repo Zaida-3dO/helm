@@ -17,11 +17,26 @@ pub fn committed_dir() -> PathBuf {
 pub fn export(dir: &Path) -> Result<Vec<String>, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     GateAsk::export_all_to(dir).map_err(|e| e.to_string())?;
+    // The write-up types come from the chats crate and are already generated one folder up,
+    // with the card's own shapes: point at that copy rather than keep a second one here.
+    let ask = dir.join(format!("{}.ts", GateAsk::ident()));
+    let text = std::fs::read_to_string(&ask).map_err(|e| e.to_string())?;
+    let fixed = text.replace("\"./GateBrief\"", "\"../GateBrief\"");
+    if fixed == text {
+        return Err("GateAsk.ts does not import GateBrief as expected".into());
+    }
+    std::fs::write(&ask, fixed).map_err(|e| e.to_string())?;
     let mut names = vec![GateAsk::ident()];
-    // The write-up type comes from the chats crate; ts-rs writes it here too, so this folder
-    // stands on its own.
-    names.push(helm_chats::types::GateBrief::ident());
-    names.push(helm_chats::types::GateBriefOption::ident());
+    for extra in [
+        helm_chats::types::GateBrief::ident(),
+        helm_chats::types::GateBriefOption::ident(),
+    ] {
+        let p = dir.join(format!("{extra}.ts"));
+        if p.exists() {
+            std::fs::remove_file(&p).map_err(|e| e.to_string())?;
+        }
+        names.push(extra);
+    }
     names.sort();
     names.dedup();
     let mut index = String::from(
@@ -29,12 +44,14 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
          // regenerate with `HELM_UPDATE_BINDINGS=1 cargo test -p helm-gatekeeper bindings_are_current`.\n",
     );
     for n in &names {
-        index.push_str(&format!("export type {{ {n} }} from './{n}.ts';\n"));
+        index.push_str(&format!(
+            "export type {{ {n} }} from '{}{n}.ts';\n",
+            if *n == GateAsk::ident() { "./" } else { "../" }
+        ));
     }
     std::fs::write(dir.join("index.ts"), index).map_err(|e| e.to_string())?;
-    let mut files: Vec<String> = names.iter().map(|n| format!("{n}.ts")).collect();
-    files.push("index.ts".into());
-    Ok(files)
+    // Only this folder's own file is written; the two re-exported ones live one level up.
+    Ok(vec![format!("{}.ts", GateAsk::ident()), "index.ts".into()])
 }
 
 #[cfg(test)]

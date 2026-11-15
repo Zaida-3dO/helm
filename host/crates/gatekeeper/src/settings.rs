@@ -16,7 +16,7 @@ pub const MAX_MODEL: usize = 120;
 /// The built-in policy: the same principle in generic words, naming no one. A person's own
 /// copy, naming their live services, lives in their row and never in the repo.
 pub const DEFAULT_POLICY: &str = "Only ask the user when it truly needs them. Where a reasonable \
-default exists and staying easy to undo, take it and carry on. Always hand the choice to the \
+default exists and it stays easy to undo, take it and carry on. Always hand the choice to the \
 user when it cannot be undone, costs money, sends anything to other people, touches credentials, \
 or touches anything live or in production. Prefer the choice that keeps the work moving and \
 stays easy to reverse.";
@@ -89,6 +89,24 @@ impl GateSettings {
 
     pub fn policy_text(&self) -> &str {
         self.policy.as_deref().unwrap_or(DEFAULT_POLICY)
+    }
+}
+
+/// The test switch: in debug builds only, `HELM_TEST_GATE` is `on` or `off` and forces the gate
+/// for everyone. Without it, a run under the fake claude (`HELM_TEST_CLAUDE` set) has the gate
+/// off, so a check that does not script the judge never waits on it. Release builds ignore both.
+pub const TEST_GATE_ENV: &str = "HELM_TEST_GATE";
+
+/// What the test switch says: `Some(on)` forces the gate, `None` follows each person's setting.
+pub fn test_switch(debug: bool, raw: Option<&str>, fake_claude: bool) -> Option<bool> {
+    if !debug {
+        return None;
+    }
+    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("on") => Some(true),
+        Some("off") => Some(false),
+        _ if fake_claude => Some(false),
+        _ => None,
     }
 }
 
@@ -221,5 +239,28 @@ mod tests {
         let s = parse_strict(&json!({"policy": "  "})).unwrap();
         assert_eq!(s.policy, None, "blank resets to the built-in words");
         assert_eq!(GateSettings::default().policy_text(), DEFAULT_POLICY);
+        // The debug-only test switches: the gate's own, and the shortened hold.
+        for (debug, raw, fake, want) in [
+            (true, Some("on"), true, Some(true)),
+            (true, Some(" OFF "), false, Some(false)),
+            (true, None, true, Some(false)),
+            (true, Some("maybe"), true, Some(false)),
+            (true, None, false, None),
+            (false, Some("on"), true, None),
+        ] {
+            assert_eq!(test_switch(debug, raw, fake), want, "{raw:?} {fake}");
+        }
+        use helm_chats::runtime::test_gate_hold;
+        use std::time::Duration;
+        for (debug, raw, want) in [
+            (true, Some("8000"), Some(Duration::from_millis(8_000))),
+            (true, Some("999"), None),
+            (true, Some("75001"), None),
+            (true, Some("soon"), None),
+            (true, None, None),
+            (false, Some("8000"), None),
+        ] {
+            assert_eq!(test_gate_hold(debug, raw), want, "{raw:?}");
+        }
     }
 }

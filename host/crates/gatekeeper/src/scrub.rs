@@ -1,9 +1,10 @@
 //! The host's pass over the judge's write-up.
 //!
 //! The brief is written for the user in their own terms, but it comes out of a machine
-//! conversation, so the host checks it: every UUID and every run of seven or more hex
-//! characters is stripped (ids and commit hashes), every field is capped, and the shape is
-//! verified. A brief that is still unusable is replaced with a plain one built from the
+//! conversation, so the host checks it: every UUID and every id or commit hash is stripped,
+//! every field is capped, and the shape is verified. An id is a whole word of hex characters
+//! that mixes digits and letters and is at least seven long, or any whole hex word of twelve
+//! or more; ordinary words made of hex letters ("feedback", "defaced") and plain numbers stay. A brief that is still unusable is replaced with a plain one built from the
 //! original card ([`fallback_brief`]).
 
 use helm_chats::types::{GateBrief, GateBriefOption, Interaction};
@@ -44,23 +45,36 @@ fn uuid_len_at(chars: &[char], i: usize) -> Option<usize> {
     Some(at - i)
 }
 
-/// Strip UUIDs and runs of seven or more hex characters, and squeeze the spaces left behind.
+/// Whether the hex run `chars[i..j]` is an id or a hash: a whole word (nothing alphanumeric
+/// on either side), and either seven or more long with both a digit and a letter, or twelve or
+/// more long.
+fn is_hex_id(chars: &[char], i: usize, j: usize) -> bool {
+    let whole = (i == 0 || !chars[i - 1].is_alphanumeric())
+        && chars.get(j).is_none_or(|c| !c.is_alphanumeric());
+    let run = &chars[i..j];
+    let mixed = run.iter().any(char::is_ascii_digit) && run.iter().any(char::is_ascii_alphabetic);
+    whole && ((run.len() >= 7 && mixed) || run.len() >= 12)
+}
+
+/// Strip UUIDs, ids and commit hashes, and squeeze the spaces left behind.
 pub fn scrub(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     while i < chars.len() {
-        if let Some(len) = uuid_len_at(&chars, i) {
-            i += len;
-            continue;
+        let starts_word = i == 0 || !chars[i - 1].is_alphanumeric();
+        if starts_word {
+            if let Some(len) = uuid_len_at(&chars, i) {
+                i += len;
+                continue;
+            }
         }
         if chars[i].is_ascii_hexdigit() {
             let mut j = i;
             while j < chars.len() && chars[j].is_ascii_hexdigit() {
                 j += 1;
             }
-            if j - i < 7 {
-                // Short enough to be part of a word; long enough is an id or a hash.
+            if !is_hex_id(&chars, i, j) {
                 out.extend(&chars[i..j]);
             }
             i = j;
@@ -173,9 +187,25 @@ mod tests {
     #[test]
     fn scrubbing_ids_and_caps() {
         assert_eq!(
-            scrub("Commit d3adb17c3d5e7f80 was pushed as deadbee (see 1234567)."),
+            scrub("Commit d3adb17c3d5e7f80 was pushed as 3f9a2c1 (see abcdef012345)."),
             "Commit was pushed as (see )."
         );
+        // Whole hex words only, and only when they look like an id: ordinary words made of
+        // hex letters, and plain numbers, stay.
+        for (raw, want) in [
+            ("feedback", "feedback"),
+            ("defaced and acceded", "defaced and acceded"),
+            ("commit 3f9a2c1d done", "commit done"),
+            ("it costs 1500000 tokens", "it costs 1500000 tokens"),
+            ("a deadbee in the logs", "a deadbee in the logs"),
+            ("the build-3f9a2c1d tag", "the build- tag"),
+            (
+                "x3f9a2c1d stays inside a word",
+                "x3f9a2c1d stays inside a word",
+            ),
+        ] {
+            assert_eq!(scrub(raw), want, "{raw}");
+        }
         assert_eq!(
             scrub("chat 12ab34cd-56ef-78ab-90cd-1234567890ab waiting"),
             "chat waiting"
@@ -185,7 +215,11 @@ mod tests {
             "short hex like cafe or beef stays"
         );
         assert_eq!(scrub("delegated 8192 items"), "delegated 8192 items");
-        assert_eq!(scrub("id 12345678 gone"), "id gone");
+        assert_eq!(
+            scrub("id 12345678 stays"),
+            "id 12345678 stays",
+            "a plain number"
+        );
         let b = clean_brief(&json!({
             "problem": "Delete 9fe12a4b and rebuild?",
             "options": [{
