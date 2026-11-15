@@ -8,21 +8,34 @@ export const REDACTED = "[redacted]";
 const MIN_SECRET = 4;
 
 export class Redactor {
-  private readonly secrets: string[];
+  private secrets: string[];
+  private readonly set = new Set<string>();
 
   constructor(secrets: Iterable<string>) {
-    const set = new Set<string>();
-    for (const s of secrets) {
-      if (typeof s !== "string" || s.length < MIN_SECRET) continue;
-      set.add(s);
-      // A secret may come back JSON- or URL-encoded inside text.
-      const json = JSON.stringify(s).slice(1, -1);
-      if (json !== s) set.add(json);
-      const url = encodeURIComponent(s);
-      if (url !== s) set.add(url);
-    }
+    for (const s of secrets) this.collect(s);
+    this.sort();
+  }
+
+  private collect(s: string): void {
+    if (typeof s !== "string" || s.length < MIN_SECRET) return;
+    this.set.add(s);
+    // A secret may come back JSON- or URL-encoded inside text.
+    const json = JSON.stringify(s).slice(1, -1);
+    if (json !== s) this.set.add(json);
+    const url = encodeURIComponent(s);
+    if (url !== s) this.set.add(url);
+  }
+
+  private sort(): void {
     // Longest first, so a secret that contains another is replaced whole.
-    this.secrets = [...set].sort((a, b) => b.length - a.length);
+    this.secrets = [...this.set].sort((a, b) => b.length - a.length);
+  }
+
+  /** Adds a secret learned while running (a refreshed token), rebuilding the set. */
+  add(secret: string): void {
+    if (this.set.has(secret)) return;
+    this.collect(secret);
+    this.sort();
   }
 
   get empty(): boolean {

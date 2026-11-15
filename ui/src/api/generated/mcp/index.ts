@@ -15,6 +15,7 @@ export type { McpServerRemoveArgs } from './McpServerRemoveArgs.ts';
 export type { McpServerSaveArgs } from './McpServerSaveArgs.ts';
 export type { McpServerTestArgs } from './McpServerTestArgs.ts';
 export type { OAuthConfig } from './OAuthConfig.ts';
+export type { OAuthStatus } from './OAuthStatus.ts';
 export type { RefKind } from './RefKind.ts';
 export type { RepoServer } from './RepoServer.ts';
 export type { RepoServerState } from './RepoServerState.ts';

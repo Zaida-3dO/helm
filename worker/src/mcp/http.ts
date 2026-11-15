@@ -120,6 +120,10 @@ interface RawResponse {
 export interface HttpOptions {
   limits: McpLimits;
   resolver?: Resolver;
+  /** For a server that signs in through the browser: asked once when the server refuses the
+   * header we have. Answers the current `Authorization` value, or undefined when there is none.
+   * The value never goes into a log line; the caller adds it to redaction. */
+  oauthHeader?: () => Promise<string | undefined>;
 }
 
 export class HttpTransport implements Transport {
@@ -128,6 +132,10 @@ export class HttpTransport implements Transport {
   private sessionId: string | undefined;
   private protocolVersion: string | undefined;
   private ended = false;
+  /** A browser-signed-in server gets one ask for a fresh header per transport. */
+  private oauthAsked = false;
+  /** Set after a fresh header arrives: sent instead of the resolved one, on every later post. */
+  private authOverride: string | undefined;
   private readonly origin: string;
   private readonly live = new Set<http.ClientRequest>();
 
@@ -153,6 +161,11 @@ export class HttpTransport implements Transport {
   private post(url: URL, body: string, signal?: AbortSignal): Promise<RawResponse> {
     const lookup = connectRule(url, this.server.allowPrivateHttp, this.server.name, this.opts.resolver);
     const headers: Record<string, string> = { ...(this.server.headers ?? {}) };
+    if (this.authOverride !== undefined) {
+      // Replace the resolved Authorization (any casing) so only one is sent.
+      for (const k of Object.keys(headers)) if (k.toLowerCase() === "authorization") delete headers[k];
+      headers["authorization"] = this.authOverride;
+    }
     headers["content-type"] = "application/json";
     headers["accept"] = "application/json, text/event-stream";
     headers["content-length"] = String(Buffer.byteLength(body));
@@ -199,6 +212,25 @@ export class HttpTransport implements Transport {
 
   async send(msg: Json, signal?: AbortSignal): Promise<void> {
     if (this.ended) throw new McpError(`${this.server.name} is not connected.`);
+    try {
+      await this.sendOnce(msg, signal);
+    } catch (err) {
+      // A server that signs in through the browser and refuses the header gets one ask to the
+      // host for a current one and one retry. A second refusal is the caller's to report.
+      if (err instanceof McpError && err.signin && this.server.oauth && !this.oauthAsked && this.opts.oauthHeader) {
+        this.oauthAsked = true;
+        const fresh = await this.opts.oauthHeader();
+        if (fresh) {
+          this.authOverride = fresh;
+          await this.sendOnce(msg, signal);
+          return;
+        }
+      }
+      throw err;
+    }
+  }
+
+  private async sendOnce(msg: Json, signal?: AbortSignal): Promise<void> {
     const res = await this.postFollowing(JSON.stringify(msg), signal);
     const sid = res.headers["mcp-session-id"];
     if (typeof sid === "string" && sid !== "") this.sessionId = sid;

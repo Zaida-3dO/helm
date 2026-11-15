@@ -76,6 +76,7 @@ pub const TABLE: &[(&str, Class)] = &[
     // only the hub's own speech caller may ask ([`HUB_ONLY`]).
     ("app_make_room_for_speech", Class::Allowed),
     ("app_mcp_call", Class::Denied(MCP)),
+    ("app_mcp_oauth_header", Class::Denied(LOCAL)),
     ("app_mcp_tools", Class::Denied(MCP)),
     ("app_offer_options", Class::Denied(LOCAL)),
     ("app_open_chat", Class::Denied(CHANGES)),

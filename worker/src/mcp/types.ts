@@ -21,6 +21,9 @@ export interface ResolvedServer {
   guidance?: string;
   /** The host could not resolve a reference: report failed, never connect. */
   error?: string;
+  /** The server signs in through the browser. The bridge may ask the host once for a current
+   * `Authorization` header when the server refuses the one it has. */
+  oauth?: boolean;
 }
 
 /** A server Claude Code already loads natively: from the CLI's start-up report or a

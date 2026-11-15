@@ -21,7 +21,7 @@ pub mod register;
 pub mod tokens;
 
 #[cfg(test)]
-mod fake;
+pub(crate) mod fake;
 
 pub use discovery::{discover, AuthServer};
 pub use register::{register, Client};
