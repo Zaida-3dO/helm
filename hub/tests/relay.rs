@@ -20,6 +20,7 @@ const MEMORY_ONLY: &str = "memory-token-0123456789abcdefgh";
 const FORWARDER: &str = "forwarder-token-0123456789abcdef";
 const PHONE: &str = "phone-token-0123456789abcdefghij";
 const PAGE: &str = "page-token-0123456789abcdefghijkl";
+const INDEXER: &str = "indexer-token-0123456789abcdefgh";
 
 /// The person who owns every client the legacy token list makes (the first person made).
 const OWNER: i64 = 1;
@@ -33,7 +34,7 @@ async fn start() -> Hub {
     let registry = Registry::from_legacy_spec(
         &format!(
             "helm-line:{LINE}:relay, remote:{REMOTE}:ro+app, notes:{MEMORY_ONLY}:rw, \
-             forwarder:{FORWARDER}:telegram, phone:{PHONE}:voice, page:{PAGE}:remote"
+             forwarder:{FORWARDER}:telegram, phone:{PHONE}:voice, page:{PAGE}:remote, indexer:{INDEXER}:relay+peer+app+rw"
         ),
         "owner",
     )
@@ -387,4 +388,217 @@ async fn an_upstream_frame_under_the_limit_is_accepted_and_a_bigger_one_ends_the
         "the hub kept a line that sent a frame over the limit"
     );
     wait_up(&hub, false).await;
+}
+
+async fn send(ws: &mut Ws, frame: Value) {
+    ws.send(Message::Text(frame.to_string().into()))
+        .await
+        .unwrap();
+}
+
+/// One request frame and its answer.
+async fn ask(ws: &mut Ws, frame: Value) -> Value {
+    send(ws, frame).await;
+    loop {
+        let f = next_json(ws).await;
+        if f["type"] != "devices" {
+            return f;
+        }
+    }
+}
+
+fn int8(v: &[f32]) -> (String, f32) {
+    use base64::Engine as _;
+    let max = v.iter().fold(0f32, |m, x| m.max(x.abs()));
+    let scale = max / 127.0;
+    let q: Vec<u8> = v
+        .iter()
+        .map(|x| ((x / scale).round() as i8) as u8)
+        .collect();
+    (base64::engine::general_purpose::STANDARD.encode(q), scale)
+}
+
+#[tokio::test]
+async fn a_machine_indexes_its_notes_and_they_are_found_by_words_and_by_meaning() {
+    let hub = start().await;
+    let mut ws = connect(&hub, INDEXER).await.unwrap();
+    let welcome = next_json(&mut ws).await;
+    assert_eq!(welcome["features"], json!(["index"]));
+    // Only a token with the peer scope may use the index frames.
+    let mut plain = connect(&hub, LINE).await.unwrap();
+    next_json(&mut plain).await;
+    let r = ask(
+        &mut plain,
+        json!({ "type": "ix_hello", "id": 1, "sources": [] }),
+    )
+    .await;
+    assert_eq!(
+        (r["type"].as_str(), r["ok"].as_bool()),
+        (Some("ix_state"), Some(false))
+    );
+
+    let state = ask(
+        &mut ws,
+        json!({ "type": "ix_hello", "id": 2, "sources": [{ "id": "pc:notes", "kind": "folder", "name": "Notes" }] }),
+    )
+    .await;
+    assert_eq!(state["sources"][0]["docs"], 0);
+
+    let (b64, scale) = int8(&[1.0, 0.0, 0.0, 0.2]);
+    let doc = |hash: &str, owner: &str| {
+        json!({ "key": "garden/beds.md", "hash": hash, "title": "Garden beds", "locator": "garden/beds.md",
+                "owner": owner, "scope": "me", "tier": "note", "occurredAt": 1_700_000_000_000i64,
+                "chunks": [
+                    { "ord": 0, "text": "Raised beds hold the tomatoes", "vec": b64, "scale": scale,
+                      "model": "nomic-embed-text:latest" },
+                    { "ord": 1, "text": "Compost goes in each autumn" },
+                ] })
+    };
+    let put =
+        |docs: Vec<Value>| json!({ "type": "ix_put", "id": 3, "source": "pc:notes", "docs": docs });
+    let status = |r: &Value| r["results"][0]["status"].as_str().unwrap().to_owned();
+    assert_eq!(
+        status(&ask(&mut ws, put(vec![doc("h1", "1")])).await),
+        "inserted"
+    );
+    assert_eq!(
+        status(&ask(&mut ws, put(vec![doc("h1", "1")])).await),
+        "unchanged"
+    );
+    assert_eq!(
+        status(&ask(&mut ws, put(vec![doc("h2", "1")])).await),
+        "replaced"
+    );
+    // A person this machine does not act for (or that does not exist) is refused.
+    let refused = ask(&mut ws, put(vec![doc("h3", "2")])).await;
+    assert_eq!(status(&refused), "refused", "{refused}");
+
+    let page = ask(
+        &mut ws,
+        json!({ "type": "ix_manifest", "id": 4, "source": "pc:notes", "afterKey": "" }),
+    )
+    .await;
+    assert_eq!(
+        page["items"],
+        json!([{ "key": "garden/beds.md", "hash": "h2" }])
+    );
+    assert_eq!(page["more"], false);
+    let again = ask(
+        &mut ws,
+        json!({ "type": "ix_hello", "id": 5, "sources": [{ "id": "pc:notes", "kind": "folder" }] }),
+    )
+    .await;
+    assert_eq!(again["sources"][0]["docs"], 1);
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        again["sources"][0]["digest"],
+        format!("{:x}", Sha256::digest(b"garden/beds.md:h2"))
+    );
+
+    // A source belongs to the machine that named it: no other machine may read or change it.
+    let other = ask(
+        &mut plain,
+        json!({ "type": "ix_manifest", "id": 11, "source": "pc:notes" }),
+    )
+    .await;
+    assert_eq!(other["ok"], false);
+    // Close that line, so the query below is embedded by the indexer's PC (the only one up).
+    drop(plain);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Chunk 1 has no vector yet: it is what `ix_pending` lists, until `ix_vectors` fills it.
+    let waiting = ask(
+        &mut ws,
+        json!({ "type": "ix_pending", "id": 6, "limit": 50 }),
+    )
+    .await;
+    let chunks = waiting["chunks"].as_array().unwrap();
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0]["text"], "Compost goes in each autumn");
+    let (b2, s2) = int8(&[0.0, 1.0, 0.0, 0.0]);
+    let stored = ask(
+        &mut ws,
+        json!({ "type": "ix_vectors", "id": 7, "model": "nomic-embed-text",
+                "items": [{ "chunk": chunks[0]["chunk"], "vec": b2, "scale": s2 }] }),
+    )
+    .await;
+    assert_eq!(stored["stored"], 1);
+    let waiting = ask(&mut ws, json!({ "type": "ix_pending", "id": 8 })).await;
+    assert_eq!(waiting["chunks"], json!([]));
+
+    // Found by words (the PC is not asked to embed: nobody answers within the test's patience
+    // would also do, so the search falls back and says why).
+    let search = |query: &str| {
+        call(
+            "memory_search",
+            json!({ "query": query, "parseDates": false }),
+        )
+    };
+    let (_, found) = tokio::join!(async {}, async {
+        let pc = async {
+            // The hub asks the PC to embed the query; answer with the first chunk's direction.
+            let f = next_json(&mut ws).await;
+            assert_eq!(f["type"], "ix_embed");
+            assert_eq!(f["text"], "search_query: vegetable patches location");
+            send(
+                &mut ws,
+                json!({ "type": "ix_embedded", "id": f["id"], "vec": [0.9, 0.0, 0.0, 0.1],
+                "model": "nomic-embed-text:latest" }),
+            )
+            .await;
+        };
+        let (r, ()) = tokio::join!(mcp(&hub, INDEXER, search("vegetable patches location")), pc);
+        r
+    });
+    let result = &found.1["result"]["structuredContent"];
+    assert_eq!(result["searched"]["meaning"], "pc", "{result}");
+    assert_eq!(result["mode"], "hybrid");
+    let top = &result["results"][0];
+    assert_eq!(
+        (top["kind"].as_str(), top["title"].as_str()),
+        (Some("note"), Some("Garden beds"))
+    );
+    assert_eq!(top["matched"], json!(["vector"]));
+    let reference = top["ref"].as_str().unwrap().to_owned();
+    assert!(
+        reference.starts_with("d:") && reference.ends_with("#0"),
+        "{reference}"
+    );
+
+    // A PC that does not answer in time leaves the search on keywords, with the reason.
+    let (_, kw) = tokio::join!(async {}, mcp(&hub, INDEXER, search("compost")));
+    let result = &kw.1["result"]["structuredContent"];
+    assert!(
+        result["searched"]["meaning"]
+            .as_str()
+            .unwrap()
+            .starts_with("off:"),
+        "{result}"
+    );
+    assert_eq!(result["results"][0]["ref"], reference.replace("#0", "#1"));
+    // Drain the embed request that went unanswered.
+    let _ = next_json(&mut ws).await;
+
+    // Reading a hit gives its chunk and the ones beside it.
+    let (_, read) = mcp(
+        &hub,
+        INDEXER,
+        call("memory_read", json!({ "ref": reference })),
+    )
+    .await;
+    let chunks = read["result"]["structuredContent"]["chunks"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(chunks.len(), 2);
+    assert_eq!(chunks[0]["text"], "Raised beds hold the tomatoes");
+
+    let gone = ask(&mut ws, json!({ "type": "ix_delete", "id": 9, "source": "pc:notes", "keys": ["garden/beds.md", "nope.md"] })).await;
+    assert_eq!(gone["deleted"], 1);
+    let page = ask(
+        &mut ws,
+        json!({ "type": "ix_manifest", "id": 10, "source": "pc:notes" }),
+    )
+    .await;
+    assert_eq!(page["items"], json!([]));
 }

@@ -1,5 +1,6 @@
 use helm_hub::admin;
 use helm_hub::auth::Tokens;
+use helm_hub::embed::{self, QueryEmbedder};
 use helm_hub::import::{import_dir, parse_args};
 use helm_hub::lines::Lines;
 use helm_hub::mcp::Options;
@@ -40,6 +41,10 @@ ENVIRONMENT:
                     people existed, and Telegram users with no person (default owner); set
                     it to the name your own PC is paired under before the first start
   HUB_ALLOW_MUTATE  1 to offer memory_update and memory_delete
+  HUB_EMBED_URL     an OpenAI-style embeddings server (base URL or .../v1/embeddings) that embeds
+                    search queries when the asker's PC cannot; unset: keywords only then
+  HUB_EMBED_MODEL   the embedding model all vectors must come from (default nomic-embed-text)
+  TZ                Europe/London reads dates in queries in UK time; anything else reads as UTC
   HUB_TELEGRAM_BOT_TOKEN      the bot's token; without it the bot stays off
   HUB_TELEGRAM_ALLOWED_USERS  numeric Telegram user ids, each optionally followed by :person
                               (123456:Sam) to route that user to that person's Helm;
@@ -348,6 +353,23 @@ fn serve() -> ExitCode {
         telegram.clone(),
     );
     state.voice = voice.clone();
+    // Queries are embedded by the asker's PC first, then by this server, else not at all.
+    let embed_url = std::env::var("HUB_EMBED_URL").ok();
+    let embed_model =
+        std::env::var("HUB_EMBED_MODEL").unwrap_or_else(|_| embed::DEFAULT_MODEL.into());
+    state.embedder = Arc::new(QueryEmbedder::new(
+        lines.clone(),
+        embed_url.clone(),
+        &embed_model,
+    ));
+    eprintln!(
+        "search: meaning model {embed_model}; NAS embedder {}",
+        if embed_url.is_some() {
+            "configured"
+        } else {
+            "off (the PC embeds, else keywords only)"
+        }
+    );
     let state = Arc::new(state);
 
     // One thread is plenty for a household's memory store and keeps RSS small.

@@ -23,8 +23,8 @@ else from the repo.
 
 | Tool | What it does |
 |---|---|
-| `memory_search {query, k?, vector?, model?, tags?, person?}` | Keyword search (FTS5, porter stemming, bm25 with title > description > tags > body). With `vector`, a hybrid: keyword and cosine rankings fused by reciprocal rank. Only vectors of the same dimension (and `model`, if given) are compared. Every listed tag must match. |
-| `memory_read {id}` | One memory in full, by numeric id or by name |
+| `memory_search {query, k?, sources?, tier?, chat?, folder?, after?, before?, parseDates?, vector?, model?, tags?, person?}` | One search over memories, watched notes and chat history (see [Search](#search)): keywords and meaning together, dates in the query understood, results ranked by source, person and age. A caller's own `vector` still works |
+| `memory_read {id}` or `{ref, around?}` | One memory in full, by numeric id or by name; or a search hit by its `ref`: the chunk and `around` chunks (default 1) either side |
 | `memory_write {title, body, tags?, source?, name?, scope?, visibility?, vector?, model?}` | New memory, owned by the caller's person and for that person only unless `scope` is `everyone`. A vector must come with the id of the model that made it |
 | `memory_list {tag?, since?, limit?, person?}` | Newest first; `since` is an ISO-8601 date (`2026-11-01`) or UTC timestamp (`2026-11-01T09:30:00Z`), and anything else is refused |
 | `memory_update`, `memory_delete` | Only when `HUB_ALLOW_MUTATE=1`, and only on the caller's own memories (`memory_update` may also change `scope`). A new body without a new vector clears the old vector |
@@ -575,12 +575,66 @@ before the first start, or the hub cannot open its database. A folder left owned
 example one the Docker daemon made itself, fails the same way. The memory folder at `/mnt/memory`
 is mounted read-only and only needs to be readable by that user.
 
+## Search
+
+Everything searchable is a *doc* made of *chunks* in `ix_*` tables beside `memories` (`src/index.rs`).
+A memory is mirrored as a doc of the `memory` source in the same transaction as every write
+(insert, update, delete, import, person merge), and a store from before the index gets its
+mirrors when it opens, once. Notes and chat history are pushed by a person's Helm over the relay
+line. Nothing here changes what the memory tools did: a memory hit keeps its old fields.
+
+**Privacy.** A viewer sees the docs they own, the ones shared with everyone, and the ones that name
+them as a reader. That filter is part of every candidate query, so another person's private text is
+never a candidate. Their *shared* items are down-weighted to 0.3 but still win when they are the
+only match.
+
+**Ranking** (`src/rank.rs`, one table of constants): keyword (bm25: title 8, heading 4, text 1)
+and vector candidates are fused by reciprocal rank, then multiplied by the source (memory 1.0, note
+0.8, conversation 0.5), by 0.3 for another person's item unless `person` names them, and for
+conversations with no date window by age (half-life 120 days, floor 0.6). A doc scores its best
+chunk plus a tenth of its second and shows at most two chunks (a memory one); a chunk whose vector
+is within 0.95 of a higher one is dropped. A result is `{kind: memory|note|chat, ref, title, where,
+at, owner, snippet, score, matched}`, with `ref` `m:<id>` or `d:<doc>#<chunk>`, and the answer's
+`searched` says `{sources, window?, widened?, meaning}`. `meaning` is `pc` or `nas` (who embedded
+the query), `caller` (a `vector` was sent) or `off: <why>` (keywords only).
+
+**Dates.** `after`/`before` (ISO) win; otherwise a phrase in the query (`when.rs`) becomes a window
+on the passage's time. A window with fewer than three docs widens by half, once (`widened`).
+`parseDates: false` turns the phrases off. The zone is the container's `TZ` (`Europe/London`, else UTC).
+
+**Vectors.** int8 on disk (a scale and a byte per dimension), keyed by model (the `:tag` is
+dropped, so `nomic-embed-text:latest` is `nomic-embed-text`); the hub also keeps one sign bit per
+dimension of every vector in RAM (about 20 MB at 200k chunks), scans the allowed docs' codes by
+Hamming distance and re-scores the closest 200 exactly. It never embeds documents. A query is
+embedded by the asker's own PC (`ix_embed`, 600 ms; a PC with busy local models answers `locked`),
+else by the server at `HUB_EMBED_URL` (OpenAI-style `/v1/embeddings`, 2.5 s, one query at a time),
+else not at all. Queries go out as `search_query: <text>`, documents carry no prefix. The last 512
+query vectors are kept.
+
+**Trace.** `tier: "trace"` with `chat` searches the working steps of one chat. The hub checks the
+asker may read the chat, then asks the PC that holds it (`ix_trace`, 3 s); with the PC off the
+answer says `trace: "unavailable while the PC is off"`.
+
+**Index frames** (peer scope; see the table in `src/relay.rs`): `ix_hello` registers sources and
+returns each one's doc count and digest (sha256 of the lines `key:hash`, sorted by key bytes and
+joined by newlines); `ix_manifest` pages `{key, hash}`; `ix_put` stores up to 200 chunks and 2 MiB
+of docs, one transaction per doc (`inserted`, `replaced`, `unchanged` or `refused`: the owner must
+be the machine's person or one it may act for, and a source belongs to the first machine that names
+it; a chunk whose text is unchanged keeps its vector); `ix_delete`; `ix_pending` lists chunks with
+no vector for the hub's model, only of docs the machine's people may read; `ix_vectors` stores
+them. The welcome frame carries `features: ["index"]`, so a Helm on an older hub knows to wait.
+
+Environment: `HUB_EMBED_URL` (unset: only a PC embeds queries), `HUB_EMBED_MODEL` (default
+`nomic-embed-text`), `TZ`. The database work of a search and of every index write runs on the
+blocking pool, so the hub's one thread keeps serving Telegram and the lines meanwhile.
+
 ## Budget
 
 One-thread runtime, two SQLite connections (memories, and the registry that token checks read), a
-2 MB page cache. A release build idles at about 7 MB
-of working set with ~340 memories loaded (measured on Windows). Vector search is a brute-force
-scan, which is fine below roughly 50k rows.
+16 MB page cache, plus about 20 MB for the vector codes at 200k chunks (search is a Hamming scan of
+the codes, not of the vectors). A release build idles at about 7 MB
+of working set with ~340 memories loaded (measured on Windows). Vector search is a Hamming
+scan of the codes, a few milliseconds at 200k chunks.
 
 **The peak.** Idle is small, but the queues may fill, and every one of them is capped for the whole
 hub: Telegram files waiting for Helm about 150 MB (as base64), plus up to 64 MB of frames a
