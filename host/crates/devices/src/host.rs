@@ -584,6 +584,22 @@ impl ChatPort for HostPort {
                     ))
                 }
             };
+            // The card must belong to the chat the caller holds open, not any chat on this PC.
+            let db = self.db()?;
+            let kinds = self
+                .services()
+                .get::<helm_consent::AllowKinds>()
+                .unwrap_or_else(|| Arc::new(helm_consent::AllowKinds::new()));
+            let list = helm_consent::store::list(&db, &kinds, &a.chat_id, helm_core::now_ms())
+                .map_err(wire)?;
+            if !list
+                .pending
+                .iter()
+                .chain(&list.decided)
+                .any(|c| c.id == a.request_id)
+            {
+                return Err(WireError::not_found());
+            }
             let args = helm_consent::ConsentDecideArgs {
                 request_id: a.request_id,
                 decision,

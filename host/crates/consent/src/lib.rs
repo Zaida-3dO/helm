@@ -3,7 +3,8 @@
 //! The one place Helm decides that an agent's step counts as the user's own consent. Two proofs:
 //!
 //! - **An Allow grant**: a request the user's click on the card in the main window moved to
-//!   `allowed` ([`store::decide`], reached only through the `consent_decide` op). Bound to one
+//!   `allowed` ([`store::decide`], reached through the main window's `consent_decide` op, or for a chat served to another
+//!   device through that PC's own decide path, which checks the chat). Bound to one
 //!   chat, one allow kind and the SHA-256 of a canonical target the host builds itself;
 //!   single-use; 30 minutes by default (the agent may ask 5–120, the user may pick 5–240).
 //! - **The user's words**: a message the user typed in this chat that is exactly the step's fixed
