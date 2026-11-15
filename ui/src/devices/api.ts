@@ -59,6 +59,8 @@ export type RemoteChatRecord = ChatRecord & {
   boardName?: string | null;
   boardColour?: string | null;
   needsAttention?: boolean;
+  /** Allow cards and questions waiting on the PC that runs the chat (kept fresh in the copy). */
+  waitingCards?: number;
 };
 
 export interface DeviceChats {
