@@ -16,4 +16,7 @@ test('only complete assistant replies are fork points, and a fork opens the new 
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual(calls, [['c1', { messageId: 7 }]]);
   assert.equal(opened, 'f1');
+  // Fork is offered on a chat that runs on another PC as well: the action names the chat, and
+  // the host routes the fork to the PC that runs it.
+  assert.equal(a.localOnly, undefined);
 });

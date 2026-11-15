@@ -9,7 +9,7 @@ import type { EventBus } from '../api/events.ts';
 import type { ChatOps } from '../api/ops.ts';
 import { projectOps, type ProjectNode, type SidebarRow, type SidebarView } from '../api/projects.ts';
 import type { RowPreview } from '../api/generated/projects/index.ts';
-import type { AttentionSummary } from '../api/types.ts';
+import type { AttentionKind, AttentionSummary } from '../api/types.ts';
 import type { ChatStore } from '../state/store.ts';
 import { SETTINGS_DIALOG } from '../settings/index.ts';
 import { SEARCH_DIALOG } from '../search/index.ts';
@@ -18,6 +18,7 @@ import { PagesEntry } from '../pages/PagesEntry.tsx';
 import { ProfileDisc } from '../profiles/Disc.tsx';
 import { ProfileItem, moveChatToProfile, profileChoices, rowsForProfile, shareChatWith, shareChoices, sharedFrom, useProfiles } from '../profiles/index.ts';
 import { ALL_DEVICES, type DeviceInfo } from '../devices/api.ts';
+import { remoteChatOps } from '../api/devices.ts';
 import { DeviceToggle } from '../devices/DeviceToggle.tsx';
 import { useDevices, useRemoteList } from '../devices/hooks.ts';
 import { remoteProfileChoices, remoteShareChoices, scopeNote } from '../devices/model.ts';
@@ -32,6 +33,8 @@ import { setVisibleOrder } from './rowOrder.ts';
 import { SidebarTop } from './SidebarTop.tsx';
 import { PromptDialog, type Prompt } from './PromptDialog.tsx';
 import { ItemChip, ItemFolderRow, ItemOpenButton, ItemPickerHost, useItemRefs, useOpenItem } from '../itemlinks/ItemUi.tsx'; // item links
+import { refsByChat, type ItemRef } from '../itemlinks/folders.ts';
+import type { ItemLink } from '../api/itemlinks.ts';
 import {
   IconArchive,
   IconChevronDown,
@@ -164,6 +167,35 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     const d = dev.list?.devices.find((x) => x.uid === uid);
     return d ? { name: d.name, online: d.online } : { name: 'Another device', online: false };
   };
+  // Chats that run on other PCs keep their board-item links and their flags there: read both
+  // from the PCs that run them (mirror reads, allowed even while that PC's switch is off).
+  const devOps = useMemo(() => remoteChatOps(api), [api]);
+  const remoteIds = useMemo(() => [...other.chats.keys()], [other.chats]);
+  const remoteKey = remoteIds.join(',');
+  const [remoteRefs, setRemoteRefs] = useState<ReadonlyMap<string, ItemRef>>(() => new Map());
+  const [remoteAttn, setRemoteAttn] = useState<{ needsYou: { chatId: string; kind: AttentionKind; reason: string }[]; flagged: { chatId: string; kind: AttentionKind; reason: string }[] }>({ needsYou: [], flagged: [] });
+  useEffect(() => {
+    if (!remoteIds.length) {
+      setRemoteRefs(new Map());
+      setRemoteAttn({ needsYou: [], flagged: [] });
+      return;
+    }
+    let live = true;
+    void devOps
+      .itemLinks(remoteIds)
+      .then((r) => live && setRemoteRefs(refsByChat(r.links ?? [])))
+      .catch(() => undefined);
+    void devOps
+      .attention(remoteIds)
+      .then((r) => live && setRemoteAttn({ needsYou: r.needsYou ?? [], flagged: r.flagged ?? [] }))
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [devOps, remoteKey]);
+  const remoteNeedsYouIds = useMemo(() => new Set([...remoteIds.filter((id) => other.chats.get(id)?.needsAttention), ...remoteAttn.needsYou.map((r) => r.chatId)]), [remoteIds, other.chats, remoteAttn]);
+  const remoteFlagReasons = useMemo(() => new Map(remoteAttn.flagged.map((f) => [f.chatId, f.reason])), [remoteAttn]);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [collapsedItems, setCollapsedItems] = useState<Set<string>>(() => new Set());
@@ -251,7 +283,8 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
 
   const openItem = useOpenItem();
   const itemRefs = useItemRefs(useMemo(() => snap.rows.map((r) => r.chatId), [snap.rows]));
-  const flaggedIds = useMemo(() => new Set([...snap.needsYou, ...snap.flagged.keys()]), [snap.needsYou, snap.flagged]);
+  const allItemRefs = useMemo(() => new Map([...itemRefs, ...remoteRefs]), [itemRefs, remoteRefs]);
+  const flaggedIds = useMemo(() => new Set([...snap.needsYou, ...snap.flagged.keys(), ...remoteNeedsYouIds, ...remoteFlagReasons.keys()]), [snap.needsYou, snap.flagged, remoteNeedsYouIds, remoteFlagReasons]);
   const items = useMemo(
     () =>
       buildList(shownProjects, shownRows, {
@@ -260,11 +293,11 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         expandedChats: expanded,
         selectedChatId: selected,
         keptShut: keptShut.chat === selected ? keptShut.ids : undefined,
-        flagged: remote ? undefined : flaggedIds,
+        flagged: flaggedIds,
         closed: remote ? undefined : snap.closed,
-        itemLinks: currentView === 'activity' || remote ? undefined : { refs: itemRefs, collapsed: collapsedItems },
+        itemLinks: currentView === 'activity' ? undefined : { refs: allItemRefs, collapsed: collapsedItems },
       }),
-    [shownProjects, shownRows, listView, currentView, compact, expanded, selected, keptShut, flaggedIds, snap.closed, itemRefs, collapsedItems, remote],
+    [shownProjects, shownRows, listView, currentView, compact, expanded, selected, keptShut, flaggedIds, snap.closed, allItemRefs, collapsedItems, remote],
   );
   useEffect(() => setVisibleOrder(visibleChatOrder(items)), [items]);
   const projectsById = useMemo(() => new Map(shownProjects.map((p) => [p.id, p])), [shownProjects]);
@@ -900,9 +933,9 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         indent={currentView === 'activity' ? 0 : (groupDepth.get(row.groupProjectId) ?? 0) * 16 + (it.block ? 4 : 0)}
         project={projectsById.get(row.groupProjectId)}
         selected={row.chatId === selected}
-        needsYou={!remoteOfRow(row.chatId) && snap.needsYou.has(row.chatId)}
-        needsLabel={needsYouLabel(snap.attention?.needsYou.find((r) => r.chatId === row.chatId)?.kind)}
-        flagReason={remoteOfRow(row.chatId) ? undefined : snap.flagged.get(row.chatId)}
+        needsYou={remoteOfRow(row.chatId) ? remoteNeedsYouIds.has(row.chatId) : snap.needsYou.has(row.chatId)}
+        needsLabel={needsYouLabel(remoteOfRow(row.chatId) ? remoteAttn.needsYou.find((r) => r.chatId === row.chatId)?.kind : snap.attention?.needsYou.find((r) => r.chatId === row.chatId)?.kind)}
+        flagReason={remoteOfRow(row.chatId) ? remoteFlagReasons.get(row.chatId) : snap.flagged.get(row.chatId)}
         remote={remoteOfRow(row.chatId)}
         sharedBy={sharedByOf(row)}
         dragging={drag?.active === true && drag.src.kind === 'chat' && drag.src.chatId === row.chatId}

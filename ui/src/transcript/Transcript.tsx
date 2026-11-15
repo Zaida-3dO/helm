@@ -3,6 +3,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatOps } from '../api/ops.ts';
+import type { RemoteChatOps } from '../api/devices.ts';
 import type { MessageRow, Submission, ThreadState } from '../api/types.ts';
 import { waitReason } from '../composer/inFlight.ts';
 import { QueueItem, inFlightItems } from '../composer/QueueList.tsx';
@@ -27,7 +28,7 @@ export interface TranscriptProps {
    * Messages in flight, shown as the last items of the flow (their keys start `q:`). Leave out for
    * a transcript that is not at its newest page: they could not sit at the end of it.
    */
-  queue?: { pending: Submission[]; thread: ThreadState | null; ops: ChatOps; readOnly: boolean };
+  queue?: { pending: Submission[]; thread: ThreadState | null; ops: ChatOps; readOnly: boolean; devOps?: RemoteChatOps };
 }
 
 /** A queued message's height before it is measured: a pill and a short bubble. */
@@ -105,7 +106,7 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
           const q = queued.find((i) => `q:${i.submission.id}` === k);
           return q && queue ? (
             <div className="row row-user row-queued">
-              <QueueItem item={q} ops={queue.ops} chatId={ctx.chatId} readOnly={queue.readOnly} />
+              <QueueItem item={q} ops={queue.ops} chatId={ctx.chatId} readOnly={queue.readOnly} devOps={queue.devOps} />
             </div>
           ) : null;
         }
