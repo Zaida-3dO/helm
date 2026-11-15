@@ -2,6 +2,7 @@
 // timeouts and config changes.
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { after, test } from "node:test";
 import { startHttpFake } from "../../fakes/mcp-server/server.ts";
 import { generatedName } from "../src/mcp/index.ts";
@@ -117,13 +118,21 @@ test("http (SSE replies): notifications are skipped and the reply is matched", a
 test("browser sign-in: one ask for a fresh header; a refusal or no sign-in becomes signin_required", async () => {
   const f = await startHttpFake({ requireHeader: { name: "authorization", value: "Bearer fresh-1" } });
   const asks: string[] = [];
-  const h = harness({
+  // The host answers the ask with "delivered" and sends the header on the worker's own line:
+  // for "ok" before the answer (the line can beat it), for "stale" just after.
+  const h: ReturnType<typeof harness> = harness({
     hostRequest: async (op, args) => {
       const id = String((args as { serverId?: unknown }).serverId);
       asks.push(id);
       assert.equal(op, "app_mcp_oauth_header");
-      if (id === "ok") return { ok: true, result: { header: "Bearer fresh-1" } };
-      if (id === "stale") return { ok: true, result: { header: "Bearer stale-9" } };
+      if (id === "ok") {
+        h.bridge.deliverOauthHeader(id, "Bearer fresh-1");
+        return { ok: true, result: { delivered: true } };
+      }
+      if (id === "stale") {
+        setTimeout(() => h.bridge.deliverOauthHeader(id, "Bearer stale-9"), 5);
+        return { ok: true, result: { delivered: true } };
+      }
       return { ok: false, error: "Not connected: open Settings → MCP and click Connect." };
     },
   });
@@ -148,12 +157,51 @@ test("browser sign-in: one ask for a fresh header; a refusal or no sign-in becom
   // No token material in any status line.
   assert.ok(!JSON.stringify(h.lines).includes("fresh-1") && !JSON.stringify(h.lines).includes("stale-9"));
   // The host says there is no sign-in: no retry, and the server asks the user.
-  await assert.rejects(() => h.bridge.tools({ server: "none" }), /refused the credentials/);
+  await assert.rejects(() => h.bridge.tools({ server: "none" }), /Sign in again in Settings/);
   assert.equal(h.last("none")?.state, "signin_required");
   // A fresh header the server still refuses: one retry only, then the same ask to the user.
-  await assert.rejects(() => h.bridge.tools({ server: "stale" }), /refused the credentials/);
+  await assert.rejects(() => h.bridge.tools({ server: "stale" }), /Sign in again in Settings/);
   assert.equal(h.last("stale")?.state, "signin_required");
   assert.deepEqual(asks, ["ok", "none", "stale"], "one ask per server, never in a loop");
+  // A header line nobody asked for is dropped, not kept.
+  assert.equal(h.bridge.deliverOauthHeader("ok", "Bearer unasked"), false);
+});
+
+test("browser sign-in: every expiry is asked about, and refusals that land together share one ask", async () => {
+  const cfg = { requireHeader: { name: "authorization", value: "Bearer t1" } };
+  const f = await startHttpFake(cfg);
+  const asks: { serverId: string; refused?: string }[] = [];
+  let next = 2;
+  const h: ReturnType<typeof harness> = harness({
+    hostRequest: async (_op, args) => {
+      const a = args as { serverId: string; refused?: string };
+      asks.push(a);
+      const header = `Bearer t${next++}`;
+      // The server learns of the new token at the same moment the host hands it over.
+      cfg.requireHeader.value = header;
+      setTimeout(() => h.bridge.deliverOauthHeader(a.serverId, header), 20);
+      return { ok: true, result: { delivered: true } };
+    },
+  });
+  open.push(h.bridge, { close: () => void f.close() });
+  h.bridge.configure({ revision: "r1", servers: [httpServer("ex", f.url, { oauth: true, headers: { Authorization: "Bearer t1" } })] });
+  await h.bridge.tools({ server: "ex" });
+  const print = (t: string) => createHash("sha256").update(t).digest("hex").slice(0, 8);
+  // Two expiries one after the other, each recovered: no "sign in again" in between.
+  for (const [i, t] of [[1, "t2"], [2, "t3"]] as const) {
+    cfg.requireHeader.value = `Bearer expired-${i}`;
+    next = Number(t.slice(1));
+    await h.bridge.tools({ server: "ex" });
+    assert.equal(asks.length, i);
+    assert.equal(asks[i - 1]!.refused, print(`t${i}`), "the host is told which token was refused, by fingerprint only");
+  }
+  // Two requests refused together: one ask answers both.
+  cfg.requireHeader.value = "Bearer expired-3";
+  next = 4;
+  await Promise.all([h.bridge.tools({ server: "ex" }), h.bridge.tools({ server: "ex" })]);
+  assert.equal(asks.length, 3);
+  assert.ok(!h.lines.some((l) => l.state === "signin_required"), "no sign-in prompt for any of it");
+  assert.ok(!JSON.stringify(h.lines).includes("Bearer t4"));
 });
 
 test("startup timeout fails the server, and the next use tries again", async () => {

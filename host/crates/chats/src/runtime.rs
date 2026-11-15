@@ -327,6 +327,7 @@ impl Spawner for ProcessSpawner {
                 claude.strict_mcp_config = h.strict_mcp;
                 claude.disabled_mcp_servers = h.disabled_mcp_servers.clone();
                 let dir = worker_dir.join("tools");
+                crate::hostcalls::sweep_tools_dir(&dir);
                 helm_core::privfs::create_private_dir_all(&dir)
                     .map_err(|e| format!("Helm could not make the host-tool folder: {e}"))?;
                 (

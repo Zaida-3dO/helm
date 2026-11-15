@@ -407,7 +407,7 @@ fn transport_schema() -> Value {
             "env": {"type": "object", "additionalProperties": value_ref_schema()},
             "url": {"type": "string", "maxLength": 4096},
             "headers": {"type": "object", "additionalProperties": value_ref_schema()},
-            "oauth": {"type": "object", "properties": {"clientId": {"type": "string"}, "scope": {"type": "string"}, "redirectUri": {"type": "string"}}, "additionalProperties": false}
+            "oauth": {"type": "object", "properties": {"clientId": {"type": "string"}, "clientSecret": value_ref_schema(), "scope": {"type": "string"}, "redirectUri": {"type": "string", "description": "http://127.0.0.1:<port>/<path> a pre-registered client id was registered with."}}, "additionalProperties": false}
         },
         "required": ["type"],
         "additionalProperties": false

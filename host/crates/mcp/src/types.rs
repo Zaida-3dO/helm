@@ -93,6 +93,11 @@ pub struct OAuthConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub redirect_uri: Option<String>,
+    /// The client secret of a pre-registered client id, as a literal (write-only: it is sealed in
+    /// the credential store on save, and only its saved id is ever read back).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub client_secret: Option<ValueRef>,
 }
 
 /// One flat transport object, as the admin tools take it. Which fields apply
