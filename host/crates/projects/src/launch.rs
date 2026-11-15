@@ -127,9 +127,15 @@ pub fn project_line(
         (None, Some(f)) => ("the project", f),
         (None, None) => return Ok(None),
     };
-    let mut line = format!("This chat is on {kind} \"{}\"", quoted(&project.name, MAX_NAME));
+    let mut line = format!(
+        "This chat is on {kind} \"{}\"",
+        quoted(&project.name, MAX_NAME)
+    );
     if let Some(d) = &project.description {
-        line.push_str(&format!(" (described as \"{}\")", quoted(d, crate::types::MAX_DESCRIPTION_CHARS)));
+        line.push_str(&format!(
+            " (described as \"{}\")",
+            quoted(d, crate::types::MAX_DESCRIPTION_CHARS)
+        ));
     }
     if !cwd.trim().is_empty() {
         line.push_str(&format!(" and runs in {}", cwd.trim()));

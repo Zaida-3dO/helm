@@ -1141,7 +1141,8 @@ mod tests {
             Ok((before, after))
         }
         fn restore(&self, tx: &Transaction<'_>, _key: &str, value: &Value) -> Result<(), String> {
-            prefs::set_raw(tx, "desktopPet", &json!({"localGameLiftMinutes": value})).map_err(|e| e.to_string())
+            prefs::set_raw(tx, "desktopPet", &json!({"localGameLiftMinutes": value}))
+                .map_err(|e| e.to_string())
         }
         fn changed_event(&self, _key: &str) -> AppEvent {
             AppEvent::new("fake_changed")
@@ -1168,7 +1169,10 @@ mod tests {
         let mut c = ctx(&e);
         c.services = Arc::new(s);
         let g = get_settings(&c, json!({})).unwrap();
-        assert_eq!(g["settings"]["localGameLiftMinutes"], json!({"open": false, "level": 1}));
+        assert_eq!(
+            g["settings"]["localGameLiftMinutes"],
+            json!({"open": false, "level": 1})
+        );
         assert_eq!(g["options"]["localGameLiftMinutes"]["default"]["level"], 1);
         // Read-only facts ride along beside the value, only for keys that have them.
         assert_eq!(g["details"]["localGameLiftMinutes"], json!({"queue": []}));
@@ -1178,20 +1182,32 @@ mod tests {
             g["settings"].as_object().unwrap().len()
         );
         // The extension refuses what is not the chat's; nothing is recorded or announced.
-        let r = update_settings(&c, json!({"changes": {"localGameLiftMinutes": {"open": true}}}));
+        let r = update_settings(
+            &c,
+            json!({"changes": {"localGameLiftMinutes": {"open": true}}}),
+        );
         assert!(r.unwrap_err().public.contains("yours to change only"));
         // An extension key nobody gave a class is closed to chats, not open.
         let r = update_settings(&c, json!({"changes": {"unclassifiedFake": {"level": 3}}}));
-        assert!(r.unwrap_err().public.contains("not a setting chats can change"));
+        assert!(r
+            .unwrap_err()
+            .public
+            .contains("not a setting chats can change"));
         assert!(e.sink.kinds().is_empty());
         let commits = COMMITS.load(std::sync::atomic::Ordering::SeqCst);
-        let r = update_settings(&c, json!({"changes": {"localGameLiftMinutes": {"level": 3}}})).unwrap();
+        let r = update_settings(
+            &c,
+            json!({"changes": {"localGameLiftMinutes": {"level": 3}}}),
+        )
+        .unwrap();
         assert!(COMMITS.load(std::sync::atomic::Ordering::SeqCst) > commits);
         assert_eq!(r["applied"]["localGameLiftMinutes"]["before"]["level"], 1);
         assert_eq!(r["applied"]["localGameLiftMinutes"]["after"]["level"], 3);
         // Its own event, not a preference change.
         assert_eq!(e.sink.kinds(), ["fake_changed", "external_settings"]);
-        let id = r["applied"]["localGameLiftMinutes"]["changeId"].as_i64().unwrap();
+        let id = r["applied"]["localGameLiftMinutes"]["changeId"]
+            .as_i64()
+            .unwrap();
         let mut o = op(&e);
         o.services = c.services.clone();
         let u = undo(&o, json!({"changeIds": [id]})).unwrap();
@@ -1235,7 +1251,10 @@ mod tests {
                 .unwrap()
                 .replace("keybindings", "localGameLiftMinutes")
         );
-        let r = update_settings(&c, json!({"changes": {"localGameLiftMinutes": {"level": 3}}}));
+        let r = update_settings(
+            &c,
+            json!({"changes": {"localGameLiftMinutes": {"level": 3}}}),
+        );
         assert!(r.unwrap_err().public.contains("all settings"));
         assert!(e.sink.kinds().is_empty());
         // Switch on: listed, readable and changeable.
@@ -1246,12 +1265,20 @@ mod tests {
         .unwrap();
         let g = get_settings(&c, json!({})).unwrap();
         assert_eq!(g["settings"]["localGameLiftMinutes"]["level"], 1);
-        let r = update_settings(&c, json!({"changes": {"localGameLiftMinutes": {"level": 3}}})).unwrap();
+        let r = update_settings(
+            &c,
+            json!({"changes": {"localGameLiftMinutes": {"level": 3}}}),
+        )
+        .unwrap();
         assert_eq!(r["applied"]["localGameLiftMinutes"]["after"]["level"], 3);
         // A base-tier extension key never needed the switch.
         let e2 = env();
         let c2 = with_fake(&e2, false);
-        assert!(update_settings(&c2, json!({"changes": {"localGameLiftMinutes": {"level": 2}}})).is_ok());
+        assert!(update_settings(
+            &c2,
+            json!({"changes": {"localGameLiftMinutes": {"level": 2}}})
+        )
+        .is_ok());
     }
 
     #[test]

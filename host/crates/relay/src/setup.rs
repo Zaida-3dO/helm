@@ -372,7 +372,9 @@ fn build(
         }
     }
     let member = db
-        .snapshot(|tx| Ok::<_, rusqlite::Error>(helm_profiles::store::is_household_member(tx, chat_id)))
+        .snapshot(|tx| {
+            Ok::<_, rusqlite::Error>(helm_profiles::store::is_household_member(tx, chat_id))
+        })
         .map_err(|_| "The settings could not be read.".to_owned())?;
     if member {
         return Err(

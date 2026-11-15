@@ -554,8 +554,7 @@ fn look(
                 let member = db
                     .snapshot(|tx| {
                         Ok::<_, rusqlite::Error>(helm_profiles::store::is_household_member(
-                            tx,
-                            &r.chat_id,
+                            tx, &r.chat_id,
                         ))
                     })
                     .unwrap_or(true);
