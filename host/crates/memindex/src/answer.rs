@@ -16,6 +16,7 @@ use crate::hub::{Embedded, Responder};
 use crate::model::{normalise_model, Kind};
 use crate::sources::claude_code::record_ts;
 use crate::store;
+use helm_core::secrets::looks_like_secret;
 use helm_profiles::store as profiles;
 use rusqlite::params;
 use serde_json::{json, Value};
@@ -26,6 +27,8 @@ use std::time::{Duration, Instant};
 /// A Claude Code record is scanned for at most this long.
 pub const SCAN_BUDGET: Duration = Duration::from_secs(3);
 const SNIPPET: usize = 300;
+/// How much of one Claude Code record is read: as much as any record holds in practice.
+const RECORD_READ: usize = 4_000_000;
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 50;
 
@@ -134,33 +137,37 @@ impl Answerer {
                 if !(owner == me.id || (owner.is_empty() && me.is_home) || shared) {
                     return Ok(Err("That chat is not shown to this person.".to_owned()));
                 }
+                // No LIMIT in the query: a message that looks like a credential is skipped, and
+                // the limit counts what is left.
                 let mut st = tx.prepare(
                     "SELECT id, role, text, thinking, timestamp FROM messages
                      WHERE chat_id = ?1 AND timestamp >= ?2 AND timestamp <= ?3
                        AND (?4 = '' OR instr(lower(text), ?4) > 0 OR instr(lower(thinking), ?4) > 0)
-                     ORDER BY timestamp, id LIMIT ?5",
+                     ORDER BY timestamp, id",
                 )?;
-                let rows = st
-                    .query_map(
-                        params![chat, after, before, needle, limit as i64],
-                        |r| {
-                            let (id, role, text, thinking, at): (i64, String, String, String, i64) =
-                                (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?);
-                            let hay = if !needle.is_empty()
-                                && !text.to_lowercase().contains(&needle)
-                            {
-                                thinking
-                            } else {
-                                text
-                            };
-                            Ok(json!({
-                                "messageId": id, "role": role, "at": at,
-                                "snippet": snippet(&hay, &needle),
-                                "link": format!("helm://chats/{chat}/messages/{id}"),
-                            }))
-                        },
-                    )?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let mut found = st.query(params![chat, after, before, needle])?;
+                let mut rows = Vec::new();
+                while let Some(r) = found.next()? {
+                    if rows.len() >= limit {
+                        break;
+                    }
+                    let (id, role, text, thinking, at): (i64, String, String, String, i64) =
+                        (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?);
+                    // Whole texts, not the snippet: a credential near the match is as good as in it.
+                    if looks_like_secret(&text) || looks_like_secret(&thinking) {
+                        continue;
+                    }
+                    let hay = if !needle.is_empty() && !text.to_lowercase().contains(&needle) {
+                        thinking
+                    } else {
+                        text
+                    };
+                    rows.push(json!({
+                        "messageId": id, "role": role, "at": at,
+                        "snippet": snippet(&hay, &needle),
+                        "link": format!("helm://chats/{chat}/messages/{id}"),
+                    }));
+                }
                 Ok::<_, rusqlite::Error>(Ok(rows))
             })
             .map_err(|e| e.to_string())?
@@ -221,8 +228,14 @@ impl Answerer {
             if at != 0 && (at < after || at > before) {
                 continue;
             }
+            // The whole record is read for the credential check, so a token past the part a
+            // snippet could show still holds the record back.
             let mut text = String::new();
-            strings(&rec, &mut text, &mut 20_000);
+            let mut budget = RECORD_READ;
+            strings(&rec, &mut text, &mut budget);
+            if looks_like_secret(&text) {
+                continue;
+            }
             if !needle.is_empty() && !text.to_lowercase().contains(&needle) {
                 continue;
             }

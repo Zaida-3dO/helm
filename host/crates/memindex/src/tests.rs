@@ -732,6 +732,49 @@ fn the_hubs_questions_are_answered_only_for_a_viewer_who_may_see_the_chat() {
     assert_eq!(window(json!(0), json!(100)), 1);
     assert_eq!(window(json!(100), json!(200)), 0);
 
+    // A message or record that looks like a credential is never shown, wherever the match is.
+    let token = format!("ghp_{}", "a1B2".repeat(6));
+    r.db.write(|tx| {
+        tx.execute(
+            "INSERT INTO messages(chat_id, source_key, role, text, thinking, timestamp, sequence)
+             VALUES ('mine', 'k1', 'assistant', ?1, '', 60, 1)",
+            [format!("the zebra key is {token}")],
+        )
+    })
+    .unwrap();
+    write(
+        &projects,
+        "sess2.jsonl",
+        &format!(
+            "{}
+",
+            json!({"type":"user","uuid":"u9","timestamp":"2026-11-01T10:00:00Z",
+                   "message":{"content":[{"type":"tool_result","content":format!("zebra {token}")}]}}),
+        ),
+    );
+    assert_eq!(
+        ask("7", "helm_chats", "mine", "zebra")["results"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "the message with the token is left out"
+    );
+    assert_eq!(
+        ask("1", "claude_code", "sess2", "zebra")["results"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(
+        ask("7", "helm_chats", "mine", "ghp_")["results"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+
     // With the home profile not linked to a person, the hub names the session's owner.
     r.db.write(|tx| {
         helm_profiles::store::update(
@@ -810,6 +853,49 @@ fn credential_looking_passages_and_hidden_files_stay_home_and_switching_off_stop
     assert!(
         status.contains("1 passages held back") && status.contains("1 left out"),
         "{status}"
+    );
+
+    // A private key longer than a chunk: the lines that open and close it and the body between
+    // are all held back, and the plain parts around it are sent.
+    let pem = r.root.join("pem");
+    let body: Vec<String> = (0..60)
+        .map(|i| format!("MIIEow{i:03}{}", "QUJD".repeat(14)))
+        .collect();
+    write(
+        &pem,
+        "k.md",
+        &format!(
+            "# Before
+
+plain words before {}
+
+# Key
+
+-----{} RSA PRIVATE KEY-----
+{}
+-----{} RSA PRIVATE KEY-----
+
+# After
+
+{} plain words after
+",
+            "filler ".repeat(400),
+            "BEGIN",
+            body.join(
+                "
+"
+            ),
+            "END",
+            "filler ".repeat(400)
+        ),
+    );
+    r.add_source("pem", Kind::Folder, &pem, "", Scope::Me);
+    r.ix.pass(Some(&HashSet::from(["pem".to_owned()])), false);
+    let sent = r.hub.doc("k.md").to_string();
+    assert!(sent.contains("plain words before") && sent.contains("plain words after"));
+    assert!(
+        !sent.contains("MIIEow") && !sent.contains("QUJD"),
+        "a piece of the key was sent: {sent}"
     );
 
     // Indexing switched off while a pass is sending: the next frame is not sent.
@@ -918,6 +1004,13 @@ fn an_agent_may_only_narrow_memory_indexing_and_files_sources_under_its_own_pers
         assert!(why.contains("permission"), "{why}");
         assert!(!svc.view().enabled);
     }
+    // A malformed name is refused before any card is asked for, so no approval is spent on it.
+    let why = call(
+        "mine",
+        json!({"action": "switch", "enabled": true, "model": "a b"}),
+    )
+    .unwrap_err();
+    assert!(why.contains("model name"), "{why}");
     // A household member's chat changes none of the switches, even off.
     let why = call("pats", json!({"action": "switch", "enabled": false})).unwrap_err();
     assert!(why.contains("own person"), "{why}");

@@ -714,6 +714,13 @@ impl Indexer {
         let ours = normalise_model(&settings.model);
         loop {
             self.still_on()?;
+            // An approved move to another server or model ends this pass: the next one starts
+            // on the new settings (saving them woke the indexer), and no more passages go to
+            // the old server in the meantime.
+            let now = self.settings();
+            if now.server_id != settings.server_id || normalise_model(&now.model) != ours {
+                return Ok(());
+            }
             if self.embedder.busy() {
                 self.say_all("Vectors wait while a local chat is working.");
                 return Ok(());

@@ -287,6 +287,8 @@ fn memory_index(ctx: &ToolCtx, a: Value) -> ToolResult {
                     "Only this PC's own person can change the memory indexing switches.",
                 ));
             }
+            // A change that would be refused anyway must not spend the user's Allow.
+            c.validate().map_err(refuse)?;
             // Turning indexing on and moving the embedding to another server widen what leaves
             // this PC, so they need the user's Allow; turning it off and naming another model on
             // the same server do not.

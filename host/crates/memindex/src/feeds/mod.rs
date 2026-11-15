@@ -173,14 +173,66 @@ fn wire_hash(content: &str, a: &Audience, locator: &str, tier: &str) -> String {
     format!("{:x}", h.finalize())
 }
 
+fn find_bytes(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    if from >= hay.len() {
+        return None;
+    }
+    hay[from..]
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .map(|i| i + from)
+}
+
+/// Which chunks hold part of a private key block. A key longer than one chunk has the marker
+/// lines in the first and last pieces and only base64 between them, which looks like nothing on
+/// its own, so the doc is read as one run of words: every chunk from the line that opens a block
+/// to the line that closes it is marked. A block that never closes marks the rest of the doc.
+fn key_block_chunks(chunks: &[ChunkOut]) -> Vec<bool> {
+    let mut flat = String::new();
+    let mut owner: Vec<usize> = Vec::new();
+    for (i, c) in chunks.iter().enumerate() {
+        for word in c.text.split_whitespace() {
+            if !flat.is_empty() {
+                flat.push(' ');
+                owner.push(i);
+            }
+            flat.push_str(&word.to_ascii_lowercase());
+            owner.resize(flat.len(), i);
+        }
+    }
+    let bytes = flat.as_bytes();
+    let mut marked = vec![false; chunks.len()];
+    let mut at = 0;
+    while let Some(begin) = find_bytes(bytes, b"-----begin", at) {
+        at = begin + 10;
+        let opens = find_bytes(bytes, b"-----", begin + 10).map_or(bytes.len(), |c| c + 5);
+        if !flat[begin..opens].contains("private key") {
+            continue;
+        }
+        let end = find_bytes(bytes, b"-----end", opens)
+            .and_then(|e| find_bytes(bytes, b"-----", e + 8))
+            .map_or(bytes.len(), |c| c + 5);
+        for o in &owner[begin..end.min(owner.len())] {
+            marked[*o] = true;
+        }
+        at = end;
+    }
+    marked
+}
+
 /// Turn a built doc into what is sent: passages that look like a credential held back, the
 /// audience folded into its hash, and the doc cut into parts of at most [`MAX_DOC_CHUNKS`] chunks
 /// when it is longer. The first part keeps the doc's key. A doc with nothing left to send is
 /// skipped.
 pub fn finish(mut doc: DocOut, a: &Audience, tier: &'static str, locator: &str) -> Built {
     let before = doc.chunks.len();
-    doc.chunks
-        .retain(|c| !looks_like_secret(&c.text) && !looks_like_secret(&c.heading));
+    let in_key = key_block_chunks(&doc.chunks);
+    let mut kept = in_key.iter();
+    doc.chunks.retain(|c| {
+        !kept.next().copied().unwrap_or(false)
+            && !looks_like_secret(&c.text)
+            && !looks_like_secret(&c.heading)
+    });
     let withheld = before - doc.chunks.len();
     if doc.chunks.is_empty() {
         return Built::Skip(if withheld > 0 {

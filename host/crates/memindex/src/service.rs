@@ -423,6 +423,7 @@ impl Service {
     }
 
     pub fn save_settings(&self, c: SettingsChanges) -> Result<(), String> {
+        c.validate()?;
         let mut s: Settings = self.indexer.settings();
         if let Some(v) = c.enabled {
             s.enabled = v;
@@ -431,20 +432,9 @@ impl Service {
             s.server_id = v.trim().to_owned();
         }
         if let Some(v) = c.model {
-            let v = v.trim().to_owned();
-            let ok = !v.is_empty()
-                && v.len() <= 100
-                && v.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || ".-_:/".contains(c));
-            if !ok {
-                return Err("The model name may hold letters, digits and . - _ : / only.".into());
-            }
-            s.model = v;
+            s.model = v.trim().to_owned();
         }
         if let Some(v) = c.nightly {
-            if parse_nightly(v.trim()).is_none() {
-                return Err("The nightly scan time is HH:MM, like 03:30.".into());
-            }
             s.nightly = v.trim().to_owned();
         }
         if s.model.is_empty() {
@@ -600,6 +590,29 @@ pub struct SettingsChanges {
     pub server_id: Option<String>,
     pub model: Option<String>,
     pub nightly: Option<String>,
+}
+
+impl SettingsChanges {
+    /// Whether the names and times in the change are well formed. Checked before a grant is
+    /// spent on a change that would be refused anyway.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(v) = &self.model {
+            let v = v.trim();
+            let ok = !v.is_empty()
+                && v.len() <= 100
+                && v.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || ".-_:/".contains(c));
+            if !ok {
+                return Err("The model name may hold letters, digits and . - _ : / only.".into());
+            }
+        }
+        if let Some(v) = &self.nightly {
+            if parse_nightly(v.trim()).is_none() {
+                return Err("The nightly scan time is HH:MM, like 03:30.".into());
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A source to add (no `id`) or change (`id`); absent keeps.
