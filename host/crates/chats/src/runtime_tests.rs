@@ -43,10 +43,13 @@ pub struct FakeWorker {
 }
 
 impl FakeWorker {
-    /// The next command the host wrote. The wait is wide: under a whole workspace's test load a
-    /// command that follows from a tick or a database write can take several seconds.
+    /// The next command the host wrote. The wait is wide: under a whole workspace's test load
+    /// the actor task can wait many seconds for CPU alone, and a command that follows from a
+    /// tick or a database write waits with it. The window sizes to that scheduling, never to
+    /// what the test asserts — a test that must prove a command does NOT come uses
+    /// [`FakeWorker::no_command_for`], which stays short.
     pub async fn next(&mut self) -> Value {
-        tokio::time::timeout(Duration::from_secs(15), self.cmds.recv())
+        tokio::time::timeout(Duration::from_secs(45), self.cmds.recv())
             .await
             .expect("a command in time")
             .expect("worker channel open")
@@ -201,19 +204,25 @@ pub struct H {
 
 pub fn limits() -> Limits {
     Limits {
-        // Generous: a test that needs the ack to time out sets its own (see ACK_TIMEOUT_TEST).
-        // At 400 ms the prompt ack raced the fake worker's answer under full-suite load.
-        ack: Duration::from_secs(3),
-        stop: Duration::from_millis(400),
-        archive_stop: Duration::from_millis(300),
-        model_ack: Duration::from_millis(300),
+        // Generous: a test that needs a deadline to expire sets its own (see
+        // ACK_TIMEOUT_TEST, and the gate table's `deadline_ms` rows). These are wall-clock
+        // deadlines inside the actor, and on a saturated machine (a full lib suite next to
+        // other heavy jobs) the scripted worker can be seconds old before its actor task is
+        // even scheduled; a window shorter than that scheduling does not test the deadline,
+        // it tests the CPU. They stay short enough that a test which deliberately waits for
+        // one still finishes in seconds.
+        ack: Duration::from_secs(30),
+        stop: Duration::from_secs(1),
+        archive_stop: Duration::from_secs(2),
+        model_ack: Duration::from_secs(2),
         flush: Duration::from_millis(20),
         stream_db: Duration::ZERO,
         title_wait: Duration::ZERO,
         wait_retry: Duration::from_millis(50),
         max_active: 100,
         max_idle_workers: 20,
-        // Slow by default; the stall test speeds it up.
+        // A `stallMinutes` minute is 100 ms here; the harness parks the window itself
+        // (see `harness_with_services`), and the tests that study stalling set their own.
         tick: Duration::from_secs(5),
         stall_unit: Duration::from_millis(100),
         send_soon: Duration::from_secs(5),
@@ -233,6 +242,13 @@ pub fn harness_with_services(limits: Limits, extra: impl FnOnce(&mut Services)) 
     let profile = Profile::open(&dir.path().join("prof")).unwrap();
     let db =
         Arc::new(Database::open(&profile.db_path(), &crate::schema::tests::registry()).unwrap());
+    // The maintenance tick flags a running chat as stalled after `stallMinutes` units of quiet,
+    // and a unit here is 100 ms — the real default of five minutes would be half a second, which
+    // a loaded machine crosses just scheduling the turn's own first output. Park the window above
+    // every test's span so only a test that studies the stall flag arms it (each sets its own
+    // `stallMinutes` in the db, as the stall tests do).
+    db.write(|tx| helm_core::prefs::set_generic(tx, "stallMinutes", &json!(1440)))
+        .unwrap();
     let work = dir.path().join("work");
     std::fs::create_dir_all(&work).unwrap();
     let clock = Arc::new(Clock::new(0));
@@ -326,11 +342,13 @@ impl H {
         (sid, r)
     }
 
-    /// The next worker the chat starts. The wait is long because under a whole workspace's test
-    /// load a start (staging, the launch line) can take several seconds; a test that expects no
-    /// worker checks for that itself.
+    /// The next worker the chat starts. The wait is wide on purpose: a full lib suite runs
+    /// every test's actor task on its own two-thread runtime, and with the machine saturated
+    /// (several test binaries at once, say) a task can wait tens of seconds for its first
+    /// slice of CPU. The wait has to outlast that scheduling, since it is not the test's logic
+    /// that is slow; a test that expects no worker checks for that itself.
     pub async fn worker(&mut self) -> FakeWorker {
-        tokio::time::timeout(Duration::from_secs(30), self.workers.recv())
+        tokio::time::timeout(Duration::from_secs(60), self.workers.recv())
             .await
             .expect("a worker was spawned")
             .unwrap()
@@ -367,10 +385,12 @@ impl H {
             .unwrap()
     }
 
-    /// Poll until `f` holds (the actor runs on its own task). The wait is generous: under a whole
-    /// workspace's test load a tick-driven step can take well over a second.
+    /// Poll until `f` holds (the actor runs on its own task). The window is wide on purpose: a
+    /// full lib suite on a loaded machine can starve this test's actor task for tens of seconds,
+    /// and the state change itself is certain — the wait must outlast the scheduling, not fail
+    /// with it. Only the absence of a change is ever asserted on a short timer.
     pub async fn until(&self, what: &str, f: impl Fn(&H) -> bool) {
-        for _ in 0..3_000 {
+        for _ in 0..6_000 {
             if f(self) {
                 return;
             }
@@ -1490,17 +1510,16 @@ async fn retry_states_land_on_the_failed_message() {
 /// after any other answer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_wait_limit_retries_while_waiting_then_stops() {
-    let mut h = harness();
-    // A 5 s limit through the generic preference op (the e2e path).
-    h.call(
-        "preference",
-        json!({"key": "sendBehavior", "value": {"waitLimitSeconds": 5}}),
-    )
-    .await
-    .ok();
+    // The maintenance tick hands every live chat the stored send behaviour, and a tick landing
+    // mid-test would overwrite the short limit set straight on the live thread below with the
+    // stored default. Park the tick; nothing else in this test is tick-driven.
+    let mut h = harness_with(Limits {
+        tick: Duration::from_secs(3600),
+        ..limits()
+    });
     let (chat, _, mut w) = running_turn(&mut h).await;
-    // The limit applies to chats as they start; this one started with the default 30 s, so set
-    // a short one straight on the live thread for the test.
+    // The setting itself floors the wait at 5 s; the test arms 1 s straight on the live thread
+    // so the retry loop runs well inside the test's span.
     {
         let map = h.rt.sh.actors.lock().unwrap();
         map.get(&chat)
@@ -1515,9 +1534,10 @@ async fn the_wait_limit_retries_while_waiting_then_stops() {
     let (steer, _) = h.send(&chat, "now please", "steer").await;
     let p = w.expect("prompt").await;
     ack(&w, &p).await;
-    let d1 = tokio::time::timeout(Duration::from_secs(3), w.expect("deliver_now"))
-        .await
-        .unwrap();
+    // The deliver follows a 1 s timer inside the starved actor task: wide window.
+    let d1 = w
+        .expect_within("deliver_now", Duration::from_secs(30))
+        .await;
     assert_eq!(d1["submissionId"], steer.as_str());
     assert_eq!(d1["reason"], "wait_limit");
     assert_eq!(d1["minRunMs"], 1000);
@@ -1865,7 +1885,12 @@ impl crate::outage::Probe for Reached {
 /// worker died before Claude read the turn's prompt (there is nothing to continue).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_worker_killed_mid_turn_is_carried_on_after_the_wait_but_a_stopped_one_is_not() {
-    let mut h = harness();
+    // Every end here is the test's own kill line, never Helm's stop deadline: push that deadline
+    // out so the scripted kill is the only thing that ends a worker, whatever the machine does.
+    let mut h = harness_with(Limits {
+        stop: Duration::from_secs(30),
+        ..limits()
+    });
     let (chat, sid, w) = running_turn(&mut h).await;
     w.emit(json!({"type": "submission_delivered", "submissionId": sid}))
         .await;
@@ -2354,10 +2379,14 @@ async fn attention_follows_the_waiting_tracker() {
     w.emit(json!({"type": "extension_ui_request", "id": "ui-1", "method": "select", "attention": "approval",
                   "title": "Run ls?", "options": ["Allow once", "Deny"]}))
         .await;
+    // Wait for the approval's own row, not for any badge of 1: a badge can also rise from a
+    // different group, and matching on the number alone let a stray event end the wait early.
     h.until("needs you published", |h| {
-        h.events("attention")
-            .last()
-            .is_some_and(|e| e["summary"]["badge"] == 1)
+        h.events("attention").last().is_some_and(|e| {
+            e["summary"]["needsYou"]
+                .as_array()
+                .is_some_and(|v| v.iter().any(|r| r["kind"] == "approval"))
+        })
     })
     .await;
     let a = h.call("attention_get", json!({})).await.unwrap();
@@ -2471,11 +2500,17 @@ async fn acknowledging_the_completion_clears_the_badge() {
 }
 
 /// Archiving a running chat is immediate: the row is archived at once, the turn is stopped in the
-/// background and the worker killed if it does not settle, a late event from it changes nothing
-/// the user sees, and nothing still waiting is sent. An idle chat's worker is simply retired.
+/// background, a late event from it changes nothing the user sees, and nothing still waiting is
+/// sent. An idle chat's worker is simply retired. Both stop deadlines are parked far out here:
+/// every end in this scenario is the scripted worker's own settle line, never Helm's kill timer,
+/// so no scheduling delay can turn one path of this test into the other.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn archive_takes_a_running_chat_at_once_and_a_dying_worker_cannot_bring_it_back() {
-    let mut h = harness();
+    let mut h = harness_with(Limits {
+        stop: Duration::from_secs(30),
+        archive_stop: Duration::from_secs(30),
+        ..limits()
+    });
     // A worker that settles late, after the archive: its completion must not be announced.
     let (chat, _, mut w) = running_turn(&mut h).await;
     // A message Claude has not read yet (a steer waiting for the next boundary).
@@ -2496,12 +2531,14 @@ async fn archive_takes_a_running_chat_at_once_and_a_dying_worker_cannot_bring_it
         .await
         .unwrap();
     assert_eq!(archived["archived"], true, "no wait for the stop");
-    w.expect("abort").await;
-    // A Stop landing together with the archive must not send what is waiting.
+    // A Stop landing together with the archive must not send what is waiting: ask for it before
+    // the worker settles, so both reach the actor while its stop is under way.
     let (api, c2) = (h.api.clone(), chat.clone());
     let esc =
         tokio::spawn(async move { api.call(&main(), "chat_stop", json!({"chatId": c2})).await });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    w.expect("abort").await;
+    // Settle at once when the abort command reaches us: both reach the actor while its stop is
+    // under way, and a sleep here would only race the scheduling of this test's own task.
     w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
         .await;
     h.until("stopped", |h| h.status(&chat) == "stopped").await;
@@ -2537,51 +2574,6 @@ async fn archive_takes_a_running_chat_at_once_and_a_dying_worker_cannot_bring_it
         "recoverable after the restore"
     );
 
-    // Undo inside the archive window: the short kill deadline is dropped, so the chat is not
-    // ended with the 60-second note while its worker is still winding down.
-    let (chat4, _, mut w4) = running_turn(&mut h).await;
-    let archived_at = std::time::Instant::now();
-    h.call("chat_archive", json!({"chatId": chat4}))
-        .await
-        .unwrap();
-    w4.expect("abort").await;
-    h.call("chat_restore", json!({"chatId": chat4}))
-        .await
-        .unwrap();
-    let restored_at = std::time::Instant::now();
-    // On a loaded machine the restore itself can land after archive_stop (300 ms); the scenario
-    // only says something when it lands inside the window.
-    let in_window = archived_at.elapsed() < Duration::from_millis(250);
-    tokio::time::sleep(Duration::from_millis(350)).await; // past archive_stop
-    let status = h.status(&chat4);
-    // The restore swaps in the ordinary stop deadline (400 ms), which may fire once the sleep
-    // overruns; only a reading taken before it says anything.
-    if in_window && restored_at.elapsed() < Duration::from_millis(400) {
-        assert_ne!(
-            status, "interrupted",
-            "the archive deadline does not fire after a restore"
-        );
-    }
-    w4.emit(json!({"type": "agent_settled", "outcome": "stopped"}))
-        .await;
-    if in_window {
-        h.until("stopped", |h| h.status(&chat4) == "stopped").await;
-    }
-
-    // A worker that never answers the stop is killed after the archive stop limit.
-    let (chat2, _, mut w2) = running_turn(&mut h).await;
-    h.call("chat_archive", json!({"chatId": chat2}))
-        .await
-        .unwrap();
-    w2.expect("abort").await;
-    h.until("killed", |h| h.status(&chat2) == "stopped").await;
-    assert_eq!(
-        h.col(&format!("SELECT error FROM chats WHERE id = '{chat2}'")),
-        ["NULL"],
-        "an archive-time stop is not an error"
-    );
-    assert!(h.events("completion").is_empty());
-
     // An idle chat's worker is retired.
     let (chat3, _, mut w3) = running_turn(&mut h).await;
     w3.emit(json!({"type": "agent_settled", "outcome": "complete"}))
@@ -2591,6 +2583,69 @@ async fn archive_takes_a_running_chat_at_once_and_a_dying_worker_cannot_bring_it
         .await
         .unwrap();
     w3.expect("shutdown").await;
+}
+
+/// Undo inside the archive window: the short kill deadline is dropped and the ordinary stop
+/// deadline swapped in, so the chat is not ended with the timeout note while its worker is still
+/// winding down. The two limits are set so the reading is exact: at the check the archive
+/// deadline (8 s) has certainly passed, while the swapped-in stop deadline (60 s from the
+/// restore) certainly has not — the only way the chat survives untouched is the deadline being
+/// dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn undo_inside_the_archive_window_drops_the_short_kill_deadline() {
+    let mut h = harness_with(Limits {
+        stop: Duration::from_secs(60),
+        archive_stop: Duration::from_secs(8),
+        ..limits()
+    });
+    let (chat, _, mut w) = running_turn(&mut h).await;
+    let archived_at = std::time::Instant::now();
+    h.call("chat_archive", json!({"chatId": chat}))
+        .await
+        .unwrap();
+    w.expect("abort").await;
+    h.call("chat_restore", json!({"chatId": chat}))
+        .await
+        .unwrap();
+    // The restore only says something if it was asked for while the window was still open; on a
+    // machine so loaded that even this lands late, the scenario proves nothing and is skipped.
+    let in_window = archived_at.elapsed() < Duration::from_millis(4_000);
+    tokio::time::sleep(Duration::from_millis(8_200)).await; // past archive_stop
+    let status = h.status(&chat);
+    if in_window {
+        assert_ne!(
+            status, "interrupted",
+            "the archive deadline does not fire after a restore"
+        );
+    }
+    w.emit(json!({"type": "agent_settled", "outcome": "stopped"}))
+        .await;
+    if in_window {
+        h.until("stopped", |h| h.status(&chat) == "stopped").await;
+    }
+}
+
+/// A worker that never answers the stop is killed after the archive stop limit — and the kill is
+/// not an error. The window is deliberately tiny: the scripted worker stays silent, so there is
+/// nothing for the deadline to race with, however late the machine schedules.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_worker_that_never_answers_the_stop_is_killed_at_the_archive_limit() {
+    let mut h = harness_with(Limits {
+        archive_stop: Duration::from_millis(300),
+        ..limits()
+    });
+    let (chat, _, mut w) = running_turn(&mut h).await;
+    h.call("chat_archive", json!({"chatId": chat}))
+        .await
+        .unwrap();
+    w.expect("abort").await;
+    h.until("killed", |h| h.status(&chat) == "stopped").await;
+    assert_eq!(
+        h.col(&format!("SELECT error FROM chats WHERE id = '{chat}'")),
+        ["NULL"],
+        "an archive-time stop is not an error"
+    );
+    assert!(h.events("completion").is_empty());
 }
 
 /// A running chat with no output for the stall limit is flagged and counted; the
@@ -4866,7 +4921,13 @@ async fn a_host_send_retry_hands_over_a_saved_row_the_first_hand_off_missed() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_retry_answers_like_a_new_send_when_the_chat_cannot_take_it() {
     use crate::submit::{host_send, HostSend};
-    let mut h = harness();
+    // This scenario is a stop that settles: its worker answers and finishes. The stop's kill
+    // deadline is deliberately far out — nothing here tests the kill, and a scheduled-out
+    // machine could fire it between the scripted worker's answer and its settle line.
+    let mut h = harness_with(Limits {
+        stop: Duration::from_secs(30),
+        ..limits()
+    });
     let (chat, _, mut w) = running_turn(&mut h).await;
     let decision = |id: &'static str| {
         host_send(
@@ -4995,10 +5056,13 @@ async fn a_stalled_flag_left_by_a_crash_is_cleared_and_never_shows_on_an_idle_ch
     h.until("running", |h| h.status(&chat) == "running").await;
     w.emit(json!({"type": "message_start", "message": {"id": "m1", "role": "assistant", "content": []}}))
         .await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_ne!(
+    // The stall window is parked above this test's whole span (see `harness_with_services`), so
+    // no upkeep tick can re-flag the chat while it runs. The flag still reading 0 says recovery
+    // cleared it and the new turn left it clear; the old 100 ms sleep here only raced the
+    // actor's scheduling and could prove nothing either way.
+    assert_eq!(
         flag(&h),
-        ["1"],
+        ["0"],
         "output during the next turn leaves it clear"
     );
     let a = h.call("attention_get", json!({})).await.unwrap();
@@ -5368,8 +5432,10 @@ async fn the_idle_check_flags_a_quiet_chat_once_and_new_activity_clears_it() {
         Ok((true, "The migration still fails on the last step.".into()));
     let jobs = || h.spawner.triage_jobs.lock().unwrap().len();
     let flagged = || h.rt.attention().unwrap().flagged;
+    // Wide like `H::until`: the verdict rides a helper thread and an actor write, both of which
+    // a saturated machine can delay by tens of seconds.
     let wait_for = |want: usize| async move {
-        for _ in 0..100 {
+        for _ in 0..2_000 {
             if flagged().len() == want {
                 return;
             }
@@ -6696,6 +6762,11 @@ async fn local_chats_say_who_the_model_server_is_busy_with() {
         tick: Duration::from_millis(50),
         ..limits()
     });
+    // And it wants the ordinary stall rule live: five 100 ms units, so the quiet span below
+    // crosses a full window and a wrongly-flagged waiting chat would show. (The harness parks
+    // the window for every other test.)
+    h.db.write(|tx| helm_core::prefs::set_generic(tx, "stallMinutes", &json!(5)))
+        .unwrap();
     // The server says it is working on a request. How many of Helm's own chats would be answered
     // first is Helm's own count: the server cannot tell whose request is whose.
     let local = Arc::new(FakeLocal {
