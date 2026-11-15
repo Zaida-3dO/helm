@@ -72,6 +72,8 @@ export { PromptDialog, type Prompt } from './PromptDialog.tsx';
 export const PREVIEW_DELAY_MS = 300;
 /** The longest project description, in characters. */
 export const DESCRIPTION_MAX = 200;
+/** The longest startup instructions text, in characters. */
+export const STARTUP_MAX = 4000;
 /** The space between one project's block and the next, in pixels. */
 const BLOCK_GAP = 4;
 
@@ -470,6 +472,15 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           value: (p as ProjectNode & { description?: string | null }).description ?? '',
           maxLength: DESCRIPTION_MAX,
           onSave: (v) => act.editProject(p, { description: v.trim() }),
+        }),
+      editStartup: () =>
+        setPrompt({
+          title: 'Startup instructions',
+          label: 'What every new chat on this project does first, before anything else (a worktree and branch, the local servers, the links to send you)',
+          value: p.startupInstructions ?? '',
+          maxLength: STARTUP_MAX,
+          multiline: true,
+          onSave: (v) => act.editProject(p, { startupInstructions: v.trim() }),
         }),
       cost: () => setCost({ projectId: p.id }),
       nestUnder: (id) => void act.nestProject(p, id),
