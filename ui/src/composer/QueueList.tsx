@@ -34,14 +34,14 @@ const DEFAULT_CAPS = { withdraw: false, deliverNow: false, stopTool: false, comp
 /** Withdraw and Recover: the host moves the text into the stored draft and sends a `chat` event
  * with the newer draft revision, which the composer picks up. The message's images and files
  * go back to the chat's unstaged set, and restore() stages them in the composer from there.
- * For a chat that runs on another PC the action travels there; Recover puts the message's own
+ * For a chat that runs on another PC the action travels there; Withdraw and Recover put the message's own
  * text into this PC's composer (the pictures already sit on the other PC, next to the chat). */
 function queueAction(ops: ChatOps, chatId: string, devOps?: RemoteChatOps) {
   return (s: Submission, action: 'withdraw' | 'recover') =>
     (devOps ? devOps.submissionAction(chatId, s.id, action) : ops.submissionAction(s.id, action))
       .then(() => {
         if (devOps) {
-          if (action === 'recover') composerApi(chatId).insert(s.text);
+          composerApi(chatId).insert(s.text);
         } else {
           composerApi(chatId).restore();
         }

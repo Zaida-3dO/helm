@@ -675,7 +675,8 @@ pub enum Op {
     VerbositySet(VerbositySetArgs),
     /// Whether the side panel's context eye is on for the chat there. A read.
     ContextOn(ChatIdArgs),
-    /// The chat's project files matching a mention query, read on the PC that runs it. A read.
+    /// The chat's project files matching a mention query, read on the PC that runs it. Runs with
+    /// the run switch, since it reads this PC's disk.
     QuickOpen(QuickOpenArgs),
     /// The chat's project folder path, as the panel shows it. A read.
     ChatFolder(ChatIdArgs),
@@ -838,6 +839,7 @@ impl Op {
                 | Op::Snooze(_)
                 | Op::Address(_)
                 | Op::DefaultsSet(_)
+                | Op::QuickOpen(_)
         )
     }
 }

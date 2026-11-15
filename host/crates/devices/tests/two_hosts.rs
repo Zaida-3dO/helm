@@ -563,7 +563,7 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         (
             "fork",
             json!({"chatId": "c1", "forkId": "f-1"}),
-            json!({"chat": {"id": "c1-copy"}}),
+            json!({"id": "c1-copy", "revision": 9}),
         ),
         ("compact", json!({"chatId": "c1"}), json!(null)),
         (
@@ -756,7 +756,6 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
     for (op, args) in [
         ("verbosity_get", json!({"chatId": "c1"})),
         ("context_on", json!({"chatId": "c1"})),
-        ("quick_open", json!({"chatId": "c1", "query": "x"})),
         ("checkpoint", json!({"chatId": "c1", "messageId": 2})),
         ("attention", json!({"chatIds": ["c1"]})),
         ("item_links", json!({"chatIds": ["c1"]})),
@@ -793,6 +792,8 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
     }
     for (op, args) in [
         ("set_permission", json!({"chatId": "c1", "mode": "plan"})),
+        // It reads this PC's disk, so it needs the switch even though it changes nothing.
+        ("quick_open", json!({"chatId": "c1", "query": "x"})),
         ("verbosity_set", json!({"chatId": "c1", "level": "low"})),
         ("warm", json!({"chatId": "c1"})),
         ("tool_stop", json!({"chatId": "c1", "toolCallId": "t-2"})),
@@ -1666,6 +1667,21 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         assert!(st.boards_read[0].params.get("chatId").is_none());
         assert_eq!(st.boards_cancelled[0].request_id, "tr-1");
     }
+    // A fork answers with the new chat's record, and the copy holds it at once, so the control
+    // that opens it finds it.
+    let forked = api
+        .call_host("chat_fork", json!({"chatId": "c1", "forkId": "f-2"}))
+        .await
+        .unwrap();
+    assert_eq!(forked["id"], "c1-copy");
+    assert!(b
+        .db
+        .snapshot(|tx| tx.query_row(
+            "SELECT 1 FROM mirror_chats WHERE chat_id = 'c1-copy'",
+            [],
+            |_| Ok(())
+        ))
+        .is_ok());
     let rec =
         b.db.snapshot(|tx| {
             tx.query_row(
@@ -2105,6 +2121,19 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
         .unwrap()
         .iter()
         .all(|it| !it["path"].as_str().unwrap_or_default().contains("away")));
+    // A path-shaped mention answers nothing from afar: only the fuzzy search under the chat's
+    // folder does.
+    for query in ["C:\\", "~/", "../..", "./x", "/etc/", "a/b"] {
+        let q = port
+            .quick_open(helm_devices::wire::QuickOpenArgs {
+                chat_id: "panel-1".to_owned(),
+                query: query.to_owned(),
+                reload: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(q["items"].as_array().unwrap().len(), 0, "{query}");
+    }
 
     // The catalogue op failing (here: no profile folder for it to read) is logged, not fatal:
     // the hello still answers, with no catalogue.
@@ -2260,6 +2289,43 @@ async fn a_household_member_gets_their_own_view_of_the_list_but_is_refused_nothi
         // A chat she starts is hers, whoever she names.
         assert_eq!(st.created[0].person_id, "person-b");
     }
+    // She cannot hand a chat that is neither hers nor shared with her to a profile or share it
+    // (that would make it read as hers), nor change this PC's new-chat defaults.
+    port.add_chat_of("his", "Pat's", 16, "person-a", &[]);
+    for (op, args, ok) in [
+        (
+            "move_profile",
+            json!({"chatId": "his", "profileId": "p"}),
+            false,
+        ),
+        (
+            "share",
+            json!({"chatId": "his", "personId": "person-b", "shared": true}),
+            false,
+        ),
+        (
+            "move_profile",
+            json!({"chatId": "hers", "profileId": "p"}),
+            true,
+        ),
+        (
+            "share",
+            json!({"chatId": "shared", "personId": "person-a", "shared": false}),
+            true,
+        ),
+        (
+            "defaults_set",
+            json!({"chatId": "hers", "model": "opus"}),
+            false,
+        ),
+    ] {
+        let got = sam.rpc.call("dev-a", op, args).await;
+        match ok {
+            true => assert!(got.is_ok(), "{op}: {got:?}"),
+            false => assert_eq!(got.unwrap_err().code, code::NOT_ALLOWED, "{op}"),
+        }
+    }
+    assert_eq!(port.st().profiles_moved.len(), 1);
 
     // With the household switch off she is refused, even reading; the owner's devices are not.
     port.set_household(false);
