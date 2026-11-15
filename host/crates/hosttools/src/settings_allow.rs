@@ -45,71 +45,105 @@ pub const NAMED: &[(&str, Risk, &str)] = &[
     ("localSpeechReserveGb", Risk::Low, ""),
     ("localToolsSetup", Risk::Low, ""),
     ("localCompareModel", Risk::Low, ""),
-    // Settings with no tool yet: they live outside the preference table.
+    ("localGameLiftMinutes", Risk::Low, ""),
+    // Extension keys a chat stages for the user to approve.
+    (
+        "localGames",
+        Risk::High,
+        "The programs that unload your local models decide what Helm stops, so you approve them.",
+    ),
+    (
+        "localRestartTask",
+        Risk::High,
+        "Helm ends and starts this scheduled task on its own, so you approve which one.",
+    ),
+    (
+        "localPauseFile",
+        Risk::High,
+        "Helm writes this file while local models are unloaded, so you approve where.",
+    ),
+    // The Claude Code runtime switches (Settings > Runtime), kept in a file Helm's workers read.
+    ("shellChanges", Risk::Low, ""),
+    ("lowPriority", Risk::Low, ""),
+    ("toolOutputCap", Risk::Low, ""),
+    ("subagentSoftTurns", Risk::Low, ""),
     (
         "fastMode",
-        Risk::User,
-        "Changes how every chat runs, so only you set it.",
+        Risk::High,
+        "Changes how every chat runs, so you approve it.",
     ),
     (
         "worktreeTools",
-        Risk::User,
-        "Lets Claude Code's own worktree tools through, so only you set it.",
+        Risk::High,
+        "Lets Claude Code's own worktree tools through to chats, so you approve it.",
     ),
     (
         "scheduleTools",
-        Risk::User,
-        "Lets Claude Code's own schedule tools through, so only you set it.",
+        Risk::High,
+        "Lets Claude Code's own schedule tools through to chats, so you approve it.",
     ),
     (
-        "shellChanges",
-        Risk::User,
-        "Decides whether Helm records the files shell commands change, so only you set it.",
+        "skipPermissions",
+        Risk::High,
+        "Decides whether chats launch with permissions bypassed, so you approve it.",
+    ),
+    (
+        "subagentLimits",
+        Risk::High,
+        "Turns the limits on sub-agents on or off, so you approve it.",
+    ),
+    (
+        "subagentHardStop",
+        Risk::High,
+        "Decides whether a sub-agent past its limit is stopped, so you approve it.",
     ),
     (
         "claudeExecutable",
-        Risk::User,
-        "Decides which program Helm runs as Claude Code, so only you set it.",
+        Risk::High,
+        "Decides which program Helm runs as Claude Code, so you approve it.",
+    ),
+    // Settings in a crate's own table that a chat stages for the user to approve.
+    (
+        "dictation",
+        Risk::High,
+        "Where a recording of your voice is sent decides who hears it, so you approve it.",
     ),
     (
-        "loadGate",
-        Risk::User,
-        "Decides when Helm holds your chats back to protect the PC, so only you set it.",
+        "usageGovernor",
+        Risk::High,
+        "The governor can stop your chats near the plan's limit, so you approve its settings.",
     ),
-    (
-        "afk",
-        Risk::User,
-        "Away mode decides when Helm answers for you, so only you set it.",
-    ),
-    (
-        "afkSchedule",
-        Risk::User,
-        "Away mode decides when Helm answers for you, so only you set it.",
-    ),
-    (
-        "mcpLoadInAppChats",
-        Risk::User,
-        "Decides which chats load MCP servers, so only you set it.",
-    ),
-    (
-        "projectMcpApprovals",
-        Risk::User,
-        "Approving a project's MCP servers is an approval itself, so only you give it.",
-    ),
-    (
-        "mcpDenyEntries",
-        Risk::User,
-        "The block list that keeps MCP servers out of chats, so only you edit it.",
-    ),
-    (
-        "boardToken",
-        Risk::User,
-        "A secret typed into a chat stays in its transcript, so you enter it in Settings.",
-    ),
+    // Secrets: the credential store behind the MCP servers, search and the board.
     (
         "credentials",
         Risk::User,
         "A secret typed into a chat stays in its transcript, so you enter it in Settings.",
+    ),
+];
+
+/// Parts of a Low extension key that only the user changes: (key, the parts, why). The extension
+/// refuses an update that touches them, in words. The class above says what a chat may do with
+/// the key's other parts; this list is for the pages that show which settings need the user.
+pub const USER_PARTS: &[(&str, &str, &str)] = &[
+    (
+        "orchestrator",
+        "every field but newChats and each stage's agent",
+        "They decide what may land without you.",
+    ),
+    (
+        "telegram",
+        "everything but the model and effort a new chat opens with",
+        "They decide who can reach you and what an answer from Telegram may approve.",
+    ),
+    (
+        "voice",
+        "everything but the model and effort a new chat opens with",
+        "They decide what the phone's voice line may do and approve.",
+    ),
+    (
+        "localServersEnabled",
+        "a server's address, name, key, start folder and preset",
+        "Where a model server is, and what Helm starts for it, is yours to set.",
     ),
 ];
 
@@ -242,6 +276,11 @@ mod tests {
         }
         for k in READ_ONLY {
             assert!(seen.insert(*k) && risk(k).is_none(), "{k}");
+        }
+        // The parts only the user changes belong to keys a chat otherwise changes itself.
+        for (k, part, why) in USER_PARTS {
+            assert_eq!(risk(k), Some(Risk::Low), "{k}");
+            assert!(!part.is_empty() && why.ends_with('.'), "{k}");
         }
     }
 

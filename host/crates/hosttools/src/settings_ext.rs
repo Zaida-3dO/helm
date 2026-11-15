@@ -53,6 +53,19 @@ pub trait SettingsExtension: Send + Sync {
         self.apply(tx, key, value)
     }
 
+    /// What [`apply_approved`](Self::apply_approved) would do, stored nowhere: checks a staged
+    /// change up front. The default runs the real thing, which is right for a setting kept in
+    /// the database, because the caller rolls the transaction back; an extension that keeps its
+    /// value elsewhere (a file) overrides it so that checking writes nothing.
+    fn check_approved(
+        &self,
+        tx: &Transaction<'_>,
+        key: &str,
+        value: &Value,
+    ) -> Result<(Value, Value), String> {
+        self.apply_approved(tx, key, value)
+    }
+
     /// Put a value from an earlier [`apply`](Self::apply) back, for Undo.
     fn restore(&self, tx: &Transaction<'_>, key: &str, value: &Value) -> Result<(), String>;
 

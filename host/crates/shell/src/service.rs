@@ -25,6 +25,16 @@ use helm_platform::{AudioInputs, CaptureDevice, PowerAssertions};
 use serde_json::json;
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// The preference keys that make up the shell settings: a change to any of them, from whoever
+/// writes it, is adopted and applied.
+const SHELL_KEYS: [&str; 5] = [
+    settings::GLOBAL_HOTKEY.name(),
+    settings::KEEP_AWAKE.name(),
+    settings::NOTIFICATIONS.name(),
+    settings::DICTATION_MIC.name(),
+    settings::TERMINAL_SHELL.name(),
+];
+
 /// What the app does for the shell. Every call is quick and never blocks on the UI.
 pub trait ShellHost: Send + Sync {
     /// The taskbar overlay: None clears it.
@@ -166,13 +176,13 @@ impl ShellService {
                 }
             }
             "preferences" => {
-                // A changed preference row for the mode (the agent-facing settings tool writes
-                // it directly): adopt it and apply, rather than waiting for a restart.
-                if !event
-                    .fields
-                    .get("changed")
-                    .is_some_and(|c| c.get(settings::KEEP_AWAKE.name()).is_some())
-                {
+                // A changed preference row for any shell setting (the agent-facing settings tool
+                // writes them directly): adopt the stored settings and apply them, rather than
+                // waiting for a restart. Our own saves reach here too and change nothing.
+                let Some(changed) = event.fields.get("changed") else {
+                    return;
+                };
+                if !SHELL_KEYS.iter().any(|k| changed.get(*k).is_some()) {
                     return;
                 }
                 let Ok(loaded) = self
@@ -181,16 +191,7 @@ impl ShellService {
                 else {
                     return;
                 };
-                let mode = loaded.keep_awake;
-                {
-                    let mut st = self.state.lock().unwrap();
-                    st.settings.keep_awake = mode;
-                    if mode != KeepAwake::Off {
-                        st.last_keep_awake = mode;
-                    }
-                }
-                self.apply_keep_awake();
-                self.publish_tray();
+                self.adopt(loaded);
             }
             _ => {}
         }
@@ -420,6 +421,13 @@ impl ShellService {
             .db
             .write(|tx| Ok::<_, rusqlite::Error>(settings::save(tx, &next)))
             .map_err(|e| e.to_string())??;
+        self.adopt(stored);
+        Ok(self.view())
+    }
+
+    /// Take `stored` as the settings in effect and apply what differs from the ones before:
+    /// the hotkey, the toasts, keep-awake and the tray.
+    fn adopt(&self, stored: ShellSettings) {
         let mut st = self.state.lock().unwrap();
         if stored.keep_awake != KeepAwake::Off {
             st.last_keep_awake = stored.keep_awake;
@@ -447,7 +455,6 @@ impl ShellService {
         }
         self.apply_keep_awake();
         self.publish_tray();
-        Ok(self.view())
     }
 
     /// The tray's Microphone pick: None is Automatic. The name comes from the device list, so a

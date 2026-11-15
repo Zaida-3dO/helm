@@ -7,10 +7,14 @@
 //!   and Open chat.
 //! - Ops `settings_changes_list` and `settings_undo {changeIds[1–16]}`: all or nothing, and only
 //!   if every value is still what the chat set.
+//! - Op `settings_risk_list`: every setting's class (`low`, `high`, `user`) with the reason a
+//!   `high` or `user` one carries, and the parts of a `low` key that only the user changes. The
+//!   Settings pages read it to say which settings need the user's approval.
 
 use crate::registry::{HostToolRegistry, ToolCtx, ToolError, ToolResult};
 use crate::settings_allow::{
-    agent_keys, high_pref_keys, high_refusal, needs_all_refusal, refusal, risk, user_refusal, Risk,
+    agent_keys, high_pref_keys, high_refusal, needs_all_refusal, reason, refusal, risk,
+    user_refusal, Risk, NAMED, USER_PARTS,
 };
 use crate::settings_ext::{PrefRules, SettingsExtensions};
 use crate::settings_options;
@@ -256,6 +260,8 @@ pub enum By {
     Chat,
     /// Helm applying what the user approved on a card: High settings only.
     Approved,
+    /// Checking what the user would be asked to approve, in a transaction that is rolled back.
+    Check,
 }
 
 /// A setting's value before and after a change; `None` is the default in use.
@@ -283,8 +289,10 @@ fn change_key(
     match (by, risk(key)) {
         (By::Chat, Some(Risk::High)) => return Err(high_refusal(key)),
         (By::Chat, Some(Risk::User)) => return Err(user_refusal(key)),
-        (By::Approved, Some(Risk::High)) => {}
-        (By::Approved, _) => return Err(format!("{key} is not a setting the user approves.")),
+        (By::Approved | By::Check, Some(Risk::High)) => {}
+        (By::Approved | By::Check, _) => {
+            return Err(format!("{key} is not a setting the user approves."))
+        }
         _ => {}
     }
     if let Some(x) = ext.owner(key) {
@@ -294,6 +302,7 @@ fn change_key(
         let (b, a) = match by {
             By::Chat => x.apply(tx, key, v)?,
             By::Approved => x.apply_approved(tx, key, v)?,
+            By::Check => x.check_approved(tx, key, v)?,
         };
         return Ok((Some(b), Some(a)));
     }
@@ -362,7 +371,8 @@ pub fn apply_approved(
     let r = db.write(|tx| {
         done.clear();
         for (key, v) in changes {
-            let (before, after) = match change_key(tx, &ext, &rules, chat, key, v, By::Approved) {
+            let by = if commit { By::Approved } else { By::Check };
+            let (before, after) = match change_key(tx, &ext, &rules, chat, key, v, by) {
                 Ok(c) => c,
                 Err(why) => {
                     // The error rolls back what the earlier keys stored.
@@ -651,8 +661,32 @@ pub(crate) fn all_settings_set(ctx: &OpCtx, args: Value) -> Result<Value, ApiErr
     Ok(Value::Null)
 }
 
+/// `settings_risk_list`: the risk table, for the pages that show which settings need approval.
+pub(crate) fn risk_list(_ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
+    let name = |r: Risk| match r {
+        Risk::Low => "low",
+        Risk::High => "high",
+        Risk::User => "user",
+    };
+    let settings: Vec<Value> = CLASSIFIED
+        .iter()
+        .map(|(k, _)| *k)
+        .chain(NAMED.iter().map(|(k, ..)| *k))
+        .filter_map(|k| {
+            let r = risk(k)?;
+            Some(json!({"key": k, "risk": name(r), "why": reason(k)}))
+        })
+        .collect();
+    let parts: Vec<Value> = USER_PARTS
+        .iter()
+        .map(|(key, part, why)| json!({"key": key, "part": part, "why": why}))
+        .collect();
+    Ok(json!({ "settings": settings, "userParts": parts }))
+}
+
 pub fn register_ops(reg: &mut OpRegistry) {
-    reg.blocking("settings_changes_list", OpClass::Blocking, changes_list)
+    reg.blocking("settings_risk_list", OpClass::Blocking, risk_list)
+        .blocking("settings_changes_list", OpClass::Blocking, changes_list)
         .blocking("settings_undo", OpClass::Maintenance, undo)
         .blocking("settings_all_set", OpClass::Maintenance, all_settings_set);
 }
@@ -737,10 +771,7 @@ mod tests {
         // compactSidebar, then fastMode fails: sidebarWidth and zoomLevel are not tried.
         assert_eq!(r["applied"].as_object().unwrap().len(), 1);
         assert_eq!(r["applied"]["compactSidebar"]["after"], true);
-        assert!(r["error"]
-            .as_str()
-            .unwrap()
-            .contains("yours to change only"));
+        assert!(r["error"].as_str().unwrap().contains("app_stage_settings"));
         let w =
             e.db.snapshot(|tx| Ok::<_, rusqlite::Error>(prefs::read(tx, "sidebarWidth")))
                 .unwrap();
@@ -778,9 +809,9 @@ mod tests {
         assert!(r.unwrap_err().public.contains("yours to change only"));
         let many: Map<String, Value> = (0..17).map(|i| (format!("k{i}"), json!(1))).collect();
         assert!(update_settings(&ctx(&e), json!({"changes": many})).is_err());
-        let g = get_settings(&ctx(&e), json!({"keys": ["theme", "fastMode"]})).unwrap();
+        let g = get_settings(&ctx(&e), json!({"keys": ["theme", "agentSettingsAll"]})).unwrap();
         assert!(g["settings"].get("theme").is_some());
-        assert!(g["unavailable"]["fastMode"]
+        assert!(g["unavailable"]["agentSettingsAll"]
             .as_str()
             .unwrap()
             .contains("yours to change only"));
@@ -823,6 +854,21 @@ mod tests {
             e.db.snapshot(|tx| Ok::<_, rusqlite::Error>(prefs::read(tx, k)))
                 .unwrap()
         };
+        // The pages read the table: High keys carry their reason, user-only ones too.
+        let table = risk_list(&op(&e), Value::Null).unwrap();
+        let row = |k: &str| {
+            table["settings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["key"] == k)
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(row("terminalShell")["risk"], "high");
+        assert_eq!(row("agentSettingsAll")["risk"], "user");
+        assert_eq!(row("theme")["why"], Value::Null);
+        assert!(table["userParts"].as_array().unwrap().len() >= 3);
         // A chat reads it, flagged, and cannot change it; the refusal names the staging tool.
         let g = get_settings(&c, json!({"keys": ["terminalShell", "agentSettingsAll"]})).unwrap();
         assert_eq!(g["options"]["terminalShell"]["needsApproval"], true);

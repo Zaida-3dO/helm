@@ -56,6 +56,7 @@ helm-pages = { path = "../crates/pages" }
 helm-dictation = { path = "../crates/dictation" }
 helm-memindex = { path = "../crates/memindex" }
 serde_json.workspace = true
+rusqlite.workspace = true
 tokio.workspace = true
 log.workspace = true
 env_logger = "0.11"

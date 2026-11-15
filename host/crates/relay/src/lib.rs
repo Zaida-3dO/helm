@@ -21,7 +21,8 @@
 //! | [`voice_watch`] | the voice chat watching the other chats: attention notes, coalesced and rate-limited, and telling the sink when the chat wakes |
 //! | [`voice_show`] | the `app_voice_show` tool: pictures, tables, lists, links, text and files queued for the phone's screen |
 //! | [`pair`] | pairing with the hub by a one-time code: token, names, the shared-memory server and the home profile in one step |
-//! | [`setup`] | `app_stage_settings`: a chat stages pairing, the update folder and the Devices switches; Helm applies them when the user clicks Approve |
+//! | [`setup`] | `app_stage_settings`: a chat stages pairing and any setting that needs approval; Helm applies them when the user clicks Approve |
+//! | [`pref_rules`] | the update folder's and the household switches' own rules, used by the settings tools and by approved changes |
 //! | [`household`] | other people's Helms through the hub: the three sharing switches, serving their calls, and asking theirs |
 //! | [`knowledge_line`] | the household's knowledge files over the line: pull and push, the hub's people as profiles, and the sync loop |
 //! | [`index_line`] | the hub's search index over the line: requests and their answers, and the hub's questions to this PC |
@@ -86,6 +87,7 @@ pub mod knowledge_line;
 pub mod notify;
 pub mod pair;
 pub mod people;
+pub mod pref_rules;
 pub mod remote;
 pub mod setup;
 pub mod sink;
