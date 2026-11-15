@@ -1,0 +1,165 @@
+/* Settings → Memory. Design-system tokens only. */
+
+.mem-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  color: var(--text);
+}
+
+.mem-section h3 {
+  margin: 0 0 6px;
+  font-size: calc(12 * var(--ui-unit));
+  font-weight: 600;
+}
+
+.mem-section-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.mem-section-head h3 {
+  margin: 0;
+  margin-right: auto;
+}
+
+.mem-help {
+  margin: 0 0 8px;
+  font-size: calc(11 * var(--ui-unit));
+  line-height: 1.6;
+  color: var(--secondary);
+}
+
+.mem-hub {
+  margin-top: 6px;
+  font-size: calc(11 * var(--ui-unit));
+}
+
+.mem-hub-ok {
+  color: var(--secondary);
+}
+
+.mem-hub-bad {
+  color: var(--error);
+}
+
+.mem-hub-idle {
+  color: var(--secondary);
+}
+
+.mem-status,
+.mem-pending {
+  margin-top: 4px;
+  font-size: calc(11 * var(--ui-unit));
+  color: var(--secondary);
+}
+
+.mem-pending {
+  color: var(--error);
+}
+
+.mem-source {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  margin-bottom: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.mem-source-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.mem-kind {
+  flex: none;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: calc(10 * var(--ui-unit));
+  color: var(--secondary);
+}
+
+.mem-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(11 * var(--ui-unit));
+  color: var(--secondary);
+}
+
+.mem-spacer {
+  flex: 1;
+}
+
+.mem-source-fields,
+.mem-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mem-field label,
+.mem-field > span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mem-label {
+  flex: none;
+  width: 130px;
+  font-size: calc(11 * var(--ui-unit));
+  color: var(--secondary);
+}
+
+.mem-field .ui-input,
+.mem-field textarea {
+  flex: 1;
+  min-width: 0;
+}
+
+.mem-path-input {
+  flex: 1;
+  min-width: 240px;
+}
+
+.mem-globs {
+  width: 260px;
+  resize: vertical;
+}
+
+.mem-wide {
+  width: 220px;
+}
+
+.mem-source-foot {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: calc(11 * var(--ui-unit));
+  color: var(--secondary);
+}
+
+.mem-source-status {
+  min-width: 0;
+}
+
+.mem-scan {
+  flex: none;
+}
+
+.mem-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}

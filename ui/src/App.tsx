@@ -30,6 +30,7 @@ import './settings/websearch/index.tsx';
 import './settings/skills/index.tsx';
 import './settings/data/index.tsx';
 import './settings/localmodels/index.tsx';
+import './settings/memory/index.tsx';
 import './settings/gatekeeper/index.tsx';
 import './saved/SavedPane.tsx';
 import './orchestrator/index.ts'; // the composer's Orchestrator switch
