@@ -1506,10 +1506,12 @@ mod tests {
                 .count(),
             0
         );
-        let ran = exec.ran.lock().unwrap();
-        assert!(!ran
-            .iter()
-            .any(|(_, _, c)| c.tool == "app_list_chats" && c.args.get("x").is_some()));
+        {
+            let ran = exec.ran.lock().unwrap();
+            assert!(!ran
+                .iter()
+                .any(|(_, _, c)| c.tool == "app_list_chats" && c.args.get("x").is_some()));
+        }
         // The welcome names the person this line acts as; the home link hears it, number
         // form included.
         let home = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
