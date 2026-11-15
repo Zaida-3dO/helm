@@ -98,14 +98,19 @@ impl SettingsExtension for HubView {
                     "hasFallback": false,
                     "memoryServer": false,
                 },
-                "about": "Read only: whether this PC is connected to the home hub. paired: a hub address and token are set. state: the line to the hub (off, connecting, online or offline). personName and machineName: who the hub says this PC is (empty when the connection was typed in by hand). hasFallback: a second address is set. memoryServer: the hub's shared-memory MCP server is added and enabled. The address, the token and any id are never shown. To pair, use app_stage_settings (the user approves it) or ask the user to use Settings > Hub.",
+                "about": "Read only: whether this PC is connected to the home hub. paired: a hub address and token are set. state: the line to the hub (off, connecting, online or offline). personName and machineName: who the hub says this PC is (empty when the connection was typed in by hand). hasFallback: a second address is set. memoryServer: the hub's shared-memory MCP server is added and enabled. configProblem: present only when a saved connection exists but could not be read, with the reason. The address, the token and any id are never shown. To pair, use app_stage_settings (the user approves it) or ask the user to use Settings > Hub.",
                 "hasEffect": true,
             })
         })
     }
 
     fn read(&self, _tx: &Transaction<'_>, _key: &str) -> Value {
-        self.value(&config::load(&self.creds))
+        let (c, problem) = config::load_checked(&self.creds);
+        let mut v = self.value(&c);
+        if let Some(p) = problem {
+            v["configProblem"] = json!(p.reason());
+        }
+        v
     }
 
     fn apply(

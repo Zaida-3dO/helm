@@ -77,6 +77,13 @@ pub struct RelayConnectionView {
     /// The hub's name for the person and for this machine, empty unless paired with a code.
     pub person_name: String,
     pub machine_name: String,
+    /// Why a saved connection could not be used, when one exists but would not open. Empty
+    /// otherwise, so "not set up" means nothing is saved.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub config_problem: String,
+    /// Why the last attempt to reach the hub failed, empty while it is connected.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub line_refusal: String,
 }
 
 /// The save op's arguments: each field absent keeps the stored value; an empty string clears it.
@@ -132,6 +139,19 @@ pub fn normalize_url(raw: &str) -> Result<String, String> {
     Ok(format!("ws://{authority}/relay"))
 }
 
+/// Whether a normalised hub address points at this PC itself: loopback, or an address one of
+/// its own interfaces holds (a socket can be bound only to an address the PC owns).
+pub fn is_own_address(url: &str) -> bool {
+    let authority = url
+        .strip_prefix("ws://")
+        .and_then(|r| r.split('/').next())
+        .unwrap_or("");
+    match host_of(authority).parse::<IpAddr>() {
+        Ok(ip) => ip.is_loopback() || std::net::UdpSocket::bind((ip, 0)).is_ok(),
+        Err(_) => false,
+    }
+}
+
 fn host_of(authority: &str) -> &str {
     if let Some(rest) = authority.strip_prefix('[') {
         return rest.split(']').next().unwrap_or("");
@@ -150,14 +170,51 @@ fn private_literal(host: &str) -> bool {
     }
 }
 
+/// Why a stored connection could not be used. Fixed sentences: never carry any stored value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigProblem {
+    /// The credential store (Windows Credential Manager) refused to give up the key.
+    Keychain,
+    /// The saved file is there but would not open: damaged, too large, or sealed for another profile.
+    Unopenable,
+}
+
+impl ConfigProblem {
+    pub fn reason(self) -> &'static str {
+        match self {
+            ConfigProblem::Keychain => {
+                "Windows' credential store could not be reached, so the saved hub connection could not be read."
+            }
+            ConfigProblem::Unopenable => {
+                "The saved hub connection could not be opened (damaged, or saved by another profile). Pair again to replace it."
+            }
+        }
+    }
+}
+
+/// The stored connection, with the reason when it exists but cannot be used. A truly absent
+/// connection is `(default, None)`. A store failure is never turned into plaintext.
+pub fn load_checked(creds: &CredentialStore) -> (RelayConfig, Option<ConfigProblem>) {
+    use helm_core::credentials::CredentialError;
+    match creds.read(CRED_NAME, CRED_IDENTITY) {
+        Ok(b) => match serde_json::from_slice(&b) {
+            Ok(c) => (c, None),
+            Err(_) => (RelayConfig::default(), Some(ConfigProblem::Unopenable)),
+        },
+        Err(CredentialError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            (RelayConfig::default(), None)
+        }
+        Err(CredentialError::Keychain(_)) => {
+            (RelayConfig::default(), Some(ConfigProblem::Keychain))
+        }
+        Err(_) => (RelayConfig::default(), Some(ConfigProblem::Unopenable)),
+    }
+}
+
 /// The stored connection, or the default (nothing set) when there is none or it cannot be
-/// opened. A store failure is never turned into plaintext.
+/// opened; [`load_checked`] says which. A store failure is never turned into plaintext.
 pub fn load(creds: &CredentialStore) -> RelayConfig {
-    creds
-        .read(CRED_NAME, CRED_IDENTITY)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+    load_checked(creds).0
 }
 
 /// The connection the line should use: the debug-only test override, else the store.
@@ -175,7 +232,11 @@ pub fn effective(creds: &CredentialStore) -> RelayConfig {
             };
         }
     }
-    load(creds)
+    let (config, problem) = load_checked(creds);
+    if let Some(p) = problem {
+        log::warn!("relay: saved hub connection unusable: {p:?}");
+    }
+    config
 }
 
 /// Apply a save. Errors are fixed sentences: they never carry the input.
@@ -235,6 +296,8 @@ pub fn save_paired(creds: &CredentialStore, c: &RelayConfig) -> Result<(), Strin
 
 pub fn view(c: &RelayConfig, state: &str) -> RelayConnectionView {
     RelayConnectionView {
+        config_problem: String::new(),
+        line_refusal: String::new(),
         person_name: c.person_name.clone(),
         machine_name: c.machine_name.clone(),
         has_address: !c.lan_url.is_empty(),
@@ -376,7 +439,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let kc = Arc::new(MemoryKeychain::default());
         kc.fail.store(true, std::sync::atomic::Ordering::SeqCst);
-        let creds = CredentialStore::new(&dir.path().join("credentials"), "h", kc);
+        let creds = CredentialStore::new(&dir.path().join("credentials"), "h", kc.clone());
         let e = save(
             &creds,
             RelaySaveArgs {
@@ -390,6 +453,33 @@ mod tests {
         for (_, bytes) in every_file_bytes(dir.path()) {
             assert!(!contains(&bytes, TOKEN));
         }
+        // Nothing saved is plainly absent, not a problem.
+        assert_eq!(load_checked(&creds).1, None);
+        // A saved connection the store cannot unlock, or whose file is damaged, says which.
+        kc.fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        save(
+            &creds,
+            RelaySaveArgs {
+                token: Some(TOKEN.into()),
+                lan_url: Some(LAN.into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(load_checked(&creds).1, None);
+        kc.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        // A fresh store has not cached the key, so it must ask the failing keychain.
+        let locked = CredentialStore::new(&dir.path().join("credentials"), "h", kc.clone());
+        let (c, p) = load_checked(&locked);
+        assert_eq!(
+            (c, p),
+            (RelayConfig::default(), Some(ConfigProblem::Keychain))
+        );
+        kc.fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        let file = dir.path().join("credentials").join("hub-relay.cred");
+        std::fs::write(&file, b"not an envelope at all, but long enough to read").unwrap();
+        assert_eq!(load_checked(&creds).1, Some(ConfigProblem::Unopenable));
+        assert!(!ConfigProblem::Unopenable.reason().contains(TOKEN));
     }
 
     #[test]
