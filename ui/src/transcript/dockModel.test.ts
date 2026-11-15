@@ -25,6 +25,11 @@ test("line 1 names what the chat is doing", async () => {
   assert.equal(dockState('running', t).label, 'Working');
   assert.equal(dockState('running', { ...t, subagentsRunning: 2 }).detail, '2 subagents working');
   assert.equal(dockState('running', { ...t, interactions: [{} as never] }).label, 'Waiting for you');
+  // A card the question gate is still checking is not waiting on the user yet; once the gate
+  // is done with it (or it failed the hold) it is.
+  assert.equal(dockState('running', { ...t, interactions: [{ gate: { state: 'checking' } } as never] }).label, 'Working');
+  assert.equal(dockState('running', { ...t, interactions: [{ gate: { state: 'failed' } } as never] }).label, 'Waiting for you');
+  assert.equal(dockState('running', { ...t, interactions: [{ gate: { state: 'checking' } } as never, {} as never] }).label, 'Waiting for you');
   assert.equal(dockState('running', { ...t, compacting: { retrying: true } as never }).label, 'Compacting conversation');
   assert.equal(dockState('idle', { ...t, subagentsRunning: 1 }).key, 'subagents');
   assert.equal(dockState('idle', t).key, 'background');

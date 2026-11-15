@@ -55,7 +55,9 @@ export function dockState(
   if (status === 'stopping') return { key: 'stopping', label: 'Stopping safely', detail: null };
   if (status === 'running') {
     if (thread.compacting) return { key: 'compacting', label: 'Compacting conversation', detail: thread.compacting.retrying ? 'Retrying' : null };
-    if (thread.interactions.length) return { key: 'waiting', label: 'Waiting for you', detail: 'Answer the card below to carry on' };
+    // A card the question gate is still checking is not waiting on the user yet: only count
+    // cards the user can actually answer.
+    if (thread.interactions.some((i) => i.gate?.state !== 'checking')) return { key: 'waiting', label: 'Waiting for you', detail: 'Answer the card below to carry on' };
     // The model server answers one request at a time: say when this chat is the one waiting.
     if (onLocal && local.localAhead != null) return { key: 'model-waiting', label: localWaitLabel(local.localAhead), detail: null };
     const n = thread.subagentsRunning ?? 0;

@@ -501,7 +501,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
           emitAttention();
           const rec = fakeGateAddDecided(c.chat.id, c.chat.title || 'Untitled', 'Which export format?', 'CSV', 'it opens straight in a spreadsheet and the import accepts it back');
           emit({ kind: 'gate', askId: rec.id, chatId: c.chat.id, what: 'decided' });
-          addRow(c, { role: 'context', text: `Helm answered for you: «CSV», because ${rec.reason}.`, details: { contextKind: 'gatekeeper' } });
+          addRow(c, { role: 'context', text: `«CSV», because ${rec.reason}.`, details: { contextKind: 'gatekeeper' } });
           await streamText(c, 'Exported as CSV. If you would rather have JSON, the Needs attention list can change that answer. ', cancelled);
         } else {
           const next: Interaction =

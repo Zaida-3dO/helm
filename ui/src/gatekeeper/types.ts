@@ -1,51 +1,15 @@
-// The gatekeeper's shapes as the UI sees them. They mirror the host's audit row and settings
-// view; when the host crate's generated bindings land in `api/generated/gatekeeper/`, this file
-// re-exports them instead of defining its own.
+// The gatekeeper's shapes as the UI sees them. The audit row and the brief come straight from
+// the host's generated bindings; only the settings view stays here, since it is this UI's own
+// pairing of the saved settings with what they imply.
+
+import type { GateBrief } from '../api/generated/gatekeeper';
 
 /** What the gate's write-up of an escalated question looks like (the same brief the card header
  *  and any remote copy carry). */
-export interface GateBriefView {
-  problem: string;
-  options: Array<{ label: string; means: string; pros: string; cons: string; cost: string }>;
-  recommendation: string;
-  why: string;
-}
+export type GateBriefView = GateBrief;
 
 /** One audit row: a question the gate judged, in one of its verdicts. */
-export interface GateAsk {
-  id: string;
-  profileId: string;
-  chatId: string;
-  chatTitle: string;
-  /** `question`, `plan`, `flag`, `telegram_ask` or `board_pick`. */
-  channel: string;
-  requestRef: string;
-  askedAt: number;
-  /** The question as asked, in one line. */
-  question: string;
-  /** `checking`, `decided`, `escalated`, `failed` or `passed`. */
-  verdict: string;
-  passReason?: string;
-  /** `local`, `claude` or `rule`. */
-  decidedBy?: string;
-  model?: string;
-  confidence?: number;
-  /** `low`, `medium` or `high`. */
-  risk?: string;
-  reason?: string;
-  choice?: string;
-  brief?: GateBriefView;
-  tookMs?: number | null;
-  /** `open`, `answered`, `parked`, `withdrawn`, `kept`, `vetoed` or `expired`. */
-  state: string;
-  answer?: string;
-  /** `helm`, `telegram`, `board` or `chat`. */
-  answeredVia?: string;
-  answeredAt?: number | null;
-  /** `pending`, `fine`, `should_have_asked` or `didnt_need_me`. */
-  review: string;
-  reviewNote?: string;
-}
+export type { GateAsk } from '../api/generated/gatekeeper';
 
 /** The settings record for the current person, plus what it implies. */
 export interface GateSettingsView {

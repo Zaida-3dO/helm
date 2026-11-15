@@ -1,4 +1,4 @@
-// The "(Review)" link after a "Helm answered for you" transcript row: it opens Settings →
+// The "(Review)" link after an "Answered for you" transcript row: it opens Settings →
 // Gatekeeper, where that decision waits in the review list and the History.
 
 import { SETTINGS_DIALOG } from '../settings/index.ts';
