@@ -358,6 +358,17 @@ struct RemoveArgs {
 pub fn remove(store: &McpStore, args: Value) -> Result<Value, AdminError> {
     let a: RemoveArgs = parse(args)?;
     let snap = store.mutate(Some(&a.revision), |list| {
+        // A preset server may hold sign-ins that removing it forgets (the Google accounts), so
+        // like its arguments, taking it away is the user's own click.
+        if list
+            .iter()
+            .any(|s| s.id == a.server_id && s.preset.is_some())
+        {
+            return Err(StoreError::Invalid(
+                "That server is a built-in preset; the user removes it in Settings > MCP."
+                    .to_owned(),
+            ));
+        }
         let before = list.len();
         list.retain(|s| s.id != a.server_id);
         if list.len() == before {
@@ -854,6 +865,28 @@ mod tests {
             json!({"revision": rev(&st), "serverId": "fake"})
         )
         .is_err());
+        // A preset server is the user's to remove: the agent's removal is refused in words and
+        // changes nothing, while the user's own save (no agent in it) still takes it away.
+        add_stdio(&st, "google");
+        st.mutate(None, |l| {
+            l[0].preset = Some(crate::google::PRESET_ID.into());
+            Ok(())
+        })
+        .unwrap();
+        let err = call(
+            &st,
+            REMOVE,
+            json!({"revision": rev(&st), "serverId": "google"}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Settings > MCP"), "{err}");
+        assert_eq!(st.load().unwrap().len(), 1, "the preset server stays");
+        st.mutate(None, |l| {
+            l.retain(|s| s.id != "google");
+            Ok(())
+        })
+        .unwrap();
+        assert!(st.load().unwrap().is_empty());
     }
 
     #[test]
