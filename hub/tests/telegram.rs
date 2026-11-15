@@ -2410,3 +2410,78 @@ async fn a_link_question_on_a_hub_with_no_bot_is_answered_with_the_reason() {
         "the answer was {answer}"
     );
 }
+
+/// The hub's settings still decide the account ids they list, on every start: an id taken out of
+/// them is cut off rather than left in the table from an earlier start, and an id they list wins
+/// over a link that was made at run time. A link nobody's settings list survives a restart.
+#[tokio::test]
+async fn the_settings_seed_the_allow_list_and_cut_off_an_id_they_no_longer_list() {
+    const RETIRED: i64 = 5250;
+    const LINKED_ID: i64 = 5350;
+    let api = Arc::new(FakeApi::default());
+    let scopes = Scopes::parse_list("relay,peer").unwrap();
+    let mut reg = Registry::open_in_memory().unwrap();
+    let owner = reg.ensure_person("Owner").unwrap().id;
+    let kim = reg.ensure_person("Kim").unwrap().id;
+    reg.add_client("Owner", "desk", &scopes).unwrap();
+    let registry = Arc::new(Mutex::new(reg));
+    let (lines, _up) = Lines::new(registry.clone());
+    let lines = Arc::new(lines);
+    let mut resolve = |name: &str| -> Result<i64, String> {
+        let mut r = registry.lock().unwrap();
+        r.ensure_person(name)
+            .map(|p| p.id)
+            .map_err(|e| e.to_string())
+    };
+    let now = now_ms();
+    let env_people = vec![(OWNER, "Owner".to_owned())];
+
+    // First start: the settings list two accounts, and both are answered.
+    let c = TelegramConfig {
+        allowed: vec![OWNER, RETIRED],
+        people: env_people.clone(),
+        ..cfg()
+    };
+    let tel = Telegram::build(api.clone(), &lines, &c, owner, &mut resolve, &|b| b).unwrap();
+    assert_eq!(
+        tel.on_update(&update(RETIRED, "mine", now / 1000), now)
+            .await,
+        Handled::Queued,
+        "an account the settings list was not answered"
+    );
+
+    // Kim links their own account while the hub runs.
+    registry
+        .lock()
+        .unwrap()
+        .link_telegram(LINKED_ID, kim, Some("@kim"), "link")
+        .unwrap();
+
+    // Second start with the retired id taken out and Kim's id put in.
+    let c = TelegramConfig {
+        allowed: vec![OWNER, LINKED_ID],
+        people: env_people,
+        ..cfg()
+    };
+    let tel = Telegram::build(api.clone(), &lines, &c, owner, &mut resolve, &|b| b).unwrap();
+    assert_eq!(
+        tel.on_update(&update(RETIRED, "still here?", now / 1000), now)
+            .await,
+        Handled::Ignored,
+        "an id taken out of the settings still answered"
+    );
+    let links = registry.lock().unwrap().telegram_links().unwrap();
+    assert!(
+        !links.iter().any(|l| l.telegram_id == RETIRED),
+        "the retired account stayed in the table: {links:?}"
+    );
+    let kim_link = links
+        .iter()
+        .find(|l| l.telegram_id == LINKED_ID)
+        .expect("Kim's link vanished on a restart");
+    assert_eq!(
+        (kim_link.person_id, kim_link.source.as_str()),
+        (owner, "env"),
+        "the settings did not take over the id they now list"
+    );
+}

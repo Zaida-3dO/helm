@@ -2395,9 +2395,33 @@ impl Telegram {
             .registry()
             .lock()
             .map_err(|_| "the registry is unavailable".to_owned())?;
+        let held = reg.telegram_links().map_err(|e| e.to_string())?;
         for (id, person) in &wanted {
-            reg.link_telegram(*id, *person, None)
+            let was = held.iter().find(|l| l.telegram_id == *id);
+            // An id the settings list wins, so say when that overrides a link the person made, or
+            // moves an account that was left with someone else.
+            if was.is_some_and(|l| l.source != "env" || l.person_id != *person) {
+                let name = reg
+                    .person_by_id(*person)
+                    .ok()
+                    .flatten()
+                    .map(|p| p.name)
+                    .unwrap_or_else(|| person.to_string());
+                eprintln!(
+                    "telegram: the settings put account {id} with {name}, overriding its earlier link"
+                );
+            }
+            reg.link_telegram(*id, *person, None, "env")
                 .map_err(|e| e.to_string())?;
+        }
+        // An id taken out of the settings is cut off: a row from an earlier start must not
+        // outlive the setting that wrote it.
+        let ids: Vec<i64> = wanted.iter().map(|(id, _)| *id).collect();
+        let pruned = reg.prune_env_links(&ids).map_err(|e| e.to_string())?;
+        if pruned > 0 {
+            eprintln!(
+                "telegram: {pruned} account(s) no longer listed in the settings were unlinked"
+            );
         }
         reg.telegram_links().map_err(|e| e.to_string())
     }
@@ -2580,7 +2604,8 @@ impl Telegram {
             .map(|u| format!("@{}", u.trim_start_matches('@')));
         let name = {
             let mut reg = self.registry_lock()?;
-            reg.link_telegram(from, person, handle.as_deref()).ok()?;
+            reg.link_telegram(from, person, handle.as_deref(), "link")
+                .ok()?;
             reg.person_by_id(person).ok()??
         }
         .name;

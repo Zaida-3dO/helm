@@ -96,6 +96,8 @@ pub struct TelegramLink {
     /// What Telegram calls the account, when it gave one.
     pub handle: Option<String>,
     pub linked_at: String,
+    /// `env` for an id the hub's settings list, `link` for one the person linked themselves.
+    pub source: String,
 }
 
 /// How long a pairing code works.
@@ -146,7 +148,10 @@ CREATE TABLE IF NOT EXISTS telegram_users (
     telegram_id INTEGER PRIMARY KEY,
     person_id   INTEGER NOT NULL REFERENCES people(id),
     handle      TEXT,
-    linked_at   TEXT NOT NULL
+    linked_at   TEXT NOT NULL,
+    -- 'env' for an id the hub's own settings list, 'link' for one the person linked
+    -- themselves. The first is rewritten from the settings on every start; the second stays.
+    source      TEXT NOT NULL DEFAULT 'link'
 );
 "#;
 
@@ -216,6 +221,16 @@ impl Registry {
         if !has_source {
             conn.execute_batch(
                 "ALTER TABLE acts_for ADD COLUMN source TEXT NOT NULL DEFAULT 'admin';",
+            )?;
+        }
+        // A registry made before a person could link their own account gains the link's source,
+        // which is what lets the settings revoke the ids they no longer list.
+        let has_link_source = conn
+            .prepare("SELECT 1 FROM pragma_table_info('telegram_users') WHERE name = 'source'")?
+            .exists([])?;
+        if !has_link_source {
+            conn.execute_batch(
+                "ALTER TABLE telegram_users ADD COLUMN source TEXT NOT NULL DEFAULT 'env';",
             )?;
         }
         Ok(Registry { conn })
@@ -870,7 +885,7 @@ impl Registry {
     /// id that is not here gets nothing at all.
     pub fn telegram_links(&self) -> Result<Vec<TelegramLink>> {
         let mut st = self.conn.prepare(
-            "SELECT telegram_id, person_id, handle, linked_at FROM telegram_users
+            "SELECT telegram_id, person_id, handle, linked_at, source FROM telegram_users
              ORDER BY telegram_id",
         )?;
         let rows = st.query_map([], |r| {
@@ -879,6 +894,7 @@ impl Registry {
                 person_id: r.get(1)?,
                 handle: r.get(2)?,
                 linked_at: r.get(3)?,
+                source: r.get(4)?,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -890,7 +906,7 @@ impl Registry {
         Ok(self
             .conn
             .query_row(
-                "SELECT telegram_id, person_id, handle, linked_at FROM telegram_users
+                "SELECT telegram_id, person_id, handle, linked_at, source FROM telegram_users
                  WHERE telegram_id = ?1",
                 [telegram_id],
                 |r| {
@@ -899,6 +915,7 @@ impl Registry {
                         person_id: r.get(1)?,
                         handle: r.get(2)?,
                         linked_at: r.get(3)?,
+                        source: r.get(4)?,
                     })
                 },
             )
@@ -906,23 +923,65 @@ impl Registry {
     }
 
     /// Link a Telegram account to a person, replacing whoever had it before. `handle` is what
-    /// Telegram calls the account, when it says.
+    /// Telegram calls the account, when it says. `source` is `env` for an id the hub's settings
+    /// list and `link` for one a person linked themselves; see [`Self::prune_env_links`].
     pub fn link_telegram(
         &mut self,
         telegram_id: i64,
         person_id: i64,
         handle: Option<&str>,
+        source: &str,
     ) -> Result<()> {
         self.conn.execute(
             &format!(
-                "INSERT INTO telegram_users (telegram_id, person_id, handle, linked_at)
-                 VALUES (?1, ?2, ?3, {NOW})
+                "INSERT INTO telegram_users (telegram_id, person_id, handle, linked_at, source)
+                 VALUES (?1, ?2, ?3, {NOW}, ?4)
                  ON CONFLICT(telegram_id) DO UPDATE SET person_id = ?2,
-                     handle = COALESCE(?3, handle)"
+                     handle = COALESCE(?3, handle), source = ?4"
             ),
-            params![telegram_id, person_id, handle],
+            params![telegram_id, person_id, handle, source],
         )?;
         Ok(())
+    }
+
+    /// Drop every link the hub's settings made for an id they no longer list, and return how many
+    /// went. Taking an id out of `HUB_TELEGRAM_ALLOWED_USERS` is how an account is cut off, so the
+    /// row written on an earlier start must not outlive the setting that wrote it. A link the
+    /// person made themselves is nobody's to revoke this way.
+    pub fn prune_env_links(&mut self, keep: &[i64]) -> Result<usize> {
+        if keep.is_empty() {
+            return Ok(self
+                .conn
+                .execute("DELETE FROM telegram_users WHERE source = 'env'", [])?);
+        }
+        let marks = vec!["?"; keep.len()].join(",");
+        Ok(self.conn.execute(
+            &format!(
+                "DELETE FROM telegram_users WHERE source = 'env' AND telegram_id NOT IN ({marks})"
+            ),
+            rusqlite::params_from_iter(keep),
+        )?)
+    }
+
+    /// Unlink a Telegram account whoever it belongs to, for the hub's own admin command. Returns
+    /// the person it was linked to.
+    pub fn unlink_telegram_by_id(&mut self, telegram_id: i64) -> Result<Option<i64>> {
+        let person = self
+            .conn
+            .query_row(
+                "SELECT person_id FROM telegram_users WHERE telegram_id = ?1",
+                [telegram_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(person) = person else {
+            return Ok(None);
+        };
+        self.conn.execute(
+            "DELETE FROM telegram_users WHERE telegram_id = ?1",
+            [telegram_id],
+        )?;
+        Ok(Some(person))
     }
 
     /// Unlink a Telegram account. Only the link of `person_id` is removed: another person's
