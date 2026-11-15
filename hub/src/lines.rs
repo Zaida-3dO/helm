@@ -555,22 +555,38 @@ impl Lines {
     }
 
     /// The candidate line for `person_id` on `channel` whose machine is named `machine`
-    /// (case-insensitive); `None` when that machine is down or not a candidate — never another
-    /// machine's line.
+    /// (case-insensitive), with its client id and name. Two people's machines can carry the same
+    /// name, so the one whose own person is `person_id` wins; a machine that is down, or is not a
+    /// candidate for this person and channel, is never chosen.
+    pub fn find_by_name(
+        &self,
+        person_id: i64,
+        channel: Channel,
+        machine: &str,
+    ) -> Option<(i64, String, Arc<Line>)> {
+        let found: Vec<(i64, i64, String, Arc<Line>)> = self
+            .candidate_views(person_id, channel)
+            .into_iter()
+            .filter(|(_, _, name, _)| name.eq_ignore_ascii_case(machine))
+            .collect();
+        found
+            .iter()
+            .find(|(_, home, _, _)| *home == person_id)
+            .or_else(|| found.first())
+            .cloned()
+            .map(|(client_id, _, name, line)| (client_id, name, line))
+    }
+
+    /// The candidate line for `person_id` on `channel` whose machine is named `machine`; `None`
+    /// when that machine is down or is not a candidate — never another machine's line. See
+    /// [`Self::find_by_name`] for how two machines of the same name are told apart.
     pub fn named_candidate(
         &self,
         person_id: i64,
         machine: &str,
         channel: Channel,
     ) -> Option<Arc<Line>> {
-        let client_id = self
-            .lock()
-            .iter()
-            .find(|(_, s)| s.machine.eq_ignore_ascii_case(machine))
-            .map(|(client_id, _)| *client_id)?;
-        self.candidates_for(person_id, channel)
-            .into_iter()
-            .find(|(id, _, _)| *id == client_id)
+        self.find_by_name(person_id, channel, machine)
             .map(|(_, _, line)| line)
     }
 }
@@ -682,6 +698,25 @@ mod tests {
         let (tx_c, _rx_c) = mpsc::unbounded_channel();
         let (ga, gb, gc) = (la.attach(tx_a), lb.attach(tx_b), lc.attach(tx_c));
         assert!(ga != gb && gb != gc, "generations differ between clients");
+
+        // Another person's machine carries the same name as this person's own. A named choice
+        // takes the person's own, and never lands on the other person's of that name.
+        let d = client(4, p20, "DESK");
+        let ld = lines.line_for(&d);
+        let (tx_d, _rx_d) = mpsc::unbounded_channel();
+        ld.attach(tx_d);
+        assert!(Arc::ptr_eq(
+            &lines.named_candidate(p10, "desk", Channel::App).unwrap(),
+            &la
+        ));
+        assert!(Arc::ptr_eq(
+            &lines.named_candidate(p20, "desk", Channel::App).unwrap(),
+            &ld
+        ));
+        assert!(lines
+            .named_candidate(p10, "laptop", Channel::Voice)
+            .is_some());
+        assert!(lines.named_candidate(p10, "desk", Channel::App).is_some());
 
         // A second machine does not knock the first off; the person's latest wins Telegram.
         assert!(la.is_up() && lb.is_up());

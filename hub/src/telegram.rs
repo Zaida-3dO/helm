@@ -1323,12 +1323,10 @@ impl Bridge {
                 self.reply(chat, PC_CLEARED).await;
                 return;
             }
-            match candidates
-                .iter()
-                .find(|(_, m, _)| m.eq_ignore_ascii_case(name))
-            {
+            // The person's own machine wins when two PCs carry the same name.
+            match lines.find_by_name(person, Channel::Telegram, name) {
                 Some((client_id, machine, _)) => {
-                    if lines.pin(person, Channel::Telegram, *client_id) {
+                    if lines.pin(person, Channel::Telegram, client_id) {
                         self.reply(chat, &format!("{PC_SET}{machine}.")).await;
                     } else {
                         self.reply(chat, PC_ROUTING_OFF).await;
