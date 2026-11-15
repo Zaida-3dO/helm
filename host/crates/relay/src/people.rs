@@ -7,7 +7,8 @@
 //!
 //! The first builds kept one set of files straight under `relay/`, for the one person a PC
 //! served. On the first use of the new layout those files move into the home profile's folder,
-//! once; nothing else moves and the current Telegram and voice chats keep going.
+//! once; nothing else moves and the current Telegram and voice chats keep going (the old
+//! Telegram chat keeps its own working folder, files and subfolders alike).
 
 use crate::telegram;
 use crate::voice;
@@ -79,27 +80,35 @@ pub fn migrate(profile_dir: &Path, db: &Database) {
             Err(_) => log::warn!("relay: a channel file could not be moved to the home profile"),
         }
     }
-    // The attachment folder: the pictures and files of the old single Telegram chat belong to
-    // the home profile now. The new folder sits inside the old one (`telegram/<id>`), so the
-    // old entries move into it one by one rather than the folder being renamed whole.
-    let old_att = profile_dir.join("telegram");
-    let new_att = telegram::attachments_dir(profile_dir, &home);
-    if old_att.is_dir() && std::fs::create_dir_all(&new_att).is_ok() {
-        if let Ok(entries) = std::fs::read_dir(&old_att) {
-            for entry in entries.flatten() {
-                let from = entry.path();
-                // Only the old layout's plain files move; every folder here is another
-                // profile's own attachment folder (or the home's new one) and stays.
-                if from == new_att || !from.is_file() {
-                    continue;
-                }
-                match std::fs::rename(&from, new_att.join(entry.file_name())) {
-                    Ok(()) => {}
-                    Err(_) => log::warn!("relay: an attachment could not be moved"),
-                }
-            }
-        }
+}
+
+/// What the hub's welcome does to the home profile. It takes the person only when it is not
+/// linked to anyone yet, the person is not declined and no other profile here already holds
+/// them. A home profile linked to someone else keeps that link (and a warning is logged), so a
+/// wrong token or a reassigned machine never mixes two people's rules and memories, and
+/// nobody is taken from another profile or declined. `Ok(true)` when the link changed.
+pub fn home_link(
+    tx: &rusqlite::Transaction<'_>,
+    person: &str,
+    name: &str,
+) -> Result<bool, store::ProfileError> {
+    if store::is_declined(tx, person)? {
+        return Ok(false);
     }
+    let home_person = store::home(tx)?.and_then(|h| h.hub_person_id);
+    match home_person {
+        Some(h) if h == person => return Ok(false),
+        Some(_) => {
+            log::warn!("relay: the hub's welcome names a different person than the home profile's");
+            return Ok(false);
+        }
+        None => {}
+    }
+    if store::profile_for_person(tx, person)?.is_some() {
+        return Ok(false);
+    }
+    store::link_home_to_person(tx, person, name, helm_core::now_ms())?;
+    Ok(true)
 }
 
 /// The Telegram files of one profile.
@@ -110,7 +119,7 @@ pub fn telegram_paths(profile_dir: &Path, profile_id: &str) -> telegram::Paths {
         policy: dir.join("telegram-policy.json"),
         answered: dir.join("telegram-answered.json"),
         sent: dir.join("telegram-sent.json"),
-        attachments: telegram::attachments_dir(profile_dir, profile_id),
+        folder: telegram::chat_folder(profile_dir, profile_id),
     }
 }
 
@@ -168,13 +177,11 @@ mod tests {
         for name in LEGACY {
             std::fs::write(relay.join(name), "x").unwrap();
         }
-        let old_att = prof.join("telegram");
-        std::fs::create_dir_all(&old_att).unwrap();
-        std::fs::write(old_att.join("pic.png"), "p").unwrap();
-        // Another profile's attachment folder must stay put on a later start.
-        let other = old_att.join("other-profile");
-        std::fs::create_dir_all(&other).unwrap();
-        std::fs::write(other.join("img.png"), "o").unwrap();
+        // The old Telegram chat's working folder is left exactly as it is.
+        let old_dir = prof.join("telegram");
+        std::fs::create_dir_all(old_dir.join("project")).unwrap();
+        std::fs::write(old_dir.join("notes.txt"), "p").unwrap();
+        std::fs::write(old_dir.join("project").join("a.txt"), "o").unwrap();
         migrate(&prof, &db);
         migrate(&prof, &db); // second call: nothing left to do, nothing moved twice
         let home = db.snapshot(|tx| store::home(tx)).unwrap().unwrap();
@@ -183,15 +190,51 @@ mod tests {
             assert!(to.join(name).is_file(), "{name} did not move");
             assert!(!relay.join(name).exists(), "{name} was left behind");
         }
-        let att = telegram::attachments_dir(&prof, &home.id);
         assert!(
-            att.join("pic.png").is_file(),
-            "the attachments did not move"
+            old_dir.join("notes.txt").is_file(),
+            "the old folder's file moved"
         );
-        assert!(other.join("img.png").is_file(), "another folder was moved");
-        assert!(
-            !old_att.join("pic.png").exists(),
-            "left behind in the old folder"
+        assert!(old_dir.join("project").join("a.txt").is_file());
+    }
+
+    #[test]
+    fn the_welcome_links_only_an_unlinked_home_and_takes_nobody() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db_in(dir.path());
+        let run = |p: &str, n: &str| db.write(|tx| home_link(tx, p, n)).unwrap_or(false);
+        let home_person = || {
+            db.snapshot(|tx| store::home(tx))
+                .unwrap()
+                .unwrap()
+                .hub_person_id
+        };
+        // Held by another profile: not stolen, home stays unlinked.
+        db.write(|tx| store::create(tx, "Other", None, Some("5"), 2).map(|_| ()))
+            .unwrap();
+        assert!(!run("5", "Pat"));
+        assert_eq!(home_person(), None);
+        // Empty and over-long ids change nothing.
+        assert!(!run("", "Pat"));
+        assert!(!run(&"9".repeat(300), "Pat"));
+        assert_eq!(home_person(), None);
+        // Declined: skipped.
+        db.write(|tx| tx.execute("INSERT INTO declined_people(person_id) VALUES ('6')", []))
+            .unwrap();
+        assert!(!run("6", "Pat"));
+        assert_eq!(home_person(), None);
+        // Unlinked home links; the same person again, and a different one, change nothing.
+        assert!(run("3", "Pat"));
+        assert_eq!(home_person().as_deref(), Some("3"));
+        assert!(!run("3", "Pat"));
+        assert!(!run("4", "Sam"));
+        assert_eq!(home_person().as_deref(), Some("3"));
+        assert!(!db.snapshot(|tx| store::is_declined(tx, "3")).unwrap());
+        assert_eq!(
+            db.snapshot(|tx| store::profile_for_person(tx, "5"))
+                .unwrap()
+                .unwrap()
+                .name,
+            "Other"
         );
     }
 

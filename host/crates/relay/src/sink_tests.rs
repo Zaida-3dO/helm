@@ -314,7 +314,7 @@ fn env() -> Env {
         profile_id: pid,
         person: String::new(),
         tag_path: paths.tag,
-        folder: plain_path(&paths.attachments),
+        folder: plain_path(&paths.folder),
         policy: TagPolicy::default(),
         policy_path: paths.policy,
         new_chat_model: None,
@@ -824,7 +824,7 @@ async fn the_telegram_settings_view_shows_the_saved_model_and_effort() {
 async fn a_busy_chat_gets_a_steer_whatever_the_send_mode() {
     let e = env();
     let chat = chat_of(&place_async(&e.ctx, msg("a", "first")).await.unwrap());
-    settle().await;
+    until_turned_down(&e, &chat, &telegram::submission_id("a")).await;
     sql(
         &e.db,
         "UPDATE chats SET status = 'running' WHERE id = ?1",

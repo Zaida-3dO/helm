@@ -333,7 +333,12 @@ async fn ensure_people<F, Fut>(
                     log::info!("knowledge sync: {name} stays unlinked, as it was left");
                 }
                 Some(person) => {
+                    // The answer came after an await: a link made meanwhile (a welcome, a
+                    // pairing, by hand) must not be overwritten.
                     let done = db.write(|tx| {
+                        if store::get(tx, &pid)?.is_none_or(|p| p.hub_person_id.is_some()) {
+                            return Ok(false);
+                        }
                         store::update(
                             tx,
                             &pid,
@@ -342,9 +347,11 @@ async fn ensure_people<F, Fut>(
                                 ..Default::default()
                             },
                         )
+                        .map(|_| true)
                     });
                     match done {
-                        Ok(_) => {
+                        Ok(false) => {}
+                        Ok(true) => {
                             linked = true;
                             if answer.get("created").and_then(Value::as_bool) == Some(true) {
                                 log::info!("knowledge sync: the hub made a person for {name}");

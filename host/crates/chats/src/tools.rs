@@ -950,7 +950,7 @@ async fn send_to_mirror_chat(
         body,
     );
     // The words go as the person whose profile the sending chat is in, not whoever the sidebar
-    // shows. No profile table or no linked person leaves it to the default.
+    // shows. A chat whose profile is not on the hub yet cannot send.
     let from = ctx.caller_chat_id.clone();
     let store = db(ctx)?;
     let acting: Option<String> = tokio::task::spawn_blocking(move || {
@@ -972,6 +972,9 @@ async fn send_to_mirror_chat(
     .ok()
     .and_then(Result::ok)
     .flatten();
+    if acting.is_none() {
+        return Err(refuse("This chat's profile isn't on the hub yet."));
+    }
     // A send never touches the draft on the other PC: it was not typed in its composer.
     remote
         .send_as(

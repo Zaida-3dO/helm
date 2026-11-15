@@ -159,24 +159,12 @@ pub fn register_services(services: &mut Services, events: &Arc<dyn EventSink>) {
         }));
         // The hub's welcome names the person this line acts as. Pairing links the home
         // profile to that person; a line configured with a token never pairs, so the
-        // welcome is where the link happens. A declined person is left declined.
+        // welcome is where the link happens, but only for a home profile that has no person yet.
         let db_link = Arc::clone(&db);
         let events = events.clone();
         client.set_home_link(Arc::new(move |p: &str, name: &str| {
             let linked = db_link
-                .write(|tx| -> Result<bool, helm_profiles::store::ProfileError> {
-                    if helm_profiles::store::is_declined(tx, p)? {
-                        return Ok(false);
-                    }
-                    let home_person = helm_profiles::store::home(tx)?
-                        .and_then(|h| h.hub_person_id)
-                        .unwrap_or_default();
-                    if home_person == p {
-                        return Ok(false);
-                    }
-                    helm_profiles::store::link_home_to_person(tx, p, name, helm_core::now_ms())?;
-                    Ok(true)
-                })
+                .write(|tx| people::home_link(tx, p, name))
                 .unwrap_or(false);
             if linked {
                 events.emit(helm_ipc::AppEvent::new("profiles_changed"));
@@ -316,6 +304,10 @@ fn connection_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
 /// the settings window says which profile it is showing.
 fn channel_profile(ctx: &OpCtx, args: &Value) -> Result<String, ApiError> {
     let db = ctx.services.need::<helm_core::db::Database>()?;
+    // A Settings op may be the first thing to read the channel files after a start.
+    if let Some(profile) = ctx.services.get::<Profile>() {
+        people::migrate(&profile.dir, &db);
+    }
     let named = args
         .get("profileId")
         .and_then(Value::as_str)
