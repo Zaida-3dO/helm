@@ -504,6 +504,34 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_tool_leaves_changes_to_a_chat_on_another_pc_to_the_user() {
+        let ops = Arc::new(FakeOps(Mutex::new(Vec::new())));
+        let mut services = helm_ipc::Services::new();
+        services.insert(Arc::new(crate::registry::RemoteChatGuard(Arc::new(|id| {
+            id == "far"
+        }))));
+        let mut c = ctx(ops.clone());
+        c.services = Arc::new(services);
+        let e = c
+            .op("chat_rename", json!({"chatId": "far", "title": "x"}))
+            .await
+            .unwrap_err();
+        assert!(e.public.contains("runs on another PC"), "{}", e.public);
+        // A chat here goes through, and so does a read of the far one.
+        let e = c
+            .op("chat_rename", json!({"chatId": "near", "title": "x"}))
+            .await
+            .unwrap_err();
+        assert_eq!(e.public, "no");
+        assert!(ops
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, a)| a["chatId"] != "far"));
+    }
+
     /// A folder that exists on every machine the tests run on.
     const FOLDER: &str = env!("CARGO_MANIFEST_DIR");
 

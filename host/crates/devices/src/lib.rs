@@ -84,8 +84,13 @@ pub fn register_services(
     // Chats that run on other devices: where the mirror attaches, and the check that sends the
     // ops naming such a chat to it.
     services.insert(std::sync::Arc::new(mirror::MirrorSlot::default()));
+    let slot = std::sync::Arc::new(helm_chats::remote::RemoteSlot::default());
+    services.insert(slot.clone());
+    // Host tools leave changes to chats that run elsewhere to the user.
     services.insert(std::sync::Arc::new(
-        helm_chats::remote::RemoteSlot::default(),
+        helm_hosttools::registry::RemoteChatGuard(std::sync::Arc::new(move |id| {
+            slot.get().is_some_and(|r| r.owns(id).is_some())
+        })),
     ));
     services.insert(std::sync::Arc::new(helm_ipc::OpIntercept(
         std::sync::Arc::new(helm_chats::remote::Routes),

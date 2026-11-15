@@ -1943,6 +1943,7 @@ dependencies = [
  "helm-chats",
  "helm-consent",
  "helm-core",
+ "helm-hosttools",
  "helm-ipc",
  "helm-panel",
  "helm-platform",

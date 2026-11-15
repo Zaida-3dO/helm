@@ -528,6 +528,7 @@ impl Inner {
     ) -> (Result<Value, WireError>, Option<String>) {
         // Abandoned uploads go on the clock of any request, not only the next upload.
         lock(&self.uploads).retain(|_, u| u.touched.elapsed() <= UPLOAD_TTL);
+        let op_name = op;
         let op = match Op::parse(op, args) {
             Ok(op) => op,
             Err(e) => return (Err(e), None),
@@ -543,6 +544,13 @@ impl Inner {
                 Asker::Own => op,
                 Asker::Household { .. } => self.household_op(op)?,
             };
+            if op.is_run() {
+                log::info!(
+                    "devices: {op_name} from device:{} acting as {}",
+                    from.name,
+                    from.person.as_deref().unwrap_or("this PC's person")
+                );
+            }
             // A chat started from afar belongs to the acting person: the hub's verified id
             // overwrites whatever the request named.
             let op = match op {
@@ -600,6 +608,20 @@ impl Inner {
             ));
         }
         Ok(op)
+    }
+
+    /// A household member may hand a chat to a profile or share it only when it is theirs or
+    /// shared with them; otherwise the move would make someone else's chat read as theirs.
+    async fn own_or_shared(&self, asker: &Asker, chat_id: &str) -> Result<(), WireError> {
+        let Asker::Household { person_id, .. } = asker else {
+            return Ok(());
+        };
+        let chat = self.port.chat(chat_id.to_owned()).await?.chat.to_value();
+        if subs::visible_to(&chat, person_id) {
+            Ok(())
+        } else {
+            Err(WireError::not_allowed())
+        }
     }
 
     /// The read set for this caller's subscriptions: the people its `as` covers, as a filter on
@@ -758,6 +780,7 @@ impl Inner {
                 done(json!({}))
             }
             Op::Share(a) => {
+                self.own_or_shared(asker, &a.chat_id).await?;
                 self.port.share(a).await?;
                 done(json!({}))
             }
@@ -779,6 +802,7 @@ impl Inner {
                 done(json!({}))
             }
             Op::MoveProfile(a) => {
+                self.own_or_shared(asker, &a.chat_id).await?;
                 self.port.move_profile(a).await?;
                 done(json!({}))
             }
@@ -870,7 +894,13 @@ impl Inner {
                 done(json!({}))
             }
             Op::DefaultsGet(a) => done(self.port.defaults_get(a.chat_id).await?),
-            Op::DefaultsSet(a) => done(self.port.defaults_set(a).await?),
+            Op::DefaultsSet(a) => {
+                // The new-chat defaults are this PC's own person's pick.
+                if matches!(asker, Asker::Household { .. }) {
+                    return Err(WireError::not_allowed());
+                }
+                done(self.port.defaults_set(a).await?)
+            }
         }
     }
 

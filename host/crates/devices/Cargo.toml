@@ -10,6 +10,7 @@ publish.workspace = true
 helm-core.workspace = true
 helm-ipc.workspace = true
 helm-chats.workspace = true
+helm-hosttools = { path = "../hosttools" }
 helm-consent = { path = "../consent" }
 helm-panel = { path = "../panel" }
 helm-platform.workspace = true
