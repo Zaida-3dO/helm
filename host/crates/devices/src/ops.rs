@@ -207,7 +207,7 @@ async fn devices_create_chat(ctx: OpCtx, args: Value) -> Result<Value, ApiError>
         .ok_or_else(|| {
             ApiError::new(
                 "refused",
-                "This profile is not linked to a person on the hub, so it can't start a chat on another device.",
+                "This profile isn't set up on the hub yet; try again in a moment.",
             )
         })?;
     let id = mirror

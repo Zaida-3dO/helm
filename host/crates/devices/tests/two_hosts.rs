@@ -11,11 +11,12 @@ use helm_chats::types::{
 use helm_core::db::{Database, MigrationRegistry};
 use helm_devices::host::HostPort;
 use helm_devices::link::{DeviceLink, MemLink, MemRouter, Rpc};
-use helm_devices::mirror::{self, Mirror, PeopleSync};
+use helm_devices::mirror::{self, ChatView, Mirror, PeopleSync, WhoFilter};
 use helm_devices::testing::{fake_interaction, fake_record, fake_row, FakePort};
-use helm_devices::wire::{code, DeviceFrame, Frame, Push};
+use helm_devices::wire::{code, DeviceFrame, DevicePerson, Frame, Push};
 use helm_devices::{ChatPort, Service};
 use helm_ipc::{Dispatcher, OpCtx, OpIntercept, OpRegistry, RecordingSink, Services};
+use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -66,6 +67,7 @@ impl Watcher {
             uid: uid.to_owned(),
             name: self.name.clone(),
             run: true,
+            people: Vec::new(),
         }));
     }
 
@@ -179,13 +181,6 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
             "rename",
             json!({"chatId": "c1", "title": big}),
             code::TOO_LARGE,
-        ),
-        (
-            &b,
-            "dev-a",
-            "create",
-            json!({"personId": "nobody", "projectId": "proj-1"}),
-            code::UNKNOWN_PERSON,
         ),
     ];
     for (w, to, op, args, want) in refused {
@@ -365,6 +360,27 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
             .unwrap(),
         json!({"chatId": "new-1"})
     );
+    // A chat made from afar belongs to the acting person: the hub's verified person replaces
+    // whatever name the request carried.
+    assert_eq!(
+        b.rpc
+            .call(
+                "dev-a",
+                "create",
+                json!({"personId": "nobody", "projectId": "proj-1"})
+            )
+            .await
+            .unwrap(),
+        json!({"chatId": "new-2"})
+    );
+    assert_eq!(
+        port.st()
+            .created
+            .iter()
+            .map(|c| c.person_id.as_str())
+            .collect::<Vec<_>>(),
+        ["person-a", "person-a"]
+    );
     b.rpc
         .call("dev-a", "stop", json!({"chatId": "c1"}))
         .await
@@ -537,14 +553,25 @@ struct Side {
     _dir: tempfile::TempDir,
 }
 
-fn side(router: &MemRouter, uid: &str, name: &str, people: Option<Arc<PeopleSync>>) -> Side {
+fn side(
+    router: &MemRouter,
+    uid: &str,
+    name: &str,
+    people: Option<Arc<PeopleSync>>,
+    person: &str,
+    person_name: &str,
+    act_for: &[(&str, bool, bool)],
+) -> Side {
     let dir = tempfile::tempdir().unwrap();
     let mut reg = MigrationRegistry::new();
     helm_devices::register_migrations(&mut reg);
     let db = Arc::new(Database::open(&dir.path().join("watcher.sqlite3"), &reg).unwrap());
     db.write(|tx| tx.execute("UPDATE device_self SET uid = ?1", [uid]))
         .unwrap();
-    let link = router.connect(uid, Some("person-a"), Some("Alex"), true);
+    let link = router.connect(uid, Some(person), Some(person_name), true);
+    if !act_for.is_empty() {
+        link.set_people(act_for.iter().map(|(p, _, _)| (*p).to_owned()).collect());
+    }
     let sink = Arc::new(RecordingSink::default());
     let mirror = Mirror::new(
         db.clone(),
@@ -557,6 +584,14 @@ fn side(router: &MemRouter, uid: &str, name: &str, people: Option<Arc<PeopleSync
         uid: uid.to_owned(),
         name: name.to_owned(),
         run: true,
+        people: act_for
+            .iter()
+            .map(|(p, telegram, voice)| DevicePerson {
+                person_id: (*p).to_owned(),
+                telegram: *telegram,
+                voice: *voice,
+            })
+            .collect(),
     }));
     Side {
         mirror,
@@ -628,7 +663,15 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
             .extend(list.iter().map(|p| p.name.clone()));
         true
     }));
-    let b = side(&router, "dev-b", "Laptop", Some(hook));
+    let b = side(
+        &router,
+        "dev-b",
+        "Laptop",
+        Some(hook),
+        "person-a",
+        "Alex",
+        &[],
+    );
 
     // The list arrives by itself once the hub shows the device up; the hub's people become
     // profiles, and the device reads as live.
@@ -813,6 +856,7 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         uid: "dev-b".into(),
         name: "Laptop".into(),
         run: true,
+        people: Vec::new(),
     }));
 
     // The device returns: the copy catches up from the revision it holds, without repeats.
@@ -933,7 +977,7 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_household_member_sees_and_runs_only_their_own_and_shared_chats() {
+async fn a_household_member_gets_their_own_view_of_the_list_but_is_refused_nothing() {
     let router = MemRouter::new();
     let port = Arc::new(FakePort::new("dev-a", "Desk"));
     port.st().people.push("person-b".to_owned());
@@ -1015,19 +1059,17 @@ async fn a_household_member_sees_and_runs_only_their_own_and_shared_chats() {
         json!({"chatId": chat, "clientId": format!("7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b{n:02x}"),
                "text": "hi", "mode": "steer"})
     };
+    // Nothing is refused for being someone else's chat: the person marks who acts, not what
+    // they may touch.
     let cases: Vec<(&str, Value, Option<&str>)> = vec![
         ("chat_sub", json!({"chatId": "hers", "since": 0}), None),
         ("chat_sub", json!({"chatId": "shared", "since": 0}), None),
-        (
-            "chat_sub",
-            json!({"chatId": "mine", "since": 0}),
-            Some(code::NOT_FOUND),
-        ),
-        ("page", json!({"chatId": "mine"}), Some(code::NOT_FOUND)),
+        ("chat_sub", json!({"chatId": "mine", "since": 0}), None),
+        ("page", json!({"chatId": "mine"}), None),
         ("send", send("hers", 1), None),
         ("send", send("shared", 2), None),
-        ("send", send("mine", 3), Some(code::NOT_FOUND)),
-        ("stop", json!({"chatId": "mine"}), Some(code::NOT_FOUND)),
+        ("send", send("mine", 3), None),
+        ("stop", json!({"chatId": "mine"}), None),
         (
             "answer",
             json!({"chatId": "hers", "requestId": "q1", "value": "A", "label": "A"}),
@@ -1036,7 +1078,7 @@ async fn a_household_member_sees_and_runs_only_their_own_and_shared_chats() {
         (
             "answer",
             json!({"chatId": "shared", "requestId": "q2", "value": "A", "label": "A"}),
-            Some(code::REFUSED),
+            None,
         ),
         ("consent_decide", json!({"id": "x"}), Some(code::REFUSED)),
         (
@@ -1054,14 +1096,17 @@ async fn a_household_member_sees_and_runs_only_their_own_and_shared_chats() {
     }
     {
         let st = port.st();
-        // Her words on her own chat are hers; on a shared chat they arrive marked as hers.
-        assert_eq!(st.sent_from, [None, Some("Sam".to_owned())]);
+        // Her words on her own chat are hers; on anyone's chat they arrive marked as hers.
+        assert_eq!(
+            st.sent_from,
+            [None, Some("Sam".to_owned()), Some("Sam".to_owned())]
+        );
         assert_eq!(
             st.answered
                 .iter()
                 .map(|a| a.request_id.as_str())
                 .collect::<Vec<_>>(),
-            ["q1"]
+            ["q1", "q2"]
         );
         // A chat she starts is hers, whoever she names.
         assert_eq!(st.created[0].person_id, "person-b");
@@ -1073,10 +1118,10 @@ async fn a_household_member_sees_and_runs_only_their_own_and_shared_chats() {
     assert_eq!(e.code, code::NOT_ALLOWED);
     assert!(own.rpc.call("dev-a", "hello", json!({})).await.is_ok());
     port.set_household(true);
-    // Someone with no profile on this PC is refused.
+    // A person this PC has no profile for is still served: the switch is per household, not
+    // per person.
     port.st().people.retain(|p| p != "person-b");
-    let e = sam.rpc.call("dev-a", "hello", json!({})).await.unwrap_err();
-    assert_eq!(e.code, code::NOT_ALLOWED);
+    assert!(sam.rpc.call("dev-a", "hello", json!({})).await.is_ok());
 
     // A PC paired with no person answers no one.
     let lone = Arc::new(FakePort::new("dev-l", "Lone"));
@@ -1088,4 +1133,205 @@ async fn a_household_member_sees_and_runs_only_their_own_and_shared_chats() {
         let e = w.rpc.call("dev-l", "hello", json!({})).await.unwrap_err();
         assert_eq!(e.code, code::NOT_ALLOWED);
     }
+}
+
+/// One PC, both of its people: the copy on the other side holds every chat of the PC, not
+/// just the watcher's own person's; each chat op is run by the person the window is showing;
+/// a chat started from afar belongs to the acting person; words on someone else's chat are
+/// framed; and a PC that never announced a person cannot act for them.
+#[tokio::test(start_paused = true)]
+async fn one_pc_acts_as_each_of_its_profiles() {
+    let router = MemRouter::new();
+    let port = Arc::new(FakePort::new("dev-d", "Desk"));
+    port.st().people = vec!["person-p".to_owned(), "person-s".to_owned()];
+    port.announce_people(&[("person-p", true, true), ("person-s", false, false)]);
+    port.add_chat_of("own-p", "Pat's chat", 10, "person-p", &[]);
+    port.add_chat_of("own-s", "Sam's chat on the desk", 11, "person-s", &[]);
+    port.put_interaction(fake_interaction(
+        "own-s",
+        "q1",
+        Meth::Select,
+        Some(Att::Question),
+        Some(&["A", "B"]),
+    ));
+    let link_d = router.connect("dev-d", Some("person-p"), Some("Pat"), true);
+    let host = Service::new(port.clone(), link_d, tokio::runtime::Handle::current());
+    host.announce();
+
+    // The laptop's home person is Sam, and it also acts for Pat; it announced both.
+    let b = side(
+        &router,
+        "dev-l",
+        "Laptop",
+        None,
+        "person-s",
+        "Sam",
+        &[("person-s", true, true), ("person-p", false, false)],
+    );
+    b.db.write(|tx| {
+        tx.execute_batch(
+            "CREATE TABLE profiles (id TEXT PRIMARY KEY, hub_person_id TEXT, name TEXT,
+                        colour TEXT, about TEXT, is_home INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO profiles VALUES ('p-s', 'person-s', 'Sam', 'red', '', 1);
+             INSERT INTO profiles VALUES ('p-p', 'person-p', 'Pat', 'blue', '', 0);
+             CREATE TABLE IF NOT EXISTS preferences (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        )
+    })
+    .unwrap();
+    let rpc = Rpc::new(b.link.clone());
+    let sorted = |v: &[Value]| -> Vec<String> {
+        let mut ids: Vec<String> = v
+            .iter()
+            .map(|c| c["id"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        ids.sort();
+        ids
+    };
+
+    // The hello names the people the desk acts for, and the device list repeats them.
+    let hello = rpc.call("dev-d", "hello", json!({})).await.unwrap();
+    assert_eq!(
+        hello["people"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["personId"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["person-p", "person-s"]
+    );
+    let d = device_row(&b, "dev-d");
+    assert_eq!(
+        d["people"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["personId"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["person-p", "person-s"]
+    );
+
+    // The copy holds every chat of the desk: Pat's chat shares nothing with Sam, yet it
+    // arrives, because the read acts for everyone this PC covers — and that set includes
+    // the desk's own person, so the list comes unfiltered.
+    until(|| b.mirror.owner("own-p").is_some() && b.mirror.owner("own-s").is_some()).await;
+    let for_s =
+        b.db.snapshot(|tx| mirror::mirror_chat_list(tx, "dev-d", Some("p-s"), false))
+            .unwrap();
+    let for_p =
+        b.db.snapshot(|tx| mirror::mirror_chat_list(tx, "dev-d", Some("p-p"), false))
+            .unwrap();
+    let every =
+        b.db.snapshot(|tx| mirror::mirror_chat_list(tx, "dev-d", None, false))
+            .unwrap();
+    assert_eq!(sorted(&for_s), ["own-s"]);
+    assert_eq!(sorted(&for_p), ["own-p"]);
+    assert_eq!(sorted(&every), ["own-p", "own-s"]);
+    // A view widened on purpose shows what every profile's own view chooses to hide; the
+    // copy held it all along.
+    let wide = ChatView {
+        who: WhoFilter::Any,
+        device: Some("dev-d".to_owned()),
+    };
+    let wide_list =
+        b.db.snapshot(|tx| mirror::chats_for_view(tx, &wide, false))
+            .unwrap();
+    assert_eq!(sorted(&wide_list), ["own-p", "own-s"]);
+
+    // The ops the window uses, through the dispatcher, with the check that routes them.
+    let mut services = Services::new();
+    let routes = Arc::new(RemoteSlot::default());
+    routes.attach(Arc::new(b.mirror.clone()));
+    services.insert(routes);
+    services.insert(Arc::new(OpIntercept(Arc::new(Routes))));
+    let mut ops = OpRegistry::new();
+    helm_chats::register_ops(&mut ops);
+    helm_devices::register_ops(&mut ops);
+    let api = Dispatcher::new(
+        ops,
+        OpCtx {
+            services: Arc::new(services),
+            events: b.sink.clone(),
+        },
+        false,
+    );
+
+    // As Pat: a chat started from afar belongs to Pat, whoever the request named; and
+    // Pat's own words on Pat's chat arrive unframed.
+    b.db.write(|tx| helm_core::prefs::set_raw(tx, "activeProfile", &json!("p-p")))
+        .unwrap();
+    let got = rpc
+        .call_as(
+            "dev-d",
+            "create",
+            json!({"personId": "person-s", "projectId": "proj-1"}),
+            &["person-p".to_owned()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(got["chatId"], "new-1");
+    assert_eq!(port.st().created[0].person_id, "person-p");
+    let send = |id: &str| {
+        json!({"chatId": "own-p", "submissionId": id, "text": "hi",
+               "action": "steer", "draftRevision": 0})
+    };
+    api.call_host("chat_send", send("7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b01"))
+        .await
+        .unwrap();
+    // Switch the window to Sam: the same chat, now acted for by Sam — the same words
+    // arrive marked as Sam's, never as Pat's.
+    b.db.write(|tx| helm_core::prefs::set_raw(tx, "activeProfile", &json!("p-s")))
+        .unwrap();
+    api.call_host("chat_send", send("7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b02"))
+        .await
+        .unwrap();
+    assert_eq!(port.st().sent_from, [None, Some("Sam".to_owned())]);
+    // Back to Pat: Sam's waiting request, answered from the laptop as Pat.
+    b.db.write(|tx| helm_core::prefs::set_raw(tx, "activeProfile", &json!("p-p")))
+        .unwrap();
+    api.call_host("chat_get", json!({"chatId": "own-s"}))
+        .await
+        .unwrap();
+    until(|| {
+        b.db.snapshot(|tx| {
+            Ok::<_, rusqlite::Error>(
+                tx.query_row(
+                    "SELECT thread FROM mirror_chats WHERE chat_id = 'own-s'",
+                    [],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+                .flatten()
+                .is_some_and(|t| t.contains("\"q1\"")),
+            )
+        })
+        .unwrap()
+    })
+    .await;
+    api.call_host(
+        "interaction_answer",
+        json!({"chatId": "own-s", "requestId": "q1", "value": "A"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        port.st()
+            .answered
+            .iter()
+            .map(|a| a.request_id.as_str())
+            .collect::<Vec<_>>(),
+        ["q1"]
+    );
+
+    // A PC that never announced Pat cannot act for them: the hub turns the call away and
+    // nothing reaches the desk.
+    let x = Watcher::of(&router, "pc-x", "Gale", true, "person-x", "Gale");
+    let e = x
+        .rpc
+        .call_as("dev-d", "hello", json!({}), &["person-p".to_owned()])
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, code::NOT_ALLOWED);
+    assert_eq!(port.st().created.len(), 1);
 }

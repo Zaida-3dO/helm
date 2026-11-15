@@ -61,6 +61,7 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              last_seen_at  TEXT,
              run           INTEGER NOT NULL DEFAULT 0,
              is_self       INTEGER NOT NULL DEFAULT 0,
+             people        TEXT NOT NULL DEFAULT '[]',
              hello         TEXT,
              hello_at      INTEGER
          );
@@ -101,7 +102,13 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              device_uid    TEXT PRIMARY KEY,
              chats_cursor  INTEGER NOT NULL DEFAULT 0
          );",
-    )
+    )?;
+    // A database from before the people column: gain it.
+    let _ = tx.execute(
+        "ALTER TABLE devices ADD COLUMN people TEXT NOT NULL DEFAULT '[]'",
+        [],
+    );
+    Ok(())
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -194,7 +201,7 @@ enum Work {
 pub(crate) struct Inner {
     pub(crate) db: Arc<Database>,
     pub(crate) rpc: Arc<Rpc>,
-    link: Arc<dyn DeviceLink>,
+    pub(crate) link: Arc<dyn DeviceLink>,
     events: Arc<dyn EventSink>,
     handle: Handle,
     people: Option<Arc<PeopleSync>>,
@@ -269,6 +276,24 @@ impl Mirror {
     /// The line to the hub came up. The `devices` frame that follows starts the syncs.
     pub fn line_up(&self) {
         self.inner.emit(AppEvent::new("devices_changed"));
+    }
+
+    /// The hub people this PC acts for changed (a profile was linked, relinked or removed):
+    /// ask every up device again from the start, so the copy holds the chats of every profile
+    /// here. The read set rides on each subscription, so a widened set brings new chats and a
+    /// narrowed one drops the chats that fall out.
+    pub fn people_changed(&self) {
+        let devices: Vec<String> = {
+            let st = lock(&self.inner.st);
+            st.devices
+                .iter()
+                .filter(|(_, d)| d.online && d.uid != self.inner.self_uid && !d.is_self)
+                .map(|(uid, _)| uid.clone())
+                .collect()
+        };
+        for uid in devices {
+            self.inner.resync(&uid);
+        }
     }
 
     /// The line to the hub went down: every request still waiting fails, and every subscription
@@ -374,9 +399,11 @@ impl Mirror {
 
 fn load_devices(conn: &Connection) -> rusqlite::Result<Vec<PeerDevice>> {
     let mut q = conn.prepare(
-        "SELECT uid, name, person_id, person, online, last_seen_at, run, is_self FROM devices",
+        "SELECT uid, name, person_id, person, online, last_seen_at, run, is_self, people FROM devices",
     )?;
     let rows = q.query_map([], |r| {
+        let people: String = r.get(8)?;
+        let people = serde_json::from_str(&people).unwrap_or_default();
         Ok(PeerDevice {
             uid: r.get(0)?,
             name: r.get(1)?,
@@ -385,6 +412,7 @@ fn load_devices(conn: &Connection) -> rusqlite::Result<Vec<PeerDevice>> {
             online: r.get::<_, i64>(4)? != 0,
             last_seen_at: r.get(5)?,
             run: r.get::<_, i64>(6)? != 0,
+            people,
             is_self: r.get::<_, i64>(7)? != 0,
         })
     })?;
@@ -502,12 +530,13 @@ impl Inner {
         let stored = self.db.write(|tx| {
             for d in &list {
                 tx.execute(
-                    "INSERT INTO devices(uid, name, person_id, person, online, last_seen_at, run, is_self)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                    "INSERT INTO devices(uid, name, person_id, person, online, last_seen_at, run, is_self, people)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                      ON CONFLICT(uid) DO UPDATE SET name = excluded.name,
                          person_id = excluded.person_id, person = excluded.person,
                          online = excluded.online, last_seen_at = excluded.last_seen_at,
-                         run = excluded.run, is_self = excluded.is_self",
+                         run = excluded.run, is_self = excluded.is_self,
+                         people = excluded.people",
                     params![
                         d.uid,
                         d.name,
@@ -516,7 +545,8 @@ impl Inner {
                         d.online,
                         d.last_seen_at,
                         d.run,
-                        d.is_self
+                        d.is_self,
+                        serde_json::to_string(&d.people).unwrap_or_else(|_| "[]".to_owned())
                     ],
                 )?;
             }
@@ -581,6 +611,25 @@ impl Inner {
         let mut st = lock(&self.st);
         st.feeds.retain(|_, f| f.device != device);
         st.syncing.remove(device);
+    }
+
+    /// Re-sync a device whose list this PC already holds: the list feed and its cursor go, and
+    /// the device is asked again from the start. Chats stay open; they are subscribed again as
+    /// part of the sync.
+    fn resync(self: &Arc<Self>, device: &str) {
+        {
+            let mut st = lock(&self.st);
+            st.feeds
+                .retain(|k, f| !(matches!(k, Key::List(_)) && f.device == device));
+            st.syncing.remove(device);
+        }
+        if let Err(e) = self
+            .db
+            .write(|tx| tx.execute("DELETE FROM mirror_cursor WHERE device_uid = ?1", [device]))
+        {
+            log::warn!("devices: a list cursor was not reset: {e}");
+        }
+        self.sync_soon(device, 0);
     }
 
     /// Start syncing a device that shows as up and is not subscribed yet.
@@ -718,11 +767,16 @@ impl Inner {
             .unwrap_or(0);
         let me = self.clone();
         let k = key.clone();
+        let act = self.link.people();
         let r = self
             .rpc
-            .call_then(device, "chats_sub", json!({ "since": since }), move || {
-                me.arrived(&k)
-            })
+            .call_then_as(
+                device,
+                "chats_sub",
+                json!({ "since": since }),
+                &act,
+                move || me.arrived(&k),
+            )
             .await;
         match r {
             Ok(result) => {
@@ -773,12 +827,14 @@ impl Inner {
         };
         let me = self.clone();
         let k = key.clone();
+        let act = self.link.people();
         let r = self
             .rpc
-            .call_then(
+            .call_then_as(
                 device,
                 "chat_sub",
                 json!({ "chatId": chat_id, "since": since }),
+                &act,
                 move || me.arrived(&k),
             )
             .await;
@@ -1642,6 +1698,25 @@ pub fn device_state(is_self: bool, line_up: bool, online: bool, run: bool) -> &'
     }
 }
 
+/// The hub people of this install's linked profiles, home first, as `{personId, person}`.
+/// Empty for a database with no (or no linked) profiles.
+pub fn hub_people(conn: &Connection) -> Vec<Value> {
+    let mut q = match conn.prepare(
+        "SELECT hub_person_id, name FROM profiles
+         WHERE hub_person_id IS NOT NULL ORDER BY is_home DESC, name",
+    ) {
+        Ok(q) => q,
+        Err(_) => return Vec::new(),
+    };
+    let rows = match q.query_map([], |r| {
+        Ok(json!({ "personId": r.get::<_, String>(0)?, "person": r.get::<_, String>(1)? }))
+    }) {
+        Ok(rows) => rows,
+        Err(_) => return Vec::new(),
+    };
+    rows.flatten().collect()
+}
+
 /// `devices_list`: this device first, then the others by name.
 pub fn devices_view(conn: &Connection, line_up: bool) -> rusqlite::Result<Value> {
     let self_uid = identity::self_uid(conn).unwrap_or_default();
@@ -1656,6 +1731,7 @@ pub fn devices_view(conn: &Connection, line_up: bool) -> rusqlite::Result<Value>
         "uid": self_uid,
         "name": self_name,
         "person": Value::Null,
+        "people": hub_people(conn),
         "online": true,
         "lastSeenAt": Value::Null,
         "run": run_here,
@@ -1668,6 +1744,7 @@ pub fn devices_view(conn: &Connection, line_up: bool) -> rusqlite::Result<Value>
             "name": d.name,
             "person": d.person,
             "personId": d.person_id,
+            "people": d.people,
             "online": d.online,
             "lastSeenAt": d.last_seen_at,
             "run": d.run,
@@ -1694,31 +1771,74 @@ pub fn mirror_projects(conn: &Connection, device: &str) -> rusqlite::Result<Vec<
     rows.collect()
 }
 
-/// The chats of another device that a profile shows (its own and those shared with it), the
-/// most recently active first. A profile with no hub person sees none of them; no profile at all
-/// sees every one.
-pub fn mirror_chat_list(
+// ---------------------------------------------------------------------------------------------
+// Views: what a chat list shows (never what this copy holds — that is every chat of every device)
+// ---------------------------------------------------------------------------------------------
+
+/// Whose chats a list shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WhoFilter {
+    /// Anyone's: every chat of the device.
+    Any,
+    /// One hub person's: their own and those shared with them.
+    Person(String),
+    /// Nobody's: a viewer with no hub person sees no chat of another device.
+    Nobody,
+}
+
+/// What a chat list shows: a view filter, not a rule. The copy holds every chat of every
+/// device whatever anyone asks for; these choose what a person is shown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatView {
+    pub who: WhoFilter,
+    /// Device uid, or `None` for every device.
+    pub device: Option<String>,
+}
+
+impl ChatView {
+    /// The default for a profile here: that profile's person, on one device (the caller's —
+    /// this app's own list adds this PC's chats beside it). A profile with no hub person gets
+    /// [`WhoFilter::Nobody`]; no profile at all (an unprofiled install) sees everyone's.
+    pub fn for_profile(conn: &Connection, profile_id: Option<&str>) -> rusqlite::Result<ChatView> {
+        let who = match profile_id {
+            Some(p) => {
+                let person: Option<Option<String>> = conn
+                    .query_row(
+                        "SELECT hub_person_id FROM profiles WHERE id = ?1",
+                        [p],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .flatten();
+                match person {
+                    Some(Some(p)) => WhoFilter::Person(p),
+                    Some(None) => WhoFilter::Nobody,
+                    None => WhoFilter::Any,
+                }
+            }
+            None => WhoFilter::Any,
+        };
+        Ok(ChatView { who, device: None })
+    }
+}
+
+/// The chats a view shows, most recently active first.
+pub fn chats_for_view(
     conn: &Connection,
-    device: &str,
-    profile_id: Option<&str>,
+    view: &ChatView,
     archived: bool,
 ) -> rusqlite::Result<Vec<Value>> {
-    let person: Option<Option<String>> = match profile_id {
-        Some(p) => Some(
-            conn.query_row(
-                "SELECT hub_person_id FROM profiles WHERE id = ?1",
-                [p],
-                |r| r.get(0),
-            )
-            .optional()?
-            .flatten(),
-        ),
-        None => None,
-    };
-    let ids: Vec<String> = {
-        let mut q = conn.prepare("SELECT chat_id FROM mirror_chats WHERE device_uid = ?1")?;
-        let rows = q.query_map([device], |r| r.get(0))?;
-        rows.collect::<rusqlite::Result<_>>()?
+    let ids: Vec<String> = match &view.device {
+        Some(d) => {
+            let mut q = conn.prepare("SELECT chat_id FROM mirror_chats WHERE device_uid = ?1")?;
+            let rows = q.query_map([d], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        }
+        None => {
+            let mut q = conn.prepare("SELECT chat_id FROM mirror_chats")?;
+            let rows = q.query_map([], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        }
     };
     let mut out = Vec::new();
     for id in ids {
@@ -1728,18 +1848,34 @@ pub fn mirror_chat_list(
         if c["archived"].as_bool().unwrap_or(false) != archived {
             continue;
         }
-        if let Some(p) = &person {
-            let Some(p) = p else { continue };
+        if let WhoFilter::Person(p) = &view.who {
             let mine = c["personId"].as_str() == Some(p.as_str());
-            let shared = c["sharedWithPeople"]
+            let shared = c["sharedWith"]
                 .as_array()
                 .is_some_and(|l| l.iter().any(|s| s.as_str() == Some(p.as_str())));
             if !mine && !shared {
                 continue;
             }
+        } else if view.who == WhoFilter::Nobody {
+            continue;
         }
         out.push(c);
     }
     out.sort_by_key(|c| std::cmp::Reverse(c["lastActivityAt"].as_i64().unwrap_or(0)));
     Ok(out)
+}
+
+/// The chats of another device that a profile shows (its own and those shared with it), the
+/// most recently active first. A profile with no hub person sees none of them; no profile at all
+/// sees every one. This is [`chats_for_view`] with the profile's default view; callers that let
+/// the person widen the view pass a [`ChatView`] directly.
+pub fn mirror_chat_list(
+    conn: &Connection,
+    device: &str,
+    profile_id: Option<&str>,
+    archived: bool,
+) -> rusqlite::Result<Vec<Value>> {
+    let mut view = ChatView::for_profile(conn, profile_id)?;
+    view.device = Some(device.to_owned());
+    chats_for_view(conn, &view, archived)
 }

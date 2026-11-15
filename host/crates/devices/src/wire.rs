@@ -5,10 +5,10 @@
 //!
 //! | frame | direction | fields |
 //! |---|---|---|
-//! | `device` | Helm to hub | `uid, name, run`: sent after `sharing` on every new line and on change |
-//! | `devices` | hub to Helm | `list`: every device of the household, who owns it, whether it is up |
-//! | `dev` | Helm to hub | `id, to (uid), op, args`: a request to another device |
-//! | `dev_call` | hub to Helm | `id (the hub's), from, op, args`: a request from another device |
+//! | `device` | Helm to hub | `uid, name, run, people?`: sent after `sharing` on every new line and on change; `people` lists every hub person this PC acts for, home first |
+//! | `devices` | hub to Helm | `list`: every device of the household, who owns it, who it acts for, whether it is up |
+//! | `dev` | Helm to hub | `id, to (uid), op, args, as?`: a request to another device; `as` names the acting person first, then anyone whose chats a read may cover |
+//! | `dev_call` | hub to Helm | `id (the hub's), from, op, args`: a request from another device; `from` carries the hub's verified acting person and read set |
 //! | `dev_result` | both ways | `id, ok, result` or `error {code, message}`; the hub adds `offline`, `timeout`, `scope` and `too_large` |
 //! | `dev_push` | both ways | `to`/`from (uid), sub, seq, event`: news for a subscription |
 //!
@@ -82,6 +82,11 @@ impl WireError {
         )
     }
 
+    /// The hub's: the sender asked to act for a person it never announced.
+    pub fn not_acting() -> Self {
+        Self::new(code::NOT_ALLOWED, "This PC does not act for that person.")
+    }
+
     /// Anything a watcher may not do from afar.
     pub fn elsewhere() -> Self {
         Self::new(code::REFUSED, "Do that on the PC this chat runs on.")
@@ -98,13 +103,37 @@ impl std::fmt::Display for WireError {
     }
 }
 
+/// One hub person a PC acts for, with the channels it takes for them.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DevicePerson {
+    pub person_id: String,
+    /// Whether this PC takes that person's Telegram.
+    pub telegram: bool,
+    /// Whether this PC takes that person's voice.
+    pub voice: bool,
+}
+
+/// A hub person as the hub names them: the id and the stored name.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonRef {
+    pub person_id: String,
+    pub person: String,
+}
+
 /// What a device says about itself on every line-up and on change.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeviceFrame {
     pub uid: String,
     pub name: String,
     /// Whether other devices may run chats here.
     pub run: bool,
+    /// Every hub person this PC acts for, the home profile's first. Absent (an older Helm)
+    /// means "no claims; the paired person only".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub people: Vec<DevicePerson>,
 }
 
 /// One device of the household as the hub lists it.
@@ -119,12 +148,17 @@ pub struct PeerDevice {
     /// When the device was last up (ISO 8601), or `None` if it never has been.
     pub last_seen_at: Option<String>,
     pub run: bool,
+    /// Every hub person this device announced acting for, as the hub last heard it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub people: Vec<PersonRef>,
     /// This is the device the list was sent to.
     #[serde(rename = "self")]
     pub is_self: bool,
 }
 
-/// Who a request comes from.
+/// Who a request comes from, as the hub stamps it: the acting person in `personId`/`person`,
+/// every verified person a read may cover in `people`, and the sender machine's own person in
+/// `machine_person_id` (for display only). An older hub sends only the machine's person.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Caller {
@@ -132,6 +166,10 @@ pub struct Caller {
     pub name: String,
     pub person_id: Option<String>,
     pub person: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub people: Vec<PersonRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_person_id: Option<String>,
 }
 
 /// News for a subscription: `seq` counts from 1 within it.
@@ -161,6 +199,10 @@ pub enum Frame {
         op: String,
         #[serde(default)]
         args: Value,
+        /// The people this call acts for: the acting person first, then anyone whose chats a
+        /// read may cover. Empty (an older Helm) means "the paired person, as always".
+        #[serde(rename = "as", default, skip_serializing_if = "Vec::is_empty")]
+        act_as: Vec<String>,
     },
     DevCall {
         id: String,
