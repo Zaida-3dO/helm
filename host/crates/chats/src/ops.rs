@@ -180,7 +180,10 @@ async fn chat_stop(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
         .ask(
             &a.chat_id,
             |reply| Cmd::Stop { reply },
-            rt.limits().stop + std::time::Duration::from_secs(5),
+            // The actor force-closes the worker at its stop deadline and always answers by then;
+            // the extra window only waits for the app's own task scheduling on a busy machine.
+            // A shorter grace turned a Stop on a loaded PC into a spurious timeout error.
+            rt.limits().stop + std::time::Duration::from_secs(30),
         )
         .await?;
     to_value(&ChatStopResult { status })
@@ -195,7 +198,9 @@ async fn chat_stop_no_resend(ctx: OpCtx, args: Value) -> Result<Value, ApiError>
         .ask(
             &a.chat_id,
             |reply| Cmd::StopNoResend { reply },
-            rt.limits().stop + std::time::Duration::from_secs(5),
+            // As in `chat_stop`: the actor always answers by its stop deadline; the grace only
+            // absorbs the app's own task scheduling on a loaded machine.
+            rt.limits().stop + std::time::Duration::from_secs(30),
         )
         .await?;
     to_value(&ChatStopResult { status })
