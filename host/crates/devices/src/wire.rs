@@ -440,6 +440,14 @@ pub struct ForkArgs {
     pub chat_id: String,
     /// A fresh UUID per fork: a repeat is answered without forking twice.
     pub fork_id: String,
+    /// Fork at that assistant reply ("fork from here"); absent forks the whole chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<i64>,
+    /// With `excerpt`, the copy is a side chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excerpt: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -488,6 +496,85 @@ pub struct MoveProfileArgs {
     pub profile_id: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetPermissionArgs {
+    pub chat_id: String,
+    /// The composer's permission pick, as `chat_set_permission_mode` takes it.
+    pub mode: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VerbositySetArgs {
+    pub chat_id: String,
+    /// `low`, `medium` or `high`; absent follows this PC's new-chat default again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QuickOpenArgs {
+    pub chat_id: String,
+    pub query: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolStopArgs {
+    pub chat_id: String,
+    pub tool_call_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SubmissionArgs {
+    pub chat_id: String,
+    pub submission_id: String,
+    /// `withdraw` or `recover`.
+    pub action: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CheckpointArgs {
+    pub chat_id: String,
+    pub message_id: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChatIdsArgs {
+    pub chat_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SnoozeArgs {
+    pub chat_id: String,
+    /// Until (Unix ms); absent or null unsnoozes — the same rule as the local op.
+    #[serde(default)]
+    pub until: Option<i64>,
+}
+
+/// The PC that runs a chat's defaults for new chats, as far as the model picker cares: the
+/// model, effort and reply length a new chat there starts with. A read answers with these;
+/// `defaults_set` accepts only these three, so a pick from afar cannot rewrite the other
+/// PC's whole runtime page.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DefaultsArgs {
+    /// The chat the picker was open on: the defaults are the ones on the PC that runs it.
+    pub chat_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_verbosity: Option<String>,
+}
+
 /// An op a device carries for another, parsed.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
@@ -520,6 +607,30 @@ pub enum Op {
     MarkUnread(ChatIdArgs),
     Mute(MuteArgs),
     MoveProfile(MoveProfileArgs),
+    /// The composer's permission pick, applied on the PC that runs the chat.
+    SetPermission(SetPermissionArgs),
+    /// The chat's reply-length level, as the model picker shows it. A read.
+    VerbosityGet(ChatIdArgs),
+    VerbositySet(VerbositySetArgs),
+    /// Whether the side panel's context eye is on for the chat there. A read.
+    ContextOn(ChatIdArgs),
+    /// The chat's project files matching a mention query, read on the PC that runs it. A read.
+    QuickOpen(QuickOpenArgs),
+    /// Start loading the chat's model on its own PC (the first keystroke of a local chat).
+    Warm(ChatIdArgs),
+    ToolStop(ToolStopArgs),
+    Submission(SubmissionArgs),
+    /// What going back to a message means there, for the confirmation dialog. A read.
+    Checkpoint(CheckpointArgs),
+    /// Needs-you and idle-check flag rows for named chats. A read.
+    Attention(ChatIdsArgs),
+    /// Board-item links for named chats, as the PC that runs them lists them. A read.
+    ItemLinks(ChatIdsArgs),
+    Snooze(SnoozeArgs),
+    Address(ChatIdArgs),
+    /// The PC's new-chat model/effort/reply-length, three fields only. A read.
+    DefaultsGet(ChatIdArgs),
+    DefaultsSet(DefaultsArgs),
 }
 
 fn args<T: for<'de> Deserialize<'de>>(v: Value) -> Result<T, WireError> {
@@ -574,6 +685,21 @@ impl Op {
             "mark_unread" => Op::MarkUnread(args(a)?),
             "mute" => Op::Mute(args(a)?),
             "move_profile" => Op::MoveProfile(args(a)?),
+            "set_permission" => Op::SetPermission(args(a)?),
+            "verbosity_get" => Op::VerbosityGet(args(a)?),
+            "verbosity_set" => Op::VerbositySet(args(a)?),
+            "context_on" => Op::ContextOn(args(a)?),
+            "quick_open" => Op::QuickOpen(args(a)?),
+            "warm" => Op::Warm(args(a)?),
+            "tool_stop" => Op::ToolStop(args(a)?),
+            "submission" => Op::Submission(args(a)?),
+            "checkpoint" => Op::Checkpoint(args(a)?),
+            "attention" => Op::Attention(args(a)?),
+            "item_links" => Op::ItemLinks(args(a)?),
+            "snooze" => Op::Snooze(args(a)?),
+            "address" => Op::Address(args(a)?),
+            "defaults_get" => Op::DefaultsGet(args(a)?),
+            "defaults_set" => Op::DefaultsSet(args(a)?),
             _ => return Err(WireError::elsewhere()),
         })
     }
@@ -601,6 +727,14 @@ impl Op {
                 | Op::MarkUnread(_)
                 | Op::Mute(_)
                 | Op::MoveProfile(_)
+                | Op::SetPermission(_)
+                | Op::VerbositySet(_)
+                | Op::Warm(_)
+                | Op::ToolStop(_)
+                | Op::Submission(_)
+                | Op::Snooze(_)
+                | Op::Address(_)
+                | Op::DefaultsSet(_)
         )
     }
 }

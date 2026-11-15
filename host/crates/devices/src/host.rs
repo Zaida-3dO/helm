@@ -10,9 +10,11 @@ use crate::link::BoxFut;
 use crate::sends;
 use crate::serve::{ChatPort, ChatState, PortResult, SentFile};
 use crate::wire::{
-    code, AnswerArgs, ArchiveArgs, ConsentDecideArgs, CreateArgs, DeviceInfo, DevicePerson,
-    ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, PersonInfo, ProfileInfo, ProjectInfo,
-    RemoteChat, RenameArgs, RollOverArgs, SetModelArgs, ShareArgs, WireError,
+    code, AnswerArgs, ArchiveArgs, CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs,
+    DeviceInfo, DevicePerson, ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, PersonInfo,
+    ProfileInfo, ProjectInfo, QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs, SetModelArgs,
+    SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs,
+    WireError,
 };
 use helm_chats::submit::{self, HostFile, HostImage, HostSend};
 use helm_chats::types::{ChatGetResult, ChatRecord, MessageRow, SubmissionOrigin};
@@ -391,12 +393,31 @@ impl ChatPort for HostPort {
             })
             .unwrap_or((None, Vec::new(), None, None, None));
         let (project_name, project_colour) = project.unwrap_or_default();
-        let waiting = record.unread.completion_id.is_some()
-            || self
-                .rt()
+        let interactions = self
+            .rt()
+            .ok()
+            .and_then(|rt| rt.live_thread(&record.id))
+            .map(|t| t.interactions.len())
+            .unwrap_or(0);
+        let consent_pending = self
+            .db()
+            .ok()
+            .and_then(|db| {
+                db.snapshot(|tx| {
+                    tx.query_row(
+                        "SELECT COUNT(*) FROM consent_requests
+                         WHERE chat_id = ?1 AND state = 'pending' AND expires_at > ?2",
+                        rusqlite::params![&record.id, helm_core::now_ms()],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .optional()
+                })
                 .ok()
-                .and_then(|rt| rt.live_thread(&record.id))
-                .is_some_and(|t| !t.interactions.is_empty());
+                .flatten()
+            })
+            .unwrap_or(0) as usize;
+        let waiting =
+            record.unread.completion_id.is_some() || interactions > 0 || consent_pending > 0;
         let mut chat = RemoteChat::from_record(
             &record,
             person,
@@ -405,6 +426,11 @@ impl ChatPort for HostPort {
             &project_colour,
             waiting,
         );
+        // The cards waiting on a person, so a copy's needs-you marker can count them too
+        // (requests the chat is holding open plus Allow cards). A watcher refreshes this when
+        // either set changes on its copy.
+        chat.0
+            .insert("waitingCards".into(), json!(interactions + consent_pending));
         if let Some(p) = position {
             chat.0.insert("position".into(), json!(p));
         }
@@ -777,11 +803,17 @@ impl ChatPort for HostPort {
     fn fork(&self, a: ForkArgs) -> BoxFut<'_, PortResult<Value>> {
         Box::pin(async move {
             self.here(&a.chat_id)?;
-            self.op(
-                "chat_fork",
-                json!({ "chatId": a.chat_id, "forkId": a.fork_id }),
-            )
-            .await
+            let mut args = json!({ "chatId": a.chat_id, "forkId": a.fork_id });
+            if let Some(m) = a.message_id {
+                args["messageId"] = json!(m);
+            }
+            if let Some(s) = a.side {
+                args["side"] = json!(s);
+            }
+            if let Some(e) = &a.excerpt {
+                args["excerpt"] = json!(e);
+            }
+            self.op("chat_fork", args).await
         })
     }
 
@@ -896,6 +928,219 @@ impl ChatPort for HostPort {
             )
             .await?;
             Ok(())
+        })
+    }
+
+    fn set_permission(&self, a: SetPermissionArgs) -> BoxFut<'_, PortResult<()>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            self.op(
+                "chat_set_permission_mode",
+                json!({ "chatId": a.chat_id, "mode": a.mode }),
+            )
+            .await?;
+            Ok(())
+        })
+    }
+
+    fn verbosity_get(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&chat_id)?;
+            self.op("chat_verbosity_get", json!({ "chatId": chat_id }))
+                .await
+        })
+    }
+
+    fn verbosity_set(&self, a: VerbositySetArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            let mut args = json!({ "chatId": a.chat_id });
+            if let Some(l) = &a.level {
+                args["level"] = json!(l);
+            }
+            self.op("chat_verbosity_set", args).await
+        })
+    }
+
+    fn context_on(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&chat_id)?;
+            self.op("panel_context_get", json!({ "chatId": chat_id }))
+                .await
+        })
+    }
+
+    fn quick_open(&self, a: QuickOpenArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            self.op(
+                "quick_open",
+                json!({ "chatId": a.chat_id, "query": a.query }),
+            )
+            .await
+        })
+    }
+
+    fn warm(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
+        Box::pin(async move {
+            self.here(&chat_id)?;
+            self.op("chat_warm", json!({ "chatId": chat_id })).await?;
+            Ok(())
+        })
+    }
+
+    fn tool_stop(&self, a: ToolStopArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            self.op(
+                "tool_stop",
+                json!({ "chatId": a.chat_id, "toolCallId": a.tool_call_id }),
+            )
+            .await
+        })
+    }
+
+    fn submission(&self, a: SubmissionArgs) -> BoxFut<'_, PortResult<()>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            if !matches!(a.action.as_str(), "withdraw" | "recover") {
+                return Err(WireError::bad_args("An action is withdraw or recover."));
+            }
+            // The id must name a submission of this chat, so one request can never
+            // reach another chat's queue.
+            let owns = self
+                .db()?
+                .snapshot(|tx| {
+                    tx.query_row(
+                        "SELECT 1 FROM submissions WHERE id = ?1 AND chat_id = ?2",
+                        rusqlite::params![a.submission_id, a.chat_id],
+                        |_| Ok(()),
+                    )
+                    .optional()
+                })
+                .map_err(db_err)?
+                .is_some();
+            if !owns {
+                return Err(WireError::new(
+                    code::NOT_FOUND,
+                    "That message is not in this chat's queue.",
+                ));
+            }
+            self.op(
+                "submission_action",
+                json!({ "submissionId": a.submission_id, "action": a.action }),
+            )
+            .await?;
+            Ok(())
+        })
+    }
+
+    fn checkpoint(&self, a: CheckpointArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            self.op(
+                "checkpoint_info",
+                json!({ "chatId": a.chat_id, "messageId": a.message_id }),
+            )
+            .await
+        })
+    }
+
+    fn attention_rows(&self, chat_ids: Vec<String>) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            if chat_ids.len() > 500 {
+                return Err(WireError::bad_args("Ask for at most 500 chats."));
+            }
+            let want: std::collections::HashSet<String> = chat_ids.into_iter().collect();
+            let summary = self.op("attention_get", json!({})).await?;
+            let pick = |group: &str| -> Vec<Value> {
+                summary
+                    .get(group)
+                    .and_then(Value::as_array)
+                    .map(|rows| {
+                        rows.iter()
+                            .filter(|r| {
+                                r.get("chatId")
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|c| want.contains(c))
+                            })
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            Ok(json!({
+                "needsYou": pick("needsYou"),
+                "flagged": pick("flagged"),
+            }))
+        })
+    }
+
+    fn item_links(&self, chat_ids: Vec<String>) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            if chat_ids.len() > 500 {
+                return Err(WireError::bad_args("Ask for at most 500 chats."));
+            }
+            self.op("item_links_for_chats", json!({ "chatIds": chat_ids }))
+                .await
+        })
+    }
+
+    fn snooze(&self, a: SnoozeArgs) -> BoxFut<'_, PortResult<()>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            self.op(
+                "attention_snooze",
+                json!({ "chatId": a.chat_id, "until": a.until }),
+            )
+            .await?;
+            Ok(())
+        })
+    }
+
+    fn address(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
+        Box::pin(async move {
+            self.here(&chat_id)?;
+            self.op("attention_address", json!({ "chatId": chat_id }))
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn defaults_get(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&chat_id)?;
+            let all = self.op("runtime_settings_get", json!({})).await?;
+            let mut out = serde_json::Map::new();
+            for key in ["model", "effort", "responseVerbosity"] {
+                if let Some(v) = all.get(key) {
+                    out.insert(key.to_owned(), v.clone());
+                }
+            }
+            Ok(Value::Object(out))
+        })
+    }
+
+    fn defaults_set(&self, a: DefaultsArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            if let Some(v) = &a.response_verbosity {
+                if !matches!(v.as_str(), "low" | "medium" | "high") {
+                    return Err(WireError::bad_args("Reply length is low, medium or high."));
+                }
+            }
+            // Only the three fields the picker owns ever reach the settings op.
+            let mut patch = json!({});
+            if let Some(m) = &a.model {
+                patch["model"] = json!(m);
+            }
+            if let Some(e) = &a.effort {
+                patch["effort"] = json!(e);
+            }
+            if let Some(v) = &a.response_verbosity {
+                patch["responseVerbosity"] = json!(v);
+            }
+            self.op("runtime_settings_save", patch).await
         })
     }
 

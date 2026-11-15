@@ -282,6 +282,57 @@ impl ChatPort for ChannelPort {
     fn move_profile(&self, a: MoveProfileArgs) -> BoxFut<'_, PortResult<()>> {
         self.port.move_profile(a)
     }
+    fn set_permission(
+        &self,
+        a: helm_devices::wire::SetPermissionArgs,
+    ) -> BoxFut<'_, PortResult<()>> {
+        self.port.set_permission(a)
+    }
+    fn verbosity_get(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        self.port.verbosity_get(chat_id)
+    }
+    fn verbosity_set(
+        &self,
+        a: helm_devices::wire::VerbositySetArgs,
+    ) -> BoxFut<'_, PortResult<Value>> {
+        self.port.verbosity_set(a)
+    }
+    fn context_on(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        self.port.context_on(chat_id)
+    }
+    fn quick_open(&self, a: helm_devices::wire::QuickOpenArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.port.quick_open(a)
+    }
+    fn warm(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
+        self.port.warm(chat_id)
+    }
+    fn tool_stop(&self, a: helm_devices::wire::ToolStopArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.port.tool_stop(a)
+    }
+    fn submission(&self, a: helm_devices::wire::SubmissionArgs) -> BoxFut<'_, PortResult<()>> {
+        self.port.submission(a)
+    }
+    fn checkpoint(&self, a: helm_devices::wire::CheckpointArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.port.checkpoint(a)
+    }
+    fn attention_rows(&self, chat_ids: Vec<String>) -> BoxFut<'_, PortResult<Value>> {
+        self.port.attention_rows(chat_ids)
+    }
+    fn item_links(&self, chat_ids: Vec<String>) -> BoxFut<'_, PortResult<Value>> {
+        self.port.item_links(chat_ids)
+    }
+    fn snooze(&self, a: helm_devices::wire::SnoozeArgs) -> BoxFut<'_, PortResult<()>> {
+        self.port.snooze(a)
+    }
+    fn address(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
+        self.port.address(chat_id)
+    }
+    fn defaults_get(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        self.port.defaults_get(chat_id)
+    }
+    fn defaults_set(&self, a: helm_devices::wire::DefaultsArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.port.defaults_set(a)
+    }
     fn chat_brief(&self, chat_id: String) -> BoxFut<'_, PortResult<Option<RemoteChat>>> {
         self.port.chat_brief(chat_id)
     }

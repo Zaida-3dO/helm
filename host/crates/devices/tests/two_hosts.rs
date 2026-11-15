@@ -637,6 +637,98 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
     until(|| b.heard("chats").len() == heard + 1).await;
     assert_eq!(b.heard("chats")[heard].event["chat"]["id"], "c1");
 
+    // What the composer and the chat view ask of a chat that runs on another PC: the permission
+    // pick, the reply length, the side-panel eye, the @ mentions, warming, stopping one running
+    // tool, withdrawing and recovering a queued message, the checkpoint read, the flags and item
+    // links beside the chat, and the new-chat defaults of the PC that runs it. Each is answered
+    // there, and the recorder says which function ran.
+    let view: Vec<(&str, Value)> = vec![
+        ("set_permission", json!({"chatId": "c1", "mode": "plan"})),
+        ("verbosity_get", json!({"chatId": "c1"})),
+        ("verbosity_set", json!({"chatId": "c1", "level": "high"})),
+        ("context_on", json!({"chatId": "c1"})),
+        ("quick_open", json!({"chatId": "c1", "query": "main"})),
+        ("warm", json!({"chatId": "c1"})),
+        ("tool_stop", json!({"chatId": "c1", "toolCallId": "t-1"})),
+        (
+            "submission",
+            json!({"chatId": "c1", "submissionId": "s-1", "action": "withdraw"}),
+        ),
+        ("checkpoint", json!({"chatId": "c1", "messageId": 2})),
+        ("attention", json!({"chatIds": ["c1"]})),
+        ("item_links", json!({"chatIds": ["c1"]})),
+        ("snooze", json!({"chatId": "c1", "until": 123})),
+        ("address", json!({"chatId": "c1"})),
+        ("defaults_get", json!({"chatId": "c1"})),
+        (
+            "defaults_set",
+            json!({"chatId": "c1", "model": "opus", "responseVerbosity": "high"}),
+        ),
+    ];
+    for (op, args) in &view {
+        assert!(b.rpc.call("dev-a", op, args.clone()).await.is_ok(), "{op}");
+    }
+    {
+        let st = port.st();
+        assert_eq!(st.permission_set[0].mode, "plan");
+        assert_eq!(st.verbosity_set[0].level.as_deref(), Some("high"));
+        assert_eq!(st.context_asked, ["c1"]);
+        assert_eq!(st.quick_opened[0].query, "main");
+        assert_eq!(st.warmed, ["c1"]);
+        assert_eq!(st.tool_stopped[0].tool_call_id, "t-1");
+        assert_eq!(st.submissions[0].action, "withdraw");
+        assert_eq!(st.checkpoint_for[0].message_id, 2);
+        assert_eq!(st.item_links_for[0], ["c1".to_owned()]);
+        assert_eq!(st.snoozed[0].until, Some(123));
+        assert_eq!(st.addressed, ["c1"]);
+        assert_eq!(st.defaults_saved.as_ref().unwrap()["model"], "opus");
+    }
+    // A queued action other than withdraw or recover is refused at the wire.
+    let e = b
+        .rpc
+        .call(
+            "dev-a",
+            "submission",
+            json!({"chatId": "c1", "submissionId": "s-3", "action": "delete"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, code::BAD_ARGS);
+    // Reads answer with the run switch off; every write — including each of the new ones — does
+    // not. The switch covers every op this slice added.
+    port.set_run(false);
+    for (op, args) in [
+        ("verbosity_get", json!({"chatId": "c1"})),
+        ("context_on", json!({"chatId": "c1"})),
+        ("quick_open", json!({"chatId": "c1", "query": "x"})),
+        ("checkpoint", json!({"chatId": "c1", "messageId": 2})),
+        ("attention", json!({"chatIds": ["c1"]})),
+        ("item_links", json!({"chatIds": ["c1"]})),
+        ("defaults_get", json!({"chatId": "c1"})),
+    ] {
+        assert!(
+            b.rpc.call("dev-a", op, args).await.is_ok(),
+            "{op} is a read"
+        );
+    }
+    for (op, args) in [
+        ("set_permission", json!({"chatId": "c1", "mode": "plan"})),
+        ("verbosity_set", json!({"chatId": "c1", "level": "low"})),
+        ("warm", json!({"chatId": "c1"})),
+        ("tool_stop", json!({"chatId": "c1", "toolCallId": "t-2"})),
+        (
+            "submission",
+            json!({"chatId": "c1", "submissionId": "s-2", "action": "recover"}),
+        ),
+        ("snooze", json!({"chatId": "c1", "until": 9})),
+        ("address", json!({"chatId": "c1"})),
+        ("defaults_set", json!({"chatId": "c1", "model": "sonnet"})),
+    ] {
+        let e = b.rpc.call("dev-a", op, args).await.unwrap_err();
+        assert_eq!(e.code, code::NOT_ALLOWED, "{op}");
+    }
+    port.set_run(true);
+
     // A device that drops off the hub loses its subscriptions, and asks again when it is back.
     assert!(host.watchers().contains(&"dev-b".to_owned()));
     b.link.set_up(false);
@@ -1156,6 +1248,42 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         ["k-perm", "k-ask", "k-plan", "k-trust", "k-secret"]
     );
 
+    // The waiting-card count lives in the copy too, so the sidebar's needs-you mark can count
+    // it: a question waiting on the far PC puts a count and a mark on the copy's record, and
+    // closing the card clears both.
+    let copy_state = || {
+        b.db.snapshot(|tx| {
+            tx.query_row(
+                "SELECT record FROM mirror_chats WHERE chat_id = 'c1'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+        })
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .map(|v| (v["waitingCards"].as_i64(), v["needsAttention"].as_bool()))
+    };
+    let waiting = fake_interaction(
+        "c1",
+        "wait-1",
+        Meth::Select,
+        Some(Att::Question),
+        Some(&["A", "B"]),
+    );
+    port.put_interaction(waiting.clone());
+    host.observe(
+        &AppEvent::new("thread")
+            .with("chatId", "c1")
+            .with("thread", json!({ "interactions": [waiting] })),
+    );
+    until(|| copy_state() == Some((Some(1), Some(true)))).await;
+    host.observe(
+        &AppEvent::new("thread")
+            .with("chatId", "c1")
+            .with("thread", json!({ "interactions": [] })),
+    );
+    until(|| copy_state() == Some((Some(0), Some(false)))).await;
+
     // Every chat op on a copied chat: answered from the copy, sent to the device, answered
     // quietly, or refused with the sentence that says where to do it.
     let elsewhere = "This chat runs on Desk. Do that there.";
@@ -1195,6 +1323,78 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
             json!({"chatId": "c1", "pinned": true, "parentChatId": null}),
             Ok(json!([])),
         ),
+        // The composer and chat view: each travels to the PC that runs the chat.
+        (
+            "chat_set_permission_mode",
+            json!({"chatId": "c1", "mode": "plan"}),
+            Ok(json!(null)),
+        ),
+        (
+            "chat_verbosity_get",
+            json!({"chatId": "c1"}),
+            Ok(json!({"level": "low", "own": false, "default": "low"})),
+        ),
+        (
+            "chat_verbosity_set",
+            json!({"chatId": "c1", "level": "high"}),
+            Ok(json!({"level": "high", "own": true, "default": "low"})),
+        ),
+        (
+            "panel_context_get",
+            json!({"chatId": "c1"}),
+            Ok(json!({"on": false})),
+        ),
+        (
+            "quick_open",
+            json!({"chatId": "c1", "query": "main"}),
+            Ok(json!({"mode": "files", "items": [{ "path": "src/main.ts" }], "partial": false})),
+        ),
+        (
+            "tool_stop",
+            json!({"chatId": "c1", "toolCallId": "t-9"}),
+            Ok(json!({"stopped": true})),
+        ),
+        (
+            "checkpoint_info",
+            json!({"chatId": "c1", "messageId": 2}),
+            Ok(
+                json!({"chatId": "c1", "text": "back to here", "userMessages": 1, "files": [], "filesRestored": false}),
+            ),
+        ),
+        (
+            "attention_snooze",
+            json!({"chatId": "c1", "until": 50}),
+            Ok(json!(null)),
+        ),
+        (
+            "attention_address",
+            json!({"chatId": "c1"}),
+            Ok(json!(null)),
+        ),
+        (
+            "devices_submission_action",
+            json!({"chatId": "c1", "submissionId": "s-1", "action": "withdraw"}),
+            Ok(json!(null)),
+        ),
+        (
+            "devices_composer_defaults",
+            json!({"chatId": "c1", "patch": {"model": "opus", "responseVerbosity": "high"}}),
+            Ok(json!({"model": "opus", "effort": "high", "responseVerbosity": "high"})),
+        ),
+        (
+            "devices_item_links",
+            json!({"chatIds": ["c1"]}),
+            Ok(
+                json!({"links": [{ "chatId": "c1", "itemId": "item-7", "title": "Task seven", "main": true }], "unreachable": []}),
+            ),
+        ),
+        (
+            "devices_attention",
+            json!({"chatIds": ["c1"]}),
+            Ok(
+                json!({"needsYou": [], "flagged": [{ "chatId": "c1", "kind": "idle", "reason": "quiet but unfinished" }], "unreachable": []}),
+            ),
+        ),
         ("chat_delete", json!({"chatId": "c1"}), Err(elsewhere)),
         ("message_edit_open", json!({"chatId": "c1"}), Err(elsewhere)),
         (
@@ -1228,6 +1428,19 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         assert!(st.muted.iter().all(|m| m.muted) && st.muted.len() == 1);
         assert_eq!(st.organized.len(), 1);
         assert_eq!(st.organized[0].parent_chat_id, Some(None));
+        assert_eq!(st.permission_set[0].mode, "plan");
+        assert_eq!(st.verbosity_set[0].level.as_deref(), Some("high"));
+        assert_eq!(st.context_asked, ["c1"]);
+        assert_eq!(st.quick_opened[0].query, "main");
+        // Warming now travels too: a chat typed into from afar warms the model on its own PC.
+        assert_eq!(st.warmed, ["c1"]);
+        assert_eq!(st.tool_stopped[0].tool_call_id, "t-9");
+        assert_eq!(st.checkpoint_for[0].message_id, 2);
+        assert_eq!(st.submissions[0].action, "withdraw");
+        assert_eq!(st.defaults_saved.as_ref().unwrap()["model"], "opus");
+        assert_eq!(st.item_links_for[0], ["c1".to_owned()]);
+        assert_eq!(st.snoozed[0].until, Some(50));
+        assert_eq!(st.addressed, ["c1"]);
     }
     let rec =
         b.db.snapshot(|tx| {

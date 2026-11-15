@@ -353,6 +353,160 @@ impl Mirror {
         .await
     }
 
+    /// The line and the device just need to be up: reads answer while the device's run switch
+    /// is off (the same rule as a chat's cost).
+    fn check_up(&self, device: &str) -> Result<(), ApiError> {
+        if !self.line_is_up() {
+            return Err(ApiError::new(
+                "reconnecting",
+                "Reconnecting to the hub… showing the copy on this PC.",
+            ));
+        }
+        match self.device(device) {
+            Some(d) if d.online => Ok(()),
+            other => Err(offline(
+                &self.device_name(device),
+                other.and_then(|d| d.last_seen_at).as_deref(),
+            )),
+        }
+    }
+
+    /// The new-chat model/effort/reply-length defaults of the PC that runs this chat, read or
+    /// saved from the picker on a mirrored chat. Reading answers with the run switch off;
+    /// saving needs it, and carries the acting person.
+    pub async fn composer_defaults(
+        &self,
+        chat_id: &str,
+        patch: Option<&Value>,
+    ) -> Result<Value, ApiError> {
+        let device = self.device_of(chat_id)?;
+        match patch {
+            None => {
+                self.check_up(&device)?;
+                self.ask_as(
+                    &device,
+                    "defaults_get",
+                    json!({ "chatId": chat_id }),
+                    "those defaults",
+                    &[],
+                )
+                .await
+            }
+            Some(p) => {
+                self.check_live(&device)?;
+                let act = self.acting(chat_id)?;
+                let mut args = p.clone();
+                args["chatId"] = json!(chat_id);
+                self.ask_as(&device, "defaults_set", args, "those defaults", &[act])
+                    .await
+            }
+        }
+    }
+
+    /// Withdraw or recover one queued message of a mirrored chat, on the PC that runs it.
+    pub async fn submission_action(
+        &self,
+        chat_id: &str,
+        submission_id: &str,
+        action: &str,
+    ) -> Result<(), ApiError> {
+        let device = self.device_of(chat_id)?;
+        self.check_live(&device)?;
+        let act = self.acting(chat_id)?;
+        self.ask_as(
+            &device,
+            "submission",
+            json!({ "chatId": chat_id, "submissionId": submission_id, "action": action }),
+            "that change",
+            &[act],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// The board-item links of mirrored chats, read from the PCs that run them. Each link row
+    /// names its chat, so one ask covers a device's whole group; a device that is down simply
+    /// contributes nothing and its chats are listed as unreachable.
+    pub async fn item_links(&self, chat_ids: &[String]) -> Result<Value, ApiError> {
+        let mut links = Vec::new();
+        let mut unreachable = Vec::new();
+        let mut by_device: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for id in chat_ids {
+            if let Some(device) = self.owner(id) {
+                by_device.entry(device).or_default().push(id.clone());
+            }
+        }
+        for (device, ids) in by_device {
+            if self.check_up(&device).is_err() {
+                unreachable.extend(ids);
+                continue;
+            }
+            let got = match self
+                .ask_as(
+                    &device,
+                    "item_links",
+                    json!({ "chatIds": ids }),
+                    "those links",
+                    &[],
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    log::info!("devices: an item-links read did not answer: {e}");
+                    unreachable.extend(ids);
+                    continue;
+                }
+            };
+            if let Some(rows) = got.get("links").and_then(Value::as_array) {
+                links.extend(rows.iter().cloned());
+            }
+        }
+        Ok(json!({ "links": links, "unreachable": unreachable }))
+    }
+
+    /// The needs-you and flag rows of mirrored chats, read from the PCs that run them.
+    pub async fn attention_rows(&self, chat_ids: &[String]) -> Result<Value, ApiError> {
+        let mut needs_you = Vec::new();
+        let mut flagged = Vec::new();
+        let mut unreachable = Vec::new();
+        let mut by_device: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for id in chat_ids {
+            if let Some(device) = self.owner(id) {
+                by_device.entry(device).or_default().push(id.clone());
+            }
+        }
+        for (device, ids) in by_device {
+            if self.check_up(&device).is_err() {
+                unreachable.extend(ids);
+                continue;
+            }
+            let got = match self
+                .ask_as(
+                    &device,
+                    "attention",
+                    json!({ "chatIds": ids }),
+                    "those rows",
+                    &[],
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    log::info!("devices: an attention read did not answer: {e}");
+                    unreachable.extend(ids);
+                    continue;
+                }
+            };
+            for (group, into) in [("needsYou", &mut needs_you), ("flagged", &mut flagged)] {
+                if let Some(rows) = got.get(group).and_then(Value::as_array) {
+                    into.extend(rows.iter().cloned());
+                }
+            }
+        }
+        Ok(json!({ "needsYou": needs_you, "flagged": flagged, "unreachable": unreachable }))
+    }
+
     /// Ask the device for a change, then show it in the copy here at once; the device's own news
     /// (with a newer revision) replaces it.
     async fn change(
@@ -595,6 +749,19 @@ fn not_allowed(name: &str) -> ApiError {
         "not_allowed",
         format!("{name} doesn't let other devices run its chats. You can read this one."),
     )
+}
+
+/// The local op → the wire op for the reads of a mirrored chat: they answer while the device's
+/// run switch is off, like a cost read.
+fn read_op(op: &str) -> Option<&'static str> {
+    Some(match op {
+        "usage_cost" => "cost",
+        "chat_verbosity_get" => "verbosity_get",
+        "panel_context_get" => "context_on",
+        "quick_open" => "quick_open",
+        "checkpoint_info" => "checkpoint",
+        _ => return None,
+    })
 }
 
 /// The words on the button or choice that an answer stands for, which the device checks against
@@ -966,24 +1133,10 @@ impl RemoteChats for Mirror {
                 .unwrap_or_default()
                 .to_owned();
             let device = m.device_of(&chat_id)?;
-            // What the chat has used is a read: it answers while the device's run switch is off.
-            if op == "usage_cost" {
-                if !m.line_is_up() {
-                    return Err(ApiError::new(
-                        "reconnecting",
-                        "Reconnecting to the hub… showing the copy on this PC.",
-                    ));
-                }
-                match m.device(&device) {
-                    Some(d) if d.online => {}
-                    other => {
-                        return Err(offline(
-                            &m.device_name(&device),
-                            other.and_then(|d| d.last_seen_at).as_deref(),
-                        ))
-                    }
-                }
-                return m.ask_as(&device, "cost", args, "that cost", &[]).await;
+            // Reads answer while the device's run switch is off.
+            if let Some(wire) = read_op(&op) {
+                m.check_up(&device)?;
+                return m.ask_as(&device, wire, args, "that read", &[]).await;
             }
             // Moving, nesting, pinning and reordering answer with sidebar rows; the one this
             // call is about lives in this copy, so the copy is patched and no rows come back.
@@ -1003,6 +1156,12 @@ impl RemoteChats for Mirror {
                 "chat_export_markdown" => "export_markdown",
                 "unread_mark" => "mark_unread",
                 "chat_mute" => "mute",
+                "chat_set_permission_mode" => "set_permission",
+                "chat_verbosity_set" => "verbosity_set",
+                "chat_warm" => "warm",
+                "tool_stop" => "tool_stop",
+                "attention_snooze" => "snooze",
+                "attention_address" => "address",
                 _ => return Err(helm_chats::remote::elsewhere(&m.device_name(&device))),
             };
             let muted = if op == "chat_mute" {

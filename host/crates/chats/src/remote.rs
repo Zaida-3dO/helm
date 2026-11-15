@@ -9,9 +9,9 @@
 //! |---|---|
 //! | `chat_get`, `transcript_page` | the mirror (and the device that runs the chat, for older pages) |
 //! | `chat_send`, `chat_stop`, `interaction_answer`, `chat_set_model`, `chat_rename`, `chat_archive`, `chat_restore` | the device that runs the chat |
-//! | `chat_fork`, `chat_compact`, `chat_roll_over`, `usage_cost`, `chat_export_markdown`, `chat_organize`, `unread_mark`, `chat_mute` | the same op on the device that runs the chat |
+//! | `chat_fork`, `chat_compact`, `chat_roll_over`, `usage_cost`, `chat_export_markdown`, `chat_organize`, `unread_mark`, `chat_mute`, `chat_set_permission_mode`, `chat_verbosity_get`/`set`, `chat_warm`, `tool_stop`, `checkpoint_info`, `attention_snooze`/`address`, `panel_context_get`, `quick_open` | the same op on the device that runs the chat |
 //! | `draft_save` | the mirror alone: a draft never leaves this PC |
-//! | `chat_warm`, `title_suggest`, `autocomplete_suggest`, `skills_list` | quietly, with an empty answer |
+//! | `title_suggest`, `autocomplete_suggest`, `skills_list` | quietly, with an empty answer |
 //! | `model_catalogue` with a `deviceUid` | the models that device last said it offers |
 //! | any other op that names a mirror chat | refused: "This chat runs on {device}. Do that there." |
 //!
@@ -138,9 +138,19 @@ async fn route(
         | "chat_export_markdown"
         | "chat_organize"
         | "unread_mark"
-        | "chat_mute" => remote.chat_op(&op, args).await,
-        // Nothing to warm, suggest or list for a chat that runs somewhere else.
-        "chat_warm" => Ok(Value::Null),
+        | "chat_mute"
+        // The composer's picks and the chat view's actions, applied where the chat runs.
+        | "chat_set_permission_mode"
+        | "chat_verbosity_get"
+        | "chat_verbosity_set"
+        | "panel_context_get"
+        | "quick_open"
+        | "tool_stop"
+        | "checkpoint_info"
+        | "attention_snooze"
+        | "attention_address"
+        | "chat_warm" => remote.chat_op(&op, args).await,
+        // Nothing to suggest or list for a chat that runs somewhere else.
         "title_suggest" => Ok(json!({ "title": "", "titles": [] })),
         "autocomplete_suggest" => Ok(json!({ "completion": "", "retryAfterMs": null })),
         "skills_list" => Ok(json!([])),

@@ -4,9 +4,11 @@
 use crate::link::BoxFut;
 use crate::serve::{ChatPort, ChatState, PortResult, SentFile};
 use crate::wire::{
-    code, AnswerArgs, ArchiveArgs, ConsentDecideArgs, CreateArgs, DeviceInfo, DevicePerson,
-    ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, PersonInfo, ProfileInfo, ProjectInfo,
-    RemoteChat, RenameArgs, RollOverArgs, SetModelArgs, ShareArgs, WireError,
+    code, AnswerArgs, ArchiveArgs, CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs,
+    DeviceInfo, DevicePerson, ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, PersonInfo,
+    ProfileInfo, ProjectInfo, QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs, SetModelArgs,
+    SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs,
+    WireError,
 };
 use helm_chats::types::{
     ChatRecord, ChatStatus, Harness, Interaction, InteractionAttention, InteractionMethod,
@@ -136,6 +138,20 @@ pub struct FakeState {
     pub unread_marked: Vec<String>,
     pub muted: Vec<MuteArgs>,
     pub profiles_moved: Vec<MoveProfileArgs>,
+    pub permission_set: Vec<SetPermissionArgs>,
+    pub verbosity_set: Vec<VerbositySetArgs>,
+    pub context_asked: Vec<String>,
+    pub quick_opened: Vec<QuickOpenArgs>,
+    pub warmed: Vec<String>,
+    pub tool_stopped: Vec<ToolStopArgs>,
+    pub submissions: Vec<SubmissionArgs>,
+    pub checkpoint_for: Vec<CheckpointArgs>,
+    pub attention_for: Vec<Vec<String>>,
+    pub item_links_for: Vec<Vec<String>>,
+    pub snoozed: Vec<SnoozeArgs>,
+    pub addressed: Vec<String>,
+    /// What `defaults_set` saved, as the three-field answer it would give back.
+    pub defaults_saved: Option<Value>,
     pub cursor: i64,
     /// The hub people this install announces acting for (what `people()` answers).
     pub announce: Vec<DevicePerson>,
@@ -573,6 +589,151 @@ impl ChatPort for FakePort {
     fn move_profile(&self, a: MoveProfileArgs) -> BoxFut<'_, PortResult<()>> {
         self.st().profiles_moved.push(a);
         ready(Ok(()))
+    }
+
+    fn set_permission(&self, a: SetPermissionArgs) -> BoxFut<'_, PortResult<()>> {
+        self.st().permission_set.push(a);
+        ready(Ok(()))
+    }
+
+    fn verbosity_get(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        let level = self
+            .st()
+            .verbosity_set
+            .iter()
+            .rev()
+            .find(|v| v.chat_id == chat_id)
+            .and_then(|v| v.level.clone())
+            .unwrap_or_else(|| "low".to_owned());
+        let own = self
+            .st()
+            .verbosity_set
+            .iter()
+            .any(|v| v.chat_id == chat_id && v.level.is_some());
+        ready(Ok(json!({ "level": level, "own": own, "default": "low" })))
+    }
+
+    fn verbosity_set(&self, a: VerbositySetArgs) -> BoxFut<'_, PortResult<Value>> {
+        let own = a.level.is_some();
+        let level = a.level.clone().unwrap_or_else(|| "low".to_owned());
+        self.st().verbosity_set.push(a);
+        ready(Ok(json!({ "level": level, "own": own, "default": "low" })))
+    }
+
+    fn context_on(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        self.st().context_asked.push(chat_id.clone());
+        ready(Ok(json!({ "on": false })))
+    }
+
+    fn quick_open(&self, a: QuickOpenArgs) -> BoxFut<'_, PortResult<Value>> {
+        let hit = format!("src/{}.ts", a.query);
+        self.st().quick_opened.push(a);
+        ready(Ok(
+            json!({ "mode": "files", "items": [{ "path": hit }], "partial": false }),
+        ))
+    }
+
+    fn warm(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
+        self.st().warmed.push(chat_id);
+        ready(Ok(()))
+    }
+
+    fn tool_stop(&self, a: ToolStopArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.st().tool_stopped.push(a);
+        ready(Ok(json!({ "stopped": true })))
+    }
+
+    fn submission(&self, a: SubmissionArgs) -> BoxFut<'_, PortResult<()>> {
+        if !matches!(a.action.as_str(), "withdraw" | "recover") {
+            return ready(Err(WireError::bad_args(
+                "An action is withdraw or recover.",
+            )));
+        }
+        self.st().submissions.push(a);
+        ready(Ok(()))
+    }
+
+    fn checkpoint(&self, a: CheckpointArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.st().checkpoint_for.push(a.clone());
+        ready(Ok(json!({
+            "chatId": a.chat_id,
+            "text": "back to here",
+            "userMessages": 1,
+            "files": [],
+            "filesRestored": false,
+        })))
+    }
+
+    fn attention_rows(&self, chat_ids: Vec<String>) -> BoxFut<'_, PortResult<Value>> {
+        let flagged: Vec<Value> = self
+            .st()
+            .chats
+            .iter()
+            .filter(|c| chat_ids.iter().any(|id| id == c.id()))
+            .map(|c| json!({ "chatId": c.id(), "kind": "idle", "reason": "quiet but unfinished" }))
+            .collect();
+        ready(Ok(json!({ "needsYou": [], "flagged": flagged })))
+    }
+
+    fn item_links(&self, chat_ids: Vec<String>) -> BoxFut<'_, PortResult<Value>> {
+        let links: Vec<Value> = chat_ids
+            .iter()
+            .map(|id| json!({ "chatId": id, "itemId": "item-7", "title": "Task seven", "main": true }))
+            .collect();
+        self.st().item_links_for.push(chat_ids.clone());
+        ready(Ok(json!({ "links": links })))
+    }
+
+    fn snooze(&self, a: SnoozeArgs) -> BoxFut<'_, PortResult<()>> {
+        self.st().snoozed.push(a);
+        ready(Ok(()))
+    }
+
+    fn address(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
+        self.st().addressed.push(chat_id);
+        ready(Ok(()))
+    }
+
+    fn defaults_get(&self, _chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        let saved = self
+            .st()
+            .defaults_saved
+            .clone()
+            .unwrap_or_else(|| json!({}));
+        ready(Ok(json!({
+            "model": saved.get("model").cloned().unwrap_or(Value::Null),
+            "effort": "high",
+            "responseVerbosity": saved.get("responseVerbosity").cloned().unwrap_or(json!("low")),
+        })))
+    }
+
+    fn defaults_set(&self, a: DefaultsArgs) -> BoxFut<'_, PortResult<Value>> {
+        let prev = self
+            .st()
+            .defaults_saved
+            .clone()
+            .unwrap_or_else(|| json!({}));
+        let mut saved = prev.as_object().cloned().unwrap_or_default();
+        if let Some(m) = &a.model {
+            saved.insert("model".into(), json!(m));
+        }
+        if let Some(e) = &a.effort {
+            saved.insert("effort".into(), json!(e));
+        }
+        if let Some(v) = &a.response_verbosity {
+            if !matches!(v.as_str(), "low" | "medium" | "high") {
+                return ready(Err(WireError::bad_args(
+                    "Reply length is low, medium or high.",
+                )));
+            }
+            saved.insert("responseVerbosity".into(), json!(v));
+        }
+        let saved = Value::Object(saved);
+        self.st().defaults_saved = Some(saved.clone());
+        ready(Ok(json!({
+            "model": saved.get("model").cloned().unwrap_or(Value::Null),
+            "responseVerbosity": saved.get("responseVerbosity").cloned().unwrap_or(json!("low")),
+        })))
     }
 
     fn chat_brief(&self, chat_id: String) -> BoxFut<'_, PortResult<Option<RemoteChat>>> {

@@ -1284,6 +1284,7 @@ impl Inner {
                     helm_core::now_ms()
                 ],
             )?;
+            recount_waiting(tx, chat_id);
             // More news than one answer holds, on top of rows already held: there would be a
             // hole in the middle, so start again from nothing.
             if more && since > 0 {
@@ -1376,7 +1377,9 @@ impl Inner {
                     tx.execute(
                         "UPDATE mirror_chats SET thread = ?2 WHERE chat_id = ?1",
                         params![chat_id, thread.to_string()],
-                    )
+                    )?;
+                    recount_waiting(tx, chat_id);
+                    Ok::<_, rusqlite::Error>(())
                 });
                 self.emit(
                     AppEvent::new("thread")
@@ -1431,6 +1434,56 @@ impl Inner {
 // ---------------------------------------------------------------------------------------------
 // Rows and records
 // ---------------------------------------------------------------------------------------------
+
+/// Re-count the cards waiting on a person after the copy's thread or Allow cards changed, so a
+/// mirrored chat's needs-you marker counts them just as a local chat's does. Only a chat opened
+/// here has a thread copy; for the rest the count travels with the record the host served.
+fn recount_waiting(tx: &Transaction<'_>, chat_id: &str) {
+    let row: (Option<String>, Option<String>, String) = tx
+        .query_row(
+            "SELECT thread, consent, record FROM mirror_chats WHERE chat_id = ?1",
+            [chat_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap_or((None, None, String::new()));
+    let Some(thread) = row.0.and_then(|t| serde_json::from_str::<Value>(&t).ok()) else {
+        return;
+    };
+    let interactions = thread
+        .get("interactions")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let consent = row
+        .1
+        .and_then(|c| serde_json::from_str::<Value>(&c).ok())
+        .and_then(|c| c.as_array().map(|l| l.len()))
+        .unwrap_or(0);
+    let Ok(Value::Object(mut rec)) = serde_json::from_str::<Value>(&row.2) else {
+        return;
+    };
+    let cards = (interactions + consent) as i64;
+    let prev = rec.get("waitingCards").and_then(Value::as_i64);
+    let needs = rec
+        .get("needsAttention")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if prev == Some(cards) && (cards == 0 || needs) {
+        return;
+    }
+    rec.insert("waitingCards".into(), json!(cards));
+    // Cards waiting always mean the chat needs its person. When the last one we counted is
+    // answered the mark goes here at once; a flag that came from the host's own check (an
+    // unread result, say) we never set, and it rides the next record the host serves.
+    if cards > 0 {
+        rec.insert("needsAttention".into(), json!(true));
+    } else if prev.unwrap_or(0) > 0 {
+        rec.insert("needsAttention".into(), json!(false));
+    }
+    let _ = tx.execute(
+        "UPDATE mirror_chats SET record = ?2 WHERE chat_id = ?1",
+        params![chat_id, Value::Object(rec).to_string()],
+    );
+}
 
 /// Store a chat's record when it is newer than the one held. `Some((id, changed))` for a chat
 /// kept; `None` for one that is not a mirror's business (this device's own).
