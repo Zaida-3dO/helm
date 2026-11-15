@@ -2176,6 +2176,7 @@ dependencies = [
  "helm-core",
  "helm-devices",
  "helm-ipc",
+ "helm-skills",
  "helm-workers",
  "log",
  "rusqlite",
