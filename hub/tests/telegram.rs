@@ -2370,3 +2370,43 @@ async fn a_person_links_their_own_telegram_and_their_bridge_takes_their_messages
         api.calls()
     );
 }
+
+/// A hub that has no Telegram bot at all still answers a link question: the same result type the
+/// profile asked with, carrying its id, and the reason — rather than silence the profile waits out.
+#[tokio::test]
+async fn a_link_question_on_a_hub_with_no_bot_is_answered_with_the_reason() {
+    let scopes = Scopes::parse_list("relay,peer").unwrap();
+    let mut reg = Registry::open_in_memory().unwrap();
+    let owner = reg.ensure_person("Owner").unwrap().id;
+    let pc = reg.add_client("Owner", "desk", &scopes).unwrap().client.id;
+    let (lines, _up) = Lines::new(Arc::new(Mutex::new(reg)));
+    let lines = Arc::new(lines);
+    let line = lines.line_for(&Client {
+        id: pc,
+        name: "desk".into(),
+        person_id: owner,
+        person: "Owner".into(),
+        machine: "desk".into(),
+        scopes,
+    });
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let gen = line.attach(tx);
+    assert!(line.receive(
+        gen,
+        &json!({"type": "tg_status", "id": "s9", "personId": owner.to_string()}).to_string()
+    ));
+    let answer = wait_frame(&mut rx, "tg_status_result").await;
+    assert_eq!(
+        (
+            answer["id"].as_str(),
+            answer["ok"].as_bool(),
+            answer["error"].as_str()
+        ),
+        (
+            Some("s9"),
+            Some(false),
+            Some("this hub has no Telegram bot")
+        ),
+        "the answer was {answer}"
+    );
+}

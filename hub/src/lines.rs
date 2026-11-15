@@ -232,10 +232,10 @@ impl Lines {
                             own_line.send(&frame);
                         }
                         None => {
-                            own_line.send(&serde_json::json!({
-                                "type": "tg_link_result", "ok": false,
-                                "error": "this hub has no Telegram bot",
-                            }));
+                            // Still answered with the id it was asked with and the matching
+                            // result type, or the profile waits out its own timeout instead of
+                            // saying why.
+                            own_line.send(&crate::telegram::no_bot_answer(&up));
                         }
                     },
                     Upstream::Dev {

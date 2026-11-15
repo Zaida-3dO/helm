@@ -206,6 +206,20 @@ pub const PC_UNKNOWN: &str = "No PC by that name can take your Telegram. /pc lis
 pub const PC_ROUTING_OFF: &str = "This hub cannot choose a PC for your Telegram.";
 /// What a person is told once their own account is bound to them.
 pub const LINKED: &str = "Linked to Helm as ";
+/// Why a link question cannot be answered here at all.
+pub const NO_BOT: &str = "this hub has no Telegram bot";
+
+/// The answer to a `tg_link` / `tg_unlink` / `tg_status` from a hub that has no bot. It carries
+/// the id the question was asked with and the matching result type, so the profile can say why
+/// rather than wait for its own timeout.
+pub fn no_bot_answer(u: &Upstream) -> Value {
+    match u {
+        Upstream::TgAdmin { id, op, .. } => json!({
+            "type": format!("tg_{op}_result"), "id": id.clone(), "ok": false, "error": NO_BOT,
+        }),
+        _ => json!({}),
+    }
+}
 
 pub type ApiFuture<'a> = Pin<Box<dyn Future<Output = Result<Value, ApiError>> + Send + 'a>>;
 
@@ -2452,6 +2466,9 @@ impl Telegram {
             return json!({});
         };
         let refused = |why: &str| json!({ "type": format!("tg_{op}_result"), "id": id, "ok": false, "error": why });
+        if self.make.is_none() {
+            return refused(NO_BOT);
+        }
         let Ok(person) = person_id.trim().parse::<i64>() else {
             return refused("that person is not known to this hub");
         };
