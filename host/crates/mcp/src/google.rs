@@ -446,11 +446,18 @@ fn runs_workspace_mcp(args: &[String]) -> bool {
 }
 
 /// Whether an argument can name the bridge's `--permissions` flag. The bridge parses its
-/// arguments with Python's argparse, which accepts any unambiguous abbreviation: `--perm`,
+/// arguments with Python's argparse, which accepts any unambiguous abbreviation: `--p`, `--per`,
 /// `--permis`, `--permission` and each with a `=value` all mean the same flag, so recognising
-/// only the full spelling would let a shorter one slip past the clamp.
+/// only the full spelling would let a shorter one slip past the clamp. Any name (the part before
+/// an `=`) that is a prefix of `--permissions` and at least `--p` long counts.
 fn names_permissions(a: &str) -> bool {
-    a.starts_with("--perm")
+    let name = a.split_once('=').map_or(a, |(n, _)| n);
+    a.starts_with("--") && name.len() >= 3 && "--permissions".starts_with(name)
+}
+
+/// Whether a `--permissions` value is a Gmail one: `gmail:<level>`, or the bare service name.
+fn is_gmail_value(v: &str) -> bool {
+    v == "gmail" || v.starts_with("gmail:")
 }
 
 /// `args` with every Gmail value of every flag that names `--permissions` (any abbreviation,
@@ -466,7 +473,7 @@ fn clamp_gmail(args: &[String]) -> Vec<String> {
         if names_permissions(a) {
             if let Some((_, v)) = a.split_once('=') {
                 in_values = false;
-                if v.starts_with("gmail:") {
+                if is_gmail_value(v) {
                     gmail.push(v);
                     continue;
                 }
@@ -475,7 +482,7 @@ fn clamp_gmail(args: &[String]) -> Vec<String> {
             }
         } else if a.starts_with("--") {
             in_values = false;
-        } else if in_values && a.starts_with("gmail:") {
+        } else if in_values && is_gmail_value(a) {
             gmail.push(a);
             continue;
         }
@@ -489,7 +496,7 @@ fn clamp_gmail(args: &[String]) -> Vec<String> {
         .position(|a| names_permissions(a) && !a.contains('='));
     let mut i = first.map_or(0, |f| f + 1);
     while i < out.len() {
-        let bare = out[i].starts_with("--perm")
+        let bare = names_permissions(&out[i])
             && !out[i].contains('=')
             && out.get(i + 1).is_none_or(|n| n.starts_with("--"));
         if bare {
@@ -623,7 +630,7 @@ pub fn with_permission(args: &[String], level: GooglePermission) -> Vec<String> 
     let want = level.flag().to_owned();
     let mut out = args.to_vec();
     if let Some(span) = permission_span(args) {
-        match span.clone().find(|&k| args[k].starts_with("gmail:")) {
+        match span.clone().find(|&k| is_gmail_value(&args[k])) {
             Some(k) => out[k] = want,
             None => out.insert(span.end, want),
         }
@@ -1732,7 +1739,7 @@ mod tests {
     fn the_legacy_bridge_is_clamped_by_rewriting_every_shape() {
         let d = tempfile::tempdir().unwrap();
         let st = store(d.path());
-        let cases: [(&[&str], &[&str]); 17] = [
+        let cases: [(&[&str], &[&str]); 23] = [
             (
                 &["workspace-mcp", "--permissions", "gmail:send"],
                 &["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"],
@@ -1856,6 +1863,54 @@ mod tests {
             (
                 &["workspace-mcp", "--read-only"],
                 &["workspace-mcp==2.4.2", "--permissions", "gmail:readonly"],
+            ),
+            // The shortest abbreviations argparse accepts, and a bare service name.
+            (
+                &[
+                    "workspace-mcp",
+                    "--permissions",
+                    "gmail:drafts",
+                    "--per",
+                    "gmail:send",
+                ],
+                &["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"],
+            ),
+            (
+                &[
+                    "workspace-mcp",
+                    "--permissions",
+                    "gmail:drafts",
+                    "--pe",
+                    "gmail:send",
+                ],
+                &["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"],
+            ),
+            (
+                &[
+                    "workspace-mcp",
+                    "--permissions",
+                    "gmail:drafts",
+                    "--p",
+                    "gmail:send",
+                ],
+                &["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"],
+            ),
+            (
+                &[
+                    "workspace-mcp",
+                    "--permissions",
+                    "gmail:drafts",
+                    "--per=gmail:send",
+                ],
+                &["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"],
+            ),
+            (
+                &["workspace-mcp", "--per", "gmail:send"],
+                &["workspace-mcp==2.4.2", "--per", "gmail:drafts"],
+            ),
+            (
+                &["workspace-mcp", "--permissions", "gmail"],
+                &["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"],
             ),
         ];
         for (saved, want) in cases {
