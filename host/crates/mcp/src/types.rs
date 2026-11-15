@@ -172,6 +172,22 @@ pub struct AgentServerView {
     pub allow_private_http: bool,
 }
 
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+/// What Settings → MCP may show about a server's browser sign-in. Never any token material:
+/// whether one is kept, and until when the kept access stands.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct OAuthStatus {
+    pub connected: bool,
+    /// Until when the access token stands, as seconds since the unix epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub expires_at: Option<u64>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSnapshot {
@@ -238,4 +254,8 @@ pub struct ResolvedServer {
     /// this text and never connects.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The server signs in through the browser. The worker may ask the host once for a current
+    /// `Authorization` header when the server refuses the one it has.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub oauth: bool,
 }

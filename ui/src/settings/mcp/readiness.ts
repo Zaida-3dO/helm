@@ -2,6 +2,7 @@
 // page's readiness, preset drafts and the editor-to-save conversion.
 
 import type { McpPreset, McpServer, ServerStatus, ValueRef } from '../../api/mcp.ts';
+import type { OAuthStatus } from './oauth.ts';
 
 export interface Readiness {
   state: 'off' | 'ready' | 'inactive';
@@ -30,10 +31,15 @@ function envMissing(s: McpServer, presets: McpPreset[]): boolean {
   });
 }
 
-export function serverReadiness(s: McpServer, status: ServerStatus | undefined, presets: McpPreset[] = []): Readiness {
+export function serverReadiness(s: McpServer, status: ServerStatus | undefined, presets: McpPreset[] = [], oauth?: OAuthStatus): Readiness {
+  const browserSignIn = s.transport.type !== 'stdio' && !!s.transport.oauth;
   if (!s.enabled) return { state: 'off', reason: 'Turned off: chats do not use this server.', actionLabel: 'Turn on', actionTarget: s.id };
   if (status?.state === 'native') {
     return { state: 'inactive', reason: 'Claude Code already loads this server natively, so Helm leaves it to Claude Code.' };
+  }
+  // A browser-signed-in server needs you, not a token field: say so before the token rules.
+  if (browserSignIn && !oauth?.connected && status?.state !== 'connecting') {
+    return { state: 'inactive', reason: 'Needs you to connect in your browser.', actionLabel: 'Connect', actionTarget: s.id };
   }
   if (tokenMissing(s, presets)) return { state: 'inactive', reason: 'Needs its token.', actionLabel: 'Add token', actionTarget: s.id };
   if (envMissing(s, presets)) return { state: 'inactive', reason: 'Needs its client id and secret.', actionLabel: 'Edit', actionTarget: s.id };
@@ -41,7 +47,9 @@ export function serverReadiness(s: McpServer, status: ServerStatus | undefined, 
     case 'failed':
       return { state: 'inactive', reason: status.error ?? 'The last connection failed.', actionLabel: 'Edit', actionTarget: s.id };
     case 'signin_required':
-      return { state: 'inactive', reason: 'Needs you to sign in.', actionLabel: 'Sign in', actionTarget: s.id };
+      return browserSignIn
+        ? { state: 'inactive', reason: 'Needs you to sign in again.', actionLabel: 'Sign in again', actionTarget: s.id }
+        : { state: 'inactive', reason: 'Needs you to sign in.', actionLabel: 'Sign in', actionTarget: s.id };
     case 'connected':
       return { state: 'ready', reason: status.toolCount !== undefined ? `Connected · ${status.toolCount} tools` : 'Connected' };
     case 'connecting':

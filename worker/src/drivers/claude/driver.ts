@@ -211,8 +211,12 @@ export class ClaudeDriver implements Driver {
       },
     });
     if (Array.isArray(launch.hostTools) && typeof launch.chatToolsDirectory === "string" && launch.chatToolsDirectory) {
-      this.mcp = createMcpBridge((l) => this.ch.emit(l), { cwd: launch.cwd });
       const channel = new RequestChannel({ dir: launch.chatToolsDirectory, emit: (rec) => this.ch.emit(rec) });
+      this.mcp = createMcpBridge((l) => this.ch.emit(l), {
+        cwd: launch.cwd,
+        // The bridge's one ask for a current Authorization header, answered by the host.
+        hostRequest: (operation, args, o) => channel.call(operation, args, { limitBytes: 8 * 1024, timeoutMs: o.timeoutMs, mutating: false, caller: { child: false } }),
+      });
       if (gatesWanted(deps.env)) this.gateChannel = channel;
       this.hostTools = new HostToolServer({
         bridge: asHostToolBridge(this.mcp),

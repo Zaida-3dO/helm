@@ -33,6 +33,9 @@ import {
   type ServerStatus,
 } from "./types.ts";
 
+/** The host-side tool that answers a current `Authorization` header for a browser-signed-in server. */
+const OAUTH_HEADER_OP = "app_mcp_oauth_header";
+
 export interface BridgeOptions {
   /** The chat's folder: stdio servers start there. */
   cwd?: string;
@@ -40,6 +43,8 @@ export interface BridgeOptions {
   limits?: Partial<McpLimits>;
   resolver?: Resolver;
   now?: () => number;
+  /** Ask the host an op through the chat's request channel (the header ask above). */
+  hostRequest?: (operation: string, args: Json, opts: { timeoutMs: number }) => Promise<{ ok: boolean; result?: unknown; error?: string }>;
 }
 
 export interface McpBridge {
@@ -164,7 +169,21 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
       const red = entries.get(s.id)?.red;
       return new StdioTransport(s, { cwd: opts.cwd, env, maxRecordBytes: limits.maxRecordBytes, redact: red ? (x) => red.text(x) : undefined });
     }
-    return new HttpTransport(s, { limits, resolver: opts.resolver });
+    const e = entries.get(s.id);
+    const oauthHeader =
+      s.oauth && opts.hostRequest && e
+        ? async (): Promise<string | undefined> => {
+            const r = await opts.hostRequest!(OAUTH_HEADER_OP, { serverId: s.id }, { timeoutMs: 30_000 });
+            const header = r.ok ? (r.result as Json | undefined)?.header : undefined;
+            if (typeof header !== "string" || header === "") return undefined;
+            // The fresh token joins this server's redaction before anything can echo it.
+            e.red.add(header);
+            const bearer = /^Bearer\s+(.+)$/i.exec(header);
+            if (bearer?.[1]) e.red.add(bearer[1]);
+            return header;
+          }
+        : undefined;
+    return new HttpTransport(s, { limits, resolver: opts.resolver, oauthHeader });
   };
 
   const connect = (e: Entry): Promise<McpSession> => {
@@ -198,7 +217,8 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
       (err: unknown) => {
         if (e.connecting !== attempt) return;
         e.connecting = undefined;
-        emit(e, "failed", { error: (err as Error).message });
+        const signin = err instanceof McpError && err.signin && e.server.oauth;
+        emit(e, signin ? "signin_required" : "failed", { error: (err as Error).message });
       },
     );
     return attempt;
@@ -207,6 +227,15 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
   const publicError = (e: Entry, err: unknown): McpError => {
     const m = err instanceof McpError ? err : new McpError(String((err as Error)?.message ?? err), { changed: "maybe" });
     return new McpError(e.red.text(m.message), { changed: m.changed, signin: m.signin });
+  };
+
+  /** A refused header on a browser-signed-in server is the user's to fix: say so once, and
+   * drop the session so the next use reconnects and may ask the host again. */
+  const noteSignin = (e: Entry, pe: McpError) => {
+    if (pe.signin && e.server.oauth && e.status.state !== "signin_required") {
+      e.session?.close();
+      emit(e, "signin_required", { error: pe.message });
+    }
   };
 
   const entryFor = (id: string): Entry => {
@@ -239,7 +268,8 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
           status: { serverId: id, state: "idle", at: now() },
         };
         entries.set(id, e);
-        if (s.error) emit(e, "failed", { error: s.error });
+        // A browser-signed-in server with no sign-in yet needs the user, not a failure report.
+        if (s.error) emit(e, s.oauth ? "signin_required" : "failed", { error: s.error });
         else emit(e, "idle");
       }
     },
@@ -271,6 +301,7 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
           list = await session.listTools();
         } catch (err) {
           const pe = publicError(e, err);
+          noteSignin(e, pe);
           throw new McpError(pe.message);
         }
         emit(e, "connected", { toolCount: list.length });
@@ -321,7 +352,9 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
           const session = await connect(e);
           raw = await session.callTool(l.tool, args ?? {}, signal);
         } catch (err) {
-          throw publicError(e, err);
+          const pe = publicError(e, err);
+          noteSignin(e, pe);
+          throw pe;
         }
         const r = formatResult(raw, e.red, limits);
         return { content: r.content, isError: r.isError || undefined, source: { kind: "mcp", server: e.red.text(e.server.name), tool: e.red.text(l.tool) } };

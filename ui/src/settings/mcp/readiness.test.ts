@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { McpPreset, McpServer } from '../../api/mcp.ts';
 import { GOOGLE_PRESET, SIGN_IN_WINDOW_MS, blockState, clientSaved, emailLooksValid, watchState, type GoogleAccountList } from './google.ts';
+import { connectLabel } from './oauth.ts';
 import { blankServer, draftFromPreset, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable } from './readiness.ts';
 
 const hub: McpPreset = {
@@ -31,6 +32,28 @@ test('readiness: off, native, token missing, failed, connected, idle', () => {
   assert.deepEqual([failed.state, failed.reason, failed.actionLabel], ['inactive', 'HTTP 401', 'Edit']);
   assert.equal(serverReadiness(saved, { serverId: d.id, state: 'connected', toolCount: 3, at: 1 }, [hub]).reason, 'Connected · 3 tools');
   assert.equal(serverReadiness(saved, undefined, [hub]).state, 'ready');
+});
+
+test('a browser-signed-in server asks for the browser, never for a token field', () => {
+  const s: McpServer = { id: 'crm', name: 'CRM', enabled: true, allowPrivateHttp: false, transport: { type: 'http', url: 'https://crm.example/mcp', oauth: {} } };
+  const noSignIn = serverReadiness(s, undefined, [hub]);
+  assert.deepEqual([noSignIn.state, noSignIn.reason, noSignIn.actionLabel], ['inactive', 'Needs you to connect in your browser.', 'Connect']);
+  // The host's own sign-in-needed report, once a sign-in existed: ask for it again.
+  const stale = serverReadiness(s, { serverId: 'crm', state: 'signin_required', at: 1 }, [hub], { connected: true });
+  assert.deepEqual([stale.state, stale.reason, stale.actionLabel], ['inactive', 'Needs you to sign in again.', 'Sign in again']);
+  // Connected and signed in: the usual readiness lines take over.
+  const ready = serverReadiness(s, { serverId: 'crm', state: 'connected', toolCount: 2, at: 1 }, [hub], { connected: true, expiresAt: 9_999_999_999 });
+  assert.deepEqual([ready.state, ready.reason], ['ready', 'Connected · 2 tools']);
+  // A signed-in server whose connection fails for another reason reads as a failure, not a sign-in ask.
+  const down = serverReadiness(s, { serverId: 'crm', state: 'failed', error: 'unreachable', at: 1 }, [hub], { connected: true });
+  assert.deepEqual([down.state, down.reason, down.actionLabel], ['inactive', 'unreachable', 'Edit']);
+  // Off still wins, and a stdio server is never read as browser-signed-in.
+  assert.equal(serverReadiness({ ...s, enabled: false }, undefined, [hub]).state, 'off');
+  assert.equal(serverReadiness({ ...s, transport: { type: 'stdio', command: 'x' } }, undefined, [hub]).state, 'ready');
+  // The row button follows the same rules.
+  assert.equal(connectLabel(undefined, 'idle'), 'Connect');
+  assert.equal(connectLabel({ connected: true }, 'signin_required'), 'Sign in again');
+  assert.equal(connectLabel({ connected: true }, 'connected'), undefined);
 });
 
 test('the empty page names a reason and where to act', () => {

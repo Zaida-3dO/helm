@@ -114,6 +114,48 @@ test("http (SSE replies): notifications are skipped and the reply is matched", a
   assert.equal(text(r), '{"text":"y"}');
 });
 
+test("browser sign-in: one ask for a fresh header; a refusal or no sign-in becomes signin_required", async () => {
+  const f = await startHttpFake({ requireHeader: { name: "authorization", value: "Bearer fresh-1" } });
+  const asks: string[] = [];
+  const h = harness({
+    hostRequest: async (op, args) => {
+      const id = String((args as { serverId?: unknown }).serverId);
+      asks.push(id);
+      assert.equal(op, "app_mcp_oauth_header");
+      if (id === "ok") return { ok: true, result: { header: "Bearer fresh-1" } };
+      if (id === "stale") return { ok: true, result: { header: "Bearer stale-9" } };
+      return { ok: false, error: "Not connected: open Settings → MCP and click Connect." };
+    },
+  });
+  open.push(h.bridge, { close: () => void f.close() });
+  h.bridge.configure({
+    revision: "r1",
+    servers: [
+      httpServer("none", f.url, { oauth: true }),
+      httpServer("ok", f.url, { oauth: true }),
+      httpServer("stale", f.url, { oauth: true }),
+      httpServer("off", f.url, { oauth: true, error: "Not connected: open Settings → MCP and click Connect." }),
+    ],
+  });
+  // A browser-signed-in server the host could not give a token to asks the user, not a failure.
+  assert.equal(h.last("off")?.state, "signin_required");
+  // The host has a current header: one refusal, one ask, the retry carries it and works.
+  await h.bridge.tools({ server: "ok" });
+  assert.deepEqual(asks, ["ok"], "asked once, on the first refusal");
+  assert.equal(h.last("ok")?.state, "connected");
+  const sent = f.requests.map((q) => q.headers.authorization ?? "(none)");
+  assert.ok(sent.includes("(none)") && sent.includes("Bearer fresh-1"));
+  // No token material in any status line.
+  assert.ok(!JSON.stringify(h.lines).includes("fresh-1") && !JSON.stringify(h.lines).includes("stale-9"));
+  // The host says there is no sign-in: no retry, and the server asks the user.
+  await assert.rejects(() => h.bridge.tools({ server: "none" }), /refused the credentials/);
+  assert.equal(h.last("none")?.state, "signin_required");
+  // A fresh header the server still refuses: one retry only, then the same ask to the user.
+  await assert.rejects(() => h.bridge.tools({ server: "stale" }), /refused the credentials/);
+  assert.equal(h.last("stale")?.state, "signin_required");
+  assert.deepEqual(asks, ["ok", "none", "stale"], "one ask per server, never in a loop");
+});
+
 test("startup timeout fails the server, and the next use tries again", async () => {
   const h = harness({ limits: { startupMs: 300 } });
   open.push(h.bridge);

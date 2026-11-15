@@ -841,6 +841,7 @@ mod tests {
             secrets: Vec::new(),
             guidance: Some("Be careful.".into()),
             error: None,
+            oauth: false,
         }
     }
 

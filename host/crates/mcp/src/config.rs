@@ -73,6 +73,12 @@ impl McpStore {
         }
     }
 
+    /// The credential store this profile uses, for the browser sign-ins [`crate::oauth_ops`]
+    /// keeps beside the servers' literal secrets.
+    pub fn creds(&self) -> &helm_core::credentials::CredentialStore {
+        &self.creds
+    }
+
     /// Called with the new revision after every successful save (the worker re-send hangs here).
     pub fn on_change(&self, f: impl Fn(&str) + Send + Sync + 'static) {
         self.listeners
@@ -338,6 +344,7 @@ impl McpStore {
             secrets: Vec::new(),
             guidance: crate::presets::guidance_for(s.preset.as_deref()),
             error: None,
+            oauth: s.transport.oauth.is_some() && t.kind.is_remote(),
         };
         let mut secrets = Vec::new();
         let mut run = || -> Result<(StrMap, StrMap), String> {
@@ -385,6 +392,20 @@ impl McpStore {
         if s.preset.as_deref() == Some(crate::google::PRESET_ID) && out.error.is_none() {
             if let Some(profile_dir) = self.path.parent() {
                 crate::google::prepare(profile_dir, &mut out);
+            }
+        }
+        // A server that signs in through the browser is only reachable with that sign-in: its
+        // header is added here (refreshed first when the token is nearly spent), and the token
+        // joins the redaction set like any other resolved secret. Without a sign-in the server
+        // reports as not connected, and no chat tries it without a credential.
+        if out.oauth && out.error.is_none() {
+            match crate::oauth_ops::current_access(self, s, false) {
+                Ok(access) => {
+                    out.headers
+                        .insert("Authorization".into(), format!("Bearer {access}"));
+                    out.secrets.push(access);
+                }
+                Err(why) => out.error = Some(why),
             }
         }
         out

@@ -4,11 +4,30 @@
 
 use crate::admin;
 use crate::config::McpStore;
+use crate::oauth_ops;
 use crate::unencrypted;
-use helm_hosttools::{HostToolRegistry, ToolError, ToolSpec};
-use serde_json::json;
+use helm_hosttools::{Condition, HostToolRegistry, ToolCtx, ToolError, ToolResult, ToolSpec};
+use serde_json::{json, Value};
 
 pub fn register_host_tools(r: &mut HostToolRegistry) {
+    // The worker's one-time ask when a browser-signed-in server refuses its header: the host
+    // refreshes and answers the header to the worker only. Never listed to agents.
+    r.blocking(
+        ToolSpec::read(
+            oauth_ops::HEADER_TOOL,
+            "Worker-only: answers the current Authorization header for a server that signs in \
+             through the browser, refreshing it first. Chats and agents never see this tool.",
+            json!({
+                "type": "object",
+                "properties": { "serverId": { "type": "string" } },
+                "required": ["serverId"],
+                "additionalProperties": false
+            }),
+        )
+        .when(Condition::Worker)
+        .timeout_ms(30_000),
+        oauth_header_tool,
+    );
     for def in admin::tool_defs() {
         let name = def.name;
         let spec = if def.mutating {
@@ -57,6 +76,37 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     }
 }
 
+/// Answer the worker's header request. Every refusal happens before anything is sent, and no
+/// refusal names the token; the header itself travels only in this call's reply.
+fn oauth_header_tool(ctx: &ToolCtx, args: Value) -> ToolResult {
+    let id = args
+        .get("serverId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ToolError::refused("The request names no server."))?;
+    let store = ctx
+        .services
+        .get::<McpStore>()
+        .ok_or_else(|| ToolError::refused("MCP settings are not available."))?;
+    let server = store
+        .load()
+        .map_err(|e| ToolError::refused(e.to_string()))?
+        .into_iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| ToolError::refused("That server no longer exists."))?;
+    if server.transport.oauth.is_none() || !server.transport.kind.is_remote() {
+        return Err(ToolError::refused(
+            "That server does not sign in through the browser.",
+        ));
+    }
+    if !server.enabled {
+        return Err(ToolError::refused("The server is turned off."));
+    }
+    match oauth_ops::current_header(&store, &server) {
+        Ok(header) => Ok(json!({ "header": header })),
+        Err(why) => Err(ToolError::refused(why)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,6 +143,14 @@ mod tests {
         // Listed with every feature off: the admin tools are ALWAYS.
         let listed = r.for_launch(&LaunchKeys::default());
         assert_eq!(listed.len(), 5);
+        // The worker's browser-sign-in header question is registered but never listed.
+        assert!(r.contains(crate::oauth_ops::HEADER_TOOL));
+        assert!(
+            !listed
+                .iter()
+                .any(|e| e.name == crate::oauth_ops::HEADER_TOOL),
+            "the header ask is the worker's, never the chat's"
+        );
 
         let d = tempfile::tempdir().unwrap();
         let mut services = Services::new();

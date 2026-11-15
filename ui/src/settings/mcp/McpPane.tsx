@@ -10,6 +10,7 @@ import { IconCheck, IconWarning } from '../../ui/icons.tsx';
 import { WheelMark } from '../../ui/status/index.ts';
 import { GoogleAccounts, SetUpOnce } from './GoogleAccounts.tsx';
 import { googleOps, isGoogleServer } from './google.ts';
+import { WAITING_NOTE, connectLabel, isOAuthServer, oauthOps, type OAuthStatus } from './oauth.ts';
 import { blankServer, draftFromPreset, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable } from './readiness.ts';
 
 type Refs = { [key in string]?: ValueRef };
@@ -90,6 +91,7 @@ function Editor({
   onCancel,
   onTest,
   preset,
+  signIn,
 }: {
   draft: McpServer;
   isNew: boolean;
@@ -100,6 +102,8 @@ function Editor({
   /** Connect once with the draft as it stands and report what happened. */
   onTest: (server: McpServer) => Promise<TestOutcome>;
   preset?: McpPreset;
+  /** For a saved server that signs in through the browser: the button beside Test connection. */
+  signIn?: { label: string; waiting: boolean; connect: () => void };
 }) {
   const t = draft.transport;
   const setT = (patch: Partial<McpServer['transport']>) => onChange({ ...draft, transport: { ...t, ...patch } });
@@ -221,6 +225,11 @@ function Editor({
         <Button data-testid="mcp-test" disabled={test.running} onClick={runTest}>
           {test.running ? 'Testing…' : 'Test connection'}
         </Button>
+        {signIn && (
+          <Button data-testid="mcp-oauth-connect" disabled={signIn.waiting} onClick={signIn.connect}>
+            {signIn.waiting ? 'Waiting for your browser…' : signIn.label}
+          </Button>
+        )}
         <Button onClick={onCancel}>Cancel</Button>
       </div>
       {test.running && (
@@ -243,7 +252,11 @@ export function McpPane() {
   const shell = useShell();
   const ops = useMemo(() => mcpOps(shell.api), [shell.api]);
   const google = useMemo(() => googleOps(shell.api), [shell.api]);
+  const oauth = useMemo(() => oauthOps(shell.api), [shell.api]);
   const [servers, setServers] = useState<McpServer[]>([]);
+  // Per browser-signed-in server: whether a sign-in is kept, and an open or refused sign-in ('' = waiting).
+  const [oauthState, setOauthState] = useState<Record<string, OAuthStatus>>({});
+  const [signInNote, setSignInNote] = useState<Record<string, string>>({});
   const [revision, setRevision] = useState<string | undefined>();
   const [presets, setPresets] = useState<McpPreset[]>([]);
   const [status, setStatus] = useState<Record<string, ServerStatus>>({});
@@ -269,6 +282,37 @@ export function McpPane() {
       .then((list) => setStatus(Object.fromEntries(list.map((s) => [s.serverId, s]))))
       .catch(() => {});
   }, [ops]);
+
+  // Whether each browser-signed-in server has a sign-in kept (never any token material).
+  useEffect(() => {
+    const ids = servers.filter(isOAuthServer).map((s) => s.id);
+    if (ids.length === 0) return;
+    void Promise.all(ids.map((id) => oauth.status(id).then((st) => ({ id, st })).catch(() => null))).then(
+      (seen) =>
+        setOauthState((prev) => {
+          const next = { ...prev };
+          for (const s of seen) if (s) next[s.id] = s.st;
+          return next;
+        }),
+    );
+  }, [servers, oauth]);
+
+  /** Open the browser sign-in for one saved server; it answers when the browser does, or refuses. */
+  const startSignIn = (id: string) => {
+    setSignInNote((w) => ({ ...w, [id]: '' }));
+    oauth
+      .connect(id)
+      .then((st) => {
+        setOauthState((o) => ({ ...o, [id]: st }));
+        setSignInNote((w) => {
+          const n = { ...w };
+          delete n[id];
+          return n;
+        });
+        reloadStatus();
+      })
+      .catch((e: unknown) => setSignInNote((w) => ({ ...w, [id]: errorText(e) })));
+  };
 
   useEffect(() => {
     reload();
@@ -340,7 +384,9 @@ export function McpPane() {
         )}
         <ul className="mcp-list">
           {servers.map((s) => {
-            const r = serverReadiness(s, status[s.id], presets);
+            const r = serverReadiness(s, status[s.id], presets, oauthState[s.id]);
+            const signInLabel = isOAuthServer(s) ? connectLabel(oauthState[s.id], status[s.id]?.state) : undefined;
+            const waiting = signInNote[s.id] !== undefined;
             return (
               <li key={s.id} className="mcp-server" data-testid={`mcp-server-${s.id}`} data-state={r.state}>
                 <div className="mcp-server-main">
@@ -360,12 +406,22 @@ export function McpPane() {
                   onChange={(on) => void run(() => ops.setEnabled(s.id, on, revision))}
                   label="On"
                 />
+                {signInLabel && (
+                  <Button className="mcp-act" data-testid={`mcp-oauth-${s.id}`} disabled={busy || waiting} onClick={() => startSignIn(s.id)}>
+                    {waiting ? 'Waiting…' : signInLabel}
+                  </Button>
+                )}
                 <Button className="mcp-act" onClick={() => setDraft({ server: structuredClone(s), isNew: false })}>
                   Edit
                 </Button>
                 <Button className="mcp-act" disabled={busy} onClick={() => void run(() => ops.remove(s.id, revision))}>
                   Remove
                 </Button>
+                {waiting && (
+                  <p className="mcp-test" data-testid={`mcp-oauth-note-${s.id}`} data-state={signInNote[s.id] ? 'failed' : 'running'} role="status">
+                    {signInNote[s.id] ? signInNote[s.id] : (<><WheelMark size={14} state="working" /> {WAITING_NOTE}</>)}
+                  </p>
+                )}
               </li>
             );
           })}
@@ -396,6 +452,15 @@ export function McpPane() {
             onSave={() => void save()}
             onCancel={() => setDraft(null)}
             onTest={ops.test}
+            signIn={
+              !draft.isNew && isOAuthServer(draft.server)
+                ? {
+                    label: connectLabel(oauthState[draft.server.id], status[draft.server.id]?.state) ?? 'Sign in again',
+                    waiting: signInNote[draft.server.id] !== undefined,
+                    connect: () => startSignIn(draft.server.id),
+                  }
+                : undefined
+            }
           />
         )}
       </section>
