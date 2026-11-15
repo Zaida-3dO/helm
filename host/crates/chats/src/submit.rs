@@ -1123,6 +1123,10 @@ pub fn register_worker_lines(l: &mut helm_hosttools::WorkerLines) {
 pub struct ChatSetPermissionModeArgs {
     pub chat_id: String,
     pub mode: String,
+    /// Leave the new-chat default alone: the pick is for this chat only (a pick from another
+    /// device never changes what new chats here start in).
+    #[serde(default)]
+    pub chat_only: bool,
 }
 
 /// `chat_set_permission_mode`: remember the pick and tell a live worker, which applies it before
@@ -1141,9 +1145,11 @@ pub fn chat_set_permission_mode(
         .map_err(sql)?
         .ok_or_else(crate::ops::not_found)?;
     // New chats start in the mode picked last, also after a restart.
-    rt.db()
-        .write(|tx| crate::runtime_settings::save_default_permission_mode(tx, &a.mode))
-        .map_err(sql)?;
+    if !a.chat_only {
+        rt.db()
+            .write(|tx| crate::runtime_settings::save_default_permission_mode(tx, &a.mode))
+            .map_err(sql)?;
+    }
     // A chat with a live worker hears it now; otherwise its next worker gets it at start.
     let live_worker = rt
         .sh

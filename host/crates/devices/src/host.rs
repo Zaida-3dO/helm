@@ -1045,7 +1045,7 @@ impl ChatPort for HostPort {
             self.here(&a.chat_id)?;
             self.op(
                 "chat_set_permission_mode",
-                json!({ "chatId": a.chat_id, "mode": a.mode }),
+                json!({ "chatId": a.chat_id, "mode": a.mode, "chatOnly": true }),
             )
             .await?;
             Ok(())
@@ -1082,6 +1082,11 @@ impl ChatPort for HostPort {
     fn quick_open(&self, a: QuickOpenArgs) -> BoxFut<'_, PortResult<Value>> {
         Box::pin(async move {
             self.here(&a.chat_id)?;
+            // A path-shaped query completes folders anywhere on this PC; from another device
+            // only the fuzzy search under the chat's own folder answers.
+            if helm_panel::quick::looks_like_path(a.query.trim()) {
+                return Ok(json!({ "mode": "files", "items": [], "partial": false }));
+            }
             let folder = self.project_folder(&a.chat_id)?;
             let mut out = self
                 .op(
@@ -1089,8 +1094,6 @@ impl ChatPort for HostPort {
                     json!({ "chatId": a.chat_id, "query": a.query, "reload": a.reload }),
                 )
                 .await?;
-            // A path-shaped query completes against folders beyond the project; a watcher
-            // only ever sees the chat's own files.
             if let Some(items) = out.get_mut("items").and_then(Value::as_array_mut) {
                 items.retain(|it| {
                     it.get("path")

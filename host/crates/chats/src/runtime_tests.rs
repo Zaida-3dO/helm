@@ -5131,6 +5131,15 @@ async fn a_picked_permission_mode_reaches_the_worker_and_its_successors() {
     assert_eq!(start(mine["id"].as_str().unwrap()), line("acceptEdits"));
     let theirs = made(None).await.unwrap();
     assert_eq!(start(theirs["id"].as_str().unwrap()), None);
+    // A pick from another device is for that chat only: the new-chat default stays put.
+    h.call(
+        "chat_set_permission_mode",
+        json!({"chatId": chat, "mode": "plan", "chatOnly": true}),
+    )
+    .await
+    .unwrap();
+    let s = h.call("runtime_settings_get", json!({})).await.unwrap();
+    assert_eq!(s["permissionMode"], "acceptEdits");
     // No chat can move the stored pick: the preference is the user's alone.
     assert!(helm_hosttools::settings_allow::refusal("newChatPermissionMode", true).is_some());
     let err = h

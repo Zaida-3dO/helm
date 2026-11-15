@@ -1140,7 +1140,7 @@ impl Inner {
 
     /// Store chats from a device's list. `full`: the complete list (a first subscription), so a
     /// chat of the device that is not in it is gone.
-    fn apply_chats(self: &Arc<Self>, device: &str, chats: &[Value], full: Option<i64>) {
+    pub(crate) fn apply_chats(self: &Arc<Self>, device: &str, chats: &[Value], full: Option<i64>) {
         let self_uid = self.self_uid.clone();
         let stored = self.db.write(|tx| {
             let mut changed = Vec::new();

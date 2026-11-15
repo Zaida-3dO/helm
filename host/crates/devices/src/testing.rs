@@ -541,7 +541,7 @@ impl ChatPort for FakePort {
         let mut st = self.st();
         let r = if st.chats.iter().any(|c| c.id() == a.chat_id) {
             st.forked.push((a.chat_id.clone(), a.fork_id));
-            Ok(json!({ "chat": { "id": format!("{}-copy", a.chat_id) } }))
+            Ok(json!({ "id": format!("{}-copy", a.chat_id), "revision": 9 }))
         } else {
             Err(WireError::not_found())
         };

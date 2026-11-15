@@ -146,7 +146,15 @@ impl Mirror {
             // An older Helm does not know the card and upload ops and says "do that elsewhere".
             code::REFUSED
                 if e.message == WireError::elsewhere().message
-                    && matches!(what, "a file" | "that decision" | "those requests") =>
+                    && matches!(
+                        what,
+                        "a file"
+                            | "that decision"
+                            | "those requests"
+                            | "that change"
+                            | "that read"
+                            | "those rows"
+                    ) =>
             {
                 ApiError::new(
                     "refused",
@@ -454,7 +462,16 @@ impl Mirror {
                 by_device.entry(device).or_default().push(id.clone());
             }
         }
-        for (device, ids) in by_device {
+        // The device refuses more than 500 ids in one ask.
+        let groups: Vec<(String, Vec<String>)> = by_device
+            .into_iter()
+            .flat_map(|(d, ids)| {
+                ids.chunks(500)
+                    .map(|c| (d.clone(), c.to_vec()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (device, ids) in groups {
             if self.check_up(&device).is_err() {
                 unreachable.extend(ids);
                 continue;
@@ -494,7 +511,16 @@ impl Mirror {
                 by_device.entry(device).or_default().push(id.clone());
             }
         }
-        for (device, ids) in by_device {
+        // The device refuses more than 500 ids in one ask.
+        let groups: Vec<(String, Vec<String>)> = by_device
+            .into_iter()
+            .flat_map(|(d, ids)| {
+                ids.chunks(500)
+                    .map(|c| (d.clone(), c.to_vec()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (device, ids) in groups {
             if self.check_up(&device).is_err() {
                 unreachable.extend(ids);
                 continue;
@@ -1230,15 +1256,24 @@ impl RemoteChats for Mirror {
             }
             // Some actions answer with their own result, not the chat record: the control
             // that asked reads that answer exactly as it does on a chat that runs here.
-            if op == "chat_verbosity_set" || op == "tool_stop" {
+            if let Some(wire) = match op.as_str() {
+                "chat_verbosity_set" => Some("verbosity_set"),
+                "tool_stop" => Some("tool_stop"),
+                "chat_fork" => Some("fork"),
+                "chat_roll_over" => Some("roll_over"),
+                "chat_export_markdown" => Some("export_markdown"),
+                _ => None,
+            } {
                 m.check_live(&device)?;
                 let act = m.acting(&chat_id)?;
-                let wire = if op == "chat_verbosity_set" {
-                    "verbosity_set"
-                } else {
-                    "tool_stop"
-                };
-                return m.ask_as(&device, wire, args, "that change", &[act]).await;
+                let answer = m.ask_as(&device, wire, args, "that change", &[act]).await?;
+                // A fork or a roll-over makes a new chat there: hold its record in the copy
+                // now, so the control that opens it finds it before the device's news.
+                if matches!(wire, "fork" | "roll_over") && answer.get("id").is_some() {
+                    m.inner
+                        .apply_chats(&device, std::slice::from_ref(&answer), None);
+                }
+                return Ok(answer);
             }
             // Staging answers with the Changes view, not the chat record: the panel updates
             // itself from the answer exactly as it does on a chat that runs here.
@@ -1253,10 +1288,7 @@ impl RemoteChats for Mirror {
                 return m.ask_as(&device, wire, args, "that change", &[act]).await;
             }
             let wire = match op.as_str() {
-                "chat_fork" => "fork",
                 "chat_compact" => "compact",
-                "chat_roll_over" => "roll_over",
-                "chat_export_markdown" => "export_markdown",
                 "unread_mark" => "mark_unread",
                 "chat_mute" => "mute",
                 "chat_set_permission_mode" => "set_permission",
