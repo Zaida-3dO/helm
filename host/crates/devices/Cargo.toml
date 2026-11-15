@@ -15,6 +15,7 @@ serde_json.workspace = true
 rusqlite.workspace = true
 hex.workspace = true
 getrandom = "0.3"
+base64 = "0.22"
 log.workspace = true
 tokio.workspace = true
 uuid.workspace = true
