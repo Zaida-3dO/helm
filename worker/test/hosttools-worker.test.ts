@@ -362,6 +362,50 @@ test("the landing guard asks the host before Bash and MCP calls, and fails close
   }
 });
 
+test("a local chat lists only the core host tools, but every host tool stays callable and searchable", async () => {
+  const { HostToolServer } = await import("../src/hosttools/server.ts");
+  const core = { name: "app_list_chats", description: "List chats.", inputSchema: { type: "object" }, requestLimitBytes: 8192, timeoutMs: 20000, children: false, mutating: false };
+  const other = { name: "app_list_schedules", description: "List the user's schedules.", inputSchema: { type: "object" }, requestLimitBytes: 8192, timeoutMs: 20000, children: false, mutating: false };
+  const sent: string[] = [];
+  const channel = { call: async (name: string) => (sent.push(name), { ok: true as const, result: { name } }) } as never;
+  const mk = (lean: boolean) => new HostToolServer({ hostTools: [core, other], channel, lean });
+  const listed = async (s: InstanceType<typeof HostToolServer>) => {
+    const r = (await s.handle({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { child: false })) as Json;
+    return ((r.result as Json).tools as Json[]).map((t) => t.name);
+  };
+  assert.deepEqual(await listed(mk(true)), ["app_list_chats", "app_list_tools", "app_mcp_call"], "lean: only the core tool plus the compat tools");
+  assert.deepEqual(await listed(mk(false)), ["app_list_chats", "app_list_schedules", "app_list_tools", "app_mcp_call"], "not lean: everything");
+  const lean = mk(true);
+  const call = await lean.call("app_mcp_call", { name: "app_list_schedules", arguments: {} }, { child: false });
+  assert.equal(call.ok, true, "an unlisted host tool still answers through app_mcp_call");
+  assert.deepEqual(sent, ["app_list_schedules"], "the call reached the host channel");
+  const found = (await lean.handle({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "app_list_tools", arguments: { query: "schedules" } } }, { child: false })) as Json;
+  const sc = (found.result as Json).structuredContent as Json;
+  assert.deepEqual((sc.tools as Json[]).map((t) => t.name), ["app_list_schedules"], "app_list_tools finds what the list does not show");
+  assert.equal(sc.total, 1);
+});
+
+test("a local chat is told where the rest of Helm's tools are; a Claude chat is not", async () => {
+  const { LOCAL_TOOL_RULE } = await import("../src/drivers/claude/driver.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "helm-lean-"));
+  const append = async (claude: Json) => {
+    const s = startWithFixture("tool-call", { claude, launch: { hostTools: [], chatToolsDirectory: dir } });
+    try {
+      await s.host.ready();
+      const argv = (s.fakeStart()?.argv ?? []) as string[];
+      return argv[argv.indexOf("--append-system-prompt") + 1] ?? "";
+    } finally {
+      await s.done();
+    }
+  };
+  try {
+    assert.ok((await append({ local: { baseUrl: "http://127.0.0.1:9", model: "m" } })).includes(LOCAL_TOOL_RULE), "the local chat gets the line");
+    assert.ok(!(await append({})).includes(LOCAL_TOOL_RULE), "a Claude chat does not");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("the workflow gate hook asks the host only when the launch says so, and lets an unanswered call through", async () => {
   const hookAnswers = (got: Json[]) =>
     got

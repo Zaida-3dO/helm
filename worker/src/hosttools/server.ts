@@ -12,11 +12,16 @@
 // next tool boundary. The request itself carries on into the background store, and the server
 // answers `app_background_result` from there itself; the host's handler for that tool is only a
 // fallback.
+//
+// With `lean` (a chat on a local model server) `catalogue()` lists only the core host tools
+// (`LOCAL_CORE_TOOLS`): a local server cannot expand tool-search results, so every listed schema
+// is sent in every request. Every other host tool stays reachable — `app_list_tools` searches all
+// of them and `app_mcp_call` calls any of them.
 
 import type { Json } from "../protocol/types.ts";
 import { DEFAULT_TIMEOUT_MS, NOTHING_CHANGED, type CallResult, type RequestChannel } from "./channel.ts";
 import { capToolResult, type OutputCap } from "./cap.ts";
-import { COMPAT_ALWAYS, COMPAT_WITH_MCP } from "./names.ts";
+import { COMPAT_ALWAYS, COMPAT_WITH_MCP, LOCAL_CORE_TOOLS } from "./names.ts";
 import { BackgroundStore, type BackgroundCall } from "./background.ts";
 import { MAX_TOOL_NAME_BYTES } from "../mcp/naming.ts";
 
@@ -74,6 +79,8 @@ export interface ServerOptions {
   backgroundAfterMs?: number;
   resultWaitMs?: number;
   store?: BackgroundStore;
+  /** A chat on a local model server: list only the core host tools (see the header). */
+  lean?: boolean;
 }
 
 type RpcId = string | number | null;
@@ -198,10 +205,14 @@ export class HostToolServer {
     return this.movable.get(toolCallId)?.() ?? false;
   }
 
-  /** The tools/list catalogue, host tools first. */
+  /** The tools/list catalogue, host tools first. With `lean` only the core host tools are listed. */
   catalogue(): HostTool[] {
-    const compat = [LIST_TOOLS, MCP_CALL].filter((t) => (COMPAT_ALWAYS as readonly string[]).includes(t.name));
-    const out = [...this.o.hostTools, ...compat];
+    const listed = this.o.lean ? this.o.hostTools.filter((t) => LOCAL_CORE_TOOLS.includes(t.name)) : this.o.hostTools;
+    return [...listed, ...this.compatTools()];
+  }
+
+  private compatTools(): HostTool[] {
+    const out = [LIST_TOOLS, MCP_CALL].filter((t) => (COMPAT_ALWAYS as readonly string[]).includes(t.name));
     if (this.o.bridge && (COMPAT_WITH_MCP as readonly string[]).includes(MCP_TOOLS.name)) out.push(MCP_TOOLS);
     return out;
   }
@@ -364,7 +375,9 @@ export class HostToolServer {
   private search(args: Json): Json {
     const q = typeof args.query === "string" ? args.query.toLowerCase().split(/\s+/).filter(Boolean) : [];
     const offset = Number.isInteger(args.offset) && (args.offset as number) > 0 ? (args.offset as number) : 0;
-    const hits = this.catalogue().filter((t) => q.every((w) => t.name.includes(w) || t.description.toLowerCase().includes(w)));
+    // Search every host tool, listed or not: a lean catalogue is small, `app_list_tools` is not.
+    const all = [...this.o.hostTools, ...this.compatTools()];
+    const hits = all.filter((t) => q.every((w) => t.name.includes(w) || t.description.toLowerCase().includes(w)));
     const page = hits.slice(offset, offset + SEARCH_PAGE).map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema, ...(t.guidelines ? { guidelines: t.guidelines } : {}) }));
     const out: Json = { tools: page, total: hits.length };
     if (offset + SEARCH_PAGE < hits.length) out.nextOffset = offset + SEARCH_PAGE;
