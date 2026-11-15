@@ -487,6 +487,16 @@ fn table() -> Vec<Entry> {
             about: "Minutes without output before a running chat shows as stalled.",
         },
         Entry {
+            key: "localChatCap",
+            kind: Kind::Int {
+                min: 0,
+                max: 12,
+                step: 1,
+            },
+            default: || json!(3),
+            about: "How many chats one local model server carries at once before new ones wait their turn. 0 switches the limit off.",
+        },
+        Entry {
             key: "scrollOnSend",
             kind: Kind::Bool,
             default: || json!(true),
