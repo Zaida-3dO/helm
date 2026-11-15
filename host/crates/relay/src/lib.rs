@@ -153,10 +153,9 @@ pub fn register_services(services: &mut Services, events: &Arc<dyn EventSink>) {
         client.restore_sharing(household::load(&db));
         let db_check = Arc::clone(&db);
         client.set_person_check(Arc::new(move |p: &str| {
-            db_check.snapshot(|tx| {
-                helm_profiles::store::profile_for_person(tx, p).map(|o| o.is_some())
-            })
-            .unwrap_or(false)
+            db_check
+                .snapshot(|tx| helm_profiles::store::profile_for_person(tx, p).map(|o| o.is_some()))
+                .unwrap_or(false)
         }));
         // The hub's welcome names the person this line acts as. Pairing links the home
         // profile to that person; a line configured with a token never pairs, so the
@@ -175,12 +174,7 @@ pub fn register_services(services: &mut Services, events: &Arc<dyn EventSink>) {
                     if home_person == p {
                         return Ok(false);
                     }
-                    helm_profiles::store::link_home_to_person(
-                        tx,
-                        p,
-                        name,
-                        helm_core::now_ms(),
-                    )?;
+                    helm_profiles::store::link_home_to_person(tx, p, name, helm_core::now_ms())?;
                     Ok(true)
                 })
                 .unwrap_or(false);

@@ -1530,7 +1530,10 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert_eq!(*home.lock().unwrap(), vec![("3".to_owned(), "Pat".to_owned())]);
+        assert_eq!(
+            *home.lock().unwrap(),
+            vec![("3".to_owned(), "Pat".to_owned())]
+        );
         assert_eq!(c.handle().state(), LineState::Online);
         task.abort();
     }
