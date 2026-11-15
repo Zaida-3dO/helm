@@ -36,7 +36,7 @@
 //! [`TICK`] under [`VoiceBridge::run`] and after every call that changes state.
 
 use crate::lines::{Lines, PersonUpstream};
-use crate::relay::{Line, Upstream};
+use crate::relay::{Channel, Line, Upstream};
 use crate::stt::Transcribe;
 use crate::telegram::now_ms;
 use serde_json::{json, Value};
@@ -722,6 +722,8 @@ struct Phone {
 
 #[derive(Default)]
 struct Person {
+    /// Whose this is, so the frames sent down the line can name the person they are for.
+    id: i64,
     turns: HashMap<String, TurnRec>,
     /// Turn ids in upload order.
     order: VecDeque<String>,
@@ -968,11 +970,12 @@ impl Person {
         else {
             return false;
         };
-        // The stop goes to the PC that has the turn while its line is up, else to the best line.
+        // The stop goes to the PC that has the turn while its line is up, else to the routed line.
         let to = self.line_on(went).or(line.as_ref()).cloned();
-        let stop = || {
+        let person = self.id.to_string();
+        let stop = move || {
             if let Some(l) = &to {
-                l.send(&json!({ "type": "voice_stop", "turn": turn }));
+                l.send(&json!({ "type": "voice_stop", "turn": turn, "personId": person }));
             }
         };
         match state {
@@ -1019,7 +1022,8 @@ impl Person {
             if let Some((live, mode)) = self.presence {
                 if self.presence_gen != Some(gen)
                     && line.send(&json!({
-                        "type": "voice_presence", "live": live, "mode": mode.as_str()
+                        "type": "voice_presence", "live": live, "mode": mode.as_str(),
+                        "personId": self.id.to_string(),
                     }))
                 {
                     self.presence_gen = Some(gen);
@@ -1034,7 +1038,9 @@ impl Person {
                     .iter()
                     .map(|i| self.heard[*i].report.to_value())
                     .collect();
-                if !line.send(&json!({ "type": "voice_heard", "reports": reports })) {
+                if !line.send(&json!({ "type": "voice_heard", "reports": reports,
+                                        "personId": self.id.to_string() }))
+                {
                     break;
                 }
                 for i in chunk {
@@ -1071,6 +1077,7 @@ impl Person {
                         let frame = json!({
                             "type": "voice",
                             "id": t.id,
+                            "personId": self.id.to_string(),
                             "mode": t.mode.as_str(),
                             "text": t.text,
                             "source": if t.typed { "typed" } else { "speech" },
@@ -1261,7 +1268,7 @@ impl VoiceBridge {
         now: i64,
         f: impl FnOnce(&mut Person, &Option<Arc<Line>>) -> R,
     ) -> (R, usize) {
-        let line = self.lines.best_up(person);
+        let line = self.lines.route_for(person, Channel::Voice);
         let mut people = self.people.lock().unwrap_or_else(|p| p.into_inner());
         // The attachment caps are for the whole hub: this person gets what the others leave.
         let (held, outbox) =
@@ -1276,6 +1283,7 @@ impl VoiceBridge {
             next_seq: self.seq_base,
             ..Person::default()
         });
+        p.id = person;
         p.room = Room {
             held: HELD_MAX_BYTES.saturating_sub(held),
             outbox: self.cfg.outbox_attachment_bytes.saturating_sub(outbox),
@@ -1296,7 +1304,7 @@ impl VoiceBridge {
     /// `GET /voice/status`.
     pub fn status(&self, person: i64) -> Status {
         Status {
-            helm_online: self.lines.best_up(person).is_some(),
+            helm_online: self.lines.route_for(person, Channel::Voice).is_some(),
             stt: self.stt.is_some(),
         }
     }
@@ -1460,8 +1468,10 @@ impl VoiceBridge {
     /// `POST /voice/fresh`: tell Helm to start a new conversation. False when the line is down.
     pub fn fresh(&self, person: i64) -> bool {
         self.lines
-            .best_up(person)
-            .is_some_and(|l| l.send(&json!({ "type": "voice_fresh" })))
+            .route_for(person, Channel::Voice)
+            .is_some_and(|l| {
+                l.send(&json!({ "type": "voice_fresh", "personId": person.to_string() }))
+            })
     }
 
     // ----- the live socket -----
