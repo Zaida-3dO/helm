@@ -464,7 +464,7 @@ pub struct Client {
     knowledge: std::sync::OnceLock<Arc<dyn KnowledgeSink>>,
     /// Does this PC act for that hub person (a profile of theirs is linked here)? Set while
     /// the services are wired; until then every named person passes, as before.
-    person_known: std::sync::OnceLock<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
+    person_known: std::sync::OnceLock<PersonCheck>,
     handle: Arc<LineHandle>,
     up_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<(u64, Value)>>,
     /// Hub ids of Telegram messages being delivered now: the hub's resend of one of them is
@@ -493,6 +493,9 @@ const KEEPALIVE_EVERY: Duration = Duration::from_secs(30);
 /// The most one frame from the hub may hold: a Telegram message can carry up to 50 MB of files,
 /// which is a third larger as base64, plus its text.
 const MAX_FRAME: usize = 80 * 1024 * 1024;
+
+/// Does this PC act for that hub person? Set once while the services are wired.
+type PersonCheck = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -570,7 +573,7 @@ impl Client {
 
     /// Tell the line which hub persons this PC acts for. A frame naming a person the check
     /// refuses is dropped (or refused, for a call), since nobody here could answer it.
-    pub fn set_person_check(&self, f: Arc<dyn Fn(&str) -> bool + Send + Sync>) {
+    pub fn set_person_check(&self, f: PersonCheck) {
         let _ = self.person_known.set(f);
     }
 

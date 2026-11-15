@@ -84,18 +84,16 @@ pub fn migrate(profile_dir: &Path, db: &Database) {
     // old entries move into it one by one rather than the folder being renamed whole.
     let old_att = profile_dir.join("telegram");
     let new_att = telegram::attachments_dir(profile_dir, &home);
-    if old_att.is_dir() {
-        if std::fs::create_dir_all(&new_att).is_ok() {
-            if let Ok(entries) = std::fs::read_dir(&old_att) {
-                for entry in entries.flatten() {
-                    let from = entry.path();
-                    if from == new_att {
-                        continue;
-                    }
-                    match std::fs::rename(&from, new_att.join(entry.file_name())) {
-                        Ok(()) => {}
-                        Err(_) => log::warn!("relay: an attachment could not be moved"),
-                    }
+    if old_att.is_dir() && std::fs::create_dir_all(&new_att).is_ok() {
+        if let Ok(entries) = std::fs::read_dir(&old_att) {
+            for entry in entries.flatten() {
+                let from = entry.path();
+                if from == new_att {
+                    continue;
+                }
+                match std::fs::rename(&from, new_att.join(entry.file_name())) {
+                    Ok(()) => {}
+                    Err(_) => log::warn!("relay: an attachment could not be moved"),
                 }
             }
         }

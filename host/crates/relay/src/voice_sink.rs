@@ -957,8 +957,11 @@ pub struct ChatVoice {
     shown: Arc<Shown>,
     /// Each profile's voice chat id as its tag file last said, and when it was read; the event
     /// tap asks on every busy chat, so a file is read at most every [`TAG_RECHECK`].
-    tagged: Mutex<HashMap<String, (Option<Instant>, Option<String>)>>,
+    tagged: Mutex<HashMap<String, TagEntry>>,
 }
+
+/// One profile's voice chat id as its tag file last said, and when that was read.
+type TagEntry = (Option<Instant>, Option<String>);
 
 /// How long the voice chat's id is trusted before the tag file is read again.
 const TAG_RECHECK: Duration = Duration::from_secs(5);
