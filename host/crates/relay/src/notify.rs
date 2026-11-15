@@ -549,6 +549,19 @@ fn look(
                 else {
                     continue;
                 };
+                // A change to this PC is the owner's to approve: a household member's chat is
+                // answered in Helm only.
+                let member = db
+                    .snapshot(|tx| {
+                        Ok::<_, rusqlite::Error>(helm_profiles::store::is_household_member(
+                            tx,
+                            &r.chat_id,
+                        ))
+                    })
+                    .unwrap_or(true);
+                if member {
+                    continue;
+                }
                 let voice =
                     crate::voice::load_tag(&crate::people::voice_paths(dir, &ch.profile_id).tag)
                         .map(|t| t.chat_id);

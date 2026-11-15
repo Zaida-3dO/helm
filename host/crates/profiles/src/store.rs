@@ -629,6 +629,26 @@ pub fn chat_owner_profile(conn: &Connection, chat_id: &str) -> Option<String> {
     profile_of_chat(conn, chat_id).ok().flatten().map(|p| p.id)
 }
 
+/// Whether a chat belongs to someone other than this PC's own person: the chat's profile is not the
+/// home profile and is not linked to the home profile's hub person. Fails closed: a profile that
+/// cannot be read, or one that is not home and names no person, counts as someone else's. An
+/// install with no profile at all has no household, so its chats are the owner's.
+pub fn is_household_member(conn: &Connection, chat_id: &str) -> bool {
+    let p = match profile_of_chat(conn, chat_id) {
+        Ok(Some(p)) => p,
+        Ok(None) => return false,
+        Err(_) => return true,
+    };
+    if p.is_home {
+        return false;
+    }
+    let home = match home(conn) {
+        Ok(h) => h.and_then(|h| h.hub_person_id),
+        Err(_) => return true,
+    };
+    !matches!((&p.hub_person_id, &home), (Some(a), Some(b)) if a == b)
+}
+
 /// The profile linked to a hub person, when one is.
 pub fn profile_for_person(conn: &Connection, person_id: &str) -> rusqlite::Result<Option<Profile>> {
     conn.query_row(
@@ -1042,6 +1062,9 @@ mod tests {
             assert_eq!(who("c6"), home.id);
             assert_eq!(who("c7"), other.id);
             assert_eq!(who("c8"), home.id);
+            // Another profile that names no person is still someone else's; home's chats are not.
+            assert!(is_household_member(tx, "c4"));
+            assert!(!is_household_member(tx, "c6") && !is_household_member(tx, "c8"));
 
             // Counts leave archived chats out; a profile view reads the same list.
             let v = view(tx)?;

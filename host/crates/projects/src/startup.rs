@@ -462,6 +462,21 @@ struct Staged {
 
 fn stage_set(ctx: &ToolCtx, db: &Arc<Database>, node: &ProjectNode, args: &Value) -> ToolResult {
     let fail = |m: String| ToolError::refused(format!("[Helm] Nothing was staged: {m}"));
+    // Instructions run first in every later chat on the project, so only the PC's own person's
+    // chats may propose them.
+    if db
+        .snapshot(|tx| {
+            Ok::<_, rusqlite::Error>(helm_profiles::store::is_household_member(
+                tx,
+                &ctx.caller_chat_id,
+            ))
+        })
+        .unwrap_or(true)
+    {
+        return Err(fail(
+            "only chats of this PC's own person can change a project's startup instructions, not a household member's.".into(),
+        ));
+    }
     let to = match args.get("instructions") {
         None | Some(Value::Null) => None,
         Some(Value::String(s)) => store::validate_startup(s).map_err(|e| fail(refusal_text(&e)))?,
