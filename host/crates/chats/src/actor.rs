@@ -73,9 +73,12 @@ pub(crate) enum Cmd {
     Archived,
     /// The chat was restored while a worker was still winding down from its archive.
     Restored,
-    /// The maintenance tick: mark the chat stalled if it has had no output for `after`.
+    /// The maintenance tick: refresh the chat's live state, and mark it stalled if it has had
+    /// no output for `after` (longer for a chat on a local model server, which answers one
+    /// request at a time and gaps between outputs in between).
     StallCheck {
         after: std::time::Duration,
+        local_after: std::time::Duration,
     },
     /// Apply the staged edit once the worker has closed, then send its submission.
     ApplyEdit,
@@ -279,6 +282,10 @@ struct Actor {
     me: mpsc::WeakSender<Cmd>,
     /// A local chat's turn waiting for its model to be made ready.
     prepare: Option<Prepare>,
+    /// A local chat's turn held at its very start because the server already carries the cap
+    /// of working chats: the opening submission and those held behind it. The maintenance tick
+    /// reopens it when a place frees.
+    start_wait: Option<(String, Vec<String>)>,
     prepare_count: u64,
     /// The submission that is opening its turn now that its preparation is done.
     opening: Option<String>,
@@ -288,6 +295,9 @@ struct Actor {
     launched_local: Option<(String, String)>,
     /// The prompt carrying a message fork's saved history, until the worker answers it.
     carry_in_flight: Option<String>,
+    /// The live state the maintenance tick last published (the `chat_activity.state` mirror);
+    /// only this actor writes it, so the cache needs no lock.
+    state: Option<crate::types::ChatState>,
     /// A model warm-up ran (or was attempted) since this chat's last turn started; typing does
     /// not start another until one does.
     warmed: bool,
@@ -334,6 +344,11 @@ fn recent_reading(
 }
 /// Typing does not start a second model warm-up within this long of the last one.
 const WARM_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(300);
+/// The soft cap of this PC's chats a local model server carries before new local turns queue at
+/// their start rather than piling onto the server (the stored `localChatCap` overrides; 0 is off).
+/// A local server answers one request at a time, so this is how many chats can be "working"
+/// there at once; the rest wait, visibly, with their place in line.
+const DEFAULT_LOCAL_CAP: u64 = 3;
 
 pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
     let (tx, rx) = mpsc::channel(64);
@@ -426,11 +441,13 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         worker_started: None,
         me: tx.downgrade(),
         prepare: None,
+        start_wait: None,
         prepare_count: 0,
         opening: None,
         prepared: None,
         launched_local: None,
         carry_in_flight: None,
+        state: None,
         warmed: false,
         last_warm: None,
     };
@@ -1387,6 +1404,9 @@ impl Actor {
                 self.give_back(p.sid.into_iter().chain(p.held).collect());
                 self.clear_loading();
             }
+            if let Some((sid, held)) = self.start_wait.take() {
+                self.give_back(std::iter::once(sid).chain(held).collect());
+            }
             let error = if self
                 .sh
                 .shutting_down
@@ -1525,6 +1545,9 @@ impl Actor {
         }
         self.stream.clear();
         self.turn_opened_by = None;
+        if self.state.is_some() {
+            self.publish_state(None);
+        }
         let tool_keys: Vec<String> = self.tools.keys().map(|t| format!("t:{t}")).collect();
         for key in &tool_keys {
             let id = self.chat_id.clone();
@@ -1665,6 +1688,89 @@ impl Actor {
             )
         });
         self.emit_chat();
+    }
+
+    /// What the busy chat is doing right now, for the chip, the chat list and the silent check.
+    /// A card waiting on the person outranks a tool call: the turn cannot move without them.
+    /// Nothing here asks a model or a server — it reads only what the actor already knows.
+    fn compute_state(&self, silent_limit: std::time::Duration) -> Option<crate::types::ChatState> {
+        use crate::types::ChatState;
+        if !self.status().is_busy() {
+            return None;
+        }
+        if !self.live.lock().unwrap().thread.interactions.is_empty() {
+            return Some(ChatState::WaitingUser);
+        }
+        if let Some(rec) = self.tools.values().min_by_key(|r| r.started_at) {
+            return Some(ChatState::Tool {
+                name: rec.name.clone(),
+                since: rec.started_at,
+            });
+        }
+        if let Some(ahead) = self.live.lock().unwrap().local_ahead {
+            return Some(ChatState::Queued {
+                ahead: (ahead >= 0).then_some(ahead),
+            });
+        }
+        let last_ms = now() - self.last_output.elapsed().as_millis() as i64;
+        if self.last_output.elapsed() >= silent_limit {
+            return Some(ChatState::Silent { since: last_ms });
+        }
+        Some(ChatState::Generating { since: last_ms })
+    }
+
+    /// Store and announce the live state (the `chat_activity.state` column, read into the chat
+    /// record's `state`); writes only when it changed.
+    fn publish_state(&mut self, state: Option<crate::types::ChatState>) {
+        if self.state == state {
+            return;
+        }
+        self.state = state.clone();
+        let json = state.as_ref().and_then(|s| serde_json::to_string(s).ok());
+        let id = self.chat_id.clone();
+        self.write(|t| {
+            t.execute(
+                "INSERT INTO chat_activity(chat_id, last_activity_at, state) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(chat_id) DO UPDATE SET state = excluded.state",
+                rusqlite::params![id, now(), json],
+            )
+        });
+        self.emit_chat();
+    }
+
+    /// A child chat went silent: say so in its parent once per silent spell, so an orchestrator
+    /// learns of it without polling. The stalled flag on the child covers the person watching
+    /// the board; this covers the chat that made the child.
+    fn notify_parent_silent(&self, since: i64) {
+        let Some(chat) = self.chat() else { return };
+        let Some(parent) = chat.parent_chat_id.clone() else {
+            return;
+        };
+        let minutes = ((now() - since) / 60_000).max(1);
+        let text = format!(
+            "Helm noticed: your subchat \"{}\" has been silent for {minutes} minute{} — its turn \
+             is open with no output, no tool call and no queue wait. Check it, or send it a \
+             message or stop it if it looks lost.",
+            chat.title,
+            if minutes == 1 { "" } else { "s" }
+        );
+        let sh = self.sh.clone();
+        self.sh.handle.spawn(async move {
+            let rt = crate::runtime::ChatRuntime { sh };
+            let sid = uuid::Uuid::new_v4().to_string();
+            let sent = crate::submit::host_send(
+                &rt,
+                crate::submit::HostSend {
+                    chat_id: &parent,
+                    submission_id: &sid,
+                    text: &text,
+                    origin: crate::types::SubmissionOrigin::App,
+                },
+            );
+            if let Err(e) = sent {
+                log::debug!("silent-child note not sent to {parent}: {}", e.message);
+            }
+        });
     }
 
     /// The maintenance tick's other question about a busy chat: is its turn waiting on a local
@@ -2096,18 +2202,48 @@ impl Actor {
                 }
             }
             Cmd::Warm => self.warm_now(),
-            Cmd::StallCheck { after } => {
+            Cmd::StallCheck { after, local_after } => {
                 self.check_local_wait();
+                // A turn held at the server's start capacity gets first look at a freed place.
+                // This runs after the queue-position check: a chat held before its turn ever
+                // opened has no launched model, so nothing else would keep its place on show.
+                if let Some((sid, held)) = self.start_wait.take() {
+                    let server = self.chat().and_then(|c| local_of(&c)).map(|(s, _)| s);
+                    match server {
+                        Some(s) if self.over_local_cap(&s) => {
+                            let ahead = self.chats_busy_on(&s) as i64;
+                            self.start_wait = Some((sid, held));
+                            self.set_local_ahead(Some(ahead));
+                        }
+                        _ => {
+                            self.set_local_ahead(None);
+                            self.restart_prepare(sid, held);
+                        }
+                    }
+                }
+                // What the chat is doing right now, then the silent question: a turn that is
+                // queued, generating, running a tool or waiting on the person is doing
+                // something; only the state with none of those, past its limit, is silent.
+                let base = if self.is_local_chat() {
+                    local_after
+                } else {
+                    after
+                };
+                // Something this chat started (a build) is still in the worker's process tree:
+                // its silence is that process working, so the limit stretches.
+                let busy_tree = self.link.as_ref().and_then(|l| l.tree_size()).unwrap_or(0);
+                let limit = if busy_tree >= 3 { base * 3 } else { base };
+                let state = self.compute_state(limit);
+                let silent_now = matches!(state, Some(crate::types::ChatState::Silent { .. }));
                 let stalled = self.live.lock().unwrap().stalled;
-                let waiting = self.live.lock().unwrap().local_ahead.is_some();
-                // A chat waiting at the model server is explained: waiting time is not "may be
-                // stuck" time, so the stall flag waits until the model starts answering.
-                if self.status().is_busy()
-                    && !stalled
-                    && !waiting
-                    && self.last_output.elapsed() >= after
-                {
+                self.publish_state(state.clone());
+                if silent_now && !stalled {
                     self.set_stalled(true);
+                    if let Some(crate::types::ChatState::Silent { since }) = state {
+                        self.notify_parent_silent(since);
+                    }
+                } else if !silent_now && stalled {
+                    self.set_stalled(false);
                 }
             }
             Cmd::LocalNote { token, text } => {
@@ -2216,6 +2352,14 @@ impl Actor {
             .ok()
             .flatten()
             .flatten();
+        if let Some(w) = self.start_wait.as_mut() {
+            // The turn is waiting at the model server's start capacity: this send waits in
+            // front of it, and the maintenance tick reopens the pair when a place frees.
+            if w.0 != sid && !w.1.iter().any(|h| h == sid) {
+                w.1.push(sid.to_owned());
+            }
+            return;
+        }
         // A warm-up started for the model the chat has since left cannot answer for this send:
         // drop it first (its late answers are ignored by token) and prepare the current model.
         let stale = self.prepare.as_ref().is_some_and(|p| {
@@ -2599,7 +2743,12 @@ impl Actor {
         if self.begin_prepare(&sid) {
             match self.prepare.as_mut() {
                 Some(p) => p.held = held,
-                None => self.give_back(held), // refused: nothing to prepare with
+                // Back at the start-capacity wait (the server refilled meanwhile): the held
+                // sends go in front of it too. Only a refusal leaves them nowhere.
+                None => match self.start_wait.as_mut() {
+                    Some(w) => w.1.extend(held),
+                    None => self.give_back(held),
+                },
             }
             return;
         }
@@ -2610,9 +2759,48 @@ impl Actor {
         }
     }
 
+    /// How many other chats of ours have a turn open on this server right now, working or
+    /// waiting — the number the soft cap compares against.
+    fn chats_busy_on(&self, server: &str) -> usize {
+        let handles: Vec<crate::runtime::ActorHandle> = self
+            .sh
+            .actors
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| **id != self.chat_id)
+            .map(|(_, h)| h.clone())
+            .collect();
+        handles
+            .iter()
+            .filter(|h| {
+                let l = h.live.lock().unwrap();
+                l.thread.status.is_busy() && l.server_id.as_deref() == Some(server)
+            })
+            .count()
+    }
+
+    /// Whether this server already carries [`DEFAULT_LOCAL_CAP`] of our chats (the stored
+    /// `localChatCap`; 0 switches the cap off). A local server answers one request at a time,
+    /// so each chat piled onto it deepens everyone's wait without any of them working faster —
+    /// the house rule an orchestrator used to have to remember by hand.
+    fn over_local_cap(&self, server: &str) -> bool {
+        let cap = self
+            .sh
+            .db
+            .snapshot(|tx| Ok::<_, rusqlite::Error>(helm_core::prefs::read(tx, "localChatCap")))
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_u64())
+            .unwrap_or(DEFAULT_LOCAL_CAP);
+        cap > 0 && self.chats_busy_on(server) >= cap as usize
+    }
+
     /// A chat on a local model gets its model made ready before each turn it opens (the memory
     /// check, the load, Ollama's variant). Starts that on the blocking pool and answers true;
-    /// the turn goes ahead, or is refused, when it reports back.
+    /// the turn goes ahead, or is refused, when it reports back. A server already carrying its
+    /// cap holds the turn at its start instead: it queues here, where a place is known to free,
+    /// rather than piling requests onto the server.
     fn begin_prepare(&mut self, sid: &str) -> bool {
         let Some(chat) = self.chat() else {
             return false;
@@ -2624,6 +2812,14 @@ impl Actor {
             self.refuse_local(&[sid.to_owned()], crate::local::NOT_AVAILABLE);
             return true;
         };
+        if self.over_local_cap(&server_id) {
+            self.last_output = Instant::now();
+            self.set_status(ChatStatus::Starting, None);
+            let ahead = self.chats_busy_on(&server_id) as i64;
+            self.start_wait = Some((sid.to_owned(), Vec::new()));
+            self.set_local_ahead(Some(ahead));
+            return true;
+        }
         // The chat shows as starting while its model is made ready; Stop works as usual. The wait
         // is not silence: the stall flag counts from here, not from the chat's last output.
         self.last_output = Instant::now();
@@ -2794,6 +2990,11 @@ impl Actor {
             // chat is idle, and the stop returns before this.)
             self.give_back(p.sid.into_iter().chain(p.held).collect());
             self.clear_loading();
+        }
+        if let Some((sid, held)) = self.start_wait.take() {
+            // Waiting at the server's start capacity: nothing reached the server either.
+            self.give_back(std::iter::once(sid).chain(held).collect());
+            self.set_local_ahead(None);
         }
         if let Some(s) = self.stopping.as_mut() {
             s.replies.push(reply);

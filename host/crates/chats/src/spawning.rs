@@ -76,6 +76,16 @@ impl WorkerLink for PendingLink {
             State::Failed => {}
         }
     }
+
+    fn tree_size(&self) -> Option<u32> {
+        // Not a mutable borrow: read the state, then answer outside the lock so a process
+        // query never blocks the worker's own end of the link.
+        let link = match &*self.state.lock().unwrap() {
+            State::Running(link) => link.clone(),
+            _ => return None,
+        };
+        link.tree_size()
+    }
 }
 
 /// Start the worker on the blocking pool; the link and output channel are usable at once.

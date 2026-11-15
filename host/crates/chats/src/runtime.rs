@@ -178,6 +178,14 @@ pub struct HostLaunch {
 pub trait WorkerLink: Send + Sync {
     fn send(&self, command: &Value) -> bool;
     fn terminate(&self);
+
+    /// How many processes the worker's kill-group still holds: the worker itself, the CLI it
+    /// runs, and whatever those have started. A number above two means something this chat ran
+    /// (a build, say) is still going even with no tool call open — the silent check reads it.
+    /// `None` when the link cannot say.
+    fn tree_size(&self) -> Option<u32> {
+        None
+    }
 }
 
 pub type Spawned = (Arc<dyn WorkerLink>, mpsc::Receiver<WorkerOutput>);
@@ -240,6 +248,9 @@ impl WorkerLink for ProcessLink {
     }
     fn terminate(&self) {
         self.0.terminate()
+    }
+    fn tree_size(&self) -> Option<u32> {
+        self.0.job().active_processes()
     }
 }
 
@@ -612,6 +623,15 @@ pub(crate) struct Live {
     pub local_ahead: Option<i64>,
 }
 
+/// One local model server's load right now: chats with a turn open on it and working, and chats
+/// whose turn is open but waits in the server's queue. See [`ChatRuntime::local_load`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServerLoad {
+    pub server_id: String,
+    pub working: usize,
+    pub queued: usize,
+}
+
 /// What a local server last said about requests waiting on it, and when. Filled only while some
 /// chat has a request open against that server — never at start-up, never on a plain timer.
 pub(crate) struct QueueSeen {
@@ -746,6 +766,9 @@ impl ChatRuntime {
                     .snapshot(|tx| Ok::<_, rusqlite::Error>(stall_minutes(tx)))
                     .unwrap_or(DEFAULT_STALL_MINUTES);
                 let after = sh.cfg.limits.stall_unit * minutes;
+                // A local server answers one request at a time, so a local chat's gaps between
+                // outputs are longer by nature: it gets twice the quiet before a silent.
+                let local_after = after * 2;
                 let busy: Vec<ActorHandle> = sh
                     .actors
                     .lock()
@@ -755,13 +778,41 @@ impl ChatRuntime {
                     .cloned()
                     .collect();
                 for h in busy {
-                    let _ = enqueue(&h.tx, Cmd::StallCheck { after });
+                    let _ = enqueue(&h.tx, Cmd::StallCheck { after, local_after });
                 }
                 crate::attention::publish(&sh);
                 crate::triage::pass(&sh);
                 ChatRuntime { sh: sh.clone() }.apply_send_behavior();
             }
         });
+    }
+
+    /// What each local model server is busy with right now: how many of this PC's chats have a
+    /// turn open on it, and how many of those wait in the server's queue. Read from the actors'
+    /// live state — it asks the servers nothing and starts nothing, so a coordinator can check
+    /// the load cheaply before opening another local chat.
+    pub fn local_load(&self) -> Vec<ServerLoad> {
+        let mut per: std::collections::BTreeMap<String, ServerLoad> = Default::default();
+        for h in self.sh.actors.lock().unwrap().values() {
+            let live = h.live.lock().unwrap();
+            let Some(server) = live.server_id.as_ref() else {
+                continue;
+            };
+            if !live.thread.status.is_busy() {
+                continue;
+            }
+            let e = per.entry(server.clone()).or_insert_with(|| ServerLoad {
+                server_id: server.clone(),
+                working: 0,
+                queued: 0,
+            });
+            if live.local_ahead.is_some() {
+                e.queued += 1;
+            } else {
+                e.working += 1;
+            }
+        }
+        per.into_values().collect()
     }
 
     /// Hand every chat the stored send behaviour. An actor whose worker was

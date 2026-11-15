@@ -110,8 +110,11 @@ fn chat_meta(tx: &Transaction<'_>, boards: &Boards, id: &str) -> rusqlite::Resul
             &format!(
                 "SELECT c.id, c.title, c.project_id, p.path, c.archived, c.status, c.created_at,
                         c.updated_at, c.harness, {}, c.thinking, c.parent_chat_id, c.pinned,
-                        c.side_source_id, EXISTS(SELECT 1 FROM chat_mutes m WHERE m.chat_id = c.id)
-                 FROM chats c JOIN projects p ON p.id = c.project_id WHERE c.id = ?1",
+                        c.side_source_id, EXISTS(SELECT 1 FROM chat_mutes m WHERE m.chat_id = c.id),
+                        CASE WHEN c.status IN ('starting', 'running', 'stopping')
+                             THEN a.state ELSE NULL END
+                 FROM chats c JOIN projects p ON p.id = c.project_id
+                 LEFT JOIN chat_activity a ON a.chat_id = c.id WHERE c.id = ?1",
                 crate::local::MODEL_ID_SQL
             ),
             [id],
@@ -134,6 +137,11 @@ fn chat_meta(tx: &Transaction<'_>, boards: &Boards, id: &str) -> rusqlite::Resul
                     "pinned": r.get::<_, bool>(12)?,
                     "sideChatOf": r.get::<_, Option<String>>(13)?,
                     "muted": r.get::<_, bool>(14)?,
+                    // What a busy chat is doing now, as the maintenance tick last saw it
+                    // (queued / generating / tool / waitingUser / silent); null when idle.
+                    "state": r
+                        .get::<_, Option<String>>(15)?
+                        .and_then(|j| serde_json::from_str::<Value>(&j).ok()),
                 }))
             },
         )
@@ -568,6 +576,25 @@ fn list_chats(ctx: &ToolCtx, a: Value) -> ToolResult {
     let mut out = json!({ "chats": chats });
     if more {
         out["nextOffset"] = json!(offset + limit);
+    }
+    // What the local model servers on this PC are carrying right now, so an orchestrator can
+    // see the load before starting another local chat. Read from the running chats' live state;
+    // it asks the servers nothing.
+    if let Ok(rt) = rt(ctx) {
+        let load: Vec<Value> = rt
+            .local_load()
+            .into_iter()
+            .map(|l| {
+                json!({
+                    "serverId": l.server_id,
+                    "working": l.working,
+                    "queued": l.queued,
+                })
+            })
+            .collect();
+        if !load.is_empty() {
+            out["localServers"] = json!(load);
+        }
     }
     Ok(out)
 }

@@ -2739,42 +2739,123 @@ async fn a_worker_that_never_answers_the_stop_is_killed_at_the_archive_limit() {
     assert!(h.events("completion").is_empty());
 }
 
-/// A running chat with no output for the stall limit is flagged and counted; the
-/// next output clears it.
+/// A busy chat reports a live state (generating, tool, waitingUser, silent) that the tick
+/// maintains without asking any model. Only the silent one is flagged, and when it is, the flag,
+/// the attention row and a one-per-spell note to the parent chat all say the same thing; a
+/// running tool call and a card waiting on the person never raise it, and the next output ends
+/// the whole thing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_silent_running_chat_shows_as_stalled_until_output() {
     let mut h = harness_with(Limits {
         tick: Duration::from_millis(50),
         ..limits()
     });
-    // One minute is 100 ms in the test limits.
-    h.db.write(|tx| helm_core::prefs::set_generic(tx, "stallMinutes", &json!(10)))
-        .unwrap();
-    // The limit (10 x 100 ms) counts from the chat's last output, which `running_turn` produces
-    // after `t0`. Under a heavily loaded full run the harness can itself take longer than the
-    // limit to get past `running_turn`, and then the flag is rightly set already, so "not yet" is
-    // claimed only while less than the limit has passed since `t0`.
-    let t0 = std::time::Instant::now();
+    let parent = h.create().await;
+    // The silent window starts parked (the harness default): on a loaded machine the start-up
+    // itself can outlast a short window, which would let the first observed state be `silent`
+    // rather than `generating`. The window is shortened once the turn is demonstrably open.
     let (chat, _, w) = running_turn(&mut h).await;
+    h.db.write(|tx| {
+        tx.execute(
+            "UPDATE chats SET parent_chat_id = ?1 WHERE id = ?2",
+            [&parent, &chat],
+        )
+    })
+    .unwrap();
     let flag = |h: &H| {
         h.col(&format!(
             "SELECT stalled FROM chat_activity WHERE chat_id = '{chat}'"
         ))
     };
+    let state = |h: &H| -> String {
+        serde_json::from_str::<Value>(
+            &h.col(&format!(
+                "SELECT COALESCE(state, 'null') FROM chat_activity WHERE chat_id = '{chat}'"
+            ))[0],
+        )
+        .unwrap()["kind"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned()
+    };
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let early = flag(&h);
-    if t0.elapsed() < Duration::from_millis(1000) {
-        assert_ne!(early, ["1"], "not before the limit");
-    }
+    assert_eq!(flag(&h), ["0"], "not flagged while the window is parked");
+    h.until("generating", |h| state(h) == "generating").await;
+    // One minute is 100 ms in the test limits: from here the silent window is a second.
+    h.db.write(|tx| helm_core::prefs::set_generic(tx, "stallMinutes", &json!(10)))
+        .unwrap();
+
+    // A tool call genuinely running: the state names it, and it is never silent no matter how
+    // long it runs.
+    w.emit(json!({"type": "tool_execution_start", "toolCallId": "tc1", "toolName": "Bash", "args": {"command": "cargo build"}, "stoppable": true}))
+        .await;
+    h.until("tool", |h| state(h) == "tool").await;
+    tokio::time::sleep(Duration::from_millis(1150)).await;
+    assert_eq!(flag(&h), ["0"], "a running tool call is not a silent");
+    assert_eq!(state(&h), "tool", "and it keeps its state");
+    w.emit(json!({"type": "tool_execution_end", "toolCallId": "tc1", "toolName": "Bash", "result": {"text": "done"}, "isError": false}))
+        .await;
+
+    // A card waiting on the person: a different state, and equally not a silent.
+    w.emit(json!({"type": "extension_ui_request", "id": "ui-1", "method": "select", "attention": "approval",
+                  "title": "Run ls?", "options": ["Allow once", "Deny"]}))
+        .await;
+    h.until("waitingUser", |h| state(h) == "waitingUser").await;
+    tokio::time::sleep(Duration::from_millis(1150)).await;
+    assert_eq!(flag(&h), ["0"], "waiting on the person is not a silent");
+    h.call(
+        "interaction_answer",
+        json!({"chatId": chat, "requestId": "ui-1", "value": "Allow once"}),
+    )
+    .await
+    .unwrap();
+
+    // Now nothing is running and nothing answers: the silent arrives, and it is the one state
+    // that raises a voice.
     h.until("stalled", |h| flag(h) == ["1"]).await;
+    assert_eq!(state(&h), "silent", "the state says which one");
     let a = h.call("attention_get", json!({})).await.unwrap();
     assert_eq!(a["stalled"][0]["chatId"], chat.as_str());
     assert_eq!(a["badge"], 1);
     let got = h.call("chat_get", json!({"chatId": chat})).await.unwrap();
     assert_eq!(got["chat"]["stalled"], true);
+    assert_eq!(got["chat"]["state"]["kind"], "silent");
+    // The parent hears about it once, as a message it can act on.
+    h.until("the parent was told", |h| {
+        h.col(&format!(
+            "SELECT m.origin FROM submissions s \
+             JOIN submission_meta m ON m.submission_id = s.id \
+             WHERE s.chat_id = '{parent}'"
+        )) == ["app"]
+    })
+    .await;
+    assert!(
+        h.col(&format!(
+            "SELECT text FROM submissions WHERE chat_id = '{parent}'"
+        ))[0]
+            .contains("silent for"),
+        "the note says what and how long"
+    );
     w.emit(json!({"type": "message_start", "message": {"id": "m9", "role": "assistant", "content": []}}))
         .await;
     h.until("unstalled", |h| flag(h) == ["0"]).await;
+    h.until("generating again", |h| state(h) == "generating")
+        .await;
+    // The note goes once per silent spell: this chat recovered, so a fresh silent gets a fresh
+    // note — and never more than one while it stays silent.
+    let notes = |h: &H| {
+        h.col(&format!(
+            "SELECT count(*) FROM submissions WHERE chat_id = '{parent}'"
+        ))
+    };
+    tokio::time::sleep(Duration::from_millis(1150)).await;
+    h.until("stalled again", |h| flag(h) == ["1"]).await;
+    // The note for the new spell arrives on its own task: wait for it, then check it stays the
+    // only one while the chat keeps saying nothing.
+    h.until("the new spell tells the parent once", |h| notes(h) == ["2"])
+        .await;
+    tokio::time::sleep(Duration::from_millis(650)).await;
+    assert_eq!(notes(&h), ["2"], "staying silent adds nothing");
 }
 
 /// A muted chat leaves the badge and every group, but keep-awake still counts it.
@@ -6420,15 +6501,12 @@ async fn a_model_change_while_only_a_queue_wait_runs_restarts_the_turn_now() {
     hw.emit(json!({"type": "agent_start"})).await;
     hw.emit(json!({"type": "tool_execution_start", "toolCallId": "tc1", "toolName": "Bash", "args": {"command": "cargo build"}, "stoppable": true}))
         .await;
-    h.until(
-        "the actor has the tool in hand",
-        |h| {
-            !h.col(&format!(
-                "SELECT id FROM messages WHERE chat_id = '{hc}' AND tool_call_id = 'tc1'"
-            ))
-            .is_empty()
-        },
-    )
+    h.until("the actor has the tool in hand", |h| {
+        !h.col(&format!(
+            "SELECT id FROM messages WHERE chat_id = '{hc}' AND tool_call_id = 'tc1'"
+        ))
+        .is_empty()
+    })
     .await;
     h.call(
         "chat_set_model",
@@ -7109,6 +7187,30 @@ async fn local_chats_say_who_the_model_server_is_busy_with() {
         );
     }
 
+    // The state both chats show is `queued`, with the queue position, and the server summary
+    // counts them as waiting rather than working — what an orchestrator reads before starting
+    // yet another local chat.
+    let state_json = |h: &H, id: &str| -> Value {
+        serde_json::from_str(
+            &h.col(&format!(
+                "SELECT COALESCE(state, 'null') FROM chat_activity WHERE chat_id = '{id}'"
+            ))[0],
+        )
+        .unwrap()
+    };
+    assert_eq!(state_json(&h, &second)["kind"], "queued");
+    assert_eq!(
+        state_json(&h, &second)["ahead"],
+        1,
+        "the later chat's queued state names its place in the queue"
+    );
+    assert_eq!(state_json(&h, &first)["kind"], "queued");
+    let loads = h.rt.local_load();
+    assert_eq!(loads.len(), 1, "one server carries both");
+    assert_eq!(loads[0].server_id, "strata");
+    assert_eq!(loads[0].queued, 2, "both turns are waiting, not working");
+    assert_eq!(loads[0].working, 0);
+
     // The model's first words end the wait for that chat…
     w2.emit(json!({"type": "message_start", "message": {"id": "m1", "role": "assistant", "content": []}}))
         .await;
@@ -7147,4 +7249,119 @@ async fn local_chats_say_who_the_model_server_is_busy_with() {
     assert_eq!(record(&h, &second), None, "an idle chat carries no flag");
     w1.exit().await;
     w2.exit().await;
+}
+
+/// A local model server carries a soft cap of our chats. A new local turn whose server already
+/// carries the cap waits at its start — visibly queued, with its place in line, and nothing
+/// asked of the server — and opens by itself when a place frees.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn new_local_turns_wait_when_the_server_carries_its_cap() {
+    let mut h = harness_with(Limits {
+        tick: Duration::from_millis(50),
+        ..limits()
+    });
+    h.db.write(|tx| helm_core::prefs::set_generic(tx, "localChatCap", &json!(2)))
+        .unwrap();
+    let local = Arc::new(FakeLocal {
+        turns: Mutex::new(Vec::new()),
+        outcome: Mutex::new(Ok("m-one".into())),
+        gate: Mutex::new(None),
+        finished: Mutex::new(Vec::new()),
+        refreshed: Mutex::new(Vec::new()),
+        held_outcome: Mutex::new(None),
+        queue: Mutex::new(None),
+    });
+    h.rt.set_local_models(local.clone());
+    let cwd = h.work.to_string_lossy().into_owned();
+    let asked =
+        |_: &H, id: &str| -> bool { local.turns.lock().unwrap().iter().any(|t| t.chat_id == id) };
+
+    let new_id = |r: Value| r["id"].as_str().unwrap().to_owned();
+    let first = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
+        )
+        .await
+        .unwrap(),
+    );
+    h.send(&first, "job one", "default").await;
+    let mut w1 = h.worker().await;
+    w1.ready().await;
+    let p1 = w1.expect("prompt").await;
+    ack(&w1, &p1).await;
+    w1.emit(json!({"type": "agent_start"})).await;
+    let second = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
+        )
+        .await
+        .unwrap(),
+    );
+    h.send(&second, "job two", "default").await;
+    let mut w2 = h.worker().await;
+    w2.ready().await;
+    let p2 = w2.expect("prompt").await;
+    ack(&w2, &p2).await;
+    w2.emit(json!({"type": "agent_start"})).await;
+
+    // The cap (two) stands: the third chat's turn waits at its start.
+    let third = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
+        )
+        .await
+        .unwrap(),
+    );
+    let (sid3, _) = h.send(&third, "job three", "default").await;
+    h.until("the third waits at its start", |h| {
+        h.status(&third) == "starting" && h.state(&sid3) == "saved" && !asked(h, &third)
+    })
+    .await;
+    h.until("and shows its place in line", |h| {
+        h.col(&format!(
+            "SELECT local_ahead FROM chat_activity WHERE chat_id = '{third}'"
+        )) == ["2"]
+            && serde_json::from_str::<Value>(
+                &h.col(&format!(
+                    "SELECT COALESCE(state, 'null') FROM chat_activity WHERE chat_id = '{third}'"
+                ))[0],
+            )
+            .unwrap()["kind"]
+                == "queued"
+    })
+    .await;
+    assert_eq!(h.state(&sid3), "saved", "nothing was sent to the server");
+    assert!(!asked(&h, &third), "and its model was never asked to load");
+    let loads = h.rt.local_load();
+    assert_eq!(
+        loads[0].working + loads[0].queued,
+        3,
+        "the summary counts the wait with the work"
+    );
+    assert!(
+        loads[0].queued >= 1,
+        "the waiting chat shows as queued, not working"
+    );
+
+    // A place frees when the first turn ends: the waiting one goes out on its own, no new send.
+    w1.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-c1"}))
+        .await;
+    h.until("the freed place takes the third turn", |h| asked(h, &third))
+        .await;
+    let mut w3 = h.worker().await;
+    assert_eq!(
+        w3.req.local.as_ref().map(|l| l.model.as_str()),
+        Some("m-one"),
+        "launched on the server, not piled onto it"
+    );
+    w3.ready().await;
+    let p3 = w3.expect("prompt").await;
+    assert_eq!(
+        p3["submissionId"],
+        sid3.as_str(),
+        "the same message opens the turn"
+    );
 }

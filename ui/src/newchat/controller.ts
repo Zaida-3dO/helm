@@ -439,6 +439,7 @@ export class NewChatController {
       lastActivityAt: d.createdAt,
       stalled: false,
       localAhead: null,
+      state: null,
       started: false,
       profileId: '',
       hostDeviceId: this.device?.uid ?? '',

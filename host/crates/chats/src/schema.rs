@@ -49,6 +49,7 @@ pub fn register(reg: &mut MigrationRegistry) {
         .initializer("chats-triage-priority", crate::triage::init)
         .initializer("chats-created-by", crate::mute::init)
         .initializer("chats-late-columns", late_columns)
+        .initializer("chats-activity-state", activity_state)
         .one_time("chats-origin-user-is-typed", origin_user_is_typed)
         .recovery_capture("chats-restart-capture", capture_continuations)
         .recovery_step("chats-retry-leftovers", cancel_retry_leftovers)
@@ -255,10 +256,24 @@ fn capture_continuations(tx: &Transaction<'_>) -> rusqlite::Result<()> {
 /// be cleared.
 fn reset_stalls(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     tx.execute(
-        "UPDATE chat_activity SET stalled = 0, local_ahead = NULL
-         WHERE stalled <> 0 OR local_ahead IS NOT NULL",
+        "UPDATE chat_activity SET stalled = 0, local_ahead = NULL, state = NULL
+         WHERE stalled <> 0 OR local_ahead IS NOT NULL OR state IS NOT NULL",
         [],
     )?;
+    Ok(())
+}
+
+/// `chat_activity` gained the live-state column (what a busy chat is doing right now, as the
+/// maintenance tick last saw it); older databases get it here.
+fn activity_state(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    let has: bool = tx.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('chat_activity') WHERE name = 'state'",
+        [],
+        |r| r.get::<_, i64>(0).map(|n| n > 0),
+    )?;
+    if !has {
+        tx.execute("ALTER TABLE chat_activity ADD COLUMN state TEXT", [])?;
+    }
     Ok(())
 }
 

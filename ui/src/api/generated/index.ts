@@ -25,6 +25,7 @@ export type { ChatRenameArgs } from './ChatRenameArgs.ts';
 export type { ChatSendArgs } from './ChatSendArgs.ts';
 export type { ChatSendResult } from './ChatSendResult.ts';
 export type { ChatSetModelArgs } from './ChatSetModelArgs.ts';
+export type { ChatState } from './ChatState.ts';
 export type { ChatStatus } from './ChatStatus.ts';
 export type { ChatStopArgs } from './ChatStopArgs.ts';
 export type { ChatStopResult } from './ChatStopResult.ts';

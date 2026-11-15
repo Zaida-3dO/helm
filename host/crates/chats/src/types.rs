@@ -60,6 +60,42 @@ pub enum Harness {
     Claude,
 }
 
+/// What a busy chat is doing right now, as the maintenance tick last saw it: read by the chip,
+/// the chat list and the agent tools, and the base of the silent check. `null` while no turn is
+/// open. Only `silent` raises a flag; a queue wait is never one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ChatState {
+    /// A local chat whose turn is open while the model server answers something else: how many
+    /// of Helm's own local chats would be answered first (`null` when the count is not known).
+    Queued {
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        #[ts(optional)]
+        #[ts(type = "number")]
+        ahead: Option<i64>,
+    },
+    /// The model is answering: `since` is the last output, Unix ms.
+    Generating {
+        #[ts(type = "number")]
+        since: i64,
+    },
+    /// A tool call is running: its name and when it began, Unix ms (the oldest one when more
+    /// than one runs at once).
+    Tool {
+        name: String,
+        #[ts(type = "number")]
+        since: i64,
+    },
+    /// A card — approval, question or plan — waits for the person.
+    WaitingUser,
+    /// The turn is open with no output, no tool call, no card and no queue wait for longer than
+    /// the silent limit: `since` is the last output, Unix ms. This is the one state Helm flags.
+    Silent {
+        #[ts(type = "number")]
+        since: i64,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatRecord {
@@ -105,6 +141,10 @@ pub struct ChatRecord {
     /// its turn ends.
     #[ts(type = "number | null")]
     pub local_ahead: Option<i64>,
+    /// What the busy chat is doing right now ([`ChatState`]); `null` while no turn is open.
+    /// Refreshed by the maintenance tick, never by a model call. Boxed so the record keeps its
+    /// size: the state is read by the chip and the tools, not by every event hop.
+    pub state: Option<Box<ChatState>>,
     /// The chat's first turn has run (or it was forked from one that did). The picker uses it to
     /// tell a chat whose conversation exists and will carry across a model change; a started chat
     /// can still move between any models, the relaunch keeps the conversation.
