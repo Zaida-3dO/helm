@@ -7,6 +7,7 @@
 //! which files are sources at all, keeps the cursors, and pushes the result.
 
 pub mod chat_turns;
+pub mod claude_code;
 pub mod markdown;
 
 use sha2::{Digest, Sha256};
