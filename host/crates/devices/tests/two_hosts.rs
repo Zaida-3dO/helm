@@ -949,6 +949,19 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         .await
         .unwrap();
     assert_eq!(cards["pending"].as_array().unwrap().len(), 1);
+    // A copy made from an older device holds no card list (null); the window still gets a list.
+    b.db.write(|tx| {
+        tx.execute(
+            "UPDATE mirror_chats SET consent = 'null' WHERE chat_id = 'c1'",
+            [],
+        )
+    })
+    .unwrap();
+    let old = api
+        .call_host("devices_consent_list", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    assert_eq!(old["pending"], json!([]));
     api.call_host(
         "devices_consent_decide",
         json!({"chatId": "c1", "requestId": "r1", "decision": "allow", "grantMinutes": 15}),
@@ -1121,6 +1134,7 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
     std::fs::create_dir_all(&stage).unwrap();
     let img: Vec<u8> = (0..650_000u32).map(|i| (i % 251) as u8).collect();
     std::fs::write(stage.join("att-img"), &img).unwrap();
+    std::fs::write(stage.join("att-text"), b"a long paste").unwrap();
     let note = b.db.path().with_file_name("big-note.txt");
     let note_bytes: Vec<u8> = (0..700_004u32).map(|i| b'a' + (i % 26) as u8).collect();
     std::fs::write(&note, &note_bytes).unwrap();
@@ -1135,6 +1149,11 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
              VALUES ('att-file', 'c1', 'file', 'big-note.txt', '', ?1, ?2, 2)",
             rusqlite::params![note.to_str().unwrap(), note_bytes.len() as i64],
         )?;
+        tx.execute(
+            "INSERT INTO mirror_attachments(id, chat_id, kind, name, mime, target, bytes, created_at)
+             VALUES ('att-text', 'c1', 'text', 'Pasted text.txt', 'text/plain', 'att-text', 12, 3)",
+            [],
+        )?;
         Ok::<_, rusqlite::Error>(())
     })
     .unwrap();
@@ -1147,7 +1166,7 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
                 "text": "look",
                 "action": "default",
                 "draftRevision": 0,
-                "attachments": ["att-img", "att-file"],
+                "attachments": ["att-img", "att-file", "att-text"],
             }),
         )
         .await
@@ -1156,7 +1175,12 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
     {
         let st = port.st();
         let files = st.sent_files.last().unwrap();
-        assert_eq!(files.len(), 2);
+        assert_eq!(files.len(), 3);
+        // A pasted text crosses as a plain-text file.
+        assert_eq!(
+            (files[2].kind.as_str(), files[2].mime.as_str()),
+            ("file", "text/plain")
+        );
         assert_eq!(
             (
                 files[0].kind.as_str(),
@@ -1800,4 +1824,52 @@ async fn one_pc_acts_as_each_of_its_profiles() {
         .unwrap_err();
     assert_eq!(e.code, code::NOT_ALLOWED);
     assert_eq!(port.st().created.len(), 1);
+}
+
+/// A profile linked after the first sync widens the copy: the app's event tap, handed the
+/// mirror, asks the other PC again with the wider read set, and the chat of the new person
+/// arrives without the hub line dropping.
+#[tokio::test(start_paused = true)]
+async fn a_profile_linked_later_brings_its_chats_into_the_copy() {
+    let router = MemRouter::new();
+    let port = Arc::new(FakePort::new("dev-d", "Desk"));
+    port.st().people = vec!["person-p".to_owned(), "person-s".to_owned()];
+    port.add_chat_of("own-s", "Sam's chat", 10, "person-s", &[]);
+    port.add_chat_of("own-t", "Tia's chat", 11, "person-t", &[]);
+    let link_d = router.connect("dev-d", Some("person-p"), Some("Pat"), true);
+    let host = Service::new(port.clone(), link_d, tokio::runtime::Handle::current());
+    host.announce();
+    let b = side(
+        &router,
+        "dev-l",
+        "Laptop",
+        None,
+        "person-s",
+        "Sam",
+        &[("person-s", true, true)],
+    );
+    until(|| b.mirror.owner("own-s").is_some()).await;
+    assert!(b.mirror.owner("own-t").is_none());
+
+    // The laptop now announces Tia as well; the tap hears the profile change.
+    b.link
+        .set_people(vec!["person-s".to_owned(), "person-t".to_owned()]);
+    b.link.send(Frame::Device(DeviceFrame {
+        uid: "dev-l".to_owned(),
+        name: "Laptop".to_owned(),
+        run: true,
+        people: ["person-s", "person-t"]
+            .iter()
+            .map(|p| DevicePerson {
+                person_id: (*p).to_owned(),
+                telegram: false,
+                voice: false,
+            })
+            .collect(),
+    }));
+    settle().await;
+    let tap = helm_devices::EventTap::default();
+    tap.attach_mirror(b.mirror.clone());
+    tap.observe(&AppEvent::new("profiles_changed"));
+    until(|| b.mirror.owner("own-t").is_some()).await;
 }

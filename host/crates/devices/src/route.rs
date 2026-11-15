@@ -263,7 +263,8 @@ impl Mirror {
                 "data": b64.encode(&f.bytes[offset..end]),
             });
             if seq == 0 {
-                args["kind"] = json!(f.kind);
+                // A pasted text is a plain-text file to the PC that runs the chat.
+                args["kind"] = json!(if f.kind == "image" { "image" } else { "file" });
                 args["name"] = json!(f.name);
                 args["mime"] = json!(f.mime);
             }
