@@ -1,7 +1,9 @@
 // Settings → MCP end to end in the real debug app, over the real host.
 // The empty page names a reason; a saved server's literal secret never reaches the config file
 // or the UI; the pane follows the mcp_config event; a stale revision is refused; the presets
-// carry no address; the native switch defaults on.
+// carry no address; the native switch defaults on; clicking a preset opens its setup visibly,
+// focused; the Google preset goes straight to its accounts dialog with the setup checklist; a
+// browser-signed-in server shows its sign-in block in the editor.
 //
 // Run: `npm run build:debug` at the root, then `npm run e2e -w checks`.
 
@@ -21,6 +23,18 @@ async function openMcpPane(): Promise<void> {
   await page().keyboard.press("Control+Comma");
   await page().getByRole("tab", { name: "MCP" }).or(page().getByRole("button", { name: "MCP", exact: true })).first().click();
   await page().waitForSelector(tid("mcp-pane"), { timeout: 20_000 });
+}
+
+/** Settings toggles on Ctrl+Comma, so only open it when it is not already showing. */
+async function ensureMcpPane(): Promise<void> {
+  if (await page().locator(tid("mcp-pane")).isVisible().catch(() => false)) return;
+  await openMcpPane();
+}
+
+/** Leave the pane as the next check expects: no editor open, no dialog open. */
+async function tidyPane(): Promise<void> {
+  if (await page().locator(tid("google-accounts-dialog")).isVisible().catch(() => false)) await page().keyboard.press("Escape");
+  if (await page().locator(tid("mcp-cancel")).isVisible().catch(() => false)) await page().locator(tid("mcp-cancel")).click();
 }
 
 describe("Settings → MCP", { timeout: 10 * 60_000 }, () => {
@@ -87,5 +101,70 @@ describe("Settings → MCP", { timeout: 10 * 60_000 }, () => {
     );
     const repo = (await api(page(), "mcp_repo_servers_list", {})) as unknown[];
     assert.deepEqual(repo, []);
+  });
+
+  test("M4: clicking a preset opens its editor in view, caret in the first field", async () => {
+    try {
+      await ensureMcpPane();
+      await page().locator(tid("mcp-add-preset-home_assistant")).click();
+      await page().waitForSelector(tid("mcp-editor"), { timeout: 5_000 });
+      assert.ok(await page().locator(tid("mcp-editor")).isVisible(), "the editor is visible, not off-screen");
+      const focused = await page().evaluate(() => (document.activeElement as HTMLElement | null)?.getAttribute("data-testid"));
+      assert.equal(focused, "mcp-name", "the caret goes to the editor's first field");
+      const inView = await page().locator(tid("mcp-name")).evaluate((el) => {
+        const r = el.getBoundingClientRect();
+        return r.top >= 0 && r.bottom <= innerHeight && r.height > 0;
+      });
+      assert.ok(inView, "the editor is scrolled into view");
+    } finally {
+      await shot(page(), OUT, "w4-mcp-editor");
+      await tidyPane();
+    }
+  });
+
+  test("M5: the Google preset opens its accounts dialog, not the plain form", async () => {
+    try {
+      await ensureMcpPane();
+      await page().locator(tid("mcp-add-preset-google_accounts")).click();
+      await page().waitForSelector(tid("google-accounts-dialog"), { timeout: 10_000 });
+      assert.equal(await page().locator(tid("mcp-editor")).count(), 0, "no plain form for the Google preset");
+      assert.ok(await page().locator(tid("google-steps")).isVisible(), "the setup checklist is what greets the click");
+      for (const step of ["google-step-1", "google-step-6"]) assert.equal(await page().locator(tid(step)).count(), 1);
+      assert.equal(String(await page().locator(tid("google-client")).getAttribute("data-state")), "unset", "a fresh profile has no sign-in client");
+      assert.equal(await page().locator(tid("google-client-save")).isEnabled(), false, "Save waits for both values");
+      assert.equal(await page().locator(tid("google-add")).count(), 0, "Add account only appears once the client is set");
+      // The choice-free draft was saved: the server exists, with an Accounts button that reopens this.
+      const snap = (await api(page(), "mcp_config_get", {})) as { servers: { id: string; preset?: string }[] };
+      assert.ok(snap.servers.some((s) => s.preset === "google_accounts"), "the preset saved its server");
+      await page().locator(tid("google-accounts-dialog")).getByRole("button", { name: "Close dialog" }).click();
+      await page().waitForSelector(tid("mcp-google-google_accounts"), { timeout: 5_000 });
+      await page().locator(tid("mcp-google-google_accounts")).click();
+      await page().waitForSelector(tid("google-accounts-dialog"), { timeout: 5_000 });
+    } finally {
+      await shot(page(), OUT, "w4-mcp-google");
+      await tidyPane();
+    }
+  });
+
+  test("M6: a browser-signed-in server shows its sign-in block in the editor", async () => {
+    const { revision } = (await api(page(), "mcp_config_get", {})) as { revision: string };
+    await api(page(), "mcp_server_save", {
+      revision,
+      server: { id: "crm", name: "CRM", enabled: true, allowPrivateHttp: false, transport: { type: "http", url: "https://crm.example/mcp", oauth: {} } },
+    });
+    try {
+      await ensureMcpPane();
+      await page().waitForSelector(tid("mcp-server-crm"), { timeout: 10_000 });
+      await page().locator(tid("mcp-edit-crm")).click();
+      await page().waitForSelector(tid("mcp-oauth"), { timeout: 5_000 });
+      assert.ok(await page().locator(tid("mcp-oauth-note")).isVisible());
+      assert.ok(await page().locator(tid("mcp-oauth-client-id")).isVisible());
+      assert.ok(await page().locator(tid("mcp-oauth-connect")).isVisible(), "the editor offers Connect for a saved sign-in server");
+      // The empty oauth marker survives the pane: the row still reads as a browser sign-in ask.
+      assert.match(String(await page().textContent(tid("mcp-status-crm"))), /browser|sign in/i);
+    } finally {
+      await shot(page(), OUT, "w4-mcp-oauth");
+      await tidyPane();
+    }
   });
 });

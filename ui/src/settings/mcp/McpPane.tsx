@@ -132,7 +132,7 @@ function Editor({
       .catch((e: unknown) => mine === run.current && setTest({ running: false, failed: errorText(e) }));
   };
   return (
-    <div className="mcp-editor" data-testid="mcp-editor">
+    <div className="mcp-editor" ref={box} data-testid="mcp-editor">
       <h4>{isNew ? 'Add a server' : `Edit ${draft.name}`}</h4>
       {preset && <p className="mcp-help">{preset.description}</p>}
       {preset?.secretEnv?.length ? (
@@ -274,7 +274,9 @@ function Editor({
             {signIn.waiting ? 'Waiting for your browser…' : signIn.label}
           </Button>
         )}
-        <Button onClick={onCancel}>Cancel</Button>
+        <Button data-testid="mcp-cancel" onClick={onCancel}>
+          Cancel
+        </Button>
       </div>
       {test.running && (
         <p className="mcp-test" data-testid="mcp-test-result" data-state="running" role="status">
@@ -505,7 +507,7 @@ export function McpPane() {
                     Accounts
                   </Button>
                 )}
-                <Button className="mcp-act" onClick={() => setDraft({ server: structuredClone(s), isNew: false })}>
+                <Button className="mcp-act" data-testid={`mcp-edit-${s.id}`} onClick={() => setDraft({ server: structuredClone(s), isNew: false })}>
                   Edit
                 </Button>
                 <Button className="mcp-act" disabled={busy} onClick={() => void run(() => ops.remove(s.id, revision))}>
