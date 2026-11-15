@@ -206,6 +206,8 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("mirror_chats", Data),
     ("mirror_rows", Data),
     ("mirror_cursor", Data),
+    // Staged images and files waiting to cross to a chat another device runs.
+    ("mirror_attachments", Data),
     // This install's own device id and name; written by Helm and the user's rename alone.
     (
         "device_self",
