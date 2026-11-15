@@ -2,9 +2,9 @@
 // the frame (App.tsx), the top bar (its Show sidebar button) and Ctrl+B; written by the resizer and
 // the toggle. Both persist through the generic `preference` op (`sidebarWidth`, `sidebarVisible`).
 //
-// The stored values are what the user chose; what shows is fitted to the room the frame has (the
-// window less the side panel): the sidebar narrows so the chat keeps MAIN_KEEP, and under HIDE_BELOW
-// it hides behind its toggle. Neither fitting is saved.
+// The stored values are what the user chose; what shows is fitted to the frame: the sidebar narrows
+// so the chat keeps MAIN_KEEP beside the side panel, and in a frame under HIDE_BELOW (a narrow
+// window, whatever the panel does) it hides behind its toggle. Neither fitting is saved.
 
 export const SIDEBAR_DEFAULT = 480;
 export const SIDEBAR_MIN = 200;
@@ -12,7 +12,7 @@ export const SIDEBAR_MIN = 200;
 export const MAIN_MIN = 320;
 /** The chat's width the sidebar gives way to, unless the user drags it wider. */
 export const MAIN_KEEP = 560;
-/** Below this much room the sidebar hides by itself; its toggle still shows it. */
+/** In a frame narrower than this the sidebar hides by itself; its toggle still shows it. */
 export const HIDE_BELOW = 900;
 export const SIDEBAR_WIDTH_PREF = 'sidebarWidth';
 export const SIDEBAR_VISIBLE_PREF = 'sidebarVisible';
@@ -47,19 +47,26 @@ export interface FittedLayout extends SidebarLayout {
 }
 
 export interface FitState {
-  /** The frame's width less the side panel; null until measured. */
-  room: number | null;
+  /** The frame's (the window's) width; null until measured. */
+  frame: number | null;
+  /** What the side panel takes beside the chat: 0 when it is shut or maximised (it then covers the chat, not the sidebar). */
+  panel: number;
   /** The toggle showed the sidebar in a window too narrow for it. */
   peek: boolean;
   /** The user dragged the sidebar wider than MAIN_KEEP allows; the chat may then drop to MAIN_MIN. */
   squeeze: boolean;
 }
 
-/** The sidebar that shows for a stored layout in `room`. */
-export function fitSidebar(stored: SidebarLayout, { room, peek, squeeze }: FitState): FittedLayout {
-  if (!stored.visible || room === null) return { ...stored, fitted: null };
-  if (room < HIDE_BELOW && !peek) return { width: stored.width, visible: false, fitted: 'hidden' };
-  const max = Math.max(SIDEBAR_MIN, room - (squeeze ? MAIN_MIN : MAIN_KEEP));
+/** The widest the sidebar may show without squeezing the chat under `keep`. */
+function widest(frame: number, panel: number, keep: number): number {
+  return Math.max(SIDEBAR_MIN, frame - panel - keep);
+}
+
+/** The sidebar that shows for a stored layout in a frame. */
+export function fitSidebar(stored: SidebarLayout, { frame, panel, peek, squeeze }: FitState): FittedLayout {
+  if (!stored.visible || frame === null) return { ...stored, fitted: null };
+  if (frame < HIDE_BELOW && !peek) return { width: stored.width, visible: false, fitted: 'hidden' };
+  const max = widest(frame, panel, squeeze ? MAIN_MIN : MAIN_KEEP);
   const width = Math.min(stored.width, max);
   return { width, visible: true, fitted: width < stored.width ? 'shrunk' : null };
 }
@@ -68,7 +75,7 @@ type Saver = (key: string, value: unknown) => void;
 
 class LayoutStore {
   private stored: SidebarLayout = { width: SIDEBAR_DEFAULT, visible: true };
-  private fit: FitState = { room: null, peek: false, squeeze: false };
+  private fit: FitState = { frame: null, panel: 0, peek: false, squeeze: false };
   /** The width while a drag is under way. */
   private dragging: number | null = null;
   private shown: FittedLayout = { ...this.stored, fitted: null };
@@ -93,16 +100,19 @@ class LayoutStore {
     this.saver = save;
   }
 
-  /** Apply stored values without saving them back. */
+  /** Apply stored values without saving them back. Only a drag stores a width over the default,
+   *  so such a width is a drag's and is kept as one (the chat may narrow for it). */
   load(width: unknown, visible: unknown): void {
-    this.update({ width: parseSidebarWidth(width), visible: parseSidebarVisible(visible) });
+    const w = parseSidebarWidth(width);
+    this.update({ width: w, visible: parseSidebarVisible(visible) }, { ...this.fit, squeeze: w > SIDEBAR_DEFAULT });
   }
 
-  /** The room the frame measured. Coming back above HIDE_BELOW ends a peek. */
-  setRoom(room: number): void {
-    const r = Math.round(room);
-    if (r === this.fit.room) return;
-    this.update(this.stored, { ...this.fit, room: r, peek: r < HIDE_BELOW && this.fit.peek });
+  /** The frame's width and what the side panel takes beside the chat. Coming back above HIDE_BELOW ends a peek. */
+  setRoom(frame: number, panel = 0): void {
+    const f = Math.round(frame);
+    const p = Math.round(panel);
+    if (f === this.fit.frame && p === this.fit.panel) return;
+    this.update(this.stored, { ...this.fit, frame: f, panel: p, peek: f < HIDE_BELOW && this.fit.peek });
   }
 
   /** Show a width while dragging; null ends the preview. */
@@ -113,15 +123,15 @@ class LayoutStore {
 
   /** Set the chosen width. A width wider than the chat's MAIN_KEEP allows is kept by letting the chat narrow. */
   setWidth(width: number, persist: boolean): void {
-    const room = this.fit.room;
-    const squeeze = room !== null && width > Math.max(SIDEBAR_MIN, room - MAIN_KEEP);
+    const { frame, panel } = this.fit;
+    const squeeze = frame !== null && width > widest(frame, panel, MAIN_KEEP);
     this.update({ ...this.stored, width }, { ...this.fit, squeeze });
     if (persist) this.saver(SIDEBAR_WIDTH_PREF, width);
   }
 
   /** Saved, except that hiding in a window too narrow for the sidebar only ends the peek (it shows again in a wide one). */
   setVisible(visible: boolean): void {
-    const narrow = this.fit.room !== null && this.fit.room < HIDE_BELOW;
+    const narrow = this.fit.frame !== null && this.fit.frame < HIDE_BELOW;
     const fit = narrow ? { ...this.fit, peek: visible } : this.fit;
     if (visible === this.stored.visible || (narrow && !visible)) return this.update(this.stored, fit);
     this.update({ ...this.stored, visible }, fit);

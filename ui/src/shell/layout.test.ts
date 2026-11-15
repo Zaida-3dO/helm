@@ -29,28 +29,36 @@ test('a drag clamps at the minimum and leaves the main pane at least 320 px', ()
   assert.equal(dragWidth(480, -30, 300), 450);
 });
 
-test('the sidebar gives way to the chat in a narrow frame and hides below 900 px', () => {
-  const rows: [room: number | null, stored: number, peek: boolean, squeeze: boolean, width: number | 'hidden', fitted: string | null][] = [
-    [null, 480, false, false, 480, null], // not measured yet: as stored
-    [1440, 480, false, false, 480, null],
-    [1040, 480, false, false, 480, null], // exactly leaves the chat 560
-    [1000, 480, false, false, 440, 'shrunk'],
-    [900, 480, false, false, 340, 'shrunk'],
-    [899, 480, false, false, 'hidden', 'hidden'],
-    [760, 480, true, false, SIDEBAR_MIN, 'shrunk'], // shown by its toggle: at least the minimum
-    [1000, 300, false, false, 300, null], // a narrow stored width needs no fitting
-    [1000, 600, false, true, 600, null], // dragged wider: the chat may drop to 320
-    [800, 600, false, true, 'hidden', 'hidden'], // but a narrow window still hides it
-    [900, 700, false, true, 900 - MAIN_MIN, 'shrunk'],
+test('the sidebar gives way to the chat beside the side panel, and hides only in a window under 900 px', () => {
+  const rows: [frame: number | null, panel: number, stored: number, peek: boolean, squeeze: boolean, width: number | 'hidden', fitted: string | null][] = [
+    [null, 0, 480, false, false, 480, null], // not measured yet: as stored
+    [1440, 0, 480, false, false, 480, null],
+    [1040, 0, 480, false, false, 480, null], // exactly leaves the chat 560
+    [1000, 0, 480, false, false, 440, 'shrunk'],
+    [900, 0, 480, false, false, 340, 'shrunk'],
+    [899, 0, 480, false, false, 'hidden', 'hidden'],
+    [760, 0, 480, true, false, SIDEBAR_MIN, 'shrunk'], // shown by its toggle: at least the minimum
+    [1000, 0, 300, false, false, 300, null], // a narrow stored width needs no fitting
+    [1000, 0, 600, false, true, 600, null], // dragged wider: the chat may drop to 320
+    [800, 0, 600, false, true, 'hidden', 'hidden'], // but a narrow window still hides it
+    [900, 0, 700, false, true, 900 - MAIN_MIN, 'shrunk'],
+    // The side panel narrows the sidebar but never hides it: a wide window keeps it at any panel width.
+    [1440, 370, 480, false, false, 480, null],
+    [1440, 600, 480, false, false, 280, 'shrunk'],
+    [1200, 370, 480, false, false, 270, 'shrunk'],
+    [1000, 800, 480, false, false, SIDEBAR_MIN, 'shrunk'],
+    [899, 370, 480, false, false, 'hidden', 'hidden'],
+    // A maximised panel covers the chat and is passed as taking no room: the sidebar stays as it was.
+    [1440, 0, 480, false, false, 480, null],
   ];
-  for (const [room, stored, peek, squeeze, width, fitted] of rows) {
-    const f = fitSidebar({ width: stored, visible: true }, { room, peek, squeeze });
-    const label = `room ${room}, stored ${stored}, peek ${peek}, squeeze ${squeeze}`;
+  for (const [frame, panel, stored, peek, squeeze, width, fitted] of rows) {
+    const f = fitSidebar({ width: stored, visible: true }, { frame, panel, peek, squeeze });
+    const label = `frame ${frame}, panel ${panel}, stored ${stored}, peek ${peek}, squeeze ${squeeze}`;
     assert.equal(f.visible ? f.width : 'hidden', width, label);
     assert.equal(f.fitted, fitted, label);
   }
   // Hidden by the user: no fitting, whatever the room.
-  assert.deepEqual(fitSidebar({ width: 480, visible: false }, { room: 700, peek: false, squeeze: false }), { width: 480, visible: false, fitted: null });
+  assert.deepEqual(fitSidebar({ width: 480, visible: false }, { frame: 700, panel: 0, peek: false, squeeze: false }), { width: 480, visible: false, fitted: null });
 });
 
 test('the store fits what shows but saves only what the user chose', () => {
@@ -91,6 +99,15 @@ test('the store fits what shows but saves only what the user chose', () => {
     ['sidebarVisible', false],
     ['sidebarVisible', true],
   ]);
+  // A width dragged wider than the default outlives a restart: loading it keeps it as a drag.
+  sidebarLayout.load(600, true);
+  sidebarLayout.setRoom(1000);
+  assert.deepEqual(sidebarLayout.get(), { width: 600, visible: true, fitted: null });
+  // The side panel opening beside it narrows it (the chat keeps its 320), and a wide window keeps it shown.
+  sidebarLayout.setRoom(1440, 600);
+  assert.deepEqual(sidebarLayout.get(), { width: 1440 - 600 - MAIN_MIN, visible: true, fitted: 'shrunk' });
+  sidebarLayout.setRoom(1440, 0); // maximised, or shut
+  assert.deepEqual(sidebarLayout.get(), { width: 600, visible: true, fitted: null });
   sidebarLayout.setRoom(4096);
   sidebarLayout.connect(() => undefined);
 });
