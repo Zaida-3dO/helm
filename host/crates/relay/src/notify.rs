@@ -354,8 +354,13 @@ fn ask(ctx: &ToolCtx, a: Value) -> ToolResult {
     }
     let title = title_of(&db, &ctx.caller_chat_id).unwrap_or_default();
     let id = approve::new_id();
-    sink.asks
-        .add_question(&id, &ctx.caller_chat_id, &ch.person, question, options.clone());
+    sink.asks.add_question(
+        &id,
+        &ctx.caller_chat_id,
+        &ch.person,
+        question,
+        options.clone(),
+    );
     if !line.telegram_ask(&ch.person, &id, &compose(&title, question), &options) {
         sink.asks.unsent(&id);
         return Err(ToolError::refused(
@@ -477,37 +482,43 @@ fn look(rt: &ChatRuntime, afk: &helm_afk::AfkService, db: &Database, dir: &Path)
         .then(|| rt.attention().ok())
         .flatten();
     // A failed read is no look at all, not "nothing waits".
-    let rows = (away && any_alerts).then(|| summary.as_ref().map(alertable)).flatten();
-    let waiting = any_approvals.then(|| {
-        let summary = summary.as_ref()?;
-        let mut out = vec![];
-        for r in &summary.needs_you {
-            let Some(ch) = chans.iter().find(|c| owner.get(&r.chat_id).is_some_and(|p| p == &c.profile_id)) else {
-                continue;
-            };
-            if !ch.policy.approvals {
-                continue;
+    let rows = (away && any_alerts)
+        .then(|| summary.as_ref().map(alertable))
+        .flatten();
+    let waiting = any_approvals
+        .then(|| {
+            let summary = summary.as_ref()?;
+            let mut out = vec![];
+            for r in &summary.needs_you {
+                let Some(ch) = chans
+                    .iter()
+                    .find(|c| owner.get(&r.chat_id).is_some_and(|p| p == &c.profile_id))
+                else {
+                    continue;
+                };
+                if !ch.policy.approvals {
+                    continue;
+                }
+                let here = away || ch.tg_chat.as_deref() == Some(r.chat_id.as_str());
+                if !here || !matches!(r.kind, AttentionKind::Approval | AttentionKind::Plan) {
+                    continue;
+                }
+                for i in rt
+                    .live_thread(&r.chat_id)
+                    .map(|t| t.interactions)
+                    .unwrap_or_default()
+                {
+                    out.push(approve::Waiting {
+                        chat_id: r.chat_id.clone(),
+                        chat_title: r.title.clone(),
+                        person: ch.person.clone(),
+                        interaction: i,
+                    });
+                }
             }
-            let here = away || ch.tg_chat.as_deref() == Some(r.chat_id.as_str());
-            if !here || !matches!(r.kind, AttentionKind::Approval | AttentionKind::Plan) {
-                continue;
-            }
-            for i in rt
-                .live_thread(&r.chat_id)
-                .map(|t| t.interactions)
-                .unwrap_or_default()
-            {
-                out.push(approve::Waiting {
-                    chat_id: r.chat_id.clone(),
-                    chat_title: r.title.clone(),
-                    person: ch.person.clone(),
-                    interaction: i,
-                });
-            }
-        }
-        Some(out)
-    })
-    .flatten();
+            Some(out)
+        })
+        .flatten();
     Look {
         channels: chans,
         owner,
@@ -535,14 +546,8 @@ pub fn watch_away(
         let mut every = tokio::time::interval(TICK);
         loop {
             every.tick().await;
-            let (rt2, afk, dir, db2) = (
-                rt.clone(),
-                afk.clone(),
-                profile_dir.clone(),
-                db.clone(),
-            );
-            let Ok(found) =
-                tokio::task::spawn_blocking(move || look(&rt2, &afk, &db2, &dir)).await
+            let (rt2, afk, dir, db2) = (rt.clone(), afk.clone(), profile_dir.clone(), db.clone());
+            let Ok(found) = tokio::task::spawn_blocking(move || look(&rt2, &afk, &db2, &dir)).await
             else {
                 continue;
             };
@@ -606,7 +611,10 @@ pub fn watch_away(
                 let mine: Vec<AttentionRow> = rows
                     .iter()
                     .filter(|r| {
-                        found.owner.get(&r.chat_id).is_some_and(|p| *p == ch.profile_id)
+                        found
+                            .owner
+                            .get(&r.chat_id)
+                            .is_some_and(|p| *p == ch.profile_id)
                             && !(matches!(r.kind, AttentionKind::Approval | AttentionKind::Plan)
                                 && asked.contains(r.chat_id.as_str()))
                     })
@@ -622,16 +630,9 @@ pub fn watch_away(
                     if BUDGET.take(helm_core::now_ms())
                         && line.telegram_notify(&ch.person, &alert.text)
                     {
-                        let (rt2, text, ch2) =
-                            (rt.clone(), alert.text.clone(), ch.clone());
+                        let (rt2, text, ch2) = (rt.clone(), alert.text.clone(), ch.clone());
                         let _ = tokio::task::spawn_blocking(move || {
-                            record_sent(
-                                Some(&rt2),
-                                &ch2,
-                                "Helm, while you were away",
-                                &text,
-                                None,
-                            )
+                            record_sent(Some(&rt2), &ch2, "Helm, while you were away", &text, None)
                         })
                         .await;
                         a.sent(alert.keys);

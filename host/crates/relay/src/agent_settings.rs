@@ -601,7 +601,9 @@ mod tests {
             err.contains("remoteAnswers") && err.contains("Settings > Hub"),
             "{err}"
         );
-        assert!(!telegram::load_file(&telegram::policy_path(&e.dir.path().join("prof"))).remote_answers);
+        assert!(
+            !telegram::load_file(&telegram::policy_path(&e.dir.path().join("prof"))).remote_answers
+        );
         assert!(e
             .apply(json!({"approvals": false, "maxAgeHours": 48}))
             .unwrap_err()
@@ -761,7 +763,10 @@ mod tests {
 
         // Blank means the app's usual setting; null puts the defaults back; undo restores.
         apply(json!({"model": "", "effort": ""})).unwrap();
-        assert_eq!(voice::load_file(&voice::policy_path(&e.dir.path().join("prof"))).new_chat(), (None, None));
+        assert_eq!(
+            voice::load_file(&voice::policy_path(&e.dir.path().join("prof"))).new_chat(),
+            (None, None)
+        );
         let (before, after) = apply(json!(null)).unwrap();
         assert_eq!(after["model"], json!("claude-sonnet-5-5"));
         assert_eq!(after["effort"], json!("low"));

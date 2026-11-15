@@ -128,12 +128,7 @@ pub trait TelegramSink: Send + Sync {
     /// `/stop` from the person's Telegram. `person` `None`: an older hub, the PC's own person.
     fn stop<'a>(&'a self, person: Option<String>) -> BoxFut<'a, ()>;
     /// The user tapped button `index` of the approval ask `id` ([`LineHandle::telegram_ask`]).
-    fn answer<'a>(
-        &'a self,
-        person: Option<String>,
-        id: String,
-        index: usize,
-    ) -> BoxFut<'a, ()>;
+    fn answer<'a>(&'a self, person: Option<String>, id: String, index: usize) -> BoxFut<'a, ()>;
 }
 
 /// One turn for the voice chat as the hub forwarded it.
@@ -367,7 +362,10 @@ impl LineHandle {
     }
     /// The one live status message on Telegram, edited in place by the hub.
     pub fn telegram_status(&self, person: &str, text: &str) {
-        let _ = self.push(ANY_LINE, named("telegram_status", person, json!({ "text": text })));
+        let _ = self.push(
+            ANY_LINE,
+            named("telegram_status", person, json!({ "text": text })),
+        );
     }
     /// A message Helm starts (an alert). Sent only while the line is up, so it never waits in
     /// the queue for a later line; `false` when it was not sent.
@@ -395,7 +393,11 @@ impl LineHandle {
     pub fn telegram_ask_done(&self, person: &str, id: &str, text: &str) {
         let _ = self.push(
             ANY_LINE,
-            named("telegram_ask_done", person, json!({ "id": id, "text": text })),
+            named(
+                "telegram_ask_done",
+                person,
+                json!({ "id": id, "text": text }),
+            ),
         );
     }
     /// The turn's answer, sent by the hub as a new message; the status message goes.
@@ -414,7 +416,11 @@ impl LineHandle {
         if self.state() == LineState::Online {
             let _ = self.push(
                 self.this_line(),
-                named("voice_status", person, json!({ "turn": turn, "text": text })),
+                named(
+                    "voice_status",
+                    person,
+                    json!({ "turn": turn, "text": text }),
+                ),
             );
         }
     }
@@ -828,9 +834,10 @@ impl Client {
                     });
                     let reply = match admitted {
                         Err(text) => refusal(&id, text),
-                        Ok(admitted) => {
-                            answer(&id, executor.run(&caller, person.as_deref(), admitted).await)
-                        }
+                        Ok(admitted) => answer(
+                            &id,
+                            executor.run(&caller, person.as_deref(), admitted).await,
+                        ),
                     };
                     let _ = out.send(reply);
                 });
@@ -923,11 +930,7 @@ impl Client {
                         .remove(&key);
                     match r {
                         Ok(()) => {
-                            let _ = out.send(named(
-                                "telegram_ack",
-                                &r_person,
-                                json!({ "id": id }),
-                            ));
+                            let _ = out.send(named("telegram_ack", &r_person, json!({ "id": id })));
                         }
                         // Not acknowledged: the hub keeps it and sends it again on the next line.
                         Err(e) => log::warn!("relay: a Telegram message was not delivered: {e}"),
@@ -1115,7 +1118,12 @@ mod tests {
             *self.stops.lock().unwrap() += 1;
             Box::pin(async {})
         }
-        fn answer<'a>(&'a self, _person: Option<String>, _id: String, _index: usize) -> BoxFut<'a, ()> {
+        fn answer<'a>(
+            &'a self,
+            _person: Option<String>,
+            _id: String,
+            _index: usize,
+        ) -> BoxFut<'a, ()> {
             Box::pin(async {})
         }
     }
@@ -1389,8 +1397,8 @@ mod tests {
         ws.send(Message::Text(
             json!({"type": "telegram", "id": "m9", "text": "for Sam", "personId": "7",
                    "sentAt": 5})
-                .to_string()
-                .into(),
+            .to_string()
+            .into(),
         ))
         .await
         .unwrap();
@@ -1405,16 +1413,16 @@ mod tests {
         ws.send(Message::Text(
             json!({"type": "telegram", "id": "m10", "text": "for nobody", "personId": "9",
                    "sentAt": 5})
-                .to_string()
-                .into(),
+            .to_string()
+            .into(),
         ))
         .await
         .unwrap();
         ws.send(Message::Text(
             json!({"type": "call", "id": "c9", "client": "x", "tool": "app_list_chats",
                    "args": {}, "personId": "9"})
-                .to_string()
-                .into(),
+            .to_string()
+            .into(),
         ))
         .await
         .unwrap();
@@ -1429,11 +1437,18 @@ mod tests {
         );
         // Nothing from either unknown-person frame reached Helm.
         assert_eq!(
-            sink.got.lock().unwrap().iter().filter(|m| m.id == "m10").count(),
+            sink.got
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.id == "m10")
+                .count(),
             0
         );
         let ran = exec.ran.lock().unwrap();
-        assert!(!ran.iter().any(|(_, _, c)| c.tool == "app_list_chats" && c.args.get("x").is_some()));
+        assert!(!ran
+            .iter()
+            .any(|(_, _, c)| c.tool == "app_list_chats" && c.args.get("x").is_some()));
         assert_eq!(c.handle().state(), LineState::Online);
         task.abort();
     }
@@ -1675,10 +1690,7 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert_eq!(
-            *voice.stops.lock().unwrap(),
-            [(None, "t3".to_owned())]
-        );
+        assert_eq!(*voice.stops.lock().unwrap(), [(None, "t3".to_owned())]);
         assert_eq!(voice.heard.lock().unwrap()[0]["reply"], "r1");
         assert_eq!(
             *voice.presence.lock().unwrap(),

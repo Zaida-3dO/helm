@@ -1478,7 +1478,9 @@ async fn voice_turns_enter_one_chat_with_origin_voice_a_primer_once_and_a_new_ch
     // What the phone did not hear rides along on the next message, once, and only in the
     // conversation it belongs to.
     set_idle(&e, &chat);
-    let store = HeardStore::new(crate::people::voice_paths(&e.dir.path().join("prof"), &e.ctx.profile_id).heard);
+    let store = HeardStore::new(
+        crate::people::voice_paths(&e.dir.path().join("prof"), &e.ctx.profile_id).heard,
+    );
     let spoken = "Sure thing, the build finished and everything looks fine today.";
     store.sent("rA", &conversation, spoken, 5, t0 + 70_000);
     store.sent("rB", "another-conversation", "Elsewhere.", 1, t0 + 70_000);
@@ -1622,15 +1624,18 @@ async fn the_voice_sink_delivers_only_once_wired_and_stop_presence_and_fresh_act
     );
     // What the phone reports having heard is kept for the next message, and wakes nothing: a
     // report about an answer this PC sent counts, one about another does not.
-    let store = HeardStore::new(crate::people::voice_paths(&e.dir.path().join("prof"), &e.ctx.profile_id).heard);
+    let store = HeardStore::new(
+        crate::people::voice_paths(&e.dir.path().join("prof"), &e.ctx.profile_id).heard,
+    );
     let said = helm_core::now_ms();
     store.sent("rX", &live.conversation, "Hello there, friend.", 3, said);
     v.heard(
         None,
         vec![
-        json!({"reply": "rX", "state": "partial", "sentence": 2, "at": 1}),
-        json!({"reply": "rY", "state": "none", "at": 1}),
-    ])
+            json!({"reply": "rX", "state": "partial", "sentence": 2, "at": 1}),
+            json!({"reply": "rY", "state": "none", "at": 1}),
+        ],
+    )
     .await;
     assert_eq!(
         store.pending(Some(&live.conversation), said).lines,
@@ -1640,7 +1645,12 @@ async fn the_voice_sink_delivers_only_once_wired_and_stop_presence_and_fresh_act
     assert!(voice::load_tag(&tag_path).is_none());
 
     // What Settings shows: the saved policy, and no chat once the tag is gone.
-    let view = vs::voice_view(&e.db, &e.dir.path().join("prof"), &e.ctx.profile_id, helm_core::now_ms());
+    let view = vs::voice_view(
+        &e.db,
+        &e.dir.path().join("prof"),
+        &e.ctx.profile_id,
+        helm_core::now_ms(),
+    );
     assert!(view.chat.is_none());
     assert_eq!(
         (view.model.as_str(), view.idle_minutes),
@@ -1801,8 +1811,8 @@ fn things_to_show_go_up_before_the_answer_and_stay_claimed_until_it_is_sent() {
     };
     let heard_dir = tempfile::tempdir().unwrap();
     let heard = HeardStore::at(heard_dir.path());
-    let mut out =
-        vs::Outbox::new(wire.clone(), String::new(), shown.clone(), "chat1".into()).with_heard(heard.clone());
+    let mut out = vs::Outbox::new(wire.clone(), String::new(), shown.clone(), "chat1".into())
+        .with_heard(heard.clone());
     let live = vs::Live {
         turn: Some("t1".into()),
         conversation: "c1".into(),

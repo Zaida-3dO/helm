@@ -283,7 +283,10 @@ impl AppExecutor {
         crate::people::profile_for(&db, person)
             .ok()
             .map(|p| p.id)
-            .and_then(|pid| db.snapshot(|tx| helm_profiles::store::chat_ids_for(tx, &pid)).ok())
+            .and_then(|pid| {
+                db.snapshot(|tx| helm_profiles::store::chat_ids_for(tx, &pid))
+                    .ok()
+            })
             .unwrap_or_default()
             .into_iter()
             .collect()
@@ -303,12 +306,7 @@ impl AppExecutor {
             keep(rows);
         }
         for key in [
-            "needsYou",
-            "running",
-            "unread",
-            "stalled",
-            "flagged",
-            "muted",
+            "needsYou", "running", "unread", "stalled", "flagged", "muted",
         ] {
             if let Some(rows) = r.get_mut(key).and_then(Value::as_array_mut) {
                 keep(rows);
@@ -463,7 +461,11 @@ mod tests {
             .unwrap_err();
         assert!(!p.changed);
         let r = e
-            .run("remote", None, gate::admit("app_list_chats", &json!({})).unwrap())
+            .run(
+                "remote",
+                None,
+                gate::admit("app_list_chats", &json!({})).unwrap(),
+            )
             .await
             .unwrap_err();
         assert!(!r.changed);
@@ -471,10 +473,7 @@ mod tests {
 
     #[test]
     fn listings_keep_only_the_visible_chats() {
-        let ids: HashSet<String> = ["a", "c"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
+        let ids: HashSet<String> = ["a", "c"].into_iter().map(str::to_owned).collect();
         // app_list_chats items, and every group of app_list_attention, key on chatId.
         let chats = json!({
             "chats": [{"chatId": "a"}, {"chatId": "b"}, {"chatId": "c"}],

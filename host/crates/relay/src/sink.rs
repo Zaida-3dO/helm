@@ -480,7 +480,11 @@ impl ChatPort for RealPort<'_> {
                 "profiles_assign_chats",
                 json!({ "chatIds": [&id], "profileId": pid }),
             )) {
-                log::warn!("relay: the new {} chat could not be kept to its profile: {}", self.label, e.message);
+                log::warn!(
+                    "relay: the new {} chat could not be kept to its profile: {}",
+                    self.label,
+                    e.message
+                );
             }
         }
         Ok(id)
@@ -1097,9 +1101,7 @@ impl ChatSink {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .entry(profile.id.clone())
-            .or_insert_with(|| {
-                Arc::new(Mutex::new(telegram::load_answered(&paths.answered)))
-            })
+            .or_insert_with(|| Arc::new(Mutex::new(telegram::load_answered(&paths.answered))))
             .clone();
         Ok(Ctx {
             rt: (*rt).clone(),
@@ -1204,19 +1206,17 @@ impl TelegramSink for ChatSink {
         })
     }
 
-    fn answer<'a>(
-        &'a self,
-        person: Option<String>,
-        id: String,
-        index: usize,
-    ) -> BoxFut<'a, ()> {
+    fn answer<'a>(&'a self, person: Option<String>, id: String, index: usize) -> BoxFut<'a, ()> {
         Box::pin(async move {
             let Some(up) = self.up.get().cloned() else {
                 return;
             };
             let who = person.clone().unwrap_or_default();
             let Some(ask) = self.asks.take(&id, index) else {
-                up.notify(&who, "That request is no longer waiting, so your tap was not used.");
+                up.notify(
+                    &who,
+                    "That request is no longer waiting, so your tap was not used.",
+                );
                 return;
             };
             let label = ask.options[index].clone();
@@ -1254,9 +1254,10 @@ impl TelegramSink for ChatSink {
                         helm_chats::types::ContextKind::Telegram,
                         &format!("Answered from Telegram: {label}"),
                     ),
-                    Err(e) => {
-                        up.notify(&c.person, &format!("Helm could not pass it on: {}", e.message))
-                    }
+                    Err(e) => up.notify(
+                        &c.person,
+                        &format!("Helm could not pass it on: {}", e.message),
+                    ),
                 }
                 return;
             }
@@ -1278,9 +1279,7 @@ impl TelegramSink for ChatSink {
                 Err(AnswerError::Gone) => up.notify(&c.person, &nothing),
                 Err(AnswerError::Failed(why)) => up.notify(
                     &c.person,
-                    &format!(
-                        "Your \"{label}\" was not used: Helm could not answer it ({why})."
-                    ),
+                    &format!("Your \"{label}\" was not used: Helm could not answer it ({why})."),
                 ),
             }
         })

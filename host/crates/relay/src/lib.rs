@@ -148,11 +148,8 @@ pub fn register_services(services: &mut Services, _events: &Arc<dyn EventSink>) 
         client.restore_sharing(household::load(&db));
         let db = db.clone();
         client.set_person_check(Arc::new(move |p: &str| {
-            db.snapshot(|tx| {
-                helm_profiles::store::profile_for_person(tx, p)
-                    .map(|o| o.is_some())
-            })
-            .unwrap_or(false)
+            db.snapshot(|tx| helm_profiles::store::profile_for_person(tx, p).map(|o| o.is_some()))
+                .unwrap_or(false)
         }));
     }
     services.insert(sink);
@@ -309,7 +306,12 @@ fn telegram_view(ctx: &OpCtx, args: &Value) -> Result<Value, ApiError> {
     let profile = ctx.services.need::<Profile>()?;
     let db = ctx.services.need::<helm_core::db::Database>()?;
     let pid = channel_profile(ctx, args)?;
-    to_value(&sink::telegram_view(&db, &profile.dir, &pid, helm_core::now_ms()))
+    to_value(&sink::telegram_view(
+        &db,
+        &profile.dir,
+        &pid,
+        helm_core::now_ms(),
+    ))
 }
 
 fn telegram_get(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {

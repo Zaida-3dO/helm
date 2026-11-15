@@ -54,8 +54,7 @@ pub fn migrate(profile_dir: &Path, db: &Database) {
     let Some(home) = home else {
         return;
     };
-    done
-        .lock()
+    done.lock()
         .unwrap_or_else(|p| p.into_inner())
         .insert(profile_dir.to_path_buf());
     let to = person_dir(profile_dir, &home);
@@ -181,8 +180,14 @@ mod tests {
             assert!(!relay.join(name).exists(), "{name} was left behind");
         }
         let att = telegram::attachments_dir(&prof, &home.id);
-        assert!(att.join("pic.png").is_file(), "the attachments did not move");
-        assert!(!old_att.join("pic.png").exists(), "left behind in the old folder");
+        assert!(
+            att.join("pic.png").is_file(),
+            "the attachments did not move"
+        );
+        assert!(
+            !old_att.join("pic.png").exists(),
+            "left behind in the old folder"
+        );
     }
 
     #[test]

@@ -16,8 +16,8 @@ use helm_devices::host::HostPort;
 use helm_devices::link::{BoxFut, DeviceLink, FrameCb};
 use helm_devices::serve::{ChatPort, ChatState, PortResult};
 use helm_devices::wire::{
-    AnswerArgs, ArchiveArgs, CreateArgs, DeviceInfo, DevicePerson, Frame, Hello, RenameArgs,
-    RemoteChat, SetModelArgs, ShareArgs,
+    AnswerArgs, ArchiveArgs, CreateArgs, DeviceInfo, DevicePerson, Frame, Hello, RemoteChat,
+    RenameArgs, SetModelArgs, ShareArgs,
 };
 use helm_devices::{EventTap, Service};
 use serde_json::Value;
@@ -51,7 +51,11 @@ pub struct HubLink {
 }
 
 impl HubLink {
-    pub fn new(line: Arc<LineHandle>, read_person: PersonFn, read_people: PeopleFn) -> Arc<HubLink> {
+    pub fn new(
+        line: Arc<LineHandle>,
+        read_person: PersonFn,
+        read_people: PeopleFn,
+    ) -> Arc<HubLink> {
         let person = read_person();
         Arc::new(HubLink {
             line,
@@ -146,7 +150,10 @@ struct ChannelPort {
 
 impl ChatPort for ChannelPort {
     fn people(&self) -> Vec<DevicePerson> {
-        let rows = match self.db.snapshot(|tx| helm_profiles::store::linked_claims(tx)) {
+        let rows = match self
+            .db
+            .snapshot(|tx| helm_profiles::store::linked_claims(tx))
+        {
             Ok(rows) => rows,
             Err(_) => return Vec::new(),
         };

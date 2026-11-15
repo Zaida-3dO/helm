@@ -1078,7 +1078,11 @@ impl ChatVoice {
     /// Every profile's tagged voice chat, refreshed. A chat is a voice chat when any profile's
     /// tag names it.
     fn all_tagged(&self) -> Vec<(String, Option<String>)> {
-        let db = match self.exec.wiring().and_then(|w| w.services.get::<Database>()) {
+        let db = match self
+            .exec
+            .wiring()
+            .and_then(|w| w.services.get::<Database>())
+        {
             Some(db) => db,
             None => return vec![],
         };
@@ -1098,7 +1102,9 @@ impl ChatVoice {
 
     /// Whether `chat` is the voice chat of any profile.
     pub fn is_voice_chat(&self, chat: &str) -> bool {
-        self.all_tagged().iter().any(|(_, t)| t.as_deref() == Some(chat))
+        self.all_tagged()
+            .iter()
+            .any(|(_, t)| t.as_deref() == Some(chat))
     }
 
     /// The profile whose voice chat `chat` is, when it is one.
@@ -1362,9 +1368,7 @@ impl VoiceSink for ChatVoice {
             };
             let live = {
                 let cell = self.live_for(&c.profile_id);
-                let mut l = cell
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
+                let mut l = cell.lock().unwrap_or_else(|p| p.into_inner());
                 l.turn = Some(turn.id);
                 l.mode = Mode::parse(&turn.mode);
                 l.conversation = conversation;
@@ -1413,11 +1417,7 @@ impl VoiceSink for ChatVoice {
         })
     }
 
-    fn heard<'a>(
-        &'a self,
-        person: Option<String>,
-        reports: Vec<Value>,
-    ) -> BoxFut<'a, ()> {
+    fn heard<'a>(&'a self, person: Option<String>, reports: Vec<Value>) -> BoxFut<'a, ()> {
         Box::pin(async move {
             // Kept for the next message; the chat is never woken for a report.
             let Ok(c) = self.ctx(person.as_deref()) else {

@@ -619,9 +619,7 @@ pub fn linked_person_ids(conn: &Connection) -> rusqlite::Result<Vec<String>> {
 /// The linked profiles as the device frame announces them: profile id, hub person and the home
 /// flag, the home profile's first. The channel switches are read per profile from that profile's
 /// own policy files by whoever assembles the frame.
-pub fn linked_claims(
-    conn: &Connection,
-) -> rusqlite::Result<Vec<(String, String, bool)>> {
+pub fn linked_claims(conn: &Connection) -> rusqlite::Result<Vec<(String, String, bool)>> {
     conn.prepare(
         "SELECT id, hub_person_id, is_home FROM profiles
          WHERE hub_person_id IS NOT NULL AND hub_person_id <> ''
@@ -1112,7 +1110,10 @@ mod tests {
             // ensure list holds every named profile still without a hub person.
             let claims = linked_claims(tx)?;
             assert_eq!(
-                claims.iter().map(|(_, p, _)| p.as_str()).collect::<Vec<_>>(),
+                claims
+                    .iter()
+                    .map(|(_, p, _)| p.as_str())
+                    .collect::<Vec<_>>(),
                 ["7", "9"]
             );
             assert_eq!(claims[0], (home.id.clone(), "7".into(), true));

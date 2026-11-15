@@ -275,7 +275,8 @@ impl Asks {
             };
             let id = new_id();
             let person = o.ask.person.clone();
-            step.ask.push((id.clone(), person, o.text, o.ask.options.clone()));
+            step.ask
+                .push((id.clone(), person, o.text, o.ask.options.clone()));
             m.insert(id, o.ask);
         }
         step

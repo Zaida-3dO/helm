@@ -897,7 +897,11 @@ mod tests {
             .unwrap()
             .unwrap()
             .id;
-        voice::save_tag(&crate::people::voice_paths(dir.path(), &pid).tag, Some(&tag)).unwrap();
+        voice::save_tag(
+            &crate::people::voice_paths(dir.path(), &pid).tag,
+            Some(&tag),
+        )
+        .unwrap();
         assert!(is_voice_chat(&db, dir.path(), "c1"));
         assert!(!is_voice_chat(&db, dir.path(), "c2"));
     }
