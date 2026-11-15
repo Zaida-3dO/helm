@@ -66,13 +66,13 @@ fn env_with(own_hub_ok: bool) -> Env {
     s.insert(Arc::new(helm_mcp::McpStore::new(&profile.dir, creds)));
     s.insert(Arc::new(helm_updates::UpdateService::new(
         db.clone(),
-        events,
+        events.clone(),
         helm_updates::scan::Version::parse("2.0.1").unwrap(),
     )));
     if own_hub_ok {
         s.insert(Arc::new(AllowOwnHub));
     }
-    let rules = crate::pref_rules::pref_rules(&s);
+    let rules = crate::pref_rules::pref_rules(&s, &events);
     s.insert(Arc::new(helm_hosttools::PrefRules(rules)));
     s.insert(Arc::new(profile));
     s.insert(Arc::new(platform));
@@ -241,6 +241,17 @@ fn staged_settings_apply_all_or_nothing_and_never_show_the_code() {
             false,
             false,
         ),
+        // The switch is turned off by someone else between the card and the approval: the card
+        // said "on", so nothing applies, not even the pairing.
+        (
+            "moved since the card",
+            Hub::Down,
+            "Pat",
+            false,
+            "Nothing changed: Let other devices use chats on this PC is not what the card showed",
+            false,
+            false,
+        ),
     ];
     for (case, hub, person, remove_folder, outcome_starts, paired, changed) in rows {
         let e = env();
@@ -284,9 +295,8 @@ fn staged_settings_apply_all_or_nothing_and_never_show_the_code() {
             std::fs::remove_dir(&folder).unwrap();
         }
 
-        // The switch is turned off by someone else between the card and the approval: the card
-        // said "on", so the outcome names the difference.
-        if changed {
+        let moved = case == "moved since the card";
+        if moved {
             e.db.write(|tx| prefs::set(tx, DEVICE_RUN_FROM_OTHERS, &Value::Bool(false)))
                 .unwrap();
         }
@@ -301,7 +311,7 @@ fn staged_settings_apply_all_or_nothing_and_never_show_the_code() {
         assert_eq!(e.paired().usable(), paired, "{case}");
         assert_eq!(
             e.pref("deviceRunFromOthers"),
-            changed.then_some(Value::Bool(false)),
+            (changed || moved).then_some(Value::Bool(false)),
             "{case}: the switches change only with everything else"
         );
         assert_eq!(
@@ -313,10 +323,6 @@ fn staged_settings_apply_all_or_nothing_and_never_show_the_code() {
             assert_eq!(e.paired().person_id, "3");
             assert_eq!(e.pref("deviceHouseholdRun"), Some(Value::Bool(false)));
             assert!(outcome.contains("The code file can be deleted."));
-            assert!(
-                outcome.contains("was off, not on as the card said."),
-                "{outcome}"
-            );
             assert!(e.sink.kinds().contains(&"preferences".to_string()));
         } else {
             assert!(
@@ -498,4 +504,23 @@ fn any_high_setting_is_staged_applied_and_left_for_the_users_undo() {
     assert_eq!(listed.len(), 4, "{listed:?}");
     assert!(listed.iter().all(|(_, c)| c == "home"));
     assert!(e.sink.kinds().contains(&"external_settings".to_string()));
+    // The household switches reached the live line too, not just the table.
+    assert!(e.sink.kinds().contains(&"household_changed".to_string()));
+
+    // A setting that moved after the card was made is not applied: the user approved the lines
+    // they saw, not whatever the setting has become.
+    let staged = e.stage("home", json!({"nativeMcp": true})).unwrap();
+    e.db.write(|tx| {
+        helm_core::prefs::set(
+            tx,
+            helm_core::prefs::PrefKey::classified("nativeMcp"),
+            &json!(true),
+        )
+    })
+    .unwrap();
+    let outcome = e.approve(staged["requestId"].as_str().unwrap());
+    assert!(
+        outcome.starts_with("Nothing changed: nativeMcp is not what the card showed"),
+        "{outcome}"
+    );
 }

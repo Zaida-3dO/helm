@@ -2,17 +2,22 @@
 //! generic writer cannot know about the key's value. The relay crate's own rules (the update
 //! folder and the household switches) are in `helm_relay::pref_rules`.
 //!
-//! - `githubPrView` keeps a revision that its own save compares, so a change moves it on.
+//! - `githubPrView` keeps a revision that its own save compares, so a change moves it on, and
+//!   announces the switch and forgets the rate-limit pause as its own save does.
 //! - `defaultBoard` must name an open board, or ask each time.
 //! - `globalHotkey` is normalised the way Settings → Shell normalises it; the shell adopts the
 //!   stored value as soon as the change is announced.
 
 use helm_hosttools::PrefRule;
+use helm_ipc::{AppEvent, EventSink};
 use rusqlite::Transaction;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-struct GithubPrView;
+struct GithubPrView {
+    github: Option<Arc<helm_github::GitHub>>,
+    events: Arc<dyn EventSink>,
+}
 
 impl PrefRule for GithubPrView {
     fn key(&self) -> &'static str {
@@ -31,6 +36,21 @@ impl PrefRule for GithubPrView {
             .ok_or("githubPrView is {enabled: true or false}.")?;
         let revision = helm_github::read_settings(tx).revision;
         Ok(json!({"enabled": enabled, "revision": revision.saturating_add(1)}))
+    }
+
+    fn after_commit(&self, after: Option<&Value>) {
+        // No value is the default: off.
+        let enabled = after
+            .and_then(|v| v.get("enabled"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !enabled {
+            if let Some(gh) = &self.github {
+                gh.client.clear_pause();
+            }
+        }
+        self.events
+            .emit(AppEvent::new("github_settings").with("enabled", enabled));
     }
 }
 
@@ -86,12 +106,18 @@ impl PrefRule for GlobalHotkey {
 }
 
 /// The rules of the preference keys the app wires: its own and the relay crate's.
-pub fn pref_rules(services: &helm_ipc::Services) -> helm_hosttools::PrefRules {
+pub fn pref_rules(
+    services: &helm_ipc::Services,
+    events: &Arc<dyn helm_ipc::EventSink>,
+) -> helm_hosttools::PrefRules {
     let mut rules: Vec<Arc<dyn PrefRule>> = vec![
-        Arc::new(GithubPrView),
+        Arc::new(GithubPrView {
+            github: services.get::<helm_github::GitHub>(),
+            events: events.clone(),
+        }),
         Arc::new(DefaultBoard),
         Arc::new(GlobalHotkey),
     ];
-    rules.extend(helm_relay::pref_rules::pref_rules(services));
+    rules.extend(helm_relay::pref_rules::pref_rules(services, events));
     helm_hosttools::PrefRules(rules)
 }

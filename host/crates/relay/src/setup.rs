@@ -274,22 +274,6 @@ fn code_file_looks_right(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether this chat belongs to someone other than this PC's own person: its profile is linked
-/// to a hub person who is not the home profile's.
-fn household_member(tx: &rusqlite::Connection, chat_id: &str) -> bool {
-    let Ok(Some(p)) = helm_profiles::store::profile_of_chat(tx, chat_id) else {
-        return false;
-    };
-    if p.is_home {
-        return false;
-    }
-    let home = helm_profiles::store::home(tx)
-        .ok()
-        .flatten()
-        .and_then(|h| h.hub_person_id);
-    p.hub_person_id.is_some_and(|id| Some(id) != home)
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PairingArgs {
@@ -379,7 +363,7 @@ fn build(
     if changes.is_empty() {
         return Err("Stage at least one change.".into());
     }
-    if changes.len() > MAX_SETTINGS + 1 {
+    if changes.len() > MAX_SETTINGS + usize::from(changes.contains_key(PAIRING)) {
         return Err(format!("Stage at most {MAX_SETTINGS} settings at once."));
     }
     for k in changes.keys().filter(|k| k.as_str() != PAIRING) {
@@ -388,7 +372,7 @@ fn build(
         }
     }
     let member = db
-        .snapshot(|tx| Ok::<_, rusqlite::Error>(household_member(tx, chat_id)))
+        .snapshot(|tx| Ok::<_, rusqlite::Error>(helm_profiles::store::is_household_member(tx, chat_id)))
         .map_err(|_| "The settings could not be read.".to_owned())?;
     if member {
         return Err(
@@ -567,16 +551,30 @@ fn apply_staged(
         .iter()
         .map(|(k, c)| (k.clone(), c.value.clone()))
         .collect();
-    // (a) Every check that changes nothing, again.
+    // (a) Every check that changes nothing, again. The card showed each setting going from one
+    // value to another: if either end is different now, the user approved something else.
     if !wanted.is_empty() {
-        if let Err(why) = helm_hosttools::settings::apply_approved(
+        let would = match helm_hosttools::settings::apply_approved(
             services,
             events.as_ref(),
             chat_id,
             &wanted,
             false,
         ) {
-            return format!("Nothing changed: {why}");
+            Ok(w) => w,
+            Err(why) => return format!("Nothing changed: {why}"),
+        };
+        for ((key, _), w) in wanted.iter().zip(&would) {
+            let moved = s.settings.get(key).is_some_and(|c| {
+                effective(key, w.before.as_ref()) != c.from
+                    || effective(key, w.after.as_ref()) != c.to
+            });
+            if moved {
+                return format!(
+                    "Nothing changed: {} is not what the card showed any more. Stage it again.",
+                    label(key)
+                );
+            }
         }
     }
     let code = match &s.hub_pairing {
