@@ -8,7 +8,7 @@ use helm_hub::auth::{Client, Scopes};
 use helm_hub::lines::Lines;
 use helm_hub::mcp::Options;
 use helm_hub::registry::Registry;
-use helm_hub::relay::{Line, Upstream, OFFLINE};
+use helm_hub::relay::{Channel, Line, Upstream, OFFLINE};
 use helm_hub::server::{router, AppState};
 use helm_hub::store::Store;
 use helm_hub::telegram::{
@@ -2076,6 +2076,26 @@ async fn wait_frame(rx: &mut mpsc::UnboundedReceiver<String>, what: &str) -> Val
     panic!("no {what} frame arrived");
 }
 
+/// Wait for a condition the hub reaches on its own (a claim from a `device` frame, say).
+async fn wait_until(cond: impl Fn() -> bool) {
+    for _ in 0..400 {
+        if cond() {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("the condition never became true");
+}
+
+/// The Telegram chats a `sendMessage` went to, in order.
+fn sent_chats(api: &FakeApi) -> Vec<i64> {
+    api.calls()
+        .into_iter()
+        .filter(|(method, _)| method == "sendMessage")
+        .map(|(_, body)| body["chat_id"].as_i64().unwrap_or_default())
+        .collect()
+}
+
 /// The link flow for a person who brings their own Telegram account: a PC asks for a link with
 /// `tg_link`, the person taps the address it answers on their phone, and the code is what proves
 /// which account is theirs. Their bridge is made on the spot, their messages go down their own
@@ -2270,6 +2290,55 @@ async fn a_person_links_their_own_telegram_and_their_bridge_takes_their_messages
         (Some("mine"), Some(owner.to_string().as_str()))
     );
 
+    // What Kim's chats send back goes to the linked account.
+    api.clear();
+    tel.on_upstream(kim, Upstream::TelegramFinal("the answer".into()))
+        .await;
+    assert_eq!(
+        sent_chats(&api),
+        vec![LINKED_ID],
+        "the answer did not reach the linked account"
+    );
+
+    // Kim's laptop then takes the owner's Telegram, the way "Use this PC" on another person's
+    // profile does: the owner's messages go down Kim's line, and their answers come back there.
+    assert!(kline.receive(
+        kgen,
+        &json!({"type": "device", "uid": "uid-laptop", "name": "Laptop", "run": true,
+        "people": [
+            {"personId": kim.to_string(), "telegram": true, "voice": true},
+            {"personId": owner.to_string(), "telegram": true, "voice": true}
+        ]})
+        .to_string()
+    ));
+    wait_until(|| {
+        lines
+            .candidate_names(owner, Channel::Telegram)
+            .iter()
+            .any(|name| name == "laptop")
+    })
+    .await;
+    lines.pin(owner, Channel::Telegram, kim_pc);
+    assert_eq!(
+        tel.on_update(&update(OWNER, "on another pc", now / 1000), now)
+            .await,
+        Handled::Forwarded
+    );
+    let moved = wait_frame(&mut krx, "telegram").await;
+    assert_eq!(
+        (moved["text"].as_str(), moved["personId"].as_str()),
+        (Some("on another pc"), Some(owner.to_string().as_str())),
+        "a message routed to another person's PC never arrived"
+    );
+    api.clear();
+    tel.on_upstream(owner, Upstream::TelegramFinal("answered there".into()))
+        .await;
+    assert_eq!(
+        sent_chats(&api),
+        vec![OWNER],
+        "the answer from that PC did not reach the phone"
+    );
+
     // Unlinking makes them a stranger again.
     assert!(kline.receive(
         kgen,
@@ -2285,5 +2354,19 @@ async fn a_person_links_their_own_telegram_and_their_bridge_takes_their_messages
         tel.on_update(&update(LINKED_ID, "again", now / 1000), now)
             .await,
         Handled::Ignored
+    );
+    // And the unlinked phone stops hearing that person at once: no answer, no alert, no status
+    // line, even though their bridge is still standing for their other accounts.
+    api.clear();
+    tel.on_upstream(kim, Upstream::TelegramFinal("still listening?".into()))
+        .await;
+    tel.on_upstream(kim, Upstream::TelegramNotify("an alert".into()))
+        .await;
+    tel.on_upstream(kim, Upstream::TelegramStatus("working".into()))
+        .await;
+    assert!(
+        api.calls().is_empty(),
+        "an unlinked account was still written to: {:?}",
+        api.calls()
     );
 }

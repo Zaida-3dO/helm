@@ -1012,12 +1012,23 @@ impl Bridge {
         }
     }
 
-    /// Stop answering an account that has been unlinked (or moved to another person).
+    /// Stop answering an account that has been unlinked (or moved to another person). It loses
+    /// everything the bridge owed that chat: its place as the chat answers and alerts go to, the
+    /// one live status message, and any ask buttons still waiting for a tap. Until this was done,
+    /// an unlinked phone kept receiving that person's answers.
     pub fn unallow(&self, id: i64) {
         self.allowed
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .retain(|a| *a != id);
+        let mut st = self.st();
+        if st.reply_chat == Some(id) {
+            st.reply_chat = None;
+            st.status_id = None;
+            st.status_text = None;
+            st.pending_status = None;
+        }
+        st.asks.retain(|ask| ask.chat != id);
     }
 
     /// `personId` for a frame this bridge sends down the line.
