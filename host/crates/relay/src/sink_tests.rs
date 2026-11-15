@@ -281,6 +281,7 @@ fn env() -> Env {
     helm_chats::register_migrations(&mut reg);
     helm_consent::register_migrations(&mut reg);
     helm_profiles::register_migrations(&mut reg);
+    helm_devices::register_migrations(&mut reg);
     let db = Arc::new(Database::open(&dir.path().join("t.sqlite3"), &reg).unwrap());
     let rt = ChatRuntime::new(
         db.clone(),
@@ -957,6 +958,195 @@ async fn a_relayed_outside_send_is_stored_as_another_chat_never_as_typed() {
     assert_eq!(s.len(), 1);
     assert_eq!(s[0].1, "other_chat", "stored as another agent's message");
     assert!(s[0].4.contains("from remote"));
+}
+
+/// A chat some other PC runs, as this PC's copy knows it; the stand-in for the watcher answers
+/// only what an outside call touches (list, read, send) and records the sends that cross.
+const MIRRORED: &str = "0f0f0f0f-7777-8888-9999-000000000001";
+const MIRRORED_ARCHIVED: &str = "0f0f0f0f-7777-8888-9999-000000000002";
+
+#[derive(Default)]
+struct FakeWatcher {
+    sent: Mutex<Vec<helm_chats::types::ChatSendArgs>>,
+}
+
+impl helm_chats::remote::RemoteChats for FakeWatcher {
+    fn owns(&self, chat_id: &str) -> Option<String> {
+        matches!(chat_id, MIRRORED | MIRRORED_ARCHIVED).then(|| "dev-2".to_owned())
+    }
+    fn this_device(&self) -> String {
+        "dev-1".to_owned()
+    }
+    fn device_name(&self, device_uid: &str) -> String {
+        device_uid.to_owned()
+    }
+    fn page(
+        &self,
+        a: helm_chats::types::TranscriptPageArgs,
+    ) -> helm_chats::remote::Fut<helm_chats::remote::Res> {
+        assert_eq!(a.chat_id, MIRRORED, "only the living copy is paged");
+        Box::pin(async move {
+            Ok(json!({
+                "messages": [{"id": 2, "role": "user", "text": "Over there.", "timestamp": 900}],
+                "hasOlder": false,
+            }))
+        })
+    }
+    fn send(
+        &self,
+        a: helm_chats::types::ChatSendArgs,
+    ) -> helm_chats::remote::Fut<helm_chats::remote::Res> {
+        self.sent.lock().unwrap().push(a);
+        Box::pin(async move { Ok(json!({"submission": {"state": "accepted"}, "chat": {}})) })
+    }
+    fn get(&self, _chat_id: String) -> helm_chats::remote::Fut<helm_chats::remote::Res> {
+        Box::pin(async { panic!("not used") })
+    }
+    fn stop(&self, _chat_id: String) -> helm_chats::remote::Fut<helm_chats::remote::Res> {
+        Box::pin(async { panic!("not used") })
+    }
+    fn answer(
+        &self,
+        _a: helm_chats::types::InteractionAnswerArgs,
+    ) -> helm_chats::remote::Fut<helm_chats::remote::Res> {
+        Box::pin(async { panic!("not used") })
+    }
+    fn set_model(
+        &self,
+        _a: helm_chats::types::ChatSetModelArgs,
+    ) -> helm_chats::remote::Fut<helm_chats::remote::Res> {
+        Box::pin(async { panic!("not used") })
+    }
+    fn rename(
+        &self,
+        _chat_id: String,
+        _title: String,
+    ) -> helm_chats::remote::Fut<helm_chats::remote::Res> {
+        Box::pin(async { panic!("not used") })
+    }
+    fn archive(
+        &self,
+        _chat_id: String,
+        _archived: bool,
+    ) -> helm_chats::remote::Fut<helm_chats::remote::Res> {
+        Box::pin(async { panic!("not used") })
+    }
+    fn draft_save(
+        &self,
+        _a: helm_chats::types::DraftSaveArgs,
+    ) -> helm_chats::remote::Fut<helm_chats::remote::Res> {
+        Box::pin(async { panic!("not used") })
+    }
+    fn catalogue(&self, _device_uid: String) -> helm_chats::remote::Fut<helm_chats::remote::Res> {
+        Box::pin(async { panic!("not used") })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn outside_calls_reach_reads_and_sends_cross_to_another_pc() {
+    let e = env();
+    // Sam, linked to a hub person, and the other PC's chats as this PC's copies know them.
+    e.db
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO profiles (id, name, colour, hub_person_id, is_home, created_at)
+                 VALUES ('p-sam', 'Sam', '', 'person-s', 0, 0);
+                 INSERT INTO mirror_chats (chat_id, device_uid, record, person_id, shared_with) VALUES
+                   ('0f0f0f0f-7777-8888-9999-000000000001', 'dev-2',
+                    '{\"title\":\"On the laptop\",\"archived\":false,\"status\":\"idle\",\"updatedAt\":900,\"createdAt\":800,\"harness\":\"claude\",\"pinned\":false,\"muted\":false}',
+                    'person-s', '[]'),
+                   ('0f0f0f0f-7777-8888-9999-000000000002', 'dev-2',
+                    '{\"title\":\"Archived there\",\"archived\":true,\"status\":\"idle\",\"updatedAt\":800,\"createdAt\":800,\"harness\":\"claude\",\"pinned\":false,\"muted\":false}',
+                    'person-s', '[]');",
+            )
+        })
+        .unwrap();
+    let watcher = Arc::new(FakeWatcher::default());
+    let slot = helm_chats::remote::RemoteSlot::default();
+    slot.attach(watcher.clone());
+    let mut services = helm_ipc::Services::new();
+    services.insert(e.db.clone());
+    services.insert(Arc::new(e.ctx.rt.clone()));
+    services.insert(Arc::new(slot));
+    let mut reg = helm_hosttools::HostToolRegistry::new();
+    helm_chats::tools::register_host_tools(&mut reg);
+    let exec = AppExecutor::default();
+    exec.wire(crate::exec::Wiring {
+        services: Arc::new(services),
+        events: Arc::new(helm_ipc::NullSink),
+        tools: Arc::new(helm_hosttools::HostTools::new(Arc::new(reg))),
+    });
+    use crate::client::Executor;
+    // A listing for Sam with the other PCs in scope shows their chat there; the home person,
+    // whose copies own nothing, does not. Nothing limits which PC is asked; what a listing
+    // shows is the acting person's view.
+    let call =
+        crate::gate::admit("app_list_chats", &json!({"person": "any", "device": "any"})).unwrap();
+    let r = exec.run("remote", Some("person-s"), call).await.unwrap();
+    let ids: Vec<&str> = r["chats"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["chatId"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&MIRRORED), "{ids:?}");
+    let call =
+        crate::gate::admit("app_list_chats", &json!({"person": "any", "device": "any"})).unwrap();
+    let r = exec.run("remote", None, call).await.unwrap();
+    assert!(
+        !r["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["chatId"] == MIRRORED),
+        "the home person's copies hold nothing of it: {r}"
+    );
+    // An outside read of that chat answers from the copy and the watcher's page.
+    let call = crate::gate::admit("app_read_chat", &json!({"chatId": MIRRORED})).unwrap();
+    let r = exec.run("remote", None, call).await.unwrap();
+    assert_eq!(r["chat"]["title"], "On the laptop");
+    assert_eq!(r["messages"][0]["text"], "Over there.");
+    // A send for Sam crosses, framed as acting for them, steer, and not the composer's.
+    let call = crate::gate::admit(
+        "app_send_message",
+        &json!({"chatId": MIRRORED, "message": "Cross-PC note.", "mode": "steer"}),
+    )
+    .unwrap();
+    let r = exec
+        .run("remote-caller", Some("person-s"), call)
+        .await
+        .unwrap();
+    assert_eq!(r["delivered"], true);
+    assert_eq!(r["title"], "On the laptop");
+    {
+        let mut s = watcher.sent.lock().unwrap();
+        assert_eq!(s.len(), 1);
+        let sent = s.pop().unwrap();
+        assert_eq!(sent.action, helm_chats::types::SendAction::Steer);
+        assert_eq!(sent.origin, Some(helm_chats::types::SendOrigin::Action));
+        assert!(
+            sent.text
+                .starts_with("[Message from an agent acting for \"Sam\""),
+            "{}",
+            sent.text
+        );
+        assert!(sent.text.ends_with("\n\nCross-PC note."));
+    }
+    // An archived copy refuses, and a chat no copy holds stays unknown.
+    let call = crate::gate::admit(
+        "app_send_message",
+        &json!({"chatId": MIRRORED_ARCHIVED, "message": "x", "mode": "steer"}),
+    )
+    .unwrap();
+    let e1 = exec.run("remote-caller", None, call).await.unwrap_err();
+    assert!(e1.text.contains("archived"), "{}", e1.text);
+    let call = crate::gate::admit(
+        "app_send_message",
+        &json!({"chatId": "0f0f0f0f-7777-8888-9999-000000000003", "message": "x", "mode": "steer"}),
+    )
+    .unwrap();
+    let e2 = exec.run("remote-caller", None, call).await.unwrap_err();
+    assert!(e2.text.contains("no chat"), "{}", e2.text);
 }
 
 fn wired_sink(e: &Env) -> ChatSink {

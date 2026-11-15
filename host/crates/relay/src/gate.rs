@@ -137,8 +137,20 @@ pub const TABLE: &[(&str, Class)] = &[
 fn allowed_args(tool: &str) -> &'static [&'static str] {
     match tool {
         // No includeCurrent: an outside caller has no "current" chat. "all" asks for every
-        // chat on the PC, not just the ones the calling person sees.
-        "app_list_chats" => &["query", "projectId", "archived", "limit", "offset", "all"],
+        // chat the tool can see, not just the ones the calling person sees; person and device
+        // narrow to one person or one device ("any" for all), as in the app's own tool.
+        // "profile" is the retired spelling of person and is still taken.
+        "app_list_chats" => &[
+            "query",
+            "projectId",
+            "archived",
+            "limit",
+            "offset",
+            "all",
+            "person",
+            "device",
+            "profile",
+        ],
         // No includeTools: tool output never leaves the PC through the hub.
         "app_read_chat" => &["chatId", "beforeMessageId", "limit"],
         "app_list_projects" => &["query"],
@@ -450,6 +462,15 @@ mod tests {
         assert!(e.contains("includeCurrent"), "{e}");
         assert!(admit("app_list_chats", &json!({"query": "x", "limit": 5})).is_ok());
         assert!(admit("app_list_chats", &json!({"all": true})).is_ok());
+        // person and device widen or narrow the list across people and PCs; the retired
+        // `profile` spelling is still taken, and near-misses are not.
+        assert!(admit("app_list_chats", &json!({"person": "any", "device": "any"})).is_ok());
+        assert!(admit("app_list_chats", &json!({"profile": "Pat"})).is_ok());
+        assert!(admit(
+            "app_list_chats",
+            &json!({"person": "Pat", "devices": "Desk"})
+        )
+        .is_err());
         assert!(admit("app_list_attention", &json!({"all": true})).is_ok());
         assert!(admit("app_list_chats", &json!([1])).is_err());
         assert!(

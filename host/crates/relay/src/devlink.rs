@@ -220,8 +220,9 @@ impl ChatPort for ChannelPort {
         client_id: String,
         text: String,
         from: Option<String>,
+        files: Vec<helm_devices::serve::SentFile>,
     ) -> BoxFut<'_, PortResult<()>> {
-        self.port.send(chat_id, client_id, text, from)
+        self.port.send(chat_id, client_id, text, from, files)
     }
     fn stop(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
         self.port.stop(chat_id)
