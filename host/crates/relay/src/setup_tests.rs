@@ -20,6 +20,12 @@ struct Env {
 }
 
 fn env() -> Env {
+    env_with(true)
+}
+
+/// `own_hub_ok`: the staging check against this PC's own addresses is relaxed, because the test
+/// hub listens on a loopback port.
+fn env_with(own_hub_ok: bool) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let profile = helm_core::profile::Profile::open(&dir.path().join("profile")).unwrap();
     let platform = helm_platform::Platform {
@@ -61,6 +67,9 @@ fn env() -> Env {
         events,
         helm_updates::scan::Version::parse("2.0.1").unwrap(),
     )));
+    if own_hub_ok {
+        s.insert(Arc::new(AllowOwnHub));
+    }
     s.insert(Arc::new(profile));
     s.insert(Arc::new(platform));
     s.insert(db.clone());
@@ -320,7 +329,7 @@ fn staged_settings_apply_all_or_nothing_and_never_show_the_code() {
 
 #[test]
 fn staging_is_refused_when_it_would_be_wrong_or_change_nothing() {
-    let e = env();
+    let e = env_with(false);
     let code_file = e.dir.path().join("pair.txt");
     std::fs::write(&code_file, TYPED).unwrap();
     let big = e.dir.path().join("big.txt");
@@ -375,6 +384,13 @@ fn staging_is_refused_when_it_would_be_wrong_or_change_nothing() {
                                   "person": "Pat", "machine": "Laptop"}}),
             "never public",
         ),
+        (
+            "home",
+            json!({"hubPairing": {"address": "ws://127.0.0.1:8000", "codeFile": file,
+                                  "person": "Pat", "machine": "Laptop"}}),
+            "this PC itself",
+        ),
+        ("home", pairing(&format!("{file}"), "Pat"), "absolute path"),
     ];
     for (chat, changes, part) in rows {
         let err = e.stage(chat, changes.clone()).unwrap_err();

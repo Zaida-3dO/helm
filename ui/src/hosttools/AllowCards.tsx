@@ -140,11 +140,18 @@ export function AllowCards({ chatId }: { chatId: string }) {
       {cards.map((c) => (
         <div key={c.id} className="allow-card" data-testid="allow-card" data-request={c.id} data-applies={c.appliesOnAllow ? 'true' : undefined}>
           <div className="allow-title">
-            <strong>{c.label}</strong>
-            {/* Host-built, but it names agent- or repository-supplied targets: inert too. */}
-            <span className="allow-agent-line" dir="auto">
-              {inertLines(summaryParts(c).title).join(' ')}
-            </span>
+            {/* A card Helm applies says its title once, after "Approval needed ·"; the title is host-built but
+                names agent- or repository-supplied targets, so it is inert too. */}
+            {c.appliesOnAllow ? (
+              <strong dir="auto">{inertLines(summaryParts(c).title).join(' ')}</strong>
+            ) : (
+              <>
+                <strong>{c.label}</strong>
+                <span className="allow-agent-line" dir="auto">
+                  {inertLines(summaryParts(c).title).join(' ')}
+                </span>
+              </>
+            )}
           </div>
           {summaryParts(c).changes.length > 0 && (
             <div className="allow-changes" role="list">

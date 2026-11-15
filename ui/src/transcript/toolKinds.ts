@@ -87,7 +87,12 @@ export function allowRequestId(row: MessageRow): string | null {
 }
 
 /** What an Allow request's tool chip says: waiting on the user, allowed (spent or not), or refused (denied or lapsed). */
-export function allowChipState(state: string | undefined): 'waiting' | 'allowed' | 'refused' | null {
+export function allowChipState(
+  state: string | undefined,
+  outcome?: string | null,
+): 'waiting' | 'allowed' | 'refused' | 'applied' | 'notApplied' | null {
+  // A request Helm applies itself ends with an outcome: say whether it took.
+  if (state === 'used' && outcome) return outcome.startsWith('Applied') ? 'applied' : 'notApplied';
   switch (state) {
     case 'pending':
       return 'waiting';

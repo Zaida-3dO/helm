@@ -551,11 +551,13 @@ button.danger {
   color: var(--muted);
 }
 
-.allow-chip-allowed {
+.allow-chip-allowed,
+.allow-chip-applied {
   color: var(--text);
 }
 
-.allow-chip-refused {
+.allow-chip-refused,
+.allow-chip-notApplied {
   color: var(--error);
 }
 

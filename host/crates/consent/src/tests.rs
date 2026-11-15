@@ -820,8 +820,12 @@ fn upkeep_holds_an_applying_note_until_the_outcome_or_a_stop() {
     let late = owed(T0 + 2 + store::APPLY_STALE);
     assert_eq!(late.len(), 1);
     assert!(late[0].contains("Helm stopped while applying"), "{late:?}");
+    // The stale note went; the real outcome that follows is owed as its own note.
+    store::mark_delivered(&e.db, &a.id, T0 + 3 + store::APPLY_STALE).unwrap();
+    assert!(owed(T0 + 4 + store::APPLY_STALE).is_empty());
     // The outcome is written once.
     store::set_outcome(&e.db, &a.id, "first").unwrap();
+    assert_eq!(owed(T0 + 5 + store::APPLY_STALE).len(), 1);
     store::set_outcome(&e.db, &a.id, "second").unwrap();
     let l = store::list(&e.db, &e.kinds, "c0", T0).unwrap();
     assert_eq!(l.decided[0].outcome.as_deref(), Some("first"));

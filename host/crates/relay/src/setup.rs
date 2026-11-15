@@ -112,7 +112,9 @@ fn card_lines(s: &Staged) -> Result<Vec<String>, String> {
             p.machine
         ));
         lines.push(format!("One-time code read from the file {}", p.code_file));
-        lines.push("Helm pairs only if the hub names the same person and computer.".into());
+        lines.push(
+            "Helm pairs only if the hub answers with the person and computer named here.".into(),
+        );
         if !p.replaces.is_empty() {
             lines.push(format!(
                 "This replaces the current pairing (as {}).",
@@ -197,7 +199,7 @@ fn plain_path(raw: &str, what: &str) -> Result<String, String> {
         ));
     }
     let lead: String = s.chars().take(3).collect();
-    if matches!(lead.as_str(), r"\\?" | r"\\." | "//?" | "//.") || s.contains('\0') {
+    if matches!(lead.as_str(), r"\\?" | r"\\." | "//?" | "//.") || s.chars().any(char::is_control) {
         return Err(bad());
     }
     let p = Path::new(s);
@@ -207,6 +209,22 @@ fn plain_path(raw: &str, what: &str) -> Result<String, String> {
         return Err(bad());
     }
     Ok(s.to_owned())
+}
+
+/// Tests pair with a hub on a loopback port; they say so with this marker in their services.
+#[cfg(test)]
+pub(crate) struct AllowOwnHub;
+
+fn own_hub_allowed(services: &Services) -> bool {
+    #[cfg(test)]
+    {
+        services.get::<AllowOwnHub>().is_some()
+    }
+    #[cfg(not(test))]
+    {
+        let _ = services;
+        false
+    }
 }
 
 /// A person's or computer's name as the hub shows it.
@@ -322,6 +340,11 @@ fn build(services: &Services, chat_id: &str, args: &Value) -> Result<Staged, Str
             Some(f) => config::normalize_url(f)?,
             None => String::new(),
         };
+        for url in [&address, &fallback] {
+            if !url.is_empty() && config::is_own_address(url) && !own_hub_allowed(services) {
+                return Err("The hub address is this PC itself. Pair with the hub on its own machine's address, not one served from here.".into());
+            }
+        }
         let code_file = plain_path(&a.code_file, "codeFile")?;
         code_file_looks_right(&code_file)?;
         let current = services
@@ -579,7 +602,45 @@ fn apply_staged(services: &Arc<Services>, events: &Arc<dyn EventSink>, s: &Stage
         }
     }
 
-    // (c) The folder and the switches together.
+    // (c) The folder and the switches together. A value that no longer matches the card's "from"
+    // is named in the outcome, so the agent knows the card was read against something else.
+    let mut drift: Vec<String> = Vec::new();
+    let _ = db.snapshot(|tx| {
+        if let Some(c) = &s.update_source {
+            let now = helm_updates::current_source(tx);
+            if now != c.from {
+                drift.push(format!(
+                    "The update folder was {}, not {} as the card said.",
+                    now.as_deref().unwrap_or("none"),
+                    c.from.as_deref().unwrap_or("none")
+                ));
+            }
+        }
+        for (label, key, c) in [
+            (
+                RUN_FROM_OTHERS,
+                DEVICE_RUN_FROM_OTHERS.name(),
+                &s.device_run_from_others,
+            ),
+            (
+                HOUSEHOLD_RUN,
+                DEVICE_HOUSEHOLD_RUN.name(),
+                &s.device_household_run,
+            ),
+        ] {
+            if let Some(c) = c {
+                let now = switch(tx, key);
+                if now != c.from {
+                    drift.push(format!(
+                        "{label} was {}, not {} as the card said.",
+                        on_off(now),
+                        on_off(c.from)
+                    ));
+                }
+            }
+        }
+        Ok::<_, rusqlite::Error>(())
+    });
     let mut changed = Map::new();
     if let Some(v) = &source {
         changed.insert(
@@ -646,6 +707,10 @@ fn apply_staged(services: &Arc<Services>, events: &Arc<dyn EventSink>, s: &Stage
         events.emit(AppEvent::new("preferences").with("changed", Value::Object(changed)));
     }
     let mut out = format!("Applied. {}", done.join(" "));
+    for d in drift {
+        out.push(' ');
+        out.push_str(&d);
+    }
     if s.hub_pairing.is_some() {
         out.push_str(" The code file can be deleted.");
     }

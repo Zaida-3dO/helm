@@ -68,5 +68,8 @@ test('an Allow request call names its request, and the chip reads waiting, allow
   const want: Record<string, string | null> = { pending: 'waiting', allowed: 'allowed', used: 'allowed', denied: 'refused', expired: 'refused', other: null };
   for (const [state, chip] of Object.entries(want)) assert.equal(allowChipState(state), chip, state);
   assert.equal(allowChipState(undefined), null);
+  assert.equal(allowChipState('used', 'Applied. The update folder is now none.'), 'applied');
+  assert.equal(allowChipState('used', 'Nothing changed: the hub address is not valid.'), 'notApplied');
+  assert.equal(allowChipState('used', null), 'allowed');
 });
 

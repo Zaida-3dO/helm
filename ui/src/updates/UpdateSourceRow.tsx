@@ -17,11 +17,23 @@ export function UpdateSourceRow() {
   const shell = useShell();
   const [status, setStatus] = useState<UpdateStatus | null>(null);
   const [busy, setBusy] = useState(false);
+  // Read again whenever the status changes or the folder preference is changed from elsewhere
+  // (an approved settings change from a chat).
   useEffect(() => {
-    updateOps(shell.api)
-      .status()
-      .then(setStatus)
-      .catch(() => undefined);
+    const read = () =>
+      updateOps(shell.api)
+        .status()
+        .then(setStatus)
+        .catch(() => undefined);
+    void read();
+    const offUpdate = shell.bus.on('update', () => void read());
+    const offPrefs = shell.bus.on('preferences', (e) => {
+      if ('updateSource' in ((e.changed ?? {}) as Record<string, unknown>)) void read();
+    });
+    return () => {
+      offUpdate();
+      offPrefs();
+    };
   }, [shell]);
   const apply = (run: Promise<UpdateStatus | null>) => {
     setBusy(true);

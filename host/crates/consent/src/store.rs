@@ -738,11 +738,12 @@ pub const MAX_OUTCOME: usize = 1_200;
 /// stopped while applying it.
 pub const APPLY_STALE: i64 = 10 * MINUTE;
 
-/// Record what applying did, once; the agent's note goes out at the next upkeep.
+/// Record what applying did, once; the agent's note goes out at the next upkeep. When the
+/// "Helm stopped while applying" note already went, the real outcome is owed as a fresh note.
 pub fn set_outcome(db: &Database, request_id: &str, outcome: &str) -> Result<(), ApiError> {
     db.write::<_, rusqlite::Error>(|tx| {
         tx.execute(
-            "UPDATE consent_requests SET outcome = ?2
+            "UPDATE consent_requests SET outcome = ?2, delivered_at = NULL
              WHERE id = ?1 AND state = 'used' AND outcome IS NULL",
             params![request_id, cut(outcome, MAX_OUTCOME)],
         )

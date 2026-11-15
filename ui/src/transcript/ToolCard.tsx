@@ -54,12 +54,13 @@ function useElapsed(since: number, live: boolean): number {
 
 const STATUS_TITLE: Record<ToolStatus, string> = { running: 'Running', complete: 'Done', failed: 'Failed', interrupted: 'Stopped' };
 
-const ALLOW_CHIP_TEXT = { waiting: 'Waiting for you', allowed: 'Allowed', refused: 'Refused' } as const;
+const ALLOW_CHIP_TEXT = { waiting: 'Waiting for you', allowed: 'Allowed', refused: 'Refused', applied: 'Applied', notApplied: 'Not applied' } as const;
 
 /** Where an Allow request stands, read from the consent list: waiting, allowed or refused. Nothing when the list no longer holds it. */
 function AllowChip({ chatId, requestId, remoteDevice, running }: { chatId: string; requestId: string; remoteDevice?: string; running: boolean }) {
   const shell = useShell();
   const [state, setState] = useState<string | undefined>();
+  const [outcome, setOutcome] = useState<string | null>(null);
   useEffect(() => {
     // The request lives on the device the chat runs on, and only someone there can decide it.
     if (remoteDevice) return;
@@ -68,7 +69,10 @@ function AllowChip({ chatId, requestId, remoteDevice, running }: { chatId: strin
       consentOps(shell.api)
         .list(chatId)
         .then((l) => {
-          if (live) setState([...l.pending, ...l.decided].find((r) => r.id === requestId)?.state);
+          const found = [...l.pending, ...l.decided].find((r) => r.id === requestId);
+          if (!live) return;
+          setState(found?.state);
+          setOutcome(found?.outcome ?? null);
         })
         .catch(() => {});
     };
@@ -88,7 +92,7 @@ function AllowChip({ chatId, requestId, remoteDevice, running }: { chatId: strin
       </span>
     ) : null;
   }
-  const chip = allowChipState(state);
+  const chip = allowChipState(state, outcome);
   if (!chip) return null;
   return (
     <span className={`allow-chip allow-chip-${chip}`} data-testid="tool-allow-state" data-state={chip}>
