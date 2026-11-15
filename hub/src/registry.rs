@@ -695,9 +695,13 @@ impl Registry {
             "UPDATE pairings SET person_id = ?2 WHERE person_id = ?1",
             params![from.id, into.id],
         )?;
+        // A grant made by an admin outlives a merge: where the machine already had a row for the
+        // person that stays, an admin source wins over one the machine announced.
         tx.execute(
-            "INSERT OR IGNORE INTO acts_for (client_id, person_id, source)
-             SELECT client_id, ?2, source FROM acts_for WHERE person_id = ?1",
+            "INSERT INTO acts_for (client_id, person_id, source)
+             SELECT client_id, ?2, source FROM acts_for WHERE person_id = ?1
+             ON CONFLICT(client_id, person_id) DO UPDATE SET
+                 source = CASE WHEN acts_for.source = 'admin' THEN 'admin' ELSE excluded.source END",
             params![from.id, into.id],
         )?;
         tx.execute("DELETE FROM acts_for WHERE person_id = ?1", [from.id])?;
@@ -745,7 +749,11 @@ impl Registry {
         let person = self.find_person(person)?;
         if allow {
             self.conn.execute(
-                "INSERT OR IGNORE INTO acts_for (client_id, person_id, source) VALUES (?1, ?2, 'admin')",
+                // The source is rewritten, not only inserted: if the machine had already
+                // announced this person, the row must stop being one the machine may take away
+                // with its next announcement.
+                "INSERT INTO acts_for (client_id, person_id, source) VALUES (?1, ?2, 'admin')
+                 ON CONFLICT(client_id, person_id) DO UPDATE SET source = 'admin'",
                 params![client_id, person.id],
             )?;
         } else {
@@ -1372,6 +1380,36 @@ mod tests {
         assert_eq!(
             people.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
             ["Sam", "Ivy"]
+        );
+
+        // Allowing someone the machine had already announced turns that row into an admin one, so
+        // the next announcement cannot take the grant away again.
+        r.set_acts_for(pc, "Ivy", false).unwrap();
+        r.set_device_people(pc, &[kit]).unwrap();
+        assert_eq!(
+            r.acts_for(pc).unwrap(),
+            vec![("Kit".into(), "device".into())]
+        );
+        r.set_acts_for(pc, "Kit", true).unwrap();
+        assert_eq!(
+            r.acts_for(pc).unwrap(),
+            vec![("Kit".into(), "admin".into())],
+            "the grant became an admin one, not a second row"
+        );
+        r.set_device_people(pc, &[]).unwrap();
+        assert!(
+            r.may_act_for(pc, kit),
+            "an announcement that named nobody took the admin grant away"
+        );
+
+        // A merge keeps the admin source where the machine already had a row for the person that
+        // stays.
+        r.set_device_people(pc, &[ivy]).unwrap();
+        r.merge_person("Kit", "Ivy").unwrap();
+        assert_eq!(
+            r.acts_for(pc).unwrap(),
+            vec![("Ivy".into(), "admin".into())],
+            "the merged grant came out as the device row"
         );
 
         // Pins survive a reopen of the same file, and a merge drops the folded person's.
