@@ -8,6 +8,7 @@
 //! | [`StartupSeam`] (installed with [`crate::ChatRuntime::set_startup_seam`]) | `helm_projects` | a chat's first message: the project's startup instructions ride it as hidden context |
 //! | [`AfkPolicy`] (installed with [`crate::ChatRuntime::set_afk_policy`]) | `helm_afk` | each new interaction a worker raises, and each turn's context block |
 //! | [`QuestionGate`] (installed with [`crate::ChatRuntime::set_question_gate`]) | `helm_gatekeeper` | each new interaction, before AFK; its verdict arrives through [`crate::ChatRuntime::gate_verdict`] |
+//! | [`StopJudge`] (installed with [`crate::ChatRuntime::set_stop_judge`]) | `helm_gatekeeper` | each clean turn end, before the finish is announced, and each turn's context block; its verdict arrives through [`crate::ChatRuntime::stop_verdict`] |
 //!
 //! A seam with nothing registered is skipped: a context payload is dropped (logged once per send)
 //! and every project counts as open.
@@ -232,4 +233,70 @@ pub trait AfkPolicy: Send + Sync {
         interaction: &crate::types::Interaction,
         at_flip: bool,
     ) -> AfkAction;
+}
+
+/// A turn that just ended cleanly, as the stop judge sees it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TurnEnd {
+    /// The run that ended. A verdict names it, so one for an earlier turn never lands on a later one.
+    pub run_id: String,
+    pub ended_at: i64,
+}
+
+/// What the stop judge makes of a turn end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopOffer {
+    /// Not the judge's business: the turn finishes now, as it always did.
+    Pass,
+    /// The judge takes it: the finish is held back, and the chat shows that it is being checked,
+    /// until the judge answers with [`crate::ChatRuntime::stop_verdict`] or the hold runs out.
+    Hold,
+}
+
+/// Why a stop is one the user should see.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopKind {
+    /// Something only the user can clear.
+    Blocker,
+    /// The plan's usage limit, with nothing left that can run elsewhere.
+    Limit,
+    /// A failure that persists after retrying.
+    Failure,
+    /// The chat stopped to ask, and the judge would not answer for the user.
+    Asked,
+}
+
+/// The judge's say over a held turn end.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StopOutcome {
+    /// The chat is carrying on (the judge sends the nudge itself, after this is applied): the
+    /// held finish is dropped, so nothing says the chat finished.
+    Continue,
+    /// A stop worth the user's eyes: `line` is written to the transcript as a row of the kind's
+    /// own sort, and the finish is announced.
+    Stop { kind: StopKind, line: String },
+    /// The chat finished. `line` is an optional transcript note (a gatekeeper row); the finish is
+    /// announced.
+    Done { line: Option<String> },
+    /// The judge could not tell: the finish is announced, as with no judge.
+    Failed,
+}
+
+/// The stop judge: it looks at each clean end of a turn, and decides whether the chat should
+/// carry on by itself. Implemented by the gatekeeper crate; with nothing installed every turn
+/// end finishes as it always did. The actor never waits on it: after a [`StopOffer::Hold`] the
+/// judge calls `ChatRuntime::stop_verdict` for that turn, and a deadline in the actor ends the
+/// hold whatever the judge is doing.
+pub trait StopJudge: Send + Sync {
+    /// Called on the chat's actor at each clean turn end the actor may hand over (never a stop
+    /// the user or the governor asked for, an interrupted turn, an archived chat, one with
+    /// messages waiting, or one whose background agents still run). Returns at once; after a
+    /// Hold the judge later calls [`crate::ChatRuntime::stop_verdict`] for this run.
+    fn offer(&self, chat_id: &str, end: &TurnEnd) -> StopOffer;
+
+    /// One line every new turn of this chat carries while the judge has something to say about
+    /// how the chat is meant to work (a changed mode, say); `None` adds nothing.
+    fn turn_line(&self, _chat_id: &str) -> Option<String> {
+        None
+    }
 }

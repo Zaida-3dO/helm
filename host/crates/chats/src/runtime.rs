@@ -63,6 +63,9 @@ pub struct Limits {
     /// as a normal card (75 s). The gate's own helper timeout is shorter, so it fails quietly
     /// inside this.
     pub gate_deadline: Duration,
+    /// How long the stop judge gets with a held turn end before the actor lets the chat finish as
+    /// usual (75 s). The judge's own helper timeout is shorter, so it fails quietly inside this.
+    pub stop_deadline: Duration,
 }
 
 impl Default for Limits {
@@ -86,12 +89,21 @@ impl Default for Limits {
                 std::env::var(TEST_GATE_HOLD_ENV).ok().as_deref(),
             )
             .unwrap_or(GATE_HOLD),
+            stop_deadline: STOP_HOLD,
         }
     }
 }
 
 /// How long the question gate holds a card by default.
 pub const GATE_HOLD: Duration = Duration::from_secs(75);
+
+/// How long the stop judge holds a turn end by default.
+pub const STOP_HOLD: Duration = Duration::from_secs(75);
+
+/// A turn end held for the stop judge reads as busy to anything watching the chat for 90 s from
+/// when the hold began, so a watcher fires only when the chain of turns really ends, and a hold
+/// a crash left behind cannot keep a chat busy for good.
+pub const STOP_HOLD_BUSY_MS: i64 = 90_000;
 
 /// The test override for the question gate's hold: in debug builds only,
 /// `HELM_TEST_GATE_HOLD_MS` sets [`Limits::gate_deadline`], so an end-to-end check of a hold
@@ -656,6 +668,9 @@ pub(crate) struct Shared {
     /// The question gate ([`crate::seams::QuestionGate`]), installed once. Without it every card
     /// follows the normal path.
     pub gate: std::sync::OnceLock<Arc<dyn crate::seams::QuestionGate>>,
+    /// The stop judge ([`crate::seams::StopJudge`]), installed once. Without it every clean turn
+    /// end finishes at once.
+    pub stop_judge: std::sync::OnceLock<Arc<dyn crate::seams::StopJudge>>,
     /// The local model servers ([`crate::local::LocalModels`]), installed once.
     pub local: std::sync::OnceLock<crate::local::SharedLocal>,
     /// Per local server: what it last said about requests waiting on it ([`QueueSeen`]).
@@ -702,6 +717,7 @@ impl ChatRuntime {
                 afk: std::sync::OnceLock::new(),
                 startup: std::sync::OnceLock::new(),
                 gate: std::sync::OnceLock::new(),
+                stop_judge: std::sync::OnceLock::new(),
                 local: std::sync::OnceLock::new(),
                 local_queue: Mutex::new(HashMap::new()),
                 exits: crate::exits::ExitLog::new(&cfg_profile),
@@ -1062,19 +1078,48 @@ impl ChatRuntime {
             outcome: Box::new(outcome),
             reply: reply_tx,
         };
-        // The caller is a plain thread, so a full channel gets a short wait rather than losing
-        // the verdict (the card would otherwise sit until its hold ran out).
-        let deadline = Instant::now() + GATE_VERDICT_RETRY;
-        let mut cmd = cmd;
-        loop {
-            match enqueue(&tx, cmd) {
-                Ok(()) => break,
-                Err(_) if tx.is_closed() || Instant::now() >= deadline => return false,
-                Err(c) => cmd = c,
-            }
-            std::thread::sleep(SEND_SOON_POLL);
+        if !enqueue_blocking(&tx, cmd) {
+            return false;
         }
         // The actor answers from its own loop, which never waits on the caller.
+        reply_rx.recv().unwrap_or(false)
+    }
+
+    /// Install the stop judge (once). Without it no turn end is ever held.
+    pub fn set_stop_judge(&self, j: Arc<dyn crate::seams::StopJudge>) {
+        if self.sh.stop_judge.set(j).is_err() {
+            log::warn!("a stop judge is already installed; keeping the first");
+        }
+    }
+
+    /// Answer for a turn end the judge is holding ([`crate::seams::StopOffer::Hold`]). The
+    /// command goes to the chat's actor, which owns the hold: a verdict that arrives after the
+    /// hold ended (a message was sent, the deadline passed, the chat was archived) or for an
+    /// earlier turn finds nothing and answers false, and the caller then sends nothing. True when
+    /// the verdict was applied. Blocks the calling thread until the actor answers, so call it from
+    /// a plain or blocking thread, never from an actor.
+    pub fn stop_verdict(
+        &self,
+        chat_id: &str,
+        run_id: &str,
+        outcome: crate::seams::StopOutcome,
+    ) -> bool {
+        if self.sh.shutting_down.load(Ordering::SeqCst) {
+            return false;
+        }
+        let tx = match self.sh.actors.lock().unwrap().get(chat_id) {
+            Some(h) if !h.tx.is_closed() => h.tx.clone(),
+            _ => return false,
+        };
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        let cmd = Cmd::StopVerdict {
+            run_id: run_id.to_owned(),
+            outcome,
+            reply: reply_tx,
+        };
+        if !enqueue_blocking(&tx, cmd) {
+            return false;
+        }
         reply_rx.recv().unwrap_or(false)
     }
 
@@ -1449,8 +1494,23 @@ pub(crate) async fn send_soon(
 
 const SEND_SOON_POLL: Duration = Duration::from_millis(25);
 
-/// How long a gate verdict keeps trying a full actor channel before it is given up.
+/// How long a gate or stop verdict keeps trying a full actor channel before it is given up.
 const GATE_VERDICT_RETRY: Duration = Duration::from_secs(2);
+
+/// Hand a command to an actor from a plain thread. A full channel gets a short wait rather than
+/// losing a verdict (the card or the held turn end would otherwise sit until its hold ran out).
+/// False when the actor is gone or never took it.
+fn enqueue_blocking(tx: &mpsc::Sender<Cmd>, mut cmd: Cmd) -> bool {
+    let deadline = Instant::now() + GATE_VERDICT_RETRY;
+    loop {
+        match enqueue(tx, cmd) {
+            Ok(()) => return true,
+            Err(_) if tx.is_closed() || Instant::now() >= deadline => return false,
+            Err(c) => cmd = c,
+        }
+        std::thread::sleep(SEND_SOON_POLL);
+    }
+}
 
 pub const DEFAULT_STALL_MINUTES: u32 = 5;
 

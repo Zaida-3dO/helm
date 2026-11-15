@@ -498,6 +498,7 @@ pub fn stored_thread(
         subagents_running: 0,
         compacting: None,
         loading: None,
+        stop_check: None,
         capabilities: Capabilities::default(),
         send_behavior: sb,
         revision,

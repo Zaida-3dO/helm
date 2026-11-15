@@ -323,35 +323,50 @@ fn tail_chars(text: &str, max: usize) -> String {
 }
 
 /// The last four user and four assistant messages with text, oldest first. The question gate
-/// builds its job on the same reader.
+/// builds its job on the same reader. A user turn also says where it came from (`from`: the
+/// submission's origin, `typed`, `answer`, `remote`, `app`, `other_chat`, and so on), so a reader
+/// can tell the user's own words from a message another chat or Helm sent. A user row with no
+/// recorded origin reads as `typed`.
 pub fn recent_turns(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<Vec<Value>> {
-    let mut all: Vec<(i64, i64, &'static str, String)> = Vec::new();
+    let mut all: Vec<(i64, i64, &'static str, String, Option<String>)> = Vec::new();
     for role in ["user", "assistant"] {
         let mut st = tx.prepare(
-            "SELECT timestamp, id, text FROM messages WHERE chat_id = ?1 AND role = ?2 AND active = 1
-             AND text <> '' ORDER BY timestamp DESC, id DESC LIMIT 4",
+            "SELECT m.timestamp, m.id, m.text, s.origin
+             FROM messages m
+             LEFT JOIN submission_meta s ON m.source_key = 'u:' || s.submission_id
+             WHERE m.chat_id = ?1 AND m.role = ?2 AND m.active = 1 AND m.text <> ''
+             ORDER BY m.timestamp DESC, m.id DESC LIMIT 4",
         )?;
         let rows = st.query_map(params![chat_id, role], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, i64>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
             ))
         })?;
         for row in rows {
-            let (t, i, text) = row?;
+            let (t, i, text, origin) = row?;
             all.push((
                 t,
                 i,
                 if role == "user" { "user" } else { "assistant" },
                 text,
+                origin,
             ));
         }
     }
-    all.sort_by_key(|(t, i, _, _)| (*t, *i));
+    all.sort_by_key(|(t, i, _, _, _)| (*t, *i));
     Ok(all
         .into_iter()
-        .map(|(_, _, role, text)| json!({"role": role, "text": tail_chars(&text, TURN_CHARS)}))
+        .map(|(_, _, role, text, origin)| {
+            let text = tail_chars(&text, TURN_CHARS);
+            if role == "user" {
+                json!({"role": role, "from": origin.unwrap_or_else(|| "typed".into()), "text": text})
+            } else {
+                json!({"role": role, "text": text})
+            }
+        })
         .collect())
 }
 

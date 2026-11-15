@@ -648,6 +648,28 @@ mod tests {
         // A running chat reads as busy while its turn lasts; messages never hold it open.
         let real = crate::probes::RealProbes { db: db.clone() };
         assert!(!real.chat("c7").unwrap().unwrap().busy);
+        // A turn end the stop judge is still checking reads as busy while the hold is recent, and
+        // not once it is old (a crash could leave one behind) or gone.
+        let now = helm_core::now_ms();
+        let hold = |since: Option<i64>| {
+            db.write(|tx| {
+                tx.execute("DELETE FROM chat_stop_holds", [])?;
+                if let Some(s) = since {
+                    tx.execute(
+                        "INSERT INTO chat_stop_holds(chat_id, since) VALUES ('c7', ?1)",
+                        [s],
+                    )?;
+                }
+                Ok::<_, rusqlite::Error>(())
+            })
+            .unwrap();
+            real.chat("c7").unwrap().unwrap().busy
+        };
+        assert!(hold(Some(now)));
+        assert!(!hold(Some(
+            now - helm_chats::runtime::STOP_HOLD_BUSY_MS - 1_000
+        )));
+        assert!(!hold(None));
         assert!(real.chat("nope").unwrap().is_none());
     }
 }
