@@ -14,6 +14,10 @@ export interface HubConnection {
   /** Who this PC is paired as, once it has paired with a code. */
   personName?: string | null;
   machineName?: string | null;
+  /** Set when a saved connection exists but could not be read: the reason, in words. */
+  configProblem?: string;
+  /** Why the last attempt to reach the hub failed; absent while connected. */
+  lineRefusal?: string;
 }
 
 /** What pairing with a code answered: who this PC now is on the hub. */

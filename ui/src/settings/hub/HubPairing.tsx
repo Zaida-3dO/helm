@@ -17,6 +17,20 @@ function errorText(e: unknown): string {
   return String((e as { message?: unknown })?.message ?? e);
 }
 
+function pairedTitle(conn: HubConnection | null, who: string): string {
+  if (conn?.configProblem) return `Paired as ${who}, but the saved connection can't be read`;
+  switch (conn?.state) {
+    case 'online':
+      return `Connected as ${who}`;
+    case 'connecting':
+      return `Paired as ${who}, connecting…`;
+    case 'off':
+      return `Paired as ${who}, but the hub line is not set up`;
+    default:
+      return `Paired as ${who}, but the hub is offline`;
+  }
+}
+
 export function HubPairing() {
   const shell = useShell();
   const ops = useMemo(() => hubOps(shell.api), [shell.api]);
@@ -43,7 +57,10 @@ export function HubPairing() {
     };
   }, [ops]);
 
-  const paired = conn?.personName ? `Connected as ${conn.personName}${conn.machineName ? ` on ${conn.machineName}` : ''}` : null;
+  // A saved name says who this PC was paired as, not that the line is up: show the real state.
+  const who = conn?.personName ? `${conn.personName}${conn.machineName ? ` on ${conn.machineName}` : ''}` : null;
+  const paired = who ? pairedTitle(conn, who) : null;
+  const pairedDetail = conn?.configProblem ?? (conn?.state !== 'online' ? conn?.lineRefusal : undefined);
   const ready = address.trim() !== '' && code.trim().length >= 4;
 
   const pair = async () => {
@@ -72,7 +89,8 @@ export function HubPairing() {
     <div data-testid="hub-pairing">
       <h3 className="hub-heading">Pair with a code</h3>
       {(done ?? paired) && (
-        <SettingRow testId="hub-paired" title={done ?? paired} description="Shared memory and the hub line are set up; no token to paste." />
+        <SettingRow testId="hub-paired" title={done ?? paired} description={done ? 'Shared memory and the hub line are set up; no token to paste.' : (pairedDetail ?? 'Shared memory and the hub line are set up; no token to paste.')}
+        />
       )}
       <SettingRow
         title="Hub address"

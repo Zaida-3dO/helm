@@ -217,6 +217,9 @@ pub struct LineHandle {
     /// receiving it: a line that drops can lose what was on its way, so a new line offers these
     /// again. The hub keeps the reply ids it has seen and stores each reply once.
     recent_voice: std::sync::Mutex<VecDeque<(Instant, Value)>>,
+    /// Why the last attempt to connect failed (a fixed sentence, never the request), cleared
+    /// once a line is up.
+    last_refusal: std::sync::Mutex<String>,
 }
 
 /// A frame that may go up on any line, the next one included.
@@ -233,6 +236,16 @@ const PEER_TIMEOUT: Duration = Duration::from_secs(30);
 impl LineHandle {
     pub fn state(&self) -> LineState {
         LineState::from_u8(self.state.load(Ordering::SeqCst))
+    }
+    /// The reason the last connection attempt failed; empty while the line is up or untried.
+    pub fn last_refusal(&self) -> String {
+        self.last_refusal
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+    fn set_refusal(&self, text: &str) {
+        *self.last_refusal.lock().unwrap_or_else(|p| p.into_inner()) = text.to_owned();
     }
     fn set(&self, s: LineState) {
         self.state.store(s as u8, Ordering::SeqCst);
@@ -466,6 +479,7 @@ impl Client {
                 generation: AtomicU64::new(ANY_LINE),
                 peers: Default::default(),
                 recent_voice: Default::default(),
+                last_refusal: Default::default(),
             }),
             up_rx: tokio::sync::Mutex::new(up_rx),
             delivering: Arc::default(),
@@ -597,15 +611,20 @@ impl Client {
             }
             self.handle.set(LineState::Connecting);
             let mut connected = None;
+            let mut refusal = String::new();
             for url in cfg.urls() {
                 match Self::connect(&url, &cfg.token).await {
                     Ok(ws) => {
                         connected = Some(ws);
                         break;
                     }
-                    Err(e) => log::info!("relay: {e}"),
+                    Err(e) => {
+                        log::info!("relay: {e}");
+                        refusal = e;
+                    }
                 }
             }
+            self.handle.set_refusal(&refusal);
             match connected {
                 Some(ws) => {
                     backoff = Duration::from_secs(1);
