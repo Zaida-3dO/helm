@@ -12,6 +12,7 @@ helm-core.workspace = true
 helm-ipc.workspace = true
 helm-hosttools = { path = "../hosttools" }
 helm-chats.workspace = true
+helm-profiles = { path = "../profiles" }
 helm-platform.workspace = true
 helm-workers.workspace = true
 helm-worktrees = { path = "../worktrees" }

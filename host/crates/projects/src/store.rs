@@ -273,15 +273,39 @@ fn project_from_row(r: &Row<'_>, counts: &HashMap<String, i64>) -> rusqlite::Res
     })
 }
 
-/// Non-archived, non-side chats per shown group, in one grouped read.
+/// The profile the counts follow: the one the sidebar shows, or `None` when it shows every
+/// profile. An unset or vanished choice means the home profile; a database with no profiles
+/// yet (a bare test store) counts everything.
+fn active_scope(tx: &Transaction<'_>) -> Option<(String, bool)> {
+    let id = helm_profiles::store::active_id(tx)?;
+    let is_home = helm_profiles::store::get(tx, &id)
+        .ok()?
+        .is_some_and(|p| p.is_home);
+    Some((id, is_home))
+}
+
+/// Non-archived, non-side chats per shown group that the profile the sidebar shows can see
+/// (its own, those shared with it, and for the home profile any without an owner), in one
+/// grouped read. A board holding none of them reads 0 and the sidebar hides it.
 fn chat_counts(tx: &Transaction<'_>) -> rusqlite::Result<HashMap<String, i64>> {
+    let scope = active_scope(tx);
+    let (profile, is_home): (Option<&str>, i64) = match &scope {
+        Some((id, home)) => (Some(id.as_str()), *home as i64),
+        None => (None, 0),
+    };
     let mut st = tx.prepare(
         "SELECT COALESCE(g.project_id, c.project_id), count(*) FROM chats c
          LEFT JOIN chat_groups g ON g.chat_id = c.id
          WHERE c.archived = 0 AND c.side_source_id IS NULL
+           AND (?1 IS NULL
+                OR c.profile_id = ?1
+                OR EXISTS (SELECT 1 FROM chat_shares s WHERE s.chat_id = c.id AND s.profile_id = ?1)
+                OR (?2 = 1 AND c.profile_id = ''))
          GROUP BY 1",
     )?;
-    let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let rows = st.query_map(rusqlite::params![profile, is_home], |r| {
+        Ok((r.get(0)?, r.get(1)?))
+    })?;
     rows.collect()
 }
 

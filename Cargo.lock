@@ -2196,6 +2196,7 @@ dependencies = [
  "helm-hosttools",
  "helm-ipc",
  "helm-platform",
+ "helm-profiles",
  "helm-standup",
  "helm-workers",
  "helm-worktrees",
