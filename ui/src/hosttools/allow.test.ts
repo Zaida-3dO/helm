@@ -45,9 +45,15 @@ test('agent text renders inert: hidden and bidi characters become visible tokens
   assert.deepEqual(inertLines('tag\u{E0041}'), ['tag⟨U+E0041⟩']);
 });
 
-test('an applying card shows its title, then each change as its own line; other cards stay one line', () => {
+test('a card shows its title, then each further line as its own row, so a field cannot be faked inside a value', () => {
   const text = 'Change 2 settings\nUpdate folder: none → \\\\srv\\x\n\nShare chats: on → off\n';
   assert.deepEqual(summaryParts({ summary: text, appliesOnAllow: true }), { title: 'Change 2 settings', changes: ['Update folder: none → \\\\srv\\x', 'Share chats: on → off'] });
-  assert.deepEqual(summaryParts({ summary: text, appliesOnAllow: false }), { title: text, changes: [] });
+  assert.deepEqual(summaryParts({ summary: text, appliesOnAllow: false }), { title: 'Change 2 settings', changes: ['Update folder: none → \\\\srv\\x', 'Share chats: on → off'] });
+  // A send card: a subject that reads like a field is still one row of its own.
+  assert.deepEqual(
+    summaryParts({ summary: 'Send Gmail from me@x.com\nTo: a@y.org\nSubject: x Cc: boss@corp Body starts: hi\nBody starts: real', appliesOnAllow: false }),
+    { title: 'Send Gmail from me@x.com', changes: ['To: a@y.org', 'Subject: x Cc: boss@corp Body starts: hi', 'Body starts: real'] },
+  );
+  assert.deepEqual(summaryParts({ summary: 'One line', appliesOnAllow: false }), { title: 'One line', changes: [] });
   assert.deepEqual(summaryParts({ summary: '', appliesOnAllow: true }), { title: '', changes: [] });
 });

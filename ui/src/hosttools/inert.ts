@@ -29,9 +29,10 @@ export function inertLines(text: string): string[] {
   return out.split('\n');
 }
 
-/** A card's summary as shown: for a card Helm applies itself, a title line then one change per line; otherwise all one title. */
-export function summaryParts(c: { summary: string; appliesOnAllow: boolean }): { title: string; changes: string[] } {
-  if (!c.appliesOnAllow) return { title: c.summary, changes: [] };
+/** A card's summary as shown: a title line, then each further line as its own row (a send card's addresses,
+ * subject and body start, an applying card's changes), so a value can never run into the next field. */
+export function summaryParts(_c: { summary: string; appliesOnAllow: boolean }): { title: string; changes: string[] } {
+  const c = _c;
   const [title = '', ...rest] = c.summary.split('\n');
   return { title, changes: rest.filter((l) => l.trim()) };
 }
