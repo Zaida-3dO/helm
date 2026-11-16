@@ -149,6 +149,74 @@ impl Mirror {
         Ok(id)
     }
 
+    /// Make a project on `device` for the person, then read its projects again so the new one is
+    /// listed here at once. Answers the new project's id and kind.
+    pub async fn project_create(
+        &self,
+        device: &str,
+        person_id: &str,
+        title: &str,
+        description: Option<String>,
+        folder_project_id: Option<String>,
+    ) -> Result<Value, ApiError> {
+        self.check_live(device)?;
+        let mut args = json!({ "title": title });
+        if let Some(d) = description {
+            args["description"] = json!(d);
+        }
+        if let Some(f) = folder_project_id {
+            args["folderProjectId"] = json!(f);
+        }
+        let act = [person_id.to_owned()];
+        let made = self
+            .ask_as(device, "project_create", args, "that project", &act)
+            .await?;
+        self.reread_projects(device).await;
+        Ok(made)
+    }
+
+    /// Pin a project on `device`, or give its board one of that PC's folders, for the person.
+    pub async fn project_set(
+        &self,
+        device: &str,
+        person_id: &str,
+        project_id: &str,
+        pinned: Option<bool>,
+        folder_project_id: Option<String>,
+    ) -> Result<(), ApiError> {
+        self.check_live(device)?;
+        let mut args = json!({ "projectId": project_id });
+        if let Some(p) = pinned {
+            args["pinned"] = json!(p);
+        }
+        if let Some(f) = folder_project_id {
+            args["folderProjectId"] = json!(f);
+        }
+        let act = [person_id.to_owned()];
+        self.ask_as(device, "project_set", args, "that project", &act)
+            .await?;
+        self.reread_projects(device).await;
+        Ok(())
+    }
+
+    /// Read the device's projects again (the new-chat page asks when it opens). A read, so it
+    /// needs only the line and the device up.
+    pub async fn refresh_projects(&self, device: &str) -> Result<(), ApiError> {
+        self.check_up(device)?;
+        self.inner
+            .refresh_hello(device)
+            .await
+            .map_err(|e| self.failed(device, e, "its projects"))
+    }
+
+    /// After a change to the device's projects, take its word on them again. The change is
+    /// already made, so a failure here only leaves the old list until the next time.
+    async fn reread_projects(&self, device: &str) {
+        if let Err(e) = self.inner.refresh_hello(device).await {
+            log::info!("devices: projects were not read again: {e}");
+        }
+    }
+
     /// A failed request to the device, in the person's words.
     fn failed(&self, device: &str, e: WireError, what: &str) -> ApiError {
         let name = self.device_name(device);
@@ -175,6 +243,7 @@ impl Mirror {
                             | "its pages"
                             | "that page"
                             | "those rows"
+                            | "that project"
                     ) =>
             {
                 ApiError::new(

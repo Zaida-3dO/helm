@@ -99,7 +99,9 @@ export interface NewChatDevice {
 export type NewChatDialog =
   | { kind: 'new-project'; /** The title to start with. */ title?: string; /** Settings opens it without starting a chat after. */ noChat?: boolean }
   | { kind: 'add-project'; /** Open on the New folder tab with this name filled in. */ newName?: string; /** Start a chat in the folder once it is added. */ startChat?: boolean }
-  | { kind: 'primary-folder'; projectId: string };
+  | { kind: 'primary-folder'; projectId: string }
+  /** New project on the device the page is aimed at; the dialog makes it there and picks it. */
+  | { kind: 'device-project'; title?: string };
 
 type Listener = () => void;
 export type ReadyListener = (place: { projectId: string | null; folder: string | null }) => void;
@@ -216,11 +218,13 @@ export class NewChatController {
     this.changed();
   }
 
-  /** The device's projects (only folders can hold a new chat); keeps the choice while it is still listed. */
+  /** The device's projects: its boards first (that is where its chats are shown), then its folders,
+   *  each by name; keeps the choice while it is still listed. */
   setDeviceProjects(list: RemoteProject[]): void {
     const dev = this.device;
     if (!dev) return;
-    this.deviceProjects = list.filter((p) => p.kind === 'folder');
+    const byName = (a: RemoteProject, b: RemoteProject) => a.name.localeCompare(b.name);
+    this.deviceProjects = [...list.filter((p) => p.kind === 'board').sort(byName), ...list.filter((p) => p.kind === 'folder').sort(byName)];
     if (!this.deviceProjects.some((p) => p.id === this.remoteProjectId)) {
       let last: string | null = null;
       try {
@@ -254,6 +258,11 @@ export class NewChatController {
    *  new folder (unless `noChat`). */
   newProject(opts: { title?: string; noChat?: boolean } = {}): void {
     const title = opts.title?.trim() || undefined;
+    // Aimed at another device the project is made there, whatever this PC's task board says.
+    if (this.device) {
+      this.openDialog({ kind: 'device-project', ...(title ? { title } : {}) });
+      return;
+    }
     if (this.boardConnected) {
       this.openDialog({ kind: 'new-project', ...(title ? { title } : {}), ...(opts.noChat ? { noChat: true } : {}) });
     } else {
@@ -286,7 +295,10 @@ export class NewChatController {
       follow = true;
     }
     if (follow && from) this.followBoardOf(env, from, this.draft);
-    if (explicit) this.move(opts.projectId !== undefined ? (boardFor(opts.projectId, this.projects) ?? opts.projectId) : this.projectForFolder(opts.folder), opts.folder ?? null, false);
+    // Aimed at another device, a project (or a folder) named by the caller is one of that device's.
+    if (explicit && this.device) {
+      if (opts.projectId !== undefined) this.remoteProjectId = opts.projectId;
+    } else if (explicit) this.move(opts.projectId !== undefined ? (boardFor(opts.projectId, this.projects) ?? opts.projectId) : this.projectForFolder(opts.folder), opts.folder ?? null, false);
     if (opts.itemId) {
       const title = opts.itemTitle ?? (this.draft.item?.id === opts.itemId ? this.draft.item.title : undefined);
       this.draft.item = { id: opts.itemId, ...(title ? { title } : {}) };

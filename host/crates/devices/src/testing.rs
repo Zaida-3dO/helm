@@ -7,9 +7,9 @@ use crate::wire::{
     code, AnswerArgs, ArchiveArgs, AttachmentGetArgs, BoardCancelArgs, BoardReadArgs,
     CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo, DevicePerson,
     ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, PageIdArgs, PagesReadArgs,
-    PanelStageArgs, PersonInfo, ProfileInfo, ProjectInfo, QuickOpenArgs, RemoteChat, RenameArgs,
-    RollOverArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs,
-    ToolStopArgs, VerbositySetArgs, WireError,
+    PanelStageArgs, PersonInfo, ProfileInfo, ProjectCreateArgs, ProjectInfo, ProjectSetArgs,
+    QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs, SetModelArgs, SetPermissionArgs,
+    ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError,
 };
 use base64::Engine as _;
 use helm_chats::types::{
@@ -178,6 +178,9 @@ pub struct FakeState {
     pub addressed: Vec<String>,
     /// What `defaults_set` saved, as the three-field answer it would give back.
     pub defaults_saved: Option<Value>,
+    /// The projects made and changed from afar.
+    pub projects_created: Vec<ProjectCreateArgs>,
+    pub projects_set: Vec<ProjectSetArgs>,
     pub cursor: i64,
     /// The hub people this install announces acting for (what `people()` answers).
     pub announce: Vec<DevicePerson>,
@@ -303,11 +306,18 @@ impl ChatPort for FakePort {
     }
 
     fn hello(&self) -> BoxFut<'_, PortResult<Hello>> {
+        // One look at the state: the lock is not held while the answer is built.
+        let (people, created, pinned) = {
+            let st = self.st();
+            (
+                st.people.clone(),
+                st.projects_created.clone(),
+                st.projects_set.iter().any(|s| s.pinned == Some(true)),
+            )
+        };
         ready(Ok(Hello {
             device: self.device(),
-            people: self
-                .st()
-                .people
+            people: people
                 .iter()
                 .map(|p| PersonInfo {
                     person_id: p.clone(),
@@ -316,13 +326,26 @@ impl ChatPort for FakePort {
                     about: String::new(),
                 })
                 .collect(),
-            projects: vec![ProjectInfo {
+            // The folder, then every board made from afar, each one a board with the folder asked for.
+            projects: std::iter::once(ProjectInfo {
                 id: "proj-1".to_owned(),
                 name: "Work".to_owned(),
                 colour: "#aabbcc".to_owned(),
                 kind: "folder".to_owned(),
                 path: "/work".to_owned(),
-            }],
+                folder_id: String::new(),
+                pinned,
+            })
+            .chain(created.iter().enumerate().map(|(i, c)| ProjectInfo {
+                id: format!("proj-new-{}", i + 1),
+                name: c.title.clone(),
+                colour: String::new(),
+                kind: "board".to_owned(),
+                path: String::new(),
+                folder_id: c.folder_project_id.clone().unwrap_or_default(),
+                pinned: false,
+            }))
+            .collect(),
             profiles: vec![
                 ProfileInfo {
                     profile_id: "profile-local".to_owned(),
@@ -894,6 +917,18 @@ impl ChatPort for FakePort {
             "effort": saved.get("effort").cloned().unwrap_or(json!("high")),
             "responseVerbosity": saved.get("responseVerbosity").cloned().unwrap_or(json!("low")),
         })))
+    }
+
+    fn project_create(&self, a: ProjectCreateArgs) -> BoxFut<'_, PortResult<Value>> {
+        let mut st = self.st();
+        let id = format!("proj-new-{}", st.projects_created.len() + 1);
+        st.projects_created.push(a);
+        ready(Ok(json!({ "projectId": id, "kind": "board" })))
+    }
+
+    fn project_set(&self, a: ProjectSetArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.st().projects_set.push(a);
+        ready(Ok(json!({})))
     }
 
     fn chat_brief(&self, chat_id: String) -> BoxFut<'_, PortResult<Option<RemoteChat>>> {

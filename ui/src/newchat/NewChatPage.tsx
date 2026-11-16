@@ -20,7 +20,7 @@ import { pickFolder } from './api.ts';
 import { getDefaultBoard } from './boards.ts';
 import { draftOps, newChat } from './controller.ts';
 import { folderMenu, folderName, pickerProjects, samePath } from './places.ts';
-import { AddProjectDialog, NewProjectDialog, PrimaryFolderDialog } from './ProjectDialogs.tsx';
+import { AddProjectDialog, DeviceProjectDialog, NewProjectDialog, PrimaryFolderDialog } from './ProjectDialogs.tsx';
 import './newchat.css';
 
 const NEW_PROJECT = '__new__';
@@ -114,6 +114,7 @@ export function NewChatHost({ flushers, sendShortcut }: { flushers: Flushers; se
       {newChat.open && newChat.draft && <NewChatPage flushers={flushers} sendShortcut={sendShortcut} />}
       {d?.kind === 'new-project' && <NewProjectDialog />}
       {d?.kind === 'add-project' && <AddProjectDialog />}
+      {d?.kind === 'device-project' && <DeviceProjectDialog />}
       {primaryOf && <PrimaryFolderDialog key={primaryOf.id} project={primaryOf} />}
     </>
   );
@@ -137,6 +138,19 @@ function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShort
   const isDefault = !draft.projectId && !!boardId && boardId === newChat.boards.boardId;
   const shownName = owner ? (isDefault ? `${owner.name} (default)` : owner.name) : null;
   const hidden = newChat.boards.hiddenBoardIds;
+  // A device says its projects only when this PC connects to it; ask again as the page opens.
+  const aimedAt = newChat.device?.uid ?? null;
+  useEffect(() => {
+    if (!aimedAt) return;
+    let live = true;
+    void deviceOps(shell.api)
+      .refreshProjects(aimedAt)
+      .then((l) => live && newChat.setDeviceProjects(l))
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [aimedAt, shell.api]);
   const folderBtn = useRef<HTMLButtonElement>(null);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [showCompleted, setShowCompleted] = useState(false);
@@ -234,8 +248,12 @@ function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShort
               <div className="nc-project">
                 <Picker
                   value={newChat.remoteProjectId}
-                  options={newChat.deviceProjects.map((p) => ({ value: p.id, title: p.name, text: p.name }))}
-                  onChange={(v) => newChat.pickRemoteProject(v)}
+                  options={newChat.deviceProjects.map((p) => ({ value: p.id, title: p.name, text: p.name, ...(p.kind === 'folder' ? { subtitle: 'Folder' } : {}) }))}
+                  onChange={(v, query) => (v === NEW_PROJECT ? newChat.newProject({ title: query }) : newChat.pickRemoteProject(v))}
+                  extraOption={(query, matches) => {
+                    const typed = query.trim();
+                    return { value: NEW_PROJECT, title: matches === 0 && typed ? `Create project “${typed}”` : 'New project…' };
+                  }}
                   label={`Project on ${device.name}`}
                   display={newChat.deviceProjects.find((p) => p.id === newChat.remoteProjectId)?.name}
                   heading={`Start the chat on ${device.name} in`}
