@@ -7,13 +7,15 @@ import { useState } from 'react';
 import { ApiError } from '../api/client.ts';
 import type { ProjectNode } from '../api/projects.ts';
 import { useShell } from '../shell/context.ts';
-import { Button, Dialog, Segmented, TextArea, TextInput } from '../ui/index.ts';
+import { Button, Dialog, Picker, Segmented, TextArea, TextInput } from '../ui/index.ts';
+import { deviceOps } from '../devices/api.ts';
 import { pickFolder } from './api.ts';
 import { createBoardProject } from './boards.ts';
 import { newChat } from './controller.ts';
 import { folderName } from './places.ts';
 import { addExistingFolder, addNewFolder, currentFolder, setPrimaryFolder } from './projects.ts';
 
+const NO_FOLDER = '__none__';
 const message = (e: unknown) => (e instanceof ApiError || e instanceof Error ? e.message : String(e));
 
 /**
@@ -103,6 +105,104 @@ export function NewProjectDialog() {
         </label>
         {error && (
           <p className="nc-error" role="alert" data-testid="new-project-error">
+            {error}
+          </p>
+        )}
+      </form>
+    </Dialog>
+  );
+}
+
+/**
+ * New project on another device: the device makes it (a board when it has a task board connected,
+ * else a folder) and the page picks it, ready for the first message. The folder, when asked for,
+ * is one of that device's own.
+ */
+export function DeviceProjectDialog() {
+  const shell = useShell();
+  const dev = newChat.device;
+  const [title, setTitle] = useState(newChat.dialog?.kind === 'device-project' ? (newChat.dialog.title ?? '') : '');
+  const [description, setDescription] = useState('');
+  const [folderId, setFolderId] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const close = () => newChat.closeDialog();
+  const folders = newChat.deviceProjects.filter((p) => p.kind === 'folder');
+  const ready = !!dev && title.trim().length > 0;
+
+  const submit = async () => {
+    if (!dev || !ready || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const ops = deviceOps(shell.api);
+      const made = await ops.createProject({
+        deviceUid: dev.uid,
+        title: title.trim(),
+        ...(description.trim() ? { description: description.trim() } : {}),
+        ...(folderId ? { folderProjectId: folderId } : {}),
+      });
+      newChat.setDeviceProjects(await ops.projects(dev.uid));
+      newChat.pickRemoteProject(made.projectId);
+      close();
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog
+      title={`New project on ${dev?.name ?? 'that PC'}`}
+      onClose={close}
+      busy={busy}
+      testId="device-project"
+      intro="It is made on that PC, on its task board when it has one connected, and your chat starts in it."
+      footer={
+        <>
+          <Button variant="text" onClick={close} disabled={busy}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={() => void submit()} disabled={!ready || busy} data-testid="device-project-submit">
+            Create project
+          </Button>
+        </>
+      }
+    >
+      <form
+        className="nc-form"
+        onSubmit={(e) => e.preventDefault()}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && (e.target as HTMLElement).tagName === 'INPUT') {
+            e.preventDefault();
+            void submit();
+          }
+        }}
+      >
+        <label className="nc-field">
+          <span>Title</span>
+          <TextInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder="What the project is" maxLength={200} autoFocus data-testid="device-project-title" />
+        </label>
+        <label className="nc-field">
+          <span>Description</span>
+          <TextArea value={description} onChange={(e) => setDescription(e.target.value)} placeholder="One plain paragraph: what it is for and what done looks like" rows={3} data-testid="device-project-description" />
+        </label>
+        {folders.length > 0 && (
+          <label className="nc-field">
+            <span>Folder on {dev?.name ?? 'that PC'}</span>
+            <Picker
+              value={folderId || NO_FOLDER}
+              options={[{ value: NO_FOLDER, title: 'Choose later', text: 'Choose later' }, ...folders.map((f) => ({ value: f.id, title: f.name, text: f.name }))]}
+              onChange={(v) => setFolderId(v === NO_FOLDER ? '' : v)}
+              label={`Folder on ${dev?.name ?? 'that PC'}`}
+              searchable
+              testId="device-project-folder"
+            />
+          </label>
+        )}
+        {error && (
+          <p className="nc-error" role="alert" data-testid="device-project-error">
             {error}
           </p>
         )}

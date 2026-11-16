@@ -58,7 +58,7 @@ test("another device's chats become rows and projects: groups made for projects 
     record('c5', { projectId: 'p1', boardId: 'b1', boardName: 'All boards', boardColour: 'green' }),
     record('c6', { projectId: 'p1', boardId: 'p1' }),
   ];
-  const { rows, projects } = remoteList(chats, [{ id: 'p1', name: 'Shop', colour: null, kind: 'board' }]);
+  const { rows, projects } = remoteList(chats, [{ id: 'p1', name: 'Shop', colour: null, kind: 'board', folderId: 'f1', pinned: true }, { id: 'f1', name: 'Shop folder', colour: null, kind: 'folder', path: 'C:/w/p1' }]);
   assert.deepEqual(rows.map((r) => [r.chatId, r.groupProjectId, r.hasChildren, r.attention]), [
     ['c1', 'p1', true, null],
     ['c2', 'p1', false, 'unread'],
@@ -70,8 +70,11 @@ test("another device's chats become rows and projects: groups made for projects 
   assert.deepEqual([rows[2]!.local, rows[3]!.hasDraft, rows[3]!.archived], [true, true, true]);
   assert.deepEqual([rows[2]!.position, rows[0]!.position], [5, null], 'the manual order set on its home PC travels');
   assert.deepEqual([rows[4]!.folderProjectId, rows[4]!.folderPath], ['p1', 'C:/w/p1'], 'the board groups the row, the folder still says where it runs');
+  // A board says whether it has a folder yet (the sidebar offers "Set folder" when not) and whether it is pinned.
+  assert.deepEqual([projects[0]!.primaryFolderProjectId, projects[0]!.pinned, projects[1]!.path], ['f1', true, 'C:/w/p1']);
   assert.deepEqual(projects.map((p) => [p.id, p.name, p.kind, p.colour, p.chatCount]), [
     ['p1', 'Shop', 'board', null, 3],
+    ['f1', 'Shop folder', 'folder', null, 0],
     ['px', 'Side', 'folder', 'blue', 1],
     // A board the computer did not list gets a group made from what the chat carries; one it did list is not doubled.
     ['b1', 'All boards', 'board', 'green', 1],

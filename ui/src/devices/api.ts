@@ -39,6 +39,11 @@ export interface RemoteProject {
   name: string;
   colour: string | null;
   kind: 'folder' | 'board';
+  /** A folder project's folder on that computer (a board has none of its own). */
+  path?: string;
+  /** A board's folder project: where its new chats start. Absent when none is set. */
+  folderId?: string;
+  pinned?: boolean;
 }
 
 /** A chat of another computer: the local record plus who it belongs to and where it runs. */
@@ -95,7 +100,15 @@ export function deviceOps(api: Api) {
     discard: (chatId: string, attachmentId: string) => api<unknown>('devices_discard', { chatId, attachmentId }),
     /** The projects a computer last said it has (every one, not only those holding chats shown to this profile). */
     projects: (deviceUid: string) => api<DeviceChats>('devices_chats', { deviceUid, limit: 1 }).then((r) => r.projects),
+    /** Ask a computer for its projects again (it only says them when this PC connects to it); what
+     *  the sidebar and the new-chat page list follows. */
+    refreshProjects: (deviceUid: string) => api<DeviceChats>('devices_projects_refresh', { deviceUid }).then((r) => r.projects),
     createChat: (a: { deviceUid: string; projectId: string; model?: string; effort?: string }) => api<{ chatId: string }>('devices_create_chat', a),
+    /** Make a project on that computer: a board when it has a task board, else a folder. */
+    createProject: (a: { deviceUid: string; title: string; description?: string; folderProjectId?: string }) =>
+      api<{ projectId: string; kind: 'folder' | 'board' }>('devices_project_create', a),
+    /** Pin a project there, or give a board the folder of one of that computer's folder projects. */
+    setProject: (a: { deviceUid: string; projectId: string; pinned?: boolean; folderProjectId?: string }) => api<unknown>('devices_project_set', a),
     /** Show a mirrored chat to one more person on the PC that runs it, or stop. */
     shareChat: (a: { chatId: string; personId: string; shared: boolean }) => api<unknown>('devices_share_chat', a),
     /** Hand a mirrored chat to one of the profiles on the PC that runs it. */
