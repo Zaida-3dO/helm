@@ -33,6 +33,15 @@ export interface PageSession {
   pins: PinnedPage[];
 }
 
+/** The pages pinned on one other PC of the household, as `devices_pages` lists them. */
+export interface RemotePages {
+  deviceUid: string;
+  name: string;
+  pages: PinnedPage[];
+  /** Why that PC could not be read (offline, its switch off...), in words. */
+  problem: { code: string; message: string } | null;
+}
+
 export interface PageStatus {
   revision: number;
   changed: boolean;
@@ -61,6 +70,10 @@ export function pageOps(api: Api) {
       }),
     unpin: (id: string) => api<{ removed: boolean }>('page_unpin', { id }),
     linkChat: (id: string, chatId: string | null) => api<{ linked: boolean }>('page_link_chat', { id, ...(chatId ? { chatId } : {}) }),
+    /** The pages pinned on the household's other PCs that the active profile's person may open. */
+    devicePages: () => api<{ devices: RemotePages[] }>('devices_pages', {}),
+    /** A page from another PC, brought across and opened here; answers as `open` does. */
+    openRemote: (deviceUid: string, pageId: string, network: boolean) => api<PageSession>('devices_page_open', { deviceUid, pageId, network }),
     list: (profileId?: string | null) => api<{ pages: PinnedPage[] }>('page_list', profileId ? { profileId } : {}),
   };
 }

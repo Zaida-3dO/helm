@@ -15,6 +15,12 @@
 //! Only `GET` and `HEAD` are answered. Every response is `no-store` and `nosniff`; an unknown
 //! session, an unlisted path and a wrong method all get a plain answer under a deny-all policy.
 //!
+//! A page that lives on another PC is opened from a bundle (`open_bundle`): its document and the
+//! files it refers to, brought across and held in memory, served by the same rules (the same
+//! request paths, the same policy). The PC that holds the page builds the bundle with
+//! `bundle_list` and `bundle_read`, which use the page gate and the asset gate below, so nothing
+//! outside the page's own folder leaves it.
+//!
 //! Budgets: at most [`MAX_SESSIONS`] sessions and [`MAX_RETAINED`] bytes of retained HTML. Over
 //! either, an open is refused and the user is asked to close a page; a session nobody has touched
 //! for [`IDLE_BEFORE_DROP`] is dropped first to make room.
@@ -23,6 +29,7 @@ use helm_panel::private::PrivateRoots;
 use helm_panel::serve::Reply;
 use helm_panel::viewer::{self, ReadError};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -216,6 +223,20 @@ struct Session {
     touched: Instant,
     /// When the last state save of this open was let through (or is due to be).
     last_save: Option<Instant>,
+    /// The files of a page held for another PC, by relative path; the page's own folder is not
+    /// read for such a session.
+    bundle: Option<HashMap<String, Vec<u8>>>,
+}
+
+impl Session {
+    /// What this session holds in memory.
+    fn weight(&self) -> usize {
+        self.html.len()
+            + self
+                .bundle
+                .as_ref()
+                .map_or(0, |b| b.values().map(Vec::len).sum())
+    }
 }
 
 /// What a read of a page file produced.
@@ -342,11 +363,20 @@ fn percent_decode(s: &str) -> Option<String> {
 /// relative path: no empty or `.`/`..` segments, no backslash, drive colon, control character or
 /// trailing dot or space (Windows reads those as another name).
 fn asset_path(dir: &Path, rel: &str) -> Option<PathBuf> {
+    let mut out = dir.to_path_buf();
+    for seg in rel_segments(rel)? {
+        out.push(seg);
+    }
+    Some(out)
+}
+
+/// The segments of a relative address after the same checks, percent-decoded.
+fn rel_segments(rel: &str) -> Option<Vec<String>> {
     let decoded = percent_decode(rel)?;
     if decoded.is_empty() || decoded.len() > 1024 {
         return None;
     }
-    let mut out = dir.to_path_buf();
+    let mut out = Vec::new();
     for seg in decoded.split('/') {
         if seg.is_empty()
             || seg == "."
@@ -358,7 +388,7 @@ fn asset_path(dir: &Path, rel: &str) -> Option<PathBuf> {
         {
             return None;
         }
-        out.push(seg);
+        out.push(seg.to_owned());
     }
     Some(out)
 }
@@ -484,12 +514,12 @@ impl PageServer {
         let loaded = self.load(raw)?;
         let mut live = self.lock();
         if live.len() >= MAX_SESSIONS
-            || live.iter().map(|s| s.html.len()).sum::<usize>() + loaded.html.len() > MAX_RETAINED
+            || live.iter().map(Session::weight).sum::<usize>() + loaded.html.len() > MAX_RETAINED
         {
             live.retain(|s| s.touched.elapsed() < IDLE_BEFORE_DROP);
         }
         if live.len() >= MAX_SESSIONS
-            || live.iter().map(|s| s.html.len()).sum::<usize>() + loaded.html.len() > MAX_RETAINED
+            || live.iter().map(Session::weight).sum::<usize>() + loaded.html.len() > MAX_RETAINED
         {
             return Err(PageError::Refused(
                 "Too many pages are open. Close one first.".into(),
@@ -513,6 +543,57 @@ impl PageServer {
             revision: 1,
             touched: Instant::now(),
             last_save: None,
+            bundle: None,
+        };
+        let out = Self::opened(&session);
+        live.push(session);
+        Ok(out)
+    }
+
+    /// Starts a session for a page held on another PC: its document and the files it refers to,
+    /// already read there. `key` files its saved state and `shown` is the path to show for it.
+    pub fn open_bundle(
+        &self,
+        key: &str,
+        shown: &str,
+        html: String,
+        files: HashMap<String, Vec<u8>>,
+        network: bool,
+    ) -> Result<Opened, PageError> {
+        if html.is_empty() || html.contains(char::from(0)) {
+            return Err(PageError::Refused("The page is empty or not text.".into()));
+        }
+        let mut live = self.lock();
+        let weight = html.len() + files.values().map(Vec::len).sum::<usize>();
+        if live.len() >= MAX_SESSIONS
+            || live.iter().map(Session::weight).sum::<usize>() + weight > MAX_RETAINED
+        {
+            live.retain(|s| s.touched.elapsed() < IDLE_BEFORE_DROP);
+        }
+        if live.len() >= MAX_SESSIONS
+            || live.iter().map(Session::weight).sum::<usize>() + weight > MAX_RETAINED
+        {
+            return Err(PageError::Refused(
+                "Too many pages are open. Close one first.".into(),
+            ));
+        }
+        let session = Session {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            channel: uuid::Uuid::new_v4().simple().to_string(),
+            path: PathBuf::from(shown),
+            key: key.to_owned(),
+            dir: PathBuf::new(),
+            html,
+            network,
+            scripts: network || self.offline_scripts.load(Ordering::Relaxed),
+            stamp: Stamp {
+                len: 0,
+                modified: None,
+            },
+            revision: 1,
+            touched: Instant::now(),
+            last_save: None,
+            bundle: Some(files),
         };
         let out = Self::opened(&session);
         live.push(session);
@@ -568,6 +649,11 @@ impl PageServer {
                 .iter()
                 .find(|s| s.id == id)
                 .ok_or_else(Self::not_open)?;
+            if s.bundle.is_some() {
+                return Err(PageError::Refused(
+                    "A page from another PC is brought across again from the Pages list.".into(),
+                ));
+            }
             s.path.to_string_lossy().into_owned()
         };
         let loaded = self.load(&path)?;
@@ -575,7 +661,7 @@ impl PageServer {
         let others: usize = live
             .iter()
             .filter(|s| s.id != id)
-            .map(|s| s.html.len())
+            .map(Session::weight)
             .sum();
         if others + loaded.html.len() > MAX_RETAINED {
             return Err(PageError::Refused(
@@ -604,6 +690,14 @@ impl PageServer {
                 .find(|s| s.id == id)
                 .ok_or_else(Self::not_open)?;
             s.touched = Instant::now();
+            if s.bundle.is_some() {
+                return Ok(Status {
+                    revision: s.revision,
+                    changed: false,
+                    missing: false,
+                    error: None,
+                });
+            }
             (s.path.to_string_lossy().into_owned(), s.stamp, s.revision)
         };
         let quiet = |error: Option<String>, missing: bool| Status {
@@ -627,7 +721,7 @@ impl PageServer {
                 let others: usize = live
                     .iter()
                     .filter(|s| s.id != id)
-                    .map(|s| s.html.len())
+                    .map(Session::weight)
                     .sum();
                 if others + loaded.html.len() > MAX_RETAINED {
                     return Ok(quiet(Some("Too many pages are open.".into()), false));
@@ -686,49 +780,191 @@ impl PageServer {
                         head,
                     );
                 }
-                _ => s.dir.clone(),
+                _ => {
+                    if let Some(files) = &s.bundle {
+                        let held = rel_segments(rest)
+                            .and_then(|segs| files.get(&segs.join("/")).map(|b| (segs, b.clone())));
+                        let Some((segs, body)) = held else {
+                            return deny(404, "Not found.");
+                        };
+                        let Some(mime) = segs
+                            .last()
+                            .and_then(|n| asset_mime(&extension(Path::new(n))))
+                        else {
+                            return deny(404, "Not found.");
+                        };
+                        return asset_reply(mime, body, head);
+                    }
+                    s.dir.clone()
+                }
             }
         };
-        self.asset(&dir, rest, head)
+        match self.read_asset(&dir, rest, !head) {
+            Some((mime, body)) => asset_reply(mime, body, head),
+            None => deny(404, "Not found."),
+        }
     }
 
-    fn asset(&self, dir: &Path, rel: &str, head: bool) -> Reply {
-        let Some(path) = asset_path(dir, rel) else {
-            return deny(404, "Not found.");
-        };
-        let Some(mime) = asset_mime(&extension(&path)) else {
-            return deny(404, "Not found.");
-        };
+    /// One file beside a page: its type and (when `read`) its bytes, or `None` for anything the
+    /// page may not have.
+    fn read_asset(&self, dir: &Path, rel: &str, read: bool) -> Option<(&'static str, Vec<u8>)> {
+        let path = asset_path(dir, rel)?;
+        let mime = asset_mime(&extension(&path))?;
         // The same gate as the page itself: no links along the way, no private folder.
-        let Ok(path) = viewer::admit(&path.to_string_lossy(), &self.roots) else {
-            return deny(404, "Not found.");
-        };
-        let Ok(file) = helm_platform::fs::open_regular_no_follow(&path) else {
-            return deny(404, "Not found.");
-        };
-        let Ok(meta) = file.metadata() else {
-            return deny(404, "Not found.");
-        };
+        let path = viewer::admit(&path.to_string_lossy(), &self.roots).ok()?;
+        let file = helm_platform::fs::open_regular_no_follow(&path).ok()?;
+        let meta = file.metadata().ok()?;
         if meta.len() > MAX_ASSET_BYTES {
-            return deny(404, "Not found.");
+            return None;
         }
         let mut body = Vec::new();
-        if !head
-            && (&file)
-                .take(MAX_ASSET_BYTES)
-                .read_to_end(&mut body)
-                .is_err()
-        {
-            return deny(404, "Not found.");
+        if read {
+            (&file).take(MAX_ASSET_BYTES).read_to_end(&mut body).ok()?;
         }
-        let mut r = page_reply(mime, Some("default-src 'none'; sandbox".into()), body, head);
-        if mime.starts_with("font/") {
-            // A font loads in CORS mode. The unguessable session address is what protects it.
-            r.headers
-                .push(("access-control-allow-origin", "*".to_string()));
-        }
-        r
+        Some((mime, body))
     }
+
+    /// What a page needs to run on another PC: its document and every file beside it (in its
+    /// own folder and below) that its text, or the text of a style sheet or script it pulls in,
+    /// names. Each is checked as a request for it would be, and the whole must fit the memory
+    /// budget, so a page with a folder of photos it does not use brings only what it shows.
+    pub fn bundle_list(&self, raw: &str) -> Result<BundleList, PageError> {
+        let loaded = self.load(raw)?;
+        let dir = loaded
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| PageError::Refused("The page has no folder.".into()))?;
+        let mut found: Vec<(String, u64)> = Vec::new();
+        self.walk(&dir, "", 0, &mut found);
+        found.sort();
+        let mut texts = vec![loaded.html.clone()];
+        let mut taken: Vec<(String, u64)> = Vec::new();
+        let mut left = found;
+        let mut total = loaded.html.len() as u64;
+        loop {
+            let (hit, rest): (Vec<_>, Vec<_>) = left.into_iter().partition(|(rel, _)| {
+                let name = rel.rsplit('/').next().unwrap_or(rel);
+                let spaced = name.replace(' ', "%20");
+                texts
+                    .iter()
+                    .any(|t| t.contains(name) || t.contains(&spaced))
+            });
+            left = rest;
+            if hit.is_empty() {
+                break;
+            }
+            for (rel, size) in hit {
+                total += size;
+                if total > MAX_RETAINED as u64 {
+                    return Err(PageError::Refused(
+                        "This page and its files are larger than 64 MiB, so it cannot be opened from another PC.".into(),
+                    ));
+                }
+                if matches!(
+                    extension(Path::new(&rel)).as_str(),
+                    "css" | "js" | "mjs" | "svg"
+                ) && size <= MAX_TEXT_SCAN
+                {
+                    if let Some((_, bytes)) = self.read_asset(&dir, &rel, true) {
+                        texts.push(String::from_utf8_lossy(&bytes).into_owned());
+                    }
+                }
+                taken.push((rel, size));
+            }
+        }
+        taken.sort();
+        Ok(BundleList {
+            name: loaded
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            title: title_of(&loaded.path),
+            path: loaded.path.to_string_lossy().into_owned(),
+            key: loaded.key,
+            size: loaded.html.len() as u64,
+            files: taken,
+        })
+    }
+
+    /// Files the page's folder holds that a page may be served: relative path and size.
+    fn walk(&self, dir: &Path, prefix: &str, depth: usize, out: &mut Vec<(String, u64)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten().take(MAX_WALK) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let rel = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if helm_platform::fs::is_link_like(&meta) {
+                continue;
+            }
+            if meta.is_dir() {
+                if depth < MAX_DEPTH && !self.roots.contains(&entry.path()) {
+                    self.walk(&entry.path(), &rel, depth + 1, out);
+                }
+            } else if meta.is_file()
+                && meta.len() <= MAX_ASSET_BYTES
+                && asset_mime(&extension(Path::new(&name))).is_some()
+                && rel_segments(&rel).is_some()
+            {
+                out.push((rel, meta.len()));
+            }
+        }
+    }
+
+    /// The bytes of the page's document (`None`) or of one file beside it, for another PC.
+    pub fn bundle_read(&self, raw: &str, rel: Option<&str>) -> Result<Vec<u8>, PageError> {
+        let loaded = self.load(raw)?;
+        let Some(rel) = rel else {
+            return Ok(loaded.html.into_bytes());
+        };
+        let dir = loaded
+            .path
+            .parent()
+            .ok_or_else(|| PageError::Refused("The page has no folder.".into()))?;
+        self.read_asset(dir, rel, true)
+            .map(|(_, bytes)| bytes)
+            .ok_or_else(|| PageError::NotFound("That file is not part of the page.".into()))
+    }
+}
+
+/// Folders below the page's own that a bundle looks into, and the entries it looks at per folder.
+const MAX_DEPTH: usize = 4;
+const MAX_WALK: usize = 2000;
+/// The largest style sheet, script or drawing read for the names it refers to.
+const MAX_TEXT_SCAN: u64 = 2 * 1024 * 1024;
+
+/// What [`PageServer::bundle_list`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundleList {
+    /// The page file's name.
+    pub name: String,
+    pub title: String,
+    /// The page's canonical path and the key its saved state is filed under, on the PC that holds it.
+    pub path: String,
+    pub key: String,
+    /// The document's size.
+    pub size: u64,
+    /// The files to bring with it: relative path and size.
+    pub files: Vec<(String, u64)>,
+}
+
+fn asset_reply(mime: &str, body: Vec<u8>, head: bool) -> Reply {
+    let mut r = page_reply(mime, Some("default-src 'none'; sandbox".into()), body, head);
+    if mime.starts_with("font/") {
+        // A font loads in CORS mode. The unguessable session address is what protects it.
+        r.headers
+            .push(("access-control-allow-origin", "*".to_string()));
+    }
+    r
 }
 
 /// The served document: the host prelude, then the page's own HTML verbatim. The prelude opens no
@@ -953,6 +1189,69 @@ mod tests {
                 .status,
             404
         );
+
+        // A page held for another PC: its list names the document and only the files its text
+        // (or a style sheet it pulls in) names, found below the folder too; the files come from
+        // the same gate as a request, and the copy is served from memory by the same rules.
+        fs::write(
+            dir.join("b.html"),
+            "<link rel=stylesheet href=\"style.css\"><img src=\"pic.png\"><img src=\"sub/deep.png\">",
+        )
+        .unwrap();
+        fs::write(dir.join("style.css"), "a{background:url(bg.png)}").unwrap();
+        fs::write(dir.join("bg.png"), [4u8]).unwrap();
+        let raw = dir.join("b.html").to_string_lossy().into_owned();
+        let list = s.bundle_list(&raw).unwrap();
+        assert_eq!((list.name.as_str(), list.title.as_str()), ("b.html", "b"));
+        let names: Vec<&str> = list.files.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["bg.png", "pic.png", "style.css", "sub/deep.png"]);
+        let doc = String::from_utf8(s.bundle_read(&raw, None).unwrap()).unwrap();
+        assert!(doc.contains("pic.png"));
+        let mut held = HashMap::new();
+        for (rel, _) in &list.files {
+            held.insert(rel.clone(), s.bundle_read(&raw, Some(rel)).unwrap());
+        }
+        for bad in [
+            "../s.png",
+            "data.json",
+            "other.html",
+            "sub/../pic.png",
+            "missing.png",
+        ] {
+            assert!(s.bundle_read(&raw, Some(bad)).is_err(), "{bad}");
+        }
+        let far = server();
+        let o = far
+            .open_bundle("remote:x", "Desk: b.html", doc, held, false)
+            .unwrap();
+        let got = |p: &str| far.respond("GET", &format!("/{}/{p}", o.session));
+        assert_eq!(got("pic.png").body, [1, 2, 3]);
+        assert_eq!(got("sub/deep.png").body, [7]);
+        assert_eq!(got("sub%2Fdeep.png").status, 200);
+        let page = got("index.html");
+        assert!(header(&page, "content-security-policy")
+            .unwrap()
+            .contains("connect-src blob: data:;"));
+        assert_eq!(
+            header(&page, "connection-allowlist"),
+            Some(OFFLINE_ALLOWLIST)
+        );
+        // Nothing but the held files: not the other PC's folder, not other types, not climbing.
+        for bad in [
+            "f.woff2",
+            "data.json",
+            "../s.png",
+            "sub/../pic.png",
+            "p.html",
+            "other.html",
+        ] {
+            assert_eq!(got(bad).status, 404, "{bad}");
+        }
+        // The copy never changes under the page, and cannot be re-read from a folder here.
+        let st = far.status(&o.session).unwrap();
+        assert!(!st.changed && !st.missing && st.revision == 1);
+        assert!(matches!(far.reload(&o.session), Err(PageError::Refused(_))));
+        assert_eq!(far.key_of(&o.session).as_deref(), Some("remote:x"));
     }
 
     /// Which files may run as a page, how a changed file shows up, and the session budget.

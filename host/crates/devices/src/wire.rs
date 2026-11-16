@@ -288,6 +288,25 @@ pub struct ChatIdArgs {
     pub chat_id: String,
 }
 
+/// A pinned page on the PC that holds it, by the id of its pin there.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PageIdArgs {
+    pub page_id: String,
+}
+
+/// One piece of a pinned page's bundle: its document (no `path`) or one file beside it, from
+/// `offset`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PagesReadArgs {
+    pub page_id: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub offset: u64,
+}
+
 /// One picture of a message, by the id its row carries.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -693,6 +712,13 @@ pub enum Op {
     /// A picture sent with a message, read where it is stored: a thumbnail or the full image,
     /// base64 with its type. A read, since the message itself can be read without the switch.
     AttachmentGet(AttachmentGetArgs),
+    /// The pages pinned on this PC that the asking person may open. Reads this PC's disk, so
+    /// the pages ops run with the switch like the project folder's reads.
+    PagesList,
+    /// What a pinned page needs to run elsewhere: its name and the files its text names.
+    PagesFiles(PageIdArgs),
+    /// One chunk of the page's document or of a file beside it.
+    PagesRead(PagesReadArgs),
     /// One file or folder listing from the chat's project folder, read on the PC that runs it.
     /// A read; the serving PC keeps the path inside the folder.
     FileView(PanelPathArgs),
@@ -789,6 +815,12 @@ impl Op {
             "quick_open" => Op::QuickOpen(args(a)?),
             "chat_folder" => Op::ChatFolder(args(a)?),
             "attachment_get" => Op::AttachmentGet(args(a)?),
+            "pages_list" => {
+                args::<NoArgs>(a)?;
+                Op::PagesList
+            }
+            "pages_files" => Op::PagesFiles(args(a)?),
+            "pages_read" => Op::PagesRead(args(a)?),
             "file_view" => Op::FileView(args(a)?),
             "file_stat" => Op::FileStat(args(a)?),
             "changes" => Op::Changes(args(a)?),
@@ -855,6 +887,9 @@ impl Op {
                 | Op::Address(_)
                 | Op::DefaultsSet(_)
                 | Op::QuickOpen(_)
+                | Op::PagesList
+                | Op::PagesFiles(_)
+                | Op::PagesRead(_)
                 | Op::FileView(_)
                 | Op::FileStat(_)
                 | Op::Changes(_)

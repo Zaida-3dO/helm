@@ -2,15 +2,16 @@
 //! builders for the records it holds. Nothing here touches a database, a process or a network.
 
 use crate::link::BoxFut;
-use crate::serve::{ChatPort, ChatState, PanelRead, PortResult, SentFile};
+use crate::serve::{ChatPort, ChatState, PageScope, PanelRead, PortResult, SentFile};
 use crate::wire::{
     code, AnswerArgs, ArchiveArgs, AttachmentGetArgs, BoardCancelArgs, BoardReadArgs,
     CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo, DevicePerson,
-    ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, PanelStageArgs, PersonInfo,
-    ProfileInfo, ProjectInfo, QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs, SetModelArgs,
-    SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs,
-    WireError,
+    ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, PageIdArgs, PagesReadArgs,
+    PanelStageArgs, PersonInfo, ProfileInfo, ProjectInfo, QuickOpenArgs, RemoteChat, RenameArgs,
+    RollOverArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs,
+    ToolStopArgs, VerbositySetArgs, WireError,
 };
+use base64::Engine as _;
 use helm_chats::types::{
     ChatRecord, ChatStatus, Harness, Interaction, InteractionAttention, InteractionMethod,
     MessageDetails, MessageRole, MessageRow, MessageStatus, TitleState, UnreadState,
@@ -19,6 +20,18 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+
+/// The page and the file beside it that the fake port holds.
+pub const FAKE_PAGE: &str = "<p>plan</p>";
+pub const FAKE_ASSET: &[u8] = &[1, 2, 3];
+
+/// The pin the fake port lists, linked to the chat `c1`.
+pub fn fake_pin() -> Value {
+    json!({
+        "id": "pg-1", "profileId": "p-a", "path": "/work/plan.html", "title": "Plan",
+        "chatId": "c1", "pinnedAt": 5,
+    })
+}
 
 /// A chat record with the fields a test cares about; the rest are plain defaults.
 pub fn fake_record(id: &str, title: &str, revision: i64) -> ChatRecord {
@@ -146,6 +159,8 @@ pub struct FakeState {
     pub folders_asked: Vec<String>,
     /// Each picture read: the chat and the attachment.
     pub attachments_asked: Vec<(String, String)>,
+    /// Each pages request: what was asked, the person and whether it is the PC's own person.
+    pub pages_asked: Vec<(String, String, bool)>,
     /// Each side-panel read: the op it answers and the (confined) arguments it was given.
     pub panel_reads: Vec<(&'static str, Value)>,
     /// Each stage/unstage: (args, whether it was a stage).
@@ -662,6 +677,49 @@ impl ChatPort for FakePort {
     fn chat_folder(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
         self.st().folders_asked.push(chat_id);
         ready(Ok(json!({ "path": "/work" })))
+    }
+
+    fn pages_list(&self, who: PageScope) -> BoxFut<'_, PortResult<Value>> {
+        self.st()
+            .pages_asked
+            .push(("list".to_owned(), who.person_id, who.own));
+        ready(Ok(json!({ "pages": [fake_pin()] })))
+    }
+
+    fn pages_files(&self, who: PageScope, a: PageIdArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.st()
+            .pages_asked
+            .push((format!("files {}", a.page_id), who.person_id, who.own));
+        ready(if a.page_id == "pg-1" {
+            Ok(json!({
+                "name": "plan.html", "title": "Plan", "size": FAKE_PAGE.len(),
+                "files": [{ "path": "a.png", "size": FAKE_ASSET.len() }],
+                "pin": fake_pin(),
+            }))
+        } else {
+            Err(WireError::not_found())
+        })
+    }
+
+    fn pages_read(&self, who: PageScope, a: PagesReadArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.st().pages_asked.push((
+            format!("read {} {:?}", a.page_id, a.path),
+            who.person_id,
+            who.own,
+        ));
+        let whole: &[u8] = match a.path.as_deref() {
+            None => FAKE_PAGE.as_bytes(),
+            Some("a.png") => FAKE_ASSET,
+            Some(_) => return ready(Err(WireError::not_found())),
+        };
+        // Two bytes at a time, so a file always arrives in more than one piece.
+        let from = (a.offset as usize).min(whole.len());
+        let to = (from + 2).min(whole.len());
+        ready(Ok(json!({
+            "data": base64::engine::general_purpose::STANDARD.encode(&whole[from..to]),
+            "size": whole.len(),
+            "eof": to == whole.len(),
+        })))
     }
 
     fn attachment(&self, a: AttachmentGetArgs) -> BoxFut<'_, PortResult<Value>> {

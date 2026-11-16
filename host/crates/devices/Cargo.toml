@@ -13,6 +13,7 @@ helm-chats.workspace = true
 helm-hosttools = { path = "../hosttools" }
 helm-consent = { path = "../consent" }
 helm-panel = { path = "../panel" }
+helm-pages = { path = "../pages" }
 helm-platform.workspace = true
 serde.workspace = true
 serde_json.workspace = true

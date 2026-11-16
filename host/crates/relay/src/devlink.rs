@@ -320,6 +320,23 @@ impl ChatPort for ChannelPort {
     ) -> BoxFut<'_, PortResult<Value>> {
         self.port.attachment(a)
     }
+    fn pages_list(&self, who: helm_devices::serve::PageScope) -> BoxFut<'_, PortResult<Value>> {
+        self.port.pages_list(who)
+    }
+    fn pages_files(
+        &self,
+        who: helm_devices::serve::PageScope,
+        a: helm_devices::wire::PageIdArgs,
+    ) -> BoxFut<'_, PortResult<Value>> {
+        self.port.pages_files(who, a)
+    }
+    fn pages_read(
+        &self,
+        who: helm_devices::serve::PageScope,
+        a: helm_devices::wire::PagesReadArgs,
+    ) -> BoxFut<'_, PortResult<Value>> {
+        self.port.pages_read(who, a)
+    }
     fn panel_stage(
         &self,
         a: helm_devices::wire::PanelStageArgs,
