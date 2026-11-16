@@ -135,6 +135,8 @@ pub fn effective(conn: &Connection, chat_id: &str) -> Effective {
 /// the board it was moved to. How a chat works is the user's to set, so a move made by a chat
 /// changes where a chat is shown but not how it works: while the chat sits on that board, its
 /// board's own mode is ignored for it. A move the user made, or a fresh start, clears the mark.
+/// The mark lives only in memory: after a host restart a moved chat starts fresh, and a fresh
+/// start settles on its board's mode.
 static AGENT_MOVED: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
 /// A chat's tool showed `chat_id` on `board_id`.

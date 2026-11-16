@@ -110,6 +110,7 @@ pub const TABLE: &[(&str, Class)] = &[
     ("app_request_allow", Class::Denied(CONSENT)),
     ("app_resolve_side_chat", Class::Denied(CHANGES)),
     ("app_resume_saved_agent", Class::Denied(CHANGES)),
+    ("app_roll_over", Class::Denied(CHANGES)),
     ("app_save_item", Class::Denied(LOCAL)),
     ("app_save_rule", Class::Denied(LOCAL)),
     ("app_saved", Class::Denied(LOCAL)),

@@ -397,6 +397,35 @@ async fn settle() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 }
 
+/// Wait until the chat's actor is done with `sid`: its submission has reached an end state, so
+/// the actor's own status changes are behind us and the status we set afterwards is the last
+/// word. The real sink runs one delivery at a time under its serial lock; a test that calls
+/// `place` directly must not let a resend race the actor still reacting to the first send.
+async fn wait_quiet(db: &Database, sid: &str) {
+    for _ in 0..100 {
+        let ended = db
+            .snapshot(|tx| {
+                Ok::<_, rusqlite::Error>(
+                    tx.query_row(
+                        "SELECT state IN ('delivered', 'complete', 'uncertain', 'rejected',
+                                  'withdrawn', 'superseded')
+                         FROM submissions WHERE id = ?1",
+                        [sid],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap_or(1),
+                )
+            })
+            .unwrap_or(1)
+            != 0;
+        if ended {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    settle().await;
+}
+
 fn chat_of(p: &Placed) -> String {
     match p {
         Placed::Sent { chat, .. } | Placed::Answered { chat, .. } => chat.clone(),
@@ -494,7 +523,10 @@ async fn a_message_starts_the_telegram_chat_with_origin_telegram_and_is_stored_o
     assert_eq!(s[0].1, "telegram", "never the user's typed words");
     assert!(s[0].4.starts_with(telegram::BRIEF_NOTE));
     assert!(s[0].4.ends_with("hello from the phone"));
-    // The hub resends it (no ack reached it): the same submission, nothing new.
+    // The hub resends it (no ack reached it): the same submission, nothing new. First let the
+    // actor be done with the send: place runs here without the sink's serial lock, so a resend
+    // must not race the actor still opening (or closing) the turn the send started.
+    wait_quiet(&e.db, &telegram::submission_id("hub-1")).await;
     sql(
         &e.db,
         "UPDATE chats SET status = 'idle' WHERE id = ?1",

@@ -31,6 +31,9 @@ const SNIPPET: usize = 300;
 const RECORD_READ: usize = 4_000_000;
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 50;
+/// How many matching rows one chat-trace query reads at most: well past any limit, so skipped
+/// credentials can still leave a full page, but a huge chat cannot make one trace crawl.
+const SCAN_CAP: i64 = 500;
 
 pub struct Answerer {
     pub env: Arc<Env>,
@@ -137,15 +140,17 @@ impl Answerer {
                 if !(owner == me.id || (owner.is_empty() && me.is_home) || shared) {
                     return Ok(Err("That chat is not shown to this person.".to_owned()));
                 }
-                // No LIMIT in the query: a message that looks like a credential is skipped, and
-                // the limit counts what is left.
+                // A generous SQL cap, not the limit: a message that looks like a credential is
+                // skipped and the limit counts what is left, so the query reads past the limit —
+                // but never more than SCAN_CAP rows, so a huge chat cannot make one trace crawl.
                 let mut st = tx.prepare(
                     "SELECT id, role, text, thinking, timestamp FROM messages
                      WHERE chat_id = ?1 AND timestamp >= ?2 AND timestamp <= ?3
                        AND (?4 = '' OR instr(lower(text), ?4) > 0 OR instr(lower(thinking), ?4) > 0)
-                     ORDER BY timestamp, id",
+                     ORDER BY timestamp, id
+                     LIMIT ?5",
                 )?;
-                let mut found = st.query(params![chat, after, before, needle])?;
+                let mut found = st.query(params![chat, after, before, needle, SCAN_CAP])?;
                 let mut rows = Vec::new();
                 while let Some(r) = found.next()? {
                     if rows.len() >= limit {

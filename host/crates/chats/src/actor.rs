@@ -2997,6 +2997,10 @@ impl Actor {
     /// wait. Only chats that are working count against the cap: a chat held at its start is not
     /// working, so waiters never block each other. They go in the order they began to wait, the
     /// oldest first.
+    ///
+    /// The cap is deliberately soft at the margin: a chat that has passed this check but has not
+    /// opened its turn yet counts as neither working nor waiting, so briefly one chat more than
+    /// the cap can be preparing. It settles as soon as that turn opens, and nothing waits on it.
     fn start_place(&self, server: &str) -> Option<i64> {
         let cap = self
             .sh
