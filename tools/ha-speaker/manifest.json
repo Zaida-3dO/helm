@@ -1,0 +1,11 @@
+{
+  "domain": "helm_speaker",
+  "name": "Helm Speaker",
+  "codeowners": [],
+  "config_flow": true,
+  "documentation": "https://github.com/zaida-3do/helm/tree/main/tools/ha-speaker",
+  "integration_type": "service",
+  "iot_class": "cloud_push",
+  "requirements": [],
+  "version": "1.0.0"
+}
