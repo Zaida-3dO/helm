@@ -20,6 +20,9 @@
 //!   question is remembered by its hub id in the profile, so a resend after a restart is not
 //!   taken as a new prompt.
 //! - `/stop` stops the tagged chat's turn.
+//! - `/mode` shows or sets the working mode. Like `/stop` it is answered between the phone and
+//!   Helm and never reaches a chat. Only a sender the hub paired with someone on this PC gets
+//!   that far, so the command is always one person's own words, never an agent's text.
 //!
 //! **Out.** While a Telegram turn runs, a mirror task watches the chat (its stored status, the
 //! live tools and the transcript) and sends ONE status line up the line, only when it changes and
@@ -44,7 +47,7 @@ use helm_chats::ChatRuntime;
 use helm_core::db::Database;
 use helm_hosttools::OpInvoker;
 use rusqlite::OptionalExtension;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1211,6 +1214,42 @@ impl ChatSink {
         }
     }
 
+    /// Answer a `/mode` command between the phone and Helm: it reads and changes the working
+    /// mode through the same ops the window's chip uses, and reaches no chat.
+    async fn answer_mode(&self, c: &Ctx, up: &Arc<dyn Upstream>, cmd: ModeCommand) {
+        let (op, args) = match cmd {
+            ModeCommand::Show => ("workmode_get", json!({})),
+            ModeCommand::Set(m) => ("workmode_set", json!({ "scope": "app", "mode": m })),
+            ModeCommand::Usage => {
+                up.notify(
+                    &c.person,
+                    "Working mode: \"/mode\" shows it, \"/mode run\" and \"/mode check\" change it.",
+                );
+                return;
+            }
+        };
+        match c.ops.invoke(op, args).await {
+            Ok(view) => match mode_answer(cmd, &view) {
+                Some(text) => up.notify(&c.person, &text),
+                None => up.notify(
+                    &c.person,
+                    "Helm answered the working mode in words it could not read.",
+                ),
+            },
+            Err(e) => {
+                let what = if op == "workmode_get" {
+                    "read"
+                } else {
+                    "change"
+                };
+                up.notify(
+                    &c.person,
+                    &format!("Helm could not {what} the working mode ({}).", e.message),
+                );
+            }
+        }
+    }
+
     /// Watch `chat` for its profile unless it is already being watched. One task per chat; a
     /// new exchange in a watched chat reuses the task, a chat whose task ended gets a new one.
     fn watch(&self, c: &Ctx, chat: &str, baseline: i64) {
@@ -1237,12 +1276,94 @@ impl ChatSink {
     }
 }
 
+/// What a `/mode` message is asking for. Only the two user words reach the op; anything else
+/// after the command gets the usage line instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModeCommand {
+    /// Show the mode, the board overrides and the counts.
+    Show,
+    /// Set the app's mode to the op's word (`run` or `check_in`).
+    Set(&'static str),
+    /// Something the command does not understand.
+    Usage,
+}
+
+/// The command behind a Telegram text: the first word exactly `/mode` (a bot handle after `@`
+/// allowed, and the word itself read without minding case, as Telegram's own commands are).
+/// `None` for anything else — `/modem`, `mode run` and ordinary sentences all stay messages.
+pub fn mode_command(text: &str) -> Option<ModeCommand> {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+    let mut words = trimmed.split_whitespace();
+    let head = words.next()?;
+    // The word after the slash, before any `@handle`: exactly `mode`, in any case. This keeps
+    // `/modem` and `/modeX` out.
+    if !head[1..].split('@').next()?.eq_ignore_ascii_case("mode") {
+        return None;
+    }
+    Some(match words.next() {
+        None => ModeCommand::Show,
+        Some(w) => match w.to_ascii_lowercase().as_str() {
+            "run" | "complete" => ModeCommand::Set("run"),
+            "check" | "checkin" | "check-in" | "check_in" | "ask" => ModeCommand::Set("check_in"),
+            _ => ModeCommand::Usage,
+        },
+    })
+}
+
+/// The user's words for one of the op's mode names.
+fn mode_label(word: &str) -> Option<&'static str> {
+    match word {
+        "run" => Some("Run to completion"),
+        "check_in" => Some("Check in with me"),
+        _ => None,
+    }
+}
+
+/// The phone's reply, from the view the ops answered with: the mode and counts for a show, the
+/// new mode for a set. `None` when the view does not read as one (which never happens with the
+/// real op).
+fn mode_answer(cmd: ModeCommand, view: &serde_json::Value) -> Option<String> {
+    let mode = mode_label(view.get("app")?.as_str()?)?;
+    match cmd {
+        ModeCommand::Show => {
+            let boards = view
+                .get("overrides")
+                .and_then(Value::as_array)
+                .map_or(0, |a| a.len());
+            let counts = view.get("counts")?;
+            let decided = counts.get("decided").and_then(Value::as_u64)?;
+            let needs = counts.get("needsYou").and_then(Value::as_u64)?;
+            Some(format!(
+                "Working mode: {mode}.\nBoards with a mode of their own: {boards}.\n\
+                 Decided for you: {decided} \u{b7} need you: {needs}"
+            ))
+        }
+        ModeCommand::Set(_) => Some(format!("Working mode is now {mode}.")),
+        // Usage is answered to the phone before any op runs, so it never comes here.
+        ModeCommand::Usage => None,
+    }
+}
+
 impl TelegramSink for ChatSink {
     fn deliver<'a>(&'a self, msg: TelegramMessage) -> BoxFut<'a, Result<(), String>> {
         Box::pin(async move {
             // One at a time: two messages with no tag must not start two chats.
             let _turn = self.serial.lock().await;
             let c = self.ctx(msg.person.as_deref())?;
+            // A working-mode command is answered between the phone and Helm: it opens no chat,
+            // sets no tag and starts no watch. One with a picture or file attached is left as a
+            // message, so nothing the person sent is silently dropped.
+            if msg.images.is_empty() && msg.files.is_empty() {
+                if let Some(cmd) = mode_command(&msg.text) {
+                    if let Some(up) = self.up.get() {
+                        self.answer_mode(&c, up, cmd).await;
+                    }
+                    return Ok(());
+                }
+            }
             let c2 = c.clone();
             let placed = tokio::task::spawn_blocking(move || place(&c2, &msg, helm_core::now_ms()))
                 .await
