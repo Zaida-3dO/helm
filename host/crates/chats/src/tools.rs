@@ -1299,6 +1299,21 @@ async fn send_message(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRe
     }
 }
 
+/// The chat that took this chat's place when it rolled over, if any.
+fn successor_of(ctx: &ToolCtx, id: &str) -> Result<Option<String>, ToolError> {
+    let store = db(ctx)?;
+    store
+        .snapshot(|tx| {
+            tx.query_row(
+                "SELECT chat_id FROM chat_succession WHERE predecessor_id = ?1",
+                [id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+        })
+        .map_err(|e| ToolError::maybe(e.to_string()))
+}
+
 fn send_local_message(
     ctx: &ToolCtx,
     to: &str,
@@ -1306,20 +1321,41 @@ fn send_local_message(
     limits: &SendLimits,
     a: &Value,
 ) -> ToolResult {
-    let target = meta(ctx, to)?;
+    let mut to = to.to_owned();
+    let mut target = meta(ctx, &to)?;
+    // A rolled-over chat still gets named in reports: when the target is archived, follow its
+    // roll-over successor (at most twice over a chain); with no successor it is refused as before.
+    let mut redirected_from: Option<String> = None;
+    for _ in 0..2 {
+        if target["archived"] != true {
+            break;
+        }
+        let Some(next) = successor_of(ctx, &to)? else {
+            return Err(refuse("That chat is archived."));
+        };
+        redirected_from = Some(std::mem::replace(&mut to, next));
+        target = meta(ctx, &to)?;
+    }
     if target["archived"] == true {
         return Err(refuse("That chat is archived."));
     }
-    limits.admit(&ctx.caller_chat_id, Some(to), Instant::now())?;
-    let sent = send_framed(ctx, to, body)?;
+    if to == ctx.caller_chat_id {
+        return Err(refuse("A chat cannot message itself."));
+    }
+    limits.admit(&ctx.caller_chat_id, Some(&to), Instant::now())?;
+    let sent = send_framed(ctx, &to, body)?;
     let (title, _) = cut_bytes(target["title"].as_str().unwrap_or(""), 512);
-    Ok(json!({
+    let mut out = json!({
         "delivered": sent.delivered,
         "mode": a["mode"],
         "chatId": to,
-        "link": chat_link(to, None),
+        "link": chat_link(&to, None),
         "title": title,
-    }))
+    });
+    if let Some(old) = redirected_from {
+        out["redirectedFrom"] = json!(old);
+    }
+    Ok(out)
 }
 
 async fn send_to_mirror_chat(
@@ -2351,6 +2387,108 @@ mod tests {
             h.col(&format!("SELECT archived FROM chats WHERE id = '{chat}'")) == ["1"]
         })
         .await;
+    }
+
+    /// A report that names an archived chat reaches the chat that rolled over in its place
+    /// (following the successor at most twice); with no successor, or a chain deeper than
+    /// that, the send is refused as before.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_send_message_follows_a_rolled_over_chats_successor() {
+        let h = harness();
+        let tools = tools(&h);
+        let maker = h.create().await;
+        // a1 -> a2: one hop, the live successor takes the report.
+        // b1 -> b2 -> b3: two hops, still followed.
+        // c1 -> c2 -> c3 (all archived): the third hop is not followed.
+        // lone: archived with no successor.
+        let (a1, a2, b1, b2, b3, c1, c2, c3, lone) = (
+            h.create().await,
+            h.create().await,
+            h.create().await,
+            h.create().await,
+            h.create().await,
+            h.create().await,
+            h.create().await,
+            h.create().await,
+            h.create().await,
+        );
+        h.db
+            .write(|tx| {
+                for (new, old) in [(&a2, &a1), (&b2, &b1), (&b3, &b2), (&c2, &c1), (&c3, &c2)] {
+                    tx.execute(
+                        "INSERT INTO chat_succession(chat_id, predecessor_id) VALUES (?1, ?2)",
+                        [new, old],
+                    )?;
+                }
+                for id in [&a1, &b1, &b2, &c1, &c2, &c3, &lone] {
+                    tx.execute("UPDATE chats SET archived = 1 WHERE id = ?1", [id])?;
+                }
+                Ok::<_, rusqlite::Error>(())
+            })
+            .unwrap();
+        // One hop: the successor of the named chat takes the report, and the result says so.
+        let r = call(
+            &h,
+            &tools,
+            &maker,
+            "app_send_message",
+            json!({"chatId": a1, "message": "the report", "mode": "steer"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r["chatId"], a2.as_str());
+        assert_eq!(r["redirectedFrom"], a1.as_str());
+        h.until("report reached the successor", |h| {
+            h.col(&format!(
+                "SELECT COUNT(*) FROM submissions WHERE chat_id = '{a2}' AND text LIKE '%the report%'"
+            )) == ["1"]
+        })
+        .await;
+        // Two hops: b1 -> b2 -> b3, and b3 is live.
+        let r = call(
+            &h,
+            &tools,
+            &maker,
+            "app_send_message",
+            json!({"chatId": b1, "message": "again", "mode": "steer"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r["chatId"], b3.as_str());
+        // The third hop is not followed: after two the target is still archived.
+        let e = call(
+            &h,
+            &tools,
+            &maker,
+            "app_send_message",
+            json!({"chatId": c1, "message": "deep", "mode": "steer"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(e.public.contains("archived"), "{}", e.public);
+        // An archived chat with no successor: refused as before.
+        let e = call(
+            &h,
+            &tools,
+            &maker,
+            "app_send_message",
+            json!({"chatId": lone, "message": "nowhere", "mode": "steer"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(e.public.contains("archived"), "{}", e.public);
+        // A live chat is untouched: no redirect key in its result.
+        let r = call(
+            &h,
+            &tools,
+            &maker,
+            "app_send_message",
+            json!({"chatId": a2, "message": "plain", "mode": "steer"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r["chatId"], a2.as_str());
+        assert!(r.get("redirectedFrom").is_none());
     }
 
     #[test]
