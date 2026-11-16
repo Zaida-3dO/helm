@@ -9,8 +9,8 @@ import type { EventBus } from '../api/events.ts';
 import { Button, Dialog, toast } from '../ui/index.ts';
 import { IconGrid, IconUnpin } from '../ui/icons.tsx';
 import { pageOps } from './api.ts';
-import type { PinnedPage } from './api.ts';
-import { openPageTab } from './open.ts';
+import type { PinnedPage, RemotePages } from './api.ts';
+import { openPageTab, openRemotePageTab } from './open.ts';
 import { displayPath, shortPath } from '../panel/viewer/paths.ts';
 
 export function PagesEntry({ api, bus, profileId }: { api: Api; bus: EventBus; profileId?: string | null }) {
@@ -18,6 +18,7 @@ export function PagesEntry({ api, bus, profileId }: { api: Api; bus: EventBus; p
   const [open, setOpen] = useState(false);
   const [pages, setPages] = useState<PinnedPage[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [remote, setRemote] = useState<RemotePages[] | null>(null);
 
   const refresh = useCallback(() => {
     ops
@@ -33,6 +34,28 @@ export function PagesEntry({ api, bus, profileId }: { api: Api; bus: EventBus; p
     refresh();
     return bus.on('pages_changed', refresh);
   }, [bus, refresh]);
+
+  // The household's other PCs are asked when the list is opened, not on every change.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setRemote(null);
+    ops
+      .devicePages()
+      .then((r) => !cancelled && setRemote(r.devices))
+      .catch(() => !cancelled && setRemote([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [ops, open]);
+
+  const showRemote = (device: RemotePages, p: PinnedPage) => {
+    if (!openRemotePageTab(device.deviceUid, p)) {
+      toast.show({ kind: 'error', text: 'The side panel has no room for another tab.' });
+      return;
+    }
+    setOpen(false);
+  };
 
   const show = (p: PinnedPage) => {
     if (!openPageTab(p.path)) {
@@ -56,7 +79,7 @@ export function PagesEntry({ api, bus, profileId }: { api: Api; bus: EventBus; p
       {open && (
         <Dialog title="Pages" onClose={() => setOpen(false)} padded testId="pages-list">
           {error && <p className="pg-handoff-error">{error}</p>}
-          {pages && pages.length === 0 && (
+          {pages && pages.length === 0 && remote && remote.every((d) => d.pages.length === 0) && (
             <p className="pg-handoff-note" data-testid="pages-empty">
               No pages are pinned yet. Ask an agent to build you a page, or open an .html file and pin it.
             </p>
@@ -83,6 +106,24 @@ export function PagesEntry({ api, bus, profileId }: { api: Api; bus: EventBus; p
               </li>
             ))}
           </ul>
+          {(remote ?? [])
+            .filter((d) => d.pages.length > 0 || d.problem)
+            .map((d) => (
+              <section key={d.deviceUid} data-testid="pages-device">
+                <h3 className="pg-list-device">On {d.name}</h3>
+                {d.problem && <p className="pg-handoff-note">{d.problem.message}</p>}
+                <ul className="pg-list">
+                  {d.pages.map((p) => (
+                    <li key={p.id} className="pg-list-row">
+                      <button type="button" className="pg-list-open" onClick={() => showRemote(d, p)} title={`${p.title}\n${displayPath(p.path)}`} data-testid="pages-remote-row">
+                        <span className="pg-list-title">{p.title}</span>
+                        <span className="pg-list-path">{shortPath(p.path)}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ))}
         </Dialog>
       )}
     </>

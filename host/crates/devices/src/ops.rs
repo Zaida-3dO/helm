@@ -18,6 +18,8 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .async_op("devices_create_chat", devices_create_chat)
         .async_op("devices_open_chat", devices_open_chat)
         .async_op("devices_attach", devices_attach)
+        .async_op("devices_pages", devices_pages)
+        .async_op("devices_page_open", devices_page_open)
         .blocking("devices_discard", OpClass::Blocking, devices_discard)
         .blocking(
             "devices_consent_list",
@@ -733,6 +735,80 @@ fn split_board_args(args: Value) -> Result<(String, Value), ApiError> {
         _ => return Err(ApiError::bad_args("The board call names a chat.")),
     };
     Ok((chat_id, Value::Object(map.clone())))
+}
+
+/// `devices_pages`: the pages pinned on the other PCs of the household that the acting person
+/// may open, one entry per PC: `{devices: [{deviceUid, name, pages, problem?}]}`. A PC that is
+/// offline, or has its switch off, answers with a `problem` in words and no pages.
+async fn devices_pages(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    serde_json::from_value::<NoArgs>(if args.is_null() { json!({}) } else { args })
+        .map_err(|e| ApiError::bad_args(e.to_string()))?;
+    let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
+    let db = ctx.services.need::<Database>()?;
+    // With no hub person to act as yet there is nothing to ask.
+    let Ok(person) = mirror.acting_now() else {
+        return Ok(json!({ "devices": [] }));
+    };
+    let peers = db
+        .snapshot(|tx| mirror::load_devices(tx))
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let mut asks = Vec::new();
+    for d in peers.into_iter().filter(|d| !d.is_self) {
+        let (m, person) = (mirror.clone(), person.clone());
+        asks.push(tokio::spawn(async move {
+            let (pages, problem) = match m.pages_on(&d.uid, &person).await {
+                Ok(v) => (v["pages"].clone(), Value::Null),
+                Err(e) => (json!([]), json!({ "code": e.code, "message": e.message })),
+            };
+            json!({ "deviceUid": d.uid, "name": d.name, "pages": pages, "problem": problem })
+        }));
+    }
+    let mut devices = Vec::new();
+    for a in asks {
+        if let Ok(v) = a.await {
+            devices.push(v);
+        }
+    }
+    Ok(json!({ "devices": devices }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PageOpenArgs {
+    device_uid: String,
+    page_id: String,
+    #[serde(default)]
+    network: bool,
+}
+
+/// `devices_page_open`: a page pinned on another PC, brought across and opened in a session
+/// here. Answers as `page_open` does (the session to load, its saved state, its pin there), so
+/// the page frame runs it the same way. The page's saved state is kept on this PC under the
+/// device and the pin; its messages go to the chat the pin names, which is the chat there.
+async fn devices_page_open(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: PageOpenArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
+    let db = ctx.services.need::<Database>()?;
+    let server = ctx.services.need::<helm_pages::PageServer>()?;
+    let person = mirror.acting_now()?;
+    let b = mirror
+        .page_bundle(&a.device_uid, &person, &a.page_id)
+        .await?;
+    let key = format!("remote:{}:{}", a.device_uid, a.page_id);
+    let shown = b.pin["path"].as_str().unwrap_or_default().to_owned();
+    let opened = server
+        .open_bundle(&key, &shown, b.html, b.files, a.network)
+        .map_err(|e| ApiError::new("refused", e.message().to_owned()))?;
+    let (state, revision) = db
+        .snapshot(|tx| helm_pages::store::state_get(tx, &key))
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let mut out = opened.to_json();
+    out["title"] = json!(b.title);
+    out["state"] = state;
+    out["stateRevision"] = json!(revision);
+    out["pins"] = json!([b.pin]);
+    Ok(out)
 }
 
 /// `devices_board_connection`: whether the PC that runs a mirrored chat has a task board set

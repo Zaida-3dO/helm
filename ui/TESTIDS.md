@@ -210,6 +210,7 @@ Send now `Ctrl+Alt+Enter`, Stop and send waiting messages `Esc`.
 | `nav-pages` / `nav-pages-count` | The sidebar footer's Pages entry and its pinned-page count | |
 | `nav-archived` / `nav-settings` | The sidebar footer's Archived chats and Settings entries | `nav-archived`: `aria-pressed` while the archived list shows |
 | `pages-list` / `pages-row` / `pages-empty` | The Pages dialog, one pinned page in it (click opens it as a tab), and the empty note | |
+| `pages-device` / `pages-remote-row` | A PC of the household in the Pages dialog, and one page pinned on it (click brings it across and opens it as a tab) | |
 | `page-frame-root` / `page-frame` / `page-error` | A page tab's body (`data-network` and `data-scripts` are `on` or `off`), its sandboxed frame, and the error shown when the page could not open | |
 | `page-reload` / `page-more` / `page-menu` | The page bar's Reload button, its "…" button, and the menu it opens (Allow network for this open, ticked while on; Add to / Remove from Pages; Send its messages to this chat, only when the page is linked elsewhere; Reset page storage) | |
 | `page-network-notice` / `page-network-hint` / `page-runtime-error` | The notice while the network is on (its `page-network-off` link turns it off), the hint after an offline page tried the network (its `page-network-allow` link allows it), and the dismissible script-error strip | |

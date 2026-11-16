@@ -34,6 +34,8 @@
 //! | `devices_create_chat` | async | `{deviceUid, projectId, model?, effort?}` → `{chatId}`: starts the chat for the active profile's person on that device, then opens it here |
 //! | `devices_open_chat` | async | `{chatId}` → `{}`: listen to a copied chat; its rows arrive as `chat`, `thread`, `pending`, `message` and `refresh` events |
 //! | `devices_attach` | async | `{chatId, kind, name, mime?, data?, path?}` → `{attachmentId}`: stage a picture (base64) or a file (path on this PC) for the next message to a chat that runs on another device; the send names the ids |
+//! | `devices_pages` | async | `{}` → `{devices: [{deviceUid, name, pages, problem?}]}`: the pages pinned on the other PCs of the household that the active profile's person may open, each as the Pages list shows it; a PC that is offline or has its switch off carries a `problem` in words |
+//! | `devices_page_open` | async | `{deviceUid, pageId, network?}` → as `page_open`: brings the page and the files beside it that it names across and opens it here; its messages go to the chat the pin names there, and its saved state stays on this PC |
 //! | `devices_discard` | blocking | `{chatId, attachmentId}` → `{}`: take back a staged attachment |
 //!
 //! `model_catalogue` also takes `deviceUid` (the models that device last reported). Every other
@@ -44,12 +46,15 @@
 //! serialised types in [`wire`] are the device-to-device frames, which the UI never sees.
 //!
 //! What another device may ask of this one (`wire::Op`): reads — `hello`, `chats_sub`, `chat_sub`,
-//! `chat_unsub`, `chats_unsub`, `page`, the panel reads of the chat's project folder (`file_view`,
+//! `chat_unsub`, `chats_unsub`, `page`, `attachment_get` (a picture of a message), the panel reads of the chat's project folder (`file_view`,
 //! `file_stat`, `changes`, `diff`, `archive_list`, `path_resolve`, `chat_folder`, `quick_open`)
 //! and the task-board reads (`board_connection`, `board_read`, `board_cancel`) — need only the
 //! pairing; everything that changes something (`send`, `stop`, `answer`, `create`, `set_model`,
 //! `rename`, `archive`, `share`, staging, and the rest) also needs the switch "Let other devices
 //! use chats on this PC". Panel paths never leave the chat's project folder.
+//! Pinned pages come across the same way: a device may list the pages its person pinned on this PC
+//! and read a pinned page's document and the files beside it that the document names (`pages_list`,
+//! `pages_files`, `pages_read`, all run with the switch), never any other path.
 
 pub mod host;
 pub mod identity;

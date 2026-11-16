@@ -412,7 +412,7 @@ impl Mirror {
     }
 }
 
-fn load_devices(conn: &Connection) -> rusqlite::Result<Vec<PeerDevice>> {
+pub(crate) fn load_devices(conn: &Connection) -> rusqlite::Result<Vec<PeerDevice>> {
     let mut q = conn.prepare(
         "SELECT uid, name, person_id, person, online, last_seen_at, run, is_self, people FROM devices",
     )?;

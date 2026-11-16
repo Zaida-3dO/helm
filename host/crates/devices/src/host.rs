@@ -9,14 +9,16 @@ use crate::identity;
 use crate::link::BoxFut;
 use crate::sends;
 use crate::serve::PanelRead;
-use crate::serve::{ChatPort, ChatState, PortResult, SentFile};
+use crate::serve::{ChatPort, ChatState, PageScope, PortResult, SentFile};
 use crate::wire::{
-    code, AnswerArgs, ArchiveArgs, BoardCancelArgs, BoardReadArgs, CheckpointArgs,
-    ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo, DevicePerson, ForkArgs, Hello,
-    MoveProfileArgs, MuteArgs, OrganizeArgs, PanelStageArgs, PersonInfo, ProfileInfo, ProjectInfo,
-    QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs, SetModelArgs, SetPermissionArgs,
-    ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError,
+    code, AnswerArgs, ArchiveArgs, AttachmentGetArgs, BoardCancelArgs, BoardReadArgs,
+    CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo, DevicePerson,
+    ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, PageIdArgs, PagesReadArgs,
+    PanelStageArgs, PersonInfo, ProfileInfo, ProjectInfo, QuickOpenArgs, RemoteChat, RenameArgs,
+    RollOverArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs,
+    ToolStopArgs, VerbositySetArgs, WireError,
 };
+use base64::Engine as _;
 use helm_chats::submit::{self, HostFile, HostImage, HostSend};
 use helm_chats::types::{ChatGetResult, ChatRecord, MessageRow, SubmissionOrigin};
 use helm_chats::{store, ChatRuntime};
@@ -42,6 +44,15 @@ const LIST_BYTES: usize = 900 * 1024;
 
 fn wire(e: ApiError) -> WireError {
     WireError::new(&e.code, e.message)
+}
+
+fn page_wire(e: helm_pages::server::PageError) -> WireError {
+    use helm_pages::server::PageError;
+    match e {
+        PageError::Refused(m) => WireError::new(code::REFUSED, m),
+        PageError::NotFound(m) => WireError::new(code::NOT_FOUND, m),
+        PageError::Io(m) => WireError::internal(m),
+    }
 }
 
 fn db_err(e: rusqlite::Error) -> WireError {
@@ -180,6 +191,44 @@ impl HostPort {
         self.services()
             .get::<Database>()
             .ok_or_else(|| WireError::internal("The database is not available."))
+    }
+
+    fn page_server(&self) -> PortResult<Arc<helm_pages::PageServer>> {
+        self.services()
+            .get::<helm_pages::PageServer>()
+            .ok_or_else(|| WireError::internal("Pages are not available."))
+    }
+
+    /// The pinned pages this person may open from another PC: those filed under the profiles
+    /// that act for them here, and (for this PC's own person) the ones pinned before profiles.
+    fn visible_pins(&self, who: &PageScope) -> PortResult<Vec<Value>> {
+        let db = self.db()?;
+        db.snapshot(|tx| {
+            let profiles: Vec<String> = tx
+                .prepare("SELECT id FROM profiles WHERE hub_person_id = ?1")
+                .and_then(|mut q| {
+                    q.query_map([&who.person_id], |r| r.get::<_, String>(0))?
+                        .collect()
+                })
+                .unwrap_or_default();
+            let all = helm_pages::store::list(tx, None)?;
+            Ok::<_, rusqlite::Error>(
+                all.into_iter()
+                    .filter(|p| match p["profileId"].as_str().unwrap_or_default() {
+                        "" => who.own,
+                        profile => profiles.iter().any(|x| x == profile),
+                    })
+                    .collect(),
+            )
+        })
+        .map_err(db_err)
+    }
+
+    fn visible_pin(&self, who: &PageScope, id: &str) -> PortResult<Value> {
+        self.visible_pins(who)?
+            .into_iter()
+            .find(|p| p["id"].as_str() == Some(id))
+            .ok_or_else(WireError::not_found)
     }
 
     fn rt(&self) -> PortResult<Arc<ChatRuntime>> {
@@ -1192,6 +1241,75 @@ impl ChatPort for HostPort {
         Box::pin(async move {
             self.here(&chat_id)?;
             self.op("chat_folder", json!({ "chatId": chat_id })).await
+        })
+    }
+
+    fn pages_list(&self, who: PageScope) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move { Ok(json!({ "pages": self.visible_pins(&who)? })) })
+    }
+
+    fn pages_files(&self, who: PageScope, a: PageIdArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            let pin = self.visible_pin(&who, &a.page_id)?;
+            let path = pin["path"].as_str().unwrap_or_default().to_owned();
+            let server = self.page_server()?;
+            let list = tokio::task::spawn_blocking(move || server.bundle_list(&path))
+                .await
+                .map_err(|e| WireError::internal(e.to_string()))?
+                .map_err(page_wire)?;
+            let title = pin["title"]
+                .as_str()
+                .filter(|t| !t.is_empty())
+                .unwrap_or(&list.title)
+                .to_owned();
+            Ok(json!({
+                "name": list.name,
+                "title": title,
+                "size": list.size,
+                "files": list.files.iter().map(|(p, n)| json!({ "path": p, "size": n })).collect::<Vec<_>>(),
+                "pin": pin,
+            }))
+        })
+    }
+
+    fn pages_read(&self, who: PageScope, a: PagesReadArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            let pin = self.visible_pin(&who, &a.page_id)?;
+            let path = pin["path"].as_str().unwrap_or_default().to_owned();
+            let server = self.page_server()?;
+            let rel = a.path.clone();
+            let whole =
+                tokio::task::spawn_blocking(move || server.bundle_read(&path, rel.as_deref()))
+                    .await
+                    .map_err(|e| WireError::internal(e.to_string()))?
+                    .map_err(page_wire)?;
+            let from = usize::try_from(a.offset)
+                .unwrap_or(usize::MAX)
+                .min(whole.len());
+            let to = (from + crate::wire::MAX_CHUNK_BYTES).min(whole.len());
+            Ok(json!({
+                "data": base64::engine::general_purpose::STANDARD.encode(&whole[from..to]),
+                "size": whole.len(),
+                "eof": to == whole.len(),
+            }))
+        })
+    }
+
+    fn attachment(&self, a: AttachmentGetArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            let mut args = json!({ "chatId": a.chat_id, "attachmentId": a.attachment_id });
+            if let Some(t) = a.thumb {
+                args["thumb"] = json!(t);
+            }
+            let out = self.op("attachment_get", args).await?;
+            if out.to_string().len() > ANSWER_BYTES {
+                return Err(WireError::new(
+                    code::REFUSED,
+                    "A picture over 512 KiB is only shown full size on the PC this chat runs on.",
+                ));
+            }
+            Ok(out)
         })
     }
 

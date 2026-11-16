@@ -27,6 +27,25 @@ use helm_ipc::ApiError;
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 
+/// The most a page brought from another PC may weigh, the document and its files together.
+const MAX_PAGE_BUNDLE: u64 = 64 * 1024 * 1024;
+
+fn too_big_page() -> ApiError {
+    ApiError::new(
+        "refused",
+        "This page and its files are larger than 64 MiB, so it cannot be opened from another PC.",
+    )
+}
+
+/// A page held on another PC, brought across to run here.
+pub struct PageBundle {
+    /// The pin there: id, title, path, linked chat.
+    pub pin: Value,
+    pub title: String,
+    pub html: String,
+    pub files: std::collections::HashMap<String, Vec<u8>>,
+}
+
 /// The most a draft may hold, as for a chat that runs here.
 const MAX_DRAFT_BYTES: usize = 2 * 1024 * 1024;
 
@@ -153,6 +172,8 @@ impl Mirror {
                             | "those requests"
                             | "that change"
                             | "that read"
+                            | "its pages"
+                            | "that page"
                             | "those rows"
                     ) =>
             {
@@ -716,12 +737,120 @@ impl Mirror {
         .await
     }
 
+    /// The pages pinned on `device` that `person` may open from here, read there: `{pages}`.
+    /// Needs the device up and its switch on, as everything that reads its disk does.
+    pub async fn pages_on(&self, device: &str, person: &str) -> Result<Value, ApiError> {
+        self.check_live(device)?;
+        self.ask_as(
+            device,
+            "pages_list",
+            json!({}),
+            "its pages",
+            &[person.to_owned()],
+        )
+        .await
+    }
+
+    /// Bring a pinned page across: the document and the files beside it that it names, each
+    /// read there in chunks small enough for the line. Nothing else of that PC's disk is asked
+    /// for: the page is named by its pin, and the device reads only inside the page's folder.
+    pub async fn page_bundle(
+        &self,
+        device: &str,
+        person: &str,
+        page_id: &str,
+    ) -> Result<PageBundle, ApiError> {
+        self.check_live(device)?;
+        let act = [person.to_owned()];
+        let info = self
+            .ask_as(
+                device,
+                "pages_files",
+                json!({ "pageId": page_id }),
+                "that page",
+                &act,
+            )
+            .await?;
+        let size = info["size"].as_u64().unwrap_or_default();
+        let files: Vec<(String, u64)> = info["files"]
+            .as_array()
+            .map(|l| {
+                l.iter()
+                    .filter_map(|f| Some((f["path"].as_str()?.to_owned(), f["size"].as_u64()?)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if size + files.iter().map(|(_, n)| n).sum::<u64>() > MAX_PAGE_BUNDLE {
+            return Err(too_big_page());
+        }
+        let html = self
+            .read_page_file(device, page_id, None, &act)
+            .await
+            .and_then(|b| {
+                String::from_utf8(b)
+                    .map_err(|_| ApiError::new("refused", "The page must be UTF-8 text."))
+            })?;
+        let mut held = std::collections::HashMap::new();
+        for (rel, _) in files {
+            let bytes = self
+                .read_page_file(device, page_id, Some(&rel), &act)
+                .await?;
+            held.insert(rel, bytes);
+        }
+        Ok(PageBundle {
+            pin: info["pin"].clone(),
+            title: info["title"].as_str().unwrap_or("Page").to_owned(),
+            html,
+            files: held,
+        })
+    }
+
+    async fn read_page_file(
+        &self,
+        device: &str,
+        page_id: &str,
+        rel: Option<&str>,
+        act: &[String],
+    ) -> Result<Vec<u8>, ApiError> {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let mut out: Vec<u8> = Vec::new();
+        loop {
+            let mut args = json!({ "pageId": page_id, "offset": out.len() });
+            if let Some(r) = rel {
+                args["path"] = json!(r);
+            }
+            let got = self
+                .ask_as(device, "pages_read", args, "that page", act)
+                .await?;
+            let chunk = b64
+                .decode(got["data"].as_str().unwrap_or_default())
+                .map_err(|_| ApiError::new("refused", "A page file arrived damaged."))?;
+            let eof = got["eof"].as_bool() == Some(true);
+            if chunk.is_empty() && !eof {
+                return Err(ApiError::new("refused", "A page file stopped arriving."));
+            }
+            out.extend(chunk);
+            if out.len() as u64 > MAX_PAGE_BUNDLE {
+                return Err(too_big_page());
+            }
+            if eof {
+                return Ok(out);
+            }
+        }
+    }
+
     /// The person a change to this chat acts as, alone on the wire: the active profile's
     /// person, or with "All profiles" the chat owner's person when a profile here is linked to
     /// them, else the home profile's person. A profile with no hub person yet (before the first
     /// sync pass lines it up) is refused in words.
     fn acting(&self, chat_id: &str) -> Result<String, ApiError> {
         self.acting_as(chat_id, None)
+    }
+
+    /// The person this PC acts as when no chat is in view (the Pages list): the active
+    /// profile's, as for a chat that has no owner of its own.
+    pub fn acting_now(&self) -> Result<String, ApiError> {
+        self.acting_as("", None)
     }
 
     /// [`Self::acting`], except that a caller who names the person they act for (a tool call
@@ -855,6 +984,7 @@ fn read_op(op: &str) -> Option<&'static str> {
         "quick_open" => "quick_open",
         "checkpoint_info" => "checkpoint",
         "chat_folder" => "chat_folder",
+        "attachment_get" => "attachment_get",
         "file_read" | "dir_list" => "file_view",
         "file_stat" => "file_stat",
         "archive_list" => "archive_list",
