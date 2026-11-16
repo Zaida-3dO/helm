@@ -10,9 +10,17 @@
 //     seconds rather than the normal minute and a half; and it turns the gate on with
 //     HELM_TEST_GATE, since a run on the fake claude has it off by default.
 //
+// The working mode end to end (the second scenario set): the top-bar chip reads "check in" by
+// default; switching it to run puts the run text in the next chat's launch, a turn that ends by
+// asking is held with a quiet checking line and answered with an App nudge instead of a finished
+// notice, the nudge shows up under "Decided for you" where Change answer still works, a real
+// blocker ends on a Blocker row that counts in attention, and a chat that keeps asking ends on a
+// "Stopped to ask" row after three nudges.
+//
 // Run: `npm run build:debug` at the root, then `npm run e2e -w checks`.
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, describe, test } from "node:test";
@@ -141,6 +149,113 @@ describe("The question gate: decided, escalated and timed-out cards", { timeout:
       await waitText(page(), "Exported.", 30_000);
     } finally {
       await shot(page(), OUT, "gatekeeper-hang");
+    }
+  });
+});
+
+const profile2 = scratchDir("helm-e2e-profile-");
+const work2 = scratchDir("helm-e2e-work-");
+const claudeDir2 = scratchDir("helm-e2e-claude-");
+
+describe("The working mode: the chip, the nudged stop, the counted blocker and the asked limit", { timeout: 12 * 60_000 }, () => {
+  let app2: App | undefined;
+  const page2 = () => app2!.page;
+
+  before(async () => {
+    app2 = await launchApp(profile2, {
+      env: {
+        HELM_TEST_CLAUDE: JSON.stringify({ command: process.execPath, args: [FAKE_CLAUDE, path.join(FIX, "gatekeeper.json")] }),
+        CLAUDE_CONFIG_DIR: claudeDir2,
+        FAKE_CLAUDE_LOG: path.join(profile2, "fake-claude.log"),
+      },
+    });
+  });
+  after(async () => {
+    await dispose(app2);
+  });
+
+  const chip = () => page2().locator(tid("workmode-chip"));
+  const sendText2 = async (text: string): Promise<void> => {
+    await typeMessage(page2(), text);
+    await page2().locator(tid("send")).dispatchEvent("click");
+  };
+
+  test("W1: run mode turns an asked stop into a nudge, records it, and Change answer reaches the chat", async () => {
+    try {
+      // The mode is check-in by default: the chip says so, and the popover switches the app.
+      await chip().waitFor({ timeout: 20_000 });
+      assert.equal(await chip().getAttribute("data-mode"), "check_in", "the app starts on check in");
+      await chip().click();
+      await page2().waitForSelector(tid("workmode-pop"), { timeout: 10_000 });
+      await page2().locator(`${tid("workmode-pop")} ${tid("workmode-app")} [data-tab="run"]`).click();
+      await until("the chip reads run", async () => (await chip().getAttribute("data-mode")) === "run");
+      await page2().keyboard.press("Escape");
+
+      const chat = await newChat(page2(), work2);
+      await sendText2("stop flow one");
+
+      // Every chat is launched with the mode: the run text is in this chat's launch record.
+      const launchFile = path.join(profile2, "workers", chat, "launch.json");
+      const launched = await until("the launch record", () => (fs.existsSync(launchFile) ? fs.readFileSync(launchFile, "utf8") : undefined));
+      assert.match(launched, /Working mode: run to completion/, "the launch says the mode");
+
+      // The turn ends by asking: a quiet checking line appears, no finished notice is given.
+      const lineSeen = page2().waitForSelector(tid("stop-check-line"), { timeout: 30_000 }).catch(() => null);
+      await waitText(page2(), "Shall I go ahead with the next step?", 60_000);
+      assert.ok(await lineSeen, "the checking line shows while the stop is judged");
+
+      // The answer is a nudge from Helm, and the chat carries on with the default.
+      await waitText(page2(), "Carry on without asking", 60_000);
+      await waitText(page2(), "All finished. Done.", 60_000);
+      assert.equal(await needsYou(chat), false, "a nudged stop is not counted against the chat");
+      assert.equal(await page2().locator(tid("stop-row")).count(), 0, "a nudge writes no stop row");
+
+      const decided = await until("the decided stop record", async () => (await gateRows("review")).find((r) => r.chatId === chat));
+      assert.equal(decided.verdict, "decided");
+      assert.equal(decided.channel, "stop");
+      assert.equal(decided.choice, "Take the next step");
+      assert.match(decided.question, /next step/);
+
+      // It joins "Decided for you", and Change answer lands a correction in the chat.
+      await page2().click(tid("nav-attention"));
+      const row = page2().locator(tid("gate-decided-row", `[data-ask-id="${decided.id}"]`));
+      await row.waitFor({ timeout: 20_000 });
+      await row.locator(tid("gate-change-open")).click();
+      await row.locator(tid("gate-change-input")).fill("Only after I have reviewed it");
+      await row.locator(tid("gate-change-send")).click();
+      await row.waitFor({ state: "detached", timeout: 20_000 });
+      await page2().keyboard.press("Escape");
+      await waitText(page2(), "You said: Correction", 30_000);
+    } finally {
+      await shot(page2(), OUT, "workmode-nudged");
+    }
+  });
+
+  test("W2: a real blocker ends on a Blocker row and counts in attention", async () => {
+    try {
+      const chat = await newChat(page2(), work2);
+      await sendText2("stop flow blocker");
+      await waitText(page2(), "sign in to the package registry", 60_000);
+      await page2().waitForSelector(`${tid("stop-row")}[data-class="blocker"]`, { timeout: 30_000 });
+      await until("the stop counted in attention", () => needsYou(chat), 20_000);
+      const asked = await until("the escalated stop record", async () => (await gateRows("asked")).find((r) => r.chatId === chat));
+      assert.equal(asked.verdict, "escalated");
+      assert.equal(asked.channel, "stop");
+      assert.equal(asked.stopClass, "blocker");
+    } finally {
+      await shot(page2(), OUT, "workmode-blocker");
+    }
+  });
+
+  test("W3: a chat that keeps asking stops on its own after three nudges", async () => {
+    try {
+      const chat = await newChat(page2(), work2);
+      await sendText2("loop chat");
+      await page2().waitForSelector(`${tid("stop-row")}[data-class="asked"]`, { timeout: 120_000 });
+      await waitText(page2(), "Still asking after 3 nudges", 10_000);
+      assert.ok(chat, "the loop ran in one chat");
+    } finally {
+      await shot(page2(), OUT, "workmode-asked");
     }
   });
 });
