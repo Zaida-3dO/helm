@@ -198,6 +198,22 @@ fn apply_edit(s: &mut McpServer, e: EditArgs) -> Result<(), StoreError> {
             return bad("The Google accounts' program, arguments and sign-in settings are changed in Settings > MCP.");
         }
     }
+    // The browser server's program and entry, and every variable the broker reads — the sites
+    // it may act on and its token included — are the user's alone: an agent must not be able to
+    // widen what chats may click in the person's own browser or to move its token.
+    if s.preset.as_deref() == Some(crate::presets::BROKER_PRESET_ID) {
+        let broker_var = |k: &String| k.to_ascii_uppercase().starts_with("BROKER_");
+        if e.command.is_some()
+            || e.args.is_some()
+            || e.kind.is_some()
+            || e.env.as_ref().is_some_and(|m| m.keys().any(broker_var))
+            || e.remove_env
+                .as_ref()
+                .is_some_and(|l| l.iter().any(broker_var))
+        {
+            return bad("The browser's program, entry and settings — including the sites it may act on and its token — are changed in Settings > MCP.");
+        }
+    }
     if let Some(n) = e.name {
         s.name = n;
     }
@@ -718,7 +734,8 @@ mod tests {
         let st = store(d.path());
         add_stdio(&st, "fake");
         // The person header is Helm's, and the Google preset's program, arguments and sign-in
-        // settings are the user's: an agent's edit of them is refused, other edits pass.
+        // settings and the browser preset's program, entry and every BROKER_* variable are the
+        // user's: an agent's edit of those is refused, other edits pass.
         call(
             &st,
             ADD,
@@ -726,9 +743,13 @@ mod tests {
                 "transport": {"type": "stdio", "command": "uvx.exe", "args": ["workspace-mcp"]}}}),
         )
         .unwrap();
+        add_stdio(&st, "browser");
         st.mutate(None, |l| {
             if let Some(g) = l.iter_mut().find(|s| s.id == "google") {
                 g.preset = Some(crate::google::PRESET_ID.into());
+            }
+            if let Some(b) = l.iter_mut().find(|s| s.id == "browser") {
+                b.preset = Some(crate::presets::BROKER_PRESET_ID.into());
             }
             Ok(())
         })
@@ -760,6 +781,35 @@ mod tests {
             (
                 "google",
                 json!({"env": {"TZ": {"kind": "literal", "value": "UTC"}}}),
+                true,
+            ),
+            (
+                "browser",
+                json!({"args": ["C:\\elsewhere\\broker-tool.js"]}),
+                false,
+            ),
+            ("browser", json!({"command": "cmd.exe"}), false),
+            (
+                "browser",
+                json!({"env": {"BROKER_ATTACHED_ACT_SITES": {"kind": "literal", "value": "shop.example"}}}),
+                false,
+            ),
+            (
+                "browser",
+                json!({"env": {"BROKER_ATTACHED_TOKEN": {"kind": "environment", "value": "X"}}}),
+                false,
+            ),
+            (
+                "browser",
+                json!({"removeEnv": ["BROKER_ATTACHED_TOKEN"]}),
+                false,
+            ),
+            ("browser", json!({"name": "My browser"}), true),
+            // The floor belongs to the browser server; the same variable on any other server is
+            // an ordinary environment entry.
+            (
+                "fake",
+                json!({"env": {"BROKER_NOTHING": {"kind": "literal", "value": "1"}}}),
                 true,
             ),
         ] {

@@ -2,7 +2,7 @@
 // api(op, args).
 
 import type { Api } from './client.ts';
-import type { McpEditorSnapshot, McpPreset, McpServer, RepoServer, ServerStatus, TestOutcome } from './generated/mcp/index.ts';
+import type { DoctorOutcome, McpEditorSnapshot, McpPreset, McpServer, RepoServer, ServerStatus, TestOutcome } from './generated/mcp/index.ts';
 
 /** "Use my Claude Code MCP servers" (user-only; on by default). */
 export const NATIVE_MCP_PREF = 'nativeMcp';
@@ -11,6 +11,8 @@ export const NATIVE_MCP_PREF = 'nativeMcp';
 export const MCP_ENABLED_PREF = 'mcpEnabled';
 
 export type {
+  DoctorCheck,
+  DoctorOutcome,
   McpEditorSnapshot,
   McpPreset,
   McpServer,
@@ -37,6 +39,8 @@ export function mcpOps(api: Api) {
     test: (server: McpServer) => api<TestOutcome>('mcp_server_test', { server }),
     presets: () => api<McpPreset[]>('mcp_presets_list', {}),
     status: () => api<ServerStatus[]>('mcp_servers_status', {}),
+    /** The broker's own checks for the built-in browser server; changes nothing. */
+    doctor: (serverId: string) => api<DoctorOutcome>('mcp_broker_doctor', { serverId }),
     repoList: () => api<RepoServer[]>('mcp_repo_servers_list', {}),
     repoApprove: (s: RepoServer) => api<RepoServer[]>('mcp_repo_approve', { file: s.file, name: s.name, hash: s.hash }),
     repoRevoke: (s: RepoServer) => api<RepoServer[]>('mcp_repo_revoke', { file: s.file, name: s.name }),

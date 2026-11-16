@@ -11,6 +11,7 @@
 //! | `mcp_server_test` | blocking | [`McpServerTestArgs`](crate::probe::McpServerTestArgs) → [`TestOutcome`](crate::probe::TestOutcome) (connects once, saves nothing) |
 //! | `mcp_presets_list` | blocking | `{}` → [`McpPreset`](crate::presets::McpPreset)`[]` |
 //! | `mcp_servers_status` | blocking | `{}` → [`ServerStatus`](crate::status::ServerStatus)`[]` |
+//! | `mcp_broker_doctor` | blocking | `{serverId}` → [`DoctorOutcome`](crate::doctor::DoctorOutcome) (the browser server's own checks; listed in [`crate::doctor`]) |
 //! | `mcp_repo_servers_list` | blocking | `{}` → [`RepoServer`](crate::repo_gate::RepoServer)`[]` (seen since launch) |
 //! | `mcp_repo_approve` | maintenance | `{file, name, hash}` → the list |
 //! | `mcp_repo_revoke` | maintenance | `{file, name}` → the list |
@@ -43,6 +44,11 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("mcp_servers_status", OpClass::Blocking, |ctx, _| {
             let st = ctx.services.need::<crate::status::McpStatusStore>()?;
             to_value(&st.list())
+        })
+        .blocking("mcp_broker_doctor", OpClass::Blocking, |ctx, args| {
+            let a: crate::doctor::DoctorArgs = parse(args)?;
+            let st = ctx.services.need::<McpStore>()?;
+            to_value(&crate::doctor::run(&st, &a.server_id))
         })
         .blocking("mcp_repo_servers_list", OpClass::Blocking, |ctx, _| {
             to_value(&ctx.services.need::<RepoGate>()?.seen())

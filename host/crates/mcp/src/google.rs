@@ -1219,6 +1219,7 @@ mod tests {
         ResolvedServer {
             id: PRESET_ID.into(),
             name: "Google".into(),
+            preset: None,
             transport: TransportKind::Stdio,
             command: Some(if cfg!(windows) { "uvx.exe" } else { "uvx" }.into()),
             args: strings(&DEFAULT_ARGS),
