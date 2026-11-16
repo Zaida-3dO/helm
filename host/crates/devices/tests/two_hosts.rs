@@ -653,6 +653,11 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         ),
         // The side panel around the chat, and the task board of the PC that runs it.
         ("chat_folder", json!({"chatId": "c1"})),
+        // A picture the person sent, read where it is stored.
+        (
+            "attachment_get",
+            json!({"chatId": "c1", "attachmentId": "img-1", "thumb": true}),
+        ),
         (
             "file_view",
             json!({"chatId": "c1", "path": "/work/src/main.rs"}),
@@ -709,6 +714,10 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         assert_eq!(st.context_asked, ["c1"]);
         assert_eq!(st.quick_opened[0].query, "main");
         assert!(st.quick_opened[0].reload);
+        assert_eq!(
+            st.attachments_asked,
+            [("c1".to_owned(), "img-1".to_owned())]
+        );
         assert_eq!(st.folders_asked, ["c1"]);
         assert_eq!(
             st.panel_reads.iter().map(|(op, _)| *op).collect::<Vec<_>>(),
@@ -762,6 +771,11 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         ("defaults_get", json!({"chatId": "c1"})),
         // The folder's name and the board answer with the switch off too.
         ("chat_folder", json!({"chatId": "c1"})),
+        // So does a picture in the transcript: it is part of what the person can already read.
+        (
+            "attachment_get",
+            json!({"chatId": "c1", "attachmentId": "img-1"}),
+        ),
         ("board_connection", json!({"chatId": "c1"})),
         (
             "board_read",
@@ -1476,6 +1490,12 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
             "chat_folder",
             json!({"chatId": "c1"}),
             Ok(json!({ "path": "/work" })),
+        ),
+        // A picture in a message, read from the PC that stored it, thumbnail or full size.
+        (
+            "attachment_get",
+            json!({"chatId": "c1", "attachmentId": "img-1", "thumb": true}),
+            Ok(json!({"mime": "image/png", "bytes": "AAAA"})),
         ),
         (
             "file_read",

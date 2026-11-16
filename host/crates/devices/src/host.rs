@@ -11,11 +11,12 @@ use crate::sends;
 use crate::serve::PanelRead;
 use crate::serve::{ChatPort, ChatState, PortResult, SentFile};
 use crate::wire::{
-    code, AnswerArgs, ArchiveArgs, BoardCancelArgs, BoardReadArgs, CheckpointArgs,
-    ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo, DevicePerson, ForkArgs, Hello,
-    MoveProfileArgs, MuteArgs, OrganizeArgs, PanelStageArgs, PersonInfo, ProfileInfo, ProjectInfo,
-    QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs, SetModelArgs, SetPermissionArgs,
-    ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError,
+    code, AnswerArgs, ArchiveArgs, AttachmentGetArgs, BoardCancelArgs, BoardReadArgs,
+    CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo, DevicePerson,
+    ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, PanelStageArgs, PersonInfo,
+    ProfileInfo, ProjectInfo, QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs, SetModelArgs,
+    SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs,
+    WireError,
 };
 use helm_chats::submit::{self, HostFile, HostImage, HostSend};
 use helm_chats::types::{ChatGetResult, ChatRecord, MessageRow, SubmissionOrigin};
@@ -1192,6 +1193,24 @@ impl ChatPort for HostPort {
         Box::pin(async move {
             self.here(&chat_id)?;
             self.op("chat_folder", json!({ "chatId": chat_id })).await
+        })
+    }
+
+    fn attachment(&self, a: AttachmentGetArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            let mut args = json!({ "chatId": a.chat_id, "attachmentId": a.attachment_id });
+            if let Some(t) = a.thumb {
+                args["thumb"] = json!(t);
+            }
+            let out = self.op("attachment_get", args).await?;
+            if out.to_string().len() > ANSWER_BYTES {
+                return Err(WireError::new(
+                    code::REFUSED,
+                    "A picture over 512 KiB is only shown full size on the PC this chat runs on.",
+                ));
+            }
+            Ok(out)
         })
     }
 

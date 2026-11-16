@@ -44,7 +44,7 @@
 //! serialised types in [`wire`] are the device-to-device frames, which the UI never sees.
 //!
 //! What another device may ask of this one (`wire::Op`): reads — `hello`, `chats_sub`, `chat_sub`,
-//! `chat_unsub`, `chats_unsub`, `page`, the panel reads of the chat's project folder (`file_view`,
+//! `chat_unsub`, `chats_unsub`, `page`, `attachment_get` (a picture of a message), the panel reads of the chat's project folder (`file_view`,
 //! `file_stat`, `changes`, `diff`, `archive_list`, `path_resolve`, `chat_folder`, `quick_open`)
 //! and the task-board reads (`board_connection`, `board_read`, `board_cancel`) — need only the
 //! pairing; everything that changes something (`send`, `stop`, `answer`, `create`, `set_model`,

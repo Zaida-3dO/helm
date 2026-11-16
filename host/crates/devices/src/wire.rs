@@ -288,6 +288,16 @@ pub struct ChatIdArgs {
     pub chat_id: String,
 }
 
+/// One picture of a message, by the id its row carries.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttachmentGetArgs {
+    pub chat_id: String,
+    pub attachment_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumb: Option<bool>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PageArgs {
@@ -680,6 +690,9 @@ pub enum Op {
     QuickOpen(QuickOpenArgs),
     /// The chat's project folder path, as the panel shows it. A read.
     ChatFolder(ChatIdArgs),
+    /// A picture sent with a message, read where it is stored: a thumbnail or the full image,
+    /// base64 with its type. A read, since the message itself can be read without the switch.
+    AttachmentGet(AttachmentGetArgs),
     /// One file or folder listing from the chat's project folder, read on the PC that runs it.
     /// A read; the serving PC keeps the path inside the folder.
     FileView(PanelPathArgs),
@@ -775,6 +788,7 @@ impl Op {
             "context_on" => Op::ContextOn(args(a)?),
             "quick_open" => Op::QuickOpen(args(a)?),
             "chat_folder" => Op::ChatFolder(args(a)?),
+            "attachment_get" => Op::AttachmentGet(args(a)?),
             "file_view" => Op::FileView(args(a)?),
             "file_stat" => Op::FileStat(args(a)?),
             "changes" => Op::Changes(args(a)?),

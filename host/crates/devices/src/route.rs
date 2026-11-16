@@ -855,6 +855,7 @@ fn read_op(op: &str) -> Option<&'static str> {
         "quick_open" => "quick_open",
         "checkpoint_info" => "checkpoint",
         "chat_folder" => "chat_folder",
+        "attachment_get" => "attachment_get",
         "file_read" | "dir_list" => "file_view",
         "file_stat" => "file_stat",
         "archive_list" => "archive_list",

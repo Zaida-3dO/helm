@@ -314,6 +314,12 @@ impl ChatPort for ChannelPort {
     fn panel_read(&self, a: helm_devices::serve::PanelRead) -> BoxFut<'_, PortResult<Value>> {
         self.port.panel_read(a)
     }
+    fn attachment(
+        &self,
+        a: helm_devices::wire::AttachmentGetArgs,
+    ) -> BoxFut<'_, PortResult<Value>> {
+        self.port.attachment(a)
+    }
     fn panel_stage(
         &self,
         a: helm_devices::wire::PanelStageArgs,

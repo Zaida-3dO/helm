@@ -33,7 +33,7 @@ function MessageImageViewer({ chatId, images, index, onIndex, onClose }: { chatI
       onIndex={onIndex}
       onClose={onClose}
       src={full.state === 'ready' ? full.url : thumb}
-      state={full.state === 'ready' ? 'ready' : full.state === 'failed' && !thumb ? 'failed' : 'loading'}
+      state={full.state === 'ready' ? 'ready' : full.state === 'failed' ? (thumb ? 'ready' : 'failed') : 'loading'}
       testId="message-image-viewer"
       imageTestId="message-image-full"
     />

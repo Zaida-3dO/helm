@@ -4,11 +4,12 @@
 use crate::link::BoxFut;
 use crate::serve::{ChatPort, ChatState, PanelRead, PortResult, SentFile};
 use crate::wire::{
-    code, AnswerArgs, ArchiveArgs, BoardCancelArgs, BoardReadArgs, CheckpointArgs,
-    ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo, DevicePerson, ForkArgs, Hello,
-    MoveProfileArgs, MuteArgs, OrganizeArgs, PanelStageArgs, PersonInfo, ProfileInfo, ProjectInfo,
-    QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs, SetModelArgs, SetPermissionArgs,
-    ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError,
+    code, AnswerArgs, ArchiveArgs, AttachmentGetArgs, BoardCancelArgs, BoardReadArgs,
+    CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo, DevicePerson,
+    ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, PanelStageArgs, PersonInfo,
+    ProfileInfo, ProjectInfo, QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs, SetModelArgs,
+    SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs,
+    WireError,
 };
 use helm_chats::types::{
     ChatRecord, ChatStatus, Harness, Interaction, InteractionAttention, InteractionMethod,
@@ -143,6 +144,8 @@ pub struct FakeState {
     pub context_asked: Vec<String>,
     pub quick_opened: Vec<QuickOpenArgs>,
     pub folders_asked: Vec<String>,
+    /// Each picture read: the chat and the attachment.
+    pub attachments_asked: Vec<(String, String)>,
     /// Each side-panel read: the op it answers and the (confined) arguments it was given.
     pub panel_reads: Vec<(&'static str, Value)>,
     /// Each stage/unstage: (args, whether it was a stage).
@@ -659,6 +662,13 @@ impl ChatPort for FakePort {
     fn chat_folder(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
         self.st().folders_asked.push(chat_id);
         ready(Ok(json!({ "path": "/work" })))
+    }
+
+    fn attachment(&self, a: AttachmentGetArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.st()
+            .attachments_asked
+            .push((a.chat_id, a.attachment_id));
+        ready(Ok(json!({ "mime": "image/png", "bytes": "AAAA" })))
     }
 
     fn panel_read(&self, a: PanelRead) -> BoxFut<'_, PortResult<Value>> {

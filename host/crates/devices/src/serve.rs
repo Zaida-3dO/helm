@@ -20,13 +20,14 @@
 use crate::link::{BoxFut, DeviceLink};
 use crate::subs::{self, Out, Subs, CHATS_SUB, PUSH_ROW_BUDGET};
 use crate::wire::{
-    code, AnswerArgs, ArchiveArgs, AttachPutArgs, AttachmentRef, BoardCancelArgs, BoardReadArgs,
-    Caller, ChatIdArgs, CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceFrame,
-    DeviceInfo, DevicePerson, ForkArgs, Frame, Hello, MoveProfileArgs, MuteArgs, Op, OrganizeArgs,
-    PageArgs, PanelStageArgs, PeerDevice, QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs,
-    SendArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs,
-    VerbositySetArgs, WireError, MAX_CHUNK_BYTES, MAX_PAGE_ROWS, MAX_SEND_ATTACHMENTS,
-    MAX_SEND_BYTES, MAX_UPLOAD_BYTES, SUB_ROWS,
+    code, AnswerArgs, ArchiveArgs, AttachPutArgs, AttachmentGetArgs, AttachmentRef,
+    BoardCancelArgs, BoardReadArgs, Caller, ChatIdArgs, CheckpointArgs, ConsentDecideArgs,
+    CreateArgs, DefaultsArgs, DeviceFrame, DeviceInfo, DevicePerson, ForkArgs, Frame, Hello,
+    MoveProfileArgs, MuteArgs, Op, OrganizeArgs, PageArgs, PanelStageArgs, PeerDevice,
+    QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs, SendArgs, SetModelArgs, SetPermissionArgs,
+    ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError,
+    MAX_CHUNK_BYTES, MAX_PAGE_ROWS, MAX_SEND_ATTACHMENTS, MAX_SEND_BYTES, MAX_UPLOAD_BYTES,
+    SUB_ROWS,
 };
 use base64::Engine as _;
 use helm_chats::types::{
@@ -177,6 +178,9 @@ pub trait ChatPort: Send + Sync {
     fn quick_open(&self, a: QuickOpenArgs) -> BoxFut<'_, PortResult<Value>>;
     /// The chat's project folder path, as this install sees it.
     fn chat_folder(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>>;
+    /// One picture of a message: `{mime, bytes}` as the chat's own op answers, or a refusal in
+    /// words when it is too large to bring across.
+    fn attachment(&self, a: AttachmentGetArgs) -> BoxFut<'_, PortResult<Value>>;
     /// One side-panel read from the chat's project folder here — a file, a folder listing, a
     /// change stamp, an archive listing or a path resolution. The paths must lie inside that
     /// folder; nothing else on this PC is reachable this way.
@@ -831,6 +835,7 @@ impl Inner {
             Op::ContextOn(a) => done(self.port.context_on(a.chat_id).await?),
             Op::QuickOpen(a) => done(self.port.quick_open(a).await?),
             Op::ChatFolder(a) => done(self.port.chat_folder(a.chat_id).await?),
+            Op::AttachmentGet(a) => done(self.port.attachment(a).await?),
             Op::FileView(a) => done(
                 self.port
                     .panel_read(PanelRead {
