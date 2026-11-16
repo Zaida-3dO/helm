@@ -1,5 +1,5 @@
 // The top bar. Left: the breadcrumb (project ›
-// chat title, double-click to rename). Right, in order: the graphics-card control, the usage meter, [update-pill slot] [Swarm slot] Fork, Pin,
+// chat title, double-click to rename). Right, in order: the graphics-card control, the usage meter, the working-mode chip, [update-pill slot] [Swarm slot] Fork, Pin,
 // Archive/Restore, the action row, Toggle inspector, [Chat view slot], "…", and at the far right
 // the Windows caption buttons (Helm draws its own caption). Below it, a slot for
 // the Project / Workspace tags strip (the sidebar fills it).
@@ -21,6 +21,7 @@ import { sidebarUndo } from '../sidebar/undo.ts';
 import { GpuControl } from '../gpu/GpuControl.tsx';
 import { UpdatePill } from '../updates/UpdatePill.tsx';
 import { UsageMeter } from '../usage/UsageMeter.tsx';
+import { WorkModeChip } from '../workmode/WorkModeChip.tsx';
 import { isBusy } from '../sidebar/status.ts';
 import { LOCAL_WORKING_LABEL, isLocalModelId, localWaitLabel } from '../state/localModel.ts';
 import { CaptionButtons, dragHandlers } from './caption.tsx';
@@ -212,6 +213,9 @@ ${renameHint}` : undefined}
         <div className="topbar-actions">
           <GpuControl tier={tier} />
           <UsageMeter />
+          {/* The working mode is always visible: the selected chat's mode, or the app's when no
+              chat is open. It stays at every width (glyph only at narrow and tight). */}
+          <WorkModeChip tier={tier} />
           {updatePill ?? <UpdatePill />}
           {swarm}
           {chat && (

@@ -10,6 +10,7 @@
 //! | `chat_mutes` | muted chats (user-only) |
 //! | `chat_activity` | per chat: the last worker output time, the stalled flag, and how many local chats stand ahead in the model server's queue while this chat's turn waits on it |
 //! | `chat_attention` | per chat: when its attention was marked addressed, and a snooze |
+//! | `chat_stop_holds` | per chat: when its last turn end was handed to the stop judge and is still held; read by the waits watcher so a held chat reads as busy, and cleared at start-up |
 //! | `chat_triage` | per chat: the idle check's last verdict, and the activity it was made for |
 //! | `chat_shares` | the profiles besides its own that a chat is shown to; the chat row itself carries its `profile_id` and `host_device_id` |
 //! | `chat_flags` | per chat: the question its agent flagged for the user ([`crate::flags`]) |
@@ -53,7 +54,8 @@ pub fn register(reg: &mut MigrationRegistry) {
         .one_time("chats-origin-user-is-typed", origin_user_is_typed)
         .recovery_capture("chats-restart-capture", capture_continuations)
         .recovery_step("chats-retry-leftovers", cancel_retry_leftovers)
-        .recovery_step("chats-stall-reset", reset_stalls);
+        .recovery_step("chats-stall-reset", reset_stalls)
+        .recovery_step("chats-stop-holds-clear", clear_stop_holds);
 }
 
 fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
@@ -122,6 +124,10 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              addressed_at   INTEGER,
              snoozed_until  INTEGER,
              snoozed_at     INTEGER
+         );
+         CREATE TABLE IF NOT EXISTS chat_stop_holds (
+             chat_id  TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+             since    INTEGER NOT NULL
          );
          CREATE TABLE IF NOT EXISTS chat_triage (
              chat_id     TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
@@ -274,6 +280,12 @@ fn activity_state(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     if !has {
         tx.execute("ALTER TABLE chat_activity ADD COLUMN state TEXT", [])?;
     }
+    Ok(())
+}
+
+/// A held turn end belongs to a running app; after a restart no hold is open.
+fn clear_stop_holds(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute("DELETE FROM chat_stop_holds", [])?;
     Ok(())
 }
 

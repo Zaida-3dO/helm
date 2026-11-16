@@ -1,0 +1,54 @@
+/* The top bar's working-mode chip and its popover. The chip sits where the bar's quiet controls
+   sit: a calm pill, no fill stronger than the graphics pill's. */
+
+.workmode-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: calc(24 * var(--ui-unit));
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill, 999px);
+  background: var(--accent-bg);
+  color: var(--text);
+  font-size: calc(11 * var(--ui-unit));
+  white-space: nowrap;
+  cursor: var(--cursor-pointer);
+}
+
+.workmode-chip:hover {
+  border-color: var(--accent);
+}
+
+.workmode-board-dot {
+  color: var(--secondary);
+}
+
+.workmode-pop-note {
+  margin: 0 0 10px;
+  font-size: calc(12 * var(--ui-unit));
+  line-height: 1.6;
+  color: var(--secondary);
+}
+
+.workmode-pop-board {
+  margin-top: 10px;
+}
+
+.workmode-pop-counts {
+  margin: 12px 0 0;
+  font-size: calc(12 * var(--ui-unit));
+}
+
+.workmode-counts-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--link-color);
+  text-decoration: underline;
+  cursor: var(--cursor-pointer);
+}
+
+.workmode-counts-link:hover {
+  color: var(--link-hover-color);
+}

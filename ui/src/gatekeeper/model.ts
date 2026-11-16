@@ -79,9 +79,37 @@ export function channelLabel(channel: string): string {
       return 'Telegram ask';
     case 'board_pick':
       return 'Board pick';
+    case 'stop':
+      return 'Stop';
     default:
       return 'Question';
   }
+}
+
+/** The quiet line shown while a turn end is being checked against the working mode. */
+export function stopCheckLine(): string {
+  return 'Checking whether this stop needs you…';
+}
+
+/** The transcript word for one stop context row: the class the stop was filed under. */
+export function stopKindLabel(kind: string): string | null {
+  switch (kind) {
+    case 'stopBlocker':
+      return 'Blocker';
+    case 'stopLimit':
+      return 'Plan limit';
+    case 'stopFailure':
+      return 'Failure';
+    case 'stopAsked':
+      return 'Stopped to ask';
+    default:
+      return null;
+  }
+}
+
+/** The stop kind's class for the row's `data-class`: `blocker`, `limit`, `failure` or `asked`. */
+export function stopClass(kind: string): string {
+  return kind.startsWith('stop') ? kind.slice(4).toLowerCase() : kind;
 }
 
 /** The mark the user left on a record, or null when it is unmarked. */

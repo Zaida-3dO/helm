@@ -269,10 +269,31 @@ pub fn hard_to_undo(text: &str) -> bool {
         .any(|w| HARD_WORDS.contains(&w))
 }
 
+/// How many judgements may run at once, wait their turn, and start in an hour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Caps {
+    pub running: usize,
+    pub waiting: usize,
+    pub per_hour: usize,
+}
+
+impl Default for Caps {
+    /// The question gate's own limits.
+    fn default() -> Self {
+        Self {
+            running: MAX_RUNNING,
+            waiting: MAX_WAITING,
+            per_hour: MAX_PER_HOUR,
+        }
+    }
+}
+
 /// The limits and the failure pause. Not pure (it counts), but table-testable: every call
 /// carries `now`.
 #[derive(Default)]
 pub struct Limiter {
+    /// The most that may run, wait and start; the gate's own unless built with [`Limiter::with_caps`].
+    pub caps: Caps,
     /// Judgements running now and waiting their turn (the running ones first).
     pub running: usize,
     pub waiting: usize,
@@ -292,6 +313,13 @@ pub const FAILURE_TRIP: usize = 3;
 pub const PAUSE_MS: i64 = 15 * 60_000;
 
 impl Limiter {
+    pub fn with_caps(caps: Caps) -> Self {
+        Self {
+            caps,
+            ..Self::default()
+        }
+    }
+
     /// Whether a judgement may start, and in which slot. The slot must be given back with
     /// [`Limiter::release`] when the judgement ends.
     pub fn admit(&mut self, now: i64) -> Result<Slot, PassReason> {
@@ -300,13 +328,13 @@ impl Limiter {
             return Err(PassReason::Paused);
         }
         self.starts.retain(|t| now - t < 3_600_000);
-        if self.starts.len() >= MAX_PER_HOUR {
+        if self.starts.len() >= self.caps.per_hour {
             return Err(PassReason::Limit);
         }
-        let slot = if self.running < MAX_RUNNING {
+        let slot = if self.running < self.caps.running {
             self.running += 1;
             Slot::Running
-        } else if self.waiting < MAX_WAITING {
+        } else if self.waiting < self.caps.waiting {
             self.waiting += 1;
             Slot::Waiting
         } else {
@@ -322,7 +350,7 @@ impl Limiter {
     pub fn start_running(&mut self, slot: Slot) -> bool {
         match slot {
             Slot::Running => true,
-            Slot::Waiting if self.running < MAX_RUNNING => {
+            Slot::Waiting if self.running < self.caps.running => {
                 self.waiting = self.waiting.saturating_sub(1);
                 self.running += 1;
                 true

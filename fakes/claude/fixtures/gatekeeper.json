@@ -1,5 +1,5 @@
 {
-  "description": "Scripts the gatekeeper helper's answer from a tag in the prompt it is given: [GATE-DECIDE] takes the default, [GATE-ASK] escalates with a brief, [GATE-BAD] answers prose (every time, so the retry fails too), [GATE-HANG] never answers, anything else escalates with nothing else said.",
+  "description": "Scripts the gatekeeper helper's answer from a tag in the prompt it is given. Question cards: [GATE-DECIDE] takes the default, [GATE-ASK] escalates with a brief, [GATE-BAD] answers prose (every time, so the retry fails too), [GATE-HANG] never answers. Stop decisions (the prompt carries a <last> block): [STOP-NUDGE] continues with a default, [STOP-BLOCKER] calls it a blocker, [STOP-DONE] calls it finished, [STOP-BAD] answers prose (every time). Anything else escalates with nothing else said.",
   "steps": [
     {
       "await": {
@@ -11,49 +11,101 @@
     {
       "if": {
         "saved": "p",
-        "contains": "[GATE-DECIDE]"
+        "contains": "[STOP-NUDGE]"
       },
       "then": [
         {
-          "result": "{\"verdict\": \"decide\", \"choice\": \"Rename it\", \"reason\": \"Renaming a scratch note is easy to undo and nothing depends on the old name.\", \"confidence\": 0.9, \"risk\": \"low\", \"reversible\": true}"
+          "result": "{\"class\": \"continue\", \"question\": \"Start phase two?\", \"default\": \"Start phase two and keep the commits small\", \"reason\": \"the plan names phase two next\", \"confidence\": 0.9}"
         }
       ],
       "else": [
         {
           "if": {
             "saved": "p",
-            "contains": "[GATE-ASK]"
+            "contains": "[STOP-BLOCKER]"
           },
           "then": [
             {
-              "result": "{\"verdict\": \"escalate\", \"reason\": \"Deleting the backups cannot be undone.\", \"confidence\": 0.4, \"risk\": \"high\", \"reversible\": false, \"brief\": {\"problem\": \"The chat wants to delete the old backups and only you know whether they are still needed.\", \"options\": [{\"label\": \"Delete them\", \"means\": \"The old copies go away for good.\", \"pros\": \"Frees the disk.\", \"cons\": \"Nothing can be brought back.\", \"cost\": \"A few gigabytes.\"}, {\"label\": \"Keep them\", \"means\": \"Nothing is removed.\", \"pros\": \"Safe.\", \"cons\": \"The disk stays full.\", \"cost\": \"No effort.\"}], \"recommendation\": \"Keep them\", \"why\": \"Deletion cannot be undone, and keeping costs nothing.\"}}"
+              "result": "{\"class\": \"blocker\", \"question\": \"Sign in to the package registry?\", \"reason\": \"Only the user can sign in.\", \"confidence\": 0.95}"
             }
           ],
           "else": [
             {
               "if": {
                 "saved": "p",
-                "contains": "[GATE-HANG]"
+                "contains": "[STOP-DONE]"
               },
               "then": [
                 {
-                  "hang": true
+                  "result": "{\"class\": \"done\", \"reason\": \"The report is filed and nothing is waiting.\", \"confidence\": 0.9}"
                 }
               ],
               "else": [
                 {
                   "if": {
                     "saved": "p",
-                    "contains": "[GATE-BAD]"
+                    "contains": "[STOP-BAD]"
                   },
                   "then": [
                     {
-                      "result": "I think you should just ask the user."
+                      "result": "The chat looks finished to me."
                     }
                   ],
                   "else": [
                     {
-                      "result": "{\"verdict\": \"escalate\"}"
+                      "if": {
+                        "saved": "p",
+                        "contains": "[GATE-DECIDE]"
+                      },
+                      "then": [
+                        {
+                          "result": "{\"verdict\": \"decide\", \"choice\": \"Rename it\", \"reason\": \"Renaming a scratch note is easy to undo and nothing depends on the old name.\", \"confidence\": 0.9, \"risk\": \"low\", \"reversible\": true}"
+                        }
+                      ],
+                      "else": [
+                        {
+                          "if": {
+                            "saved": "p",
+                            "contains": "[GATE-ASK]"
+                          },
+                          "then": [
+                            {
+                              "result": "{\"verdict\": \"escalate\", \"reason\": \"Deleting the backups cannot be undone.\", \"confidence\": 0.4, \"risk\": \"high\", \"reversible\": false, \"brief\": {\"problem\": \"The chat wants to delete the old backups and only you know whether they are still needed.\", \"options\": [{\"label\": \"Delete them\", \"means\": \"The old copies go away for good.\", \"pros\": \"Frees the disk.\", \"cons\": \"Nothing can be brought back.\", \"cost\": \"A few gigabytes.\"}, {\"label\": \"Keep them\", \"means\": \"Nothing is removed.\", \"pros\": \"Safe.\", \"cons\": \"The disk stays full.\", \"cost\": \"No effort.\"}], \"recommendation\": \"Keep them\", \"why\": \"Deletion cannot be undone, and keeping costs nothing.\"}}"
+                            }
+                          ],
+                          "else": [
+                            {
+                              "if": {
+                                "saved": "p",
+                                "contains": "[GATE-HANG]"
+                              },
+                              "then": [
+                                {
+                                  "hang": true
+                                }
+                              ],
+                              "else": [
+                                {
+                                  "if": {
+                                    "saved": "p",
+                                    "contains": "[GATE-BAD]"
+                                  },
+                                  "then": [
+                                    {
+                                      "result": "I think you should just ask the user."
+                                    }
+                                  ],
+                                  "else": [
+                                    {
+                                      "result": "{\"verdict\": \"escalate\"}"
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
                     }
                   ]
                 }

@@ -113,6 +113,14 @@ pub(crate) enum Cmd {
         outcome: Box<crate::seams::GateOutcome>,
         reply: std::sync::mpsc::Sender<bool>,
     },
+    /// The stop judge answered for the held end of the turn `run_id` names. The actor owns the
+    /// hold, so every race (a message was sent, the deadline passed, a later turn began) settles
+    /// here; `reply` gets whether the verdict was applied.
+    StopVerdict {
+        run_id: String,
+        outcome: crate::seams::StopOutcome,
+        reply: std::sync::mpsc::Sender<bool>,
+    },
     /// A local chat's model is being made ready for the turn `token` names: a line to show.
     LocalNote {
         token: u64,
@@ -168,6 +176,14 @@ enum Timer {
     WaitLimit(String),
     /// A held question-card's hold ends: the card becomes a normal card. One per held card.
     GateDeadline(String),
+    /// A held turn end's check ends: the chat finishes as it would have with no judge.
+    StopCheck,
+}
+
+/// A turn end the stop judge is holding: the turn's finish is not announced until the judge
+/// answers, a message is sent, or the hold runs out.
+struct StopHold {
+    run_id: String,
 }
 
 struct LiveMsg {
@@ -255,6 +271,8 @@ struct Actor {
     /// The chat is archived: a late event from the dying worker changes nothing the user sees
     /// (no completion, no unread mark) and nothing is sent.
     archived: bool,
+    /// The held end of the last turn, while the stop judge decides about it.
+    stop_hold: Option<StopHold>,
     finished: bool,
     /// The last worker output (or turn start).
     last_output: Instant,
@@ -391,6 +409,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
             subagents_running: 0,
             compacting: None,
             loading: None,
+            stop_check: None,
             capabilities: Capabilities::default(),
             send_behavior: crate::send_behavior::HOME_DEFAULTS,
             revision: 0,
@@ -442,6 +461,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         host_calls: HashMap::new(),
         retiring: false,
         archived: false,
+        stop_hold: None,
         finished: false,
         last_output: Instant::now(),
         activity_written: None,
@@ -554,6 +574,8 @@ impl Actor {
                 break;
             }
         }
+        // However the actor ended, a turn end it was holding still finishes (once).
+        self.release_stop_hold(true);
         self.sh.actors.lock().unwrap().remove(&self.chat_id);
         // Its blocking requests (if any) leave the waiting tracker with it.
         crate::attention::publish(&self.sh);
@@ -1073,6 +1095,124 @@ impl Actor {
         true
     }
 
+    /// A clean turn end, offered to the stop judge. True when the judge holds it: the turn's
+    /// finish (the completion row, its event and the "finished" notice) waits until the judge's
+    /// verdict, the next message, or the hold ending. Never offered: a stop the user or the
+    /// governor asked for, an interrupted turn, an archived or retiring chat, a quit, a chat with
+    /// messages waiting to go out, or one whose background agents still run (it is not over).
+    fn stop_hold_offer(&mut self, run: Option<String>) -> bool {
+        let Some(judge) = self.sh.stop_judge.get().cloned() else {
+            return false;
+        };
+        let Some(run_id) = run else {
+            return false;
+        };
+        if self.archived
+            || self.retiring
+            || self.finished
+            || self.agents_running()
+            || self
+                .sh
+                .shutting_down
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return false;
+        }
+        let chat = self.chat_id.clone();
+        let waiting: i64 = self
+            .sh
+            .db
+            .snapshot(|t| {
+                t.query_row(
+                    "SELECT count(*) FROM submissions
+                     WHERE chat_id = ?1 AND state IN ('saved', 'dispatching')",
+                    [&chat],
+                    |r| r.get(0),
+                )
+            })
+            // A chat that cannot be read is not judged: it finishes as it always did.
+            .unwrap_or(1);
+        if waiting > 0 {
+            return false;
+        }
+        let ended_at = now();
+        let end = crate::seams::TurnEnd {
+            run_id: run_id.clone(),
+            ended_at,
+        };
+        if judge.offer(&self.chat_id, &end) != crate::seams::StopOffer::Hold {
+            return false;
+        }
+        self.write(|t| {
+            t.execute(
+                "INSERT INTO chat_stop_holds(chat_id, since) VALUES (?1, ?2)
+                 ON CONFLICT(chat_id) DO UPDATE SET since = excluded.since",
+                (&chat, ended_at),
+            )
+        });
+        self.stop_hold = Some(StopHold { run_id });
+        self.live.lock().unwrap().thread.stop_check = Some(StopCheck {
+            started_at: ended_at,
+        });
+        self.add_timer(self.sh.cfg.limits.stop_deadline, Timer::StopCheck);
+        self.emit_thread();
+        true
+    }
+
+    /// End the hold on the last turn's finish, whichever way it ended: the verdict, the
+    /// deadline, a message, an archive, a stop, or the worker leaving. With `complete` the
+    /// finish the hold deferred is written and announced now (exactly once); without it (the
+    /// chat is carrying on) it is dropped. False when nothing was held.
+    fn release_stop_hold(&mut self, complete: bool) -> bool {
+        if self.stop_hold.take().is_none() {
+            return false;
+        }
+        self.clear_timer(|t| matches!(t, Timer::StopCheck));
+        let chat = self.chat_id.clone();
+        self.write(|t| t.execute("DELETE FROM chat_stop_holds WHERE chat_id = ?1", [&chat]));
+        self.live.lock().unwrap().thread.stop_check = None;
+        self.emit_thread();
+        if complete {
+            self.complete_turn();
+        }
+        true
+    }
+
+    /// Apply the stop judge's verdict to the held turn end of run `run_id`. A verdict for a hold
+    /// that is gone (released by a message, the deadline, an archive) or for an earlier turn is
+    /// refused, and the judge then sends nothing.
+    fn stop_verdict(&mut self, run_id: &str, outcome: crate::seams::StopOutcome) -> bool {
+        if self.stop_hold.as_ref().map(|h| h.run_id.as_str()) != Some(run_id) {
+            return false;
+        }
+        use crate::seams::{StopKind, StopOutcome};
+        match outcome {
+            StopOutcome::Continue => {
+                self.release_stop_hold(false);
+            }
+            StopOutcome::Stop { kind, line } => {
+                let kind = match kind {
+                    StopKind::Blocker => ContextKind::StopBlocker,
+                    StopKind::Limit => ContextKind::StopLimit,
+                    StopKind::Failure => ContextKind::StopFailure,
+                    StopKind::Asked => ContextKind::StopAsked,
+                };
+                self.context_row(kind, &line);
+                self.release_stop_hold(true);
+            }
+            StopOutcome::Done { line } => {
+                if let Some(line) = line.filter(|l| !l.trim().is_empty()) {
+                    self.context_row(ContextKind::Gatekeeper, &line);
+                }
+                self.release_stop_hold(true);
+            }
+            StopOutcome::Failed => {
+                self.release_stop_hold(true);
+            }
+        }
+        true
+    }
+
     fn context_row(&mut self, kind: ContextKind, text: &str) {
         self.record(Entry::Context(ContextEntry {
             id: format!("c:{}", uuid::Uuid::new_v4()),
@@ -1375,6 +1515,8 @@ impl Actor {
 
     fn on_exit(&mut self, reason: String) {
         self.stop_ended = false;
+        // The timers go with the worker, and a verdict could no longer be followed by a nudge.
+        self.release_stop_hold(true);
         crate::hostcalls::sweep_tools_dir(&crate::hostcalls::tools_dir(
             &self.sh.cfg.profile_dir,
             &self.chat_id,
@@ -1517,6 +1659,8 @@ impl Actor {
 
     /// Start a run in memory: the caller writes the row (see `insert_run`).
     fn new_run_id(&mut self) -> String {
+        // Whatever starts a turn ends a hold on the one before.
+        self.release_stop_hold(true);
         self.last_output = Instant::now();
         self.stop_ended = false;
         let run = uuid::Uuid::new_v4().to_string();
@@ -2094,6 +2238,14 @@ impl Actor {
                 let applied = self.gate_verdict(&interaction_id, *outcome);
                 let _ = reply.send(applied);
             }
+            Cmd::StopVerdict {
+                run_id,
+                outcome,
+                reply,
+            } => {
+                let applied = self.stop_verdict(&run_id, outcome);
+                let _ = reply.send(applied);
+            }
             Cmd::ApplyModel { model, effort } => {
                 // A send that is waiting on the old model's preparation must not go out on it:
                 // take that preparation down first and put the send back through the model the
@@ -2332,7 +2484,8 @@ impl Actor {
                 if self.link.is_none() {
                     // No worker to shut down: the actor itself goes (archive, delete).
                     self.finished = true;
-                } else if !self.status().is_busy() {
+                } else if !self.status().is_busy() && self.stop_hold.is_none() {
+                    // A chat whose turn end is being checked is not closed under the check.
                     self.retiring = true;
                     if let Some(l) = &self.link {
                         self.link_closing = true;
@@ -2347,6 +2500,9 @@ impl Actor {
     /// deadline (the kill path is the ordinary stop deadline). Nothing sends from here on.
     fn on_archived(&mut self) {
         self.archived = true;
+        // An archived chat announces nothing (the completion is not written for it), but the hold
+        // and the busy mark go.
+        self.release_stop_hold(true);
         if !self.status().is_busy() {
             self.on_cmd(Cmd::Retire);
             return;
@@ -2390,6 +2546,9 @@ impl Actor {
         if sub.state != SubmissionState::Saved {
             return;
         }
+        // A message ends any hold on the last turn's finish: that is written and announced first,
+        // exactly as it would have been, and the judge's late verdict then finds nothing.
+        self.release_stop_hold(true);
         let priority: Option<String> = self
             .sh
             .db
@@ -2623,6 +2782,16 @@ impl Actor {
             .filter(|_| !afk_note)
             .and_then(|p| p.turn_text(&self.chat_id));
         let context = match (context, afk_text) {
+            (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
+            (a, b) => a.or(b),
+        };
+        // The stop judge's own line (a changed working mode, say) rides beside AFK's.
+        let judge_text = self
+            .sh
+            .stop_judge
+            .get()
+            .and_then(|j| j.turn_line(&self.chat_id));
+        let context = match (context, judge_text) {
             (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
             (a, b) => a.or(b),
         };
@@ -3070,6 +3239,8 @@ impl Actor {
     fn stop(&mut self, reply: oneshot::Sender<ChatStatus>, resend: bool) {
         let status = self.status();
         if !status.is_busy() {
+            // A Stop on a chat whose turn end is being checked ends the check: it finishes now.
+            self.release_stop_hold(true);
             let _ = reply.send(status);
             return;
         }
@@ -3259,6 +3430,10 @@ impl Actor {
                     if still && self.status().is_busy() {
                         self.deliver_now(&sid, "wait_limit");
                     }
+                }
+                Timer::StopCheck => {
+                    // A verdict that never arrived: the chat finishes as it would with no judge.
+                    self.release_stop_hold(true);
                 }
                 Timer::GateDeadline(id) => {
                     // A verdict that never arrived. Nothing is ever dropped: the card becomes
@@ -4484,7 +4659,10 @@ impl Actor {
                 self.end_run(status, err.as_deref(), outcome);
                 self.emit_pending();
                 if status == ChatStatus::Idle {
-                    self.complete_turn();
+                    let held = outcome == "complete" && self.stop_hold_offer(run);
+                    if !held {
+                        self.complete_turn();
+                    }
                 }
             }
         }

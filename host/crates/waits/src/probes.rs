@@ -40,22 +40,43 @@ impl Probes for RealProbes {
     fn chat(&self, chat_id: &str) -> Result<Option<ChatObs>, String> {
         self.db
             .snapshot(|tx| {
-                tx.query_row(
-                    "SELECT archived, status, error FROM chats WHERE id = ?1",
-                    [chat_id],
-                    |r| {
-                        let status: String = r.get(1)?;
-                        Ok(ChatObs {
-                            archived: r.get(0)?,
-                            busy: matches!(status.as_str(), "starting" | "running" | "stopping"),
-                            stopped: status == "stopped",
-                            error: r.get(2)?,
-                        })
-                    },
-                )
-                .optional()
+                let obs = tx
+                    .query_row(
+                        "SELECT archived, status, error FROM chats WHERE id = ?1",
+                        [chat_id],
+                        |r| {
+                            let status: String = r.get(1)?;
+                            Ok(ChatObs {
+                                archived: r.get(0)?,
+                                busy: matches!(
+                                    status.as_str(),
+                                    "starting" | "running" | "stopping"
+                                ),
+                                stopped: status == "stopped",
+                                error: r.get(2)?,
+                            })
+                        },
+                    )
+                    .optional()?;
+                // A turn end the stop judge is still checking is not the chain's end: the chat may
+                // carry on at once, so it reads as busy for as long as the hold is recent. Its
+                // own table is read apart, so a database without it reads as no hold.
+                Ok(obs.map(|mut o| {
+                    if !o.busy {
+                        let since = helm_core::now_ms() - helm_chats::runtime::STOP_HOLD_BUSY_MS;
+                        o.busy = tx
+                            .query_row(
+                                "SELECT EXISTS(SELECT 1 FROM chat_stop_holds
+                                 WHERE chat_id = ?1 AND since > ?2)",
+                                rusqlite::params![chat_id, since],
+                                |r| r.get::<_, bool>(0),
+                            )
+                            .unwrap_or(false);
+                    }
+                    o
+                }))
             })
-            .map_err(|e| e.to_string())
+            .map_err(|e: rusqlite::Error| e.to_string())
     }
 
     fn process(&self, pid: u32) -> ProcessObs {

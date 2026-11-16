@@ -7,6 +7,7 @@ import type { Interaction } from "./Interaction";
 import type { LiveTool } from "./LiveTool";
 import type { LocalLoading } from "./LocalLoading";
 import type { SendBehavior } from "./SendBehavior";
+import type { StopCheck } from "./StopCheck";
 import type { Subagent } from "./Subagent";
 
 export type ThreadState = { chatId: string, status: ChatStatus, permissionMode: string | null, interactions: Array<Interaction>, liveTools: Array<LiveTool>, backgroundTasks: Array<BackgroundTask>, 
@@ -23,4 +24,9 @@ subagentsRunning: number, compacting: Compacting | null,
  * A chat on a local model: what Helm is doing before the model's first words, until they
  * arrive ("Loading <model>…"). Absent for a Claude chat and once the reply has started.
  */
-loading?: LocalLoading, capabilities: Capabilities, sendBehavior: SendBehavior, revision: number, };
+loading?: LocalLoading, 
+/**
+ * The end of the chat's last turn is being checked (Helm decides whether the stop needs the
+ * user): the chat shows "Checking whether this stop needs you…" until the check ends.
+ */
+stopCheck?: StopCheck, capabilities: Capabilities, sendBehavior: SendBehavior, revision: number, };

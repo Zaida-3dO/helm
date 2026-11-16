@@ -577,10 +577,23 @@ pub struct ThreadState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub loading: Option<LocalLoading>,
+    /// The end of the chat's last turn is being checked (Helm decides whether the stop needs the
+    /// user): the chat shows "Checking whether this stop needs you…" until the check ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub stop_check: Option<StopCheck>,
     pub capabilities: Capabilities,
     pub send_behavior: SendBehavior,
     #[ts(type = "number")]
     pub revision: i64,
+}
+
+/// A turn end being checked, with when the check began.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct StopCheck {
+    #[ts(type = "number")]
+    pub started_at: i64,
 }
 
 /// The line shown while a local model is made ready for a turn, with when it began.
@@ -678,6 +691,14 @@ pub enum ContextKind {
     /// Something the question gate did with an ask: an answer it chose for the user, which they
     /// can review and change later.
     Gatekeeper,
+    /// The chat stopped at a blocker only the user can clear, and Helm checked and agreed.
+    StopBlocker,
+    /// The chat stopped at the plan's usage limit, with nothing left that can run elsewhere.
+    StopLimit,
+    /// The chat stopped after a failure that persisted through retries.
+    StopFailure,
+    /// The chat stopped to ask, and Helm would not answer for the user.
+    StopAsked,
     /// A gap in the chat's work that was not its doing: the computer slept, the connection was
     /// down, or Helm asked the chat to carry on after one.
     Interruption,

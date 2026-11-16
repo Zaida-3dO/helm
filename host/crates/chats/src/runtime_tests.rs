@@ -242,6 +242,8 @@ pub fn limits() -> Limits {
         // Long enough that a test handing a verdict by hand always beats the hold ending;
         // the row that wants the hold to end shortens it.
         gate_deadline: Duration::from_secs(10),
+        // As the gate's: a verdict handed by hand always beats the hold ending.
+        stop_deadline: Duration::from_secs(10),
     }
 }
 
@@ -1328,6 +1330,392 @@ async fn the_question_gate_holds_cards_until_it_judges_them() {
                 );
             }
         }
+    }
+}
+
+/// The stop judge's hold, one table beside the question gate's. A fake judge only says whether to
+/// hold a turn end and records what it was offered; the test plays the judge's verdict by hand
+/// (`stop_verdict`), a message during the hold, the worker leaving, an archive, a Stop and the
+/// deadline (shortened). Every wait is on a state the actor has already settled, never on a
+/// sleep; every row ends with the turn finished exactly once, or dropped on purpose.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_stop_judge_holds_a_turn_end_until_it_answers() {
+    use crate::seams::{StopJudge, StopKind, StopOffer, StopOutcome, TurnEnd};
+    use crate::types::ContextKind;
+
+    struct FakeJudge {
+        offer: StopOffer,
+        ends: Mutex<Vec<TurnEnd>>,
+        line: Option<String>,
+    }
+    impl StopJudge for FakeJudge {
+        fn offer(&self, _: &str, end: &TurnEnd) -> StopOffer {
+            self.ends.lock().unwrap().push(end.clone());
+            self.offer
+        }
+        fn turn_line(&self, _: &str) -> Option<String> {
+            self.line.clone()
+        }
+    }
+    struct AfkText;
+    impl crate::seams::AfkPolicy for AfkText {
+        fn turn_text(&self, _: &str) -> Option<String> {
+            Some("[AFK] away".into())
+        }
+        fn decide(
+            &self,
+            _: &str,
+            _: &crate::types::Interaction,
+            _: bool,
+        ) -> crate::seams::AfkAction {
+            crate::seams::AfkAction::Leave
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum Then {
+        /// No judge installed: the turn finishes at once.
+        NoJudge,
+        /// The judge passes: the same.
+        Pass,
+        Continue,
+        Stop(StopKind, ContextKind),
+        Done(Option<&'static str>),
+        Failed,
+        /// The hold ends by itself (shortened).
+        Deadline,
+        /// A message during the hold: the finish is announced first, the late verdict is false,
+        /// and the next turn's end is a hold of its own.
+        Send,
+        WorkerExit,
+        Archive,
+        /// The user's Stop on the checked chat finishes it.
+        StopWhileHeld,
+        /// Never offered: an interrupted turn.
+        Interrupted,
+        /// Never offered: a Stop the user asked for while the turn ran.
+        UserStopped,
+        /// Never offered: a message waiting to go out when the turn ends.
+        MessageWaiting,
+        /// Never offered, and the chat keeps running: Claude has an unread steer.
+        UnreadSteer,
+        /// Never offered: a background agent is still running.
+        AgentRunning,
+    }
+    use Then::*;
+    let cases = [
+        NoJudge,
+        Pass,
+        Continue,
+        Stop(StopKind::Blocker, ContextKind::StopBlocker),
+        Stop(StopKind::Limit, ContextKind::StopLimit),
+        Stop(StopKind::Failure, ContextKind::StopFailure),
+        Stop(StopKind::Asked, ContextKind::StopAsked),
+        Done(Some("Run finished: 2 choices were made for you.")),
+        Done(None),
+        Failed,
+        Deadline,
+        Send,
+        WorkerExit,
+        Archive,
+        StopWhileHeld,
+        Interrupted,
+        UserStopped,
+        MessageWaiting,
+        UnreadSteer,
+        AgentRunning,
+    ];
+
+    fn completions(h: &H) -> usize {
+        h.events("completion").len()
+    }
+    fn holds(h: &H) -> Vec<String> {
+        h.col("SELECT chat_id FROM chat_stop_holds")
+    }
+    fn checking(h: &H, chat: &str) -> bool {
+        h.rt.live_thread(chat)
+            .is_some_and(|t| t.stop_check.is_some())
+    }
+    fn context_rows(h: &H) -> Vec<String> {
+        h.col("SELECT json_extract(details, '$.contextKind') || ': ' || text FROM messages WHERE role = 'context'")
+    }
+    fn kind_name(k: ContextKind) -> String {
+        serde_json::to_value(k)
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    for then in cases {
+        let mut lim = limits();
+        if matches!(then, Deadline) {
+            lim.stop_deadline = Duration::from_millis(150);
+        }
+        let mut h = harness_with(lim);
+        let judge = Arc::new(FakeJudge {
+            offer: if matches!(then, Pass) {
+                StopOffer::Pass
+            } else {
+                StopOffer::Hold
+            },
+            ends: Mutex::new(Vec::new()),
+            line: None,
+        });
+        if !matches!(then, NoJudge) {
+            h.rt.set_stop_judge(judge.clone());
+        }
+        let (chat, _, mut w) = running_turn(&mut h).await;
+        let ended = |j: &FakeJudge| j.ends.lock().unwrap().clone();
+
+        // How the turn ends: most rows end it cleanly with a question in its last message.
+        match then {
+            Interrupted => {
+                w.emit(json!({"type": "agent_settled", "outcome": "error", "error": "API error"}))
+                    .await;
+                h.until("the turn failed", |h| h.status(&chat) == "interrupted")
+                    .await;
+                assert!(
+                    ended(&judge).is_empty(),
+                    "an interrupted turn is never offered"
+                );
+                continue;
+            }
+            UserStopped => {
+                let (api, c2) = (h.api.clone(), chat.clone());
+                let stop = tokio::spawn(async move {
+                    api.call(&main(), "chat_stop", json!({"chatId": c2})).await
+                });
+                w.expect("abort").await;
+                w.emit(json!({"type": "agent_settled", "outcome": "stopped"}))
+                    .await;
+                h.until("stopped", |h| h.status(&chat) == "stopped").await;
+                stop.await.unwrap().ok();
+                assert!(
+                    ended(&judge).is_empty(),
+                    "a Stop by the user is never offered"
+                );
+                assert!(holds(&h).is_empty());
+                continue;
+            }
+            UnreadSteer => {
+                let (steer, _) = h.send(&chat, "also this", "default").await;
+                let p = w.expect("prompt").await;
+                ack(&w, &p).await;
+                h.until("the steer is accepted", |h| h.state(&steer) == "accepted")
+                    .await;
+                reply(&h, &w, "m1", "Shall I go ahead?").await;
+                w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+                    .await;
+                // The CLI opens its next turn on the steer by itself: the chat stays running.
+                h.until("the settle was handled", |h| {
+                    h.col("SELECT status FROM chats") == ["running"]
+                })
+                .await;
+                assert!(
+                    ended(&judge).is_empty(),
+                    "a chat with an unread steer is not over"
+                );
+                assert_eq!(completions(&h), 0);
+                continue;
+            }
+            MessageWaiting => {
+                let (waiting, _) = h.send(&chat, "also this", "default").await;
+                let _p = w.expect("prompt").await; // handed over, not yet read by Claude
+                assert_ne!(h.state(&waiting), "accepted");
+            }
+            AgentRunning => {
+                w.emit(json!({"type": "subagent_start", "toolCallId": "sa_1", "name": "background job"}))
+                    .await;
+                h.until("the agent is running", |h| {
+                    h.rt.live_thread(&chat)
+                        .is_some_and(|t| t.subagents_running == 1)
+                })
+                .await;
+            }
+            _ => {}
+        }
+        reply(&h, &w, "m1", "Shall I go ahead?").await;
+        w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+            .await;
+
+        match then {
+            NoJudge | Pass | MessageWaiting | AgentRunning => {
+                h.until("the turn finished", |h| completions(h) == 1).await;
+                assert!(holds(&h).is_empty() && !checking(&h, &chat));
+                let seen = ended(&judge);
+                if matches!(then, Pass) {
+                    assert_eq!(seen.len(), 1, "the judge was asked about the turn end once");
+                } else {
+                    assert!(seen.is_empty(), "this turn end is never offered");
+                }
+                continue;
+            }
+            _ => {}
+        }
+
+        // Everything else is held: the finish waits, the chat reads as being checked, and the
+        // hold is on record for anything watching the chat.
+        h.until("the turn end is held", |h| {
+            ended(&judge).len() == 1 && checking(h, &chat)
+        })
+        .await;
+        let end = ended(&judge).remove(0);
+        assert_eq!(holds(&h), [chat.as_str()], "the hold is recorded");
+        assert_eq!(h.status(&chat), "idle");
+        assert_eq!(completions(&h), 0, "no finish while the judge checks");
+        assert!(h.col("SELECT 1 FROM chat_completions").is_empty());
+
+        match then {
+            Continue => {
+                assert!(h.rt.stop_verdict(&chat, &end.run_id, StopOutcome::Continue));
+                assert!(holds(&h).is_empty() && !checking(&h, &chat));
+                assert_eq!(completions(&h), 0, "carrying on drops the finish");
+                assert!(h.col("SELECT 1 FROM chat_completions").is_empty());
+            }
+            Stop(kind, ck) => {
+                let ok = h.rt.stop_verdict(
+                    &chat,
+                    &end.run_id,
+                    StopOutcome::Stop {
+                        kind,
+                        line: "Blocker: needs a sign-in.".into(),
+                    },
+                );
+                assert!(ok);
+                h.until("the class row, then the finish", |h| completions(h) == 1)
+                    .await;
+                assert_eq!(
+                    context_rows(&h),
+                    [format!("{}: Blocker: needs a sign-in.", kind_name(ck))]
+                );
+                assert!(holds(&h).is_empty() && !checking(&h, &chat));
+            }
+            Done(line) => {
+                let ok = h.rt.stop_verdict(
+                    &chat,
+                    &end.run_id,
+                    StopOutcome::Done {
+                        line: line.map(str::to_owned),
+                    },
+                );
+                assert!(ok);
+                h.until("the finish", |h| completions(h) == 1).await;
+                let want: Vec<String> = line
+                    .map(|l| format!("{}: {l}", kind_name(ContextKind::Gatekeeper)))
+                    .into_iter()
+                    .collect();
+                assert_eq!(context_rows(&h), want);
+            }
+            Failed => {
+                assert!(h.rt.stop_verdict(&chat, &end.run_id, StopOutcome::Failed));
+                h.until("the finish", |h| completions(h) == 1).await;
+                assert!(context_rows(&h).is_empty());
+            }
+            Deadline => {
+                h.until("the hold ends by itself", |h| completions(h) == 1)
+                    .await;
+                assert!(holds(&h).is_empty() && !checking(&h, &chat));
+            }
+            Send => {
+                let (nudge, _) = h.send(&chat, "go on", "default").await;
+                let p = w.expect("prompt").await;
+                assert_eq!(p["submissionId"], nudge.as_str());
+                // The prompt left only after the earlier finish was written and announced.
+                assert_eq!(completions(&h), 1);
+                assert!(holds(&h).is_empty() && !checking(&h, &chat));
+                assert!(
+                    !h.rt.stop_verdict(&chat, &end.run_id, StopOutcome::Continue),
+                    "the late verdict finds the hold gone"
+                );
+                // The next turn's end is held on its own, under its own run: the old verdict
+                // still lands nowhere, the new one does.
+                ack(&w, &p).await;
+                w.emit(json!({"type": "agent_start"})).await;
+                w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+                    .await;
+                h.until("the next end is held", |h| {
+                    ended(&judge).len() == 2 && checking(h, &chat)
+                })
+                .await;
+                let second = ended(&judge).remove(1);
+                assert_ne!(second.run_id, end.run_id);
+                assert!(!h.rt.stop_verdict(&chat, &end.run_id, StopOutcome::Failed));
+                assert!(
+                    checking(&h, &chat),
+                    "an earlier turn's verdict ends no later hold"
+                );
+                assert!(h
+                    .rt
+                    .stop_verdict(&chat, &second.run_id, StopOutcome::Continue));
+                assert_eq!(
+                    completions(&h),
+                    1,
+                    "one finish in all: the dropped one is silent"
+                );
+            }
+            WorkerExit => {
+                w.exit().await;
+                h.until("the finish", |h| completions(h) == 1).await;
+                assert!(holds(&h).is_empty() && !checking(&h, &chat));
+                assert!(!h.rt.stop_verdict(&chat, &end.run_id, StopOutcome::Continue));
+            }
+            Archive => {
+                h.call("chat_archive", json!({"chatId": chat}))
+                    .await
+                    .unwrap();
+                h.until("the hold is gone", |h| {
+                    holds(h).is_empty() && !checking(h, &chat)
+                })
+                .await;
+                assert_eq!(completions(&h), 0, "an archived chat announces nothing");
+                assert!(!h.rt.stop_verdict(&chat, &end.run_id, StopOutcome::Continue));
+            }
+            StopWhileHeld => {
+                h.call("chat_stop", json!({"chatId": chat})).await.unwrap();
+                h.until("the finish", |h| completions(h) == 1).await;
+                assert!(holds(&h).is_empty() && !checking(&h, &chat));
+                assert!(!h.rt.stop_verdict(&chat, &end.run_id, StopOutcome::Continue));
+            }
+            _ => unreachable!(),
+        }
+        if !matches!(then, Continue | Archive | Send) {
+            // A verdict twice finishes nothing twice.
+            assert!(!h.rt.stop_verdict(&chat, &end.run_id, StopOutcome::Failed));
+            assert_eq!(completions(&h), 1);
+        }
+    }
+
+    // The judge's own line rides each turn's context beside AFK's text.
+    for (afk, line, want) in [
+        (
+            false,
+            Some("[Helm] Mode changed."),
+            Some("[Helm] Mode changed."),
+        ),
+        (
+            true,
+            Some("[Helm] Mode changed."),
+            Some("[AFK] away\n\n[Helm] Mode changed."),
+        ),
+        (true, None, Some("[AFK] away")),
+        (false, None, None),
+    ] {
+        let mut h = harness();
+        if afk {
+            h.rt.set_afk_policy(Arc::new(AfkText));
+        }
+        h.rt.set_stop_judge(Arc::new(FakeJudge {
+            offer: StopOffer::Pass,
+            ends: Mutex::new(Vec::new()),
+            line: line.map(str::to_owned),
+        }));
+        let chat = h.create().await;
+        h.send(&chat, "start", "default").await;
+        let mut w = h.worker().await;
+        w.ready().await;
+        let p = w.expect("prompt").await;
+        assert_eq!(p.get("context").and_then(Value::as_str), want);
     }
 }
 

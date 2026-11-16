@@ -75,6 +75,7 @@ export type { SendOrigin } from './SendOrigin.ts';
 export type { SideChatAction } from './SideChatAction.ts';
 export type { SideChatResolveArgs } from './SideChatResolveArgs.ts';
 export type { SkillInfo } from './SkillInfo.ts';
+export type { StopCheck } from './StopCheck.ts';
 export type { Subagent } from './Subagent.ts';
 export type { SubagentStatus } from './SubagentStatus.ts';
 export type { Submission } from './Submission.ts';

@@ -1987,7 +1987,12 @@ version = "2.1.1"
 dependencies = [
  "helm-chats",
  "helm-core",
+ "helm-governor",
+ "helm-hosttools",
  "helm-ipc",
+ "helm-usage",
+ "helm-waits",
+ "helm-workers",
  "log",
  "rusqlite",
  "serde",

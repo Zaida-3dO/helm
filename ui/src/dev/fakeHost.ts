@@ -36,7 +36,7 @@ import { knowledgeFakeOps } from './fake-knowledge.ts';
 import { githubFakeOps } from './fake-github.ts';
 import { webSearchFakeOps } from './fake-websearch.ts';
 import { dictationFakeOps } from './fake-dictation.ts';
-import { fakeGateAddDecided, gatekeeperFakeOps } from './fake-gatekeeper.ts';
+import { fakeGateAddDecided, fakeGateAddStop, gatekeeperFakeOps } from './fake-gatekeeper.ts';
 import { localModelsFakeOps } from './fake-localmodels.ts';
 import { memindexFakeOps } from './fake-memindex.ts';
 import { gpuFakeOps } from './fake-gpu.ts';
@@ -532,6 +532,35 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
           emit({ kind: 'gate', askId: id, chatId: c.chat.id, what: mode === 'escalate' ? 'escalated' : 'failed' });
           const a = await answered;
           await streamText(c, `You picked ${String(a.value ?? 'nothing')}. `, cancelled);
+        }
+      }
+      // The working mode's stop check by eye: "stop" ends the turn with the quiet checking line,
+      // then Helm's nudge arrives and the chat carries on with the default; "stop blocker" ends
+      // on a Blocker row that counts in attention.
+      if (/stop/i.test(text)) {
+        const blocker = /blocker/i.test(text);
+        if (blocker) {
+          await streamText(c, 'I need you to sign in before I can carry on. ', cancelled);
+          c.thread = { ...c.thread, stopCheck: { startedAt: now() } };
+          emitThread(c);
+          await sleep(2500, cancelled);
+          c.thread = { ...c.thread, stopCheck: undefined };
+          emitThread(c);
+          addRow(c, { role: 'context', text: 'Only you can sign in, so it stopped.', details: { contextKind: 'stopBlocker' } });
+          const rec = fakeGateAddStop(c.chat.id, c.chat.title || 'Untitled', 'Sign in to continue?', 'blocker', undefined, 'Only you can sign in.');
+          emit({ kind: 'gate', askId: rec.id, chatId: c.chat.id, what: 'escalated' });
+          emitAttention();
+        } else {
+          await streamText(c, 'The first part is done. Shall I go ahead with the next step? ', cancelled);
+          c.thread = { ...c.thread, stopCheck: { startedAt: now() } };
+          emitThread(c);
+          await sleep(2500, cancelled);
+          c.thread = { ...c.thread, stopCheck: undefined };
+          emitThread(c);
+          const rec = fakeGateAddStop(c.chat.id, c.chat.title || 'Untitled', 'Start the next step?', 'asked', 'the next step', 'the plan names the next step and it is easy to undo');
+          emit({ kind: 'gate', askId: rec.id, chatId: c.chat.id, what: 'decided' });
+          addRow(c, { role: 'user', text: '[Helm · Run to completion] Carry on without asking. Go ahead with: «the next step». (You were about to ask: «Start the next step?».)' });
+          await streamText(c, 'Carrying on: I took the next step and kept it easy to undo. ', cancelled);
         }
       }
       if (/question/i.test(text)) {
