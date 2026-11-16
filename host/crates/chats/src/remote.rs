@@ -159,6 +159,7 @@ async fn route(
         // The side panel around a chat: the same ops, run on the device that runs the chat,
         // kept inside that chat's project folder there.
         | "chat_folder"
+        | "attachment_get"
         | "file_read"
         | "dir_list"
         | "file_stat"

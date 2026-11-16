@@ -436,15 +436,24 @@ test('aimed at another device: its folder projects, its own model choice, create
   const h = harness();
   h.ctl.setDevice({ uid: 'lap', name: 'Laptop' });
   h.ctl.show();
-  // Only folders can hold a chat; the project used last time on that device comes back first.
+  // Its boards come first, each group by name, then its folders; the project used last time on
+  // that device comes back as the choice.
   h.storage.setItem('helm.newchat.remoteProject.lap', 'p2');
   h.ctl.setDeviceProjects([
-    { id: 'b1', name: 'Board', colour: null, kind: 'board' },
     { id: 'p1', name: 'Shop', colour: null, kind: 'folder' },
+    { id: 'b2', name: 'Zebra', colour: null, kind: 'board' },
     { id: 'p2', name: 'Notes', colour: null, kind: 'folder' },
+    { id: 'b1', name: 'Board', colour: null, kind: 'board' },
   ]);
-  assert.deepEqual(h.ctl.deviceProjects.map((p) => p.id), ['p1', 'p2']);
+  assert.deepEqual(h.ctl.deviceProjects.map((p) => p.id), ['b1', 'b2', 'p2', 'p1']);
   assert.equal(h.ctl.remoteProjectId, 'p2');
+  // A project named by the sidebar's "+" is that device's own, and New project is made there.
+  h.ctl.show({ projectId: 'b2' });
+  assert.equal(h.ctl.remoteProjectId, 'b2');
+  h.ctl.pickRemoteProject('p2');
+  h.ctl.newProject({ title: 'Ideas' });
+  assert.deepEqual(h.ctl.dialog, { kind: 'device-project', title: 'Ideas' });
+  h.ctl.closeDialog();
   const ops = draftOps(h.env.ops, h.ctl);
   // The model chosen is the device's own and never touches this PC's draft model.
   await ops.setModel(h.ctl.draft!.id, 'claude-haiku-5', 'low');

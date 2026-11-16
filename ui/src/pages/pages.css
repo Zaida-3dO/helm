@@ -150,3 +150,10 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.pg-list-device {
+  margin: 14px 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}

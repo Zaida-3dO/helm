@@ -14,6 +14,7 @@ import {
   parseMessage,
 } from './protocol.ts';
 import { buildTheme, plainValue, THEME_VARIABLES } from './theme.ts';
+import { remoteTabKey, validPagePath, validRemote } from './open.ts';
 
 const CHANNEL = 'chan1';
 const msg = (type: string, extra: Record<string, unknown> = {}) => ({ mark: MARK, channel: CHANNEL, type, ...extra });
@@ -229,4 +230,23 @@ test('page errors reach the strip at most once a second; a missing frame hears n
   gone.b.receive({ source: null, data: msg('ready') });
   gone.b.receive({ source: undefined, data: msg('ready') });
   assert.equal(gone.seen.ready, 0);
+});
+
+test('a page from another PC keeps its own tab key and survives a restore only whole', () => {
+  assert.equal(remoteTabKey('dev-1', 'pg-1'), 'remote:dev-1:pg-1');
+  assert.notEqual(remoteTabKey('dev-1', 'pg-1'), remoteTabKey('dev-2', 'pg-1'));
+  const rows: Array<[unknown, boolean]> = [
+    [{ deviceUid: 'dev-1', pageId: 'pg-1', title: 'Plan' }, true],
+    [{ deviceUid: '', pageId: 'pg-1', title: 'Plan' }, false],
+    [{ deviceUid: 'dev-1', pageId: 'pg-1' }, false],
+    [{ deviceUid: 'dev-1', pageId: 7, title: 'Plan' }, false],
+    [{ deviceUid: 'dev-1', pageId: 'pg-1', title: 'a\u0000b' }, false],
+    [{ deviceUid: 'x'.repeat(201), pageId: 'pg-1', title: 'Plan' }, false],
+    ['dev-1', false],
+    [null, false],
+  ];
+  for (const [r, want] of rows) assert.equal(validRemote(r), want, JSON.stringify(r));
+  // A local page still needs a complete local path; a remote one does not.
+  assert.equal(validPagePath('C:/pages/a.html'), true);
+  assert.equal(validPagePath('/home/pages/a.html'), false);
 });

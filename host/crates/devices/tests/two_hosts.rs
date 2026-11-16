@@ -349,6 +349,11 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
             json!({"personId": "person-a", "projectId": "proj-1"}),
         ),
         ("archive", json!({"chatId": "c1", "archived": true})),
+        ("project_create", json!({"title": "Ideas"})),
+        (
+            "project_set",
+            json!({"projectId": "proj-1", "pinned": true}),
+        ),
     ] {
         let e = b.rpc.call("dev-a", op, args).await.unwrap_err();
         assert_eq!(e.code, code::NOT_ALLOWED, "{op}");
@@ -653,6 +658,19 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         ),
         // The side panel around the chat, and the task board of the PC that runs it.
         ("chat_folder", json!({"chatId": "c1"})),
+        // A picture the person sent, read where it is stored.
+        (
+            "attachment_get",
+            json!({"chatId": "c1", "attachmentId": "img-1", "thumb": true}),
+        ),
+        // The pages pinned here, and one page's document and files, a chunk at a time.
+        ("pages_list", json!({})),
+        ("pages_files", json!({"pageId": "pg-1"})),
+        ("pages_read", json!({"pageId": "pg-1", "offset": 0})),
+        (
+            "pages_read",
+            json!({"pageId": "pg-1", "path": "a.png", "offset": 2}),
+        ),
         (
             "file_view",
             json!({"chatId": "c1", "path": "/work/src/main.rs"}),
@@ -709,6 +727,25 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         assert_eq!(st.context_asked, ["c1"]);
         assert_eq!(st.quick_opened[0].query, "main");
         assert!(st.quick_opened[0].reload);
+        assert_eq!(
+            st.attachments_asked,
+            [("c1".to_owned(), "img-1".to_owned())]
+        );
+        // The person the hub says is asking is who the pages are for.
+        let asked: Vec<&str> = st.pages_asked.iter().map(|(w, _, _)| w.as_str()).collect();
+        assert_eq!(
+            asked,
+            [
+                "list",
+                "files pg-1",
+                "read pg-1 None",
+                "read pg-1 Some(\"a.png\")"
+            ]
+        );
+        assert!(st
+            .pages_asked
+            .iter()
+            .all(|(_, p, own)| p == "person-a" && *own));
         assert_eq!(st.folders_asked, ["c1"]);
         assert_eq!(
             st.panel_reads.iter().map(|(op, _)| *op).collect::<Vec<_>>(),
@@ -762,6 +799,11 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         ("defaults_get", json!({"chatId": "c1"})),
         // The folder's name and the board answer with the switch off too.
         ("chat_folder", json!({"chatId": "c1"})),
+        // So does a picture in the transcript: it is part of what the person can already read.
+        (
+            "attachment_get",
+            json!({"chatId": "c1", "attachmentId": "img-1"}),
+        ),
         ("board_connection", json!({"chatId": "c1"})),
         (
             "board_read",
@@ -778,6 +820,10 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         ("set_permission", json!({"chatId": "c1", "mode": "plan"})),
         // It reads this PC's disk, so it needs the switch even though it changes nothing.
         ("quick_open", json!({"chatId": "c1", "query": "x"})),
+        // So does every read of a pinned page: it opens files on this PC.
+        ("pages_list", json!({})),
+        ("pages_files", json!({"pageId": "pg-1"})),
+        ("pages_read", json!({"pageId": "pg-1", "offset": 0})),
         // So does every read of the project folder's files and changes.
         ("file_view", json!({"chatId": "c1", "path": "/work/a.rs"})),
         (
@@ -990,6 +1036,7 @@ fn side(
     let dir = tempfile::tempdir().unwrap();
     let mut reg = MigrationRegistry::new();
     helm_devices::register_migrations(&mut reg);
+    helm_pages::register_migrations(&mut reg);
     let db = Arc::new(Database::open(&dir.path().join("watcher.sqlite3"), &reg).unwrap());
     db.write(|tx| tx.execute("UPDATE device_self SET uid = ?1", [uid]))
         .unwrap();
@@ -1138,6 +1185,53 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         b.db.snapshot(|tx| mirror::mirror_projects(tx, "dev-a"))
             .unwrap();
     assert_eq!(projects[0]["name"], "Work");
+    // A project made or pinned from this PC is on the device at once, and this PC lists it
+    // without waiting for the next connection: the board arrives with its folder, the pin shows.
+    let made = b
+        .mirror
+        .project_create(
+            "dev-a",
+            "person-a",
+            "Ideas",
+            Some("About ideas".into()),
+            Some("proj-1".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(made["projectId"], "proj-new-1");
+    b.mirror
+        .project_set("dev-a", "person-a", "proj-1", Some(true), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        port.st().projects_set,
+        [helm_devices::wire::ProjectSetArgs {
+            project_id: "proj-1".into(),
+            pinned: Some(true),
+            folder_project_id: None,
+        }]
+    );
+    let projects =
+        b.db.snapshot(|tx| mirror::mirror_projects(tx, "dev-a"))
+            .unwrap();
+    let find = |id: &str| projects.iter().find(|p| p["id"] == id).unwrap().clone();
+    assert_eq!(
+        (
+            find("proj-new-1")["kind"].as_str(),
+            find("proj-new-1")["folderId"].as_str()
+        ),
+        (Some("board"), Some("proj-1"))
+    );
+    assert_eq!(find("proj-1")["pinned"], true);
+    // A PC that does not let others run its chats takes neither, and says so.
+    port.set_run(false);
+    let e = b
+        .mirror
+        .project_set("dev-a", "person-a", "proj-1", Some(false), None)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, "not_allowed");
+    port.set_run(true);
     let listed =
         b.db.snapshot(|tx| mirror::mirror_chat_list(tx, "dev-a", None, false))
             .unwrap();
@@ -1150,6 +1244,10 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
     // The ops the window uses, through the dispatcher, with the check that routes them.
     let mut services = Services::new();
     services.insert(b.db.clone());
+    let pages = Arc::new(helm_pages::PageServer::new(
+        helm_panel::private::PrivateRoots::default(),
+    ));
+    services.insert(pages.clone());
     let routes = Arc::new(RemoteSlot::default());
     routes.attach(Arc::new(b.mirror.clone()));
     services.insert(routes);
@@ -1477,6 +1575,12 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
             json!({"chatId": "c1"}),
             Ok(json!({ "path": "/work" })),
         ),
+        // A picture in a message, read from the PC that stored it, thumbnail or full size.
+        (
+            "attachment_get",
+            json!({"chatId": "c1", "attachmentId": "img-1", "thumb": true}),
+            Ok(json!({"mime": "image/png", "bytes": "AAAA"})),
+        ),
         (
             "file_read",
             json!({"chatId": "c1", "path": "/work/src/main.ts"}),
@@ -1613,6 +1717,73 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
             Err(m) => assert_eq!(got.unwrap_err().message, m, "{op}"),
         }
     }
+    // The pages pinned on the other PC list here, and one opens from a copy brought across: the
+    // document and the files it names, served in a sealed session of this PC. Its messages go to
+    // the chat the pin names, and nothing else of the other PC is reachable.
+    let listed = api.call_host("devices_pages", json!({})).await.unwrap();
+    assert_eq!(
+        (
+            listed["devices"][0]["name"].as_str(),
+            listed["devices"][0]["pages"][0]["title"].as_str(),
+            listed["devices"][0]["pages"][0]["chatId"].as_str(),
+            listed["devices"][0]["problem"].is_null()
+        ),
+        (Some("Desk"), Some("Plan"), Some("c1"), true)
+    );
+    let opened = api
+        .call_host(
+            "devices_page_open",
+            json!({"deviceUid": "dev-a", "pageId": "pg-1"}),
+        )
+        .await
+        .unwrap();
+    let session = opened["session"].as_str().unwrap();
+    assert_eq!(
+        (
+            opened["title"].as_str(),
+            opened["pins"][0]["chatId"].as_str(),
+            opened["stateRevision"].as_i64()
+        ),
+        (Some("Plan"), Some("c1"), Some(0))
+    );
+    let doc = pages.respond("GET", &format!("/{session}/index.html"));
+    assert!(String::from_utf8(doc.body)
+        .unwrap()
+        .ends_with("<p>plan</p>"));
+    assert_eq!(
+        pages.respond("GET", &format!("/{session}/a.png")).body,
+        [1, 2, 3]
+    );
+    for bad in ["b.png", "../a.png", "plan.html"] {
+        assert_eq!(
+            pages.respond("GET", &format!("/{session}/{bad}")).status,
+            404,
+            "{bad}"
+        );
+    }
+    let gone = api
+        .call_host(
+            "devices_page_open",
+            json!({"deviceUid": "dev-a", "pageId": "pg-9"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(gone.code, "not_found");
+    // With the other PC's switch off the list says so in words and the page does not open.
+    port.set_run(false);
+    let off = api.call_host("devices_pages", json!({})).await.unwrap();
+    assert_eq!(off["devices"][0]["problem"]["code"], "not_allowed");
+    assert_eq!(off["devices"][0]["pages"], json!([]));
+    let e = api
+        .call_host(
+            "devices_page_open",
+            json!({"deviceUid": "dev-a", "pageId": "pg-1"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, "not_allowed");
+    port.set_run(true);
+
     // A chat that is not a copy is left to its own handler.
     let own = api
         .call_host("chat_fork", json!({"chatId": "mine"}))
@@ -1946,12 +2117,15 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
     let dir = tempfile::tempdir().unwrap();
     let mut reg = MigrationRegistry::new();
     helm_devices::register_migrations(&mut reg);
+    helm_chats::register_migrations(&mut reg);
+    helm_pages::register_migrations(&mut reg);
     let db = Arc::new(Database::open(&dir.path().join("host.sqlite3"), &reg).unwrap());
     // The profiles table is the profiles crate's, read here directly: make just enough of it.
     db.write(|tx| {
         tx.execute_batch(
             "CREATE TABLE profiles (id TEXT PRIMARY KEY, hub_person_id TEXT, name TEXT, colour TEXT, about TEXT);
              INSERT INTO profiles VALUES ('p-a', 'person-a', 'Alex', 'red', '');
+             INSERT INTO profiles VALUES ('p-b', 'person-b', 'Bo', 'blue', '');
              INSERT INTO projects (id, kind, name, path, color, created_at)
              VALUES ('proj-1', 'folder', 'Work', '/work', 'blue', 0),
                     ('brd-1', 'board', 'Task board', NULL, '#ff0000', 0);
@@ -1966,6 +2140,9 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
     // catalogue op reads.
     let mut services = Services::new();
     services.insert(db.clone());
+    services.insert(Arc::new(helm_pages::PageServer::new(
+        helm_panel::private::PrivateRoots::default(),
+    )));
     services.insert(Arc::new(
         helm_core::profile::Profile::open(&dir.path().join("prof")).unwrap(),
     ));
@@ -2135,6 +2312,263 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
         assert_eq!(q["items"].as_array().unwrap().len(), 0, "{query}");
     }
 
+    // A picture sent with a message is served to the watcher from this PC's store, for this
+    // chat only.
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    png.extend(2u32.to_be_bytes());
+    png.extend(2u32.to_be_bytes());
+    png.extend([8, 6, 0, 0, 0]);
+    let store = dir.path().join("prof").join("attachments");
+    let staged = helm_chats::attachments::stage_image(&store, "a.png", "image/png", &png).unwrap();
+    db.write(|tx| helm_chats::attachments::record_image(tx, "panel-1", &staged, 0))
+        .unwrap();
+    let seen = |chat: &str, thumb: Option<bool>| {
+        port.attachment(helm_devices::wire::AttachmentGetArgs {
+            chat_id: chat.to_owned(),
+            attachment_id: staged.id.clone(),
+            thumb,
+        })
+    };
+    assert_eq!(seen("panel-1", None).await.unwrap()["mime"], "image/png");
+    assert_eq!(seen("c-other", None).await.unwrap_err().code, "not_found");
+
+    // Pinned pages cross to a PC for the person they are filed under, and only inside the page's
+    // own folder: the document and the files it names, a chunk at a time. The PC's own person
+    // also sees the pages pinned before profiles; a pin of someone else is not found.
+    std::fs::write(
+        work.join("plan.html"),
+        "<img src=\"pic.png\"><link href=\"style.css\" rel=stylesheet>",
+    )
+    .unwrap();
+    std::fs::write(work.join("pic.png"), [9u8; 5]).unwrap();
+    std::fs::write(work.join("style.css"), "a{}").unwrap();
+    std::fs::write(work.join("unused.png"), [1u8]).unwrap();
+    std::fs::write(away.join("secret.png"), [2u8]).unwrap();
+    let plan = work.join("plan.html").to_string_lossy().into_owned();
+    db.write(|tx| {
+        for (id, profile, title) in [
+            ("pg-a", "p-a", "Plan"),
+            ("pg-b", "p-b", "Theirs"),
+            ("pg-old", "", "Before profiles"),
+        ] {
+            helm_pages::store::pin(
+                tx,
+                id,
+                profile,
+                &format!("{id}-key"),
+                &plan,
+                Some(title),
+                Some("panel-1"),
+                1,
+            )
+            .unwrap();
+        }
+        Ok::<_, rusqlite::Error>(())
+    })
+    .unwrap();
+    let who = |person: &str, own: bool| helm_devices::serve::PageScope {
+        person_id: person.to_owned(),
+        own,
+    };
+    let titles = |v: serde_json::Value| -> Vec<String> {
+        let mut t: Vec<String> = v["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["title"].as_str().unwrap().to_owned())
+            .collect();
+        t.sort();
+        t
+    };
+    assert_eq!(
+        titles(port.pages_list(who("person-a", true)).await.unwrap()),
+        ["Before profiles", "Plan"]
+    );
+    assert_eq!(
+        titles(port.pages_list(who("person-b", false)).await.unwrap()),
+        ["Theirs"]
+    );
+    let page = |id: &str| helm_devices::wire::PageIdArgs {
+        page_id: id.to_owned(),
+    };
+    let files = port
+        .pages_files(who("person-a", true), page("pg-a"))
+        .await
+        .unwrap();
+    let names: Vec<&str> = files["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["pic.png", "style.css"]);
+    assert_eq!(
+        port.pages_files(who("person-b", false), page("pg-a"))
+            .await
+            .unwrap_err()
+            .code,
+        "not_found"
+    );
+    let read = |id: &str, path: Option<&str>, offset: u64| {
+        port.pages_read(
+            who("person-a", true),
+            helm_devices::wire::PagesReadArgs {
+                page_id: id.to_owned(),
+                path: path.map(str::to_owned),
+                offset,
+            },
+        )
+    };
+    let got = read("pg-a", Some("pic.png"), 3).await.unwrap();
+    assert_eq!(
+        (got["size"].as_u64(), got["eof"].as_bool()),
+        (Some(5), Some(true))
+    );
+    for bad in [
+        "unused.html",
+        "../away/secret.png",
+        "plan.html",
+        "src/../pic.png",
+    ] {
+        assert!(read("pg-a", Some(bad), 0).await.is_err(), "{bad}");
+    }
+    assert_eq!(read("pg-b", None, 0).await.unwrap_err().code, "not_found");
+
+    // A board is a place to start a chat from afar: the chat runs in the folder the board starts
+    // its chats in and is shown on the board. The projects crate's tables and the ops that use
+    // them are stood in for, so what the host asks of them can be read back.
+    db.write(|tx| {
+        tx.execute_batch(
+            "CREATE TABLE project_local (
+                 project_id TEXT PRIMARY KEY, pinned INTEGER NOT NULL DEFAULT 0,
+                 archived INTEGER NOT NULL DEFAULT 0, closed INTEGER NOT NULL DEFAULT 0,
+                 primary_folder_project_id TEXT, revision INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE board_projects (project_id TEXT PRIMARY KEY, stale INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO board_projects(project_id) VALUES ('brd-1');
+             INSERT INTO project_local(project_id, primary_folder_project_id, revision)
+             VALUES ('brd-1', 'proj-w', 4);
+             INSERT INTO projects (id, kind, name, path, color, created_at)
+             VALUES ('brd-2', 'board', 'No folder yet', NULL, '', 0);
+             INSERT INTO board_projects(project_id) VALUES ('brd-2');",
+        )
+    })
+    .unwrap();
+    let calls = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+    let mut stand_in = OpRegistry::new();
+    for name in [
+        "chat_create",
+        "profiles_assign_chats",
+        "project_update",
+        "board_project_create",
+        "project_create_folder",
+    ] {
+        let calls = calls.clone();
+        let op = name.to_owned();
+        stand_in.blocking(name, OpClass::Blocking, move |_, args| {
+            calls.lock().unwrap().push((op.clone(), args));
+            Ok(json!({ "id": "made-1" }))
+        });
+    }
+    let board_on = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let on = board_on.clone();
+    stand_in.blocking("board_connection_get", OpClass::Blocking, move |_, _| {
+        let set = on.load(std::sync::atomic::Ordering::SeqCst);
+        Ok(json!({ "url": if set { "board" } else { "" }, "hasToken": set }))
+    });
+    let remote = HostPort::new(Arc::new(Dispatcher::new(
+        stand_in,
+        OpCtx {
+            services: Arc::new({
+                let mut s = Services::new();
+                s.insert(db.clone());
+                s
+            }),
+            events: Arc::new(RecordingSink::default()),
+        },
+        false,
+    )));
+    let create = |project: &str| helm_devices::wire::CreateArgs {
+        person_id: "person-a".into(),
+        project_id: project.into(),
+        model: None,
+        effort: None,
+    };
+    assert_eq!(remote.create(create("brd-1")).await.unwrap(), "made-1");
+    let first = calls.lock().unwrap().remove(0);
+    assert_eq!(first.0, "chat_create");
+    assert_eq!(first.1["cwd"], workp);
+    assert_eq!(first.1["projectId"], "brd-1");
+    calls.lock().unwrap().clear();
+    // A board with no folder yet says so in words instead of starting a chat nowhere.
+    let e = remote.create(create("brd-2")).await.unwrap_err();
+    assert!(e.message.contains("folder"), "{}", e.message);
+
+    // A new project from afar is a board on the task board when one is connected, with the
+    // folder asked for, and a folder when none is; its id and kind come back.
+    use helm_devices::wire::{ProjectCreateArgs, ProjectSetArgs};
+    let new_project = |title: &str, folder: Option<&str>| ProjectCreateArgs {
+        title: title.into(),
+        description: Some("About".into()),
+        folder_project_id: folder.map(str::to_owned),
+    };
+    let made = remote
+        .project_create(new_project(" Ideas ", None))
+        .await
+        .unwrap();
+    assert_eq!(made, json!({"projectId": "made-1", "kind": "folder"}));
+    assert_eq!(
+        calls.lock().unwrap().remove(0),
+        ("project_create_folder".to_owned(), json!({"name": "Ideas"}))
+    );
+    board_on.store(true, std::sync::atomic::Ordering::SeqCst);
+    remote
+        .project_create(new_project("Ideas", Some("proj-w")))
+        .await
+        .unwrap();
+    assert_eq!(
+        calls.lock().unwrap().remove(0),
+        (
+            "board_project_create".to_owned(),
+            json!({"title": "Ideas", "description": "About", "folder": workp})
+        )
+    );
+    // A folder that is not one of this PC's, or a nameless project, is refused in words.
+    for bad in [new_project("Ideas", Some("brd-1")), new_project("  ", None)] {
+        assert!(remote.project_create(bad).await.is_err());
+    }
+    // Pinning and choosing a board's folder go to the projects op with the project's current
+    // revision; anything else is refused before it gets there.
+    let set = |id: &str, pinned: Option<bool>, folder: Option<&str>| ProjectSetArgs {
+        project_id: id.into(),
+        pinned,
+        folder_project_id: folder.map(str::to_owned),
+    };
+    remote
+        .project_set(set("brd-2", Some(true), Some("proj-w")))
+        .await
+        .unwrap();
+    assert_eq!(
+        calls.lock().unwrap().remove(0),
+        (
+            "project_update".to_owned(),
+            json!({"projectId": "brd-2", "revision": 0, "pinned": true, "primaryFolderProjectId": "proj-w"})
+        )
+    );
+    remote
+        .project_set(set("brd-1", Some(false), None))
+        .await
+        .unwrap();
+    assert_eq!(calls.lock().unwrap().remove(0).1["revision"], 4);
+    for bad in [
+        set("brd-1", None, None),
+        set("proj-w", None, Some("proj-1")),
+        set("brd-1", None, Some("brd-2")),
+        set("nope", Some(true), None),
+    ] {
+        assert!(remote.project_set(bad).await.is_err());
+    }
+    assert!(calls.lock().unwrap().is_empty());
+
     // The catalogue op failing (here: no profile folder for it to read) is logged, not fatal:
     // the hello still answers, with no catalogue.
     let mut bare = Services::new();
@@ -2263,6 +2697,18 @@ async fn a_household_member_gets_their_own_view_of_the_list_but_is_refused_nothi
             "create",
             json!({"personId": "person-a", "projectId": "proj-1"}),
             None,
+        ),
+        ("project_create", json!({"title": "Sam's project"}), None),
+        (
+            "project_set",
+            json!({"projectId": "proj-1", "pinned": true}),
+            None,
+        ),
+        // Unknown fields are refused, as for every op.
+        (
+            "project_set",
+            json!({"projectId": "proj-1", "path": "/etc"}),
+            Some(code::BAD_ARGS),
         ),
     ];
     for (op, args, want) in cases {

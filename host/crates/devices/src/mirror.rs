@@ -72,6 +72,8 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              colour      TEXT NOT NULL DEFAULT '',
              kind        TEXT NOT NULL DEFAULT 'folder',
              path        TEXT NOT NULL DEFAULT '',
+             folder_id   TEXT NOT NULL DEFAULT '',
+             pinned      INTEGER NOT NULL DEFAULT 0,
              PRIMARY KEY (device_uid, project_id)
          );
          CREATE TABLE IF NOT EXISTS mirror_chats (
@@ -123,6 +125,15 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     );
     // A database from before the copy kept Allow cards: gain that too.
     let _ = tx.execute("ALTER TABLE mirror_chats ADD COLUMN consent TEXT", []);
+    // And from before a board's folder and a pinned project were kept.
+    let _ = tx.execute(
+        "ALTER TABLE mirror_projects ADD COLUMN folder_id TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = tx.execute(
+        "ALTER TABLE mirror_projects ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     Ok(())
 }
 
@@ -412,7 +423,7 @@ impl Mirror {
     }
 }
 
-fn load_devices(conn: &Connection) -> rusqlite::Result<Vec<PeerDevice>> {
+pub(crate) fn load_devices(conn: &Connection) -> rusqlite::Result<Vec<PeerDevice>> {
     let mut q = conn.prepare(
         "SELECT uid, name, person_id, person, online, last_seen_at, run, is_self, people FROM devices",
     )?;
@@ -725,6 +736,14 @@ impl Inner {
         });
     }
 
+    /// Ask the device for its hello again and keep what it says: its projects change while this
+    /// PC stays connected, and the hello is the only place they are read from.
+    pub(crate) async fn refresh_hello(&self, device: &str) -> Result<(), WireError> {
+        let hello = self.rpc.call(device, "hello", json!({})).await?;
+        self.apply_hello(device, &hello);
+        Ok(())
+    }
+
     async fn sync_device(self: &Arc<Self>, device: &str) -> Result<(), WireError> {
         let hello = self.rpc.call(device, "hello", json!({})).await?;
         self.apply_hello(device, &hello);
@@ -765,9 +784,18 @@ impl Inner {
                     continue;
                 }
                 tx.execute(
-                    "INSERT OR REPLACE INTO mirror_projects(device_uid, project_id, name, colour, kind, path)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![device, s("id"), s("name"), s("colour"), s("kind"), s("path")],
+                    "INSERT OR REPLACE INTO mirror_projects(device_uid, project_id, name, colour, kind, path, folder_id, pinned)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        device,
+                        s("id"),
+                        s("name"),
+                        s("colour"),
+                        s("kind"),
+                        s("path"),
+                        s("folderId"),
+                        p.get("pinned").and_then(Value::as_bool).unwrap_or(false)
+                    ],
                 )?;
             }
             Ok::<_, rusqlite::Error>(())
@@ -1913,35 +1941,37 @@ fn hello_profiles(conn: &Connection, uid: &str) -> Value {
     .unwrap_or_else(|| json!([]))
 }
 
+/// One project row as the window reads it.
+fn project_json(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    Ok(json!({
+        "id": r.get::<_, String>(0)?,
+        "name": r.get::<_, String>(1)?,
+        "colour": r.get::<_, String>(2)?,
+        "kind": r.get::<_, String>(3)?,
+        "path": r.get::<_, String>(4)?,
+        "folderId": r.get::<_, String>(5)?,
+        "pinned": r.get::<_, i64>(6)? != 0,
+    }))
+}
+
 /// The projects another device last said it has.
 pub fn mirror_projects(conn: &Connection, device: &str) -> rusqlite::Result<Vec<Value>> {
     let mut q = conn.prepare(
-        "SELECT project_id, name, colour, kind FROM mirror_projects WHERE device_uid = ?1 ORDER BY name",
+        "SELECT project_id, name, colour, kind, path, folder_id, pinned FROM mirror_projects
+         WHERE device_uid = ?1 ORDER BY name",
     )?;
-    let rows = q.query_map([device], |r| {
-        Ok(json!({
-            "id": r.get::<_, String>(0)?,
-            "name": r.get::<_, String>(1)?,
-            "colour": r.get::<_, String>(2)?,
-            "kind": r.get::<_, String>(3)?,
-        }))
-    })?;
+    let rows = q.query_map([device], project_json)?;
     rows.collect()
 }
 
 /// Every project of every device held here, for the all-devices view. Project ids are the
 /// other PCs' own ids, so one per device and never doubling.
 pub fn mirror_projects_all(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
-    let mut q =
-        conn.prepare("SELECT project_id, name, colour, kind FROM mirror_projects ORDER BY name")?;
-    let rows = q.query_map([], |r| {
-        Ok(json!({
-            "id": r.get::<_, String>(0)?,
-            "name": r.get::<_, String>(1)?,
-            "colour": r.get::<_, String>(2)?,
-            "kind": r.get::<_, String>(3)?,
-        }))
-    })?;
+    let mut q = conn.prepare(
+        "SELECT project_id, name, colour, kind, path, folder_id, pinned FROM mirror_projects
+         ORDER BY name",
+    )?;
+    let rows = q.query_map([], project_json)?;
     rows.collect()
 }
 

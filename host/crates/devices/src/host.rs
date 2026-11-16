@@ -9,14 +9,16 @@ use crate::identity;
 use crate::link::BoxFut;
 use crate::sends;
 use crate::serve::PanelRead;
-use crate::serve::{ChatPort, ChatState, PortResult, SentFile};
+use crate::serve::{ChatPort, ChatState, PageScope, PortResult, SentFile};
 use crate::wire::{
-    code, AnswerArgs, ArchiveArgs, BoardCancelArgs, BoardReadArgs, CheckpointArgs,
-    ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo, DevicePerson, ForkArgs, Hello,
-    MoveProfileArgs, MuteArgs, OrganizeArgs, PanelStageArgs, PersonInfo, ProfileInfo, ProjectInfo,
+    code, AnswerArgs, ArchiveArgs, AttachmentGetArgs, BoardCancelArgs, BoardReadArgs,
+    CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo, DevicePerson,
+    ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, PageIdArgs, PagesReadArgs,
+    PanelStageArgs, PersonInfo, ProfileInfo, ProjectCreateArgs, ProjectInfo, ProjectSetArgs,
     QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs, SetModelArgs, SetPermissionArgs,
     ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError,
 };
+use base64::Engine as _;
 use helm_chats::submit::{self, HostFile, HostImage, HostSend};
 use helm_chats::types::{ChatGetResult, ChatRecord, MessageRow, SubmissionOrigin};
 use helm_chats::{store, ChatRuntime};
@@ -42,6 +44,15 @@ const LIST_BYTES: usize = 900 * 1024;
 
 fn wire(e: ApiError) -> WireError {
     WireError::new(&e.code, e.message)
+}
+
+fn page_wire(e: helm_pages::server::PageError) -> WireError {
+    use helm_pages::server::PageError;
+    match e {
+        PageError::Refused(m) => WireError::new(code::REFUSED, m),
+        PageError::NotFound(m) => WireError::new(code::NOT_FOUND, m),
+        PageError::Io(m) => WireError::internal(m),
+    }
 }
 
 fn db_err(e: rusqlite::Error) -> WireError {
@@ -141,9 +152,38 @@ fn folders(conn: &Connection, sql: &str) -> rusqlite::Result<Vec<ProjectInfo>> {
             colour: r.get(2)?,
             kind: r.get(3)?,
             path: r.get(4)?,
+            folder_id: r.get(5)?,
+            pinned: r.get::<_, i64>(6)? != 0,
         })
     })?;
     rows.collect()
+}
+
+/// Where a chat started in a project runs: the folder project's own path, or for a board the
+/// folder it starts its chats in. `None` when the project is not here or has no folder.
+fn project_cwd(conn: &Connection, project_id: &str) -> rusqlite::Result<Option<String>> {
+    let own: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT kind, path FROM projects WHERE id = ?1",
+            [project_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    match own {
+        Some((kind, path)) if kind == "folder" => Ok(path),
+        // The side table belongs to the projects crate; a database without it has no boards.
+        Some(_) => Ok(conn
+            .query_row(
+                "SELECT f.path FROM project_local l JOIN projects f ON f.id = l.primary_folder_project_id
+                 WHERE l.project_id = ?1 AND f.kind = 'folder'",
+                [project_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .unwrap_or(None)
+            .flatten()),
+        None => Ok(None),
+    }
 }
 
 /// A household member's message on a chat shared with them, framed so the chat never takes it
@@ -182,10 +222,64 @@ impl HostPort {
             .ok_or_else(|| WireError::internal("The database is not available."))
     }
 
+    fn page_server(&self) -> PortResult<Arc<helm_pages::PageServer>> {
+        self.services()
+            .get::<helm_pages::PageServer>()
+            .ok_or_else(|| WireError::internal("Pages are not available."))
+    }
+
+    /// The pinned pages this person may open from another PC: those filed under the profiles
+    /// that act for them here, and (for this PC's own person) the ones pinned before profiles.
+    fn visible_pins(&self, who: &PageScope) -> PortResult<Vec<Value>> {
+        let db = self.db()?;
+        db.snapshot(|tx| {
+            let profiles: Vec<String> = tx
+                .prepare("SELECT id FROM profiles WHERE hub_person_id = ?1")
+                .and_then(|mut q| {
+                    q.query_map([&who.person_id], |r| r.get::<_, String>(0))?
+                        .collect()
+                })
+                .unwrap_or_default();
+            let all = helm_pages::store::list(tx, None)?;
+            Ok::<_, rusqlite::Error>(
+                all.into_iter()
+                    .filter(|p| match p["profileId"].as_str().unwrap_or_default() {
+                        "" => who.own,
+                        profile => profiles.iter().any(|x| x == profile),
+                    })
+                    .collect(),
+            )
+        })
+        .map_err(db_err)
+    }
+
+    fn visible_pin(&self, who: &PageScope, id: &str) -> PortResult<Value> {
+        self.visible_pins(who)?
+            .into_iter()
+            .find(|p| p["id"].as_str() == Some(id))
+            .ok_or_else(WireError::not_found)
+    }
+
     fn rt(&self) -> PortResult<Arc<ChatRuntime>> {
         self.services()
             .get::<ChatRuntime>()
             .ok_or_else(|| WireError::internal("The chat runtime is not available."))
+    }
+
+    /// The path of one of this PC's folder projects; refused when it is not one.
+    fn folder_path(&self, project_id: &str) -> PortResult<String> {
+        self.db()?
+            .snapshot(|tx| {
+                tx.query_row(
+                    "SELECT path FROM projects WHERE id = ?1 AND kind = 'folder'",
+                    [project_id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()
+            })
+            .map_err(db_err)?
+            .flatten()
+            .ok_or_else(|| WireError::new(code::NOT_FOUND, "That folder is not on this PC."))
     }
 
     /// Refuse a chat that is not this install's own: a chat this PC only keeps a copy of runs on
@@ -371,17 +465,26 @@ impl HostPort {
             // its own, so its path travels empty.
             let projects = folders(
                 tx,
-                "SELECT p.id, p.name, COALESCE(p.color, ''), p.kind, COALESCE(p.path, '')
+                // A board also carries the folder it starts its chats in, when that folder is still
+                // there. A board that is closed or no longer on the task board is left out:
+                // neither can take a new chat.
+                "SELECT p.id, p.name, COALESCE(p.color, ''), p.kind, COALESCE(p.path, ''),
+                        COALESCE((SELECT f.id FROM projects f
+                                  WHERE f.id = l.primary_folder_project_id AND f.kind = 'folder'
+                                    AND f.path IS NOT NULL), ''),
+                        COALESCE(l.pinned, 0)
                  FROM projects p LEFT JOIN project_local l ON l.project_id = p.id
                  WHERE p.kind IN ('folder', 'board')
                    AND (p.kind = 'board' OR p.path IS NOT NULL)
                    AND COALESCE(l.archived, 0) = 0
+                   AND (p.kind = 'folder' OR (COALESCE(l.closed, 0) = 0 AND NOT EXISTS
+                        (SELECT 1 FROM board_projects b WHERE b.project_id = p.id AND b.stale = 1)))
                  ORDER BY p.name",
             )
             .or_else(|_| {
                 folders(
                     tx,
-                    "SELECT p.id, p.name, COALESCE(p.color, ''), p.kind, COALESCE(p.path, '')
+                    "SELECT p.id, p.name, COALESCE(p.color, ''), p.kind, COALESCE(p.path, ''), '', 0
                      FROM projects p
                      WHERE p.kind IN ('folder', 'board')
                        AND (p.kind = 'board' OR p.path IS NOT NULL)
@@ -886,18 +989,19 @@ impl ChatPort for HostPort {
     fn create(&self, a: CreateArgs) -> BoxFut<'_, PortResult<String>> {
         Box::pin(async move {
             let db = self.db()?;
-            let (profile, path) = db
+            let (profile, path, known) = db
                 .snapshot(|tx| {
                     let profile = profile_of_person(tx, &a.person_id)?;
-                    let path: Option<String> = tx
+                    let path = project_cwd(tx, &a.project_id)?;
+                    let known = tx
                         .query_row(
-                            "SELECT path FROM projects WHERE id = ?1 AND kind = 'folder'",
+                            "SELECT 1 FROM projects WHERE id = ?1",
                             [&a.project_id],
-                            |r| r.get(0),
+                            |_| Ok(()),
                         )
                         .optional()?
-                        .flatten();
-                    Ok::<_, rusqlite::Error>((profile, path))
+                        .is_some();
+                    Ok::<_, rusqlite::Error>((profile, path, known))
                 })
                 .map_err(db_err)?;
             let profile = profile.ok_or_else(|| {
@@ -907,8 +1011,16 @@ impl ChatPort for HostPort {
                 )
             })?;
             let path = path.ok_or_else(|| {
-                WireError::new(code::NOT_FOUND, "That project is not on this PC.")
+                if known {
+                    WireError::new(
+                        code::REFUSED,
+                        "That project has no folder on this PC yet. Choose one for it first.",
+                    )
+                } else {
+                    WireError::new(code::NOT_FOUND, "That project is not on this PC.")
+                }
             })?;
+            // A board is where the chat is shown; it runs in the board's own folder.
             let mut args = json!({ "cwd": path, "projectId": a.project_id });
             if let Some(m) = &a.model {
                 args["model"] = json!(m);
@@ -1192,6 +1304,75 @@ impl ChatPort for HostPort {
         Box::pin(async move {
             self.here(&chat_id)?;
             self.op("chat_folder", json!({ "chatId": chat_id })).await
+        })
+    }
+
+    fn pages_list(&self, who: PageScope) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move { Ok(json!({ "pages": self.visible_pins(&who)? })) })
+    }
+
+    fn pages_files(&self, who: PageScope, a: PageIdArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            let pin = self.visible_pin(&who, &a.page_id)?;
+            let path = pin["path"].as_str().unwrap_or_default().to_owned();
+            let server = self.page_server()?;
+            let list = tokio::task::spawn_blocking(move || server.bundle_list(&path))
+                .await
+                .map_err(|e| WireError::internal(e.to_string()))?
+                .map_err(page_wire)?;
+            let title = pin["title"]
+                .as_str()
+                .filter(|t| !t.is_empty())
+                .unwrap_or(&list.title)
+                .to_owned();
+            Ok(json!({
+                "name": list.name,
+                "title": title,
+                "size": list.size,
+                "files": list.files.iter().map(|(p, n)| json!({ "path": p, "size": n })).collect::<Vec<_>>(),
+                "pin": pin,
+            }))
+        })
+    }
+
+    fn pages_read(&self, who: PageScope, a: PagesReadArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            let pin = self.visible_pin(&who, &a.page_id)?;
+            let path = pin["path"].as_str().unwrap_or_default().to_owned();
+            let server = self.page_server()?;
+            let rel = a.path.clone();
+            let whole =
+                tokio::task::spawn_blocking(move || server.bundle_read(&path, rel.as_deref()))
+                    .await
+                    .map_err(|e| WireError::internal(e.to_string()))?
+                    .map_err(page_wire)?;
+            let from = usize::try_from(a.offset)
+                .unwrap_or(usize::MAX)
+                .min(whole.len());
+            let to = (from + crate::wire::MAX_CHUNK_BYTES).min(whole.len());
+            Ok(json!({
+                "data": base64::engine::general_purpose::STANDARD.encode(&whole[from..to]),
+                "size": whole.len(),
+                "eof": to == whole.len(),
+            }))
+        })
+    }
+
+    fn attachment(&self, a: AttachmentGetArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            let mut args = json!({ "chatId": a.chat_id, "attachmentId": a.attachment_id });
+            if let Some(t) = a.thumb {
+                args["thumb"] = json!(t);
+            }
+            let out = self.op("attachment_get", args).await?;
+            if out.to_string().len() > ANSWER_BYTES {
+                return Err(WireError::new(
+                    code::REFUSED,
+                    "A picture over 512 KiB is only shown full size on the PC this chat runs on.",
+                ));
+            }
+            Ok(out)
         })
     }
 
@@ -1479,6 +1660,95 @@ impl ChatPort for HostPort {
                 patch["responseVerbosity"] = json!(v);
             }
             self.op("runtime_settings_save", patch).await
+        })
+    }
+
+    fn project_create(&self, a: ProjectCreateArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            let title = a.title.trim().to_owned();
+            if title.is_empty() {
+                return Err(WireError::bad_args("A project needs a name."));
+            }
+            let folder = match a.folder_project_id.as_deref() {
+                Some(id) => Some(self.folder_path(id)?),
+                None => None,
+            };
+            // Without a task board connected "New project" is a folder, as it is on this PC.
+            let conn = self.op("board_connection_get", json!({})).await?;
+            let board = conn
+                .get("url")
+                .and_then(Value::as_str)
+                .is_some_and(|u| !u.trim().is_empty())
+                && conn
+                    .get("hasToken")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+            let made = if board {
+                let mut args = json!({ "title": title });
+                if let Some(d) = a.description.as_deref().filter(|d| !d.trim().is_empty()) {
+                    args["description"] = json!(d);
+                }
+                if let Some(f) = folder {
+                    args["folder"] = json!(f);
+                }
+                self.op("board_project_create", args).await?
+            } else {
+                self.op("project_create_folder", json!({ "name": title }))
+                    .await?
+            };
+            let id = made
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| WireError::internal("The new project has no id."))?;
+            let kind = made.get("kind").and_then(Value::as_str).unwrap_or("folder");
+            Ok(json!({ "projectId": id, "kind": kind }))
+        })
+    }
+
+    fn project_set(&self, a: ProjectSetArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            if a.pinned.is_none() && a.folder_project_id.is_none() {
+                return Err(WireError::bad_args("Name what to change."));
+            }
+            let (kind, revision) = self
+                .db()?
+                .snapshot(|tx| {
+                    let kind: Option<String> = tx
+                        .query_row(
+                            "SELECT kind FROM projects WHERE id = ?1",
+                            [&a.project_id],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    // The side table belongs to the projects crate; no row is revision 0.
+                    let revision: i64 = tx
+                        .query_row(
+                            "SELECT revision FROM project_local WHERE project_id = ?1",
+                            [&a.project_id],
+                            |r| r.get(0),
+                        )
+                        .optional()
+                        .unwrap_or(None)
+                        .unwrap_or(0);
+                    Ok::<_, rusqlite::Error>((kind, revision))
+                })
+                .map_err(db_err)?;
+            let kind = kind.ok_or_else(|| {
+                WireError::new(code::NOT_FOUND, "That project is not on this PC.")
+            })?;
+            let mut args = json!({ "projectId": a.project_id, "revision": revision });
+            if let Some(p) = a.pinned {
+                args["pinned"] = json!(p);
+            }
+            if let Some(f) = a.folder_project_id.as_deref() {
+                if kind != "board" {
+                    return Err(WireError::bad_args("Only a board takes a folder this way."));
+                }
+                self.folder_path(f)?;
+                args["primaryFolderProjectId"] = json!(f);
+            }
+            self.op("project_update", args).await?;
+            Ok(json!({}))
         })
     }
 

@@ -390,6 +390,19 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     return { siblings, depthOf, heightOf };
   };
   const remoteFail = (e: unknown) => setError(String((e as Error)?.message ?? e));
+  // A project of the other PC shown: pin it there, or give its board one of that PC's folders.
+  const pinRemoteProject = (uid: string, p: ProjectNode) => void devStore.ops.setProject({ deviceUid: uid, projectId: p.id, pinned: !p.pinned }).catch(remoteFail);
+  const chooseRemoteFolder = (uid: string, p: ProjectNode, x: number, y: number) => {
+    const folders = other.projects.filter((f) => f.kind === 'folder' && !!f.path);
+    const items: MenuItem[] = folders.length
+      ? folders.map((f) => ({
+          id: f.id,
+          label: <span title={f.path ?? undefined}>{f.name}</span>,
+          onSelect: () => void devStore.ops.setProject({ deviceUid: uid, projectId: p.id, folderProjectId: f.id }).catch(remoteFail),
+        }))
+      : [{ id: 'none', label: `${remote?.name ?? 'That PC'} has no folders to choose from`, disabled: true }];
+    openMenu(x, y, items, `Folder for ${p.name}`);
+  };
   const rowMenuItems = (row: SidebarRow): MenuItem[] => {
     // A chat on another device: the same menu, carried across the wire. The ops route through
     // the mirror, which answers with the device's own words.
@@ -942,10 +955,11 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
             } else if (p.collapsed !== collapse) void act.updateProject(p, { collapsed: collapse });
           }}
           readOnly={!!remote || remoteProjectIds.has(p.id)}
-          onPin={() => void act.updateProject(p, { pinned: !p.pinned })}
+          remoteActs={!!remote && remoteProjectIds.has(p.id)}
+          onPin={() => (remote && remoteProjectIds.has(p.id) ? pinRemoteProject(remote.uid, p) : void act.updateProject(p, { pinned: !p.pinned }))}
           onMove={(dir) => moveProject(p, dir)}
           onNew={() => newChatIn(p)}
-          onSetFolder={() => openPrimaryFolder(p.id)}
+          onSetFolder={(x, y) => (remote && remoteProjectIds.has(p.id) ? chooseRemoteFolder(remote.uid, p, x, y) : openPrimaryFolder(p.id))}
           onRestore={() => void act.restoreProject(p)}
           onMenu={(x, y) => openMenu(x, y, projectMenu(p), `Options for ${p.name}`)}
           onPointerDown={(e) => startDrag(e, { kind: 'project', projectId: p.id, parentId: p.parentId, pinned: p.pinned }, p.name)}
@@ -1002,6 +1016,7 @@ function GroupHeader({
   current,
   dragging,
   readOnly,
+  remoteActs,
   onToggle,
   onPin,
   onMove,
@@ -1014,13 +1029,16 @@ function GroupHeader({
   item: Extract<ListItem, { kind: 'header' }>;
   current: boolean;
   dragging: boolean;
-  /** Another device's project: it collapses here, and has no menu or buttons. */
+  /** Another device's project: it collapses here, and has no menu. */
   readOnly: boolean;
+  /** A project of the one other device shown: pinning it, starting a chat in it and choosing the
+   *  folder a board starts in are asked of that device. */
+  remoteActs: boolean;
   onToggle: () => void;
   onPin: () => void;
   onMove: (dir: -1 | 1) => void;
   onNew: () => void;
-  onSetFolder: () => void;
+  onSetFolder: (x: number, y: number) => void;
   onRestore: () => void;
   onMenu: (x: number, y: number) => void;
   onPointerDown: (e: ReactPointerEvent) => void;
@@ -1112,18 +1130,21 @@ function GroupHeader({
             </span>
           )}
         </button>
-        {item.needsFolder && (
+        {item.needsFolder && (!readOnly || remoteActs) && (
           <button
             type="button"
             className="sb-set-folder"
             data-testid="sidebar-set-folder"
             title={`Choose the folder new chats in ${p.name} start in`}
-            onClick={onSetFolder}
+            onClick={(e) => {
+              const r = e.currentTarget.getBoundingClientRect();
+              onSetFolder(r.left, r.bottom);
+            }}
           >
             Set folder
           </button>
         )}
-        <span className="sb-actions" hidden={readOnly}>
+        <span className="sb-actions" hidden={readOnly && !remoteActs}>
           {!p.archived && (
             <button
               type="button"
@@ -1136,22 +1157,26 @@ function GroupHeader({
               <IconPin filled={p.pinned} />
             </button>
           )}
-          <button
-            type="button"
-            className="sb-act"
-            aria-label={`Options for ${p.name}`}
-            title="Project options"
-            onClick={(e) => {
-              const r = e.currentTarget.getBoundingClientRect();
-              onMenu(r.right, r.bottom);
-            }}
-          >
-            <IconMore />
-          </button>
-          {p.archived ? (
-            <button type="button" className="sb-act" aria-label={`Restore project ${p.name}`} title="Restore project and its chats" onClick={onRestore}>
-              <IconRestore />
+          {!readOnly && (
+            <button
+              type="button"
+              className="sb-act"
+              aria-label={`Options for ${p.name}`}
+              title="Project options"
+              onClick={(e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                onMenu(r.right, r.bottom);
+              }}
+            >
+              <IconMore />
             </button>
+          )}
+          {p.archived ? (
+            !readOnly && (
+              <button type="button" className="sb-act" aria-label={`Restore project ${p.name}`} title="Restore project and its chats" onClick={onRestore}>
+                <IconRestore />
+              </button>
+            )
           ) : (
             <button type="button" className="sb-act" aria-label={`New chat in ${p.name}`} title="New chat" onClick={onNew}>
               <IconPlus />
