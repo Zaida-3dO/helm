@@ -29,8 +29,9 @@ pub trait SystemWatcher: Send + Sync + 'static {
     /// The machine woke. May be called twice for one wake.
     fn resumed(&self);
     /// The user is signing out or the computer is shutting down, and it will happen. Run the quit
-    /// flow without asking, and return once it has finished or `budget` has passed.
-    fn session_ending(&self, budget: Duration);
+    /// flow without asking, and return once it has finished or `budget` has passed. `reason` says
+    /// which it is, in words, straight from the system's message.
+    fn session_ending(&self, budget: Duration, reason: &str);
 }
 
 /// Start watching. Safe to call once; later calls do nothing.
@@ -57,6 +58,9 @@ mod imp {
 
     static WATCHER: OnceLock<Arc<dyn SystemWatcher>> = OnceLock::new();
 
+    /// WM_ENDSESSION's flag: the high bit of its parameter means sign-out, not shutdown.
+    const ENDSESSION_LOGOFF: u32 = 0x8000_0000;
+
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
@@ -74,6 +78,7 @@ mod imp {
                     return 1;
                 }
                 WM_QUERYENDSESSION => {
+                    log::info!("the system asked to end the session (sign-out or shutdown)");
                     // Yes, the session may end; and please wait while Helm saves.
                     let reason = wide("Helm is saving your chats");
                     ShutdownBlockReasonCreate(hwnd, reason.as_ptr());
@@ -81,7 +86,17 @@ mod imp {
                 }
                 WM_ENDSESSION => {
                     if wp != 0 {
-                        w.session_ending(SESSION_END_BUDGET);
+                        // The message's flag says which: sign-out or shutdown. (The parameter
+                        // carries the flag in its high bit.)
+                        let what = if (lp as u32) & ENDSESSION_LOGOFF != 0 {
+                            "sign-out"
+                        } else {
+                            "shutdown"
+                        };
+                        log::info!("the session is ending: {what}");
+                        w.session_ending(SESSION_END_BUDGET, what);
+                    } else {
+                        log::info!("the session end was called off (another program objected)");
                     }
                     ShutdownBlockReasonDestroy(hwnd);
                     return 0;
