@@ -109,7 +109,7 @@ fn set_mode(ctx: &OpCtx, a: &ModeSetArgs) -> Result<(), ApiError> {
         db.snapshot(|tx| {
             Ok::<_, rusqlite::Error>(
                 busy.iter()
-                    .map(|c| (c.clone(), workmode::effective(tx, c).mode))
+                    .map(|c| (c.clone(), workmode::effective_live(tx, c).mode))
                     .collect(),
             )
         })

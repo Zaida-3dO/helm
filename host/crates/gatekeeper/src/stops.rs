@@ -190,7 +190,7 @@ impl StopGate {
     fn see(&self, chat_id: &str) -> Option<Seen> {
         self.db
             .snapshot(|tx| -> rusqlite::Result<Option<Seen>> {
-                let run_mode = workmode::effective(tx, chat_id).mode == Mode::Run;
+                let run_mode = workmode::effective_live(tx, chat_id).mode == Mode::Run;
                 let profile = store::chat_profile(tx, chat_id);
                 let settings = store::load_settings(tx, &profile)?;
                 let Some((title, local, side)) = tx
@@ -650,6 +650,10 @@ impl StopJudge for StopGate {
 
     fn turn_line(&self, chat_id: &str) -> Option<String> {
         workmode::turn_line(&self.db, chat_id)
+    }
+
+    fn agent_board_move(&self, chat_id: &str, board_id: &str) {
+        workmode::note_agent_move(chat_id, board_id);
     }
 }
 

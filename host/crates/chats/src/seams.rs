@@ -299,4 +299,10 @@ pub trait StopJudge: Send + Sync {
     fn turn_line(&self, _chat_id: &str) -> Option<String> {
         None
     }
+
+    /// The chat is now shown on board `board_id` because another chat's tool moved it there.
+    /// How a chat works is the user's to set, so a move made by a chat does not change how the
+    /// moved chat works: the judge ignores that board's own mode for it (the app's mode
+    /// stands) until the user moves the chat or it starts again.
+    fn agent_board_move(&self, _chat_id: &str, _board_id: &str) {}
 }

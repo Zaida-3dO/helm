@@ -1839,8 +1839,20 @@ async fn update_chat(ctx: ToolCtx, a: Value) -> ToolResult {
     if let Some(p) = a.get("pinned").and_then(Value::as_bool) {
         organize["pinned"] = json!(p);
     }
+    // A move made by a chat's own tool must not change how the moved chat works: tell the stop
+    // judge, so the new board's own mode is ignored for that chat until the user moves it or it
+    // starts again. (How a chat works is the user's own setting.)
+    let moved_to = organize
+        .get("groupProjectId")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     if organize.as_object().is_some_and(|o| o.len() > 1) {
         ctx.op("chat_organize", organize).await?;
+    }
+    if let (Some(board), Ok(rt)) = (moved_to, rt(&ctx)) {
+        if let Some(j) = rt.sh.stop_judge.get() {
+            j.agent_board_move(&id, &board);
+        }
     }
     if let Some(t) = a.get("title") {
         let t = t.as_str().map(str::trim).unwrap_or("");

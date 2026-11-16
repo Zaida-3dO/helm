@@ -131,6 +131,48 @@ pub fn effective(conn: &Connection, chat_id: &str) -> Effective {
     }
 }
 
+/// The board each chat was moved onto by another chat's tool, since its last start: chat id to
+/// the board it was moved to. How a chat works is the user's to set, so a move made by a chat
+/// changes where a chat is shown but not how it works: while the chat sits on that board, its
+/// board's own mode is ignored for it. A move the user made, or a fresh start, clears the mark.
+static AGENT_MOVED: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+/// A chat's tool showed `chat_id` on `board_id`.
+pub fn note_agent_move(chat_id: &str, board_id: &str) {
+    moved()
+        .get_or_insert_with(HashMap::new)
+        .insert(chat_id.to_owned(), board_id.to_owned());
+}
+
+fn moved() -> MutexGuard<'static, Option<HashMap<String, String>>> {
+    AGENT_MOVED.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+fn clear_agent_move(chat_id: &str) {
+    if let Some(m) = moved().as_mut() {
+        m.remove(chat_id);
+    }
+}
+
+/// The mode a running chat is judged by: [`effective`], except that a board the chat was moved
+/// onto by another chat's tool does not override for it — the app's mode stands until the user
+/// moves the chat or it starts again.
+pub fn effective_live(conn: &Connection, chat_id: &str) -> Effective {
+    // Read the mark under a lock of its own: nothing below may run while it is held.
+    let moved_to = moved().as_ref().and_then(|m| m.get(chat_id)).cloned();
+    if let (Some((board, _)), Some(moved_to)) = (board_of(conn, chat_id), moved_to) {
+        if moved_to == board {
+            return Effective {
+                mode: app_mode(conn),
+                source: Source::App,
+            };
+        }
+        // The chat sits elsewhere now: whatever moved it since has the user's hand on it.
+        clear_agent_move(chat_id);
+    }
+    effective(conn, chat_id)
+}
+
 /// Set (or clear, with `None`) the app's mode.
 pub fn set_app(tx: &rusqlite::Transaction<'_>, mode: Option<Mode>) -> rusqlite::Result<()> {
     let value = mode.map_or(Value::Null, |m| json!(m.as_str()));
@@ -245,6 +287,8 @@ impl AddendumSection for WorkmodeSection {
             .db
             .snapshot(|tx| Ok::<_, rusqlite::Error>(effective(tx, ctx.chat_id).mode))
             .unwrap_or_default();
+        // A start settles the mode: a mark from an older agent-made move is dropped.
+        clear_agent_move(ctx.chat_id);
         launched()
             .get_or_insert_with(HashMap::new)
             .insert(ctx.chat_id.to_owned(), mode);
@@ -256,7 +300,7 @@ impl AddendumSection for WorkmodeSection {
 pub fn turn_line(db: &Database, chat_id: &str) -> Option<String> {
     let told = launched_mode(chat_id)?;
     let now = db
-        .snapshot(|tx| Ok::<_, rusqlite::Error>(effective(tx, chat_id).mode))
+        .snapshot(|tx| Ok::<_, rusqlite::Error>(effective_live(tx, chat_id).mode))
         .ok()?;
     (now != told).then(|| switch_line(now))
 }
@@ -543,5 +587,88 @@ mod tests {
         assert!(turn_line(&db, &chat).unwrap().contains("check in with me"));
         assert_eq!(section.id(), "workmode");
         assert!(section.order() < 6, "ahead of the rules section");
+    }
+
+    #[test]
+    fn a_board_move_made_by_a_chat_does_not_change_how_the_chat_works() {
+        let (_dir, db) = env();
+        let chat = db
+            .write(|tx| helm_chats::store::create_chat(tx, "C:/w", None, None, T0))
+            .unwrap();
+        board(&db, "b1", "Check-in board");
+        board(&db, "b2", "Run board");
+        db.write(|tx| set_board(tx, "b2", Some(Mode::Run), T0))
+            .unwrap();
+        let onto = |b: &str| {
+            db.write(|tx| {
+                tx.execute(
+                    "INSERT INTO chat_groups(chat_id, project_id) VALUES (?1, ?2)
+                     ON CONFLICT(chat_id) DO UPDATE SET project_id = excluded.project_id",
+                    params![chat, b],
+                )
+            })
+            .unwrap();
+        };
+        onto("b1");
+        let ef = |mode, source| Effective { mode, source };
+        let live = |chat: &str| {
+            db.snapshot(|tx| Ok::<_, rusqlite::Error>(effective_live(tx, chat)))
+                .unwrap()
+        };
+        let live_mode = |chat: &str| live(chat).mode;
+
+        // Launched on the first board: check in is what it was told.
+        let section = WorkmodeSection { db: db.clone() };
+        let launch = || {
+            section
+                .text(&LaunchCtx {
+                    chat_id: &chat,
+                    cwd: "C:/w",
+                })
+                .unwrap()
+        };
+        assert_eq!(launch(), CHECK_IN_TEXT);
+
+        // Another chat's tool moves it onto the run board. Where it is shown changes; how it
+        // works does not, and the chat is never told of a switch the user did not make.
+        note_agent_move(&chat, "b2");
+        onto("b2");
+        assert_eq!(
+            live(&chat),
+            ef(Mode::CheckIn, Source::App),
+            "the moved-to board's own mode does not apply to a chat the move was not the user's"
+        );
+        assert_eq!(turn_line(&db, &chat), None);
+        // The view still shows where the chat is shown and what that board's mode is.
+        assert_eq!(
+            mode_of(&db, &chat),
+            ef(Mode::Run, Source::Board("b2".into()))
+        );
+
+        // The user's own change reaches the chat whatever the boards say.
+        db.write(|tx| set_app(tx, Some(Mode::Run))).unwrap();
+        assert_eq!(live_mode(&chat), Mode::Run);
+        assert!(turn_line(&db, &chat).unwrap().contains("run to completion"));
+
+        // The user moves the chat itself: that settles it, and from then on boards count again.
+        onto("b1");
+        live(&chat);
+        db.write(|tx| set_app(tx, Some(Mode::CheckIn))).unwrap();
+        onto("b2");
+        assert_eq!(
+            live_mode(&chat),
+            Mode::Run,
+            "after the user moved it, the board's mode rules"
+        );
+
+        // A fresh start settles the mode again, mark and all.
+        db.write(|tx| set_app(tx, Some(Mode::CheckIn))).unwrap();
+        note_agent_move(&chat, "b2");
+        assert_eq!(live_mode(&chat), Mode::CheckIn);
+        assert_eq!(
+            launch(),
+            RUN_TEXT,
+            "a start re-pins the mode of the board it sits on"
+        );
     }
 }
