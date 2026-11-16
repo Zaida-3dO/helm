@@ -1,12 +1,14 @@
 // The chat's context size, quietly, and a prominent Roll over button once it is large. Rolling
 // over hands the work to a fresh chat (see sidebar/actions.ts); it is offered only on an idle,
 // unarchived chat. With the model's real window known the line says how full the chat is against
-// it, and large means near that window (which for a small local window comes well before 250k).
+// it, and large means near that window (which for a small local window comes well before the
+// roll-over token setting).
 
 import type { ChatRecord, MessageRow } from '../api/types.ts';
 import { isLocalModelId } from '../state/localModel.ts';
 import { Button } from '../ui/index.ts';
-import { compactCount, CONTEXT_SHOWN_TOKENS, contextSize, ROLL_OVER_TOKENS, type ChatContextReading } from './rowMeta.ts';
+import { compactCount, CONTEXT_SHOWN_TOKENS, contextSize, type ChatContextReading } from './rowMeta.ts';
+import { useRolloverTokens } from './rolloverPref.ts';
 
 export interface ContextBarProps {
   chat: ChatRecord;
@@ -27,11 +29,12 @@ const NEAR_LOCAL_WINDOW_PCT = 70;
 const SHOWN_PCT = 60;
 
 export function ContextBar({ chat, rows, host, hasNewer, busy, onRollOver }: ContextBarProps) {
+  const rollOverAt = useRolloverTokens();
   if (hasNewer || chat.archived || chat.sideSourceId) return null;
   const size = contextSize(rows, host);
   if (!size || (size.tokens < CONTEXT_SHOWN_TOKENS && (size.pct ?? 0) < SHOWN_PCT)) return null;
   const { tokens, window, pct } = size;
-  const large = pct !== null ? pct >= (isLocalModelId(chat.model) ? NEAR_LOCAL_WINDOW_PCT : NEAR_WINDOW_PCT) : tokens >= ROLL_OVER_TOKENS;
+  const large = pct !== null ? pct >= (isLocalModelId(chat.model) ? NEAR_LOCAL_WINDOW_PCT : NEAR_WINDOW_PCT) : tokens >= rollOverAt;
   const where = pct !== null ? ` of ${compactCount(window!)} (${Math.round(pct)}%)` : '';
   const label = `${compactCount(tokens)} tokens of context${where}`;
   const title =

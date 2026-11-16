@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { agoText, compactCount, contextSize, messageTimeFull, messageTimeLabel, messageTimeShort, contextTokens, formatTurnTime, isTooLargeRefusal, newTokens, tokenChip, turnTimes, skillsByReply, chatRefOpens } from './rowMeta.ts';
+import { agoText, compactCount, contextSize, messageTimeFull, messageTimeLabel, messageTimeShort, contextTokens, formatTurnTime, isTooLargeRefusal, newTokens, tokenChip, turnTimes, skillsByReply, chatRefOpens, ROLL_OVER_TOKENS } from './rowMeta.ts';
+import { parseRolloverTokens } from './rolloverPref.ts';
 
 const usage = { inputTokens: 1200, outputTokens: 300, cacheReadTokens: 40_000, cacheWriteTokens: 500, costUsd: 0 };
 
@@ -88,6 +89,25 @@ test('the shown context size follows the last measured call and the model\'s rea
   // Nothing measured anywhere: nothing to show.
   assert.equal(contextSize([], null), null);
   assert.equal(contextSize([], host(null, null)), null);
+});
+
+test('the roll-over threshold: the default constant, and the setting read through parse', () => {
+  assert.equal(ROLL_OVER_TOKENS, 180_000);
+  for (const [v, want] of [
+    [null, 180_000],
+    [undefined, 180_000],
+    [0, 180_000],
+    [-5, 180_000],
+    [1, 1],
+    [250_000, 250_000],
+    [2_000_000, 2_000_000],
+    [2_000_001, 180_000],
+    [1.5, 180_000],
+    ['100000', 180_000],
+    [{}, 180_000],
+  ] as const) {
+    assert.equal(parseRolloverTokens(v), want, String(v));
+  }
 });
 
 test('a too-large-for-the-window refusal is recognised; other faults and no error are not', () => {

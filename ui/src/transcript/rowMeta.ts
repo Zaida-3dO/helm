@@ -34,8 +34,10 @@ export function isTooLargeRefusal(error: string | null | undefined): boolean {
   return !!error && TOO_LONG_PHRASES.some((re) => re.test(error));
 }
 
-/** Context size at which the chat offers a prominent Roll over button. */
-export const ROLL_OVER_TOKENS = 250_000;
+/** Context size at which the chat offers a prominent Roll over button, and at which a quiet
+ * chat is asked to roll over by itself when the `rolloverTokens` setting is unset. Keep it
+ * equal to the host's default in `helm-chats` (rollover::DEFAULT_ROLLOVER_TOKENS). */
+export const ROLL_OVER_TOKENS = 180_000;
 /** Below this the context size is not worth showing. */
 export const CONTEXT_SHOWN_TOKENS = 50_000;
 

@@ -6186,6 +6186,159 @@ async fn roll_over_hands_the_work_to_a_successor_and_archives_the_old_chat() {
     );
 }
 
+/// Attach a host seam carrying the harness's own services, so a flow started from inside the
+/// runtime (the automatic roll-over trigger) can run its ops.
+pub fn attach_ops_host(h: &H) {
+    let mut s = Services::new();
+    s.insert(Arc::new(h.profile.clone()));
+    s.insert(h.db.clone());
+    s.insert(Arc::new(Clock::new(0)));
+    s.insert(Arc::new(h.rt.clone()));
+    h.rt.attach_host(crate::hostcalls::HostSeam {
+        ctx: OpCtx {
+            services: Arc::new(s),
+            events: h.sink.clone(),
+        },
+        tools: Arc::new(helm_hosttools::HostTools::new(Arc::new(
+            helm_hosttools::HostToolRegistry::new(),
+        ))),
+        lines: Arc::new(helm_hosttools::WorkerLines::new()),
+    });
+}
+
+/// A quiet chat grown past the roll-over setting runs the same flow the button runs, at the end
+/// of its turn: the hand-off request goes out while the chat is idle, and the turn's end inside
+/// that roll over is not itself a roll-over trigger (the in-flight guard holds).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chat_grown_past_the_setting_rolls_itself_over_at_its_turn_end() {
+    let mut h = harness();
+    attach_ops_host(&h);
+    h.db
+        .write(|tx| helm_core::prefs::set_generic(tx, "rolloverTokens", &json!(100)))
+        .unwrap();
+    let chat = h.create().await;
+    let (sid, _) = h.send(&chat, "build the thing", "default").await;
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    ack(&w, &p).await;
+    w.emit(json!({"type": "agent_start"})).await;
+    echo(&w, &sid).await;
+    // The reply's usage puts the chat at 462 tokens of context — over the setting.
+    reply(&h, &w, "msg_1", "Built part one.").await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    let p = w.expect("prompt").await;
+    assert!(
+        p["text"].as_str().unwrap().contains("rolled over"),
+        "the trigger asked for a hand-off at the turn's end"
+    );
+    ack(&w, &p).await;
+    w.emit(json!({"type": "agent_start"})).await;
+    w.emit(json!({"type": "message_end", "message": {"id": "msg_2", "role": "assistant", "content": [{"type": "text", "text": "Goal: finish it. Left to do: part two."}], "status": "complete"}}))
+        .await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    let mut w2 = h.worker().await;
+    w2.ready().await;
+    let first = w2.expect("prompt").await;
+    let text = first["text"].as_str().unwrap();
+    assert!(
+        text.contains(&chat) && text.contains("Left to do: part two."),
+        "{text}"
+    );
+    h.until("old chat archived", |h| {
+        h.col(&format!("SELECT archived FROM chats WHERE id = '{chat}'")) == ["1"]
+    })
+    .await;
+}
+
+/// The automatic trigger, one pass over every case that leaves a chat alone: the setting off,
+/// context below it, no usage recorded, a side chat, an archived chat, a busy chat — and the
+/// one row that fires. The asked-again case rides the in-flight guard in the firing row: the
+/// roll over it starts is still running when its turn ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_auto_roll_over_trigger_checks_every_case_in_one_pass() {
+    let mut h = harness();
+    attach_ops_host(&h);
+    let asked = |chat: &str| {
+        h.col(&format!(
+            "SELECT COUNT(*) FROM submissions WHERE chat_id = '{chat}' \
+             AND text LIKE 'This chat is being rolled over%'"
+        )) == ["1"]
+    };
+    for (label, pref, tokens, extra, expect) in [
+        ("off", 0, 9_999, "", false),
+        ("below", 100, 99, "", false),
+        ("no usage", 100, 0, "", false),
+        (
+            "side chat",
+            100,
+            999,
+            "UPDATE chats SET side_source_id = 'src' WHERE id = '{c}';",
+            false,
+        ),
+        (
+            "archived",
+            100,
+            999,
+            "UPDATE chats SET archived = 1 WHERE id = '{c}';",
+            false,
+        ),
+        (
+            "busy",
+            100,
+            999,
+            "UPDATE chats SET status = 'running' WHERE id = '{c}';",
+            false,
+        ),
+        ("over the line", 100, 999, "", true),
+    ] {
+        let chat = h.create().await;
+        if tokens > 0 {
+            h.db
+                .write(|tx| {
+                    tx.execute(
+                        "INSERT INTO messages(chat_id, source_key, role, text, timestamp, details)
+                         VALUES (?1, 'x1', 'assistant', 'done', ?2, ?3)",
+                        rusqlite::params![
+                            &chat,
+                            helm_core::now_ms(),
+                            format!(
+                                r#"{{"usage": {{"inputTokens": {tokens}, "cacheReadTokens": 0, "cacheWriteTokens": 0}}}}"#
+                            )
+                        ],
+                    )
+                })
+                .unwrap();
+        }
+        if !extra.is_empty() {
+            h.db
+                .write(|tx| tx.execute_batch(&extra.replace("{c}", &chat)))
+                .unwrap();
+        }
+        h.db
+            .write(|tx| helm_core::prefs::set_generic(tx, "rolloverTokens", &json!(pref)))
+            .unwrap();
+        crate::rollover::on_turn_end(&h.rt.sh, &chat);
+        assert_eq!(asked(&chat), expect, "{label}");
+    }
+    // The chat the trigger fired for is not asked a second time at the hand-off turn's end:
+    // its roll over is still in flight.
+    let last = h
+        .col("SELECT id FROM chats WHERE archived = 0 ORDER BY rowid DESC LIMIT 1")
+        .remove(0);
+    crate::rollover::on_turn_end(&h.rt.sh, &last);
+    assert_eq!(
+        h.col(&format!(
+            "SELECT COUNT(*) FROM submissions WHERE chat_id = '{last}' \
+             AND text LIKE 'This chat is being rolled over%'"
+        )),
+        ["1"],
+        "still exactly one ask"
+    );
+}
+
 /// A local model server that records how it was used and can hold a preparation until released.
 struct FakeLocal {
     turns: Mutex<Vec<crate::local::LocalTurn>>,

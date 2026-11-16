@@ -15,14 +15,20 @@
 //!
 //! Refused up front: an archived chat, a chat that is working or has messages waiting, and a chat
 //! that has never had an assistant reply.
+//!
+//! The same flow runs itself when a chat's turn ends and its context has grown past the
+//! roll-over setting ([`on_turn_end`]): the chat is idle at that moment, so every check the op
+//! makes holds, and the only difference is who asks.
 
 use crate::actor::Cmd;
-use crate::runtime::ChatRuntime;
+use crate::runtime::{ChatRuntime, Shared};
 use crate::submit::HostSend;
 use crate::types::*;
 use helm_ipc::{ApiError, AppEvent, OpCtx, OpRegistry};
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// How long the agent gets to write the hand-off.
@@ -37,6 +43,17 @@ pub fn register(reg: &mut OpRegistry) {
 
 /// What the old chat's agent is asked. Plain text, because it appears in that chat's transcript.
 pub const REQUEST: &str = "This chat is being rolled over into a fresh one because its context has grown large. Reply with a hand-off for the agent that takes over, and nothing else: no tool calls. Use these headings: Goal, Done, Left to do, Key files and branches, Open problems and decisions. Be specific (paths, branch names, commands, ids) and keep it under 600 words. The new agent starts with no memory of this chat.";
+
+/// Context size at which a quiet chat is asked to roll over, when the setting is unset
+/// (`0` in the setting switches the asking off).
+pub const DEFAULT_ROLLOVER_TOKENS: i64 = 180_000;
+
+/// Chats the automatic trigger has already fired for. Once per process run: after a restart a
+/// chat still over the threshold is asked again, which is bounded (a successor starts well under
+/// it, and a failed attempt leaves the chat working or idle-but-asked) and harmless.
+static AUTO_DONE: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
+/// Chats with a roll over running, whichever way it started.
+static IN_FLIGHT: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
 
 /// The first message of the successor chat.
 pub fn successor_message(old_title: &str, old_id: &str, handoff: &str) -> String {
@@ -168,19 +185,48 @@ async fn chat_roll_over(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
             "There is nothing to hand over yet: this chat has no replies.",
         ));
     }
-    let mark = last_message_id(&rt, &chat.id).map_err(crate::ops::sql)?;
-    crate::submit::host_send(
-        &rt,
+    start(&rt, &ctx, &chat, target_model, target_effort)?;
+    Ok(json!({"started": true}))
+}
+
+/// Run the roll-over flow for `chat`: ask for a hand-off, then finish in the background. Shared
+/// by the op and the automatic trigger. A chat with a roll over already running
+/// is refused; `model` and `effort` must already be validated.
+fn start(
+    rt: &Arc<ChatRuntime>,
+    ctx: &OpCtx,
+    chat: &ChatRecord,
+    model: Option<String>,
+    effort: Option<String>,
+) -> Result<(), ApiError> {
+    if !IN_FLIGHT.lock().unwrap().insert(chat.id.clone()) {
+        return Err(refuse("A roll over for this chat is already running."));
+    }
+    let mark = match last_message_id(rt, &chat.id) {
+        Ok(m) => m,
+        Err(e) => {
+            IN_FLIGHT.lock().unwrap().remove(&chat.id);
+            return Err(crate::ops::sql(e));
+        }
+    };
+    if let Err(e) = crate::submit::host_send(
+        rt,
         HostSend {
             chat_id: &chat.id,
             submission_id: &uuid::Uuid::new_v4().to_string(),
             text: REQUEST,
             origin: SubmissionOrigin::App,
         },
-    )?;
+    ) {
+        IN_FLIGHT.lock().unwrap().remove(&chat.id);
+        return Err(e);
+    }
     let handle = rt.handle().clone();
+    let rt = Arc::clone(rt);
+    let ctx = ctx.clone();
+    let chat = chat.clone();
     handle.spawn(async move {
-        if let Err(why) = finish(&ctx, &rt, &chat, mark, target_model, target_effort).await {
+        if let Err(why) = finish(&ctx, &rt, &chat, mark, model, effort).await {
             log::warn!("roll over of {}: {why}", chat.id);
             ctx.events.emit(
                 AppEvent::new("chat_roll_over_failed")
@@ -188,8 +234,69 @@ async fn chat_roll_over(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
                     .with("message", why),
             );
         }
+        IN_FLIGHT.lock().unwrap().remove(&chat.id);
     });
-    Ok(json!({"started": true}))
+    Ok(())
+}
+
+/// A turn has just ended and the chat is quiet: if its context has grown past the roll-over
+/// setting, start the flow now — the chat is idle at this moment, so every guard the op makes
+/// holds. Every check is a cheap read; side chats, archived chats, chats without a context
+/// reading, and chats already asked once are left alone.
+pub(crate) fn on_turn_end(sh: &Arc<Shared>, chat_id: &str) {
+    // The flow runs on the app's services; until the host seam is attached there is nothing to
+    // run it with.
+    let Some(seam) = sh.host.get().cloned() else {
+        return;
+    };
+    if IN_FLIGHT.lock().unwrap().contains(chat_id) {
+        return;
+    }
+    let over = sh
+        .db
+        .snapshot(|tx| {
+            let threshold = helm_core::prefs::get_or(
+                tx,
+                helm_core::prefs::ROLLOVER_TOKENS,
+                DEFAULT_ROLLOVER_TOKENS,
+            );
+            if threshold <= 0 {
+                return Ok::<_, rusqlite::Error>(false);
+            }
+            let idle_root: bool = tx
+                .query_row(
+                    "SELECT archived = 0 AND side_source_id IS NULL AND status = 'idle'
+                     FROM chats WHERE id = ?1",
+                    [chat_id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or(false);
+            if !idle_root {
+                return Ok(false);
+            }
+            Ok(crate::turn_usage::context_reported_at(tx, chat_id)
+                .is_some_and(|(n, _)| n >= threshold as u64))
+        })
+        .unwrap_or(false);
+    if !over || !AUTO_DONE.lock().unwrap().insert(chat_id.to_owned()) {
+        return;
+    }
+    let rt = Arc::new(ChatRuntime { sh: sh.clone() });
+    let chat = match rt.db().snapshot(|tx| crate::store::get_chat(tx, chat_id, 0)) {
+        Ok(Some(c)) => c,
+        Ok(None) => return,
+        Err(e) => {
+            log::warn!("roll over check for {chat_id}: {e}");
+            return;
+        }
+    };
+    if chat.archived || chat.side_source_id.is_some() {
+        return;
+    }
+    if let Err(e) = start(&rt, &seam.ctx, &chat, None, None) {
+        log::warn!("auto roll over of {chat_id}: {}", e.message);
+    }
 }
 
 async fn finish(
@@ -213,7 +320,20 @@ async fn finish(
             .map_err(|e| e.to_string())?
             .ok_or("The agent ended its turn without a hand-off. Nothing was changed.")?;
     };
-    let message = successor_message(&chat.title, &chat.id, &cut(&handoff, MAX_HANDOFF_BYTES));
+    carry_on(ctx, rt, chat, &handoff, model, effort).await
+}
+
+/// The hand-off exists: start the successor, hand it the brief, take the old chat's place and
+/// archive the old chat.
+async fn carry_on(
+    ctx: &OpCtx,
+    rt: &ChatRuntime,
+    chat: &ChatRecord,
+    handoff: &str,
+    model: Option<String>,
+    effort: Option<String>,
+) -> Result<(), String> {
+    let message = successor_message(&chat.title, &chat.id, &cut(handoff, MAX_HANDOFF_BYTES));
     let mut create = json!({"cwd": chat.cwd, "projectId": chat.project_id});
     // The successor stays on the old chat's board while that board still takes chats; otherwise
     // the host picks its home as for any new chat.

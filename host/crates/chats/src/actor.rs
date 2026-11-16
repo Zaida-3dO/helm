@@ -4090,6 +4090,9 @@ impl Actor {
         if self.relaunch_on_idle && !self.agents_running() {
             self.relaunch_worker();
         }
+        // A chat that has grown past the roll-over setting is asked for a hand-off right here,
+        // while it is quiet (helm-chats' rollover). Cheap reads; it never interrupts a turn.
+        crate::rollover::on_turn_end(&self.sh, &self.chat_id);
         crate::runtime::ChatRuntime {
             sh: self.sh.clone(),
         }

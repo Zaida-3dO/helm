@@ -189,6 +189,13 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
         "workingMode",
         UserOnly("How your chats work, run to completion or check in, is yours to set; no brief can change it."),
     ),
+    // Context size at which an idle chat is asked to roll over into a fresh one (0 = never). A
+    // chat could set a tiny threshold and force itself and every other chat to keep rolling
+    // over, so only the user sets it.
+    (
+        "rolloverTokens",
+        UserOnly("A chat could use a low threshold to force rollovers, so when chats roll over is yours to set."),
+    ),
 ];
 
 /// Dynamic keys under fixed prefixes: all internal.
@@ -279,13 +286,14 @@ mod tests {
             |want: fn(&PrefClass) -> bool| CLASSIFIED.iter().filter(|(_, c)| want(c)).count();
         assert_eq!(count(|c| *c == Registry(Base)), 47);
         assert_eq!(count(|c| *c == Registry(All)), 1);
-        // The user-only floor: the switch that governs what chats may change, and how chats work.
+        // The user-only floor: the switch that governs what chats may change, how chats work,
+        // and when they roll themselves over.
         let user: Vec<_> = CLASSIFIED
             .iter()
             .filter(|(_, c)| matches!(c, UserOnly(_)))
             .map(|(k, _)| *k)
             .collect();
-        assert_eq!(user, ["agentSettingsAll", "workingMode"]);
+        assert_eq!(user, ["agentSettingsAll", "workingMode", "rolloverTokens"]);
         // Nothing is parked: a new preference is agent-settable unless it says why not.
         assert_eq!(count(|c| *c == Later), 0);
     }
