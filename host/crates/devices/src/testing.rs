@@ -2,14 +2,16 @@
 //! builders for the records it holds. Nothing here touches a database, a process or a network.
 
 use crate::link::BoxFut;
-use crate::serve::{ChatPort, ChatState, PanelRead, PortResult, SentFile};
+use crate::serve::{ChatPort, ChatState, PageScope, PanelRead, PortResult, SentFile};
 use crate::wire::{
-    code, AnswerArgs, ArchiveArgs, BoardCancelArgs, BoardReadArgs, CheckpointArgs,
-    ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo, DevicePerson, ForkArgs, Hello,
-    MoveProfileArgs, MuteArgs, OrganizeArgs, PanelStageArgs, PersonInfo, ProfileInfo, ProjectInfo,
+    code, AnswerArgs, ArchiveArgs, AttachmentGetArgs, BoardCancelArgs, BoardReadArgs,
+    CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo, DevicePerson,
+    ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, PageIdArgs, PagesReadArgs,
+    PanelStageArgs, PersonInfo, ProfileInfo, ProjectCreateArgs, ProjectInfo, ProjectSetArgs,
     QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs, SetModelArgs, SetPermissionArgs,
     ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError,
 };
+use base64::Engine as _;
 use helm_chats::types::{
     ChatRecord, ChatStatus, Harness, Interaction, InteractionAttention, InteractionMethod,
     MessageDetails, MessageRole, MessageRow, MessageStatus, TitleState, UnreadState,
@@ -18,6 +20,18 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+
+/// The page and the file beside it that the fake port holds.
+pub const FAKE_PAGE: &str = "<p>plan</p>";
+pub const FAKE_ASSET: &[u8] = &[1, 2, 3];
+
+/// The pin the fake port lists, linked to the chat `c1`.
+pub fn fake_pin() -> Value {
+    json!({
+        "id": "pg-1", "profileId": "p-a", "path": "/work/plan.html", "title": "Plan",
+        "chatId": "c1", "pinnedAt": 5,
+    })
+}
 
 /// A chat record with the fields a test cares about; the rest are plain defaults.
 pub fn fake_record(id: &str, title: &str, revision: i64) -> ChatRecord {
@@ -143,6 +157,10 @@ pub struct FakeState {
     pub context_asked: Vec<String>,
     pub quick_opened: Vec<QuickOpenArgs>,
     pub folders_asked: Vec<String>,
+    /// Each picture read: the chat and the attachment.
+    pub attachments_asked: Vec<(String, String)>,
+    /// Each pages request: what was asked, the person and whether it is the PC's own person.
+    pub pages_asked: Vec<(String, String, bool)>,
     /// Each side-panel read: the op it answers and the (confined) arguments it was given.
     pub panel_reads: Vec<(&'static str, Value)>,
     /// Each stage/unstage: (args, whether it was a stage).
@@ -160,6 +178,9 @@ pub struct FakeState {
     pub addressed: Vec<String>,
     /// What `defaults_set` saved, as the three-field answer it would give back.
     pub defaults_saved: Option<Value>,
+    /// The projects made and changed from afar.
+    pub projects_created: Vec<ProjectCreateArgs>,
+    pub projects_set: Vec<ProjectSetArgs>,
     pub cursor: i64,
     /// The hub people this install announces acting for (what `people()` answers).
     pub announce: Vec<DevicePerson>,
@@ -285,11 +306,18 @@ impl ChatPort for FakePort {
     }
 
     fn hello(&self) -> BoxFut<'_, PortResult<Hello>> {
+        // One look at the state: the lock is not held while the answer is built.
+        let (people, created, pinned) = {
+            let st = self.st();
+            (
+                st.people.clone(),
+                st.projects_created.clone(),
+                st.projects_set.iter().any(|s| s.pinned == Some(true)),
+            )
+        };
         ready(Ok(Hello {
             device: self.device(),
-            people: self
-                .st()
-                .people
+            people: people
                 .iter()
                 .map(|p| PersonInfo {
                     person_id: p.clone(),
@@ -298,13 +326,26 @@ impl ChatPort for FakePort {
                     about: String::new(),
                 })
                 .collect(),
-            projects: vec![ProjectInfo {
+            // The folder, then every board made from afar, each one a board with the folder asked for.
+            projects: std::iter::once(ProjectInfo {
                 id: "proj-1".to_owned(),
                 name: "Work".to_owned(),
                 colour: "#aabbcc".to_owned(),
                 kind: "folder".to_owned(),
                 path: "/work".to_owned(),
-            }],
+                folder_id: String::new(),
+                pinned,
+            })
+            .chain(created.iter().enumerate().map(|(i, c)| ProjectInfo {
+                id: format!("proj-new-{}", i + 1),
+                name: c.title.clone(),
+                colour: String::new(),
+                kind: "board".to_owned(),
+                path: String::new(),
+                folder_id: c.folder_project_id.clone().unwrap_or_default(),
+                pinned: false,
+            }))
+            .collect(),
             profiles: vec![
                 ProfileInfo {
                     profile_id: "profile-local".to_owned(),
@@ -661,6 +702,56 @@ impl ChatPort for FakePort {
         ready(Ok(json!({ "path": "/work" })))
     }
 
+    fn pages_list(&self, who: PageScope) -> BoxFut<'_, PortResult<Value>> {
+        self.st()
+            .pages_asked
+            .push(("list".to_owned(), who.person_id, who.own));
+        ready(Ok(json!({ "pages": [fake_pin()] })))
+    }
+
+    fn pages_files(&self, who: PageScope, a: PageIdArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.st()
+            .pages_asked
+            .push((format!("files {}", a.page_id), who.person_id, who.own));
+        ready(if a.page_id == "pg-1" {
+            Ok(json!({
+                "name": "plan.html", "title": "Plan", "size": FAKE_PAGE.len(),
+                "files": [{ "path": "a.png", "size": FAKE_ASSET.len() }],
+                "pin": fake_pin(),
+            }))
+        } else {
+            Err(WireError::not_found())
+        })
+    }
+
+    fn pages_read(&self, who: PageScope, a: PagesReadArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.st().pages_asked.push((
+            format!("read {} {:?}", a.page_id, a.path),
+            who.person_id,
+            who.own,
+        ));
+        let whole: &[u8] = match a.path.as_deref() {
+            None => FAKE_PAGE.as_bytes(),
+            Some("a.png") => FAKE_ASSET,
+            Some(_) => return ready(Err(WireError::not_found())),
+        };
+        // Two bytes at a time, so a file always arrives in more than one piece.
+        let from = (a.offset as usize).min(whole.len());
+        let to = (from + 2).min(whole.len());
+        ready(Ok(json!({
+            "data": base64::engine::general_purpose::STANDARD.encode(&whole[from..to]),
+            "size": whole.len(),
+            "eof": to == whole.len(),
+        })))
+    }
+
+    fn attachment(&self, a: AttachmentGetArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.st()
+            .attachments_asked
+            .push((a.chat_id, a.attachment_id));
+        ready(Ok(json!({ "mime": "image/png", "bytes": "AAAA" })))
+    }
+
     fn panel_read(&self, a: PanelRead) -> BoxFut<'_, PortResult<Value>> {
         let echo = json!({ "op": a.local_op, "args": a.args.clone() });
         let path = a.args.get("path").cloned();
@@ -826,6 +917,18 @@ impl ChatPort for FakePort {
             "effort": saved.get("effort").cloned().unwrap_or(json!("high")),
             "responseVerbosity": saved.get("responseVerbosity").cloned().unwrap_or(json!("low")),
         })))
+    }
+
+    fn project_create(&self, a: ProjectCreateArgs) -> BoxFut<'_, PortResult<Value>> {
+        let mut st = self.st();
+        let id = format!("proj-new-{}", st.projects_created.len() + 1);
+        st.projects_created.push(a);
+        ready(Ok(json!({ "projectId": id, "kind": "board" })))
+    }
+
+    fn project_set(&self, a: ProjectSetArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.st().projects_set.push(a);
+        ready(Ok(json!({})))
     }
 
     fn chat_brief(&self, chat_id: String) -> BoxFut<'_, PortResult<Option<RemoteChat>>> {

@@ -314,6 +314,29 @@ impl ChatPort for ChannelPort {
     fn panel_read(&self, a: helm_devices::serve::PanelRead) -> BoxFut<'_, PortResult<Value>> {
         self.port.panel_read(a)
     }
+    fn attachment(
+        &self,
+        a: helm_devices::wire::AttachmentGetArgs,
+    ) -> BoxFut<'_, PortResult<Value>> {
+        self.port.attachment(a)
+    }
+    fn pages_list(&self, who: helm_devices::serve::PageScope) -> BoxFut<'_, PortResult<Value>> {
+        self.port.pages_list(who)
+    }
+    fn pages_files(
+        &self,
+        who: helm_devices::serve::PageScope,
+        a: helm_devices::wire::PageIdArgs,
+    ) -> BoxFut<'_, PortResult<Value>> {
+        self.port.pages_files(who, a)
+    }
+    fn pages_read(
+        &self,
+        who: helm_devices::serve::PageScope,
+        a: helm_devices::wire::PagesReadArgs,
+    ) -> BoxFut<'_, PortResult<Value>> {
+        self.port.pages_read(who, a)
+    }
     fn panel_stage(
         &self,
         a: helm_devices::wire::PanelStageArgs,
@@ -362,6 +385,15 @@ impl ChatPort for ChannelPort {
     }
     fn defaults_set(&self, a: helm_devices::wire::DefaultsArgs) -> BoxFut<'_, PortResult<Value>> {
         self.port.defaults_set(a)
+    }
+    fn project_create(
+        &self,
+        a: helm_devices::wire::ProjectCreateArgs,
+    ) -> BoxFut<'_, PortResult<Value>> {
+        self.port.project_create(a)
+    }
+    fn project_set(&self, a: helm_devices::wire::ProjectSetArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.port.project_set(a)
     }
     fn chat_brief(&self, chat_id: String) -> BoxFut<'_, PortResult<Option<RemoteChat>>> {
         self.port.chat_brief(chat_id)

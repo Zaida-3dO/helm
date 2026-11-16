@@ -288,6 +288,35 @@ pub struct ChatIdArgs {
     pub chat_id: String,
 }
 
+/// A pinned page on the PC that holds it, by the id of its pin there.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PageIdArgs {
+    pub page_id: String,
+}
+
+/// One piece of a pinned page's bundle: its document (no `path`) or one file beside it, from
+/// `offset`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PagesReadArgs {
+    pub page_id: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub offset: u64,
+}
+
+/// One picture of a message, by the id its row carries.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttachmentGetArgs {
+    pub chat_id: String,
+    pub attachment_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumb: Option<bool>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PageArgs {
@@ -636,6 +665,31 @@ pub struct DefaultsArgs {
     pub response_verbosity: Option<String>,
 }
 
+/// A new project on the PC that serves, made for the person acting. It is a board when that PC
+/// has a task board connected and a folder project otherwise, as "New project" is there.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectCreateArgs {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// One of the folder projects this PC listed in its hello: where the board's chats start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_project_id: Option<String>,
+}
+
+/// A change to one of the serving PC's projects from the sidebar: pin it, or point a board at
+/// one of that PC's folder projects. Both are optional; naming neither changes nothing.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectSetArgs {
+    pub project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_project_id: Option<String>,
+}
+
 /// An op a device carries for another, parsed.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
@@ -680,6 +734,16 @@ pub enum Op {
     QuickOpen(QuickOpenArgs),
     /// The chat's project folder path, as the panel shows it. A read.
     ChatFolder(ChatIdArgs),
+    /// A picture sent with a message, read where it is stored: a thumbnail or the full image,
+    /// base64 with its type. A read, since the message itself can be read without the switch.
+    AttachmentGet(AttachmentGetArgs),
+    /// The pages pinned on this PC that the asking person may open. Reads this PC's disk, so
+    /// the pages ops run with the switch like the project folder's reads.
+    PagesList,
+    /// What a pinned page needs to run elsewhere: its name and the files its text names.
+    PagesFiles(PageIdArgs),
+    /// One chunk of the page's document or of a file beside it.
+    PagesRead(PagesReadArgs),
     /// One file or folder listing from the chat's project folder, read on the PC that runs it.
     /// A read; the serving PC keeps the path inside the folder.
     FileView(PanelPathArgs),
@@ -715,6 +779,10 @@ pub enum Op {
     /// The PC's new-chat model/effort/reply-length, three fields only. A read.
     DefaultsGet(ChatIdArgs),
     DefaultsSet(DefaultsArgs),
+    /// Make a project on this PC (a board, or a folder when no task board is connected).
+    ProjectCreate(ProjectCreateArgs),
+    /// Pin a project here, or give a board one of this PC's folders to start its chats in.
+    ProjectSet(ProjectSetArgs),
 }
 
 fn args<T: for<'de> Deserialize<'de>>(v: Value) -> Result<T, WireError> {
@@ -775,6 +843,13 @@ impl Op {
             "context_on" => Op::ContextOn(args(a)?),
             "quick_open" => Op::QuickOpen(args(a)?),
             "chat_folder" => Op::ChatFolder(args(a)?),
+            "attachment_get" => Op::AttachmentGet(args(a)?),
+            "pages_list" => {
+                args::<NoArgs>(a)?;
+                Op::PagesList
+            }
+            "pages_files" => Op::PagesFiles(args(a)?),
+            "pages_read" => Op::PagesRead(args(a)?),
             "file_view" => Op::FileView(args(a)?),
             "file_stat" => Op::FileStat(args(a)?),
             "changes" => Op::Changes(args(a)?),
@@ -802,6 +877,8 @@ impl Op {
             "address" => Op::Address(args(a)?),
             "defaults_get" => Op::DefaultsGet(args(a)?),
             "defaults_set" => Op::DefaultsSet(args(a)?),
+            "project_create" => Op::ProjectCreate(args(a)?),
+            "project_set" => Op::ProjectSet(args(a)?),
             _ => return Err(WireError::elsewhere()),
         })
     }
@@ -840,7 +917,12 @@ impl Op {
                 | Op::Snooze(_)
                 | Op::Address(_)
                 | Op::DefaultsSet(_)
+                | Op::ProjectCreate(_)
+                | Op::ProjectSet(_)
                 | Op::QuickOpen(_)
+                | Op::PagesList
+                | Op::PagesFiles(_)
+                | Op::PagesRead(_)
                 | Op::FileView(_)
                 | Op::FileStat(_)
                 | Op::Changes(_)
@@ -871,12 +953,19 @@ pub struct PersonInfo {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectInfo {
     pub id: String,
     pub name: String,
     pub colour: String,
     pub kind: String,
     pub path: String,
+    /// A board's folder project: where its new chats start. Empty when it has none yet (and
+    /// for a folder project, which is a folder itself).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub folder_id: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
 }
 
 /// One of this device's profiles, as another device lists it. A chat can be labelled with one

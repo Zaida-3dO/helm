@@ -20,13 +20,14 @@
 use crate::link::{BoxFut, DeviceLink};
 use crate::subs::{self, Out, Subs, CHATS_SUB, PUSH_ROW_BUDGET};
 use crate::wire::{
-    code, AnswerArgs, ArchiveArgs, AttachPutArgs, AttachmentRef, BoardCancelArgs, BoardReadArgs,
-    Caller, ChatIdArgs, CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceFrame,
-    DeviceInfo, DevicePerson, ForkArgs, Frame, Hello, MoveProfileArgs, MuteArgs, Op, OrganizeArgs,
-    PageArgs, PanelStageArgs, PeerDevice, QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs,
-    SendArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs,
-    VerbositySetArgs, WireError, MAX_CHUNK_BYTES, MAX_PAGE_ROWS, MAX_SEND_ATTACHMENTS,
-    MAX_SEND_BYTES, MAX_UPLOAD_BYTES, SUB_ROWS,
+    code, AnswerArgs, ArchiveArgs, AttachPutArgs, AttachmentGetArgs, AttachmentRef,
+    BoardCancelArgs, BoardReadArgs, Caller, ChatIdArgs, CheckpointArgs, ConsentDecideArgs,
+    CreateArgs, DefaultsArgs, DeviceFrame, DeviceInfo, DevicePerson, ForkArgs, Frame, Hello,
+    MoveProfileArgs, MuteArgs, Op, OrganizeArgs, PageArgs, PageIdArgs, PagesReadArgs,
+    PanelStageArgs, PeerDevice, ProjectCreateArgs, ProjectSetArgs, QuickOpenArgs, RemoteChat,
+    RenameArgs, RollOverArgs, SendArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SnoozeArgs,
+    SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError, MAX_CHUNK_BYTES, MAX_PAGE_ROWS,
+    MAX_SEND_ATTACHMENTS, MAX_SEND_BYTES, MAX_UPLOAD_BYTES, SUB_ROWS,
 };
 use base64::Engine as _;
 use helm_chats::types::{
@@ -49,6 +50,14 @@ pub type PortResult<T> = Result<T, WireError>;
 pub struct PanelRead {
     pub local_op: &'static str,
     pub args: Value,
+}
+
+/// Who is asking for pages: the hub person acting, and whether that is this PC's own person
+/// (who also sees the pages pinned before profiles existed).
+#[derive(Clone, Debug)]
+pub struct PageScope {
+    pub person_id: String,
+    pub own: bool,
 }
 
 /// A file carried from another device, with its bytes, ready to hand to the chat.
@@ -177,6 +186,15 @@ pub trait ChatPort: Send + Sync {
     fn quick_open(&self, a: QuickOpenArgs) -> BoxFut<'_, PortResult<Value>>;
     /// The chat's project folder path, as this install sees it.
     fn chat_folder(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>>;
+    /// One picture of a message: `{mime, bytes}` as the chat's own op answers, or a refusal in
+    /// words when it is too large to bring across.
+    fn attachment(&self, a: AttachmentGetArgs) -> BoxFut<'_, PortResult<Value>>;
+    /// The pages pinned here that this person may open: `{pages}`, as the Pages list shows them.
+    fn pages_list(&self, who: PageScope) -> BoxFut<'_, PortResult<Value>>;
+    /// What a pinned page needs to run on another PC: `{name, title, size, files: [{path, size}], pin}`.
+    fn pages_files(&self, who: PageScope, a: PageIdArgs) -> BoxFut<'_, PortResult<Value>>;
+    /// One chunk of the page's document or of one file beside it: `{data, size, eof}`.
+    fn pages_read(&self, who: PageScope, a: PagesReadArgs) -> BoxFut<'_, PortResult<Value>>;
     /// One side-panel read from the chat's project folder here — a file, a folder listing, a
     /// change stamp, an archive listing or a path resolution. The paths must lie inside that
     /// folder; nothing else on this PC is reachable this way.
@@ -206,6 +224,10 @@ pub trait ChatPort: Send + Sync {
     fn defaults_get(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>>;
     /// Save those three defaults here.
     fn defaults_set(&self, a: DefaultsArgs) -> BoxFut<'_, PortResult<Value>>;
+    /// Make a project here: a board when a task board is connected, else a folder.
+    fn project_create(&self, a: ProjectCreateArgs) -> BoxFut<'_, PortResult<Value>>;
+    /// Pin a project here, or point a board at one of this install's folder projects.
+    fn project_set(&self, a: ProjectSetArgs) -> BoxFut<'_, PortResult<Value>>;
     /// The chat as other devices see it, for a push after a sidebar change. `Ok(None)` when
     /// the chat is not this install's.
     fn chat_brief(&self, chat_id: String) -> BoxFut<'_, PortResult<Option<RemoteChat>>>;
@@ -831,6 +853,10 @@ impl Inner {
             Op::ContextOn(a) => done(self.port.context_on(a.chat_id).await?),
             Op::QuickOpen(a) => done(self.port.quick_open(a).await?),
             Op::ChatFolder(a) => done(self.port.chat_folder(a.chat_id).await?),
+            Op::AttachmentGet(a) => done(self.port.attachment(a).await?),
+            Op::PagesList => done(self.port.pages_list(self.page_scope(asker)).await?),
+            Op::PagesFiles(a) => done(self.port.pages_files(self.page_scope(asker), a).await?),
+            Op::PagesRead(a) => done(self.port.pages_read(self.page_scope(asker), a).await?),
             Op::FileView(a) => done(
                 self.port
                     .panel_read(PanelRead {
@@ -917,6 +943,21 @@ impl Inner {
                 }
                 done(self.port.defaults_set(a).await?)
             }
+            Op::ProjectCreate(a) => done(self.port.project_create(a).await?),
+            Op::ProjectSet(a) => done(self.port.project_set(a).await?),
+        }
+    }
+
+    fn page_scope(&self, asker: &Asker) -> PageScope {
+        match asker {
+            Asker::Own => PageScope {
+                person_id: self.link.person_id().unwrap_or_default(),
+                own: true,
+            },
+            Asker::Household { person_id, .. } => PageScope {
+                person_id: person_id.clone(),
+                own: false,
+            },
         }
     }
 

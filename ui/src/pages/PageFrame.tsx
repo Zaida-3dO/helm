@@ -29,6 +29,7 @@ import type { ConfirmSpec, MenuItem } from '../ui/index.ts';
 import { IconMore, IconRefresh, IconX } from '../ui/icons.tsx';
 import { pageOps } from './api.ts';
 import type { PageSession, PinnedPage } from './api.ts';
+import type { PageRemote } from './open.ts';
 import { PageBridge } from './bridge.ts';
 import { HandoffDialog } from './HandoffDialog.tsx';
 import type { HandoffChoice, HandoffRequest } from './HandoffDialog.tsx';
@@ -50,6 +51,8 @@ export interface PageFrameProps {
   api: Api;
   /** The page file, absolute. */
   path: string;
+  /** Set when the page is pinned on another PC: it is brought across to run here, and its messages go to the chat the pin names. */
+  remote?: PageRemote;
   /** The chat in view when the page was opened: where messages go if the page is not linked. */
   chatId: string | null;
   /** The tab is shown. A page is not read before this is first true. */
@@ -61,7 +64,7 @@ function words(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-export function PageFrame({ api, path, chatId, visible, onTitle }: PageFrameProps) {
+export function PageFrame({ api, path, remote, chatId, visible, onTitle }: PageFrameProps) {
   const ops = useMemo(() => pageOps(api), [api]);
   const [shown, setShown] = useState(visible);
   const [network, setNetwork] = useState(false);
@@ -105,8 +108,7 @@ export function PageFrame({ api, path, chatId, visible, onTitle }: PageFrameProp
     let opened: PageSession | null = null;
     setOpenError(null);
     setSession(null);
-    ops
-      .open(path, chatRef.current, network)
+    (remote ? ops.openRemote(remote.deviceUid, remote.pageId, network) : ops.open(path, chatRef.current, network))
       .then((s) => {
         if (cancelled) {
           void ops.close(s.session).catch(() => undefined);
@@ -130,7 +132,7 @@ export function PageFrame({ api, path, chatId, visible, onTitle }: PageFrameProp
     };
     // onTitle is the tab's setter and changes every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ops, path, network, nonce, shown]);
+  }, [ops, path, remote?.deviceUid, remote?.pageId, network, nonce, shown]);
 
   // The file watch.
   useEffect(() => {
@@ -295,6 +297,11 @@ export function PageFrame({ api, path, chatId, visible, onTitle }: PageFrameProp
 
   const reload = () => {
     if (!session) return;
+    // A page from another PC is brought across again: its file there is not watched from here.
+    if (remote) {
+      setNonce((n) => n + 1);
+      return;
+    }
     ops
       .reload(session.session)
       .then((r) => {
@@ -358,10 +365,11 @@ export function PageFrame({ api, path, chatId, visible, onTitle }: PageFrameProp
     );
   }
 
-  const canLinkHere = Boolean(pin && chatId && pin.chatId !== chatId);
+  const canLinkHere = Boolean(!remote && pin && chatId && pin.chatId !== chatId);
   const menuItems: MenuItem[] = [
     { id: 'network', label: 'Allow network for this open', checked: network, onSelect: () => setNetwork((n) => !n) },
-    { id: 'pin', label: pin ? 'Remove from Pages' : 'Add to Pages', onSelect: togglePin },
+    // Pinning belongs to the PC that holds the page.
+    ...(remote ? [] : [{ id: 'pin', label: pin ? 'Remove from Pages' : 'Add to Pages', onSelect: togglePin }]),
     ...(canLinkHere ? [{ id: 'link-chat', label: 'Send its messages to this chat', onSelect: linkHere }] : []),
     { id: 'reset', label: 'Reset page storage…', danger: true, separator: true, onSelect: resetStorage },
   ];
@@ -371,7 +379,7 @@ export function PageFrame({ api, path, chatId, visible, onTitle }: PageFrameProp
         <span className="pg-name" title={session.path}>
           {session.title}
         </span>
-        <Button variant="icon" label="Reload page" title="Reload the page file" onClick={reload} data-testid="page-reload">
+        <Button variant="icon" label="Reload page" title={remote ? 'Bring the page across again' : 'Reload the page file'} onClick={reload} data-testid="page-reload">
           <IconRefresh size={14} />
         </Button>
         <Button
