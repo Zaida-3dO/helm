@@ -28,7 +28,7 @@ use helm_ipc::{ApiError, AppEvent, OpCtx, OpRegistry};
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 /// How long the agent gets to write the hand-off.
@@ -51,18 +51,25 @@ pub const DEFAULT_ROLLOVER_TOKENS: i64 = 180_000;
 /// Chats the automatic trigger has already fired for. Once per process run: after a restart a
 /// chat still over the threshold is asked again, which is bounded (a successor starts well under
 /// it, and a failed attempt leaves the chat working or idle-but-asked) and harmless.
-static AUTO_DONE: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
+static AUTO_DONE: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 /// Chats with a roll over running, whichever way it started.
-static IN_FLIGHT: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
+static IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+/// The successor's model and effort a roll-over request asked for.
+type Target = (Option<String>, Option<String>);
+
 /// Roll overs the chat itself asked for with `app_roll_over`: chat id to the successor's model
 /// and effort. A chat that calls a tool is in mid-turn, and a roll over refuses a working chat,
 /// so the tool can only leave a note; [`on_turn_end`] runs it.
-static PENDING: Mutex<HashMap<String, (Option<String>, Option<String>)>> = Mutex::new(HashMap::new());
+static PENDING: LazyLock<Mutex<HashMap<String, Target>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Note that this chat asked to roll itself over when its turn ends; the model and effort must
 /// already be validated.
 pub(crate) fn tool_request(chat_id: &str, model: Option<String>, effort: Option<String>) {
-    PENDING.lock().unwrap().insert(chat_id.to_owned(), (model, effort));
+    PENDING
+        .lock()
+        .unwrap()
+        .insert(chat_id.to_owned(), (model, effort));
 }
 
 /// The first message of the successor chat.
@@ -179,7 +186,7 @@ pub(crate) fn check_target(
 
 async fn chat_roll_over(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: RollOverArgs = crate::ops::parse_args(args)?;
-    let rt = (*ctx.services.need::<ChatRuntime>()?).clone();
+    let rt = ctx.services.need::<ChatRuntime>()?;
     let (target_model, target_effort) = check_target(&rt, a.model.as_deref(), a.effort.as_deref())?;
     let chat = rt
         .db()
@@ -308,7 +315,10 @@ pub(crate) fn on_turn_end(sh: &Arc<Shared>, chat_id: &str) {
         }
     }
     let rt = Arc::new(ChatRuntime { sh: sh.clone() });
-    let chat = match rt.db().snapshot(|tx| crate::store::get_chat(tx, chat_id, 0)) {
+    let chat = match rt
+        .db()
+        .snapshot(|tx| crate::store::get_chat(tx, chat_id, 0))
+    {
         Ok(Some(c)) => c,
         Ok(None) => return,
         Err(e) => {

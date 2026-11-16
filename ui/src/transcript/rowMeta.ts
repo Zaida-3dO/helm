@@ -38,6 +38,15 @@ export function isTooLargeRefusal(error: string | null | undefined): boolean {
  * chat is asked to roll over by itself when the `rolloverTokens` setting is unset. Keep it
  * equal to the host's default in `helm-chats` (rollover::DEFAULT_ROLLOVER_TOKENS). */
 export const ROLL_OVER_TOKENS = 180_000;
+
+/** The stored `rolloverTokens` setting as the size the chat offers a roll over at: a whole
+ * number 1 to 2,000,000; 0 (the automatic ask switched off) and anything unreadable keep the
+ * default constant. */
+export function parseRolloverTokens(v: unknown): number {
+  return typeof v === 'number' && Number.isInteger(v) && v > 0 && v <= 2_000_000
+    ? v
+    : ROLL_OVER_TOKENS;
+}
 /** Below this the context size is not worth showing. */
 export const CONTEXT_SHOWN_TOKENS = 50_000;
 

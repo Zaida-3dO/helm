@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { agoText, compactCount, contextSize, messageTimeFull, messageTimeLabel, messageTimeShort, contextTokens, formatTurnTime, isTooLargeRefusal, newTokens, tokenChip, turnTimes, skillsByReply, chatRefOpens, ROLL_OVER_TOKENS } from './rowMeta.ts';
-import { parseRolloverTokens } from './rolloverPref.ts';
+import { agoText, compactCount, contextSize, messageTimeFull, messageTimeLabel, messageTimeShort, contextTokens, formatTurnTime, isTooLargeRefusal, newTokens, parseRolloverTokens, tokenChip, turnTimes, skillsByReply, chatRefOpens, ROLL_OVER_TOKENS } from './rowMeta.ts';
 
 const usage = { inputTokens: 1200, outputTokens: 300, cacheReadTokens: 40_000, cacheWriteTokens: 500, costUsd: 0 };
 

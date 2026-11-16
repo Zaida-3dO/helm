@@ -1342,7 +1342,7 @@ fn send_local_message(
     if to == ctx.caller_chat_id {
         return Err(refuse("A chat cannot message itself."));
     }
-    limits.admit(&ctx.caller_chat_id, Some(&to), Instant::now())?;
+    limits.admit(&ctx.caller_chat_id, Some(to.as_str()), Instant::now())?;
     let sent = send_framed(ctx, &to, body)?;
     let (title, _) = cut_bytes(target["title"].as_str().unwrap_or(""), 512);
     let mut out = json!({
@@ -2294,7 +2294,7 @@ A helper started with Claude Code's Agent tool always runs on this chat's own mo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime_tests::{harness, H};
+    use crate::runtime_tests::{ack, echo, harness, H};
     use helm_hosttools::dispatch::{Caller, CallerBinding, ChatRequest};
     use helm_hosttools::HostTools;
 
@@ -2344,13 +2344,14 @@ mod tests {
             ),
         ] {
             let blocked = h.create().await;
-            h.db
-                .write(|tx| tx.execute_batch(&sql.replace("{c}", &blocked)))
+            h.db.write(|tx| tx.execute_batch(&sql.replace("{c}", &blocked)))
                 .unwrap();
-            let e = call(&h, &tools, &blocked, "app_roll_over", json!({}))
-                .await
-                .unwrap_err();
-            assert!(e.public.contains(want), "{label}: {}", e.public);
+            let r = call(&h, &tools, &blocked, "app_roll_over", json!({})).await;
+            assert_eq!(r["ok"], false, "{label}");
+            assert!(
+                r["error"].as_str().unwrap_or_default().contains(want),
+                "{label}: {r}"
+            );
         }
         let chat = h.create().await;
         let (sid, _) = h.send(&chat, "build the thing", "default").await;
@@ -2361,14 +2362,15 @@ mod tests {
         w.emit(json!({"type": "agent_start"})).await;
         echo(&w, &sid).await;
         // Mid-turn, the chat asks for its own roll over.
-        let r = call(&h, &tools, &chat, "app_roll_over", json!({}))
-            .await
-            .unwrap();
-        assert_eq!(r["scheduled"], true);
+        let r = call(&h, &tools, &chat, "app_roll_over", json!({})).await;
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["result"]["scheduled"], true);
         assert!(
-            r["handOff"].as_str().unwrap().contains("Goal, Done, Left to do"),
-            "{}",
-            r["handOff"]
+            r["result"]["handOff"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Goal, Done, Left to do"),
+            "{r}"
         );
         // The turn's last reply is the hand-off; ending the turn runs the flow, no extra ask.
         w.emit(json!({"type": "message_end", "message": {"id": "msg_1", "role": "assistant", "content": [{"type": "text", "text": "Goal: finish it. Left to do: part two."}], "status": "complete"}}))
@@ -2412,20 +2414,19 @@ mod tests {
             h.create().await,
             h.create().await,
         );
-        h.db
-            .write(|tx| {
-                for (new, old) in [(&a2, &a1), (&b2, &b1), (&b3, &b2), (&c2, &c1), (&c3, &c2)] {
-                    tx.execute(
-                        "INSERT INTO chat_succession(chat_id, predecessor_id) VALUES (?1, ?2)",
-                        [new, old],
-                    )?;
-                }
-                for id in [&a1, &b1, &b2, &c1, &c2, &c3, &lone] {
-                    tx.execute("UPDATE chats SET archived = 1 WHERE id = ?1", [id])?;
-                }
-                Ok::<_, rusqlite::Error>(())
-            })
-            .unwrap();
+        h.db.write(|tx| {
+            for (new, old) in [(&a2, &a1), (&b2, &b1), (&b3, &b2), (&c2, &c1), (&c3, &c2)] {
+                tx.execute(
+                    "INSERT INTO chat_succession(chat_id, predecessor_id) VALUES (?1, ?2)",
+                    [new, old],
+                )?;
+            }
+            for id in [&a1, &b1, &b2, &c1, &c2, &c3, &lone] {
+                tx.execute("UPDATE chats SET archived = 1 WHERE id = ?1", [id])?;
+            }
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
         // One hop: the successor of the named chat takes the report, and the result says so.
         let r = call(
             &h,
@@ -2434,10 +2435,10 @@ mod tests {
             "app_send_message",
             json!({"chatId": a1, "message": "the report", "mode": "steer"}),
         )
-        .await
-        .unwrap();
-        assert_eq!(r["chatId"], a2.as_str());
-        assert_eq!(r["redirectedFrom"], a1.as_str());
+        .await;
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["result"]["chatId"], a2.as_str());
+        assert_eq!(r["result"]["redirectedFrom"], a1.as_str());
         h.until("report reached the successor", |h| {
             h.col(&format!(
                 "SELECT COUNT(*) FROM submissions WHERE chat_id = '{a2}' AND text LIKE '%the report%'"
@@ -2452,31 +2453,35 @@ mod tests {
             "app_send_message",
             json!({"chatId": b1, "message": "again", "mode": "steer"}),
         )
-        .await
-        .unwrap();
-        assert_eq!(r["chatId"], b3.as_str());
+        .await;
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["result"]["chatId"], b3.as_str());
         // The third hop is not followed: after two the target is still archived.
-        let e = call(
+        let r = call(
             &h,
             &tools,
             &maker,
             "app_send_message",
             json!({"chatId": c1, "message": "deep", "mode": "steer"}),
         )
-        .await
-        .unwrap_err();
-        assert!(e.public.contains("archived"), "{}", e.public);
+        .await;
+        assert!(
+            r["error"].as_str().unwrap_or_default().contains("archived"),
+            "{r}"
+        );
         // An archived chat with no successor: refused as before.
-        let e = call(
+        let r = call(
             &h,
             &tools,
             &maker,
             "app_send_message",
             json!({"chatId": lone, "message": "nowhere", "mode": "steer"}),
         )
-        .await
-        .unwrap_err();
-        assert!(e.public.contains("archived"), "{}", e.public);
+        .await;
+        assert!(
+            r["error"].as_str().unwrap_or_default().contains("archived"),
+            "{r}"
+        );
         // A live chat is untouched: no redirect key in its result.
         let r = call(
             &h,
@@ -2485,10 +2490,10 @@ mod tests {
             "app_send_message",
             json!({"chatId": a2, "message": "plain", "mode": "steer"}),
         )
-        .await
-        .unwrap();
-        assert_eq!(r["chatId"], a2.as_str());
-        assert!(r.get("redirectedFrom").is_none());
+        .await;
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["result"]["chatId"], a2.as_str());
+        assert!(r["result"].get("redirectedFrom").is_none());
     }
 
     #[test]

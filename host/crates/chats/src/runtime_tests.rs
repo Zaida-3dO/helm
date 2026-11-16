@@ -447,7 +447,7 @@ async fn reply(h: &H, w: &FakeWorker, mid: &str, text: &str) {
         .await;
 }
 
-async fn ack(w: &FakeWorker, prompt: &Value) {
+pub async fn ack(w: &FakeWorker, prompt: &Value) {
     w.respond(
         prompt,
         json!({"submissionId": prompt["submissionId"], "state": "accepted"}),
@@ -455,7 +455,7 @@ async fn ack(w: &FakeWorker, prompt: &Value) {
     .await;
 }
 
-async fn echo(w: &FakeWorker, sid: &str) {
+pub async fn echo(w: &FakeWorker, sid: &str) {
     w.emit(json!({"type": "message_end", "message": {"id": sid, "role": "user", "content": [], "status": "complete", "submissionId": sid}}))
         .await;
 }
@@ -6213,8 +6213,7 @@ pub fn attach_ops_host(h: &H) {
 async fn a_chat_grown_past_the_setting_rolls_itself_over_at_its_turn_end() {
     let mut h = harness();
     attach_ops_host(&h);
-    h.db
-        .write(|tx| helm_core::prefs::set_generic(tx, "rolloverTokens", &json!(100)))
+    h.db.write(|tx| helm_core::prefs::set_generic(tx, "rolloverTokens", &json!(100)))
         .unwrap();
     let chat = h.create().await;
     let (sid, _) = h.send(&chat, "build the thing", "default").await;
@@ -6259,7 +6258,7 @@ async fn a_chat_grown_past_the_setting_rolls_itself_over_at_its_turn_end() {
 /// roll over it starts is still running when its turn ends.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_auto_roll_over_trigger_checks_every_case_in_one_pass() {
-    let mut h = harness();
+    let h = harness();
     attach_ops_host(&h);
     let asked = |chat: &str| {
         h.col(&format!(
@@ -6313,12 +6312,10 @@ async fn the_auto_roll_over_trigger_checks_every_case_in_one_pass() {
                 .unwrap();
         }
         if !extra.is_empty() {
-            h.db
-                .write(|tx| tx.execute_batch(&extra.replace("{c}", &chat)))
+            h.db.write(|tx| tx.execute_batch(&extra.replace("{c}", &chat)))
                 .unwrap();
         }
-        h.db
-            .write(|tx| helm_core::prefs::set_generic(tx, "rolloverTokens", &json!(pref)))
+        h.db.write(|tx| helm_core::prefs::set_generic(tx, "rolloverTokens", &json!(pref)))
             .unwrap();
         crate::rollover::on_turn_end(&h.rt.sh, &chat);
         assert_eq!(asked(&chat), expect, "{label}");
