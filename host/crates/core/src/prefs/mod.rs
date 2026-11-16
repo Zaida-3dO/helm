@@ -89,6 +89,9 @@ pub const DESKTOP_PET: PrefKey = PrefKey::classified("desktopPet");
 pub const KEYBINDINGS: PrefKey = PrefKey::classified("keybindings");
 /// Minutes without worker output before a running chat shows as stalled (1 to 1440, default 5).
 pub const STALL_MINUTES: PrefKey = PrefKey::classified("stallMinutes");
+/// Context size at which an idle chat is asked to roll over into a fresh one (0 to 2 000 000;
+/// 0 switches it off). The default lives in `helm-chats` with the roll-over flow.
+pub const ROLLOVER_TOKENS: PrefKey = PrefKey::classified("rolloverTokens");
 /// How many of our chats one local model server may carry at once (0 to 12, default 3;
 /// 0 switches the cap off). A new local chat waits at its start while the cap is carried.
 pub const LOCAL_CHAT_CAP: PrefKey = PrefKey::classified("localChatCap");
@@ -136,6 +139,7 @@ pub const GENERIC_ALLOWLIST: &[PrefKey] = &[
     SOUNDS,
     KEYBINDINGS,
     STALL_MINUTES,
+    ROLLOVER_TOKENS,
     LOCAL_CHAT_CAP,
     CHAT_ELEMENTS,
     AUTOCOMPLETE,
@@ -293,6 +297,7 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
         "inspectorWidth" => int_in(280, 4096, "must be 280 to 4096"),
         "terminalHeight" => int_in(80, 4096, "must be 80 to 4096"),
         "stallMinutes" => int_in(1, 1440, "must be 1 to 1440"),
+        "rolloverTokens" => int_in(0, 2_000_000, "must be 0 to 2000000 (0 switches it off)"),
         "localChatCap" => int_in(0, 12, "must be 0 to 12"),
         "autocomplete" => match value.as_object() {
             Some(m) if m.len() == 1 && m.get("enabled").is_some_and(Value::is_boolean) => Ok(()),
@@ -777,6 +782,8 @@ mod tests {
             ("ideContext", json!(true), json!(1)),
             ("scrollOnSend", json!(false), json!("no")),
             ("doubleShift", json!(false), json!("no")),
+            ("rolloverTokens", json!(180_000), json!("soon")),
+            ("rolloverTokens", json!(0), json!(2_000_001)),
             (
                 "fontSizes",
                 json!({"interface": 14, "response": 16}),

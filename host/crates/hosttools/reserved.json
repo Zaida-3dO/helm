@@ -68,6 +68,7 @@
     "app_request_allow",
     "app_resolve_side_chat",
     "app_resume_saved_agent",
+    "app_roll_over",
     "app_save_item",
     "app_save_rule",
     "app_saved",

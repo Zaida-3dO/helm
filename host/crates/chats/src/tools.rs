@@ -1299,6 +1299,21 @@ async fn send_message(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRe
     }
 }
 
+/// The chat that took this chat's place when it rolled over, if any.
+fn successor_of(ctx: &ToolCtx, id: &str) -> Result<Option<String>, ToolError> {
+    let store = db(ctx)?;
+    store
+        .snapshot(|tx| {
+            tx.query_row(
+                "SELECT chat_id FROM chat_succession WHERE predecessor_id = ?1",
+                [id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+        })
+        .map_err(|e| ToolError::maybe(e.to_string()))
+}
+
 fn send_local_message(
     ctx: &ToolCtx,
     to: &str,
@@ -1306,20 +1321,41 @@ fn send_local_message(
     limits: &SendLimits,
     a: &Value,
 ) -> ToolResult {
-    let target = meta(ctx, to)?;
+    let mut to = to.to_owned();
+    let mut target = meta(ctx, &to)?;
+    // A rolled-over chat still gets named in reports: when the target is archived, follow its
+    // roll-over successor (at most twice over a chain); with no successor it is refused as before.
+    let mut redirected_from: Option<String> = None;
+    for _ in 0..2 {
+        if target["archived"] != true {
+            break;
+        }
+        let Some(next) = successor_of(ctx, &to)? else {
+            return Err(refuse("That chat is archived."));
+        };
+        redirected_from = Some(std::mem::replace(&mut to, next));
+        target = meta(ctx, &to)?;
+    }
     if target["archived"] == true {
         return Err(refuse("That chat is archived."));
     }
-    limits.admit(&ctx.caller_chat_id, Some(to), Instant::now())?;
-    let sent = send_framed(ctx, to, body)?;
+    if to == ctx.caller_chat_id {
+        return Err(refuse("A chat cannot message itself."));
+    }
+    limits.admit(&ctx.caller_chat_id, Some(to.as_str()), Instant::now())?;
+    let sent = send_framed(ctx, &to, body)?;
     let (title, _) = cut_bytes(target["title"].as_str().unwrap_or(""), 512);
-    Ok(json!({
+    let mut out = json!({
         "delivered": sent.delivered,
         "mode": a["mode"],
         "chatId": to,
-        "link": chat_link(to, None),
+        "link": chat_link(&to, None),
         "title": title,
-    }))
+    });
+    if let Some(old) = redirected_from {
+        out["redirectedFrom"] = json!(old);
+    }
+    Ok(out)
 }
 
 async fn send_to_mirror_chat(
@@ -1929,6 +1965,41 @@ async fn set_archived(ctx: ToolCtx, a: Value) -> ToolResult {
     meta(&ctx, &id)
 }
 
+/// What `app_roll_over` tells the agent to end its turn with.
+const HAND_OFF_HEADINGS: &str = "End this same turn with the hand-off under these headings: Goal, Done, Left to do, Key files and branches, Open problems and decisions. Be specific (paths, branch names, commands, ids) and keep it under 600 words: the successor chat starts with no memory of this chat.";
+
+/// `app_roll_over:` this chat schedules its own roll over for the end of this turn. A chat that
+/// calls a tool is in mid-turn and a roll over refuses a working chat, so this only leaves the
+/// note; the turn-end hook runs the flow, using this chat's last reply as the hand-off.
+async fn roll_over_self(ctx: ToolCtx, a: Value) -> ToolResult {
+    let rt = rt(&ctx)?;
+    let store = db(&ctx)?;
+    let state: Option<(i64, i64)> = store
+        .snapshot(|tx| {
+            tx.query_row(
+                "SELECT archived, side_source_id IS NOT NULL FROM chats WHERE id = ?1",
+                [&ctx.caller_chat_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+        })
+        .map_err(|e| ToolError::maybe(e.to_string()))?;
+    match state {
+        None => return Err(refuse("There is no chat with that id.")),
+        Some((1, _)) => return Err(refuse("That chat is archived.")),
+        Some((_, 1)) => return Err(refuse("Promote this side chat before rolling it over.")),
+        Some((_, _)) => {}
+    }
+    let (model, effort) =
+        crate::rollover::check_target(&rt, str_arg(&a, "model"), str_arg(&a, "effort"))
+            .map_err(|e| refuse(e.message))?;
+    crate::rollover::tool_request(&ctx.caller_chat_id, model, effort);
+    Ok(json!({
+        "scheduled": true,
+        "handOff": HAND_OFF_HEADINGS,
+    }))
+}
+
 async fn stop_chat(ctx: ToolCtx, a: Value) -> ToolResult {
     let id = chat_id_arg(&a)?;
     if id == ctx.caller_chat_id {
@@ -2200,13 +2271,30 @@ A helper started with Claude Code's Agent tool always runs on this chat's own mo
             let flags = Arc::new(crate::flags::FlagLimits::default());
             move |ctx, a| flag_attention(ctx, a, &flags)
         },
+    )
+    .async_tool(
+        ToolSpec::write(
+            "app_roll_over",
+            format!(
+                "Hand this chat's own work to a fresh chat at the end of this turn: you write the hand-off, the new chat carries on from it, and this chat is archived. Call it when Helm's context notice or your coordinator asks, or when your context has grown large. Only this chat is rolled over; to have another chat roll itself over, message it and ask it to call app_roll_over. model and effort are optional and say what the successor runs on. scheduled means noted, not done: {HAND_OFF_HEADINGS}{EXPLICIT}"
+            ),
+            obj(
+                json!({
+                    "model": {"type": "string"},
+                    "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]}
+                }),
+                &[],
+            ),
+        )
+        .self_locking(),
+        roll_over_self,
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime_tests::{harness, H};
+    use crate::runtime_tests::{ack, echo, harness, H};
     use helm_hosttools::dispatch::{Caller, CallerBinding, ChatRequest};
     use helm_hosttools::HostTools;
 
@@ -2233,6 +2321,179 @@ mod tests {
         };
         t.call(ctx.services.clone(), ctx.events.clone(), &caller, &req)
             .await
+    }
+
+    /// `app_roll_over` schedules the caller's own roll over for the turn's end and the turn's
+    /// last reply becomes the hand-off: the successor starts from it and the old chat archives.
+    /// A side chat and an archived chat are refused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_roll_over_hands_off_at_the_turn_end_and_refuses_side_and_archived_chats() {
+        let mut h = harness();
+        crate::runtime_tests::attach_ops_host(&h);
+        let tools = tools(&h);
+        for (label, sql, want) in [
+            (
+                "side",
+                "UPDATE chats SET side_source_id = 'src' WHERE id = '{c}';",
+                "side chat",
+            ),
+            (
+                "archived",
+                "UPDATE chats SET archived = 1 WHERE id = '{c}';",
+                "archived",
+            ),
+        ] {
+            let blocked = h.create().await;
+            h.db.write(|tx| tx.execute_batch(&sql.replace("{c}", &blocked)))
+                .unwrap();
+            let r = call(&h, &tools, &blocked, "app_roll_over", json!({})).await;
+            assert_eq!(r["ok"], false, "{label}");
+            assert!(
+                r["error"].as_str().unwrap_or_default().contains(want),
+                "{label}: {r}"
+            );
+        }
+        let chat = h.create().await;
+        let (sid, _) = h.send(&chat, "build the thing", "default").await;
+        let mut w = h.worker().await;
+        w.ready().await;
+        let p = w.expect("prompt").await;
+        ack(&w, &p).await;
+        w.emit(json!({"type": "agent_start"})).await;
+        echo(&w, &sid).await;
+        // Mid-turn, the chat asks for its own roll over.
+        let r = call(&h, &tools, &chat, "app_roll_over", json!({})).await;
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["result"]["scheduled"], true);
+        assert!(
+            r["result"]["handOff"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Goal, Done, Left to do"),
+            "{r}"
+        );
+        // The turn's last reply is the hand-off; ending the turn runs the flow, no extra ask.
+        w.emit(json!({"type": "message_end", "message": {"id": "msg_1", "role": "assistant", "content": [{"type": "text", "text": "Goal: finish it. Left to do: part two."}], "status": "complete"}}))
+            .await;
+        w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+            .await;
+        let mut w2 = h.worker().await;
+        w2.ready().await;
+        let first = w2.expect("prompt").await;
+        let text = first["text"].as_str().unwrap();
+        assert!(
+            text.contains(&chat) && text.contains("Goal: finish it. Left to do: part two."),
+            "{text}"
+        );
+        h.until("old chat archived", |h| {
+            h.col(&format!("SELECT archived FROM chats WHERE id = '{chat}'")) == ["1"]
+        })
+        .await;
+    }
+
+    /// A report that names an archived chat reaches the chat that rolled over in its place
+    /// (following the successor at most twice); with no successor, or a chain deeper than
+    /// that, the send is refused as before.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_send_message_follows_a_rolled_over_chats_successor() {
+        let h = harness();
+        let tools = tools(&h);
+        let maker = h.create().await;
+        // a1 -> a2: one hop, the live successor takes the report.
+        // b1 -> b2 -> b3: two hops, still followed.
+        // c1 -> c2 -> c3 (all archived): the third hop is not followed.
+        // lone: archived with no successor.
+        let (a1, a2, b1, b2, b3, c1, c2, c3, lone) = (
+            h.create().await,
+            h.create().await,
+            h.create().await,
+            h.create().await,
+            h.create().await,
+            h.create().await,
+            h.create().await,
+            h.create().await,
+            h.create().await,
+        );
+        h.db.write(|tx| {
+            for (new, old) in [(&a2, &a1), (&b2, &b1), (&b3, &b2), (&c2, &c1), (&c3, &c2)] {
+                tx.execute(
+                    "INSERT INTO chat_succession(chat_id, predecessor_id) VALUES (?1, ?2)",
+                    [new, old],
+                )?;
+            }
+            for id in [&a1, &b1, &b2, &c1, &c2, &c3, &lone] {
+                tx.execute("UPDATE chats SET archived = 1 WHERE id = ?1", [id])?;
+            }
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+        // One hop: the successor of the named chat takes the report, and the result says so.
+        let r = call(
+            &h,
+            &tools,
+            &maker,
+            "app_send_message",
+            json!({"chatId": a1, "message": "the report", "mode": "steer"}),
+        )
+        .await;
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["result"]["chatId"], a2.as_str());
+        assert_eq!(r["result"]["redirectedFrom"], a1.as_str());
+        h.until("report reached the successor", |h| {
+            h.col(&format!(
+                "SELECT COUNT(*) FROM submissions WHERE chat_id = '{a2}' AND text LIKE '%the report%'"
+            )) == ["1"]
+        })
+        .await;
+        // Two hops: b1 -> b2 -> b3, and b3 is live.
+        let r = call(
+            &h,
+            &tools,
+            &maker,
+            "app_send_message",
+            json!({"chatId": b1, "message": "again", "mode": "steer"}),
+        )
+        .await;
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["result"]["chatId"], b3.as_str());
+        // The third hop is not followed: after two the target is still archived.
+        let r = call(
+            &h,
+            &tools,
+            &maker,
+            "app_send_message",
+            json!({"chatId": c1, "message": "deep", "mode": "steer"}),
+        )
+        .await;
+        assert!(
+            r["error"].as_str().unwrap_or_default().contains("archived"),
+            "{r}"
+        );
+        // An archived chat with no successor: refused as before.
+        let r = call(
+            &h,
+            &tools,
+            &maker,
+            "app_send_message",
+            json!({"chatId": lone, "message": "nowhere", "mode": "steer"}),
+        )
+        .await;
+        assert!(
+            r["error"].as_str().unwrap_or_default().contains("archived"),
+            "{r}"
+        );
+        // A live chat is untouched: no redirect key in its result.
+        let r = call(
+            &h,
+            &tools,
+            &maker,
+            "app_send_message",
+            json!({"chatId": a2, "message": "plain", "mode": "steer"}),
+        )
+        .await;
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["result"]["chatId"], a2.as_str());
+        assert!(r["result"].get("redirectedFrom").is_none());
     }
 
     #[test]
