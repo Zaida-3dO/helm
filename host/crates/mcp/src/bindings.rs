@@ -25,6 +25,9 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
     crate::probe::TestOutcome::export_all_to(dir).map_err(|e| e.to_string())?;
     crate::presets::McpPreset::export_all_to(dir).map_err(|e| e.to_string())?;
     crate::status::ServerStatus::export_all_to(dir).map_err(|e| e.to_string())?;
+    crate::doctor::DoctorArgs::export_all_to(dir).map_err(|e| e.to_string())?;
+    crate::doctor::DoctorOutcome::export_all_to(dir).map_err(|e| e.to_string())?;
+    crate::doctor::DoctorCheck::export_all_to(dir).map_err(|e| e.to_string())?;
     crate::repo_gate::RepoServer::export_all_to(dir).map_err(|e| e.to_string())?;
     crate::repo_gate::LaunchGate::export_all_to(dir).map_err(|e| e.to_string())?;
     crate::google::GoogleAccountList::export_all_to(dir).map_err(|e| e.to_string())?;
@@ -50,6 +53,9 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         crate::presets::McpPreset::ident(),
         crate::status::ServerStatus::ident(),
         crate::status::ServerState::ident(),
+        crate::doctor::DoctorArgs::ident(),
+        crate::doctor::DoctorOutcome::ident(),
+        crate::doctor::DoctorCheck::ident(),
         crate::repo_gate::RepoServer::ident(),
         crate::repo_gate::RepoServerState::ident(),
         crate::repo_gate::LaunchGate::ident(),

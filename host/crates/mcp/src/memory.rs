@@ -191,6 +191,7 @@ mod tests {
         ResolvedServer {
             id: "helm_hub".into(),
             name: "Hub".into(),
+            preset: None,
             transport: TransportKind::Http,
             command: None,
             args: vec![],

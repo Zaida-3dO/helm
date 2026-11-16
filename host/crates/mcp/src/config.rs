@@ -368,6 +368,7 @@ impl McpStore {
         let mut out = ResolvedServer {
             id: s.id.clone(),
             name: s.name.clone(),
+            preset: s.preset.clone(),
             transport: t.kind,
             command: t.command.clone(),
             args: t.args.clone(),
@@ -622,8 +623,46 @@ pub(crate) mod tests {
         }
     }
 
+    /// A saved built-in browser server: stdio, broker preset, the broker tool entry named.
+    pub fn browser_server(id: &str) -> McpServer {
+        McpServer {
+            id: id.into(),
+            name: "My browser".into(),
+            enabled: true,
+            transport: Transport {
+                kind: TransportKind::Stdio,
+                command: Some("node.exe".into()),
+                args: vec!["bb/dist/src/bin/broker-tool.js".into()],
+                env: BTreeMap::new(),
+                url: None,
+                headers: BTreeMap::new(),
+                oauth: None,
+            },
+            allow_private_http: false,
+            preset: Some(crate::presets::BROKER_PRESET_ID.into()),
+        }
+    }
+
     fn no_env(_: &str) -> Option<String> {
         None
+    }
+
+    #[test]
+    fn the_resolved_server_carries_its_preset() {
+        let d = tempfile::tempdir().unwrap();
+        let st = store(d.path());
+        st.mutate(None, |l| {
+            l.push(browser_server("bb"));
+            Ok(())
+        })
+        .unwrap();
+        let (_, r) = st.resolve_enabled(&no_env).unwrap();
+        assert_eq!(
+            r[0].preset.as_deref(),
+            Some(crate::presets::BROKER_PRESET_ID),
+            "the worker recognises the built-in browser server by its preset"
+        );
+        assert_eq!(st.resolve_draft(&hub("t")).preset, None);
     }
 
     #[test]
