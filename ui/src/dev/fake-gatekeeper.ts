@@ -1,7 +1,8 @@
 // Dev fake host: the gatekeeper's ops over an in-memory audit store, seeded with a little
-// history so the review list, the marks and the History can be checked by eye. Changing an
-// answer or a mark updates the store the same way the real one would, and a `gate` event rides
-// every change.
+// history so the review list, the marks and the History can be checked by eye, and the working
+// mode's ops over an in-memory mode (the app's, plus boards set from the chip or Settings).
+// Changing an answer or a mark updates the store the same way the real one would, and a `gate`
+// or `workmode` event rides every change.
 
 import type { FakeOpHandler } from './fakeHost.ts';
 import type { GateAsk } from '../gatekeeper/types.ts';
@@ -163,10 +164,71 @@ export function fakeGateAddDecided(chatId: string, chatTitle: string, question: 
   return r;
 }
 
+/** A checked stop from the fake turn script: a nudge reads as decided (its `choice` is the
+ *  default Helm took), a real stop as escalated with its class. */
+export function fakeGateAddStop(chatId: string, chatTitle: string, question: string, cls: 'blocker' | 'limit' | 'failure' | 'asked', choice?: string, reason?: string): GateAsk {
+  const r = ask({
+    chatId,
+    chatTitle,
+    question,
+    channel: 'stop',
+    verdict: choice ? 'decided' : 'escalated',
+    state: 'open',
+    decidedBy: choice ? 'claude' : undefined,
+    model: choice ? settings.model : undefined,
+    confidence: 0.85,
+    risk: choice ? 'low' : 'high',
+    reason,
+    choice,
+    stopClass: choice ? undefined : cls,
+    tookMs: 1800,
+    askedAt: Date.now(),
+  });
+  rows.unshift(r);
+  return r;
+}
+
+// The working mode: the app default, and boards with a choice of their own. The fake chats are
+// not shown under boards, so the chip reads the app's mode; Settings lists what is set.
+let appMode: 'run' | 'check_in' = 'check_in';
+const boardModes = new Map<string, { name: string; mode: 'run' | 'check_in' }>();
+
+function modeView() {
+  const decided = rows.filter((r) => r.verdict === 'decided' && r.review === 'pending' && (r.state === 'open' || r.state === 'kept')).length;
+  const needsYou = rows.filter((r) => r.verdict === 'escalated' && r.state === 'open').length;
+  return {
+    app: appMode,
+    effective: appMode,
+    source: 'app' as const,
+    overrides: [...boardModes.entries()].map(([id, b]) => ({ id, name: b.name, mode: b.mode })),
+    counts: { decided, needsYou },
+  };
+}
+
 export function gatekeeperFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
   return {
-    prefixes: ['gate_'],
-    handler: (op, a) => {
+    prefixes: ['gate_', 'workmode_'],
+    handler: (op, a, ctx) => {
+      if (op === 'workmode_get') return modeView();
+      if (op === 'workmode_set') {
+        const scope = String(a.scope ?? 'app');
+        const mode = a.mode === null || a.mode === undefined ? null : String(a.mode);
+        if (scope === 'board') {
+          const id = String(a.boardId ?? '');
+          if (!id) throw new Error('not_found: That is not a board.');
+          if (mode === null) boardModes.delete(id);
+          else if (mode === 'run' || mode === 'check_in') boardModes.set(id, { name: `Board ${id}`, mode });
+          else throw new Error('The mode must be run or check in.');
+        } else if (mode === 'run' || mode === 'check_in') {
+          appMode = mode;
+        } else if (mode === null) {
+          appMode = 'check_in';
+        } else {
+          throw new Error('The mode must be run or check in.');
+        }
+        ctx.emit({ kind: 'workmode', scope, boardId: String(a.boardId ?? '') });
+        return modeView();
+      }
       if (op === 'gate_list') {
         const filter = String(a.filter ?? 'all');
         const query = String(a.query ?? '').trim().toLowerCase();

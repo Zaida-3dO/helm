@@ -7,6 +7,9 @@ import { Button, Checkbox, PillTabs, TextArea, TextInput } from '../../ui/index.
 import { gateOps } from '../../gatekeeper/api.ts';
 import { agoText, barNote, channelLabel, detailRows, reviewLine, verdictLabel } from '../../gatekeeper/model.ts';
 import type { GateAsk, GateHistoryFilter, GateSettingsEdit, GateSettingsView } from '../../gatekeeper/types.ts';
+import { workmodeOps } from '../../workmode/api.ts';
+import { modeLabel } from '../../workmode/model.ts';
+import type { WorkMode, WorkModeView } from '../../api/generated/gatekeeper/index.ts';
 import '../../gatekeeper/gatekeeper.css';
 
 const FILTERS: Array<{ id: GateHistoryFilter; label: string }> = [
@@ -73,6 +76,31 @@ function GatekeeperPane() {
       .catch((e) => setError(errText(e)));
   };
 
+  // Working mode: the app default and the boards that have one of their own. The top-bar chip
+  // carries the same choices; this block adds the full list, each override with Clear.
+  const wops = useMemo(() => workmodeOps(shell.api), [shell.api]);
+  const [modeView, setModeView] = useState<WorkModeView | null>(null);
+  useEffect(() => {
+    let live = true;
+    const read = () =>
+      void wops
+        .get()
+        .then((v) => live && setModeView(v))
+        .catch(() => undefined);
+    read();
+    const off = shell.bus.on('workmode', read);
+    return () => {
+      live = false;
+      off();
+    };
+  }, [wops, shell]);
+  const setMode = (scope: 'app' | 'board', mode: WorkMode | null, boardId?: string) => {
+    wops
+      .set({ scope, mode, ...(boardId ? { boardId } : {}) })
+      .then(setModeView)
+      .catch((e) => setError(errText(e)));
+  };
+
   // History: filter, search, and one open detail at a time.
   const [filter, setFilter] = useState<GateHistoryFilter>('all');
   const [query, setQuery] = useState('');
@@ -97,6 +125,33 @@ function GatekeeperPane() {
       </p>
       {saved === null && !error && <p className="gk-note">Reading your settings…</p>}
       {error && <p className="gk-error" data-testid="gate-error">{error}</p>}
+      <section className="gk-mode" data-testid="gate-working-mode">
+        <PillTabs<WorkMode>
+          label="Default for every chat"
+          value={modeView?.app ?? 'check_in'}
+          onChange={(id) => setMode('app', id)}
+          testId="gate-mode-app"
+          tabs={[
+            { id: 'check_in', label: 'Check in with me' },
+            { id: 'run', label: 'Run to completion' },
+          ]}
+        />
+        <p className="gk-foot">Run to completion: chats carry on and decide the small things themselves, keeping each choice for you to review; Helm checks every stop. Check in with me: a chat stops and asks when a choice matters.</p>
+        {modeView !== null && modeView.overrides.length > 0 && (
+          <ul className="gk-mode-overrides" data-testid="gate-mode-overrides">
+            {modeView.overrides.map((b) => (
+              <li key={b.id} className="gk-mode-override" data-board-id={b.id}>
+                <span>
+                  {b.name}: {b.mode ? modeLabel(b.mode) : 'the app’s'}
+                </span>
+                <Button variant="secondary" data-testid="gate-mode-clear" data-board-id={b.id} onClick={() => setMode('board', null, b.id)}>
+                  Clear
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
       {saved !== null && (
         <div className="gk-fields" data-testid="gate-fields">
           <Checkbox label="Answer safe questions for me" checked={enabled} onChange={setEnabled} data-testid="gate-enabled" />

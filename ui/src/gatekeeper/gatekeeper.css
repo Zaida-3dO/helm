@@ -331,3 +331,24 @@
   color: var(--muted);
   padding: 8px 2px;
 }
+
+/* The Working mode block: the app default, and the boards with a choice of their own. */
+.gk-mode {
+  margin: 14px 0 4px;
+}
+
+.gk-mode-overrides {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gk-mode-override {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text);
+  padding: 3px 0;
+}

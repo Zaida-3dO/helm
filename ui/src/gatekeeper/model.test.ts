@@ -13,6 +13,9 @@ import {
   reviewLabel,
   reviewLine,
   stateLabel,
+  stopCheckLine,
+  stopClass,
+  stopKindLabel,
   tookText,
   verdictLabel,
 } from './model.ts';
@@ -76,6 +79,17 @@ test('the review list and card lines: wording per verdict, state, channel and ma
     [frequencyLabel('less'), 'Less'],
     [frequencyLabel('balanced'), 'Balanced'],
     [frequencyLabel('more'), 'More'],
+    [channelLabel('stop'), 'Stop'],
+    [stopCheckLine(), 'Checking whether this stop needs you…'],
+    [stopKindLabel('stopBlocker'), 'Blocker'],
+    [stopKindLabel('stopLimit'), 'Plan limit'],
+    [stopKindLabel('stopFailure'), 'Failure'],
+    [stopKindLabel('stopAsked'), 'Stopped to ask'],
+    [stopKindLabel('gatekeeper'), null],
+    [stopClass('stopBlocker'), 'blocker'],
+    [stopClass('stopLimit'), 'limit'],
+    [stopClass('stopFailure'), 'failure'],
+    [stopClass('stopAsked'), 'asked'],
   ] as const)
     assert.equal(got, want);
 
