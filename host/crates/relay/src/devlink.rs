@@ -363,6 +363,15 @@ impl ChatPort for ChannelPort {
     fn defaults_set(&self, a: helm_devices::wire::DefaultsArgs) -> BoxFut<'_, PortResult<Value>> {
         self.port.defaults_set(a)
     }
+    fn project_create(
+        &self,
+        a: helm_devices::wire::ProjectCreateArgs,
+    ) -> BoxFut<'_, PortResult<Value>> {
+        self.port.project_create(a)
+    }
+    fn project_set(&self, a: helm_devices::wire::ProjectSetArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.port.project_set(a)
+    }
     fn chat_brief(&self, chat_id: String) -> BoxFut<'_, PortResult<Option<RemoteChat>>> {
         self.port.chat_brief(chat_id)
     }

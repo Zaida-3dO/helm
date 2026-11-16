@@ -349,6 +349,11 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
             json!({"personId": "person-a", "projectId": "proj-1"}),
         ),
         ("archive", json!({"chatId": "c1", "archived": true})),
+        ("project_create", json!({"title": "Ideas"})),
+        (
+            "project_set",
+            json!({"projectId": "proj-1", "pinned": true}),
+        ),
     ] {
         let e = b.rpc.call("dev-a", op, args).await.unwrap_err();
         assert_eq!(e.code, code::NOT_ALLOWED, "{op}");
@@ -1138,6 +1143,53 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         b.db.snapshot(|tx| mirror::mirror_projects(tx, "dev-a"))
             .unwrap();
     assert_eq!(projects[0]["name"], "Work");
+    // A project made or pinned from this PC is on the device at once, and this PC lists it
+    // without waiting for the next connection: the board arrives with its folder, the pin shows.
+    let made = b
+        .mirror
+        .project_create(
+            "dev-a",
+            "person-a",
+            "Ideas",
+            Some("About ideas".into()),
+            Some("proj-1".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(made["projectId"], "proj-new-1");
+    b.mirror
+        .project_set("dev-a", "person-a", "proj-1", Some(true), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        port.st().projects_set,
+        [helm_devices::wire::ProjectSetArgs {
+            project_id: "proj-1".into(),
+            pinned: Some(true),
+            folder_project_id: None,
+        }]
+    );
+    let projects =
+        b.db.snapshot(|tx| mirror::mirror_projects(tx, "dev-a"))
+            .unwrap();
+    let find = |id: &str| projects.iter().find(|p| p["id"] == id).unwrap().clone();
+    assert_eq!(
+        (
+            find("proj-new-1")["kind"].as_str(),
+            find("proj-new-1")["folderId"].as_str()
+        ),
+        (Some("board"), Some("proj-1"))
+    );
+    assert_eq!(find("proj-1")["pinned"], true);
+    // A PC that does not let others run its chats takes neither, and says so.
+    port.set_run(false);
+    let e = b
+        .mirror
+        .project_set("dev-a", "person-a", "proj-1", Some(false), None)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, "not_allowed");
+    port.set_run(true);
     let listed =
         b.db.snapshot(|tx| mirror::mirror_chat_list(tx, "dev-a", None, false))
             .unwrap();
@@ -2135,6 +2187,141 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
         assert_eq!(q["items"].as_array().unwrap().len(), 0, "{query}");
     }
 
+    // A board is a place to start a chat from afar: the chat runs in the folder the board starts
+    // its chats in and is shown on the board. The projects crate's tables and the ops that use
+    // them are stood in for, so what the host asks of them can be read back.
+    db.write(|tx| {
+        tx.execute_batch(
+            "CREATE TABLE project_local (
+                 project_id TEXT PRIMARY KEY, pinned INTEGER NOT NULL DEFAULT 0,
+                 archived INTEGER NOT NULL DEFAULT 0, closed INTEGER NOT NULL DEFAULT 0,
+                 primary_folder_project_id TEXT, revision INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE board_projects (project_id TEXT PRIMARY KEY, stale INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO board_projects(project_id) VALUES ('brd-1');
+             INSERT INTO project_local(project_id, primary_folder_project_id, revision)
+             VALUES ('brd-1', 'proj-w', 4);
+             INSERT INTO projects (id, kind, name, path, color, created_at)
+             VALUES ('brd-2', 'board', 'No folder yet', NULL, '', 0);
+             INSERT INTO board_projects(project_id) VALUES ('brd-2');",
+        )
+    })
+    .unwrap();
+    let calls = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+    let mut stand_in = OpRegistry::new();
+    for name in [
+        "chat_create",
+        "profiles_assign_chats",
+        "project_update",
+        "board_project_create",
+        "project_create_folder",
+    ] {
+        let calls = calls.clone();
+        let op = name.to_owned();
+        stand_in.blocking(name, OpClass::Blocking, move |_, args| {
+            calls.lock().unwrap().push((op.clone(), args));
+            Ok(json!({ "id": "made-1" }))
+        });
+    }
+    let board_on = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let on = board_on.clone();
+    stand_in.blocking("board_connection_get", OpClass::Blocking, move |_, _| {
+        let set = on.load(std::sync::atomic::Ordering::SeqCst);
+        Ok(json!({ "url": if set { "board" } else { "" }, "hasToken": set }))
+    });
+    let remote = HostPort::new(Arc::new(Dispatcher::new(
+        stand_in,
+        OpCtx {
+            services: Arc::new({
+                let mut s = Services::new();
+                s.insert(db.clone());
+                s
+            }),
+            events: Arc::new(RecordingSink::default()),
+        },
+        false,
+    )));
+    let create = |project: &str| helm_devices::wire::CreateArgs {
+        person_id: "person-a".into(),
+        project_id: project.into(),
+        model: None,
+        effort: None,
+    };
+    assert_eq!(remote.create(create("brd-1")).await.unwrap(), "made-1");
+    let first = calls.lock().unwrap().remove(0);
+    assert_eq!(first.0, "chat_create");
+    assert_eq!(first.1["cwd"], workp);
+    assert_eq!(first.1["projectId"], "brd-1");
+    calls.lock().unwrap().clear();
+    // A board with no folder yet says so in words instead of starting a chat nowhere.
+    let e = remote.create(create("brd-2")).await.unwrap_err();
+    assert!(e.message.contains("folder"), "{}", e.message);
+
+    // A new project from afar is a board on the task board when one is connected, with the
+    // folder asked for, and a folder when none is; its id and kind come back.
+    use helm_devices::wire::{ProjectCreateArgs, ProjectSetArgs};
+    let new_project = |title: &str, folder: Option<&str>| ProjectCreateArgs {
+        title: title.into(),
+        description: Some("About".into()),
+        folder_project_id: folder.map(str::to_owned),
+    };
+    let made = remote
+        .project_create(new_project(" Ideas ", None))
+        .await
+        .unwrap();
+    assert_eq!(made, json!({"projectId": "made-1", "kind": "folder"}));
+    assert_eq!(
+        calls.lock().unwrap().remove(0),
+        ("project_create_folder".to_owned(), json!({"name": "Ideas"}))
+    );
+    board_on.store(true, std::sync::atomic::Ordering::SeqCst);
+    remote
+        .project_create(new_project("Ideas", Some("proj-w")))
+        .await
+        .unwrap();
+    assert_eq!(
+        calls.lock().unwrap().remove(0),
+        (
+            "board_project_create".to_owned(),
+            json!({"title": "Ideas", "description": "About", "folder": workp})
+        )
+    );
+    // A folder that is not one of this PC's, or a nameless project, is refused in words.
+    for bad in [new_project("Ideas", Some("brd-1")), new_project("  ", None)] {
+        assert!(remote.project_create(bad).await.is_err());
+    }
+    // Pinning and choosing a board's folder go to the projects op with the project's current
+    // revision; anything else is refused before it gets there.
+    let set = |id: &str, pinned: Option<bool>, folder: Option<&str>| ProjectSetArgs {
+        project_id: id.into(),
+        pinned,
+        folder_project_id: folder.map(str::to_owned),
+    };
+    remote
+        .project_set(set("brd-2", Some(true), Some("proj-w")))
+        .await
+        .unwrap();
+    assert_eq!(
+        calls.lock().unwrap().remove(0),
+        (
+            "project_update".to_owned(),
+            json!({"projectId": "brd-2", "revision": 0, "pinned": true, "primaryFolderProjectId": "proj-w"})
+        )
+    );
+    remote
+        .project_set(set("brd-1", Some(false), None))
+        .await
+        .unwrap();
+    assert_eq!(calls.lock().unwrap().remove(0).1["revision"], 4);
+    for bad in [
+        set("brd-1", None, None),
+        set("proj-w", None, Some("proj-1")),
+        set("brd-1", None, Some("brd-2")),
+        set("nope", Some(true), None),
+    ] {
+        assert!(remote.project_set(bad).await.is_err());
+    }
+    assert!(calls.lock().unwrap().is_empty());
+
     // The catalogue op failing (here: no profile folder for it to read) is logged, not fatal:
     // the hello still answers, with no catalogue.
     let mut bare = Services::new();
@@ -2263,6 +2450,18 @@ async fn a_household_member_gets_their_own_view_of_the_list_but_is_refused_nothi
             "create",
             json!({"personId": "person-a", "projectId": "proj-1"}),
             None,
+        ),
+        ("project_create", json!({"title": "Sam's project"}), None),
+        (
+            "project_set",
+            json!({"projectId": "proj-1", "pinned": true}),
+            None,
+        ),
+        // Unknown fields are refused, as for every op.
+        (
+            "project_set",
+            json!({"projectId": "proj-1", "path": "/etc"}),
+            Some(code::BAD_ARGS),
         ),
     ];
     for (op, args, want) in cases {

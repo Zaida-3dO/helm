@@ -28,6 +28,9 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .async_op("devices_consent_state", devices_consent_state)
         .async_op("devices_share_chat", devices_share_chat)
         .async_op("devices_move_profile", devices_move_profile)
+        .async_op("devices_projects_refresh", devices_projects_refresh)
+        .async_op("devices_project_create", devices_project_create)
+        .async_op("devices_project_set", devices_project_set)
         .async_op("devices_submission_action", devices_submission_action)
         .async_op("devices_item_links", devices_item_links)
         .async_op("devices_attention", devices_attention)
@@ -256,6 +259,98 @@ async fn devices_create_chat(ctx: OpCtx, args: Value) -> Result<Value, ApiError>
         .create_chat(&a.device_uid, &person, &a.project_id, a.model, a.effort)
         .await?;
     Ok(json!({ "chatId": id }))
+}
+
+/// The person the sidebar acts as, or a refusal in words.
+fn acting_person_here(ctx: &OpCtx) -> Result<String, ApiError> {
+    let db = ctx.services.need::<Database>()?;
+    db.snapshot(|tx| Ok::<_, rusqlite::Error>(active_person(tx)))
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| {
+            ApiError::new(
+                "refused",
+                "This profile isn't set up on the hub yet; try again in a moment.",
+            )
+        })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DeviceArgs {
+    device_uid: String,
+}
+
+/// `devices_projects_refresh`: ask a device for its projects again and answer with them as
+/// `devices_chats` lists them. A device says its projects only when this PC connects to it, so
+/// the new-chat page asks when it opens.
+async fn devices_projects_refresh(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: DeviceArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
+    mirror.refresh_projects(&a.device_uid).await?;
+    let db = ctx.services.need::<Database>()?;
+    let projects = db
+        .snapshot(|tx| mirror::mirror_projects(tx, &a.device_uid))
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(json!({ "chats": [], "projects": projects, "more": false }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProjectCreateOpArgs {
+    device_uid: String,
+    title: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    folder_project_id: Option<String>,
+}
+
+/// `devices_project_create`: make a project on another device for the active profile's person.
+/// The device makes a board when it has a task board connected and a folder when it has not.
+async fn devices_project_create(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ProjectCreateOpArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
+    let person = acting_person_here(&ctx)?;
+    mirror
+        .project_create(
+            &a.device_uid,
+            &person,
+            &a.title,
+            a.description,
+            a.folder_project_id,
+        )
+        .await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProjectSetOpArgs {
+    device_uid: String,
+    project_id: String,
+    #[serde(default)]
+    pinned: Option<bool>,
+    #[serde(default)]
+    folder_project_id: Option<String>,
+}
+
+/// `devices_project_set`: pin a project of another device, or give its board a folder.
+async fn devices_project_set(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ProjectSetOpArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
+    let person = acting_person_here(&ctx)?;
+    mirror
+        .project_set(
+            &a.device_uid,
+            &person,
+            &a.project_id,
+            a.pinned,
+            a.folder_project_id,
+        )
+        .await?;
+    Ok(json!({}))
 }
 
 #[derive(Deserialize)]

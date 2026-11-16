@@ -23,10 +23,10 @@ use crate::wire::{
     code, AnswerArgs, ArchiveArgs, AttachPutArgs, AttachmentRef, BoardCancelArgs, BoardReadArgs,
     Caller, ChatIdArgs, CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceFrame,
     DeviceInfo, DevicePerson, ForkArgs, Frame, Hello, MoveProfileArgs, MuteArgs, Op, OrganizeArgs,
-    PageArgs, PanelStageArgs, PeerDevice, QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs,
-    SendArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs,
-    VerbositySetArgs, WireError, MAX_CHUNK_BYTES, MAX_PAGE_ROWS, MAX_SEND_ATTACHMENTS,
-    MAX_SEND_BYTES, MAX_UPLOAD_BYTES, SUB_ROWS,
+    PageArgs, PanelStageArgs, PeerDevice, ProjectCreateArgs, ProjectSetArgs, QuickOpenArgs,
+    RemoteChat, RenameArgs, RollOverArgs, SendArgs, SetModelArgs, SetPermissionArgs, ShareArgs,
+    SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError, MAX_CHUNK_BYTES,
+    MAX_PAGE_ROWS, MAX_SEND_ATTACHMENTS, MAX_SEND_BYTES, MAX_UPLOAD_BYTES, SUB_ROWS,
 };
 use base64::Engine as _;
 use helm_chats::types::{
@@ -206,6 +206,10 @@ pub trait ChatPort: Send + Sync {
     fn defaults_get(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>>;
     /// Save those three defaults here.
     fn defaults_set(&self, a: DefaultsArgs) -> BoxFut<'_, PortResult<Value>>;
+    /// Make a project here: a board when a task board is connected, else a folder.
+    fn project_create(&self, a: ProjectCreateArgs) -> BoxFut<'_, PortResult<Value>>;
+    /// Pin a project here, or point a board at one of this install's folder projects.
+    fn project_set(&self, a: ProjectSetArgs) -> BoxFut<'_, PortResult<Value>>;
     /// The chat as other devices see it, for a push after a sidebar change. `Ok(None)` when
     /// the chat is not this install's.
     fn chat_brief(&self, chat_id: String) -> BoxFut<'_, PortResult<Option<RemoteChat>>>;
@@ -917,6 +921,8 @@ impl Inner {
                 }
                 done(self.port.defaults_set(a).await?)
             }
+            Op::ProjectCreate(a) => done(self.port.project_create(a).await?),
+            Op::ProjectSet(a) => done(self.port.project_set(a).await?),
         }
     }
 
