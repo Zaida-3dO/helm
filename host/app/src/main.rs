@@ -70,6 +70,34 @@ fn init_host_log(profile: &Profile) {
     let _ = profile;
 }
 
+/// Any thread's panic goes to the log with its backtrace before the thread (or the app) dies.
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let back = std::backtrace::Backtrace::force_capture();
+        log::error!("panic: {info}\n{back}");
+    }));
+}
+
+/// One line about the run that ended without closing its record.
+fn describe_unclean(u: &helm_core::trail::Unclean) -> String {
+    let run = u
+        .previous
+        .as_ref()
+        .map(|p| {
+            format!(
+                "started {}, version {}",
+                p["startedAt"].as_i64().unwrap_or(0),
+                p["version"].as_str().unwrap_or("?"),
+            )
+        })
+        .unwrap_or_else(|| "record unreadable".to_owned());
+    let beat = match u.last_heartbeat.as_ref().and_then(|h| h["at"].as_i64()) {
+        Some(at) => format!("last heartbeat at {}", helm_core::trail::clock_text(at)),
+        None => "no heartbeat".to_owned(),
+    };
+    format!("{run}, {beat}")
+}
+
 fn main() -> ExitCode {
     init_logging();
     let platform = Platform::native();
@@ -78,6 +106,8 @@ fn main() -> ExitCode {
         Err(e) => return fatal(&platform, &format!("Helm could not open its profile: {e}")),
     };
     init_host_log(&profile);
+    install_panic_hook();
+    helm_platform::crashdumps::install(&profile.path("diagnostics"));
     let lock = match profile.lock() {
         Ok(LockOutcome::Acquired(lock)) => lock,
         Ok(LockOutcome::AlreadyRunning) => {
@@ -93,6 +123,19 @@ fn main() -> ExitCode {
         }
         Err(e) => return fatal(&platform, &format!("Helm could not lock its profile: {e}")),
     };
+
+    // The trail of this run: its record, and what the run before it ended like.
+    let started = std::time::Instant::now();
+    if let Some(u) = helm_core::trail::start(
+        &profile.path("diagnostics"),
+        helm_core::now_ms(),
+        env!("CARGO_PKG_VERSION"),
+    ) {
+        log::warn!(
+            "previous run ended without a clean exit: {}",
+            describe_unclean(&u)
+        );
+    }
 
     // A restore the user staged last session applies now: the profile is ours (locked) and nothing
     // has opened its database yet.
@@ -137,7 +180,7 @@ fn main() -> ExitCode {
 
     let mut ops = OpRegistry::new();
     registrations::ops(&mut ops);
-    run_app(profile, db, platform, ops, clock);
+    run_app(profile, db, platform, ops, clock, started);
     drop(lock);
     ExitCode::SUCCESS
 }
@@ -269,8 +312,11 @@ fn run_app(
     platform: Platform,
     ops: OpRegistry,
     clock: Arc<helm_chats::clock::Clock>,
+    started: std::time::Instant,
 ) {
     let debug = cfg!(debug_assertions);
+    let diag = profile.path("diagnostics");
+    let diag_for_setup = diag.clone();
     // Previewed PDFs, audio, video and fonts are served in ranges through one custom scheme; the
     // same server is the `file_read` op's way of issuing the short-lived addresses.
     let private_roots = helm_panel::private::PrivateRoots::new(&{
@@ -367,6 +413,22 @@ fn run_app(
             let crashes = shell::WindowCrashes::new(&profile, debug, dialogs.clone());
             let quit = Arc::new(QuitCoordinator::new());
             let drain: Arc<dyn WorkerDrain> = Arc::new(helm_chats::RuntimeDrain(runtime.clone()));
+            // The heartbeat: a cheap line every so often, so a silent death has a time and a
+            // pile-up has a shape.
+            {
+                let workers = drain.clone();
+                let diag = diag_for_setup.clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(helm_core::trail::HEARTBEAT_EVERY);
+                    let working = workers.running_work().len();
+                    helm_core::trail::heartbeat(
+                        &diag,
+                        helm_core::now_ms(),
+                        started.elapsed().as_secs(),
+                        working,
+                    );
+                });
+            }
             // Chats that lose the connection or the computer's attention get a line saying so, and
             // are asked to carry on once things are back.
             let outages = helm_chats::outage::OutageWatch::new(runtime.clone());
@@ -486,8 +548,10 @@ fn run_app(
         .build(tauri::generate_context!())
         .expect("failed to build the Tauri app");
 
-    app.run(|app, event| {
+    app.run(move |app, event| {
         if let tauri::RunEvent::Exit = event {
+            // Close this run's record before anything else goes.
+            helm_core::trail::record_exit(&diag, helm_core::now_ms());
             // Release keep-awake and never take it again.
             if let Some(svc) = app.try_state::<Arc<helm_shell::ShellService>>() {
                 svc.shutdown();
