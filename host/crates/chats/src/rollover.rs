@@ -27,7 +27,7 @@ use crate::types::*;
 use helm_ipc::{ApiError, AppEvent, OpCtx, OpRegistry};
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -54,6 +54,16 @@ pub const DEFAULT_ROLLOVER_TOKENS: i64 = 180_000;
 static AUTO_DONE: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
 /// Chats with a roll over running, whichever way it started.
 static IN_FLIGHT: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
+/// Roll overs the chat itself asked for with `app_roll_over`: chat id to the successor's model
+/// and effort. A chat that calls a tool is in mid-turn, and a roll over refuses a working chat,
+/// so the tool can only leave a note; [`on_turn_end`] runs it.
+static PENDING: Mutex<HashMap<String, (Option<String>, Option<String>)>> = Mutex::new(HashMap::new());
+
+/// Note that this chat asked to roll itself over when its turn ends; the model and effort must
+/// already be validated.
+pub(crate) fn tool_request(chat_id: &str, model: Option<String>, effort: Option<String>) {
+    PENDING.lock().unwrap().insert(chat_id.to_owned(), (model, effort));
+}
 
 /// The first message of the successor chat.
 pub fn successor_message(old_title: &str, old_id: &str, handoff: &str) -> String {
@@ -133,12 +143,15 @@ struct RollOverArgs {
     effort: Option<String>,
 }
 
-async fn chat_roll_over(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
-    let a: RollOverArgs = crate::ops::parse_args(args)?;
-    let rt = (*ctx.services.need::<ChatRuntime>()?).clone();
-    // A named model must at least name a server that is set up; the successor's own creation
-    // checks the rest.
-    let target_model = match a.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+/// Validate the successor's model and effort: a named model must at least name a server that
+/// is set up (the successor's own creation checks the rest), and effort must be one of the
+/// five words. Shared by the op and the agent tool.
+pub(crate) fn check_target(
+    rt: &ChatRuntime,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<(Option<String>, Option<String>), ApiError> {
+    let target_model = match model.map(str::trim).filter(|m| !m.is_empty()) {
         Some(m) => {
             let (server, _) = crate::local::columns(Some(m)).map_err(ApiError::bad_args)?;
             if let Some(server) = &server {
@@ -152,7 +165,7 @@ async fn chat_roll_over(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
         }
         None => None,
     };
-    let target_effort = match a.effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+    let target_effort = match effort.map(str::trim).filter(|e| !e.is_empty()) {
         Some(e) if crate::catalogue::is_effort(e) => Some(e.to_owned()),
         Some(_) => {
             return Err(ApiError::bad_args(
@@ -161,6 +174,13 @@ async fn chat_roll_over(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
         }
         None => None,
     };
+    Ok((target_model, target_effort))
+}
+
+async fn chat_roll_over(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: RollOverArgs = crate::ops::parse_args(args)?;
+    let rt = (*ctx.services.need::<ChatRuntime>()?).clone();
+    let (target_model, target_effort) = check_target(&rt, a.model.as_deref(), a.effort.as_deref())?;
     let chat = rt
         .db()
         .snapshot(|tx| crate::store::get_chat(tx, &a.chat_id, 0))
@@ -190,7 +210,7 @@ async fn chat_roll_over(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
 }
 
 /// Run the roll-over flow for `chat`: ask for a hand-off, then finish in the background. Shared
-/// by the op and the automatic trigger. A chat with a roll over already running
+/// by the op, the automatic trigger and the agent tool. A chat with a roll over already running
 /// is refused; `model` and `effort` must already be validated.
 fn start(
     rt: &Arc<ChatRuntime>,
@@ -239,10 +259,12 @@ fn start(
     Ok(())
 }
 
-/// A turn has just ended and the chat is quiet: if its context has grown past the roll-over
-/// setting, start the flow now — the chat is idle at this moment, so every guard the op makes
-/// holds. Every check is a cheap read; side chats, archived chats, chats without a context
-/// reading, and chats already asked once are left alone.
+/// A turn has just ended and the chat is quiet. Two things may be waiting here: a roll over
+/// the chat itself asked for with `app_roll_over` (its last reply's text is the hand-off, so
+/// the flow runs without the request turn), or — when the chat's context has grown past the
+/// roll-over setting — the automatic ask, the same flow the button runs. The chat is idle at
+/// this moment, so every guard the op makes holds. Every check is a cheap read; side chats,
+/// archived chats, chats without a context reading, and chats already asked once are alone.
 pub(crate) fn on_turn_end(sh: &Arc<Shared>, chat_id: &str) {
     // The flow runs on the app's services; until the host seam is attached there is nothing to
     // run it with.
@@ -252,35 +274,38 @@ pub(crate) fn on_turn_end(sh: &Arc<Shared>, chat_id: &str) {
     if IN_FLIGHT.lock().unwrap().contains(chat_id) {
         return;
     }
-    let over = sh
-        .db
-        .snapshot(|tx| {
-            let threshold = helm_core::prefs::get_or(
-                tx,
-                helm_core::prefs::ROLLOVER_TOKENS,
-                DEFAULT_ROLLOVER_TOKENS,
-            );
-            if threshold <= 0 {
-                return Ok::<_, rusqlite::Error>(false);
-            }
-            let idle_root: bool = tx
-                .query_row(
-                    "SELECT archived = 0 AND side_source_id IS NULL AND status = 'idle'
+    let asked = PENDING.lock().unwrap().remove(chat_id);
+    if asked.is_none() {
+        let over = sh
+            .db
+            .snapshot(|tx| {
+                let threshold = helm_core::prefs::get_or(
+                    tx,
+                    helm_core::prefs::ROLLOVER_TOKENS,
+                    DEFAULT_ROLLOVER_TOKENS,
+                );
+                if threshold <= 0 {
+                    return Ok::<_, rusqlite::Error>(false);
+                }
+                let idle_root: bool = tx
+                    .query_row(
+                        "SELECT archived = 0 AND side_source_id IS NULL AND status = 'idle'
                      FROM chats WHERE id = ?1",
-                    [chat_id],
-                    |r| r.get(0),
-                )
-                .optional()?
-                .unwrap_or(false);
-            if !idle_root {
-                return Ok(false);
-            }
-            Ok(crate::turn_usage::context_reported_at(tx, chat_id)
-                .is_some_and(|(n, _)| n >= threshold as u64))
-        })
-        .unwrap_or(false);
-    if !over || !AUTO_DONE.lock().unwrap().insert(chat_id.to_owned()) {
-        return;
+                        [chat_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .unwrap_or(false);
+                if !idle_root {
+                    return Ok(false);
+                }
+                Ok(crate::turn_usage::context_reported_at(tx, chat_id)
+                    .is_some_and(|(n, _)| n >= threshold as u64))
+            })
+            .unwrap_or(false);
+        if !over || !AUTO_DONE.lock().unwrap().insert(chat_id.to_owned()) {
+            return;
+        }
     }
     let rt = Arc::new(ChatRuntime { sh: sh.clone() });
     let chat = match rt.db().snapshot(|tx| crate::store::get_chat(tx, chat_id, 0)) {
@@ -294,9 +319,55 @@ pub(crate) fn on_turn_end(sh: &Arc<Shared>, chat_id: &str) {
     if chat.archived || chat.side_source_id.is_some() {
         return;
     }
+    if let Some((model, effort)) = asked {
+        // The hand-off is the chat's own last reply, written in the turn that called the tool.
+        let handoff = handoff_after(&rt, chat_id, 0).ok().flatten();
+        match handoff {
+            Some(h) => start_with_handoff(&rt, &seam.ctx, &chat, &h, model, effort),
+            // The agent ended the turn without writing text: fall back to the normal ask.
+            None => {
+                if let Err(e) = start(&rt, &seam.ctx, &chat, model, effort) {
+                    log::warn!("roll over of {chat_id}: {}", e.message);
+                }
+            }
+        }
+        return;
+    }
     if let Err(e) = start(&rt, &seam.ctx, &chat, None, None) {
         log::warn!("auto roll over of {chat_id}: {}", e.message);
     }
+}
+
+/// The roll-over flow when the hand-off is already written: no request turn — the successor
+/// starts from the text at once. Used when the chat's own turn ended with `app_roll_over`
+/// pending and its last reply is the hand-off.
+fn start_with_handoff(
+    rt: &Arc<ChatRuntime>,
+    ctx: &OpCtx,
+    chat: &ChatRecord,
+    handoff: &str,
+    model: Option<String>,
+    effort: Option<String>,
+) {
+    if !IN_FLIGHT.lock().unwrap().insert(chat.id.clone()) {
+        return;
+    }
+    let handle = rt.handle().clone();
+    let rt = Arc::clone(rt);
+    let ctx = ctx.clone();
+    let chat = chat.clone();
+    let handoff = handoff.to_owned();
+    handle.spawn(async move {
+        if let Err(why) = carry_on(&ctx, &rt, &chat, &handoff, model, effort).await {
+            log::warn!("roll over of {}: {why}", chat.id);
+            ctx.events.emit(
+                AppEvent::new("chat_roll_over_failed")
+                    .with("chatId", chat.id.clone())
+                    .with("message", why),
+            );
+        }
+        IN_FLIGHT.lock().unwrap().remove(&chat.id);
+    });
 }
 
 async fn finish(

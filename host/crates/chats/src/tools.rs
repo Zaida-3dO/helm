@@ -1929,6 +1929,41 @@ async fn set_archived(ctx: ToolCtx, a: Value) -> ToolResult {
     meta(&ctx, &id)
 }
 
+/// What `app_roll_over` tells the agent to end its turn with.
+const HAND_OFF_HEADINGS: &str = "End this same turn with the hand-off under these headings: Goal, Done, Left to do, Key files and branches, Open problems and decisions. Be specific (paths, branch names, commands, ids) and keep it under 600 words: the successor chat starts with no memory of this chat.";
+
+/// `app_roll_over:` this chat schedules its own roll over for the end of this turn. A chat that
+/// calls a tool is in mid-turn and a roll over refuses a working chat, so this only leaves the
+/// note; the turn-end hook runs the flow, using this chat's last reply as the hand-off.
+async fn roll_over_self(ctx: ToolCtx, a: Value) -> ToolResult {
+    let rt = rt(&ctx)?;
+    let store = db(&ctx)?;
+    let state: Option<(i64, i64)> = store
+        .snapshot(|tx| {
+            tx.query_row(
+                "SELECT archived, side_source_id IS NOT NULL FROM chats WHERE id = ?1",
+                [&ctx.caller_chat_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+        })
+        .map_err(|e| ToolError::maybe(e.to_string()))?;
+    match state {
+        None => return Err(refuse("There is no chat with that id.")),
+        Some((1, _)) => return Err(refuse("That chat is archived.")),
+        Some((_, 1)) => return Err(refuse("Promote this side chat before rolling it over.")),
+        Some((_, _)) => {}
+    }
+    let (model, effort) =
+        crate::rollover::check_target(&rt, str_arg(&a, "model"), str_arg(&a, "effort"))
+            .map_err(|e| refuse(e.message))?;
+    crate::rollover::tool_request(&ctx.caller_chat_id, model, effort);
+    Ok(json!({
+        "scheduled": true,
+        "handOff": HAND_OFF_HEADINGS,
+    }))
+}
+
 async fn stop_chat(ctx: ToolCtx, a: Value) -> ToolResult {
     let id = chat_id_arg(&a)?;
     if id == ctx.caller_chat_id {
@@ -2200,6 +2235,23 @@ A helper started with Claude Code's Agent tool always runs on this chat's own mo
             let flags = Arc::new(crate::flags::FlagLimits::default());
             move |ctx, a| flag_attention(ctx, a, &flags)
         },
+    )
+    .async_tool(
+        ToolSpec::write(
+            "app_roll_over",
+            format!(
+                "Hand this chat's own work to a fresh chat at the end of this turn: you write the hand-off, the new chat carries on from it, and this chat is archived. Call it when Helm's context notice or your coordinator asks, or when your context has grown large. Only this chat is rolled over; to have another chat roll itself over, message it and ask it to call app_roll_over. model and effort are optional and say what the successor runs on. scheduled means noted, not done: {HAND_OFF_HEADINGS}{EXPLICIT}"
+            ),
+            obj(
+                json!({
+                    "model": {"type": "string"},
+                    "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]}
+                }),
+                &[],
+            ),
+        )
+        .self_locking(),
+        roll_over_self,
     );
 }
 
@@ -2233,6 +2285,72 @@ mod tests {
         };
         t.call(ctx.services.clone(), ctx.events.clone(), &caller, &req)
             .await
+    }
+
+    /// `app_roll_over` schedules the caller's own roll over for the turn's end and the turn's
+    /// last reply becomes the hand-off: the successor starts from it and the old chat archives.
+    /// A side chat and an archived chat are refused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_roll_over_hands_off_at_the_turn_end_and_refuses_side_and_archived_chats() {
+        let mut h = harness();
+        crate::runtime_tests::attach_ops_host(&h);
+        let tools = tools(&h);
+        for (label, sql, want) in [
+            (
+                "side",
+                "UPDATE chats SET side_source_id = 'src' WHERE id = '{c}';",
+                "side chat",
+            ),
+            (
+                "archived",
+                "UPDATE chats SET archived = 1 WHERE id = '{c}';",
+                "archived",
+            ),
+        ] {
+            let blocked = h.create().await;
+            h.db
+                .write(|tx| tx.execute_batch(&sql.replace("{c}", &blocked)))
+                .unwrap();
+            let e = call(&h, &tools, &blocked, "app_roll_over", json!({}))
+                .await
+                .unwrap_err();
+            assert!(e.public.contains(want), "{label}: {}", e.public);
+        }
+        let chat = h.create().await;
+        let (sid, _) = h.send(&chat, "build the thing", "default").await;
+        let mut w = h.worker().await;
+        w.ready().await;
+        let p = w.expect("prompt").await;
+        ack(&w, &p).await;
+        w.emit(json!({"type": "agent_start"})).await;
+        echo(&w, &sid).await;
+        // Mid-turn, the chat asks for its own roll over.
+        let r = call(&h, &tools, &chat, "app_roll_over", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(r["scheduled"], true);
+        assert!(
+            r["handOff"].as_str().unwrap().contains("Goal, Done, Left to do"),
+            "{}",
+            r["handOff"]
+        );
+        // The turn's last reply is the hand-off; ending the turn runs the flow, no extra ask.
+        w.emit(json!({"type": "message_end", "message": {"id": "msg_1", "role": "assistant", "content": [{"type": "text", "text": "Goal: finish it. Left to do: part two."}], "status": "complete"}}))
+            .await;
+        w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+            .await;
+        let mut w2 = h.worker().await;
+        w2.ready().await;
+        let first = w2.expect("prompt").await;
+        let text = first["text"].as_str().unwrap();
+        assert!(
+            text.contains(&chat) && text.contains("Goal: finish it. Left to do: part two."),
+            "{text}"
+        );
+        h.until("old chat archived", |h| {
+            h.col(&format!("SELECT archived FROM chats WHERE id = '{chat}'")) == ["1"]
+        })
+        .await;
     }
 
     #[test]
