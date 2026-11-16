@@ -2,6 +2,9 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, test } from "node:test";
 import { startFakeLocalModel } from "../../fakes/local-model/server.ts";
 import { isAlive } from "../src/process/kill.ts";
@@ -194,6 +197,22 @@ describe("launch and handshake", () => {
       assert.equal((await s.host.exited).code, 1);
     } finally {
       await s.done();
+    }
+  });
+
+  test("stdin closing without a shutdown ends the worker with a trail line in the diagnostics folder", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "helm-gone-"));
+    const s = startWithFixture("streaming", { env: { HELM_DATA_ROOT: dir } });
+    try {
+      await s.host.ready();
+      s.host.closeStdin();
+      assert.equal((await s.host.exited).code, 0);
+      const line = fs.readFileSync(path.join(dir, "diagnostics", "host-gone.log"), "utf8");
+      assert.match(line, /host went away/);
+      assert.match(line, /chat /);
+    } finally {
+      await s.done();
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 

@@ -134,6 +134,7 @@ impl QuitCoordinator {
             DRAFT_FLUSH_TIMEOUT,
             WORKER_DRAIN_TIMEOUT,
             false,
+            "user quit",
         )
         .await
     }
@@ -158,6 +159,7 @@ impl QuitCoordinator {
             UPDATE_FLUSH_TIMEOUT,
             WORKER_DRAIN_TIMEOUT,
             true,
+            "update restart",
         )
         .await
     }
@@ -187,6 +189,7 @@ impl QuitCoordinator {
             SESSION_END_FLUSH_TIMEOUT,
             SESSION_END_DRAIN_TIMEOUT,
             false,
+            "sign-out or shutdown",
         )
         .await
     }
@@ -207,6 +210,7 @@ impl QuitCoordinator {
         true
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn finish_quit(
         &self,
         events: Arc<dyn EventSink>,
@@ -215,7 +219,10 @@ impl QuitCoordinator {
         flush_timeout: Duration,
         drain_timeout: Duration,
         require_saved: bool,
+        reason: &'static str,
     ) -> QuitOutcome {
+        // The reason the run record gets if this quit is what ends the app.
+        crate::trail::note_exit_reason(reason);
         let notify = Arc::new(Notify::new());
         *self.saved.lock().unwrap() = Some(notify.clone());
         *self.phase.lock().unwrap() = Phase::Quitting;

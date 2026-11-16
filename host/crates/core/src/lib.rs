@@ -14,6 +14,7 @@
 //! | [`credentials`] | AES-256-GCM envelopes; key in Credential Manager |
 //! | [`recovery`] | startup recovery of interrupted work |
 //! | [`lifecycle`] | quit |
+//! | [`trail`] | run record, heartbeat and unclean-start note, so a silent end can be read later |
 //! | [`ops`] | the `api` ops this crate serves |
 
 pub mod credentials;
@@ -29,6 +30,7 @@ pub mod profile;
 pub mod recovery;
 pub mod revisions;
 pub mod secrets;
+pub mod trail;
 
 /// Milliseconds since the Unix epoch.
 pub fn now_ms() -> i64 {

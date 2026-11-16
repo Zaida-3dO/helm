@@ -1,6 +1,8 @@
 // Command dispatch for one worker: reads host commands from stdin, gates prompts behind the
 // get_state handshake, and guarantees one response per id-bearing command.
 
+import fs from "node:fs";
+import path from "node:path";
 import type { Readable } from "node:stream";
 import { HostChannel, type ResponseBody } from "./channel.ts";
 import { describeFault, LineReader, MAX_RECORD_BYTES } from "./lines.ts";
@@ -34,6 +36,31 @@ const AFTER_READY: Record<string, keyof Pick<Driver, "deliverNow" | "withdraw" |
   stop_tool: "stopTool",
   compact: "compact",
 };
+
+/**
+ * A line in the host's diagnostics folder saying this worker lost its host. It tells an
+ * outside kill apart from a quit, seen from the workers' side. Best-effort: a failed note
+ * is only a stderr line.
+ */
+function noteHostGone(diag: (msg: string) => void): void {
+  const root = process.env.HELM_DATA_ROOT;
+  if (!root) return;
+  try {
+    const dir = path.join(root, "diagnostics");
+    fs.mkdirSync(dir, { recursive: true });
+    const p = path.join(dir, "host-gone.log");
+    // One rolling file, like the host's own logs.
+    if (fs.existsSync(p) && fs.statSync(p).size > 512 * 1024) {
+      fs.renameSync(p, path.join(dir, "host-gone.old.log"));
+    }
+    fs.appendFileSync(
+      p,
+      `${new Date().toISOString()} host went away: this worker's stdin closed (worker pid ${process.pid}, chat ${process.env.HELM_CHAT_ID ?? "?"})\n`,
+    );
+  } catch (e) {
+    diag(`host-gone note not written: ${(e as Error).message}`);
+  }
+}
 
 export interface ServeOptions {
   input: Readable;
@@ -173,7 +200,12 @@ export function serve(opts: ServeOptions): void {
         channel.emit({ type: "worker_error", error: `bad command from host: ${describeFault(f)}` });
         void finish(1, "bad host record");
       },
-      onEnd: () => void finish(0, "host closed stdin"),
+      onEnd: () => {
+        // The host is gone (killed or crashed) unless the quit sequence already said so;
+        // `ending` guards the orderly case inside finish.
+        if (!ending) noteHostGone(diag);
+        void finish(0, "host closed stdin");
+      },
     },
     opts.maxRecordBytes ?? MAX_RECORD_BYTES,
   );

@@ -144,3 +144,25 @@ to 12 KiB each and the reply keeps to 40 KiB of selected text.
 
 Linux: POSIX modes and `O_NOFOLLOW`, a Unix socket in the profile for the focus signal, and no
 credential store yet (credentials refuse rather than fall back to plaintext).
+
+## When Helm stops: the trail in `diagnostics`
+
+The profile's `diagnostics` folder holds small files that say how the host's last run ended.
+All of them hold numbers, ids and the app version — never message text or tokens — and none of
+them leaves the machine.
+
+| File | What it says |
+|---|---|
+| `host.log` | the host's own log (rolling, one older file kept) |
+| `run.json` | this run: when it started, its pid, the version. An orderly end adds an `exit` line with the time and the reason (user quit, update restart, sign-out or shutdown). A record without that line when the next run starts means the run before was cut short |
+| `heartbeat.json` | rewritten every 45 s while the app runs: the time, pid, uptime and how many chats were working — it pins the moment of a silent death to about a minute |
+| `unclean.json` | written at a start that follows a cut-short run: the previous run's record and its last heartbeat, kept together |
+| `host-gone.log` | the workers' side: each worker appends one line when its host's stdin closes without a shutdown — an outside kill, seen from the workers (512 KiB cap, one older file) |
+| `crash-<time>.dmp` | on a native fault (Windows only): the smallest kind of crash dump — thread stacks and the module list. It holds the process's memory at that moment (that is its purpose), so it stays here, rolling, three newest kept |
+| `ui-process.log` | one line per web view fault: the page stopped answering (the watchdog reloads it), or WebView2 reported a failed process, with what was done about it |
+
+A panic on any thread is written to `host.log` with its backtrace. A command that names the
+app's own executable, or ends processes by image name rather than by pid, gets a line in
+`host.log` from the landing guard (noted, never blocked). Start-up after an unclean end logs
+`previous run ended without a clean exit` with the last heartbeat time and the previous
+version.
