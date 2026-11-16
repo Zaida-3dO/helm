@@ -36,25 +36,33 @@ use std::time::{Duration, Instant};
 
 /// The limits, and the signal a waiting judgement listens for when a running one ends.
 #[derive(Default)]
-struct Gate {
+pub(crate) struct Gate {
     limits: Mutex<Limiter>,
     freed: Condvar,
 }
 
 impl Gate {
-    fn lock(&self) -> MutexGuard<'_, Limiter> {
+    /// A gate with limits of its own.
+    pub(crate) fn with_caps(caps: route::Caps) -> Self {
+        Self {
+            limits: Mutex::new(Limiter::with_caps(caps)),
+            freed: Condvar::new(),
+        }
+    }
+
+    pub(crate) fn lock(&self) -> MutexGuard<'_, Limiter> {
         self.limits.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Give a slot back and wake the judgements waiting for one.
-    fn release(&self, slot: Slot) {
+    pub(crate) fn release(&self, slot: Slot) {
         self.lock().release(slot);
         self.freed.notify_all();
     }
 
     /// Wait, at most `within`, until the job in `slot` may run. False when it never could:
     /// the slot is still the caller's to release.
-    fn wait_to_run(&self, slot: Slot, within: Duration) -> bool {
+    pub(crate) fn wait_to_run(&self, slot: Slot, within: Duration) -> bool {
         let deadline = Instant::now() + within;
         let mut l = self.lock();
         loop {
@@ -973,6 +981,24 @@ mod tests {
         assert!(rows[0].0.contains("\u{ab}Pay\u{bb}"));
         assert!(rows[0].0.contains("\u{ab}Use the slower plan\u{bb}"));
         assert!(rows[0].0.contains("never by rewriting history"));
+        // The nudge a stop sends is a note from Helm as well: never the user's own words.
+        let nudge_id = uuid::Uuid::new_v4().to_string();
+        let _ = crate::stops::Host::send(
+            &svc.rt,
+            &chat,
+            &nudge_id,
+            &crate::stoproute::nudge_text(&crate::stoproute::Nudge::UseLocal),
+        );
+        let origin: String = db
+            .snapshot(|tx| {
+                tx.query_row(
+                    "SELECT origin FROM submission_meta WHERE submission_id = ?1",
+                    [&nudge_id],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(origin, "app", "a nudge is never typed");
         // The decided row left the review list and remembers the new answer.
         let row = svc.get("a1").unwrap().unwrap();
         assert_eq!(row.answer.as_deref(), Some("Use the slower plan"));

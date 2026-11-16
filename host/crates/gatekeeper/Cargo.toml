@@ -10,6 +10,11 @@ publish.workspace = true
 helm-core.workspace = true
 helm-ipc.workspace = true
 helm-chats.workspace = true
+helm-hosttools = { path = "../hosttools" }
+helm-workers.workspace = true
+helm-governor = { path = "../governor" }
+helm-usage = { path = "../usage" }
+helm-waits = { path = "../waits" }
 serde.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true

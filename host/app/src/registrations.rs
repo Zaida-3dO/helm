@@ -519,7 +519,11 @@ pub fn launch_contributors(
     }))
     .register_section(Arc::new(knowledge_section(db)))
     .register_section(Arc::new(helm_itemlinks::ItemLinksSection))
-    .register_section(Arc::new(helm_workflow::WorkflowSection { db: db.clone() }));
+    .register_section(Arc::new(helm_workflow::WorkflowSection { db: db.clone() }))
+    // How the user wants chats to work (run to completion, or check in), first in the addendum.
+    .register_section(Arc::new(helm_gatekeeper::workmode::WorkmodeSection {
+        db: db.clone(),
+    }));
     // The knowledge layers: who a chat is for (its profile and project), and the rules of everyone
     // and of that person.
     if let Some(profile_dir) = db.path().parent() {

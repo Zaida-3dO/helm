@@ -52,6 +52,8 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("chat_attention", Data),
     ("chat_triage", Data),
     ("chat_flags", Data),
+    // A turn end the stop judge is holding while it decides (cleared on every exit and at start-up).
+    ("chat_stop_holds", Data),
     ("chat_turn_usage", Data),
     // What a roll-over successor continues, and what a chat was told and reported of its project's
     // startup instructions (the instructions themselves are a column of project_local).
@@ -174,6 +176,12 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
         UserOnly("The gatekeeper decides when Helm answers questions for you, so only you set it."),
     ),
     ("gate_asks", Data),
+    // The run of nudges a chat is on (the gatekeeper's own count), and a board's working mode.
+    ("gate_stop_chains", Data),
+    (
+        "board_working_modes",
+        UserOnly("How a board's chats work is yours to set; agents never change it."),
+    ),
     // Local model servers: the addresses, switches and numbers around them.
     (
         "local_model_settings",

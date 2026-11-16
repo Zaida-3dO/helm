@@ -182,6 +182,11 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
         "agentSettingsAll",
         UserOnly("Lets chats change every setting without asking, so only you can turn it on."),
     ),
+    // How chats work: run to completion, or check in (check in when missing).
+    (
+        "workingMode",
+        UserOnly("How your chats work, run to completion or check in, is yours to set; no brief can change it."),
+    ),
 ];
 
 /// Dynamic keys under fixed prefixes: all internal.
@@ -272,13 +277,13 @@ mod tests {
             |want: fn(&PrefClass) -> bool| CLASSIFIED.iter().filter(|(_, c)| want(c)).count();
         assert_eq!(count(|c| *c == Registry(Base)), 46);
         assert_eq!(count(|c| *c == Registry(All)), 1);
-        // The user-only floor is the one switch that governs what chats may change.
+        // The user-only floor: the switch that governs what chats may change, and how chats work.
         let user: Vec<_> = CLASSIFIED
             .iter()
             .filter(|(_, c)| matches!(c, UserOnly(_)))
             .map(|(k, _)| *k)
             .collect();
-        assert_eq!(user, ["agentSettingsAll"]);
+        assert_eq!(user, ["agentSettingsAll", "workingMode"]);
         // Nothing is parked: a new preference is agent-settable unless it says why not.
         assert_eq!(count(|c| *c == Later), 0);
     }

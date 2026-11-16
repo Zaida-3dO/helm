@@ -7,7 +7,10 @@
 //! | [`scrub`] | the host's pass over the write-up: ids stripped, fields capped, a plain fallback built from the card |
 //! | [`store`] | the `gate_asks` audit trail and `gate_settings` tables |
 //! | [`service`] | the gate: holds each question card, judges it through the short-lived helper, and answers the card through the chat runtime — or hands it back |
-//! | [`ops`] | the UI-only `gate_*` ops: history, review, change answer, and settings |
+//! | [`stoproute`] | the stop judge's pure decision table: which turn ends are never looked at, what the model's answer is, and what Helm does about it |
+//! | [`stops`] | the stop judge: holds a clean turn end while the working mode is run to completion, judges it through the same helper, and nudges the chat on or lets it stop |
+//! | [`workmode`] | the working mode (run to completion, or check in with me): the app's mode, a board's own, the launch text and the line a turn carries after a change |
+//! | [`ops`] | the UI-only `gate_*` and `workmode_*` ops: history, review, change answer, settings, and the working mode |
 //! | `bindings` | the TypeScript for the shapes the UI reads |
 //!
 //! Every card the gate looks at leaves one audit row, including cards it let through for a
@@ -22,7 +25,10 @@ pub mod route;
 pub mod scrub;
 pub mod service;
 pub mod settings;
+pub mod stoproute;
+pub mod stops;
 pub mod store;
+pub mod workmode;
 
 pub use ops::register_ops;
 pub use service::GateService;
@@ -33,7 +39,8 @@ use helm_ipc::{EventSink, Services};
 use std::sync::Arc;
 
 pub fn register_migrations(reg: &mut helm_core::db::MigrationRegistry) {
-    reg.initializer("gatekeeper", store::init);
+    reg.initializer("gatekeeper", store::init)
+        .one_time("gatekeeper-asks-stop-channel", store::allow_stop_channel);
 }
 
 /// The shared [`GateService`], installed as the chat runtime's question gate. Needs the
@@ -45,6 +52,17 @@ pub fn register_services(services: &mut Services, events: &Arc<dyn EventSink>) {
     let svc = GateService::new(db.clone(), events.clone(), (*rt).clone());
     rt.set_question_gate(svc.clone());
     services.insert(svc);
+    // The stop judge: it holds a clean turn end while chats run to completion. It reads plan
+    // usage from the meter, which is registered before this.
+    let usage = services
+        .get::<helm_usage::UsageService>()
+        .map(|u| Arc::new(stops::UsageMeter(u)) as Arc<dyn stops::UsageProbe>);
+    rt.set_stop_judge(stops::StopGate::new(
+        db.clone(),
+        events.clone(),
+        (*rt).clone(),
+        usage,
+    ));
     start_upkeep(&(*rt).clone());
 }
 
