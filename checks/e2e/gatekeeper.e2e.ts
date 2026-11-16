@@ -174,6 +174,10 @@ describe("The working mode: the chip, the nudged stop, the counted blocker and t
     await dispose(app2);
   });
 
+  const gateRows2 = async (filter: string): Promise<Json[]> =>
+    ((await api(page2(), "gate_list", { filter })) as { rows: Json[] }).rows;
+  const needsYou2 = async (chatId: string): Promise<boolean> =>
+    ((await api(page2(), "attention_get", {})) as { needsYou: { chatId: string }[] }).needsYou.some((r) => r.chatId === chatId);
   const chip = () => page2().locator(tid("workmode-chip"));
   const sendText2 = async (text: string): Promise<void> => {
     await typeMessage(page2(), text);
@@ -192,6 +196,28 @@ describe("The working mode: the chip, the nudged stop, the counted blocker and t
       await page2().keyboard.press("Escape");
 
       const chat = await newChat(page2(), work2);
+      // The checking line lives only while the stop is being judged, which is a moment, and
+      // a backgrounded window renders too slowly for a polling selector to catch a mount that
+      // quick. So watch the DOM itself: the observer sees the line the instant it appears.
+      const lineSeen = page2().evaluate(
+        (id) =>
+          new Promise<boolean>((resolve) => {
+            const hit = () => document.querySelector(`[data-testid="${id}"]`);
+            if (hit()) return resolve(true);
+            const mo = new MutationObserver(() => {
+              if (hit()) {
+                mo.disconnect();
+                resolve(true);
+              }
+            });
+            mo.observe(document.body, { subtree: true, childList: true });
+            setTimeout(() => {
+              mo.disconnect();
+              resolve(false);
+            }, 90_000);
+          }),
+        "stop-check-line",
+      );
       await sendText2("stop flow one");
 
       // Every chat is launched with the mode: the run text is in this chat's launch record.
@@ -199,18 +225,17 @@ describe("The working mode: the chip, the nudged stop, the counted blocker and t
       const launched = await until("the launch record", () => (fs.existsSync(launchFile) ? fs.readFileSync(launchFile, "utf8") : undefined));
       assert.match(launched, /Working mode: run to completion/, "the launch says the mode");
 
-      // The turn ends by asking: a quiet checking line appears, no finished notice is given.
-      const lineSeen = page2().waitForSelector(tid("stop-check-line"), { timeout: 30_000 }).catch(() => null);
+      // The turn ends by asking: the quiet checking line showed (no finished notice is given).
       await waitText(page2(), "Shall I go ahead with the next step?", 60_000);
       assert.ok(await lineSeen, "the checking line shows while the stop is judged");
 
       // The answer is a nudge from Helm, and the chat carries on with the default.
       await waitText(page2(), "Carry on without asking", 60_000);
       await waitText(page2(), "All finished. Done.", 60_000);
-      assert.equal(await needsYou(chat), false, "a nudged stop is not counted against the chat");
+      assert.equal(await needsYou2(chat), false, "a nudged stop is not counted against the chat");
       assert.equal(await page2().locator(tid("stop-row")).count(), 0, "a nudge writes no stop row");
 
-      const decided = await until("the decided stop record", async () => (await gateRows("review")).find((r) => r.chatId === chat));
+      const decided = await until("the decided stop record", async () => (await gateRows2("review")).find((r) => r.chatId === chat));
       assert.equal(decided.verdict, "decided");
       assert.equal(decided.channel, "stop");
       assert.equal(decided.choice, "Take the next step");
@@ -237,8 +262,8 @@ describe("The working mode: the chip, the nudged stop, the counted blocker and t
       await sendText2("stop flow blocker");
       await waitText(page2(), "sign in to the package registry", 60_000);
       await page2().waitForSelector(`${tid("stop-row")}[data-class="blocker"]`, { timeout: 30_000 });
-      await until("the stop counted in attention", () => needsYou(chat), 20_000);
-      const asked = await until("the escalated stop record", async () => (await gateRows("asked")).find((r) => r.chatId === chat));
+      await until("the stop counted in attention", () => needsYou2(chat), 20_000);
+      const asked = await until("the escalated stop record", async () => (await gateRows2("asked")).find((r) => r.chatId === chat));
       assert.equal(asked.verdict, "escalated");
       assert.equal(asked.channel, "stop");
       assert.equal(asked.stopClass, "blocker");
