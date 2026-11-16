@@ -7,6 +7,9 @@ export type Json = Record<string, unknown>;
 export interface ResolvedServer {
   id: string;
   name: string;
+  /** The preset the server was created from, if any. The worker recognises the built-in
+   * browser server by it (see `browser.ts`). */
+  preset?: string;
   transport: "stdio" | "http" | "sse";
   command?: string;
   args?: string[];

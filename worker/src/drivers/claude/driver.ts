@@ -227,8 +227,9 @@ export class ClaudeDriver implements Driver {
       const channel = new RequestChannel({ dir: launch.chatToolsDirectory, emit: (rec) => this.ch.emit(rec) });
       this.mcp = createMcpBridge((l) => this.ch.emit(l), {
         cwd: launch.cwd,
-        // The bridge's one ask for a current Authorization header, answered by the host.
-        hostRequest: (operation, args, o) => channel.call(operation, args, { limitBytes: 8 * 1024, timeoutMs: o.timeoutMs, mutating: false, caller: { child: false } }),
+        // The bridge's asks answered by the host: the current Authorization header for a
+        // signed-in server, and the browser hold reports (flag + Telegram ask) for the broker.
+        hostRequest: (operation, args, o) => channel.call(operation, args, { limitBytes: 8 * 1024, timeoutMs: o.timeoutMs, mutating: o.mutating === true, caller: { child: false } }),
       });
       if (gatesWanted(deps.env)) this.gateChannel = channel;
       this.stopAsks.workflow = gatesWanted(deps.env);
