@@ -1433,6 +1433,32 @@ async fn mode_commands_are_answered_to_the_phone_and_never_reach_a_chat() {
         .fail_workmode
         .store(false, std::sync::atomic::Ordering::SeqCst);
 
+    // A household person's phone: this PC may well take her Telegram, but the working mode
+    // belongs to the person whose profile this machine is home to. Her `/mode` gets one plain
+    // line, reaches no op, opens no chat, and changes nothing.
+    e.db.write(|tx| helm_profiles::store::create(tx, "Her", None, Some("hub-h"), 0))
+        .unwrap();
+    clear_calls();
+    let mut hers = msg("wh1", "/mode run");
+    hers.person = Some("hub-h".into());
+    sink.deliver(hers).await.unwrap();
+    assert!(
+        e.ops.calls.lock().unwrap().is_empty(),
+        "a household person's /mode reached an op"
+    );
+    let replies = said();
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert!(
+        replies[0].contains("only its owner can change it from a phone"),
+        "{replies:?}"
+    );
+    assert_eq!(chat_count(&e.db), 0, "her /mode opened no chat");
+    // And her own messages still flow: a plain one opens her chat as usual.
+    let mut plain = msg("wh2", "how are things");
+    plain.person = Some("hub-h".into());
+    sink.deliver(plain).await.unwrap();
+    assert!(chat_count(&e.db) > 0, "her plain message opened no chat");
+
     // `/modem` and a message merely starting "mode" are ordinary messages: stored in the chat.
     clear_calls();
     sink.deliver(msg("w5", "/modem run")).await.unwrap();

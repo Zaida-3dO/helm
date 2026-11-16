@@ -1217,6 +1217,21 @@ impl ChatSink {
     /// Answer a `/mode` command between the phone and Helm: it reads and changes the working
     /// mode through the same ops the window's chip uses, and reaches no chat.
     async fn answer_mode(&self, c: &Ctx, up: &Arc<dyn Upstream>, cmd: ModeCommand) {
+        // The working mode governs every chat on this PC, so only the person whose profile this
+        // machine is home to may use it from a phone. A household person whose Telegram this PC
+        // takes, or anyone else, gets a plain line and nothing changes.
+        let is_home =
+            c.db.snapshot(|tx| helm_profiles::store::home(tx))
+                .ok()
+                .flatten()
+                .is_some_and(|h| h.id == c.profile_id);
+        if !is_home {
+            up.notify(
+                &c.person,
+                "The working mode belongs to the PC that runs Helm: only its owner can change it from a phone.",
+            );
+            return;
+        }
         let (op, args) = match cmd {
             ModeCommand::Show => ("workmode_get", json!({})),
             ModeCommand::Set(m) => ("workmode_set", json!({ "scope": "app", "mode": m })),
