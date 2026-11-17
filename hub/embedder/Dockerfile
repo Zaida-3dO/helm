@@ -25,16 +25,18 @@ RUN cmake -B build -DCMAKE_BUILD_TYPE=Release \
       -DGGML_FMA=OFF \
       -DGGML_F16C=OFF \
     && cmake --build build --config Release --target llama-server -j "$(nproc)" \
-    && cp build/bin/llama-server build/bin/libllama-server-impl.so /
+    && mkdir -p /opt/llama \
+    && cp -a build/bin/llama-server build/bin/*.so* /opt/llama/
 
 FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends wget \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /models && chown 1000:100 /models
-# llama-server is a thin launcher that loads libllama-server-impl.so from its
-# own folder, so both must ship together.
-COPY --from=build /llama-server /libllama-server-impl.so /usr/local/bin/
+# llama-server is a thin launcher: it dlopens libllama-server-impl.so by bare
+# name and links against the versioned llama/ggml/mtmd shared libraries, so
+# everything build/bin produces must ship in one folder together.
+COPY --from=build /opt/llama/ /usr/local/bin/
 USER 1000:100
 ENV EMBED_MODEL=/models/nomic-embed-text-v1.5.Q8_0.gguf
 # llama-server dlopens libllama-server-impl.so by bare name, so its folder
