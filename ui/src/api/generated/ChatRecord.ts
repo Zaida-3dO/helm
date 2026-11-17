@@ -37,6 +37,12 @@ stalled: boolean,
  */
 localAhead: number | null, 
 /**
+ * Why this chat's turn start waits at its start, while it does: `local_cap`,
+ * `claude_capacity`, `at_limit` or `manual` (see [`crate::queue`], which the queue panel
+ * reads alongside this). `null` when the chat is not waiting for capacity.
+ */
+queueReason: string | null, 
+/**
  * What the busy chat is doing right now ([`ChatState`]); `null` while no turn is open.
  * Refreshed by the maintenance tick, never by a model call. Boxed so the record keeps its
  * size: the state is read by the chip and the tools, not by every event hop.

@@ -287,7 +287,7 @@ mod tests {
     fn the_tiers_and_the_floor() {
         let count =
             |want: fn(&PrefClass) -> bool| CLASSIFIED.iter().filter(|(_, c)| want(c)).count();
-        assert_eq!(count(|c| *c == Registry(Base)), 47);
+        assert_eq!(count(|c| *c == Registry(Base)), 48);
         assert_eq!(count(|c| *c == Registry(All)), 1);
         // The user-only floor: the switch that governs what chats may change, how chats work,
         // and when they roll themselves over.

@@ -637,6 +637,14 @@ pub(crate) struct Live {
     /// chats: the place it took in the line (smaller goes first). A chat held here is not working,
     /// so it does not count against the cap, and the oldest waiter starts first.
     pub held_at_start: Option<u64>,
+    /// The queue class of this chat's held turn start, while one is held ([`crate::queue`]).
+    /// Lets the chats waiting on the same place order themselves.
+    pub hold_class: Option<crate::queue::QueueClass>,
+    /// Why this chat's turn start waits (`crate::queue` reason code), while it does. The mirror
+    /// of the chat record's `queueReason`.
+    pub hold_reason: Option<&'static str>,
+    /// The queue pushed this chat's held start to the front of its line.
+    pub hold_top: bool,
 }
 
 /// One local model server's load right now: chats with a turn open on it and working, and chats
