@@ -123,6 +123,24 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
   const gaveUp = new Set<string>();
   let sendBehavior: SendBehavior = { ...HOME_SEND_BEHAVIOR };
   const prefs = new Map<string, unknown>();
+
+  // A small capacity queue for the dev host: a held start so the Queue panel has a row to show.
+  type FakeHold = { chatId: string; title: string; reason: string; class: string; serverId: string | null; since: number; top: boolean };
+  let fakeHolds: FakeHold[] = [{ chatId: 'dev-queue-chat', title: 'Waiting chat', reason: 'local_cap', class: 'normal', serverId: 'strata', since: 0, top: false }];
+  const fakeQueueList = () => ({
+    entries: fakeHolds.map((h) => ({ ...h, since: Date.now() - 60_000 })),
+    servers: [{ serverId: 'strata', working: 3, queued: fakeHolds.filter((h) => h.serverId === 'strata').length }],
+    claudeQueued: 0,
+    claudeFull: false,
+    claudeUntil: null,
+  });
+  const fakeQueueAct = (chatId: string, action: string) => {
+    if (action === 'cancel' || action === 'release') fakeHolds = fakeHolds.filter((h) => h.chatId !== chatId);
+    else if (action === 'hold') fakeHolds = fakeHolds.map((h) => (h.chatId === chatId ? { ...h, reason: 'manual', serverId: null } : h));
+    else if (action === 'release') fakeHolds = fakeHolds.map((h) => (h.chatId === chatId ? { ...h, reason: 'local_cap' } : h));
+    else if (action === 'top') fakeHolds = fakeHolds.map((h) => (h.chatId === chatId ? { ...h, top: true } : h));
+    return fakeQueueList();
+  };
   const answers = new Map<string, (a: Record<string, unknown>) => void>();
   /** forkId → the chat that fork made, so a repeated request answers the same chat. */
   const forks = new Map<string, string>();
@@ -242,6 +260,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         localAhead: null,
         state: null,
         started: false,
+        queueReason: null,
         profileId: '',
         hostDeviceId: '',
         sharedWith: [],
@@ -1171,6 +1190,8 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     },
     intro_allowed: () => ({ allowed: true }),
     preference_get: (a) => (a.key === 'sendBehavior' ? sendBehavior : (prefs.get(String(a.key)) ?? null)),
+    queue_list: () => fakeQueueList(),
+    queue_action: (a) => fakeQueueAct(String(a.chatId), String(a.action)),
     preference: (a) => {
       if (a.key === 'sendBehavior') sendBehavior = { ...HOME_SEND_BEHAVIOR, ...(a.value as object) };
       else prefs.set(String(a.key), a.value);

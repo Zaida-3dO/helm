@@ -453,6 +453,7 @@ export class NewChatController {
       localAhead: null,
       state: null,
       started: false,
+      queueReason: null,
       profileId: '',
       hostDeviceId: this.device?.uid ?? '',
       sharedWith: [],

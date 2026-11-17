@@ -54,6 +54,7 @@ export function chat(p: Partial<ChatRecord> = {}): ChatRecord {
     localAhead: null,
     state: null,
     started: false,
+    queueReason: null,
     profileId: '',
     hostDeviceId: '',
     sharedWith: [],

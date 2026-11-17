@@ -14,6 +14,10 @@ import type { ChatStore } from '../state/store.ts';
 import { SETTINGS_DIALOG } from '../settings/index.ts';
 import { SEARCH_DIALOG } from '../search/index.ts';
 import { AttentionInbox, inboxRows, nextAttention } from '../attention/index.ts';
+import { QueuePanel } from '../queue/QueuePanel.tsx';
+import { QueueStore } from '../queue/store.ts';
+import { queueOps } from '../queue/api.ts';
+import { queueCount } from '../queue/model.ts';
 import { PagesEntry } from '../pages/PagesEntry.tsx';
 import { ProfileDisc } from '../profiles/Disc.tsx';
 import { ProfileItem, moveChatToProfile, profileChoices, rowsForProfile, shareChatWith, shareChoices, sharedFrom, useProfiles } from '../profiles/index.ts';
@@ -223,6 +227,9 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const [preview, setPreview] = useState<Preview | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [inboxOpen, setInboxOpen] = useState(false);
+  const [queueOpen, setQueueOpen] = useState(false);
+  const queueStore = useMemo(() => new QueueStore(queueOps(api)), [api]);
+  const queueSnap = useSyncExternalStore(queueStore.subscribe, queueStore.getSnapshot);
   const undo = sidebarUndo;
   const act = useMemo(() => new SidebarActions({ api, pops, ops, data, undo, onError: setError }), [api, pops, ops, data, undo]);
   const now = useNow();
@@ -754,6 +761,9 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         bus={bus}
         attention={snap.attention}
         inboxOpen={inboxOpen}
+        queueCount={queueCount(queueSnap)}
+        queueOpen={queueOpen}
+        onQueue={() => setQueueOpen(true)}
         onNewChat={navNewChat}
         onSearch={openSearch}
         onAttention={() => setInboxOpen(true)}
@@ -880,6 +890,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       {confirm && <ConfirmDialog spec={confirm} onClose={() => setConfirm(null)} />}
       {cost && <CostDialog api={api} target={cost} onClose={() => setCost(null)} />}
       {inboxOpen && <AttentionInbox summary={snap.attention} ops={ops} onOpen={onSelect} onClose={() => setInboxOpen(false)} />}
+      {queueOpen && <QueuePanel store={queueStore} onOpen={onSelect} onClose={() => setQueueOpen(false)} />}
       <ItemPickerHost />
       {preview && !menu && !drag && (
         <PreviewCard

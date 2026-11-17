@@ -1,0 +1,112 @@
+/* The queue panel rows and the per-server summary line. */
+
+.queue-empty {
+  color: var(--helm-muted);
+  padding: 8px 2px;
+}
+
+.queue-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto;
+  grid-template-areas:
+    "open line class"
+    "actions actions actions";
+  gap: 2px 8px;
+  align-items: center;
+  padding: 6px 2px;
+  border-bottom: 1px solid var(--helm-border);
+}
+
+.queue-open {
+  grid-area: open;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  background: none;
+  border: none;
+  color: var(--helm-text);
+  cursor: pointer;
+  text-align: left;
+  padding: 0;
+}
+
+.queue-open:hover .queue-title {
+  text-decoration: underline;
+}
+
+.queue-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-line {
+  grid-area: line;
+  color: var(--helm-muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-class {
+  grid-area: class;
+  color: var(--helm-muted);
+  font-size: 11px;
+  border: 1px solid var(--helm-border);
+  border-radius: 7px;
+  padding: 1px 6px;
+}
+
+.queue-actions {
+  grid-area: actions;
+  display: inline-flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.queue-btn {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.queue-servers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  color: var(--helm-muted);
+  font-size: 12px;
+  padding: 8px 2px 2px;
+}
+
+.queue-foot {
+  color: var(--helm-muted);
+  font-size: 12px;
+}
+
+/* Settings → Queue rows. */
+
+.queue-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.queue-pane p {
+  margin: 0;
+  color: var(--helm-muted);
+}
+
+.queue-setting {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.queue-server-cap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

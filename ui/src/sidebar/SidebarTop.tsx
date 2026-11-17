@@ -12,7 +12,7 @@ import type { EventBus } from '../api/events.ts';
 import type { AttentionRow, AttentionSummary } from '../api/types.ts';
 import { dragHandlers } from '../topbar/caption.tsx';
 import { keys, useChord, useLayer } from '../ui/index.ts';
-import { IconBoard, IconChevronDown, IconClock, IconExternalLink, IconFlag, IconNewChat, IconSearch, IconSidebarClose, IconSuccess, IconX } from '../ui/icons.tsx';
+import { IconBoard, IconChevronDown, IconClock, IconExternalLink, IconFlag, IconNewChat, IconPause, IconSearch, IconSidebarClose, IconSuccess, IconX } from '../ui/icons.tsx';
 import { WheelMark, Wordmark } from '../ui/status/index.ts';
 import { countText, inboxCount } from '../attention/model.ts';
 import { mayMove } from '../shell/motion.ts';
@@ -36,6 +36,10 @@ export interface SidebarTopProps {
   attention: AttentionSummary | null;
   /** The Flagged list is open: its tile stays pressed. */
   inboxOpen: boolean;
+  /** How many chats wait in the capacity queue, and whether the queue panel is open. */
+  queueCount: number;
+  queueOpen: boolean;
+  onQueue: () => void;
   onNewChat: () => void;
   onSearch?: () => void;
   onAttention: () => void;
@@ -58,7 +62,7 @@ export function flaggedBadge(attention: AttentionSummary | null): string {
   return n > 99 ? '99+' : countText(attention);
 }
 
-export function SidebarTop({ api, bus, attention, inboxOpen, onNewChat, onSearch, onAttention, onOpenChat, remoteChatId }: SidebarTopProps) {
+export function SidebarTop({ api, bus, attention, inboxOpen, queueCount, queueOpen, onQueue, onNewChat, onSearch, onAttention, onOpenChat, remoteChatId }: SidebarTopProps) {
   const hide = useCommand(SIDEBAR_TOGGLE);
   const hideChord = useChord(SIDEBAR_TOGGLE);
   const newChord = useChord(NEW_CHAT_COMMAND);
@@ -83,6 +87,16 @@ export function SidebarTop({ api, bus, attention, inboxOpen, onNewChat, onSearch
       badge: count > 0 ? { text: flaggedBadge(attention), label: `${count} need attention` } : null,
       pressed: inboxOpen,
       disabled: attention === null,
+    },
+    queue: {
+      id: 'queue',
+      label: 'Queue',
+      icon: <IconPause size={20} />,
+      testId: 'nav-queue',
+      title: 'Chats waiting for a place to open',
+      onActivate: onQueue,
+      pressed: queueOpen,
+      badge: queueCount > 0 ? { text: String(queueCount > 99 ? '99+' : queueCount), label: `${queueCount} waiting`, testId: 'nav-queue-count' } : null,
     },
     tasks: tasks.ready ? { id: 'tasks', label: 'Tasks', icon: <IconBoard size={20} />, testId: 'nav-tasks', title: 'Tasks', onActivate: tasks.open } : null,
     schedules: {

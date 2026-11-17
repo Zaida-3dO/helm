@@ -7,10 +7,10 @@ export const TILE_GAP = 4;
 /** New, Search and More: the tiles that are always there. */
 export const FIXED_SLOTS = 3;
 
-export type ViewTileId = 'flagged' | 'tasks' | 'schedules';
+export type ViewTileId = 'flagged' | 'queue' | 'tasks' | 'schedules';
 
 /** The order a fresh install starts with, before any view has been opened. */
-export const DEFAULT_VIEW_ORDER: readonly ViewTileId[] = ['flagged', 'tasks', 'schedules'];
+export const DEFAULT_VIEW_ORDER: readonly ViewTileId[] = ['flagged', 'queue', 'tasks', 'schedules'];
 
 /** The `localStorage` key of the saved view order (per device, keeps views that are off). */
 export const TILES_KEY = 'helm.sidebar.tiles';
