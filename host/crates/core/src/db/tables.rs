@@ -41,6 +41,8 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("submission_meta", Data),
     ("unread_marks", Data),
     ("chat_activity", Data),
+    // A turn start held for capacity, changed only through the queue's own ops and tools.
+    ("chat_dispatch_holds", Tool),
     ("chat_forks", Data),
     ("fork_carry", Data),
     ("pending_edits", Data),

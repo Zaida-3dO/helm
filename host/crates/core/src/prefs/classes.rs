@@ -105,6 +105,9 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
     ("stallMinutes", Registry(Base)),
     // How many of our chats one local model server may carry at once (0 switches the cap off).
     ("localChatCap", Registry(Base)),
+    // The percent of the Claude plan windows at which a new Claude chat waits for the reset
+    // (0 switches it off). The default lives in `helm-chats` with the queue.
+    ("claudeHoldPct", Registry(Base)),
     // Settings > Chat and Shell: how the user's own window and keyboard behave. A chat changes
     // these itself, with the Undo notice.
     ("scrollOnSend", Registry(Base)),
@@ -284,7 +287,7 @@ mod tests {
     fn the_tiers_and_the_floor() {
         let count =
             |want: fn(&PrefClass) -> bool| CLASSIFIED.iter().filter(|(_, c)| want(c)).count();
-        assert_eq!(count(|c| *c == Registry(Base)), 47);
+        assert_eq!(count(|c| *c == Registry(Base)), 48);
         assert_eq!(count(|c| *c == Registry(All)), 1);
         // The user-only floor: the switch that governs what chats may change, how chats work,
         // and when they roll themselves over.

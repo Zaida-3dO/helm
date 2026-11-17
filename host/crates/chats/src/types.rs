@@ -141,6 +141,10 @@ pub struct ChatRecord {
     /// its turn ends.
     #[ts(type = "number | null")]
     pub local_ahead: Option<i64>,
+    /// Why this chat's turn start waits at its start, while it does: `local_cap`,
+    /// `claude_capacity`, `at_limit` or `manual` (see [`crate::queue`], which the queue panel
+    /// reads alongside this). `null` when the chat is not waiting for capacity.
+    pub queue_reason: Option<String>,
     /// What the busy chat is doing right now ([`ChatState`]); `null` while no turn is open.
     /// Refreshed by the maintenance tick, never by a model call. Boxed so the record keeps its
     /// size: the state is read by the chip and the tools, not by every event hop.
@@ -155,6 +159,64 @@ pub struct ChatRecord {
     pub host_device_id: String,
     /// Profile ids, besides its own, that the chat is shown to.
     pub shared_with: Vec<String>,
+}
+
+/// A turn start held in the queue, as `queue_list` reports it (see [`crate::queue`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueEntry {
+    pub chat_id: String,
+    pub title: String,
+    /// Why it waits: `local_cap`, `claude_capacity`, `at_limit` or `manual`.
+    pub reason: String,
+    /// `interactive`, `normal` or `background`.
+    pub class: String,
+    /// The local model server it waits on; nothing else has one.
+    pub server_id: Option<String>,
+    /// When the wait began, Unix ms.
+    #[ts(type = "number")]
+    pub since: i64,
+    /// The queue pushed it to the front of its line.
+    pub top: bool,
+}
+
+/// One local model server's load right now: chats working on it, and chats whose turn start
+/// waits at its start.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueServer {
+    pub server_id: String,
+    #[ts(type = "number")]
+    pub working: i64,
+    #[ts(type = "number")]
+    pub queued: i64,
+}
+
+/// `queue_list`: the queue whole in one read — every held start, front of the lines first,
+/// plus the load each place it waits on carries.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueSummary {
+    pub entries: Vec<QueueEntry>,
+    pub servers: Vec<QueueServer>,
+    /// Chats waiting for the Claude plan windows to open again.
+    #[ts(type = "number")]
+    pub claude_queued: i64,
+    /// Whether those windows read full right now.
+    pub claude_full: bool,
+    /// When they reopen, Unix ms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub claude_until: Option<i64>,
+}
+
+/// `queue_action`: one move on one held start; answers with the fresh [`QueueSummary`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueActionArgs {
+    pub chat_id: String,
+    /// `top`, `up`, `down`, `hold`, `release` or `cancel`.
+    pub action: String,
 }
 
 /// Where the chat's title came from. A manual rename always wins.

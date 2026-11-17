@@ -169,7 +169,6 @@ pub fn chat_send(
     let sid = uuid::Uuid::parse_str(&a.submission_id)
         .map_err(|_| ApiError::bad_args("submissionId must be a UUID."))?
         .to_string();
-    let limits = rt.limits().clone();
     let sb = rt
         .db()
         .snapshot(|t| {
@@ -207,19 +206,10 @@ pub fn chat_send(
                 return Ok(Err(ApiError::new("refused", "This chat is stopping; your message is kept, send it again in a moment.")));
             }
             let busy = status.is_busy();
-            if !busy {
-                let active: i64 = tx.query_row(
-                    "SELECT count(*) FROM chats WHERE status IN ('starting', 'running', 'stopping')",
-                    [],
-                    |r| r.get(0),
-                )?;
-                if active as usize >= limits.max_active {
-                    return Ok(Err(ApiError::new(
-                        "capacity",
-                        format!("{} chats are already working, which is the most Helm runs at once. Your message is kept in the draft.", limits.max_active),
-                    )));
-                }
-            }
+            // Nothing here refuses a start for being one chat too many: the message is saved
+            // and handed to the chat, and the queue's gate at the turn open decides whether it
+            // starts now or waits (and at most `max_active` chats work at once anyway — the
+            // runaway guard lives in the gate, where a held start is visible).
             // What Send means: idle, always a prompt; busy, the action or the mode.
             let (mode, state, priority) = if !busy {
                 (SubmissionMode::Prompt, SubmissionState::Saved, None)
@@ -441,11 +431,7 @@ enum Intake {
     Open { busy: bool },
 }
 
-fn host_intake(
-    tx: &Transaction<'_>,
-    s: &HostSend<'_>,
-    max_active: usize,
-) -> rusqlite::Result<Intake> {
+fn host_intake(tx: &Transaction<'_>, s: &HostSend<'_>) -> rusqlite::Result<Intake> {
     let existing = store::get_submission(tx, s.submission_id)?;
     let Some((status, archived)) = chat_status(tx, s.chat_id)? else {
         return Ok(Intake::Refused(crate::ops::not_found()));
@@ -467,20 +453,10 @@ fn host_intake(
             hand_off: existing.state == SubmissionState::Saved,
         });
     }
+    // Nothing is refused for being one chat too many: the message is stored and handed to
+    // the chat, and the queue's gate at the turn open makes it wait — at most `max_active`
+    // chats work at once is a rule of the gate now, where a held start shows in the queue.
     let busy = status.is_busy();
-    if !busy {
-        let active: i64 = tx.query_row(
-            "SELECT count(*) FROM chats WHERE status IN ('starting', 'running', 'stopping')",
-            [],
-            |r| r.get(0),
-        )?;
-        if active as usize >= max_active {
-            return Ok(Intake::Refused(ApiError::new(
-                "capacity",
-                "Too many chats are already working.",
-            )));
-        }
-    }
     Ok(Intake::Open { busy })
 }
 
@@ -611,18 +587,13 @@ fn host_send_inner(
         return Err(ApiError::new("too_large", "The message is too large."));
     }
     let now = helm_core::now_ms();
-    let max_active = rt.limits().max_active;
     let dir = rt.sh.cfg.profile_dir.join("attachments");
     sweep_once(rt, &dir);
     // Look first, with nothing written: a send that is refused as it stands, or already stored (the
     // hub sends a message again every 45 s until it is acknowledged), must not save its files.
     let mut staged_images = Vec::new();
     let mut staged_files = Vec::new();
-    match rt
-        .db()
-        .snapshot(|tx| host_intake(tx, &s, max_active))
-        .map_err(sql)?
-    {
+    match rt.db().snapshot(|tx| host_intake(tx, &s)).map_err(sql)? {
         Intake::Refused(e) => return Err(e),
         Intake::Already { .. } => {}
         Intake::Open { .. } => {
@@ -651,7 +622,7 @@ fn host_send_inner(
     let stored_by_this_send = std::cell::Cell::new(false);
     let written: Result<Result<(bool, bool), ApiError>, rusqlite::Error> = rt.db().write(|tx| {
         // The same look again, now that nothing else can write: it may have changed.
-        let busy = match host_intake(tx, &s, max_active)? {
+        let busy = match host_intake(tx, &s)? {
             Intake::Refused(e) => return Ok(Err(e)),
             // Already recorded: it is handed to Claude now if that never happened.
             Intake::Already { hand_off } => return Ok(Ok((true, hand_off))),

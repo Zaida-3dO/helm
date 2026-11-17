@@ -1953,32 +1953,260 @@ async fn the_wait_limit_retries_while_waiting_then_stops() {
     );
 }
 
-/// Beyond the active-chat cap a send is refused and the draft is kept.
+/// Beyond the active-chat cap a send is not refused: it is taken and waits at the chat's
+/// start — visibly, with a record in the queue — and opens when a place frees.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sends_beyond_the_active_cap_are_refused_with_the_draft_kept() {
+async fn sends_beyond_the_active_cap_wait_in_the_queue_and_open_when_one_frees() {
     let mut l = limits();
     l.max_active = 1;
     let mut h = harness_with(l);
-    let (_busy, _, _w) = running_turn(&mut h).await;
+    let (busy, _, w) = running_turn(&mut h).await;
     let other = h.create().await;
-    h.call(
-        "draft_save",
-        json!({"chatId": other, "text": "keep me", "revision": 10}),
+    let (sid, _) = h.send(&other, "wait for me", "default").await;
+    h.until(
+        "the second start waits at its start, with its reason recorded",
+        |h| {
+            h.status(&other) == "starting"
+                && h.state(&sid) == "saved"
+                && h.col(&format!(
+                "SELECT COALESCE(queue_reason, 'x') FROM chat_activity WHERE chat_id = '{other}'"
+            )) == ["at_limit"]
+                && h.col(&format!(
+                    "SELECT reason FROM chat_dispatch_holds WHERE chat_id = '{other}'"
+                )) == ["at_limit"]
+        },
     )
-    .await
+    .await;
+    // The freed place takes it: no new send, the same submission opens the turn.
+    w.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-q1"}))
+        .await;
+    let mut w2 = h.worker().await;
+    w2.ready().await;
+    let p = w2.expect("prompt").await;
+    assert_eq!(p["submissionId"], sid.as_str());
+    h.until("the hold is gone once it opens", |h| {
+        h.col(&format!(
+            "SELECT count(*) FROM chat_dispatch_holds WHERE chat_id = '{other}'"
+        )) == ["0"]
+            && h.col(&format!(
+                "SELECT COALESCE(queue_reason, 'x') FROM chat_activity WHERE chat_id = '{other}'"
+            )) == ["x"]
+    })
+    .await;
+    let _ = busy;
+}
+
+/// While the plan allowance reads used up, a new start waits at its start with that reason
+/// recorded, and the window's own reset releases it — no new send. An interactive send instead
+/// gets an answer in words and is never left waiting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_used_up_plan_allowance_holds_a_start_and_the_reset_releases_it() {
+    use crate::submit::{host_send, HostSend};
+    let mut h = harness();
+    let seed = |h: &H, pct: f64, reset_in: i64| {
+        let now = helm_core::now_ms();
+        let body = json!({ "fiveHour": { "pct": pct, "at": now, "resetsAt": now + reset_in } });
+        h.db.write(move |tx| {
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS plan_usage (\
+                     id INTEGER PRIMARY KEY CHECK (id = 1), body TEXT NOT NULL, \
+                     updated_at INTEGER NOT NULL);",
+            )?;
+            tx.execute(
+                "INSERT OR REPLACE INTO plan_usage(id, body, updated_at) VALUES (1, ?1, ?2)",
+                rusqlite::params![body.to_string(), now],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+    };
+    // A window that resets in four seconds: the wait is real but short.
+    seed(&h, 96.0, 4_000);
+    let chat = h.create().await;
+    let (sid, _) = h.send(&chat, "hold me", "default").await;
+    h.until("the start waits with the allowance as its reason", |h| {
+        h.status(&chat) == "starting"
+            && h.state(&sid) == "saved"
+            && h.col(&format!(
+                "SELECT reason FROM chat_dispatch_holds WHERE chat_id = '{chat}'"
+            )) == ["claude_capacity"]
+    })
+    .await;
+    h.until("the reset clears the hold", |h| {
+        h.col(&format!(
+            "SELECT count(*) FROM chat_dispatch_holds WHERE chat_id = '{chat}'"
+        )) == ["0"]
+    })
+    .await;
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    assert_eq!(
+        p["submissionId"],
+        sid.as_str(),
+        "the same send opens the turn once the window reopens"
+    );
+    // A window that will not reopen for an hour: an interactive send is answered, not held.
+    seed(&h, 96.0, 3_600_000);
+    let remote = h.create().await;
+    host_send(
+        &h.rt,
+        HostSend {
+            chat_id: &remote,
+            submission_id: "tg-1",
+            text: "get the shopping list",
+            origin: crate::types::SubmissionOrigin::Telegram,
+        },
+    )
     .unwrap();
-    let e = h
-        .call(
-            "chat_send",
-            json!({"chatId": other, "submissionId": uuid::Uuid::new_v4().to_string(), "text": "keep me", "action": "default", "draftRevision": 10}),
+    h.until("the interactive send is answered, not left waiting", |h| {
+        h.state("tg-1") == "rejected" && h.status(&remote) == "idle"
+    })
+    .await;
+    assert_eq!(
+        h.col(&format!(
+            "SELECT count(*) FROM chat_dispatch_holds WHERE chat_id = '{remote}'"
+        )),
+        ["0"],
+        "an interactive start is never parked"
+    );
+}
+
+/// The queue line, moved by hand: to the front, parked until released, and sent back. Against a
+/// local server's cap of one, where every opening is a real turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_queue_line_can_be_reordered_parked_and_sent_back() {
+    let mut h = harness_with(Limits {
+        tick: Duration::from_millis(50),
+        ..limits()
+    });
+    h.db.write(|tx| helm_core::prefs::set_generic(tx, "localChatCap", &json!(1)))
+        .unwrap();
+    let local = Arc::new(FakeLocal {
+        turns: Mutex::new(Vec::new()),
+        outcome: Mutex::new(Ok("m-one".into())),
+        gate: Mutex::new(None),
+        finished: Mutex::new(Vec::new()),
+        refreshed: Mutex::new(Vec::new()),
+        held_outcome: Mutex::new(None),
+        queue: Mutex::new(None),
+    });
+    h.rt.set_local_models(local.clone());
+    let cwd = h.work.to_string_lossy().into_owned();
+    let asked = |id: &str| -> bool { local.turns.lock().unwrap().iter().any(|t| t.chat_id == id) };
+    let new_id = |r: Value| r["id"].as_str().unwrap().to_owned();
+    let a = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
         )
         .await
-        .unwrap_err();
-    assert_eq!(e.code, "capacity");
-    assert_eq!(
-        h.col(&format!("SELECT draft FROM chats WHERE id = '{other}'")),
-        ["keep me"]
+        .unwrap(),
     );
+    h.send(&a, "job a", "default").await;
+    let mut wa = h.worker().await;
+    wa.ready().await;
+    let pa = wa.expect("prompt").await;
+    ack(&wa, &pa).await;
+    wa.emit(json!({"type": "agent_start"})).await;
+    let b = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
+        )
+        .await
+        .unwrap(),
+    );
+    let (sidb, _) = h.send(&b, "job b", "default").await;
+    let c = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
+        )
+        .await
+        .unwrap(),
+    );
+    let (sidc, _) = h.send(&c, "job c", "default").await;
+    h.until("both waits are recorded", |h| {
+        h.status(&b) == "starting"
+            && h.state(&sidb) == "saved"
+            && h.status(&c) == "starting"
+            && h.state(&sidc) == "saved"
+            && h.col("SELECT count(*) FROM chat_dispatch_holds") == ["2"]
+    })
+    .await;
+    // C goes to the front of the line.
+    crate::queue::action(&h.rt, &c, "top").unwrap();
+    assert_eq!(
+        h.col(&format!(
+            "SELECT top FROM chat_dispatch_holds WHERE chat_id = '{c}'"
+        )),
+        ["1"]
+    );
+    // The freed place takes C, not the older B.
+    wa.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-q-a"}))
+        .await;
+    h.until("the front of the line goes first", |_h| asked(&c))
+        .await;
+    assert!(
+        !asked(&b),
+        "the older send waits its turn behind the one at the front"
+    );
+    let mut wc = h.worker().await;
+    wc.ready().await;
+    let pc = wc.expect("prompt").await;
+    assert_eq!(pc["submissionId"], sidc.as_str());
+    ack(&wc, &pc).await;
+    wc.emit(json!({"type": "agent_start"})).await;
+    // Park B by hand: a freed place does not take it until it is released.
+    crate::queue::action(&h.rt, &b, "hold").unwrap();
+    wc.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-q-c"}))
+        .await;
+    h.until("C's turn ends", |h| h.status(&c) == "idle").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!asked(&b), "a hand-held chat waits past a free place");
+    assert_eq!(
+        h.col(&format!(
+            "SELECT reason FROM chat_dispatch_holds WHERE chat_id = '{b}'"
+        )),
+        ["manual"]
+    );
+    crate::queue::action(&h.rt, &b, "release").unwrap();
+    h.until("the released chat takes the free place", |_h| asked(&b))
+        .await;
+    let mut wb = h.worker().await;
+    wb.ready().await;
+    let pb = wb.expect("prompt").await;
+    assert_eq!(pb["submissionId"], sidb.as_str());
+    ack(&wb, &pb).await;
+    wb.emit(json!({"type": "agent_start"})).await;
+    // Cancel: a waiting send goes back to its sender.
+    let d = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
+        )
+        .await
+        .unwrap(),
+    );
+    let (sidd, _) = h.send(&d, "job d", "default").await;
+    h.until("D waits in the line", |h| {
+        h.status(&d) == "starting"
+            && h.state(&sidd) == "saved"
+            && h.col(&format!(
+                "SELECT count(*) FROM chat_dispatch_holds WHERE chat_id = '{d}'"
+            )) == ["1"]
+    })
+    .await;
+    crate::queue::action(&h.rt, &d, "cancel").unwrap();
+    h.until("the cancelled send is given back", |h| {
+        h.state(&sidd) == "rejected"
+            && h.status(&d) == "idle"
+            && h.col(&format!(
+                "SELECT count(*) FROM chat_dispatch_holds WHERE chat_id = '{d}'"
+            )) == ["0"]
+    })
+    .await;
 }
 
 /// Withdraw: the text comes back as a newer draft revision.

@@ -95,6 +95,9 @@ pub const ROLLOVER_TOKENS: PrefKey = PrefKey::classified("rolloverTokens");
 /// How many of our chats one local model server may carry at once (0 to 12, default 3;
 /// 0 switches the cap off). A new local chat waits at its start while the cap is carried.
 pub const LOCAL_CHAT_CAP: PrefKey = PrefKey::classified("localChatCap");
+/// The percent of the Claude plan windows at which a new Claude chat waits for the window to
+/// reset (0 to 100, default 95; 0 switches it off). The default lives in `helm-chats`.
+pub const CLAUDE_HOLD_PCT: PrefKey = PrefKey::classified("claudeHoldPct");
 /// Transcript element toggles: `{tokens, turnTime, fileChanges, timeline}` each
 /// `shown` or `hidden`; strict on write, a missing key reads as shown.
 pub const CHAT_ELEMENTS: PrefKey = PrefKey::classified("chatElements");
@@ -299,6 +302,7 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
         "stallMinutes" => int_in(1, 1440, "must be 1 to 1440"),
         "rolloverTokens" => int_in(0, 2_000_000, "must be 0 to 2000000 (0 switches it off)"),
         "localChatCap" => int_in(0, 12, "must be 0 to 12"),
+        "claudeHoldPct" => int_in(0, 100, "must be 0 to 100 (0 switches it off)"),
         "autocomplete" => match value.as_object() {
             Some(m) if m.len() == 1 && m.get("enabled").is_some_and(Value::is_boolean) => Ok(()),
             _ => Err(PrefError::Invalid {

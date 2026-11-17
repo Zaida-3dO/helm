@@ -66,6 +66,8 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("chat_compact", OpClass::Maintenance, chat_compact)
         .blocking("chat_warm", OpClass::Blocking, chat_warm)
         .blocking("attention_get", OpClass::Blocking, attention_get)
+        .blocking("queue_list", OpClass::Blocking, queue_list)
+        .blocking("queue_action", OpClass::Maintenance, queue_action)
         .blocking("chat_rename", OpClass::Maintenance, chat_rename)
         .async_op("title_suggest", title_suggest)
         .blocking("skills_list", OpClass::Blocking, skills_list)
@@ -111,6 +113,23 @@ async fn title_suggest(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
         title: titles.first().cloned().unwrap_or_default(),
         titles,
     })
+}
+
+/// `queue_list`: every turn start waiting for capacity (front of the lines first), what each
+/// local server carries, and what the Claude plan windows say. See [`crate::queue`].
+fn queue_list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    parse_args::<EmptyArgs>(args)?;
+    let rt = runtime(ctx)?;
+    to_value(&crate::queue::summary(rt.db(), &rt))
+}
+
+/// `queue_action`: one move on one waiting start — `top`, `up`, `down`, `hold`, `release` or
+/// `cancel` — answering with the fresh summary. `cancel` gives a waiting send back to its
+/// owner (typed text to the draft, as a refusal would); nothing is ever deleted.
+fn queue_action(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: QueueActionArgs = parse_args(args)?;
+    let rt = runtime(ctx)?;
+    to_value(&crate::queue::action(&rt, &a.chat_id, &a.action)?)
 }
 
 /// `attention_get`: the summary as it stands. Without a runtime (tests) it is
@@ -747,6 +766,9 @@ pub(crate) mod tests {
             ("option_board_answer", OpClass::Blocking),
             // Going back to before a message.
             ("checkpoint_info", OpClass::Blocking),
+            // The capacity queue: who waits, and moving one start.
+            ("queue_list", OpClass::Blocking),
+            ("queue_action", OpClass::Maintenance),
         ];
         for (name, class) in expected {
             assert_eq!(reg.class_of(name), Some(class), "{name}");
