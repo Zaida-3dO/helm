@@ -51,6 +51,8 @@ const GROUPS: &[(&str, &[&str])] = &[
             "app_fork_chat",
             "app_set_chat_archived",
             "app_roll_over",
+            "app_queue_status",
+            "app_queue_action",
             "app_wait_for",
             "app_background_result",
             "app_show_images",

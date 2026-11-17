@@ -74,6 +74,7 @@ pub mod ops;
 pub mod outage;
 pub mod output_save;
 pub mod queue;
+pub mod queue_tools;
 pub mod remote;
 pub mod rollover;
 pub mod runtime;

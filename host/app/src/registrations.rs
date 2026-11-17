@@ -586,6 +586,8 @@ mod host_tool_tests {
             "app_stop_chat",
             "app_flag_attention",
             "app_roll_over",
+            "app_queue_status",
+            "app_queue_action",
             "app_list_projects",
             "app_create_project",
             "app_update_project",

@@ -57,6 +57,8 @@
     "app_pin_page",
     "app_project",
     "app_project_startup",
+    "app_queue_action",
+    "app_queue_status",
     "app_read_chat",
     "app_read_project_context",
     "app_register_checkout",

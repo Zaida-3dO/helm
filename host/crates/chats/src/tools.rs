@@ -49,16 +49,16 @@ const REPORT_BACK: &str = " The other chat does not report back by itself: end y
 /// What `app_create_chat` says about `muted`: the rule for when an agent mutes the chat it makes.
 const MUTED_ARG: &str = "Defaults to true: a muted chat never notifies the user or raises flags. Pass false only for a chat the user is expected to read or talk to.";
 
-const EXPLICIT: &str = " Act only when the user explicitly asked; if the reply is lost, check the current state before retrying.";
+pub(crate) const EXPLICIT: &str = " Act only when the user explicitly asked; if the reply is lost, check the current state before retrying.";
 
 /// The part of the explicit-request rule that does not fit a short description.
 const EXPLICIT_MORE: &str = "Act only when the user explicitly asked for this change; confirm an ambiguous target with app_list_chats first; report what changed. If the reply is lost, check the current state before trying again and never retry automatically.";
 
-fn obj(props: Value, required: &[&str]) -> Value {
+pub(crate) fn obj(props: Value, required: &[&str]) -> Value {
     json!({"type": "object", "properties": props, "required": required, "additionalProperties": false})
 }
 
-fn refuse(m: impl Into<String>) -> ToolError {
+pub(crate) fn refuse(m: impl Into<String>) -> ToolError {
     ToolError::refused(m)
 }
 
@@ -68,7 +68,7 @@ fn db(ctx: &ToolCtx) -> Result<Arc<Database>, ToolError> {
         .ok_or_else(|| refuse("The chat store is not available."))
 }
 
-fn rt(ctx: &ToolCtx) -> Result<Arc<ChatRuntime>, ToolError> {
+pub(crate) fn rt(ctx: &ToolCtx) -> Result<Arc<ChatRuntime>, ToolError> {
     ctx.services
         .get::<ChatRuntime>()
         .ok_or_else(|| refuse("The chat runtime is not available."))
@@ -168,7 +168,7 @@ fn chat_meta(tx: &Transaction<'_>, boards: &Boards, id: &str) -> rusqlite::Resul
 /// None while no profile exists (the table belongs to another crate, so a database without it has
 /// none). The profile only filters what the user sees; the chat runs under its host computer's
 /// sign-in.
-fn chat_profile(tx: &Transaction<'_>, id: &str) -> Option<(String, String)> {
+pub(crate) fn chat_profile(tx: &Transaction<'_>, id: &str) -> Option<(String, String)> {
     tx.query_row(
         "SELECT p.id, p.name FROM profiles p WHERE p.id = COALESCE(
              (SELECT NULLIF(profile_id, '') FROM chats WHERE id = ?1),
@@ -2289,6 +2289,8 @@ A helper started with Claude Code's Agent tool always runs on this chat's own mo
         .self_locking(),
         roll_over_self,
     );
+    // The capacity queue: who waits, and moving one waiting start.
+    crate::queue_tools::register(r);
 }
 
 #[cfg(test)]
