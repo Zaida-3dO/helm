@@ -28,6 +28,11 @@ pub struct ServerView {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub preset: Option<String>,
+    /// How many of our chats may work on this server at once; absent follows the global
+    /// default, 0 switches the cap off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub chat_cap: Option<u32>,
     pub has_key: bool,
     /// Whether the server answered the last time Helm asked (a refresh or a test). Absent until
     /// it has been asked; Helm never asks at start-up.
@@ -71,6 +76,9 @@ pub struct Range {
 #[serde(rename_all = "camelCase")]
 pub struct LocalModelsState {
     pub servers: Vec<ServerView>,
+    /// The range of a server's own working-chat cap: 0 switches the cap off; leaving a server
+    /// unset follows the global default (`localChatCap`, which sits in preferences).
+    pub chat_cap_range: Range,
     /// Ollama's context window for Helm's variant of a model, in tokens.
     pub ollama_context: u32,
     pub ollama_context_range: Range,

@@ -497,6 +497,16 @@ fn table() -> Vec<Entry> {
             about: "How many chats one local model server carries at once before new ones wait their turn. 0 switches the limit off.",
         },
         Entry {
+            key: "claudeHoldPct",
+            kind: Kind::Int {
+                min: 0,
+                max: 100,
+                step: 1,
+            },
+            default: || json!(95),
+            about: "Percent used at which new Claude turns wait for the plan window to reopen. 0 switches the hold off.",
+        },
+        Entry {
             key: "scrollOnSend",
             kind: Kind::Bool,
             default: || json!(true),

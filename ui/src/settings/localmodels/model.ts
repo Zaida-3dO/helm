@@ -35,6 +35,8 @@ export interface ServerDraft {
   folder: string;
   /** Strata only: the launch preset; empty means the default. */
   preset: string;
+  /** How many of our chats may work on this server at once; null follows the global default, 0 switches the cap off. */
+  chatCap: number | null;
 }
 
 export function toDraft(s: ServerView): ServerDraft {
@@ -49,6 +51,7 @@ export function toDraft(s: ServerView): ServerDraft {
     autoStart: s.autoStart ?? true,
     folder: s.folder ?? '',
     preset: s.preset ?? '',
+    chatCap: s.chatCap ?? null,
   };
 }
 
@@ -56,10 +59,10 @@ let fresh = 0;
 /** A server the user is adding: no id until the host saves it, and no address (the host refuses anything but this machine). */
 export function newDraft(kind: ServerDraft['kind']): ServerDraft {
   fresh += 1;
-  return { key: `new-${fresh}`, id: '', name: kind === 'strata' ? 'Strata' : 'Ollama', kind, baseUrl: '', enabled: true, model: '', autoStart: true, folder: '', preset: '' };
+  return { key: `new-${fresh}`, id: '', name: kind === 'strata' ? 'Strata' : 'Ollama', kind, baseUrl: '', enabled: true, model: '', autoStart: true, folder: '', preset: '', chatCap: null };
 }
 
-const FIELDS = ['id', 'name', 'kind', 'baseUrl', 'enabled', 'model', 'autoStart', 'folder', 'preset'] as const;
+const FIELDS = ['id', 'name', 'kind', 'baseUrl', 'enabled', 'model', 'autoStart', 'folder', 'preset', 'chatCap'] as const;
 
 /** Whether two lists would save the same servers (the cards' keys do not count). */
 export function sameDrafts(a: readonly ServerDraft[], b: readonly ServerDraft[]): boolean {
@@ -67,7 +70,7 @@ export function sameDrafts(a: readonly ServerDraft[], b: readonly ServerDraft[])
 }
 
 /** What `local_models_save` takes for the server list; it replaces the whole list. */
-export function savePayload(drafts: readonly ServerDraft[]): { id: string; name: string; kind: ServerDraft['kind']; baseUrl: string; enabled: boolean; model?: string; autoStart: boolean; folder?: string; preset?: string }[] {
+export function savePayload(drafts: readonly ServerDraft[]): { id: string; name: string; kind: ServerDraft['kind']; baseUrl: string; enabled: boolean; model?: string; autoStart: boolean; folder?: string; preset?: string; chatCap?: number }[] {
   return drafts.map((d) => ({
     id: d.id,
     name: d.name.trim(),
@@ -78,6 +81,7 @@ export function savePayload(drafts: readonly ServerDraft[]): { id: string; name:
     ...(d.kind === 'strata' && d.model.trim() ? { model: d.model.trim() } : {}),
     ...(d.kind === 'strata' && d.folder.trim() ? { folder: d.folder.trim() } : {}),
     ...(d.kind === 'strata' && d.preset.trim() ? { preset: d.preset.trim() } : {}),
+    ...(d.chatCap != null ? { chatCap: d.chatCap } : {}),
   }));
 }
 

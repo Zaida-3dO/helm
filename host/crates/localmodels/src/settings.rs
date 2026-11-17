@@ -34,6 +34,10 @@ pub const MIN_SPEECH_RESERVE_GB: u32 = 0;
 pub const MAX_SPEECH_RESERVE_GB: u32 = 24;
 pub const DEFAULT_SPEECH_RESERVE_GB: u32 = 2;
 
+/// The most chats that may work on one server at once, as its own cap setting (0 switches the
+/// cap off; leaving it unset follows the `localChatCap` preference).
+pub const MAX_CHAT_CAP: u32 = 12;
+
 /// Games that unload local models while they run: at most this many, each 1 to 100 characters.
 pub const MAX_GAMES: usize = 20;
 pub const MAX_GAME_NAME: usize = 100;
@@ -116,6 +120,10 @@ pub struct Server {
     /// Strata only: the preset to launch with. None is [`DEFAULT_PRESET`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
+    /// How many of our chats may work on this server at once before their turns queue at their
+    /// start. None follows the global default (`localChatCap`); 0 switches the cap off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_cap: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,6 +188,7 @@ pub fn default_servers() -> Vec<Server> {
             auto_start: true,
             folder: None,
             preset: None,
+            chat_cap: None,
         })
         .collect()
 }
@@ -412,6 +421,7 @@ pub fn read_lenient(v: &Value) -> LocalSettings {
                     .and_then(Value::as_str)
                     .filter(|p| plain_text(p, MAX_PRESET))
                     .map(str::to_owned),
+                chat_cap: e.get("chatCap").and_then(|v| int_in(v, 0, MAX_CHAT_CAP)),
             });
         }
         s.servers = seen;
@@ -506,6 +516,8 @@ pub struct ServerInput {
     pub folder: Option<String>,
     #[serde(default)]
     pub preset: Option<String>,
+    #[serde(default)]
+    pub chat_cap: Option<u32>,
 }
 
 fn yes() -> bool {
@@ -629,6 +641,16 @@ pub fn apply_changes(current: &LocalSettings, changes: &Changes) -> Result<Local
                 }
                 Some(_) => return Err(format!("Server {n}: the preset name is not valid.")),
             };
+            let chat_cap = match e.chat_cap {
+                None => None,
+                Some(n) if n <= MAX_CHAT_CAP => Some(n),
+                Some(_) => {
+                    return Err(format!(
+                        "Server {n}: the working-chat cap must be 0 to {MAX_CHAT_CAP} \
+                         (0 switches it off; leave it unset to follow the default)."
+                    ))
+                }
+            };
             out.push(Server {
                 id,
                 name: e.name.trim().to_owned(),
@@ -639,6 +661,7 @@ pub fn apply_changes(current: &LocalSettings, changes: &Changes) -> Result<Local
                 auto_start: e.auto_start,
                 folder,
                 preset,
+                chat_cap,
             });
         }
         s.servers = out;
@@ -814,8 +837,8 @@ mod tests {
         let s = read_lenient(&json!({
             "servers": [
                 {"id": "strata", "name": "Strata", "kind": "strata", "baseUrl": "http://10.0.0.5:1", "enabled": false,
-                 "autoStart": false, "folder": "C:/Strata/terminal/current", "preset": "Fast"},
-                {"id": "ollama", "name": "Ollama", "kind": "ollama", "baseUrl": "http://127.0.0.1:1", "folder": "x".repeat(600), "preset": "ok"},
+                 "autoStart": false, "folder": "C:/Strata/terminal/current", "preset": "Fast", "chatCap": 1},
+                {"id": "ollama", "name": "Ollama", "kind": "ollama", "baseUrl": "http://127.0.0.1:1", "folder": "x".repeat(600), "preset": "ok", "chatCap": 99},
                 {"id": "Bad Id", "name": "x", "kind": "ollama", "baseUrl": "http://127.0.0.1:1"},
                 {"id": "strata", "name": "twice", "kind": "strata", "baseUrl": "http://127.0.0.1:1"},
             ],
@@ -826,19 +849,26 @@ mod tests {
             (
                 s.servers[0].auto_start,
                 s.servers[0].folder.as_deref(),
-                s.servers[0].preset.as_deref()
+                s.servers[0].preset.as_deref(),
+                s.servers[0].chat_cap
             ),
-            (false, Some("C:/Strata/terminal/current"), Some("Fast")),
-            "the start-when-needed fields read back"
+            (
+                false,
+                Some("C:/Strata/terminal/current"),
+                Some("Fast"),
+                Some(1),
+            ),
+            "the start-when-needed fields and the server's own cap read back"
         );
         assert_eq!(
             (
                 s.servers[1].auto_start,
                 s.servers[1].folder.as_deref(),
-                s.servers[1].preset.as_deref()
+                s.servers[1].preset.as_deref(),
+                s.servers[1].chat_cap
             ),
-            (true, None, Some("ok")),
-            "missing autoStart means yes; an over-long folder drops"
+            (true, None, Some("ok"), None),
+            "missing autoStart means yes; an over-long folder and a cap out of range drop"
         );
         assert_eq!(
             s.servers[0].base_url, STRATA_URL,
@@ -915,6 +945,7 @@ mod tests {
             auto_start: true,
             folder: None,
             preset: None,
+            chat_cap: None,
         };
         let mut servers: Vec<ServerInput> = cur
             .servers
@@ -929,6 +960,7 @@ mod tests {
                 auto_start: x.auto_start,
                 folder: x.folder.clone(),
                 preset: x.preset.clone(),
+                chat_cap: x.chat_cap,
             })
             .collect();
         servers.push(input(
@@ -1029,6 +1061,33 @@ mod tests {
             }
         )
         .is_ok());
+
+        // A server's own working-chat cap saves, and a value out of range is refused whole.
+        tuned[0].chat_cap = Some(0);
+        tuned[1].chat_cap = Some(5);
+        let capped = apply_changes(
+            &next,
+            &Changes {
+                servers: Some(tuned.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (capped.servers[0].chat_cap, capped.servers[1].chat_cap),
+            (Some(0), Some(5)),
+            "0 switches the cap off; 5 caps the server at five chats"
+        );
+        tuned[0].chat_cap = Some(MAX_CHAT_CAP + 1);
+        assert!(apply_changes(
+            &next,
+            &Changes {
+                servers: Some(tuned.clone()),
+                ..Default::default()
+            }
+        )
+        .unwrap_err()
+        .contains("working-chat cap"));
 
         for (changes, why) in [
             (

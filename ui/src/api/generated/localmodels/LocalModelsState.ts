@@ -7,6 +7,11 @@ import type { ToolsSetup } from "./ToolsSetup";
 
 export type LocalModelsState = { servers: Array<ServerView>, 
 /**
+ * The range of a server's own working-chat cap: 0 switches the cap off; leaving a server
+ * unset follows the global default (`localChatCap`, which sits in preferences).
+ */
+chatCapRange: Range, 
+/**
  * Ollama's context window for Helm's variant of a model, in tokens.
  */
 ollamaContext: number, ollamaContextRange: Range, 

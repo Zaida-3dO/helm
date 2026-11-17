@@ -307,8 +307,8 @@ mod tests {
 
     #[test]
     fn the_tiers_and_the_refusals() {
-        assert_eq!(agent_keys(false).len(), 47);
-        assert_eq!(agent_keys(true).len(), 48);
+        assert_eq!(agent_keys(false).len(), 48);
+        assert_eq!(agent_keys(true).len(), 49);
         assert!(agent_keys(true).contains(&"keybindings"));
         assert!(!agent_keys(false).contains(&"keybindings"));
         assert!(agent_keys(false).contains(&"scrollOnSend"));

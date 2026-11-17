@@ -430,6 +430,7 @@ fn servers(strata: &str, ollama: &str) -> Changes {
         kind,
         base_url: url.into(),
         enabled: true,
+        chat_cap: None,
         model: None,
         auto_start: true,
         folder: None,

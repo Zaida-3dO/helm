@@ -392,12 +392,15 @@ impl LocalService {
                         auto_start: x.auto_start,
                         folder: x.folder.clone(),
                         preset: x.preset.clone(),
+                        chat_cap: x.chat_cap,
                         has_key: self.has_key(&x.id),
                         reachable: last.map(|l| l.reachable),
                         note: last.and_then(|l| l.note.clone()),
                     }
                 })
                 .collect(),
+            // The factory default of the global `localChatCap` preference; unset servers follow it.
+            chat_cap_range: range(0, settings::MAX_CHAT_CAP, 3),
             ollama_context: s.ollama_context,
             ollama_context_range: range(
                 settings::MIN_CONTEXT,

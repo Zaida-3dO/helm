@@ -12,8 +12,8 @@
 //!   interactive start is never held here; with Claude's windows full it is answered where it
 //!   stands (a plain sentence, nothing started).
 //! - **The local server's cap** — at most `localChatCap` of our chats work on one local model
-//!   server at a time; the rest queue at their start, in order: pushed-to-top first, then normal
-//!   before background, then first-come.
+//!   server at a time (a server can set its own cap in its settings), and the rest queue at
+//!   their start, in order: pushed-to-top first, then normal before background, then first-come.
 //!
 //! The class comes from the submission's origin, never from a column on the chat: a Telegram or
 //! voice turn is *interactive* (a person is waiting on the other end — it is never queued behind
@@ -329,6 +329,29 @@ pub fn holds(db: &Database) -> Vec<HoldRow> {
     rows.unwrap_or_default()
 }
 
+/// The working-chat cap a local model server names for itself, if it names one (0 switches the
+/// cap off, and no answer means the `localChatCap` preference decides). The local-models crate
+/// keeps the server list in its own settings row; it is read here by name for the same reason
+/// the plan windows are: the gate runs where that crate cannot be reached.
+pub fn server_cap(db: &Database, server_id: &str) -> Option<u64> {
+    let raw: rusqlite::Result<Option<String>> = db.snapshot(|tx| {
+        tx.query_row(
+            "SELECT value FROM local_model_settings WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+    });
+    let raw = raw.ok().flatten()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    v.get("servers")?
+        .as_array()?
+        .iter()
+        .find(|s| s.get("id").and_then(|i| i.as_str()) == Some(server_id))?
+        .get("chatCap")?
+        .as_u64()
+}
+
 /// Swap the places in line of two held starts, so the queue panel can move one up or down.
 pub fn swap_seq(db: &Database, a: &str, b: &str) {
     let _ = db.write(|tx| {
@@ -399,20 +422,13 @@ pub fn summary(db: &Database, rt: &crate::runtime::ChatRuntime) -> QueueSummary 
         })
         .collect();
     let now = helm_core::now_ms();
-    let capacity = claude_capacity(db, now);
+    let capacity = helm_core::usage_windows::capacity(db, now);
     let claude_queued = entries
         .iter()
         .filter(|e| e.reason == CLAUDE_CAPACITY || e.reason == AT_LIMIT)
         .count() as i64;
-    let claude_full = capacity.is_some_and(|c| {
-        let hold = db
-            .snapshot(|tx| Ok::<_, rusqlite::Error>(helm_core::prefs::read(tx, "claudeHoldPct")))
-            .ok()
-            .flatten()
-            .and_then(|v| v.as_u64())
-            .unwrap_or(DEFAULT_CLAUDE_HOLD_PCT);
-        hold != 0 && c.full_at(hold)
-    });
+    let hold = helm_core::usage_windows::hold_pct(db);
+    let claude_full = hold != 0 && capacity.is_some_and(|c| c.full_at(hold));
     QueueSummary {
         entries,
         servers,
@@ -530,84 +546,15 @@ pub fn action(
 
 // ------------------------------------------------------------------ Claude plan capacity
 
-/// The percent of the plan windows at which a Claude start holds (0 switches the hold off).
-pub const DEFAULT_CLAUDE_HOLD_PCT: u64 = 95;
-/// A usage window older than this answers nothing (the usage crate reads fresh figures every few
-/// minutes; this is its own staleness line, kept apart on purpose).
-const USAGE_WINDOW_STALE_MS: i64 = 15 * 60_000;
-
-/// What the plan windows say right now: the fuller of the live windows, and when it reopens.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Capacity {
-    /// The higher percent in use, 0 to 100.
-    pub pct: f64,
-    /// When that window resets.
-    pub until: Option<i64>,
-}
-
-impl Capacity {
-    pub fn full_at(&self, hold_pct: u64) -> bool {
-        self.pct >= hold_pct as f64
-    }
-}
-
-/// The plan windows as the usage meter last read them, with dead windows dropped: one whose
-/// reset time has passed (the reset is what releases a capacity hold), and one read too long ago
-/// to trust. `None` means nothing is known — which never holds anything.
-///
-/// Reads the `plan_usage` row the usage crate keeps; the JSON shape is that crate's, used here by
-/// field name so the chats crate stays free of it.
-pub fn claude_capacity(db: &Database, now: i64) -> Option<Capacity> {
-    let body: rusqlite::Result<Option<String>> = db.snapshot(|tx| {
-        tx.query_row("SELECT body FROM plan_usage WHERE id = 1", [], |r| r.get(0))
-            .optional()
-    });
-    let body = match body {
-        Ok(Some(b)) => b,
-        _ => return None,
-    };
-    let stored: serde_json::Value = serde_json::from_str(&body).ok()?;
-    let mut best: Option<Capacity> = None;
-    for key in ["fiveHour", "weekly"] {
-        let Some(w) = stored.get(key) else { continue };
-        let pct = w.get("pct")?.as_f64()?;
-        if !pct.is_finite() {
-            continue;
-        }
-        let resets = w.get("resetsAt").and_then(|v| v.as_i64());
-        if resets.is_some_and(|r| r <= now) {
-            continue;
-        }
-        let at = w.get("at").and_then(|v| v.as_i64())?;
-        if now - at > USAGE_WINDOW_STALE_MS {
-            continue;
-        }
-        if best.is_none_or(|b| pct > b.pct) {
-            best = Some(Capacity { pct, until: resets });
-        }
-    }
-    best
-}
-
-/// Read the hold threshold (`claudeHoldPct`; 0 switches the capacity hold off) and ask the
-/// windows whether they are full. `None` is unknown, treated as not full everywhere.
-pub fn claude_full(db: &Database, now: i64) -> Option<Capacity> {
-    let hold_pct = db
-        .snapshot(|tx| Ok::<_, rusqlite::Error>(helm_core::prefs::read(tx, "claudeHoldPct")))
-        .ok()
-        .flatten()
-        .and_then(|v| v.as_u64())
-        .unwrap_or(DEFAULT_CLAUDE_HOLD_PCT);
-    if hold_pct == 0 {
-        return None;
-    }
-    let cap = claude_capacity(db, now)?;
-    cap.full_at(hold_pct).then_some(cap)
-}
+/// What the plan windows say right now, and whether they read used up: the core's one reading,
+/// the same rules the usage governor acts on (an expired window counts as gone — which is what
+/// releases a capacity hold at the reset — and a stale reading answers nothing). `None` is
+/// unknown, treated as not full everywhere.
+pub use helm_core::usage_windows::claude_full;
 
 /// The plain sentence a full window answers an interactive start with. No jargon: it goes to a
 /// person on Telegram or by voice, not to a log.
-pub fn claude_full_line(cap: &Capacity, now: i64) -> String {
+pub fn claude_full_line(cap: &helm_core::usage_windows::Capacity, now: i64) -> String {
     match cap.until {
         Some(until) if until > now => {
             let minutes = ((until - now) / 60_000).max(1);
@@ -626,7 +573,6 @@ pub fn claude_full_line(cap: &Capacity, now: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     fn w(class: QueueClass, top: bool, seq: u64) -> Waiter {
         Waiter { class, top, seq }
@@ -827,70 +773,35 @@ mod tests {
         }
     }
 
-    /// A temp database with only what these tests ask of it: the chats tables plus the usage
-    /// row (a table another crate makes; the reading here names its fields, not its types).
-    fn usage_db(body: Option<serde_json::Value>) -> (tempfile::TempDir, Database) {
-        let dir = tempfile::tempdir().unwrap();
-        let db = Database::open(
-            &dir.path().join("t.sqlite3"),
-            &crate::schema::tests::registry(),
-        )
-        .unwrap();
+    #[test]
+    fn a_server_can_name_its_own_cap_and_the_settings_answer_for_the_rest() {
+        let (_d, db) = crate::schema::tests::temp_db();
         db.write(|tx| {
+            // The server list lives in the local-models crate's own row; the reading here names
+            // its fields, not its types, so the test makes the table by hand.
             tx.execute_batch(
-                "CREATE TABLE IF NOT EXISTS plan_usage (
-                     id INTEGER PRIMARY KEY CHECK (id = 1), body TEXT NOT NULL, updated_at INTEGER NOT NULL);",
+                "CREATE TABLE IF NOT EXISTS local_model_settings (
+                     id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL);",
             )?;
-            if let Some(b) = body {
-                tx.execute(
-                    "INSERT INTO plan_usage(id, body, updated_at) VALUES (1, ?1, 0)",
-                    [b.to_string()],
-                )?;
-            }
-            Ok::<_, rusqlite::Error>(())
+            tx.execute(
+                "INSERT INTO local_model_settings(id, value) VALUES (1, ?1)",
+                [serde_json::json!({
+                    "servers": [
+                        {"id": "strata", "kind": "strata", "chatCap": 1},
+                        {"id": "ollama", "kind": "ollama"}
+                    ]
+                })
+                .to_string()],
+            )
         })
         .unwrap();
-        (dir, db)
-    }
-
-    #[test]
-    fn the_windows_answer_full_only_while_live_and_past_the_line() {
-        let now = 1_000_000_000_000i64;
-        let win =
-            |pct: f64, resets: i64, at: i64| json!({"pct": pct, "resetsAt": resets, "at": at});
-        // A live window past the line: full, and it says when it reopens.
-        let (_d, db) = usage_db(Some(
-            json!({"weekly": win(96.0, now + 3_600_000, now - 60_000)}),
-        ));
-        let cap = claude_capacity(&db, now).expect("the window answers");
-        assert!(cap.full_at(95));
-        assert_eq!(cap.until, Some(now + 3_600_000));
-        // The fuller of two live windows answers.
-        drop(db);
-        let (_d, db) = usage_db(Some(json!({
-            "fiveHour": win(40.0, now + 900_000, now - 60_000),
-            "weekly": win(97.5, now + 86_400_000, now - 120_000),
-        })));
-        assert_eq!(claude_capacity(&db, now).unwrap().pct, 97.5);
-        // A window whose reset has passed answers nothing: that is the automatic release.
-        drop(db);
-        let (_d, db) = usage_db(Some(json!({"weekly": win(99.0, now - 1, now - 60_000)})));
-        assert!(claude_capacity(&db, now).is_none());
-        // A window read too long ago answers nothing either (unknown, never full).
-        drop(db);
-        let (_d, db) = usage_db(Some(
-            json!({"weekly": win(99.0, now + 3_600_000, now - USAGE_WINDOW_STALE_MS - 1)}),
-        ));
-        assert!(claude_capacity(&db, now).is_none());
-        // Under the line: not full. And with no reading at all: unknown, not full.
-        drop(db);
-        let (_d, db) = usage_db(Some(
-            json!({"weekly": win(94.0, now + 3_600_000, now - 60_000)}),
-        ));
-        assert!(!claude_capacity(&db, now).unwrap().full_at(95));
-        drop(db);
-        let (_d, db) = usage_db(None);
-        assert!(claude_capacity(&db, now).is_none());
+        assert_eq!(server_cap(&db, "strata"), Some(1));
+        assert_eq!(
+            server_cap(&db, "ollama"),
+            None,
+            "no answer: the default decides"
+        );
+        assert_eq!(server_cap(&db, "nope"), None, "no such server");
     }
 
     #[test]

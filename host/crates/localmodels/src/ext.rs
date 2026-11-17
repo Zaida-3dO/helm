@@ -202,6 +202,7 @@ fn change(key: &str, cur: &LocalSettings, value: &Value) -> Result<Changes, Stri
                     auto_start: s.auto_start,
                     folder: s.folder.clone(),
                     preset: s.preset.clone(),
+                    chat_cap: s.chat_cap,
                 });
             }
             if let Some(unknown) = map

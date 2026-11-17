@@ -3123,8 +3123,9 @@ impl Actor {
     /// The queue's whole answer to "may this turn open now", for the saved send `sid`. Only
     /// asked where no turn of this chat is open: a chat mid-turn is never preempted.
     ///
-    /// A local chat's place is the line on its server: the server carries at most
-    /// `localChatCap` of our chats (0 switches the cap off), and only chats that are working
+    /// A local chat's place is the line on its server: the server carries at most its own cap
+    /// (set in the server's settings) or else `localChatCap` (0 switches the cap off), and only
+    /// chats that are working
     /// count against it — a chat held at its start is not working, so waiters never block each
     /// other; they go pushed-to-top first, then normal before background, then in the order
     /// they began to wait. The cap is deliberately soft at the margin: a chat that has passed
@@ -3148,16 +3149,18 @@ impl Actor {
         let manual = queue::is_manual(&self.sh.db, &self.chat_id);
         let (working, waiters, cap) = match &local {
             Some((server, _)) => {
-                let cap = self
-                    .sh
-                    .db
-                    .snapshot(|tx| {
-                        Ok::<_, rusqlite::Error>(helm_core::prefs::read(tx, "localChatCap"))
-                    })
-                    .ok()
-                    .flatten()
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(DEFAULT_LOCAL_CAP) as usize;
+                // The server's own cap (its settings) beats the default preference.
+                let cap = queue::server_cap(&self.sh.db, server).unwrap_or_else(|| {
+                    self.sh
+                        .db
+                        .snapshot(|tx| {
+                            Ok::<_, rusqlite::Error>(helm_core::prefs::read(tx, "localChatCap"))
+                        })
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(DEFAULT_LOCAL_CAP)
+                }) as usize;
                 // Cap off still orders the waiters; only the working-chat count is lifted.
                 let cap = if cap == 0 { usize::MAX } else { cap };
                 let (w, waits) = self.server_line(server);
@@ -3167,7 +3170,8 @@ impl Actor {
         };
         // The plan windows answer only for chats that run on Claude; local chats cost the plan
         // nothing.
-        let claude_full = local.is_none() && queue::claude_full(&self.sh.db, now()).is_some();
+        let claude_full =
+            local.is_none() && helm_core::usage_windows::claude_full(&self.sh.db, now()).is_some();
         let at_limit = self.working_chats() >= self.sh.cfg.limits.max_active;
         (
             class,

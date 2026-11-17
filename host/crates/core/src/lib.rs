@@ -15,6 +15,7 @@
 //! | [`recovery`] | startup recovery of interrupted work |
 //! | [`lifecycle`] | quit |
 //! | [`trail`] | run record, heartbeat and unclean-start note, so a silent end can be read later |
+//! | [`usage_windows`] | what the stored plan-usage windows say right now, for the queue's capacity hold |
 //! | [`ops`] | the `api` ops this crate serves |
 
 pub mod credentials;
@@ -31,6 +32,7 @@ pub mod recovery;
 pub mod revisions;
 pub mod secrets;
 pub mod trail;
+pub mod usage_windows;
 
 /// Milliseconds since the Unix epoch.
 pub fn now_ms() -> i64 {
