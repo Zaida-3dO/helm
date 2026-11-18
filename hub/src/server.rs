@@ -211,6 +211,8 @@ async fn post_mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: 
             "a voice token"
         } else if client.has(Scope::Remote) {
             "a remote token"
+        } else if client.has(Scope::Speaker) {
+            "a speaker token"
         } else {
             "this token"
         };

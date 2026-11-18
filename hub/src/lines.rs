@@ -51,6 +51,8 @@ pub struct Lines {
     registry: Arc<Mutex<Registry>>,
     /// Where the voice frames go, once the voice bridge asked for them.
     voice: Mutex<Option<mpsc::UnboundedSender<PersonUpstream>>>,
+    /// Where a room speaker's reply frames go, once the speaker bridge asked for them.
+    speaker: Mutex<Option<mpsc::UnboundedSender<PersonUpstream>>>,
     /// The hub's state, for the knowledge frames (they read and write the store). Set by
     /// [`Lines::bind`] when the router is made.
     state: Mutex<Option<Weak<AppState>>>,
@@ -97,6 +99,7 @@ impl Lines {
                 launchers: Arc::new(Launchers::new(registry.clone())),
                 registry,
                 voice: Mutex::new(None),
+                speaker: Mutex::new(None),
                 telegram: Mutex::new(None),
                 state: Mutex::new(None),
                 sticky: Mutex::new(HashMap::new()),
@@ -155,6 +158,22 @@ impl Lines {
 
     fn voice_sink(&self) -> Option<mpsc::UnboundedSender<PersonUpstream>> {
         self.voice.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// The receiver for the speaker frames the lines send up, tagged with their person. A second
+    /// call replaces the first receiver's feed. These frames never reach the voice or Telegram
+    /// receivers, whatever is or is not listening here.
+    pub fn speaker_receiver(&self) -> mpsc::UnboundedReceiver<PersonUpstream> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        *self.speaker.lock().unwrap_or_else(|p| p.into_inner()) = Some(tx);
+        rx
+    }
+
+    fn speaker_sink(&self) -> Option<mpsc::UnboundedSender<PersonUpstream>> {
+        self.speaker
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<i64, Slot>> {
@@ -373,6 +392,12 @@ impl Lines {
                             if let Some(voice) = lines.voice_sink() {
                                 let _ = voice.send((tag, client_id, other));
                             }
+                        } else if other.is_speaker() {
+                            // Likewise the speaker bridge's: with the speaker line off they are
+                            // dropped, never handed to another lane's bridge.
+                            if let Some(speaker) = lines.speaker_sink() {
+                                let _ = speaker.send((tag, client_id, other));
+                            }
                         } else {
                             let _ = tx.send((tag, client_id, other));
                         }
@@ -526,9 +551,9 @@ impl Lines {
     /// The line a person's `channel` messages go down, or `None` when nothing qualifies.
     ///
     /// Candidates are lines that are up, whose client acts for the person (its own person, an
-    /// admin allowance or a people announcement), and — for `telegram` and `voice` — whose last
-    /// `device` frame says it takes that channel for that person (a line that made no claim
-    /// takes them only for its own person). The pick, in order: the PC the person pinned, if it
+    /// admin allowance or a people announcement), and — for `telegram`, `voice` and `speaker` — whose
+    /// last `device` frame says it takes that channel for that person (a line that made no claim
+    /// takes telegram and voice only for its own person, and speaker not at all). The pick, in order: the PC the person pinned, if it
     /// is a candidate; the PC that placed the person's last message there, if it is one; the
     /// person's own PCs, most recently active first; then any candidate, most recently active
     /// first.
@@ -623,13 +648,17 @@ impl Lines {
                     && (*home == person_id || reg.may_act_for(*client_id, person_id))
                     && match channel {
                         Channel::App => true,
-                        telegram_or_voice => match line.claim_for(person_id) {
-                            Some((telegram, voice)) => match telegram_or_voice {
+                        gated => match line.claim_for(person_id) {
+                            Some((telegram, voice, speaker)) => match gated {
                                 Channel::Telegram => telegram,
                                 Channel::Voice => voice,
+                                Channel::Speaker => speaker,
                                 Channel::App => true,
                             },
-                            None => *home == person_id,
+                            // A line that made no claim takes its own person's Telegram and
+                            // voice, but never a speaker's turns: a Helm that cannot say it
+                            // understands them (an older one) is not sent them.
+                            None => *home == person_id && gated != Channel::Speaker,
                         },
                     }
             })
@@ -763,6 +792,7 @@ fn sticky_channel(up: &Upstream) -> Option<Channel> {
     match up {
         Upstream::TelegramAck(_) => Some(Channel::Telegram),
         Upstream::VoiceAck(_) => Some(Channel::Voice),
+        Upstream::SpeakerAck(_) => Some(Channel::Speaker),
         _ => None,
     }
 }
@@ -1000,7 +1030,7 @@ mod tests {
             gd,
             r#"{"type":"device","uid":"uid-desk","name":"Desk","run":true}"#
         ));
-        wait_until(|| lline.claim_for(bea) == Some((true, false))).await;
+        wait_until(|| lline.claim_for(bea) == Some((true, false, false))).await;
         wait_until(|| registry.lock().is_ok_and(|r| r.may_act_for(laptop, bea))).await;
         assert_eq!(dline.claim_for(bea), None, "Desk announced no people");
         // A PC that takes only the Telegram channel is not a candidate for voice at all.
@@ -1051,7 +1081,7 @@ mod tests {
                     "people": [{"personId": bea.to_string(), "telegram": true, "voice": true}]})
             .to_string()
         ));
-        wait_until(|| lline.claim_for(bea) == Some((true, true))).await;
+        wait_until(|| lline.claim_for(bea) == Some((true, true, false))).await;
         {
             let r = registry.lock().unwrap();
             assert!(r.may_act_for(laptop, bea) && r.may_act_for(laptop, ivy));
@@ -1259,7 +1289,7 @@ mod tests {
                     "people": [{"personId": bea.to_string(), "telegram": true, "voice": true}]})
             .to_string()
         ));
-        wait_until(|| lline.claim_for(bea) == Some((true, true))).await;
+        wait_until(|| lline.claim_for(bea) == Some((true, true, false))).await;
         wait_until(|| {
             registry.lock().is_ok_and(|r| {
                 r.pinned_client(bea, "telegram")

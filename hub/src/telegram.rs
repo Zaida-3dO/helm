@@ -2883,13 +2883,16 @@ impl Bridge {
             }
             Upstream::TelegramAskDone { id, text } => self.on_ask_done(&id, &text).await,
             // Household questions are answered where the line is kept, and the voice frames go
-            // to the voice bridge; neither reaches this one.
+            // to the voice and speaker bridges; none of them reaches this one.
             Upstream::Peer { .. }
             | Upstream::VoiceAck(_)
             | Upstream::VoiceStatus { .. }
             | Upstream::VoiceAttachment(_)
             | Upstream::VoiceFinal(_)
             | Upstream::VoiceNotify(_)
+            | Upstream::SpeakerAck(_)
+            | Upstream::SpeakerStatus { .. }
+            | Upstream::SpeakerFinal(_)
             | Upstream::Device { .. }
             | Upstream::Dev { .. }
             | Upstream::DevPush { .. }

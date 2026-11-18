@@ -36,19 +36,20 @@
 //! | hub → Helm | `voice_heard` | `reports`, `personId` (optional): what the phone did and did not play (see `voice.rs`) |
 //! | hub → Helm | `voice_presence` | `live`, `mode`, `personId` (optional): whether the phone's talk screen is open, and in which mode |
 //! | hub → Helm | `voice_fresh` | `personId` (optional): start a new voice conversation |
-//! | Helm → hub | `voice_ack` | `id`, `personId` (optional): the turn is placed in the voice chat |
-//! | Helm → hub | `voice_status` | `turn`, `text` (at most 300 characters), `personId` (optional): the working line, shown and never spoken |
-//! | Helm → hub | `voice_attachment` | `reply`, `n` (1-4), `kind`, `title`, and by kind `mediaType` + `data` (base64), `markdown` or `url`, `personId` (optional): one attachment, sent before its reply and held for 60 s |
-//! | Helm → hub | `voice_final` | `id` (the reply), `turn`, `mode`, `sentences`, `text`, `truncated`, `conversation`, `at`, `attachments` (a count), `personId` (optional): the answer to a turn |
-//! | Helm → hub | `voice_notify` | as `voice_final`, with `turn` null and `about` (`{"chat": title}` or null): news Helm starts |
-//! | Helm → hub | `device` | `uid`, `name`, `run` (whether other devices may run this Helm's chats), `people` (optional list of `{personId, telegram, voice}`: the hub people this PC acts for, its home person first, and whether it takes each one's Telegram / voice): sent after `sharing` on every line-up and on change. Only a token with the `peer` scope takes part; the hub answers every `peer` line with a fresh `devices`, and keeps the channel flags only while the line is up |
+//! | hub → Helm | `voice` (a room speaker's turn) | the fields above, plus `lane` (`speaker`), `device` and `room` and `area` (text or null), `session` (the speaker session's id), `assurance` (`none`, `claimed` or `verified`: how sure the hub is who is speaking), `person` (the display name of the person identified, or null), `tier` (`do`, or `passcode` while a passcode is in force), `until` (ms when that ends, or null), `mode` is always `conversation`, and `ageMinutes` is null. `personId` is the hub person the turn was routed to. Sent again every 10 s until `voice_ack`. Only a line whose last `device` frame claimed that person with `speaker` true is sent one |
+//! | Helm → hub | `voice_ack` | `id`, `lane` (absent or `voice` for the phone's, `speaker` for a speaker's; any other value drops the frame), `personId` (optional): the turn is placed in the voice chat |
+//! | Helm → hub | `voice_status` | `turn`, `text` (at most 300 characters), `lane` (as for `voice_ack`), `personId` (optional): the working line, shown and never spoken |
+//! | Helm → hub | `voice_attachment` | `reply`, `n` (1-4), `kind`, `title`, and by kind `mediaType` + `data` (base64), `markdown` or `url`, `personId` (optional): one attachment, sent before its reply and held for 60 s. The phone's only: a frame with `lane` `speaker` is dropped |
+//! | Helm → hub | `voice_final` | `id` (the reply), `turn`, `mode`, `sentences`, `text`, `truncated`, `conversation`, `at`, `attachments` (a count), `lane` (as for `voice_ack`), `personId` (optional): the answer to a turn. A speaker's answer is taken only when `personId` is the person the turn was routed to |
+//! | Helm → hub | `voice_notify` | as `voice_final`, with `turn` null and `about` (`{"chat": title}` or null): news Helm starts. The phone's only: a frame with `lane` `speaker` is dropped |
+//! | Helm → hub | `device` | `uid`, `name`, `run` (whether other devices may run this Helm's chats), `people` (optional list of `{personId, telegram, voice, speaker}`: the hub people this PC acts for, its home person first, and whether it takes each one's Telegram / voice / speaker turns; a PC whose last frame did not claim a person with `speaker` true is never sent that person's speaker turns): sent after `sharing` on every line-up and on change. Only a token with the `peer` scope takes part; the hub answers every `peer` line with a fresh `devices`, and keeps the channel flags only while the line is up |
 //! | hub → Helm | `devices` | `list`: every device of the household, `{uid, name, personId, person, people ([{personId, person}]), online, lastSeenAt, run, self}`; sent to each `peer` line when a device frame arrives and whenever a line comes up or drops |
 //! | Helm → hub | `person_ensure` | `id`, `name`: make (or find, ignoring case) a hub person of this name for one of this PC's profiles; answered with `person_result`. Needs the `peer` scope |
 //! | hub → Helm | `person_result` | `id` (the `person_ensure`'s), `ok`, `personId`, `person` (the stored name), `created` (bool); or `ok` false with `error` |
 //! | Helm → hub | `tg_link` / `tg_unlink` / `tg_status` | `id` (answered back on the result), `personId`: the profile asks to link its Telegram to that hub person, to unlink it, or asks whether it is linked. Only honoured for a person this PC acts for; answered with the matching `_result` frame below |
 //! | hub → Helm | `tg_link_result` | `id`, `ok`, `url` (`https://t.me/<bot>?start=<code>`: the person taps it once, which is what proves the Telegram account is theirs), or `ok` false with `error` |
 //! | hub → Helm | `tg_unlink_result` / `tg_status_result` | `id`, `ok`, and for a status `linked` (bool), `telegramId` and `handle` when it is linked; or `ok` false with `error` |
-//! | Helm → hub | `route_pin` | `personId`, `channel` (`telegram`, `voice` or `app`), optional `id` and `clear` (an unpin, back to automatic routing): this PC asks to be the one that receives that person's channel until it picks otherwise; only honoured for a person this PC acts for |
+//! | Helm → hub | `route_pin` | `personId`, `channel` (`telegram`, `voice`, `speaker` or `app`), optional `id` and `clear` (an unpin, back to automatic routing): this PC asks to be the one that receives that person's channel until it picks otherwise; only honoured for a person this PC acts for |
 //! | hub → Helm | `route_pin_result` | `id` (the frame's, if it had one), `ok`, `cleared` (whether it was an unpin) or `error`: whether the pin took |
 //! | Helm → hub | `dev` | `id`, `to` (a device uid), `op`, `args`, `as` (optional list of person ids: the acting person first, then anyone a read may also return): a call for another device, answered with `dev_result` (see `devices.rs`) |
 //! | hub → Helm | `dev_call` | `id` (the hub's), `from` (`{uid, name, personId (the acting person, verified), person, people (all verified entries, acting first), machinePersonId (the sender machine's own person)}`), `op`, `args`: another device's call for this one |
@@ -138,6 +139,15 @@ pub enum Upstream {
     VoiceAttachment(Attachment),
     VoiceFinal(ReplyIn),
     VoiceNotify(ReplyIn),
+    /// The same three replies for a room speaker's turn (`"lane": "speaker"`). They go to the
+    /// speaker bridge only, so the phone's bridge never sees one and the speaker's never sees a
+    /// phone's.
+    SpeakerAck(String),
+    SpeakerStatus {
+        turn: String,
+        text: String,
+    },
+    SpeakerFinal(ReplyIn),
     /// The line's Helm announced the device it is, and the people it acts for. Answered by
     /// `devices.rs`.
     Device {
@@ -222,6 +232,14 @@ impl Upstream {
         )
     }
 
+    /// A frame for the speaker bridge.
+    pub fn is_speaker(&self) -> bool {
+        matches!(
+            self,
+            Upstream::SpeakerAck(_) | Upstream::SpeakerStatus { .. } | Upstream::SpeakerFinal(_)
+        )
+    }
+
     /// A frame that may name the person it acts for. Its `personId` is checked by `lines.rs`
     /// against what this machine may do before the frame is tagged with that person.
     pub fn takes_person(&self) -> bool {
@@ -238,17 +256,42 @@ impl Upstream {
                 | Upstream::VoiceAttachment(_)
                 | Upstream::VoiceFinal(_)
                 | Upstream::VoiceNotify(_)
+                | Upstream::SpeakerAck(_)
+                | Upstream::SpeakerStatus { .. }
+                | Upstream::SpeakerFinal(_)
         )
     }
 }
 
+/// Which lane a voice reply frame answers: the phone's (no `lane`, or `voice`), a room speaker's
+/// (`speaker`), or one the hub does not know, which is dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lane {
+    Phone,
+    Speaker,
+    Other,
+}
+
+impl Lane {
+    fn of(frame: &Value) -> Lane {
+        match frame.get("lane") {
+            None | Some(Value::Null) => Lane::Phone,
+            Some(Value::String(l)) if l == "voice" => Lane::Phone,
+            Some(Value::String(l)) if l == "speaker" => Lane::Speaker,
+            Some(_) => Lane::Other,
+        }
+    }
+}
+
 /// One `people` entry of a `device` frame: a hub person this PC acts for (its id as written on
-/// the wire), and whether this PC takes that person's Telegram / voice while the line is up.
+/// the wire), and whether this PC takes that person's Telegram / voice / speaker turns while the
+/// line is up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceClaim {
     pub person_id: String,
     pub telegram: bool,
     pub voice: bool,
+    pub speaker: bool,
 }
 
 /// The channels a person's messages are routed over.
@@ -256,6 +299,8 @@ pub struct DeviceClaim {
 pub enum Channel {
     Telegram,
     Voice,
+    /// A room speaker's turns, for the person the speaker's token belongs to.
+    Speaker,
     App,
 }
 
@@ -264,6 +309,7 @@ impl Channel {
         match name {
             "telegram" => Some(Channel::Telegram),
             "voice" => Some(Channel::Voice),
+            "speaker" => Some(Channel::Speaker),
             "app" => Some(Channel::App),
             _ => None,
         }
@@ -273,6 +319,7 @@ impl Channel {
         match self {
             Channel::Telegram => "telegram",
             Channel::Voice => "voice",
+            Channel::Speaker => "speaker",
             Channel::App => "app",
         }
     }
@@ -359,9 +406,10 @@ pub struct Line {
     /// When this line last attached or handled a Telegram frame ([`next_activity`]); 0 never.
     activity: AtomicU64,
     sharing: Mutex<Sharing>,
-    /// Which people's Telegram / voice this PC takes, as its last `device` frame said. Only
-    /// meaningful while the line is up: a new connection starts with none, like `sharing`.
-    claims: Mutex<HashMap<i64, (bool, bool)>>,
+    /// Which people's Telegram / voice / speaker turns this PC takes, as its last `device` frame
+    /// said. Only meaningful while the line is up: a new connection starts with none, like
+    /// `sharing`.
+    claims: Mutex<HashMap<i64, (bool, bool, bool)>>,
     upstream: mpsc::UnboundedSender<RawUpstream>,
     /// Told `true` when a connection attaches and `false` when the current one ends (the
     /// household's device list follows it).
@@ -441,10 +489,10 @@ impl Line {
     }
 
     /// Replace this line's channel claims with what its latest `device` frame announced.
-    pub fn set_claims(&self, claims: Vec<(i64, bool, bool)>) {
+    pub fn set_claims(&self, claims: Vec<(i64, bool, bool, bool)>) {
         *self.claims.lock().unwrap_or_else(|p| p.into_inner()) = claims
             .into_iter()
-            .map(|(id, tg, voice)| (id, (tg, voice)))
+            .map(|(id, tg, voice, speaker)| (id, (tg, voice, speaker)))
             .collect();
     }
 
@@ -456,7 +504,7 @@ impl Line {
     }
 
     /// Whether this line's last `device` frame claimed `person`, and with which flags.
-    pub fn claim_for(&self, person_id: i64) -> Option<(bool, bool)> {
+    pub fn claim_for(&self, person_id: i64) -> Option<(bool, bool, bool)> {
         self.claims
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -813,52 +861,61 @@ impl Line {
                     .is_ok(),
                 _ => false,
             },
-            Some("voice_ack") => match s("id") {
-                Some(id) => {
+            // The voice reply frames carry the lane they answer: none or `voice` is the phone's,
+            // `speaker` a room speaker's, anything else is dropped. The lanes get their own
+            // variants, so one lane's bridge can never see the other's reply.
+            Some("voice_ack") => match (Lane::of(&v), s("id")) {
+                (Lane::Other, _) => false,
+                (lane, Some(id)) => {
                     self.bump();
-                    self.upstream
-                        .send((claimed, Upstream::VoiceAck(id)))
-                        .is_ok()
+                    let up = match lane {
+                        Lane::Speaker => Upstream::SpeakerAck(id),
+                        _ => Upstream::VoiceAck(id),
+                    };
+                    self.upstream.send((claimed, up)).is_ok()
                 }
-                None => false,
-            },
-            Some("voice_status") => match (s("turn"), s("text")) {
-                (Some(turn), Some(text)) => self
-                    .upstream
-                    .send((
-                        claimed,
-                        Upstream::VoiceStatus {
-                            turn,
-                            text: text.chars().take(MAX_STATUS_CHARS).collect(),
-                        },
-                    ))
-                    .is_ok(),
                 _ => false,
             },
-            Some("voice_attachment") => match Attachment::parse(&v) {
-                Some(a) => self
+            Some("voice_status") => match (Lane::of(&v), s("turn"), s("text")) {
+                (Lane::Other, _, _) => false,
+                (lane, Some(turn), Some(text)) => {
+                    let text = text.chars().take(MAX_STATUS_CHARS).collect();
+                    let up = match lane {
+                        Lane::Speaker => Upstream::SpeakerStatus { turn, text },
+                        _ => Upstream::VoiceStatus { turn, text },
+                    };
+                    self.upstream.send((claimed, up)).is_ok()
+                }
+                _ => false,
+            },
+            // A speaker's attachment is dropped: it has no screen to show it on.
+            Some("voice_attachment") => match (Lane::of(&v), Attachment::parse(&v)) {
+                (Lane::Phone, Some(a)) => self
                     .upstream
                     .send((claimed, Upstream::VoiceAttachment(a)))
                     .is_ok(),
-                None => false,
+                _ => false,
             },
-            Some("voice_final") => match ReplyIn::parse(&v, false) {
-                Some(r) => {
+            Some("voice_final") => match (Lane::of(&v), ReplyIn::parse(&v, false)) {
+                (Lane::Other, _) | (_, None) => false,
+                (lane, Some(r)) => {
                     self.bump();
-                    self.upstream
-                        .send((claimed, Upstream::VoiceFinal(r)))
-                        .is_ok()
+                    let up = match lane {
+                        Lane::Speaker => Upstream::SpeakerFinal(r),
+                        _ => Upstream::VoiceFinal(r),
+                    };
+                    self.upstream.send((claimed, up)).is_ok()
                 }
-                None => false,
             },
-            Some("voice_notify") => match ReplyIn::parse(&v, true) {
-                Some(r) => {
+            // News Helm starts is the phone's alone: unprompted speech in a room is not offered.
+            Some("voice_notify") => match (Lane::of(&v), ReplyIn::parse(&v, true)) {
+                (Lane::Phone, Some(r)) => {
                     self.bump();
                     self.upstream
                         .send((claimed, Upstream::VoiceNotify(r)))
                         .is_ok()
                 }
-                None => false,
+                _ => false,
             },
             Some("device") => match (s("uid"), s("name")) {
                 (Some(uid), Some(name)) => {
@@ -881,6 +938,10 @@ impl Line {
                                             .unwrap_or(false),
                                         voice: p
                                             .get("voice")
+                                            .and_then(Value::as_bool)
+                                            .unwrap_or(false),
+                                        speaker: p
+                                            .get("speaker")
                                             .and_then(Value::as_bool)
                                             .unwrap_or(false),
                                     })
@@ -1378,6 +1439,68 @@ mod tests {
         assert!(up.try_recv().is_err(), "nothing malformed went upstream");
         assert!(Upstream::VoiceAck(String::new()).is_voice());
         assert!(!Upstream::TelegramAck(String::new()).is_voice());
+
+        // The lane a reply names decides which bridge it can reach: none or `voice` the phone's,
+        // `speaker` a room speaker's (its own variants), anything else is dropped. A speaker's
+        // attachment and news are dropped too.
+        let lane = |frame_type: &str, lane: Value| {
+            let mut v: Value = serde_json::from_str(&reply(frame_type, json!({}))).unwrap();
+            v["lane"] = lane;
+            v.to_string()
+        };
+        assert!(line.receive(
+            gen,
+            r#"{"type":"voice_ack","id":"turn-0002","lane":"speaker","personId":"4"}"#
+        ));
+        assert!(line.receive(
+            gen,
+            r#"{"type":"voice_status","turn":"turn-0002","text":"Looking","lane":"speaker"}"#
+        ));
+        assert!(line.receive(gen, &lane("voice_final", json!("speaker"))));
+        assert!(line.receive(gen, &lane("voice_final", json!("voice"))));
+        assert!(line.receive(gen, r#"{"type":"voice_ack","id":"turn-0003","lane":null}"#));
+        for bad in [
+            r#"{"type":"voice_ack","id":"turn-0004","lane":"kitchen"}"#.to_owned(),
+            r#"{"type":"voice_ack","id":"turn-0004","lane":7}"#.to_owned(),
+            r#"{"type":"voice_status","turn":"turn-0004","text":"x","lane":"phone"}"#.to_owned(),
+            lane("voice_final", json!("elsewhere")),
+            lane("voice_notify", json!("speaker")),
+            {
+                let mut a = attachment.clone();
+                a["lane"] = json!("speaker");
+                a.to_string()
+            },
+        ] {
+            assert!(!line.receive(gen, &bad), "{bad}");
+        }
+        let (tag, up_ack) = up.try_recv().unwrap();
+        assert_eq!(
+            (tag, up_ack),
+            (Some("4".into()), Upstream::SpeakerAck("turn-0002".into()))
+        );
+        assert_eq!(
+            up.try_recv().unwrap(),
+            (
+                None,
+                Upstream::SpeakerStatus {
+                    turn: "turn-0002".into(),
+                    text: "Looking".into()
+                }
+            )
+        );
+        assert!(matches!(
+            up.try_recv().unwrap().1,
+            Upstream::SpeakerFinal(r) if r.turn.as_deref() == Some("turn-0001")
+        ));
+        assert!(matches!(up.try_recv().unwrap().1, Upstream::VoiceFinal(_)));
+        assert_eq!(
+            up.try_recv().unwrap().1,
+            Upstream::VoiceAck("turn-0003".into())
+        );
+        assert!(up.try_recv().is_err(), "nothing else went upstream");
+        assert!(Upstream::SpeakerAck(String::new()).is_speaker());
+        assert!(!Upstream::SpeakerAck(String::new()).is_voice());
+        assert!(!Upstream::VoiceAck(String::new()).is_speaker());
     }
 
     #[tokio::test]
@@ -1492,7 +1615,7 @@ mod tests {
         assert!(line.receive(
             gen,
             r#"{"type":"device","uid":"u1","name":"Desk","run":true,
-                "people":[{"personId":"7","telegram":true,"voice":false},{"personId":"3"}]}"#
+                "people":[{"personId":"7","telegram":true,"voice":false,"speaker":true},{"personId":"3"}]}"#
         ));
         assert!(line.receive(
             gen,
@@ -1536,11 +1659,13 @@ mod tests {
                         person_id: "7".into(),
                         telegram: true,
                         voice: false,
+                        speaker: true,
                     },
                     DeviceClaim {
                         person_id: "3".into(),
                         telegram: false,
                         voice: false,
+                        speaker: false,
                     },
                 ],
             }
@@ -1581,6 +1706,7 @@ mod tests {
                     person_id: "10".into(),
                     telegram: false,
                     voice: true,
+                    speaker: false,
                 }],
             }
         );

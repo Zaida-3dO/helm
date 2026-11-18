@@ -13,6 +13,7 @@
 //! | `telegram` | `POST /telegram/update` and nothing else (a forwarder for a shared bot) |
 //! | `voice` | `/voice/*`, the phone's voice line to its owner's Helm, and nothing else |
 //! | `remote` | `POST /remote/api/call`, the Remote page's calls to its owner's Helm, and nothing else |
+//! | `speaker` | `/speaker/*`, a room speaker's line to the household's Helm, and nothing else |
 //!
 //! New scopes are a new [`Scope`] variant, a [`Scope::parse`] arm and a [`Scope::label`] arm;
 //! routes check the scope they need with [`Client::has`], so a client without it is refused with
@@ -20,7 +21,7 @@
 //!
 //! Clients live in the registry (`registry.rs`). `HUB_TOKENS=client:token[:scope]` still works: its
 //! entries become legacy clients of one person, parsed here. The scope field is `rw` (the default),
-//! `ro`, `relay`, `app`, `peer`, `telegram`, `voice` or `remote`, or several joined with `+` (`rw+app`,
+//! `ro`, `relay`, `app`, `peer`, `telegram`, `voice`, `remote` or `speaker`, or several joined with `+` (`rw+app`,
 //! `rw+relay+app+peer`); `memory:rw` and `memory:ro` are also accepted.
 //!
 //! Only SHA-256 digests of tokens are kept, and a presented token is compared against every
@@ -45,6 +46,8 @@ pub enum Scope {
     Voice,
     /// The Remote page's calls (`/remote/api/call`); never anything else.
     Remote,
+    /// A room speaker's line (`/speaker/*`); never anything else.
+    Speaker,
 }
 
 impl Scope {
@@ -58,6 +61,7 @@ impl Scope {
             Scope::Peer => "peer",
             Scope::Voice => "voice",
             Scope::Remote => "remote",
+            Scope::Speaker => "speaker",
         }
     }
 
@@ -71,6 +75,7 @@ impl Scope {
             "peer" => Scope::Peer,
             "voice" => Scope::Voice,
             "remote" => Scope::Remote,
+            "speaker" => Scope::Speaker,
             _ => return None,
         })
     }
@@ -120,7 +125,7 @@ impl Scopes {
             list.push(Scope::parse(part).ok_or_else(|| {
                 format!(
                     "{part:?} is not a scope; use memory:ro, memory:rw, relay, app, peer, telegram, \
-                     voice or remote"
+                     voice, remote or speaker"
                 )
             })?);
         }
@@ -139,6 +144,10 @@ impl Scopes {
         // And the Remote page's: a browser token reaches the page's calls and nothing else.
         if scopes.has(Scope::Remote) && scopes.0.len() > 1 {
             return Err("the remote scope cannot be combined with another".into());
+        }
+        // And a room speaker's: it reaches the speaker line and nothing else.
+        if scopes.has(Scope::Speaker) && scopes.0.len() > 1 {
+            return Err("the speaker scope cannot be combined with another".into());
         }
         Ok(scopes)
     }
@@ -302,9 +311,24 @@ mod tests {
         // The Remote page's token stands alone too.
         let page = Tokens::parse(&format!("page:{A}:remote")).unwrap();
         assert_eq!(scopes_of(&page, "page"), "remote");
-        for bad in ["remote+app", "rw+remote", "remote,voice", "telegram+remote"] {
+        for bad in [
+            "remote+app",
+            "rw+remote",
+            "remote,voice",
+            "telegram+remote",
+            // A room speaker's token stands alone as well.
+            "speaker+app",
+            "rw+speaker",
+            "speaker,voice",
+            "speaker,remote",
+        ] {
             assert!(Scopes::parse_list(bad).is_err(), "{bad}");
         }
+        let room = Tokens::parse(&format!("kitchen:{A}:speaker")).unwrap();
+        assert_eq!(scopes_of(&room, "kitchen"), "speaker");
+        assert_eq!(Scope::parse("speaker"), Some(Scope::Speaker));
+        let s = Scopes::parse_list("speaker").unwrap();
+        assert!(s.has(Scope::Speaker) && !s.can_read_memory() && !s.has(Scope::Relay));
         assert_eq!(Scope::parse("remote"), Some(Scope::Remote));
         assert_eq!(Scope::Remote.label(), "remote");
         let r = Scopes::parse_list("remote").unwrap();
