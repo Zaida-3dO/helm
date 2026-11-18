@@ -8,9 +8,13 @@
 // - The agent's reason and evidence render inert, marked as the agent's words.
 // - A card Helm applies itself (appliesOnAllow) says Approve, has no grant length, and shows the
 //   summary's title line, then each change as its own inert row.
+// - A card may carry a picture Helm took of what it acts on (a browser step's control). It is
+//   loaded from the chat's own stored pictures; until it loads, and when the card is answered on
+//   another device's copy, the card's lines alone say what is approved.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import { consentOps, type ConsentRequest } from '../api/consent.ts';
+import { cardOps } from '../api/ops.ts';
 import { useShell } from '../shell/context.ts';
 import { inertLines, summaryParts } from './inert.ts';
 import { SettleGate, type Rect } from './settle.ts';
@@ -37,6 +41,25 @@ function Inert({ text, label }: { text: string; label: string }) {
       ))}
     </div>
   );
+}
+
+/** The picture Helm stored for a card. Its arrival changes the card's size, which restarts the
+ * settle window, so a button never moves under a click. */
+function CardPicture({ chatId, gallery }: { chatId: string; gallery: string }) {
+  const shell = useShell();
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    cardOps(shell.api)
+      .thumb(chatId, gallery, 0)
+      .then((p) => live && setSrc(`data:${p.mime};base64,${p.bytes}`))
+      .catch(() => live && setSrc(null));
+    return () => {
+      live = false;
+    };
+  }, [shell.api, chatId, gallery]);
+  if (!src) return null;
+  return <img className="allow-picture" src={src} alt="What this card approves, as Helm saw it" data-testid="allow-picture" />;
 }
 
 export function AllowCards({ chatId, remote = false }: { chatId: string; remote?: boolean }) {
@@ -164,6 +187,7 @@ export function AllowCards({ chatId, remote = false }: { chatId: string; remote?
               ))}
             </div>
           )}
+          {c.picture && !remote && <CardPicture chatId={chatId} gallery={c.picture} />}
           <Inert label="The agent's reason (its words; Helm has not checked them)" text={c.reason} />
           <Inert label="The agent's evidence (its words; Helm has not checked them)" text={c.evidence} />
           <div className="allow-controls">

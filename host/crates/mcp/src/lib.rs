@@ -15,6 +15,7 @@
 //! | [`google`] | several Google accounts through `workspace-mcp`: the account list, sign-in and the permission level |
 //! | [`oauth`] | a reusable OAuth 2.x client: metadata discovery, dynamic registration, PKCE sign-in over a loopback redirect, tokens kept in the credential store |
 //! | [`oauth_ops`] | the Settings → MCP sign-in ops built on it: Connect, its status, Disconnect, and the worker's one-time ask for a fresh header |
+//! | [`owner_step`] | approving one step in the user's own browser from a card: the card, the one-time grant Helm mints on Approve, and the retry through the chat's worker |
 //! | [`repo_gate`] | the repository-server gate and its seeding from Claude Code |
 //! | [`status`] | the newest per-server status across workers (MC3) |
 //! | [`tools`] | their registration with the host-tool registry |
@@ -35,6 +36,7 @@ pub mod memory;
 pub mod oauth;
 pub mod oauth_ops;
 mod ops;
+pub mod owner_step;
 pub mod presets;
 pub mod probe;
 pub mod repo_gate;
@@ -74,6 +76,7 @@ pub fn register_services(services: &mut Services, events: &Arc<dyn EventSink>) {
     // listens yet and no worker is running, so this needs no announcement; a failure only leaves
     // chats acting as this PC's own person.
     let _ = store.add_person_headers();
+    services.insert(Arc::new(owner_step::StepAnswers::default()));
     let status = Arc::new(McpStatusStore::default());
     let ev = events.clone();
     let st = status.clone();

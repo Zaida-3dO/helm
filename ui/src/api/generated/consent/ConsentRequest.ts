@@ -44,4 +44,10 @@ outcome: string | null,
  * Where the user answered: `app` (this PC's window), `device:<name>` (another device) or
  * `telegram`. `None` while pending, and for a request that expired.
  */
-decidedVia: string | null, };
+decidedVia: string | null, 
+/**
+ * For a card Helm applies itself: a picture the host took of what the step acts on, as the
+ * id of a gallery stored in the chat (read with the chat's own picture ops). `None` for
+ * every other card.
+ */
+picture: string | null, };

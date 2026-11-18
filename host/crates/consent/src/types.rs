@@ -75,6 +75,10 @@ pub struct ConsentRequest {
     /// Where the user answered: `app` (this PC's window), `device:<name>` (another device) or
     /// `telegram`. `None` while pending, and for a request that expired.
     pub decided_via: Option<String>,
+    /// For a card Helm applies itself: a picture the host took of what the step acts on, as the
+    /// id of a gallery stored in the chat (read with the chat's own picture ops). `None` for
+    /// every other card.
+    pub picture: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]

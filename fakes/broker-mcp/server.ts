@@ -8,19 +8,123 @@
 //                               browser refusing a consequential step),
 //   statuses: "out path"        append each browser_status line to this file (keep-alive counts),
 //   secret: "..."               echoed into one tool's text, for the redaction checks.
+//   page: {...}                 the gate mode below: the broker's acting rules over one page.
+//   acts: "out path"            append one JSON line per browser_act call (gate mode).
 // }
+//
+// Gate mode (`page` set) answers browser_act the way an attached browser decides it: the site
+// list, the password / one-time-code / card fields, the consequence words, and the owner grant
+// (HMAC-SHA256 under BROKER_OWNER_GRANT_SECRET from the environment, over the lease, the ref,
+// the control's name and the host, `<issued>.<base64url tag>`, two minutes, spent once per
+// process). browser_navigate, browser_read (with find and inline), browser_capture and
+// browser_claim answer in the broker's accepted JSON shape.
 
+import { createHmac, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 
 type Json = Record<string, unknown>;
+
+interface Control {
+  role: string;
+  name: string;
+  inputType?: string;
+  autocomplete?: string;
+}
+
+interface Page {
+  /** The host the tab arrives at, whatever was asked for. */
+  host: string;
+  actSites: string[];
+  controls: Record<string, Control>;
+  /** The page holds a password or card field (a submit over it is consequential). */
+  secretField?: boolean;
+  /** Where captures are written; answered as a path relative to it. */
+  artifacts?: string;
+}
 
 interface Cfg {
   act?: "needs_owner" | "ok";
   statuses?: string;
   secret?: string;
+  page?: Page;
+  acts?: string;
 }
 
 const cfg: Cfg = JSON.parse(process.argv[3] ?? "{}");
+
+const CONSEQUENCE = ["pay", "buy", "order", "checkout", "transfer", "send", "submit", "delete", "remove", "cancel"];
+const spent = new Set<string>();
+
+const words = (s: string | undefined) => (s ?? "").toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+const accepted = (value: Json) => ({ content: [{ type: "text", text: JSON.stringify({ outcome: "accepted", value }, null, 2) }] });
+const refused = (rule: string, message: string) => ({ content: [{ type: "text", text: `refused (${rule}): ${message}` }], isError: true });
+
+function verdict(grant: string, tuple: string[]): string {
+  const secret = process.env.BROKER_OWNER_GRANT_SECRET;
+  if (!secret) return "no_secret";
+  const at = grant.lastIndexOf(".");
+  const issued = at > 0 ? Number(grant.slice(0, at)) : 0;
+  const tag = Buffer.from(at > 0 ? grant.slice(at + 1) : grant, "base64url");
+  const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
+  const want = createHmac("sha256", secret).update([...tuple.map(esc), String(issued)].join("|")).digest();
+  if (tag.length !== 32 || !timingSafeEqual(tag, want)) return "forged";
+  if (Math.abs(Date.now() / 1000 - issued) > 120) return "expired";
+  if (spent.has(grant)) return "replayed";
+  spent.add(grant);
+  return "valid";
+}
+
+function gateAct(page: Page, args: Json): Json {
+  const ref = typeof args.target === "string" ? args.target : "";
+  const grant = typeof args.owner_grant === "string" ? args.owner_grant : undefined;
+  const c = page.controls[ref];
+  const log = (outcome: string) => cfg.acts && fs.appendFileSync(cfg.acts, `${JSON.stringify({ ref, action: args.action, grant: grant !== undefined, outcome })}\n`);
+  const no = (rule: string, message: string) => {
+    log(rule);
+    return refused(rule, message);
+  };
+  if (!page.actSites.includes(page.host)) return no("attached.act_site_off_list", "This site is not in BROKER_ATTACHED_ACT_SITES.");
+  if (!c) return no("act.ref_resolves", `No element on this page matches the reference "${ref}".`);
+  const ac = (c.autocomplete ?? "").split(/\s+/);
+  if (c.inputType === "password" || ac.some((t) => ["password", "current-password", "new-password", "one-time-code", "cc-number", "cc-csc", "cc-exp"].includes(t)))
+    return no("attached.field_forbidden", "This control is a secret field, and an agent never types into one.");
+  if (grant !== undefined) {
+    const v = verdict(grant, [String(args.lease_key ?? ""), ref, c.name, page.host]);
+    if (v !== "valid" && v !== "no_secret") return no("attached.grant_invalid", `The owner grant did not verify (${v}); the step is refused.`);
+  }
+  const seen = new Set([...words(c.name), ...words(c.role)]);
+  const consequential = CONSEQUENCE.some((w) => seen.has(w)) || (!!page.secretField && c.inputType === "submit");
+  if (consequential && grant === undefined) return no("attached.needs_owner", "This step is consequential, so the owner does it: call browser_sign_in with what to press.");
+  log("acted");
+  return accepted({ action: args.action, snapshot: "after.txt" });
+}
+
+function gateTool(page: Page, name: string, args: Json): Json | undefined {
+  switch (name) {
+    case "browser_claim":
+      return accepted({ key: "L1" });
+    case "browser_navigate":
+      return accepted({ url: `https://${page.host}/aisles` });
+    case "browser_act":
+      return gateAct(page, args);
+    case "browser_read": {
+      const find = typeof args.find === "string" ? args.find : "";
+      const re = find.startsWith("/") && find.endsWith("/") ? new RegExp(find.slice(1, -1)) : null;
+      const lines = Object.entries(page.controls).map(([ref, c]) => `- ${c.role} ${JSON.stringify(c.name)} [ref=${ref}]`);
+      const text = lines.filter((l) => !re || re.test(l)).join("\n");
+      return accepted({ artifacts: ["snapshot"], inlined: [{ artifact: "snapshot", text }] });
+    }
+    case "browser_capture": {
+      if (!page.artifacts) return refused("capture.unavailable", "no capture here");
+      const rel = `cap-${String(args.selector ?? "").replace(/[^a-z0-9]/gi, "")}.png`;
+      fs.writeFileSync(path.join(page.artifacts, rel), Buffer.from("89504e470d0a1a0a", "hex"));
+      return accepted({ capture: { path: rel } });
+    }
+    default:
+      return undefined;
+  }
+}
 const TOOLS = [
   "browser_claim",
   "browser_status",
@@ -49,6 +153,8 @@ const schema = {
 
 function callTool(name: string, args: Json): { result?: Json; error?: Json } {
   const text = (s: string) => ({ content: [{ type: "text", text: s }] });
+  const gated = cfg.page ? gateTool(cfg.page, name, args) : undefined;
+  if (gated) return { result: gated };
   switch (name) {
     case "browser_claim":
       return { result: text("lease L1 is active: one tab of your browser") };

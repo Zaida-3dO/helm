@@ -50,6 +50,12 @@ pub trait Applier: Send + Sync {
     fn apply(&self, job: &ApplyJob<'_>) -> String;
     /// The host tool that stages this kind, named when `app_request_allow` refuses it.
     fn staged_with(&self) -> &'static str;
+    /// Whether applying holds the app's maintenance lock. A kind that changes Helm's own records
+    /// does; a kind that only hands the approval on to something outside Helm and waits for its
+    /// answer does not, so other chats' changes never queue behind that wait.
+    fn holds_maintenance_lock(&self) -> bool {
+        true
+    }
 }
 
 /// The app's maintenance lock (the one maintenance ops and mutating host tools hold), as a
@@ -144,7 +150,10 @@ fn apply(
         Ok(None) => return log::warn!("consent: an approved request was no longer spendable"),
         Err(e) => return log::warn!("consent: spending an approval failed: {}", e.message),
     };
-    let lock = services.get::<MaintenanceLock>().and_then(|m| m.get());
+    let lock = applier
+        .holds_maintenance_lock()
+        .then(|| services.get::<MaintenanceLock>().and_then(|m| m.get()))
+        .flatten();
     // A plain thread, never the runtime's: blocking_lock is safe here.
     let guard = lock.as_ref().map(|l| l.blocking_lock());
     let job = ApplyJob {

@@ -430,6 +430,19 @@ impl McpStore {
                 crate::google::prepare(&self.creds, profile_dir, &mut out);
             }
         }
+        // The built-in browser checks the grants Helm mints when the user approves one of its
+        // steps (see crate::owner_step) with a key only Helm and that process hold. It joins the
+        // secrets, so the worker scrubs it from everything the server says.
+        if s.preset.as_deref() == Some(crate::presets::BROKER_PRESET_ID)
+            && t.kind == TransportKind::Stdio
+            && out.error.is_none()
+        {
+            if let Some(key) = crate::owner_step::grant_key() {
+                out.env
+                    .insert(crate::owner_step::SECRET_ENV.into(), key.to_owned());
+                out.secrets.push(key.to_owned());
+            }
+        }
         // A server that signs in through the browser is only reachable with that sign-in: its
         // header is added here (refreshed first when the token is nearly spent), and the token
         // joins the redaction set like any other resolved secret. Without a sign-in the server
@@ -662,6 +675,19 @@ pub(crate) mod tests {
             Some(crate::presets::BROKER_PRESET_ID),
             "the worker recognises the built-in browser server by its preset"
         );
+        // The grant key reaches the browser server only, and as a secret the worker scrubs.
+        let key = crate::owner_step::grant_key().unwrap();
+        assert_eq!(
+            r[0].env
+                .get(crate::owner_step::SECRET_ENV)
+                .map(String::as_str),
+            Some(key)
+        );
+        assert!(r[0].secrets.iter().any(|s| s == key));
+        assert!(!st
+            .resolve_draft(&hub("t"))
+            .env
+            .contains_key(crate::owner_step::SECRET_ENV));
         assert_eq!(st.resolve_draft(&hub("t")).preset, None);
     }
 

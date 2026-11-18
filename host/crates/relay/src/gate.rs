@@ -47,6 +47,8 @@ pub const TABLE: &[(&str, Class)] = &[
     ("app_append_feedback", Class::Denied(LOCAL)),
     ("app_attention", Class::Denied(LOCAL)),
     ("app_background_result", Class::Denied(LOCAL)),
+    ("app_browser_step", Class::Denied(LOCAL)),
+    ("app_browser_step_result", Class::Denied(LOCAL)),
     ("app_cancel_schedule", Class::Denied(SCHEDULES)),
     ("app_chat", Class::Denied(CHANGES)),
     ("app_consent_check", Class::Denied(CONSENT)),

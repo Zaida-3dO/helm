@@ -2123,6 +2123,7 @@ dependencies = [
  "helm-ipc",
  "helm-platform",
  "helm-workers",
+ "hmac",
  "log",
  "rusqlite",
  "serde",

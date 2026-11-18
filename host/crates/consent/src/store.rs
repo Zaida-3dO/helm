@@ -97,7 +97,11 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              ON consent_records(submission_id) WHERE submission_id IS NOT NULL;",
     )?;
     // Columns added after the table first shipped: added once, checked on every open.
-    for (column, ty) in [("outcome", "TEXT"), ("decided_via", "TEXT")] {
+    for (column, ty) in [
+        ("outcome", "TEXT"),
+        ("decided_via", "TEXT"),
+        ("picture", "TEXT"),
+    ] {
         let has: bool = tx.query_row(
             "SELECT EXISTS (SELECT 1 FROM pragma_table_info('consent_requests') WHERE name = ?1)",
             [column],
@@ -293,6 +297,38 @@ pub fn request(
     })
 }
 
+/// Put a picture on a pending card Helm applies itself: `gallery` is the id of a gallery the host
+/// stored in the chat (the staging tool's own copy of what the step acts on). Only the staging
+/// tool calls this, right after filing, so the picture is never an agent's choice.
+pub fn set_picture(
+    db: &Database,
+    kinds: &AllowKinds,
+    request_id: &str,
+    gallery: &str,
+) -> Result<(), Refusal> {
+    db.write::<_, Refusal>(|tx| {
+        let kind: Option<String> = tx
+            .query_row(
+                "SELECT kind FROM consent_requests WHERE id = ?1 AND state = 'pending'",
+                [request_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match kind {
+            Some(k) if kinds.applies_on_allow(&k) => {
+                tx.execute(
+                    "UPDATE consent_requests SET picture = ?2 WHERE id = ?1",
+                    params![request_id, gallery],
+                )?;
+                Ok(())
+            }
+            _ => Err(Refusal::new(
+                "Only a waiting card Helm applies can carry a picture.",
+            )),
+        }
+    })
+}
+
 fn by_tool_use(tx: &Transaction<'_>, chat: &str, id: &str) -> rusqlite::Result<Option<String>> {
     tx.query_row(
         "SELECT id FROM consent_requests WHERE chat_id = ?1 AND tool_use_id = ?2",
@@ -303,7 +339,7 @@ fn by_tool_use(tx: &Transaction<'_>, chat: &str, id: &str) -> rusqlite::Result<O
 }
 
 const COLUMNS: &str = "id, chat_id, kind, summary, reason, evidence, state, grant_minutes,
-    created_at, expires_at, decided_at, grant_expires_at, note, outcome, decided_via";
+    created_at, expires_at, decided_at, grant_expires_at, note, outcome, decided_via, picture";
 
 fn row_to_view(kinds: &AllowKinds, r: &rusqlite::Row<'_>) -> rusqlite::Result<ConsentRequest> {
     let kind: String = r.get(2)?;
@@ -327,6 +363,7 @@ fn row_to_view(kinds: &AllowKinds, r: &rusqlite::Row<'_>) -> rusqlite::Result<Co
         applies_on_allow: kinds.applies_on_allow(&kind),
         outcome: r.get(13)?,
         decided_via: r.get(14)?,
+        picture: r.get(15)?,
         kind,
     })
 }

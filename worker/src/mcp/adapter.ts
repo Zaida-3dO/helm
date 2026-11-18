@@ -96,6 +96,16 @@ export function applyOauthHeaderLine(bridge: McpBridge, cmd: Json): boolean {
   return true;
 }
 
+/** Applies an `mcp_owner_grant` line from the host: the person approved a browser step, and the
+ * grant retries it. Returns false when it is not one. The grant is only handed on, never logged. */
+export function applyOwnerGrantLine(bridge: McpBridge, cmd: Json): boolean {
+  if (cmd.type !== "mcp_owner_grant") return false;
+  const { requestId, serverId, leaseKey, ref, grant } = cmd;
+  if (typeof requestId !== "string" || typeof serverId !== "string" || typeof leaseKey !== "string" || typeof ref !== "string" || typeof grant !== "string") return false;
+  bridge.deliverOwnerGrant({ requestId, serverId, leaseKey, ref, grant });
+  return true;
+}
+
 /** The natively loaded servers from the CLI's `system/init` message (`mcp_servers: [{name,
  * status}]`), leaving out Helm's own and any that failed to connect. */
 export function nativeFromInit(init: Json): NativeServer[] {

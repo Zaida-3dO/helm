@@ -1,0 +1,28 @@
+{
+  "about": "Words that keep a browser step away from an Approve card. A word matches one whole token of the control's accessible name or role; a pair matches when both tokens appear, in any order. 'never' steps are the person's own and are refused outright; 'secret' steps sign in or touch a password, one-time code or card field and go back to the person at their browser. The worker and the host both read this file.",
+  "never": {
+    "words": ["checkout", "pay", "payment", "purchase", "buy", "transfer"],
+    "pairs": [
+      ["place", "order"],
+      ["confirm", "order"],
+      ["submit", "order"],
+      ["complete", "order"],
+      ["check", "out"],
+      ["delete", "account"],
+      ["close", "account"],
+      ["remove", "account"]
+    ]
+  },
+  "secret": {
+    "words": ["password", "passcode", "passphrase", "otp", "cvv", "cvc", "signin", "login", "logon", "2fa"],
+    "pairs": [
+      ["sign", "in"],
+      ["log", "in"],
+      ["one", "time"],
+      ["verification", "code"],
+      ["security", "code"],
+      ["card", "number"],
+      ["expiry", "date"]
+    ]
+  }
+}
