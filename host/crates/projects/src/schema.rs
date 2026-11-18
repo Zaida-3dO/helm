@@ -33,6 +33,7 @@ pub fn register(reg: &mut MigrationRegistry) {
         .one_time("projects-icon-and-description", add_icon_and_description)
         .one_time("projects-startup-instructions", add_startup_instructions)
         .one_time("projects-startup-set", add_startup_set)
+        .one_time("projects-default-modes", add_default_modes)
         .initializer("projects-startup", crate::startup::init)
         .initializer("projects-repositories", crate::repos::init);
 }
@@ -54,6 +55,7 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              startup_instructions       TEXT,
              startup_files              TEXT,
              startup_servers            TEXT,
+             default_modes              TEXT,
              icon_image                 BLOB,
              title_pending              INTEGER NOT NULL DEFAULT 0
          );
@@ -215,6 +217,20 @@ fn add_startup_set(tx: &Transaction<'_>) -> rusqlite::Result<()> {
                 "ALTER TABLE project_local ADD COLUMN {column} TEXT"
             ))?;
         }
+    }
+    Ok(())
+}
+
+/// The default modes arrived after the table did: a profile made before them gets the column
+/// here. A new profile already has it from `init`.
+fn add_default_modes(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    let present: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('project_local') WHERE name = 'default_modes')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !present {
+        tx.execute_batch("ALTER TABLE project_local ADD COLUMN default_modes TEXT")?;
     }
     Ok(())
 }

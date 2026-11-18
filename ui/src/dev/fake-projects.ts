@@ -39,7 +39,7 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
     parentId: null,
     parentSource: null,
     description: null,
-    startupInstructions: null, startupFiles: [], startupServers: [],
+    startupInstructions: null, startupFiles: [], startupServers: [], defaultModes: [],
     icon: null,
     colour: null,
     pinned: false,
@@ -62,7 +62,7 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
   if (opts.seedBoard) {
     for (const p of [
       node('f-helm', 'helm', { path: 'C:/Users/me/Documents/Coding/helm' }),
-      node('f-notes', 'notes', { path: 'C:/Users/me/Documents/notes' }),
+      node('f-notes', 'notes', { path: 'C:/Users/me/Documents/notes', defaultModes: ['writing'] }),
       { ...board('b-helm', 'Helm'), primaryFolderProjectId: 'f-helm' },
       board('b-site', 'Client Website'),
       board('b-launch', 'Launch checklist', true),
@@ -174,6 +174,7 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
         if ('startupInstructions' in args) next.startupInstructions = typeof args.startupInstructions === 'string' && args.startupInstructions !== '' ? args.startupInstructions : null;
         if (Array.isArray(args.startupFiles)) next.startupFiles = args.startupFiles.filter((f): f is string => typeof f === 'string');
         if (Array.isArray(args.startupServers)) next.startupServers = args.startupServers.filter((f): f is string => typeof f === 'string');
+        if (Array.isArray(args.defaultModes)) next.defaultModes = args.defaultModes.filter((f): f is string => typeof f === 'string');
         if (typeof args.pinned === 'boolean') next.pinned = args.pinned;
         if (typeof args.collapsed === 'boolean') next.collapsed = args.collapsed;
         if ('parentId' in args) next.parentId = (args.parentId as string) ?? null;

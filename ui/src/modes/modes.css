@@ -1,0 +1,34 @@
+/* The chip row by the composer: modes switched on in the chat, and the menu that adds more. */
+
+.mode-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 0 2px 4px;
+}
+
+.mode-chip {
+  display: inline-flex;
+  max-width: 180px;
+}
+
+.mode-add {
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-row-action);
+  background: none;
+  color: var(--secondary);
+  font: inherit;
+  font-size: calc(11 * var(--ui-unit));
+  padding: 3px 8px;
+  cursor: var(--cursor-pointer);
+}
+
+.mode-add:hover {
+  color: var(--text);
+}
+
+.mode-error {
+  color: var(--error);
+  font-size: calc(11 * var(--ui-unit));
+}

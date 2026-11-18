@@ -68,6 +68,23 @@ pub fn config_line_for_chat(
             })
         });
     }
+    // Servers that belong to a context mode the chat has not switched on are left out as well.
+    let hidden = services
+        .get::<helm_hosttools::McpServerHideGate>()
+        .map(|g| g.0.hidden(chat_id))
+        .unwrap_or_default();
+    if let (false, Some(list)) = (
+        hidden.is_empty(),
+        line.get_mut("servers").and_then(Value::as_array_mut),
+    ) {
+        list.retain(|s| {
+            !["id", "name"].iter().any(|k| {
+                s.get(k)
+                    .and_then(Value::as_str)
+                    .is_some_and(|v| hidden.iter().any(|h| h.eq_ignore_ascii_case(v)))
+            })
+        });
+    }
     Some(line)
 }
 
@@ -132,10 +149,12 @@ impl ServicesCell {
         let (Some(store), Some(b)) = (s.get::<McpStore>(), s.get::<Broadcaster>()) else {
             return;
         };
-        // A config that sends the chat's person, or that a project narrows, differs from chat to chat.
+        // A config that sends the chat's person, or that a project or a mode narrows, differs from chat to chat.
         let narrowed = s
             .get::<helm_hosttools::McpServerFilterGate>()
-            .is_some_and(|g| g.0.any());
+            .is_some_and(|g| g.0.any())
+            || s.get::<helm_hosttools::McpServerHideGate>()
+                .is_some_and(|g| g.0.any());
         if store.uses_chat_person() || narrowed {
             let running = b.0.running_chats();
             if !running.is_empty() {
@@ -197,13 +216,27 @@ mod tests {
     }
 
     /// A project that names servers gives its chats those and no others; one that names none, and a
-    /// chat of no project, get every server.
+    /// chat of no project, get every server. A server that belongs to a mode the chat has not
+    /// switched on is left out as well: by id or name, and on top of the project's list.
     #[test]
     fn a_projects_server_list_narrows_what_its_chats_get() {
         struct Only;
         impl helm_hosttools::McpServerFilter for Only {
             fn allowed(&self, chat: &str) -> Option<Vec<String>> {
-                (chat == "narrow").then(|| vec!["OTHER".to_owned()])
+                (chat == "narrow").then(|| vec!["OTHER".to_owned(), "Notes".to_owned()])
+            }
+            fn any(&self) -> bool {
+                true
+            }
+        }
+        struct Hide;
+        impl helm_hosttools::McpServerHide for Hide {
+            fn hidden(&self, chat: &str) -> Vec<String> {
+                match chat {
+                    "narrow" => vec!["NOTES".to_owned()],
+                    "free" => vec!["Other".to_owned()],
+                    _ => Vec::new(),
+                }
             }
             fn any(&self) -> bool {
                 true
@@ -217,8 +250,12 @@ mod tests {
             let mut b = hub("tok-654321");
             b.id = "other".into();
             b.name = "Other".into();
+            let mut c = hub("tok-111111");
+            c.id = "notes_server".into();
+            c.name = "Notes".into();
             l.push(a);
             l.push(b);
+            l.push(c);
             Ok(())
         })
         .unwrap();
@@ -227,6 +264,7 @@ mod tests {
         services.insert(Arc::new(helm_hosttools::McpServerFilterGate(Arc::new(
             Only,
         ))));
+        services.insert(Arc::new(helm_hosttools::McpServerHideGate(Arc::new(Hide))));
         let services = Arc::new(services);
         let mut l = WorkerLines::new();
         register_worker_lines(&mut l);
@@ -238,8 +276,21 @@ mod tests {
                 .map(|s| s["id"].as_str().unwrap().to_owned())
                 .collect()
         };
-        assert_eq!(ids("narrow"), ["other"], "ids match without regard to case");
-        assert_eq!(ids("free"), ["helm_hub", "other"]);
+        assert_eq!(
+            ids("narrow"),
+            ["other"],
+            "ids match without regard to case, and a hidden server leaves the project's list"
+        );
+        assert_eq!(
+            ids("free"),
+            ["helm_hub", "notes_server"],
+            "a hidden name goes, whatever its case"
+        );
+        assert_eq!(
+            ids("plain"),
+            ["helm_hub", "other", "notes_server"],
+            "a server no mode hides stays on"
+        );
     }
 
     #[test]

@@ -103,6 +103,10 @@ pub struct ProjectNode {
     /// server available, as for a project that names none.
     #[serde(default)]
     pub startup_servers: Vec<String>,
+    /// The modes every new chat on this project starts with (their names); empty starts a chat
+    /// with none on.
+    #[serde(default)]
+    pub default_modes: Vec<String>,
     /// A named colour or `#rrggbb`, lowercase.
     pub colour: Option<String>,
     pub pinned: bool,
@@ -338,6 +342,10 @@ pub struct ProjectUpdateArgs {
     #[serde(default)]
     #[ts(optional)]
     pub startup_servers: Option<Vec<String>>,
+    /// Replaces the modes new chats start with; an empty list clears them.
+    #[serde(default)]
+    #[ts(optional)]
+    pub default_modes: Option<Vec<String>>,
     #[serde(default)]
     #[ts(optional)]
     pub pinned: Option<bool>,

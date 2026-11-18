@@ -39,6 +39,11 @@ startupFiles: Array<string>,
  */
 startupServers: Array<string>, 
 /**
+ * The modes every new chat on this project starts with (their names); empty starts a chat
+ * with none on.
+ */
+defaultModes: Array<string>, 
+/**
  * A named colour or `#rrggbb`, lowercase.
  */
 colour: string | null, pinned: boolean, collapsed: boolean, position: number | null, archived: boolean, 

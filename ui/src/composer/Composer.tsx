@@ -20,6 +20,7 @@ import { addRef, dropLandsIn, parseFileDrop, pathName, roomLeft, type AttachedRe
 import { ModelPicker } from './ModelPicker.tsx';
 import { isLocalModel } from './modelEffort.ts';
 import { PermissionChip } from './PermissionChip.tsx';
+import { ModeChips } from '../modes/ModeChips.tsx';
 import { bytesToBase64, isAnimated, refusal, unstagedOnly, type Attached } from './attachments.ts';
 import { deviceOps } from '../devices/api.ts';
 import { bytesFromBase64 } from '../transcript/messageImages.ts';
@@ -857,6 +858,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
           </div>
         )}
         {remote ? <ContextStatusRemote api={shell.api} chatId={chat.id} /> : <ContextStatus chatId={chat.id} />}
+        {!remote && <ModeChips chatId={chat.id} projectId={chat.projectId} started={chat.started} />}
         {offBy && (
           <span className="visually-hidden" data-testid="composer-remote-blocked">
             {offBy}

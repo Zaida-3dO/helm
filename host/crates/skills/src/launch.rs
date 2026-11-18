@@ -42,6 +42,8 @@ pub struct ChatKnowledge {
     pub profile: Option<ProfileRef>,
     /// The folder project the chat runs in.
     pub project_id: Option<String>,
+    /// The context modes the chat has on, oldest first.
+    pub modes: Vec<String>,
 }
 
 /// Answers who a chat is for.
@@ -94,9 +96,14 @@ impl ChatLookup for DbLookup {
                     .optional()?
                     .flatten()
                     .filter(|p| !p.is_empty());
+                // A database without the modes table (an older one, a test) has no modes on.
+                let modes = crate::modes::active(tx, chat_id)
+                    .map(|rows| rows.into_iter().map(|m| m.name).collect())
+                    .unwrap_or_default();
                 Ok::<_, rusqlite::Error>(ChatKnowledge {
                     profile,
                     project_id,
+                    modes,
                 })
             })
             .unwrap_or_default()
@@ -376,6 +383,88 @@ impl AddendumSection for RulesSection {
     }
 }
 
+/// The index lists at most this many lines; modes beyond them are counted in one last line.
+pub const MODE_INDEX_LINES: usize = 20;
+
+/// The mode index for a chat: one line per mode its person sees, the ones it has on first. `None`
+/// when there are no mode files at all.
+pub fn modes_text(profile_dir: &Path, who: &ChatKnowledge) -> Option<String> {
+    let mut modes = crate::modes::merged(profile_dir, who.profile.as_ref().map(|p| p.id.as_str()));
+    if modes.is_empty() {
+        return None;
+    }
+    // Stable, so the others stay in name order.
+    modes.sort_by_key(|m| !who.modes.contains(&m.name));
+    let total = modes.len();
+    let shown = if total > MODE_INDEX_LINES {
+        MODE_INDEX_LINES - 1
+    } else {
+        total
+    };
+    let mut out = String::from(
+        "MODE INDEX
+Modes are named bundles of guidance for one kind of work. Switch them with app_modes; read one in full with app_help mode/<name>.",
+    );
+    for m in modes.iter().take(shown) {
+        let state = if who.modes.contains(&m.name) {
+            "on"
+        } else {
+            "off"
+        };
+        let mut d: String = m
+            .description
+            .chars()
+            .take(helm_hosttools::help::MAX_SUMMARY_CHARS)
+            .collect();
+        if d.chars().count() < m.description.chars().count() {
+            d = format!("{}…", d.trim_end());
+        }
+        out.push_str(&format!(
+            "
+- {} ({state}): {d}",
+            m.name
+        ));
+    }
+    if total > shown {
+        out.push_str(&format!(
+            "
+- {} more: app_help mode lists them",
+            total - shown
+        ));
+    }
+    Some(out)
+}
+
+/// The `modes` system-prompt section: the index of the modes a chat can switch on. Order 7 puts it
+/// right after the rules.
+pub struct ModesSection {
+    profile_dir: PathBuf,
+    lookup: Arc<dyn ChatLookup>,
+}
+
+impl ModesSection {
+    pub fn new(profile_dir: PathBuf, lookup: Arc<dyn ChatLookup>) -> Self {
+        Self {
+            profile_dir,
+            lookup,
+        }
+    }
+}
+
+impl AddendumSection for ModesSection {
+    fn id(&self) -> &'static str {
+        "modes"
+    }
+
+    fn order(&self) -> i32 {
+        7
+    }
+
+    fn text(&self, ctx: &LaunchCtx<'_>) -> Option<String> {
+        modes_text(&self.profile_dir, &self.lookup.of_chat(ctx.chat_id))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,6 +555,7 @@ mod tests {
         let home = ChatKnowledge {
             profile: person("alex", "Alex", true),
             project_id: Some("p1".into()),
+            ..Default::default()
         };
         let r = resolve(&data, &home);
         let names = loaded(&r);
@@ -500,7 +590,7 @@ mod tests {
         // profile at all only the Everyone layer loads.
         let guest = ChatKnowledge {
             profile: person("sam", "Sam", false),
-            project_id: None,
+            ..Default::default()
         };
         let r = resolve(&data, &guest);
         assert_eq!(

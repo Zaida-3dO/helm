@@ -71,6 +71,7 @@ pub fn migrations(reg: &mut MigrationRegistry) {
     helm_devices::register_migrations(reg);
     helm_dictation::register_migrations(reg);
     helm_memindex::register_migrations(reg);
+    helm_skills::register_migrations(reg);
 }
 
 /// Shared services a crate adds for op handlers (`ctx.services.need::<T>()`), called once at
@@ -143,11 +144,12 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
         services.get::<helm_core::db::Database>(),
         services.get::<helm_core::profile::Profile>(),
     ) {
-        helm_skills::help::register(
-            &help,
-            profile.dir.clone(),
-            Arc::new(helm_skills::launch::DbLookup { db: db.clone() }),
-        );
+        let lookup = Arc::new(helm_skills::launch::DbLookup { db: db.clone() });
+        helm_skills::help::register(&help, profile.dir.clone(), lookup.clone());
+        // Servers that belong to a mode a chat has not switched on stay out of its list.
+        services.insert(Arc::new(helm_hosttools::McpServerHideGate(Arc::new(
+            helm_skills::modes::ModeServerHide::new(db.clone(), profile.dir.clone(), lookup),
+        ))));
         helm_workflow::register_help(&help, db.clone());
         helm_projects::startup::register_help(&help, db);
     }
@@ -531,6 +533,10 @@ pub fn launch_contributors(
         let lookup = Arc::new(helm_skills::launch::DbLookup { db: db.clone() });
         helm_skills::launch::set_lookup(lookup.clone());
         a.register_section(Arc::new(helm_skills::launch::RulesSection::new(
+            profile_dir.to_path_buf(),
+            lookup.clone(),
+        )));
+        a.register_section(Arc::new(helm_skills::launch::ModesSection::new(
             profile_dir.to_path_buf(),
             lookup,
         )));

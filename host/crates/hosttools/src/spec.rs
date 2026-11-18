@@ -370,3 +370,17 @@ pub trait McpServerFilter: Send + Sync {
 /// The service wrapper for [`McpServerFilter`]. With none registered, every chat gets every server.
 #[derive(Clone)]
 pub struct McpServerFilterGate(pub std::sync::Arc<dyn McpServerFilter>);
+
+/// Which of Helm's MCP servers a chat does not get because they belong to a context mode it has
+/// not switched on. Registered as the [`McpServerHideGate`] service by the crate that owns the
+/// modes; the MCP crate applies it beside the project filter, so both narrow the list.
+pub trait McpServerHide: Send + Sync {
+    /// The ids or names of the servers hidden from the chat (compared without regard to case).
+    fn hidden(&self, chat_id: &str) -> Vec<String>;
+    /// Whether any mode names servers at all, so one list for every chat no longer fits.
+    fn any(&self) -> bool;
+}
+
+/// The service wrapper for [`McpServerHide`]. With none registered, nothing is hidden.
+#[derive(Clone)]
+pub struct McpServerHideGate(pub std::sync::Arc<dyn McpServerHide>);

@@ -18,9 +18,58 @@ pub fn register(providers: &HelpProviders, profile_dir: PathBuf, lookup: Arc<dyn
         lookup: lookup.clone(),
     }));
     providers.register(Arc::new(SkillHelp {
+        profile_dir: profile_dir.clone(),
+        lookup: lookup.clone(),
+    }));
+    providers.register(Arc::new(ModeHelp {
         profile_dir,
         lookup,
     }));
+}
+
+struct ModeHelp {
+    profile_dir: PathBuf,
+    lookup: Arc<dyn ChatLookup>,
+}
+
+impl ModeHelp {
+    fn modes(&self, chat_id: &str) -> Vec<crate::modes::ModeFile> {
+        let who = self.lookup.of_chat(chat_id);
+        crate::modes::merged(
+            &self.profile_dir,
+            who.profile.as_ref().map(|p| p.id.as_str()),
+        )
+    }
+}
+
+impl HelpProvider for ModeHelp {
+    fn namespace(&self) -> &'static str {
+        "mode"
+    }
+
+    fn about(&self) -> &'static str {
+        "The context modes you can switch on with app_modes, each read in full"
+    }
+
+    fn index(&self, chat_id: &str) -> Vec<(String, String)> {
+        self.modes(chat_id)
+            .into_iter()
+            .map(|m| {
+                let d: String = m.description.chars().take(MAX_SUMMARY_CHARS).collect();
+                (m.name, d)
+            })
+            .collect()
+    }
+
+    fn topic(&self, chat_id: &str, name: &str) -> Option<String> {
+        let m = self.modes(chat_id).into_iter().find(|m| m.name == name)?;
+        Some(format!(
+            "{}: {}
+
+{}",
+            m.name, m.description, m.body
+        ))
+    }
 }
 
 struct RuleHelp {
@@ -190,7 +239,7 @@ mod tests {
                 name: "Pat".into(),
                 is_home: true,
             }),
-            project_id: None,
+            ..Default::default()
         };
         let text = crate::launch::rules_text(dir.path(), &who, crate::launch::RULES_PROMPT_CAP);
         assert!(

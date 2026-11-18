@@ -150,6 +150,17 @@ pub trait StartupSeam: Send + Sync {
         submission_id: &str,
         predecessor: Option<&str>,
     ) -> rusqlite::Result<Option<StartupInjection>>;
+
+    /// The names of the context modes the chat's project starts its chats with, in the order the
+    /// project lists them (the chat's board when it names some, else its folder project). Names
+    /// that match no mode file are the caller's to skip.
+    fn default_modes(
+        &self,
+        _tx: &Transaction<'_>,
+        _chat_id: &str,
+    ) -> rusqlite::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 }
 
 /// What AFK does with one pending interaction.

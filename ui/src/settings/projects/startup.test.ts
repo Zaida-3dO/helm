@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import type { ProjectNode } from '../../api/projects.ts';
 import { changes, formOf, isAbsolutePath, parseLines, problem } from './startup.ts';
 
-const project = { id: 'p1', revision: 4, startupInstructions: 'Make a worktree.', startupFiles: ['C:\\notes\\a.md'], startupServers: ['hub'] } as ProjectNode;
+const project = { id: 'p1', revision: 4, startupInstructions: 'Make a worktree.', startupFiles: ['C:\\notes\\a.md'], startupServers: ['hub'], defaultModes: ['writing'] } as ProjectNode;
 
 test('the startup form reads lines, checks what it holds and sends only what changed', () => {
   assert.deepEqual(parseLines(' C:\\a.md \r\n\n/b.md\nC:\\a.md\n'), ['C:\\a.md', '/b.md']);
@@ -11,7 +11,7 @@ test('the startup form reads lines, checks what it holds and sends only what cha
     assert.equal(isAbsolutePath(p), abs, p);
   }
   const form = formOf(project);
-  assert.deepEqual(form, { instructions: 'Make a worktree.', files: 'C:\\notes\\a.md', servers: ['hub'] });
+  assert.deepEqual(form, { instructions: 'Make a worktree.', files: 'C:\\notes\\a.md', servers: ['hub'], modes: ['writing'] });
   assert.equal(problem(form), null);
   assert.equal(changes(project, form), null, 'nothing changed');
   assert.deepEqual(changes(project, { ...form, instructions: ' ' }), { projectId: 'p1', revision: 4, startupInstructions: '' }, 'blank clears');
@@ -22,6 +22,9 @@ test('the startup form reads lines, checks what it holds and sends only what cha
     startupServers: ['maps', 'hub'],
   });
   assert.deepEqual(changes(project, { ...form, servers: [] }), { projectId: 'p1', revision: 4, startupServers: [] }, 'none ticked clears');
+  assert.deepEqual(changes(project, { ...form, modes: ['garden', 'writing'] }), { projectId: 'p1', revision: 4, defaultModes: ['garden', 'writing'] }, 'a mode ticked');
+  assert.deepEqual(changes(project, { ...form, modes: [] }), { projectId: 'p1', revision: 4, defaultModes: [] }, 'none ticked clears');
+  assert.match(problem({ ...form, modes: Array.from({ length: 21 }, (_, i) => `m${i}`) }) ?? '', /at most 20 modes/);
   assert.match(problem({ ...form, files: 'relative.md' }) ?? '', /absolute/);
   assert.match(problem({ ...form, files: Array.from({ length: 21 }, (_, i) => `C:\\f${i}.md`).join('\n') }) ?? '', /at most 20/);
   assert.match(problem({ ...form, instructions: 'x'.repeat(4001) }) ?? '', /4000/);

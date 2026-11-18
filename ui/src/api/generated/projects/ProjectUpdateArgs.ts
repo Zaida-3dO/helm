@@ -20,7 +20,11 @@ startupFiles?: Array<string>,
 /**
  * Replaces the MCP servers the project's chats get; an empty list clears them.
  */
-startupServers?: Array<string>, pinned?: boolean, collapsed?: boolean, 
+startupServers?: Array<string>, 
+/**
+ * Replaces the modes new chats start with; an empty list clears them.
+ */
+defaultModes?: Array<string>, pinned?: boolean, collapsed?: boolean, 
 /**
  * Reorder within the sibling pin group: place before this project (`null` = last). Rewrites the
  * group's positions 0..n atomically; a no-op move writes nothing.

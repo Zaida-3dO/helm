@@ -1,5 +1,5 @@
 // The startup set of a project as the Settings form edits it: instructions, context files and the
-// MCP servers its chats get. The pure parts live here so they can be tested without the form.
+// MCP servers its chats get, and the modes its new chats start with. The pure parts live here so they can be tested without the form.
 
 import type { ProjectNode, ProjectUpdateArgs } from '../../api/projects.ts';
 
@@ -20,11 +20,13 @@ export interface StartupForm {
   instructions: string;
   files: string;
   servers: string[];
+  /** The modes new chats start with (their names). */
+  modes: string[];
 }
 
 /** The form a project's saved startup set fills in. */
-export function formOf(p: Pick<ProjectNode, 'startupInstructions' | 'startupFiles' | 'startupServers'>): StartupForm {
-  return { instructions: p.startupInstructions ?? '', files: p.startupFiles.join('\n'), servers: [...p.startupServers] };
+export function formOf(p: Pick<ProjectNode, 'startupInstructions' | 'startupFiles' | 'startupServers' | 'defaultModes'>): StartupForm {
+  return { instructions: p.startupInstructions ?? '', files: p.startupFiles.join('\n'), servers: [...p.startupServers], modes: [...p.defaultModes] };
 }
 
 /** What a path must look like: absolute, on Windows or elsewhere. */
@@ -40,6 +42,7 @@ export function problem(f: StartupForm): string | null {
   const bad = files.find((p) => !isAbsolutePath(p) || p.length > 300);
   if (bad) return `"${bad.slice(0, 60)}" is not an absolute path.`;
   if (f.servers.length > STARTUP_LIST_MAX) return `A project names at most ${STARTUP_LIST_MAX} MCP servers.`;
+  if (f.modes.length > STARTUP_LIST_MAX) return `A project starts chats with at most ${STARTUP_LIST_MAX} modes.`;
   return null;
 }
 
@@ -60,6 +63,10 @@ export function changes(p: ProjectNode, f: StartupForm): ProjectUpdateArgs | nul
   const servers = [...f.servers].sort();
   if (servers.join('\n') !== [...p.startupServers].sort().join('\n')) {
     out.startupServers = f.servers;
+    any = true;
+  }
+  if (f.modes.length !== p.defaultModes.length || !f.modes.every((m) => p.defaultModes.includes(m))) {
+    out.defaultModes = f.modes;
     any = true;
   }
   return any ? out : null;

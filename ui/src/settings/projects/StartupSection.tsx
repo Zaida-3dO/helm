@@ -2,11 +2,12 @@
 // instructions are done in order before any other work; the context files are listed in the first
 // message and read when the work needs them; the MCP servers are the ones Helm's own MCP tools
 // find in the project's chats (none ticked leaves every server available, as for a project that
-// names none).
+// names none). The default modes are the ones a new chat starts with already on.
 
 import { useEffect, useMemo, useState } from 'react';
 import { mcpOps, type McpServer } from '../../api/mcp.ts';
 import { projectOps, type ProjectNode } from '../../api/projects.ts';
+import { modeOps } from '../../modes/api.ts';
 import { useShell } from '../../shell/context.ts';
 import { Button } from '../../ui/index.ts';
 import { changes, formOf, problem, STARTUP_MAX, type StartupForm } from './startup.ts';
@@ -25,7 +26,8 @@ export function StartupSection({ projects, onSaved }: { projects: ProjectNode[];
   );
   const [id, setId] = useState('');
   const [servers, setServers] = useState<McpServer[]>([]);
-  const [form, setForm] = useState<StartupForm>({ instructions: '', files: '', servers: [] });
+  const [modeNames, setModeNames] = useState<string[]>([]);
+  const [form, setForm] = useState<StartupForm>({ instructions: '', files: '', servers: [], modes: [] });
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const node = choices.find((p) => p.id === id) ?? null;
@@ -40,6 +42,22 @@ export function StartupSection({ projects, onSaved }: { projects: ProjectNode[];
       live = false;
     };
   }, [mcp]);
+
+  // The modes a chat could be given: the ones the home person's chats get, from every list.
+  useEffect(() => {
+    let live = true;
+    const read = () =>
+      modeOps(shell.api)
+        .list()
+        .then((r) => live && setModeNames(r.modes.map((m) => m.name)))
+        .catch(() => undefined);
+    void read();
+    const off = shell.bus.on('knowledge-changed', () => void read());
+    return () => {
+      live = false;
+      off();
+    };
+  }, [shell]);
 
   // The form follows the project chosen, and its saved state after a save.
   useEffect(() => {
@@ -61,6 +79,11 @@ export function StartupSection({ projects, onSaved }: { projects: ProjectNode[];
       setError(errorText(e));
     }
   };
+
+  const toggleMode = (name: string) =>
+    setForm((f) => ({ ...f, modes: f.modes.includes(name) ? f.modes.filter((m) => m !== name) : [...f.modes, name] }));
+  // A saved default whose file is gone stays listed (ticked), so it can be unticked.
+  const shownModes = [...modeNames, ...form.modes.filter((m) => !modeNames.includes(m))];
 
   const toggle = (serverId: string) =>
     setForm((f) => ({ ...f, servers: f.servers.includes(serverId) ? f.servers.filter((s) => s !== serverId) : [...f.servers, serverId] }));
@@ -120,6 +143,18 @@ export function StartupSection({ projects, onSaved }: { projects: ProjectNode[];
               </label>
             ))}
             {form.servers.length > 0 && <p className="sp-help">Helm's own MCP tools find only the ticked servers in this project's chats. Servers that Claude Code loads by itself are not narrowed.</p>}
+          </fieldset>
+          <fieldset className="sp-field" data-testid="startup-modes">
+            <legend>Default modes</legend>
+            {shownModes.length === 0 && <p className="sp-help">No modes are set up yet. Add them in Settings → Skills &amp; rules.</p>}
+            {shownModes.map((name) => (
+              <label key={name} className="sp-check">
+                <input type="checkbox" data-testid={`startup-mode-${name}`} checked={form.modes.includes(name)} onChange={() => toggleMode(name)} />
+                <span>{name}</span>
+                {!modeNames.includes(name) && <span className="sp-meta"> · no such mode</span>}
+              </label>
+            ))}
+            {shownModes.length > 0 && <p className="sp-help">New chats on this project start with the ticked modes on; a chat can turn them off.</p>}
           </fieldset>
           <div className="sp-actions">
             <Button disabled={!update || wrong !== null} onClick={() => void save()} data-testid="startup-save">

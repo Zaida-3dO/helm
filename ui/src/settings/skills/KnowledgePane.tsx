@@ -13,6 +13,7 @@ import { errorText, type Notice } from './common.ts';
 import { LayerPicker, useKnowledgeLayer } from './LayerPicker.tsx';
 import { layerLabel, EVERYONE } from './layers.ts';
 import { MemoriesSection } from './MemoriesSection.tsx';
+import { ModesSection } from './ModesSection.tsx';
 import { RulesSection, type RunAction } from './RulesSection.tsx';
 import { SkillsSection } from './SkillsSection.tsx';
 import { SourcesSection, type ProjectChoice } from './SourcesSection.tsx';
@@ -152,6 +153,7 @@ export function KnowledgePane() {
             hidden={hidden}
             onOffer={setOffered}
           />
+          <ModesSection layer={layer} busy={busy} run={run} confirm={setConfirm} />
           <MemoriesSection ops={ops} layer={layer} options={options} busy={busy} run={run} />
           <SourcesSection {...shared} snapshot={sources} onSnapshot={setSources} skills={data.skills} projects={projects} />
         </>

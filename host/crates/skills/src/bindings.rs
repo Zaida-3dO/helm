@@ -7,6 +7,7 @@
 
 use crate::agents::AgentEntry;
 use crate::memories::MemoryRow;
+use crate::modes::ModeFile;
 use crate::plugins::{Clash, ViewSkill};
 use crate::rules::RuleEntry;
 use crate::sources::{SkillSource, Snapshot};
@@ -27,6 +28,7 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
     Clash::export_all_to(dir).map_err(|e| e.to_string())?;
     ViewSkill::export_all_to(dir).map_err(|e| e.to_string())?;
     RuleEntry::export_all_to(dir).map_err(|e| e.to_string())?;
+    ModeFile::export_all_to(dir).map_err(|e| e.to_string())?;
     Snapshot::export_all_to(dir).map_err(|e| e.to_string())?;
     let mut names = vec![
         AgentEntry::ident(),
@@ -35,6 +37,7 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         Clash::ident(),
         ViewSkill::ident(),
         RuleEntry::ident(),
+        ModeFile::ident(),
         SkillSource::ident(),
         Snapshot::ident(),
     ];

@@ -145,6 +145,44 @@ pub fn set_for_chat(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<Opt
     }
 }
 
+/// The modes a project starts its chats with.
+fn default_modes_of(tx: &Transaction<'_>, project_id: &str) -> rusqlite::Result<Vec<String>> {
+    Ok(store::json_list(
+        tx.query_row(
+            "SELECT default_modes FROM project_local WHERE project_id = ?1",
+            [project_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten(),
+    ))
+}
+
+/// The default modes that apply to a chat: its board's when the board lists some, otherwise its
+/// folder project's.
+pub fn default_modes_for_chat(
+    tx: &Transaction<'_>,
+    chat_id: &str,
+) -> rusqlite::Result<Vec<String>> {
+    if let Some(board) = crate::boards::chat_board(tx, chat_id)? {
+        let modes = default_modes_of(tx, &board)?;
+        if !modes.is_empty() {
+            return Ok(modes);
+        }
+    }
+    let folder: Option<String> = tx
+        .query_row(
+            "SELECT project_id FROM chats WHERE id = ?1",
+            [chat_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match folder {
+        Some(f) => default_modes_of(tx, &f),
+        None => Ok(Vec::new()),
+    }
+}
+
 // ---- what a chat was told and what it reported ----------------------------------------------
 
 /// The submission that carried the startup text to this chat, while that message still stands (a
@@ -315,6 +353,10 @@ pub fn continue_text(old_title: &str, state_lines: &str) -> String {
 pub struct Startup;
 
 impl StartupSeam for Startup {
+    fn default_modes(&self, tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<Vec<String>> {
+        default_modes_for_chat(tx, chat_id)
+    }
+
     fn first_send(
         &self,
         tx: &Transaction<'_>,

@@ -387,7 +387,7 @@ mod tests {
             };
             ChatKnowledge {
                 profile,
-                project_id: None,
+                ..Default::default()
             }
         }
     }

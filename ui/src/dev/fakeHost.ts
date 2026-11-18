@@ -33,6 +33,7 @@ import { hubFakeOps } from './fake-hub.ts';
 import { profilesFakeOps } from './fake-profiles.ts';
 import { devicesFakeOps, remoteFakeCatalogue, remoteFakeChat, remoteFakeRefusal } from './fake-devices.ts';
 import { knowledgeFakeOps } from './fake-knowledge.ts';
+import { modesFakeOps } from './fake-modes.ts';
 import { githubFakeOps } from './fake-github.ts';
 import { webSearchFakeOps } from './fake-websearch.ts';
 import { dictationFakeOps } from './fake-dictation.ts';
@@ -84,6 +85,7 @@ export function registerFakeOps(prefixes: string[], handler: FakeOpHandler): voi
 { const pf = profilesFakeOps(); registerFakeOps(pf.prefixes, pf.handler); }
 { const dv = devicesFakeOps(); registerFakeOps(dv.prefixes, dv.handler); }
 { const kn = knowledgeFakeOps(); registerFakeOps(kn.prefixes, kn.handler); }
+{ const md = modesFakeOps(); registerFakeOps(md.prefixes, md.handler); }
 { const gh = githubFakeOps(); registerFakeOps(gh.prefixes, gh.handler); }
 { const ws = webSearchFakeOps(); registerFakeOps(ws.prefixes, ws.handler); }
 { const dc = dictationFakeOps(); registerFakeOps(dc.prefixes, dc.handler); }

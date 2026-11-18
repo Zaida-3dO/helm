@@ -253,6 +253,36 @@ pub fn validate_startup_servers(list: &[String]) -> Res<Vec<String>> {
     Ok(out)
 }
 
+/// The modes a project starts its chats with: at most [`MAX_STARTUP_LIST`] names, each a mode's
+/// file name (lowercase letters, digits and hyphens). Whether a mode of that name exists is not
+/// checked here: a name with no file is skipped when a chat starts.
+pub fn validate_default_modes(list: &[String]) -> Res<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in list {
+        let t = raw.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let b = t.as_bytes();
+        let name_like = b.len() <= 64
+            && b[0].is_ascii_lowercase()
+            && b.iter()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-');
+        if !name_like {
+            return Err(bad(
+                "A mode is named in lowercase letters, digits and hyphens.",
+            ));
+        }
+        if !out.iter().any(|p| p == t) {
+            out.push(t.to_owned());
+        }
+    }
+    if out.len() > MAX_STARTUP_LIST {
+        return Err(bad("A project starts its chats with at most 20 modes."));
+    }
+    Ok(out)
+}
+
 /// Check a picture for a project icon: base64 of a PNG, at most [`MAX_ICON_IMAGE_BYTES`] decoded.
 pub fn validate_icon_image(png_base64: &str) -> Res<Vec<u8>> {
     use base64::Engine;
@@ -280,7 +310,7 @@ const PROJECT_SELECT: &str = "SELECT p.id, p.kind, p.name, p.path, p.color, p.cr
         b.board_url, b.board_project_id, b.title, b.headline, b.area, b.repo, b.priority,
         b.last_activity, b.stale, b.completed, COALESCE(l.closed, 0),
         l.description, COALESCE(l.title_pending, 0), l.startup_instructions,
-        l.startup_files, l.startup_servers
+        l.startup_files, l.startup_servers, l.default_modes
      FROM projects p
      LEFT JOIN project_local l ON l.project_id = p.id
      LEFT JOIN project_parents pp ON pp.project_id = p.id
@@ -341,6 +371,7 @@ fn project_from_row(r: &Row<'_>, counts: &HashMap<String, i64>) -> rusqlite::Res
         startup_instructions: r.get(29)?,
         startup_files: json_list(r.get(30)?),
         startup_servers: json_list(r.get(31)?),
+        default_modes: json_list(r.get(32)?),
         archived: r.get::<_, i64>(10)? != 0,
         closed: r.get::<_, i64>(26)? != 0,
         primary_folder_project_id: r.get(12)?,
@@ -799,6 +830,16 @@ pub fn update_project(tx: &Transaction<'_>, a: &ProjectUpdateArgs) -> Res<i64> {
             params![
                 id,
                 (!servers.is_empty()).then(|| serde_json::json!(servers).to_string())
+            ],
+        )?;
+    }
+    if let Some(modes) = &a.default_modes {
+        let modes = validate_default_modes(modes)?;
+        tx.execute(
+            "UPDATE project_local SET default_modes = ?2 WHERE project_id = ?1",
+            params![
+                id,
+                (!modes.is_empty()).then(|| serde_json::json!(modes).to_string())
             ],
         )?;
     }

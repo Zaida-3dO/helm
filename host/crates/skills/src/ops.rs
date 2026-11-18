@@ -15,6 +15,9 @@
 //! | `knowledge_skill_read` | blocking | `{layer, name}` → `{text}` (the skill's `SKILL.md`; `file_read` refuses Helm's data folder) |
 //! | `knowledge_memories_list` | blocking | `{layer}` → `{memories: [{id, title, owner, layer}]}` from the hub; code `unavailable` when it is not connected |
 //! | `knowledge_memory_move` | maintenance | `{id, to}` (`to` a layer) → `{moved}`; the same `unavailable` |
+//! | `modes_list` | blocking | `{layer?}` → `{layer, folder, modes}`; with no layer, the modes the home person sees (their layer over Everyone) |
+//! | `modes_save` | maintenance | `{layer, name, description, triggers, tools, mcp, skills, rules, builtins, model, body, expectedRevision?}` → `{mode}`; a stale revision or a taken name is a conflict |
+//! | `modes_remove` | maintenance | `{layer, name}` → `{removed}` |
 //! | `skill_sources_get` | blocking | `{}` → `{sources, revision}` |
 //! | `skill_sources_save` | maintenance | `{source, revision?}` → `{sources, revision}` |
 //! | `skill_sources_remove` | maintenance | `{id, revision?}` → `{sources, revision}` |
@@ -26,9 +29,10 @@ use crate::layers::{Kind, Layer};
 use crate::memories::{self, HubMemory, MemError};
 use crate::sources::{self, SkillSource};
 use crate::undo::item_path;
-use crate::{agents, examples, plugins, rules, SkillEntry};
+use crate::{agents, examples, modes, plugins, rules, SkillEntry};
 use helm_core::profile::Profile;
 use helm_ipc::{ApiError, AppEvent, OpClass, OpCtx, OpRegistry};
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::{self, ErrorKind};
@@ -135,6 +139,46 @@ struct SourceRemoveArgs {
     id: String,
     #[serde(default)]
     revision: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ModesListArgs {
+    #[serde(default)]
+    layer: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ModesSaveArgs {
+    layer: String,
+    name: String,
+    description: String,
+    #[serde(default)]
+    triggers: Vec<String>,
+    #[serde(default)]
+    tools: Vec<String>,
+    #[serde(default)]
+    mcp: Vec<String>,
+    #[serde(default)]
+    skills: Vec<String>,
+    #[serde(default)]
+    rules: Vec<String>,
+    #[serde(default)]
+    builtins: Vec<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ModesRemoveArgs {
+    layer: String,
+    name: String,
 }
 
 fn profile(ctx: &OpCtx) -> Result<PathBuf, ApiError> {
@@ -430,6 +474,71 @@ fn knowledge_reveal(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
     Ok(json!({"revealed": true}))
 }
 
+fn modes_list(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
+    let a: ModesListArgs = parse(v, "an optional layer")?;
+    let layer = a.layer.as_deref().map(str::trim).filter(|l| !l.is_empty());
+    let Some(layer) = layer else {
+        let data = profile(ctx)?;
+        let home = ctx
+            .services
+            .need::<helm_core::db::Database>()
+            .map_err(|_| ApiError::internal("Helm has no database."))?
+            .snapshot(|tx| {
+                tx.query_row("SELECT id FROM profiles WHERE is_home = 1", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .optional()
+            })
+            .map_err(|_| ApiError::internal("The profiles could not be read."))?;
+        return Ok(json!({
+            "layer": Value::Null,
+            "folder": Value::Null,
+            "modes": modes::merged(&data, home.as_deref()),
+        }));
+    };
+    let (_, layer, root) = layer_root(ctx, Some(layer))?;
+    Ok(json!({
+        "layer": layer.key(),
+        "folder": modes::modes_dir(&root).to_string_lossy(),
+        "modes": modes::list_layer(&root, &layer.key()),
+    }))
+}
+
+fn modes_save(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
+    let a: ModesSaveArgs = parse(v, "a layer, a name, a description and the mode's text")?;
+    let (_, layer, root) = layer_root(ctx, Some(&a.layer))?;
+    let input = modes::ModeInput {
+        description: a.description,
+        triggers: a.triggers,
+        tools: a.tools,
+        mcp: a.mcp,
+        skills: a.skills,
+        rules: a.rules,
+        builtins: a.builtins,
+        model: a.model,
+        body: a.body,
+    };
+    let mode = modes::write(
+        &root,
+        &layer.key(),
+        a.name.trim(),
+        &input,
+        a.expected_revision.as_deref(),
+    )
+    .map_err(|e| conflict_error(e, "The mode could not be saved."))?;
+    knowledge_changed(ctx, &layer);
+    Ok(json!({ "mode": mode }))
+}
+
+fn modes_remove(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
+    let a: ModesRemoveArgs = parse(v, "a layer and a mode name")?;
+    let (_, layer, root) = layer_root(ctx, Some(&a.layer))?;
+    modes::remove(&root, a.name.trim())
+        .map_err(|e| api_error(e, "The mode could not be removed."))?;
+    knowledge_changed(ctx, &layer);
+    Ok(json!({ "removed": true }))
+}
+
 fn sources_error(e: io::Error) -> ApiError {
     match e.kind() {
         ErrorKind::AlreadyExists => ApiError::conflict(e.to_string()),
@@ -630,6 +739,9 @@ pub fn register_ops(reg: &mut OpRegistry) {
             OpClass::Maintenance,
             knowledge_memory_move,
         )
+        .blocking("modes_list", OpClass::Blocking, modes_list)
+        .blocking("modes_save", OpClass::Maintenance, modes_save)
+        .blocking("modes_remove", OpClass::Maintenance, modes_remove)
         .blocking("skill_sources_get", OpClass::Blocking, skill_sources_get)
         .blocking(
             "skill_sources_save",

@@ -102,6 +102,7 @@ const CONTEXT_LABEL: Record<string, string> = {
   gatekeeper: 'Answered for you',
   interruption: 'Interruption',
   startup: 'Startup',
+  modes: 'Modes',
 };
 
 function Thinking({ text, streaming, onLink }: { text: string; streaming: boolean; onLink: RowContext['onLink'] }) {

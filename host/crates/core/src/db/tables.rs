@@ -152,6 +152,9 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("chat_workflow_modes", Tool),
     // Tasks, changes and their record: written through app_workflow / app_workflow_report.
     ("workflow_runs", Tool),
+    // The context modes a chat has on, changed by its agent only through app_modes.
+    ("chat_modes", Tool),
+    ("chat_modes_state", Tool),
     ("workflow_changes", Tool),
     ("workflow_events", Data),
     // Stage records queued for Agent Standup (the app writes them; agents never do).

@@ -20,6 +20,7 @@ pub mod help;
 pub mod launch;
 pub mod layers;
 pub mod memories;
+pub mod modes;
 pub mod ops;
 pub mod plugins;
 pub mod rules;
@@ -27,6 +28,7 @@ pub mod sources;
 pub mod sync;
 pub mod tools;
 pub mod undo;
+pub use modes::register_migrations;
 pub use ops::register_ops;
 pub use tools::register_host_tools;
 

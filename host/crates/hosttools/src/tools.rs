@@ -164,6 +164,11 @@ async fn update_project(ctx: ToolCtx, a: Value) -> ToolResult {
             )));
         }
     }
+    if a.get("defaultModes").is_some() {
+        return Err(ToolError::refused(
+            "A project's default modes are set only by the user, in Settings.",
+        ));
+    }
     let all = all_projects(&ctx, true).await?;
     let cur = find(&all, &id)?;
     if cur["closed"] == true {
@@ -583,6 +588,19 @@ mod tests {
             .await
             .unwrap_err();
         assert!(e.public.contains("path cannot be changed"));
+        // The modes a project starts its chats with are the user's alone to set.
+        ops.0.lock().unwrap().clear();
+        let e = update_project(
+            ctx(ops.clone()),
+            json!({"projectId": "p1", "defaultModes": ["writing"]}),
+        )
+        .await
+        .unwrap_err();
+        assert!(e.public.contains("set only by the user"), "{}", e.public);
+        assert!(
+            ops.0.lock().unwrap().is_empty(),
+            "nothing was asked of Helm"
+        );
         // An icon is an emoji or a library name; a picture is the user's own choice.
         for (icon, want) in [
             (json!("🚀"), Some(json!("🚀"))),

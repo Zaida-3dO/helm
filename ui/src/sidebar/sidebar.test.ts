@@ -21,7 +21,7 @@ function project(id: string, over: Partial<ProjectNode> = {}): ProjectNode {
     parentId: null,
     parentSource: null,
     description: null,
-    startupInstructions: null, startupFiles: [], startupServers: [],
+    startupInstructions: null, startupFiles: [], startupServers: [], defaultModes: [],
     icon: null,
     colour: null,
     pinned: false,

@@ -2898,6 +2898,48 @@ fn a_new_chats_first_message_carries_the_startup_instructions_once_until_it_repo
         on.row,
         "Startup instructions for Web were added to this chat"
     );
+
+    // Default modes: the user lists mode names (lowercase, at most 20, repeats collapse); a chat
+    // gets its board's list when the board has one, else its folder's.
+    let set_modes = |id: &str, modes: &[&str]| {
+        let mut a = upd(id, &env.db);
+        a.default_modes = Some(modes.iter().map(|m| (*m).to_owned()).collect());
+        update(&env.db, a)
+    };
+    let many: Vec<String> = (0..21).map(|i| format!("m{i}")).collect();
+    for bad in [
+        vec!["Writing".to_owned()],
+        vec!["a b".to_owned()],
+        vec!["../x".to_owned()],
+        many,
+    ] {
+        let list: Vec<&str> = bad.iter().map(String::as_str).collect();
+        assert!(
+            matches!(set_modes(&site, &list), Err(Refusal::BadArgs(_))),
+            "{bad:?}"
+        );
+    }
+    set_modes(&site, &["writing", "garden", "writing", " "]).unwrap();
+    assert_eq!(node(&env.db, &site).default_modes, ["writing", "garden"]);
+    let modes_of = |chat: &str| {
+        env.db
+            .snapshot(|tx| {
+                helm_chats::seams::StartupSeam::default_modes(&crate::startup::Startup, tx, chat)
+            })
+            .unwrap()
+    };
+    assert_eq!(modes_of(&plain), ["writing", "garden"]);
+    assert_eq!(
+        modes_of(&on_board),
+        ["writing", "garden"],
+        "a board with none leaves the folder's"
+    );
+    set_modes(&board, &["travel"]).unwrap();
+    assert_eq!(modes_of(&on_board), ["travel"]);
+    assert_eq!(modes_of(&plain), ["writing", "garden"]);
+    set_modes(&site, &[]).unwrap();
+    assert!(modes_of(&plain).is_empty());
+    assert_eq!(node(&env.db, &site).default_modes, Vec::<String>::new());
 }
 
 /// A project's startup set also holds context files and MCP servers: the files are listed in the

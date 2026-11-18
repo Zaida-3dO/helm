@@ -3,6 +3,7 @@
 export type { AgentEntry } from './AgentEntry.ts';
 export type { Clash } from './Clash.ts';
 export type { MemoryRow } from './MemoryRow.ts';
+export type { ModeFile } from './ModeFile.ts';
 export type { RuleEntry } from './RuleEntry.ts';
 export type { SkillEntry } from './SkillEntry.ts';
 export type { SkillSource } from './SkillSource.ts';
