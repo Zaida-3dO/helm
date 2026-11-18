@@ -163,6 +163,11 @@ export function serve(opts: ServeOptions): void {
         // line carries a credential, so nothing of it is logged.
         if (!driver.hostLine?.(cmd)) diag("mcp_oauth_header ignored: no MCP client in this worker");
         return;
+      case "mcp_owner_grant":
+        // The person approved one browser step: the grant retries it. No response is expected,
+        // and the line carries the grant, so nothing of it is logged.
+        if (!driver.hostLine?.(cmd)) diag("mcp_owner_grant ignored: no MCP client in this worker");
+        return;
       case "set_permission_mode":
         // The composer's permission-mode pick; applied before the next prompt, no response.
         if (!driver.hostLine?.(cmd)) diag("set_permission_mode ignored: this worker has no permission modes");

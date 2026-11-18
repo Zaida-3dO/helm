@@ -11,7 +11,22 @@
 // - A config change replaces only the servers whose definition changed; their loaded tools are
 //   dropped, so a child can call only tools that are discovered and still registered.
 
-import { BROKER_PRESET, HOLD_CAP_MS, RENEW_EVERY_MS, holdEvent, holdFinished, type HoldEvent } from "./browser.ts";
+import fs from "node:fs";
+import path from "node:path";
+import {
+  BROKER_PRESET,
+  HOLD_CAP_MS,
+  RENEW_EVERY_MS,
+  acceptedValue,
+  controlFinder,
+  holdEvent,
+  holdFinished,
+  oneControl,
+  readControl,
+  stepClass,
+  withoutGrant,
+  type HoldEvent,
+} from "./browser.ts";
 import { HttpTransport, type Resolver } from "./http.ts";
 import { generatedName, label, matches, terms, toolNameOk } from "./naming.ts";
 import { formatResult } from "./output.ts";
@@ -38,6 +53,22 @@ import {
  * Its answer says only that the header was sent: the header itself comes back on the worker's stdin
  * as an `mcp_oauth_header` line (see `deliverOauthHeader`), so it never sits in a file. */
 const OAUTH_HEADER_OP = "app_mcp_oauth_header";
+/** The host-side tools behind an Approve card for one browser step: file the card, and hand back
+ * what the browser answered to the approved step. Neither is ever listed to the agent. */
+const STEP_OP = "app_browser_step";
+const STEP_RESULT_OP = "app_browser_step_result";
+
+/** What a browser step that is always the person's own gets instead of a card. */
+const NEVER_STEP =
+  "This step is one the user always does themselves: Helm never approves a checkout, an order, a payment, a transfer or closing an account on their behalf, so no card was shown. Leave the browser where it is and tell the user it is ready for them.";
+
+/** The text blocks of a result, joined. */
+function textOf(r: { content: Json[] }): string {
+  return r.content
+    .filter((c) => c.type === "text")
+    .map((c) => String(c.text ?? ""))
+    .join(" ");
+}
 
 export interface BridgeOptions {
   /** The chat's folder: stdio servers start there. */
@@ -64,6 +95,9 @@ export interface McpBridge {
   /** The host's `mcp_oauth_header` line: hands the fresh `Authorization` value to whoever asked for
    * it for `serverId`. False when nothing was waiting (the value is dropped). */
   deliverOauthHeader(serverId: string, header: string): boolean;
+  /** The host's `mcp_owner_grant` line: the person approved a browser step, and this is the
+   * one-time grant to retry it with. False when no such step waits here. */
+  deliverOwnerGrant(line: { requestId: string; serverId: string; leaseKey: string; ref: string; grant: string }): boolean;
   /** Ids `app_mcp_tools` may name: every enabled server. */
   serverIds(): string[];
   tools(args: { server: string; query?: string }): Promise<DiscoveryResult>;
@@ -184,6 +218,24 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
     holds.set(key, t);
   };
 
+  /** The page each lease last arrived at (after redirects), the lease's purpose, and the steps
+   * waiting on a card (by request id) or refused for good (by lease and reference). */
+  const leaseUrls = new Map<string, string>();
+  const leasePurposes = new Map<string, string>();
+  interface Waiting {
+    entry: Entry;
+    tool: string;
+    args: Json;
+    leaseKey: string;
+    ref: string;
+    at: number;
+  }
+  const waitingSteps = new Map<string, Waiting>();
+  const neverSteps = new Set<string>();
+  const stepKey = (serverId: string, leaseKey: string, ref: string) => `${serverId}\u0000${leaseKey}\u0000${ref}`;
+  const waitingFor = (key: string) =>
+    [...waitingSteps.values()].some((w) => stepKey(w.entry.server.id, w.leaseKey, w.ref) === key && now() - w.at <= capMs);
+
   const reportHold = (ev: HoldEvent) => {
     if (!opts.hostRequest) return;
     const t = now();
@@ -208,28 +260,102 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
     if (!lease) return;
     const key = holdKey(e.server.id, lease);
     if (tool === "browser_navigate" && !r.isError && typeof args.url === "string") {
+      // Where the tab arrived, after redirects, when the broker says; else where it was sent.
+      const arrived = acceptedValue(textOf(r))?.url;
+      const url = typeof arrived === "string" ? arrived : args.url;
       try {
-        leaseHosts.set(key, new URL(args.url).host);
+        leaseHosts.set(key, new URL(url).host);
+        leaseUrls.set(key, url);
       } catch {
         /* not a url worth naming */
       }
+    }
+    if (tool === "browser_release" && !r.isError) {
+      leaseUrls.delete(key);
+      leasePurposes.delete(key);
     }
     if (holdFinished(tool, args, r.isError)) {
       stopHold(key);
       leaseHosts.delete(key);
       return;
     }
-    const text = r.content
-      .filter((c) => c.type === "text")
-      .map((c) => String(c.text ?? ""))
-      .join(" ");
-    const ev = holdEvent(e.server.id, tool, args, r.isError, text);
+    const ev = holdEvent(e.server.id, tool, args, r.isError, textOf(r));
     if (!ev) return;
     // One open ask per lease: a repeat refusal while the hold is open neither asks again nor
     // restarts the cap, which counts from the first event.
     if (holds.has(key)) return;
     startHold(e, ev);
     reportHold(ev);
+  };
+
+  /**
+   * A needs_owner refusal of a step on one control: read what the control is and ask the host
+   * for an Approve card. Answers the result to give the agent, or undefined to leave the call to
+   * the owner-step hold above (no card could be shown, and the person does it at their browser).
+   */
+  const askForCard = async (
+    e: Entry,
+    tool: string,
+    args: Json,
+    r: { content: Json[]; isError?: boolean },
+  ): Promise<{ content: Json[]; isError?: boolean } | undefined> => {
+    const step = oneControl(args);
+    const lease = typeof args.lease_key === "string" ? args.lease_key : "";
+    const s = e.session;
+    if (!step || !lease || !s || s.closed || !opts.hostRequest) return undefined;
+    const key = holdKey(e.server.id, lease);
+    let host = "";
+    try {
+      host = new URL(leaseUrls.get(key) ?? "").hostname;
+    } catch {
+      /* the page's site is unknown: no card */
+    }
+    const note = (why: string) => ({ content: [...r.content, { type: "text", text: `[Helm] ${why}` }], isError: true });
+    // What the page says the control is, read the way the broker reads it.
+    let control: ReturnType<typeof readControl> = null;
+    try {
+      const read = formatResult(await s.callTool("browser_read", { lease_key: lease, find: controlFinder(step.ref), inline: true, limit: 16_000 }), e.red, limits);
+      const inlined = acceptedValue(textOf(read))?.inlined;
+      const text = Array.isArray(inlined) ? inlined.map((x) => String((x as Json)?.text ?? "")).join("\n") : "";
+      control = readControl(text, step.ref);
+    } catch {
+      /* unread: no card */
+    }
+    if (!control || !host) return undefined;
+    const cls = stepClass(control.name, control.role, step.value, control.pageSecret);
+    if (cls === "never") {
+      neverSteps.add(stepKey(e.server.id, lease, step.ref));
+      return note(NEVER_STEP);
+    }
+    if (cls === "secret") return undefined;
+    // A picture of the control, when the broker can take one and says where it put it.
+    let picture: string | undefined;
+    try {
+      const cap = formatResult(await s.callTool("browser_capture", { lease_key: lease, selector: `aria-ref=${step.ref}` }), e.red, limits);
+      const p = (acceptedValue(textOf(cap))?.capture as Json | undefined)?.path;
+      const root = e.server.env?.BROKER_ARTIFACTS_ROOT;
+      const abs = typeof p === "string" ? (path.isAbsolute(p) ? p : root ? path.join(root, p) : "") : "";
+      if (abs && fs.existsSync(abs)) picture = abs;
+    } catch {
+      /* no picture: the card says so */
+    }
+    const asked: Json = { serverId: e.server.id, leaseKey: lease, ref: step.ref, verb: step.verb, name: control.name, role: control.role, host, pageSecret: control.pageSecret };
+    if (step.value !== undefined) asked.value = step.value;
+    const purpose = leasePurposes.get(key);
+    if (purpose) asked.purpose = purpose;
+    if (picture) asked.picture = picture;
+    const filed = await opts.hostRequest(STEP_OP, asked, { timeoutMs: 30_000, mutating: true }).catch((err: Error) => ({ ok: false, error: err.message, result: undefined }));
+    const result = filed.ok ? (filed.result as Json | undefined) : undefined;
+    // The host refused (it checks the same lists, and caps the cards a chat may have waiting):
+    // the person does the step at their browser, as without cards.
+    if (typeof result?.requestId !== "string") return undefined;
+    waitingSteps.set(result.requestId, { entry: e, tool, args, leaseKey: lease, ref: step.ref, at: now() });
+    // The lease is kept alive while the card waits; the card itself is the person's ask.
+    startHold(e, { kind: "needs_owner", serverId: e.server.id, leaseKey: lease, sentence: "" });
+    const summary = typeof result.summary === "string" ? ` (${result.summary})` : "";
+    return note(
+      `Helm showed the user an Approve card for this step${summary}. End your turn now: when they approve, Helm makes this one step itself and the browser's answer reaches you as a note. Do not retry it, and do not call browser_sign_in for it.`,
+    );
   };
 
   /** Start waiting for the host's header line for `serverId` (register before asking, so a line
@@ -485,26 +611,79 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
         loaded.delete(name);
         throw new McpError(`${name} is no longer available because its server changed. Discover it again with app_mcp_tools.`);
       }
+      const browser = e.server.preset === BROKER_PRESET;
+      const source = { kind: "mcp", server: e.red.text(e.server.name), tool: e.red.text(l.tool) };
+      // Only Helm's own retry may carry an owner grant: whatever an agent sends is dropped.
+      const sent = (browser ? withoutGrant(args ?? {}) : (args ?? {})) as Json;
+      if (browser && l.tool === "browser_act") {
+        // A step already refused for good, or already waiting on a card, never reaches the
+        // browser again from the agent.
+        const step = oneControl(sent);
+        const k = step ? stepKey(e.server.id, typeof sent.lease_key === "string" ? sent.lease_key : "", step.ref) : "";
+        if (k && neverSteps.has(k)) return { content: [{ type: "text", text: `[Helm] ${NEVER_STEP}` }], isError: true, source };
+        if (k && waitingFor(k))
+          return {
+            content: [{ type: "text", text: "[Helm] An Approve card for this step is already waiting for the user. End your turn; their answer reaches you as a note." }],
+            isError: true,
+            source,
+          };
+      }
       return slots.run(async () => {
         let raw: Json;
         try {
           const session = await connect(e);
-          raw = await session.callTool(l.tool, args ?? {}, signal);
+          raw = await session.callTool(l.tool, sent, signal);
         } catch (err) {
           const pe = publicError(e, err);
           noteSignin(e, pe);
           throw pe;
         }
-        const r = formatResult(raw, e.red, limits);
-        if (e.server.preset === BROKER_PRESET) noteBrowserCall(e, l.tool, (args ?? {}) as Json, r);
-        return { content: r.content, isError: r.isError || undefined, source: { kind: "mcp", server: e.red.text(e.server.name), tool: e.red.text(l.tool) } };
+        let r: { content: Json[]; isError?: boolean } = formatResult(raw, e.red, limits);
+        if (browser) {
+          if (l.tool === "browser_claim" && !r.isError && typeof sent.purpose === "string") {
+            const leaseKey = acceptedValue(textOf(r))?.key;
+            if (typeof leaseKey === "string") leasePurposes.set(holdKey(e.server.id, leaseKey), sent.purpose);
+          }
+          const ev = holdEvent(e.server.id, l.tool, sent, r.isError, textOf(r));
+          const carded = ev?.kind === "needs_owner" ? await askForCard(e, l.tool, sent, r) : undefined;
+          if (carded) r = carded;
+          else noteBrowserCall(e, l.tool, sent, r);
+        }
+        return { content: r.content, isError: r.isError || undefined, source };
       });
+    },
+
+    deliverOwnerGrant(line) {
+      const w = waitingSteps.get(line.requestId);
+      if (!w || w.entry.server.id !== line.serverId || w.leaseKey !== line.leaseKey || w.ref !== line.ref) return false;
+      // One grant, one retry: the step stops waiting whatever happens next.
+      waitingSteps.delete(line.requestId);
+      const e = w.entry;
+      const report = (ok: boolean, text: string) =>
+        void opts
+          .hostRequest?.(STEP_RESULT_OP, { requestId: line.requestId, ok, text: text.split(line.grant).join("[grant]").slice(0, 8000) }, { timeoutMs: 10_000 })
+          .catch(() => {});
+      void (async () => {
+        stopHold(holdKey(e.server.id, w.leaseKey));
+        if (now() - w.at > capMs || entries.get(e.server.id) !== e) {
+          report(false, "The browser server changed, or the step waited too long; nothing was retried.");
+          return;
+        }
+        try {
+          const r = await slots.run(async () => formatResult(await (await connect(e)).callTool(w.tool, { ...w.args, owner_grant: line.grant }), e.red, limits));
+          report(!r.isError, textOf(r));
+        } catch (err) {
+          report(false, publicError(e, err).message);
+        }
+      })();
+      return true;
     },
 
     close() {
       closed = true;
       for (const e of entries.values()) retire(e);
       for (const k of [...holds.keys()]) stopHold(k);
+      waitingSteps.clear();
       entries.clear();
       loaded.clear();
     },

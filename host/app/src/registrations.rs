@@ -467,6 +467,7 @@ pub fn allow_kinds() -> helm_consent::AllowKinds {
     helm_workflow::register_allow_kinds(&mut k);
     helm_relay::register_allow_kinds(&mut k);
     helm_mcp::gmail::register_allow_kinds(&mut k);
+    helm_mcp::owner_step::register_allow_kinds(&mut k);
     helm_memindex::register_allow_kinds(&mut k);
     helm_projects::startup::register_allow_kinds(&mut k);
     k

@@ -64,6 +64,7 @@ export function hosttoolsFakeOps(): { prefixes: string[]; handler: FakeOpHandler
     appliesOnAllow: false,
     outcome: null,
     decidedVia: null,
+    picture: null,
   });
   // A staged-settings card: Helm applies it on Approve, one row per change.
   const stagedCard = (chatId: string) => ({

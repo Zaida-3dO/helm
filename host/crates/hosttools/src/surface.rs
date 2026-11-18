@@ -108,6 +108,8 @@ const GROUPS: &[(&str, &[&str])] = &[
             "app_remove_mcp_server",
             "app_import_mcp_servers",
             "app_mcp_oauth_header",
+            "app_browser_step",
+            "app_browser_step_result",
         ],
     ),
     (
