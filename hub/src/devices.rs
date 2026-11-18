@@ -180,10 +180,15 @@ pub fn on_device(
             // The channel flags live only while the line is up; an unparseable person id
             // cannot be a routing candidate, so it is left out.
             if let Some(line) = lines.get(client_id) {
-                let claims: Vec<(i64, bool, bool)> = people
+                let claims: Vec<(i64, bool, bool, bool)> = people
                     .iter()
                     .filter_map(|p| {
-                        Some((p.person_id.trim().parse::<i64>().ok()?, p.telegram, p.voice))
+                        Some((
+                            p.person_id.trim().parse::<i64>().ok()?,
+                            p.telegram,
+                            p.voice,
+                            p.speaker,
+                        ))
                     })
                     .collect();
                 line.set_claims(claims);
