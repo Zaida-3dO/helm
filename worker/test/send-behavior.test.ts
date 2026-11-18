@@ -397,7 +397,8 @@ describe("native tools", () => {
       const argv = s.fakeStart()?.argv as string[];
       const i = argv.indexOf("--disallowedTools");
       assert.ok(i !== -1);
-      assert.deepEqual(argv[i + 1].split(","), [...DISALLOWED_TOOLS]);
+      // A chat without Orchestrator also loses the three built-ins only the orchestrator and review work use.
+      assert.deepEqual(argv[i + 1].split(","), [...DISALLOWED_TOOLS, "Workflow", "ReportFindings", "ListAgents"]);
       for (const t of ["CronCreate", "ScheduleWakeup", "EnterWorktree", "ExitWorktree"]) assert.ok(DISALLOWED_TOOLS.includes(t as never), t);
     } finally {
       await s.done();

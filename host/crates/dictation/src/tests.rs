@@ -328,6 +328,7 @@ impl Env {
                     auto_start: true,
                     folder: None,
                     preset: None,
+                    chat_cap: None,
                 }]),
                 ..Default::default()
             })

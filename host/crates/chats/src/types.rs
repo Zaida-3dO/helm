@@ -60,6 +60,42 @@ pub enum Harness {
     Claude,
 }
 
+/// What a busy chat is doing right now, as the maintenance tick last saw it: read by the chip,
+/// the chat list and the agent tools, and the base of the silent check. `null` while no turn is
+/// open. Only `silent` raises a flag; a queue wait is never one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ChatState {
+    /// A local chat whose turn is open while the model server answers something else: how many
+    /// of Helm's own local chats would be answered first (`null` when the count is not known).
+    Queued {
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        #[ts(optional)]
+        #[ts(type = "number")]
+        ahead: Option<i64>,
+    },
+    /// The model is answering: `since` is the last output, Unix ms.
+    Generating {
+        #[ts(type = "number")]
+        since: i64,
+    },
+    /// A tool call is running: its name and when it began, Unix ms (the oldest one when more
+    /// than one runs at once).
+    Tool {
+        name: String,
+        #[ts(type = "number")]
+        since: i64,
+    },
+    /// A card — approval, question or plan — waits for the person.
+    WaitingUser,
+    /// The turn is open with no output, no tool call, no card and no queue wait for longer than
+    /// the silent limit: `since` is the last output, Unix ms. This is the one state Helm flags.
+    Silent {
+        #[ts(type = "number")]
+        since: i64,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatRecord {
@@ -105,6 +141,14 @@ pub struct ChatRecord {
     /// its turn ends.
     #[ts(type = "number | null")]
     pub local_ahead: Option<i64>,
+    /// Why this chat's turn start waits at its start, while it does: `local_cap`,
+    /// `claude_capacity`, `at_limit` or `manual` (see [`crate::queue`], which the queue panel
+    /// reads alongside this). `null` when the chat is not waiting for capacity.
+    pub queue_reason: Option<String>,
+    /// What the busy chat is doing right now ([`ChatState`]); `null` while no turn is open.
+    /// Refreshed by the maintenance tick, never by a model call. Boxed so the record keeps its
+    /// size: the state is read by the chip and the tools, not by every event hop.
+    pub state: Option<Box<ChatState>>,
     /// The chat's first turn has run (or it was forked from one that did). The picker uses it to
     /// tell a chat whose conversation exists and will carry across a model change; a started chat
     /// can still move between any models, the relaunch keeps the conversation.
@@ -115,6 +159,81 @@ pub struct ChatRecord {
     pub host_device_id: String,
     /// Profile ids, besides its own, that the chat is shown to.
     pub shared_with: Vec<String>,
+}
+
+/// A turn start held in the queue, as `queue_list` reports it (see [`crate::queue`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueEntry {
+    pub chat_id: String,
+    pub title: String,
+    /// Why it waits: `local_cap`, `claude_capacity`, `at_limit` or `manual`.
+    pub reason: String,
+    /// `interactive`, `normal` or `background`.
+    pub class: String,
+    /// The local model server it waits on; nothing else has one.
+    pub server_id: Option<String>,
+    /// When the wait began, Unix ms.
+    #[ts(type = "number")]
+    pub since: i64,
+    /// The queue pushed it to the front of its line.
+    pub top: bool,
+}
+
+/// One local model server's load right now: chats working on it, and chats whose turn start
+/// waits at its start.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueServer {
+    pub server_id: String,
+    #[ts(type = "number")]
+    pub working: i64,
+    #[ts(type = "number")]
+    pub queued: i64,
+}
+
+/// A chat whose turn failed because Claude Code could not refresh its sign-in token, as the
+/// queue and health view lists it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueSignIn {
+    pub chat_id: String,
+    pub title: String,
+    /// When its turn failed, Unix ms.
+    #[ts(type = "number")]
+    pub since: i64,
+    /// Helm has used its tries: only signing in again gets the chat going.
+    pub gave_up: bool,
+}
+
+/// `queue_list`: the queue whole in one read — every held start, front of the lines first,
+/// plus the load each place it waits on carries.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueSummary {
+    pub entries: Vec<QueueEntry>,
+    pub servers: Vec<QueueServer>,
+    /// Chats waiting for the Claude plan windows to open again.
+    #[ts(type = "number")]
+    pub claude_queued: i64,
+    /// Whether those windows read full right now.
+    pub claude_full: bool,
+    /// When they reopen, Unix ms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub claude_until: Option<i64>,
+    /// Chats stopped by a failed token refresh, newest first: being tried again, or given up on
+    /// and waiting for a sign-in.
+    pub sign_in: Vec<QueueSignIn>,
+}
+
+/// `queue_action`: one move on one held start; answers with the fresh [`QueueSummary`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueActionArgs {
+    pub chat_id: String,
+    /// `top`, `up`, `down`, `hold`, `release` or `cancel`.
+    pub action: String,
 }
 
 /// Where the chat's title came from. A manual rename always wins.
@@ -537,10 +656,23 @@ pub struct ThreadState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub loading: Option<LocalLoading>,
+    /// The end of the chat's last turn is being checked (Helm decides whether the stop needs the
+    /// user): the chat shows "Checking whether this stop needs you…" until the check ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub stop_check: Option<StopCheck>,
     pub capabilities: Capabilities,
     pub send_behavior: SendBehavior,
     #[ts(type = "number")]
     pub revision: i64,
+}
+
+/// A turn end being checked, with when the check began.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct StopCheck {
+    #[ts(type = "number")]
+    pub started_at: i64,
 }
 
 /// The line shown while a local model is made ready for a turn, with when it began.
@@ -638,9 +770,23 @@ pub enum ContextKind {
     /// Something the question gate did with an ask: an answer it chose for the user, which they
     /// can review and change later.
     Gatekeeper,
+    /// The chat stopped at a blocker only the user can clear, and Helm checked and agreed.
+    StopBlocker,
+    /// The chat stopped at the plan's usage limit, with nothing left that can run elsewhere.
+    StopLimit,
+    /// The chat stopped after a failure that persisted through retries.
+    StopFailure,
+    /// The chat stopped to ask, and Helm would not answer for the user.
+    StopAsked,
     /// A gap in the chat's work that was not its doing: the computer slept, the connection was
     /// down, or Helm asked the chat to carry on after one.
     Interruption,
+    /// Claude Code could not refresh its sign-in after Helm's tries: the row carries the
+    /// "Sign in again" offer.
+    SignIn,
+    /// The project's startup instructions were added to the chat's first message (or, after a
+    /// roll over, the note to carry on with the startup that was already done).
+    Startup,
 }
 
 /// The `details` bag of a message row. Every field is optional and absent when unset.

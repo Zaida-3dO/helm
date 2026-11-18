@@ -14,7 +14,10 @@
 //! status message, and both are written into the Telegram chat: a line in its transcript, and a
 //! note its agent gets with the user's next message, so a reply to an alert makes sense there.
 //!
-//! The same watcher sends approval asks when approving from Telegram is on ([`crate::approve`]).
+//! The same watcher sends approval asks when approving from Telegram is on ([`crate::approve`]),
+//! for waiting prompts and for settings changes a chat staged for Approve. A staged change is
+//! asked while the user is away or talking to Helm over Telegram or voice; at the PC the card in
+//! Helm is the place to answer.
 
 use crate::approve;
 use crate::client::{LineHandle, LineState};
@@ -454,9 +457,20 @@ struct Look {
     rows: Option<Vec<AttentionRow>>,
     /// Requests an ask could answer (`None`: approving is off for every profile).
     waiting: Option<Vec<approve::Waiting>>,
+    /// Staged settings changes an ask could answer (`None`: approving is off, or the read failed).
+    consent: Option<Vec<approve::ConsentWaiting>>,
+    /// Why each open ask of a staged change that no longer waits was taken down.
+    settled: HashMap<String, String>,
 }
 
-fn look(rt: &ChatRuntime, afk: &helm_afk::AfkService, db: &Database, dir: &Path) -> Look {
+fn look(
+    rt: &ChatRuntime,
+    afk: &helm_afk::AfkService,
+    db: &Database,
+    dir: &Path,
+    kinds: Option<&helm_consent::AllowKinds>,
+    open: &[String],
+) -> Look {
     let chans = channels(db, dir);
     let away = afk.open_source().is_some();
     let any_alerts = chans.iter().any(|c| c.policy.away_alerts);
@@ -523,16 +537,76 @@ fn look(rt: &ChatRuntime, afk: &helm_afk::AfkService, db: &Database, dir: &Path)
             Some(out)
         })
         .flatten();
+    let now = helm_core::now_ms();
+    let consent = (any_approvals && waiting.is_some())
+        .then(|| {
+            let pending = helm_consent::store::pending_all(db, kinds?, now).ok()?;
+            let mut out = vec![];
+            for r in pending.into_iter().filter(|r| r.applies_on_allow) {
+                let Some(ch) = chans
+                    .iter()
+                    .find(|c| owner.get(&r.chat_id).is_some_and(|p| p == &c.profile_id))
+                else {
+                    continue;
+                };
+                // A change to this PC is the owner's to approve: a household member's chat is
+                // answered in Helm only.
+                let member = db
+                    .snapshot(|tx| {
+                        Ok::<_, rusqlite::Error>(helm_profiles::store::is_household_member(
+                            tx, &r.chat_id,
+                        ))
+                    })
+                    .unwrap_or(true);
+                if member {
+                    continue;
+                }
+                let voice =
+                    crate::voice::load_tag(&crate::people::voice_paths(dir, &ch.profile_id).tag)
+                        .map(|t| t.chat_id);
+                let here = away
+                    || ch.tg_chat.as_deref() == Some(r.chat_id.as_str())
+                    || voice.as_deref() == Some(r.chat_id.as_str());
+                if !ch.policy.approvals || !here {
+                    continue;
+                }
+                out.push(approve::ConsentWaiting {
+                    chat_id: r.chat_id.clone(),
+                    chat_title: title_of(db, &r.chat_id).unwrap_or_default(),
+                    person: ch.person.clone(),
+                    request: r,
+                });
+            }
+            Some(out)
+        })
+        .flatten();
+    // An open ask whose request no longer waits (answered, expired, withdrawn): why, for its buttons.
+    let settled = consent
+        .as_ref()
+        .zip(kinds)
+        .map(|(live, kinds)| {
+            open.iter()
+                .filter(|id| !live.iter().any(|w| &w.request.id == *id))
+                .map(|id| {
+                    let r = helm_consent::store::get(db, kinds, id).ok().flatten();
+                    (id.clone(), approve::settled_note(r.as_ref(), now))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Look {
         channels: chans,
         owner,
         away,
         rows,
         waiting,
+        consent,
+        settled,
     }
 }
 
 /// Watch for away alerts and approval asks on the app's runtime, until the app exits.
+#[allow(clippy::too_many_arguments)]
 pub fn watch_away(
     handle: &tokio::runtime::Handle,
     rt: ChatRuntime,
@@ -540,6 +614,7 @@ pub fn watch_away(
     afk: Arc<helm_afk::AfkService>,
     line: Arc<LineHandle>,
     sink: Arc<ChatSink>,
+    services: Arc<helm_ipc::Services>,
     profile_dir: PathBuf,
 ) {
     handle.spawn(async move {
@@ -551,7 +626,14 @@ pub fn watch_away(
         loop {
             every.tick().await;
             let (rt2, afk, dir, db2) = (rt.clone(), afk.clone(), profile_dir.clone(), db.clone());
-            let Ok(found) = tokio::task::spawn_blocking(move || look(&rt2, &afk, &db2, &dir)).await
+            let (kinds, open) = (
+                services.get::<helm_consent::AllowKinds>(),
+                sink.asks.consent_ids(),
+            );
+            let Ok(found) = tokio::task::spawn_blocking(move || {
+                look(&rt2, &afk, &db2, &dir, kinds.as_deref(), &open)
+            })
+            .await
             else {
                 continue;
             };
@@ -582,6 +664,19 @@ pub fn watch_away(
                     }
                     for (id, person, note) in step.done {
                         line.telegram_ask_done(&person, &id, &note);
+                    }
+                    if let Some(consent) = &found.consent {
+                        let step = sink
+                            .asks
+                            .step_consent(consent, &found.settled, approve::new_id);
+                        for (id, person, text, options) in step.ask {
+                            if !line.telegram_ask(&person, &id, &text, &options) {
+                                sink.asks.unsent(&id);
+                            }
+                        }
+                        for (id, person, note) in step.done {
+                            line.telegram_ask_done(&person, &id, &note);
+                        }
                     }
                 }
                 Some(_) => {}

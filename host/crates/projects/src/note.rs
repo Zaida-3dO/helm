@@ -84,44 +84,7 @@ pub fn note_text_for_chat(db: &Database, chat: &str) -> Option<String> {
     .filter(|t| !t.trim().is_empty())
 }
 
-/// Whether the text looks like a credential: held back rather than stored, since the note is
-/// read by every chat in the folder.
-pub fn looks_like_secret(s: &str) -> bool {
-    let lower = s.to_ascii_lowercase();
-    if lower.contains("-----begin") && lower.contains("private key") {
-        return true;
-    }
-    let prefixed = [
-        "ghp_",
-        "github_pat_",
-        "xoxb-",
-        "xoxp-",
-        "glpat-",
-        "sk-ant-",
-        "akia",
-    ]
-    .iter()
-    .any(|p| {
-        lower.match_indices(p).any(|(i, _)| {
-            lower[i + p.len()..]
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
-                .count()
-                >= 12
-        })
-    });
-    prefixed
-        || lower.lines().any(|l| {
-            let l = l.trim();
-            ["password", "passwd", "secret", "api_key", "apikey", "token"]
-                .iter()
-                .any(|k| {
-                    l.starts_with(k)
-                        && l[k.len()..].trim_start().starts_with(['=', ':'])
-                        && l.len() > k.len() + 4
-                })
-        })
-}
+pub use helm_core::secrets::looks_like_secret;
 
 fn note_set(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: SetArgs = parse_args(args)?;

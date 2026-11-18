@@ -136,7 +136,8 @@ pub fn put_on_board(tx: &Transaction<'_>, chat_id: &str, board_id: &str) -> rusq
     Ok(true)
 }
 
-fn is_open_board(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<bool> {
+/// Whether `id` names an open board (not a folder).
+pub fn is_open_board(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<bool> {
     tx.query_row(
         &format!("SELECT EXISTS(SELECT 1 FROM projects p {BOARD_JOINS} WHERE p.id = ?1 AND {OPEN_BOARD})"),
         [id],

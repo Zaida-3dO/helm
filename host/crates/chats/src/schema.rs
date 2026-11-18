@@ -10,6 +10,7 @@
 //! | `chat_mutes` | muted chats (user-only) |
 //! | `chat_activity` | per chat: the last worker output time, the stalled flag, and how many local chats stand ahead in the model server's queue while this chat's turn waits on it |
 //! | `chat_attention` | per chat: when its attention was marked addressed, and a snooze |
+//! | `chat_stop_holds` | per chat: when its last turn end was handed to the stop judge and is still held; read by the waits watcher so a held chat reads as busy, and cleared at start-up |
 //! | `chat_triage` | per chat: the idle check's last verdict, and the activity it was made for |
 //! | `chat_shares` | the profiles besides its own that a chat is shown to; the chat row itself carries its `profile_id` and `host_device_id` |
 //! | `chat_flags` | per chat: the question its agent flagged for the user ([`crate::flags`]) |
@@ -21,7 +22,9 @@
 //! | `fork_carry` | a message fork's carried history, sent once with its first prompt ([`crate::fork`]) |
 //! | `chat_file_cleanup` | files a hard delete left behind, removed after commit and retried at startup ([`crate::delete`]) |
 //! | `submission_context` | the panel-context block a composer send carried |
+//! | `chat_succession` | a roll-over successor's predecessor, read when the successor's first message is sent ([`crate::rollover`]) |
 //! | `chat_turn_usage` | per turn: the tokens and cost it used, projected from the session log's `usage` entries ([`crate::turn_usage`]) |
+//! | `chat_dispatch_holds` | the turn starts waiting for capacity, with their class, line and reason ([`crate::queue`]) |
 //! | view `chat_search_source` | the searchable message text the search crate indexes ([`crate::search_source`]) |
 //!
 //! Recovery, inside the one startup transaction:
@@ -48,10 +51,14 @@ pub fn register(reg: &mut MigrationRegistry) {
         .initializer("chats-triage-priority", crate::triage::init)
         .initializer("chats-created-by", crate::mute::init)
         .initializer("chats-late-columns", late_columns)
+        .initializer("chats-activity-state", activity_state)
+        .initializer("chats-dispatch-holds", dispatch_holds)
         .one_time("chats-origin-user-is-typed", origin_user_is_typed)
         .recovery_capture("chats-restart-capture", capture_continuations)
         .recovery_step("chats-retry-leftovers", cancel_retry_leftovers)
-        .recovery_step("chats-stall-reset", reset_stalls);
+        .recovery_step("chats-stall-reset", reset_stalls)
+        .recovery_step("chats-stop-holds-clear", clear_stop_holds)
+        .recovery_step("chats-auto-holds-clear", clear_auto_holds);
 }
 
 fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
@@ -121,6 +128,10 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              snoozed_until  INTEGER,
              snoozed_at     INTEGER
          );
+         CREATE TABLE IF NOT EXISTS chat_stop_holds (
+             chat_id  TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+             since    INTEGER NOT NULL
+         );
          CREATE TABLE IF NOT EXISTS chat_triage (
              chat_id     TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
              stamp       INTEGER NOT NULL,
@@ -179,6 +190,10 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
          CREATE TABLE IF NOT EXISTS submission_context (
              submission_id  TEXT PRIMARY KEY REFERENCES submissions(id) ON DELETE CASCADE,
              text           TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS chat_succession (
+             chat_id         TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+             predecessor_id  TEXT NOT NULL
          );
          CREATE TABLE IF NOT EXISTS chat_turn_usage (
              chat_id             TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
@@ -250,10 +265,61 @@ fn capture_continuations(tx: &Transaction<'_>) -> rusqlite::Result<()> {
 /// be cleared.
 fn reset_stalls(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     tx.execute(
-        "UPDATE chat_activity SET stalled = 0, local_ahead = NULL
-         WHERE stalled <> 0 OR local_ahead IS NOT NULL",
+        "UPDATE chat_activity SET stalled = 0, local_ahead = NULL, queue_reason = NULL, state = NULL
+         WHERE stalled <> 0 OR local_ahead IS NOT NULL OR queue_reason IS NOT NULL OR state IS NOT NULL",
         [],
     )?;
+    Ok(())
+}
+
+/// A turn start held by capacity belongs to a running app: after a restart each actor re-runs its
+/// own gate over its first waiting send, which records the hold afresh if it still stands. A
+/// hold made by hand is the user's, and waits for them across restarts.
+fn clear_auto_holds(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute(
+        "DELETE FROM chat_dispatch_holds WHERE reason <> 'manual'",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Where a turn start waits while capacity settles: one row per held chat, written when the
+/// start is held and removed when it opens, goes back or is released. `reason` says why
+/// (`local_cap`, `claude_capacity`, `at_limit` or `manual`), `class` is the queue class the
+/// start had, `server_id` the local server it waits on (nothing else has one), `seq` its place
+/// in line and `top` whether the queue pushed it to the front.
+fn dispatch_holds(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS chat_dispatch_holds (
+             chat_id     TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+             reason      TEXT NOT NULL,
+             class       TEXT NOT NULL,
+             server_id   TEXT,
+             seq         INTEGER NOT NULL,
+             since       INTEGER NOT NULL,
+             top         INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE INDEX IF NOT EXISTS dispatch_holds_line ON chat_dispatch_holds(top DESC, seq);",
+    )
+}
+
+/// `chat_activity` gained the live-state column (what a busy chat is doing right now, as the
+/// maintenance tick last saw it); older databases get it here.
+fn activity_state(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    let has: bool = tx.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('chat_activity') WHERE name = 'state'",
+        [],
+        |r| r.get::<_, i64>(0).map(|n| n > 0),
+    )?;
+    if !has {
+        tx.execute("ALTER TABLE chat_activity ADD COLUMN state TEXT", [])?;
+    }
+    Ok(())
+}
+
+/// A held turn end belongs to a running app; after a restart no hold is open.
+fn clear_stop_holds(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute("DELETE FROM chat_stop_holds", [])?;
     Ok(())
 }
 
@@ -286,6 +352,9 @@ fn late_columns(tx: &Transaction<'_>) -> rusqlite::Result<()> {
             "provider",
             "TEXT NOT NULL DEFAULT 'claude'",
         ),
+        // Why this chat's turn start waits, while it does (a queue reason code; see
+        // [`crate::queue`]). `chat_activity.local_ahead` already says how many stand ahead.
+        ("chat_activity", "queue_reason", "TEXT"),
     ] {
         let has: bool = tx.query_row(
             "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
@@ -444,6 +513,38 @@ pub(crate) mod tests {
                 "SELECT source_key || '=' || json_extract(details, '$.retry.state') FROM messages ORDER BY source_key"
             ),
             ["m1=cancelled", "m2=failed"]
+        );
+    }
+
+    #[test]
+    fn recovery_keeps_parked_chats_and_forgets_auto_holds() {
+        let (_d, db) = temp_db();
+        db.write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 0);
+                 INSERT INTO chats(id, project_id, created_at, updated_at) VALUES ('a', 'p', 0, 0), ('b', 'p', 0, 0);
+                 INSERT INTO chat_dispatch_holds(chat_id, reason, class, seq, since) VALUES
+                   ('a', 'claude_capacity', 'normal', 1, 0), ('b', 'manual', 'normal', 2, 0);
+                 INSERT INTO chat_activity(chat_id, last_activity_at, local_ahead, queue_reason, state)
+                   VALUES ('a', 0, 2, 'claude_capacity', '{\"kind\":\"queued\"}');",
+            )
+        })
+        .unwrap();
+        helm_core::recovery::run(&db, &registry()).unwrap();
+        assert_eq!(
+            col(
+                &db,
+                "SELECT chat_id || '=' || reason FROM chat_dispatch_holds"
+            ),
+            ["b=manual"]
+        );
+        assert_eq!(
+            col(
+                &db,
+                "SELECT COALESCE(local_ahead, 'x') || '/' || COALESCE(queue_reason, 'x') || '/' || COALESCE(state, 'x') FROM chat_activity"
+            ),
+            ["x/x/x"],
+            "the stored position and reason belong to the run that ended"
         );
     }
 

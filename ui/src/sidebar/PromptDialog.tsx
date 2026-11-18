@@ -1,11 +1,11 @@
 // The sidebar's one-field prompt: Rename chat, Rename project, Project icon, Project colour and
-// Project description all open it. It is one small component with one text field, so a feature that
+// Project description and Startup instructions all open it. It is one small component with one text field, so a feature that
 // adds to the rename dialog (a hint under the field, suggested titles) extends this file.
 
 import { useRef, useState } from 'react';
 import { TitleSuggestions } from '../chat/TitleSuggestions.tsx';
 import { useShell } from '../shell/context.ts';
-import { Button, Dialog, TextInput } from '../ui/index.ts';
+import { Button, Dialog, TextArea, TextInput } from '../ui/index.ts';
 
 export type Prompt = {
   title: string;
@@ -13,6 +13,8 @@ export type Prompt = {
   value: string;
   /** The field's length limit (120 when absent). */
   maxLength?: number;
+  /** Several lines in a box instead of one: Enter adds a line, Ctrl+Enter saves. */
+  multiline?: boolean;
   /** A chat's id: Rename chat shows name suggestions for it under the field. */
   suggestFor?: string;
   /** Answers with why it failed (the dialog stays open and shows it), or nothing on success. */
@@ -24,7 +26,7 @@ export function PromptDialog({ prompt, onClose }: { prompt: Prompt; onClose: () 
   const [value, setValue] = useState(prompt.value);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const field = useRef<HTMLInputElement>(null);
+  const field = useRef<HTMLInputElement & HTMLTextAreaElement>(null);
   const canSave = value !== prompt.value && !busy;
   const save = async () => {
     if (!canSave) return;
@@ -63,21 +65,42 @@ export function PromptDialog({ prompt, onClose }: { prompt: Prompt; onClose: () 
     >
       <label className="sb-prompt">
         <span>{prompt.label}</span>
-        <TextInput
-          ref={field}
-          autoFocus
-          value={value}
-          maxLength={prompt.maxLength ?? 120}
-          invalid={error}
-          readOnly={busy}
-          onChange={(e) => {
-            setValue(e.target.value);
-            setError(null);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') void save();
-          }}
-        />
+        {prompt.multiline ? (
+          <TextArea
+            ref={field}
+            autoFocus
+            rows={12}
+            value={value}
+            maxLength={prompt.maxLength ?? 4000}
+            aria-invalid={error ? true : undefined}
+            readOnly={busy}
+            data-testid="sidebar-prompt-text"
+            onChange={(e) => {
+              setValue(e.target.value);
+              setError(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) void save();
+            }}
+          />
+        ) : (
+          <TextInput
+            ref={field}
+            autoFocus
+            value={value}
+            maxLength={prompt.maxLength ?? 120}
+            invalid={error}
+            readOnly={busy}
+            onChange={(e) => {
+              setValue(e.target.value);
+              setError(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void save();
+            }}
+          />
+        )}
+        {error && prompt.multiline && <span className="sb-prompt-error">{error}</span>}
       </label>
       {prompt.suggestFor && (
         <TitleSuggestions

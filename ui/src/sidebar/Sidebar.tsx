@@ -14,6 +14,10 @@ import type { ChatStore } from '../state/store.ts';
 import { SETTINGS_DIALOG } from '../settings/index.ts';
 import { SEARCH_DIALOG } from '../search/index.ts';
 import { AttentionInbox, inboxRows, nextAttention } from '../attention/index.ts';
+import { QueuePanel } from '../queue/QueuePanel.tsx';
+import { QueueStore } from '../queue/store.ts';
+import { queueOps } from '../queue/api.ts';
+import { queueCount } from '../queue/model.ts';
 import { PagesEntry } from '../pages/PagesEntry.tsx';
 import { ProfileDisc } from '../profiles/Disc.tsx';
 import { ProfileItem, moveChatToProfile, profileChoices, rowsForProfile, shareChatWith, shareChoices, sharedFrom, useProfiles } from '../profiles/index.ts';
@@ -57,7 +61,7 @@ import { StarMark, WheelMark } from '../ui/status/index.ts';
 import { openNewChat, openPrimaryFolder } from '../newchat/index.ts';
 import { ProjectIcon, openIconPicker } from '../projects/index.ts';
 import { getDefaultBoard } from '../newchat/boards.ts';
-import { ATTENTION_LABEL, age, needsYouLabel, rowStatusLabel, trailingIndicator } from './status.ts';
+import { ATTENTION_LABEL, age, needsYouLabel, rowStateLabel, rowStatusLabel, trailingIndicator } from './status.ts';
 import { localWaitLabel } from '../state/localModel.ts';
 import { useSubagentsRunning } from '../transcript/subagents/counts.ts';
 import { startSyncTriggers, syncOnOpen, type SyncHost } from './sync.ts';
@@ -72,6 +76,8 @@ export { PromptDialog, type Prompt } from './PromptDialog.tsx';
 export const PREVIEW_DELAY_MS = 300;
 /** The longest project description, in characters. */
 export const DESCRIPTION_MAX = 200;
+/** The longest startup instructions text, in characters. */
+export const STARTUP_MAX = 4000;
 /** The space between one project's block and the next, in pixels. */
 const BLOCK_GAP = 4;
 
@@ -221,6 +227,9 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const [preview, setPreview] = useState<Preview | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [inboxOpen, setInboxOpen] = useState(false);
+  const [queueOpen, setQueueOpen] = useState(false);
+  const queueStore = useMemo(() => new QueueStore(queueOps(api)), [api]);
+  const queueSnap = useSyncExternalStore(queueStore.subscribe, queueStore.getSnapshot);
   const undo = sidebarUndo;
   const act = useMemo(() => new SidebarActions({ api, pops, ops, data, undo, onError: setError }), [api, pops, ops, data, undo]);
   const now = useNow();
@@ -484,6 +493,15 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           maxLength: DESCRIPTION_MAX,
           onSave: (v) => act.editProject(p, { description: v.trim() }),
         }),
+      editStartup: () =>
+        setPrompt({
+          title: 'Startup instructions',
+          label: 'What every new chat on this project does first, before anything else (a worktree and branch, the local servers, the links to send you)',
+          value: p.startupInstructions ?? '',
+          maxLength: STARTUP_MAX,
+          multiline: true,
+          onSave: (v) => act.editProject(p, { startupInstructions: v.trim() }),
+        }),
       cost: () => setCost({ projectId: p.id }),
       nestUnder: (id) => void act.nestProject(p, id),
       topLevel: () => void act.nestProject(p, null),
@@ -743,6 +761,9 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         bus={bus}
         attention={snap.attention}
         inboxOpen={inboxOpen}
+        queueCount={queueCount(queueSnap)}
+        queueOpen={queueOpen}
+        onQueue={() => setQueueOpen(true)}
         onNewChat={navNewChat}
         onSearch={openSearch}
         onAttention={() => setInboxOpen(true)}
@@ -869,6 +890,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       {confirm && <ConfirmDialog spec={confirm} onClose={() => setConfirm(null)} />}
       {cost && <CostDialog api={api} target={cost} onClose={() => setCost(null)} />}
       {inboxOpen && <AttentionInbox summary={snap.attention} ops={ops} onOpen={onSelect} onClose={() => setInboxOpen(false)} />}
+      {queueOpen && <QueuePanel store={queueStore} onOpen={onSelect} onClose={() => setQueueOpen(false)} />}
       <ItemPickerHost />
       {preview && !menu && !drag && (
         <PreviewCard
@@ -1254,6 +1276,7 @@ function ChatRow({
   // A chat whose own turn ended but whose subagents still run shows the wheel.
   const subagents = useSubagentsRunning(item.row.chatId);
   const r = subagents > 0 && item.row.attention !== 'running' ? { ...item.row, attention: 'running' as const } : item.row;
+  const chip = rowStateLabel(r.state);
   const colour = colourCss(project?.colour);
   const trailing = trailingIndicator(r.attention);
   const wrap = useRef<HTMLDivElement>(null);
@@ -1337,6 +1360,11 @@ function ChatRow({
         )}
         {!item.expanded && item.children > 0 && <span className="sb-agg">{item.children}</span>}
         {item.itemChip && <ItemChip item={item.itemChip} />}
+        {chip && (
+          <span className="sb-chip" data-kind={r.state?.kind} data-testid="chat-state-chip" title={chip}>
+            {chip}
+          </span>
+        )}
         {r.hasDraft && (
           <span className="sb-draft" role="img" aria-label="Unsent draft" title="Unsent draft">
             <IconEdit size={10} />

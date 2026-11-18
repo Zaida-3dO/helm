@@ -2,7 +2,7 @@
 //! restart, so an open wait carries on, and a wait that fired but was not delivered yet is
 //! delivered at the next sweep. Deleting the waiting chat deletes its waits.
 
-use crate::model::{Outcome, Target, Wait, MAX_IN_APP, MAX_PER_CHAT};
+use crate::model::{Outcome, Target, Wait, MAX_IN_APP, MAX_PER_CHAT, MAX_WATCHES_PER_CHAT};
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::Value;
 
@@ -39,6 +39,11 @@ pub enum AddError {
     NoChat,
 }
 
+/// Whether a wait's saved state marks it as a watch declared for a chat's child.
+pub fn is_watch(state: &Value) -> bool {
+    state.get("watch").and_then(Value::as_bool) == Some(true)
+}
+
 /// Add an open wait, enforcing the per-chat and app-wide caps in the same transaction.
 pub fn add(tx: &Transaction<'_>, w: &Wait) -> rusqlite::Result<Result<(), AddError>> {
     let chat_exists: bool = tx
@@ -54,10 +59,22 @@ pub fn add(tx: &Transaction<'_>, w: &Wait) -> rusqlite::Result<Result<(), AddErr
         tx.query_row(sql, p, |r| r.get::<_, i64>(0))
             .map(|n| n as usize)
     };
+    // The watches declared for a chat's children have their own room, apart from the waits it
+    // declares itself.
+    let watch = is_watch(&w.state);
+    let (own, cap) = if watch {
+        (1, MAX_WATCHES_PER_CHAT)
+    } else {
+        (0, MAX_PER_CHAT)
+    };
     if count(
-        "SELECT COUNT(*) FROM agent_waits WHERE chat_id = ?1 AND state = 'open'",
+        &format!(
+            "SELECT COUNT(*) FROM agent_waits WHERE chat_id = ?1 AND state = 'open'
+             AND CASE WHEN json_valid(memory) THEN COALESCE(json_extract(memory, '$.watch'), 0)
+                 ELSE 0 END = {own}"
+        ),
         &[&w.chat_id],
-    )? >= MAX_PER_CHAT
+    )? >= cap
     {
         return Ok(Err(AddError::ChatFull));
     }

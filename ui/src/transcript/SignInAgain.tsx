@@ -8,7 +8,9 @@ import { adoptSession } from '../terminal/adopt.ts';
 import { Button, toast } from '../ui/index.ts';
 import './signin.css';
 
-export function SignInAgain() {
+/** `message` replaces the default words when the cause is not an expired sign-in (a token refresh
+ * that kept failing, say). */
+export function SignInAgain({ message }: { message?: string }) {
   const shell = useShell();
   const [busy, setBusy] = useState(false);
   const start = () => {
@@ -21,7 +23,7 @@ export function SignInAgain() {
   };
   return (
     <div className="signin-offer" data-testid="error-signin-offer">
-      <span className="muted">Claude&apos;s sign-in has expired. Sign in again, then send your message again.</span>
+      <span className="muted">{message ?? "Claude's sign-in has expired. Sign in again, then send your message again."}</span>
       <Button variant="secondary" busy={busy} onClick={start} data-testid="error-signin">
         Sign in again
       </Button>

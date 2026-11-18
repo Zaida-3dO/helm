@@ -58,6 +58,14 @@
 //! | Helm → hub | `kn_put` | `id`, `layer`, `path`, `baseSeq` (0 for a new file), `sha256`, `deleted`, `body` (base64) |
 //! | hub → Helm | `kn_put_result` | `id`, `ok`, `seq`; or `ok` false with `conflict` (`{seq, sha256}`) or `error` |
 //! | hub → Helm | `kn_changed` | `seq`: some device changed a knowledge file; sent to every `peer` line |
+//! | Helm → hub | `ix_hello` | `id`, `sources` (`{id, kind, name, docs, digest}`: a source is a folder, `helm_chats`, `claude_code` or `chat_logs`; the first machine to name a source owns it): answered with `ix_state` (`sources` as `{id, docs, digest}` or `{id, error}`, and `features`). The digest is the sha256 of the source's `key:hash` lines, sorted by key bytes and joined by newlines. Needs the `peer` scope; all `ix_*` frames do |
+//! | Helm → hub | `ix_manifest` | `id`, `source`, `afterKey`, `limit` (at most 1000): answered with `ix_manifest_page` (`items` of `{key, hash}` in key order, `more`) |
+//! | Helm → hub | `ix_put` | `id`, `source`, `kind` (when the source is new), `model`, `docs` (`{key, hash, title, locator, owner, scope, readers, tier, occurredAt, chunks}`, at most 200 chunks and 2 MiB in all; a chunk is `{ord, text, heading, at, anchor, vec, scale, model}`, `vec` being base64 int8): answered with `ix_put_result` (`results` of `{key, status: inserted, replaced, unchanged or refused, reason}`). `scope` is `me`, `everyone` or `some` (with `readers`); `owner` must be this machine's person or one it may act for |
+//! | Helm → hub | `ix_delete` | `id`, `source`, `keys`: answered with `ix_delete_result` (`deleted`) |
+//! | Helm → hub | `ix_pending` | `id`, `limit` (at most 200): answered with `ix_pending_list` (`chunks` of `{chunk, text}` and `model`): chunks with no vector for the hub's model, of docs this machine's people own or this machine sent |
+//! | Helm → hub | `ix_vectors` | `id`, `model`, `items` (`{chunk, vec, scale, model}`): answered with `ix_vectors_result` (`stored`); only chunks of docs this machine's people own or this machine sent are stored |
+//! | hub → Helm | `ix_embed` | `id`, `text` (already prefixed for a query: embed it as it is): answered with `ix_embedded` (`id`, `vec` as numbers, `model`; or `locked` true when the local models are busy) |
+//! | hub → Helm | `ix_trace` | `id`, `viewer` (person id), `chat` (the doc's key), `source`, `kind`, `owner` (the person the doc is filed under), `query`, `after`, `before`, `limit`: answered with `ix_trace_result` (`id`, `ok`, `results`, or `error`) |
 //!
 //! New frames go in the table above, a `match` arm in [`Line::receive`] and, for what Helm sends
 //! up that is not a call result, an [`Upstream`] variant.
@@ -187,6 +195,14 @@ pub enum Upstream {
         sha256: String,
         deleted: bool,
         body: Option<String>,
+    },
+    /// A search-index frame (`ix_hello`, `ix_manifest`, `ix_put`, `ix_delete`, `ix_pending`,
+    /// `ix_vectors`), answered by `index.rs`. `frame` is the whole frame; `size` its length.
+    Ix {
+        kind: String,
+        id: Value,
+        frame: Value,
+        size: usize,
     },
 }
 
@@ -463,7 +479,11 @@ impl Line {
     pub fn attach_as(&self, tx: mpsc::UnboundedSender<String>, who: Value) -> u64 {
         let generation =
             (self.namespace << 32) | (self.generation.fetch_add(1, Ordering::SeqCst) + 1);
-        let mut welcome = json!({ "type": "welcome", "version": PROTOCOL_VERSION });
+        let mut welcome = json!({
+            "type": "welcome",
+            "version": PROTOCOL_VERSION,
+            "features": crate::index::FEATURES,
+        });
         if let (Some(w), Some(extra)) = (welcome.as_object_mut(), who.as_object()) {
             for (k, v) in extra {
                 w.insert(k.clone(), v.clone());
@@ -620,6 +640,16 @@ impl Line {
             |id| json!({ "type": "dev_call", "id": id, "from": from, "op": op, "args": args }),
         )
         .await
+    }
+
+    /// Send the frame `build` makes for a fresh id and wait for the answer frame with that id
+    /// (`ix_embedded`, `ix_trace_result`), which comes back whole in `CallOutcome::Ok`.
+    pub async fn ix_request(
+        &self,
+        timeout: Duration,
+        build: impl FnOnce(&str) -> Value,
+    ) -> CallOutcome {
+        self.request(timeout, build).await
     }
 
     /// Send the frame `build` makes for a fresh id and wait for the `result` frame with that id.
@@ -992,6 +1022,32 @@ impl Line {
                 }
                 _ => false,
             },
+            Some(
+                kind @ ("ix_hello" | "ix_manifest" | "ix_put" | "ix_delete" | "ix_pending"
+                | "ix_vectors"),
+            ) => match v.get("id") {
+                Some(id) if id.is_string() || id.is_number() => self
+                    .upstream
+                    .send((
+                        None,
+                        Upstream::Ix {
+                            kind: kind.to_owned(),
+                            id: id.clone(),
+                            frame: v.clone(),
+                            size: text.len(),
+                        },
+                    ))
+                    .is_ok(),
+                _ => false,
+            },
+            Some("ix_embedded" | "ix_trace_result") => {
+                let Some(id) = s("id") else { return false };
+                let Some(sender) = self.take_pending(&id, generation) else {
+                    return false;
+                };
+                let _ = sender.send(CallOutcome::Ok(v.clone()));
+                true
+            }
             Some("kn_pull") => match v.get("id") {
                 Some(id) if id.is_string() || id.is_number() => self
                     .upstream

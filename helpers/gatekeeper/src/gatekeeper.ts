@@ -129,7 +129,7 @@ function oneLine(value: unknown, max: number): string {
   return t.length > max ? t.slice(0, max).trim() : t;
 }
 
-const text = (v: unknown): string => (typeof v === "string" ? v : "");
+export const text = (v: unknown): string => (typeof v === "string" ? v : "");
 
 export function buildPrompt(job: GateJob, strict: boolean): string {
   const parts: string[] = [];

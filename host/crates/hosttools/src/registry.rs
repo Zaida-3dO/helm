@@ -2,6 +2,7 @@
 //! to their handlers through `pub fn register_host_tools(r: &mut HostToolRegistry)` and one line
 //! in `host/app/src/registrations.rs`.
 
+use crate::facade::{self, FacadeSpec};
 use crate::reserved;
 use crate::spec::{CatalogueEntry, LaunchKeys, ToolSpec};
 use helm_ipc::{EventSink, Services};
@@ -199,6 +200,8 @@ pub struct HostToolRegistry {
     tools: BTreeMap<&'static str, RegisteredTool>,
     /// Registration order: the catalogue lists tools in it (built-ins first).
     order: Vec<&'static str>,
+    /// The merged tools, in registration order.
+    facades: Vec<FacadeSpec>,
 }
 
 impl HostToolRegistry {
@@ -247,8 +250,130 @@ impl HostToolRegistry {
         self
     }
 
+    /// Set a registered tool's group and where it is listed (see [`crate::surface`]).
+    pub fn set_surface(
+        &mut self,
+        name: &str,
+        group: &'static str,
+        core: bool,
+        with_orchestrator: bool,
+    ) {
+        let t = self
+            .tools
+            .get_mut(name)
+            .unwrap_or_else(|| panic!("{name} is not a registered tool"));
+        t.spec.group = group;
+        t.spec.core = core;
+        t.spec.core_with_orchestrator = with_orchestrator;
+    }
+
+    /// Cut every listed tool's description to its first sentences (at most `max` characters) and
+    /// move the whole original to the front of its guidelines, which `app_list_tools` and
+    /// `app_help` return. A tool a merged tool took over is left whole: it is never listed, and
+    /// the merged tool shows its text when asked. Nothing is lost, it only moves.
+    pub fn slim_descriptions(&mut self, max: usize) {
+        let merged: Vec<&'static str> = self
+            .facades
+            .iter()
+            .flat_map(|f| f.actions.iter().map(|(_, m)| *m))
+            .collect();
+        for (name, t) in self.tools.iter_mut() {
+            if merged.contains(name)
+                || t.spec.core_with_orchestrator
+                || t.spec.description.chars().count() <= max
+            {
+                continue;
+            }
+            let full = std::mem::take(&mut t.spec.description);
+            t.spec.description =
+                format!("{} More: app_help tool/{name}.", facade::lead(&full, max));
+            t.spec.guidelines = Some(match t.spec.guidelines.take() {
+                Some(g) => format!(
+                    "{full}
+
+{g}"
+                ),
+                None => full,
+            });
+        }
+    }
+
+    /// Merge a family of registered tools behind one tool with an `action` argument (see
+    /// [`crate::facade`]). A bad merge panics, as a bad tool does.
+    pub fn facade(&mut self, f: FacadeSpec) -> &mut Self {
+        let name = f.name;
+        if !reserved::is_reserved(name) {
+            panic!("{name} is not in host/crates/hosttools/reserved.json");
+        }
+        if self.tools.contains_key(name) || self.facades.iter().any(|x| x.name == name) {
+            panic!("host tool registered twice: {name}");
+        }
+        let len = f.description.chars().count();
+        if len == 0 || len > facade::MAX_LISTED_DESCRIPTION {
+            panic!(
+                "{name}: description is {len} characters (1-{})",
+                facade::MAX_LISTED_DESCRIPTION
+            );
+        }
+        if f.actions.len() < 2 {
+            panic!("{name}: a merged tool has at least two actions");
+        }
+        for (i, (action, member)) in f.actions.iter().enumerate() {
+            if action.is_empty() || !action.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+                panic!("{name}: action {action:?} uses a-z and _ only");
+            }
+            if f.actions[..i].iter().any(|(a, _)| a == action) {
+                panic!("{name}: action {action} is listed twice");
+            }
+            if !self.tools.contains_key(member) {
+                panic!("{name}: {member} is not a registered tool");
+            }
+            if self.alias_of(member).is_some() {
+                panic!("{member} is already merged into another tool");
+            }
+            // The worker admits a call by the merged name alone, so a member that a launch may
+            // not list cannot sit behind one.
+            if self.tools[member].spec.availability.when != crate::spec::Condition::Always {
+                panic!("{name}: {member} is not always listed, so it cannot be merged");
+            }
+            if f.actions[..i].iter().any(|(_, m)| m == member) && f.fixed_for(action).is_none() {
+                panic!("{name}: {member} is listed twice without a fixed argument");
+            }
+        }
+        self.facades.push(f);
+        self
+    }
+
     pub fn get(&self, name: &str) -> Option<&RegisteredTool> {
         self.tools.get(name)
+    }
+
+    /// The merged tools.
+    pub fn facades(&self) -> &[FacadeSpec] {
+        &self.facades
+    }
+
+    /// The merged tool and action that took over `tool`, when one did.
+    pub fn alias_of(&self, tool: &str) -> Option<(&FacadeSpec, &'static str)> {
+        self.facades.iter().find_map(|f| {
+            f.actions
+                .iter()
+                .find(|(_, m)| *m == tool)
+                .map(|(a, _)| (f, *a))
+        })
+    }
+
+    /// A call to a merged tool, rewritten to the member tool its action names. `Ok(None)` when
+    /// `name` is not a merged tool: the call stands as it is.
+    pub fn rewrite(
+        &self,
+        name: &str,
+        args: &Value,
+    ) -> Result<Option<(&'static str, Value)>, ToolError> {
+        match self.facades.iter().find(|f| f.name == name) {
+            Some(f) => facade::rewrite(f, args).map(Some),
+            None => Ok(None),
+        }
     }
 
     pub fn contains(&self, name: &str) -> bool {
@@ -267,17 +392,36 @@ impl HostToolRegistry {
         self.order.is_empty()
     }
 
-    /// The tools a launch lists, in registration order (`launch.json` `hostTools[]`).
+    /// The tools a launch lists, in registration order (`launch.json` `hostTools[]`), then the
+    /// merged tools. A tool a merged tool took over stays in the list, marked with where it went:
+    /// it still answers to its old name but is neither listed to the model nor searched.
     pub fn for_launch(&self, keys: &LaunchKeys) -> Vec<CatalogueEntry> {
         if keys.restricted {
             return Vec::new();
         }
-        self.order
+        let mut out: Vec<CatalogueEntry> = self
+            .order
             .iter()
             .filter_map(|n| self.tools.get(n))
             .filter(|t| keys.admits(t.spec.availability.when))
-            .map(|t| CatalogueEntry::from(&t.spec))
-            .collect()
+            .map(|t| {
+                let mut e = CatalogueEntry::from(&t.spec);
+                if let Some((f, action)) = self.alias_of(t.spec.name) {
+                    e.alias_of = Some(facade::alias(f, action));
+                }
+                e
+            })
+            .collect();
+        for f in &self.facades {
+            let members: Vec<_> = f
+                .actions
+                .iter()
+                .filter_map(|(a, m)| self.tools.get(m).map(|t| (*a, t)))
+                .filter(|(_, t)| keys.admits(t.spec.availability.when))
+                .collect();
+            out.extend(facade::entry(f, &members));
+        }
+        out
     }
 
     /// The largest request any listed tool accepts: the channel's cap must be at least this.

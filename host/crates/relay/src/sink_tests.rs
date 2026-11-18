@@ -234,6 +234,8 @@ struct FakeOps {
     /// error, the way the chats side answers for a local server that is no longer set up —
     /// so the retry without the names can be proven to succeed.
     refuse_named: std::sync::atomic::AtomicBool,
+    /// When set, the working-mode ops answer with an error instead of a view.
+    fail_workmode: std::sync::atomic::AtomicBool,
 }
 
 impl OpInvoker for FakeOps {
@@ -262,10 +264,31 @@ impl OpInvoker for FakeOps {
                     .map(|id| json!({ "id": id }))
                     .map_err(|e| ApiError::internal(e.to_string()))
             }
+            "workmode_get" | "workmode_set"
+                if self.fail_workmode.load(std::sync::atomic::Ordering::SeqCst) =>
+            {
+                Err(ApiError::internal("the mode is out of reach right now"))
+            }
+            "workmode_get" => Ok(mode_view_json("check_in")),
+            // A set answers with the view as if its word had taken hold, the way the real op
+            // answers with the view after the change.
+            "workmode_set" => Ok(mode_view_json(args["mode"].as_str().unwrap_or("check_in"))),
             _ => Ok(Value::Null),
         };
         Box::pin(async move { r })
     }
+}
+
+/// The view the working-mode ops answer with: the given app mode, one board with its own mode,
+/// and the counts (the real shape, as the gatekeeper's view serialises).
+fn mode_view_json(app: &str) -> Value {
+    json!({
+        "app": app,
+        "effective": app,
+        "source": "app",
+        "overrides": [{ "id": "b-1", "name": "Alpha board", "mode": "run" }],
+        "counts": { "decided": 4, "needsYou": 1 }
+    })
 }
 
 struct Env {
@@ -298,6 +321,7 @@ fn env() -> Env {
         db: db.clone(),
         calls: Mutex::new(vec![]),
         refuse_named: std::sync::atomic::AtomicBool::new(false),
+        fail_workmode: std::sync::atomic::AtomicBool::new(false),
     });
     // The home profile made at open owns this test's channel files, in the per-person layout.
     let pid = db
@@ -371,6 +395,35 @@ fn sql(db: &Database, q: &str, p: &[&dyn rusqlite::ToSql]) {
 /// Let the chat's actor finish reacting to the last send (it has no worker in these tests).
 async fn settle() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+}
+
+/// Wait until the chat's actor is done with `sid`: its submission has reached an end state, so
+/// the actor's own status changes are behind us and the status we set afterwards is the last
+/// word. The real sink runs one delivery at a time under its serial lock; a test that calls
+/// `place` directly must not let a resend race the actor still reacting to the first send.
+async fn wait_quiet(db: &Database, sid: &str) {
+    for _ in 0..100 {
+        let ended = db
+            .snapshot(|tx| {
+                Ok::<_, rusqlite::Error>(
+                    tx.query_row(
+                        "SELECT state IN ('delivered', 'complete', 'uncertain', 'rejected',
+                                  'withdrawn', 'superseded')
+                         FROM submissions WHERE id = ?1",
+                        [sid],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap_or(1),
+                )
+            })
+            .unwrap_or(1)
+            != 0;
+        if ended {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    settle().await;
 }
 
 fn chat_of(p: &Placed) -> String {
@@ -470,7 +523,10 @@ async fn a_message_starts_the_telegram_chat_with_origin_telegram_and_is_stored_o
     assert_eq!(s[0].1, "telegram", "never the user's typed words");
     assert!(s[0].4.starts_with(telegram::BRIEF_NOTE));
     assert!(s[0].4.ends_with("hello from the phone"));
-    // The hub resends it (no ack reached it): the same submission, nothing new.
+    // The hub resends it (no ack reached it): the same submission, nothing new. First let the
+    // actor be done with the send: place runs here without the sink's serial lock, so a resend
+    // must not race the actor still opening (or closing) the turn the send started.
+    wait_quiet(&e.db, &telegram::submission_id("hub-1")).await;
     sql(
         &e.db,
         "UPDATE chats SET status = 'idle' WHERE id = ?1",
@@ -1245,6 +1301,224 @@ async fn the_sink_delivers_only_once_wired_and_stop_reaches_the_tagged_chat() {
     );
 }
 
+/// What went up to the phone as a note, in order.
+#[derive(Default)]
+struct RecUp {
+    notes: Mutex<Vec<(String, String)>>,
+}
+impl Upstream for RecUp {
+    fn status(&self, _person: &str, _text: &str) {}
+    fn final_answer(&self, _person: &str, _text: &str) -> bool {
+        true
+    }
+    fn notify(&self, person: &str, text: &str) {
+        self.notes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((person.to_owned(), text.to_owned()));
+    }
+}
+
+fn chat_count(db: &Database) -> i64 {
+    db.snapshot(|tx| tx.query_row("SELECT COUNT(*) FROM chats", [], |r| r.get(0)))
+        .unwrap()
+}
+
+#[test]
+fn the_mode_command_parser_takes_only_a_leading_mode_word() {
+    let rows: &[(&str, Option<ModeCommand>)] = &[
+        ("/mode", Some(ModeCommand::Show)),
+        ("  /mode  ", Some(ModeCommand::Show)),
+        ("/mode run", Some(ModeCommand::Set("run"))),
+        ("/mode complete", Some(ModeCommand::Set("run"))),
+        ("/mode check", Some(ModeCommand::Set("check_in"))),
+        ("/mode checkin", Some(ModeCommand::Set("check_in"))),
+        ("/mode check-in", Some(ModeCommand::Set("check_in"))),
+        ("/mode check_in", Some(ModeCommand::Set("check_in"))),
+        ("/mode ask", Some(ModeCommand::Set("check_in"))),
+        ("/mode@helm_bot run", Some(ModeCommand::Set("run"))),
+        ("/Mode Run", Some(ModeCommand::Set("run"))),
+        ("/mode run now", Some(ModeCommand::Set("run"))),
+        ("/mode nonsense", Some(ModeCommand::Usage)),
+        ("/modem", None),
+        ("/modem run", None),
+        ("/modes run", None),
+        ("mode run", None),
+        ("the /mode run", None),
+        ("", None),
+        ("/", None),
+    ];
+    for (text, want) in rows {
+        assert_eq!(&mode_command(text), want, "{text:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mode_commands_are_answered_to_the_phone_and_never_reach_a_chat() {
+    let e = env();
+    let sink = wired_sink(&e);
+    sink.attach_ops(e.ops.clone());
+    let up = Arc::new(RecUp::default());
+    sink.attach_line(up.clone());
+    let said = || -> Vec<String> {
+        up.notes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .drain(..)
+            .map(|(_, t)| t)
+            .collect()
+    };
+    let clear_calls = || e.ops.calls.lock().unwrap().clear();
+
+    // Show: the mode, the overrides and the counts go up; nothing is asked of any op but the read.
+    sink.deliver(msg("w1", "/mode")).await.unwrap();
+    let calls = e.ops.calls.lock().unwrap().clone();
+    assert_eq!(calls.as_slice(), [("workmode_get".to_owned(), json!({}))]);
+    let replies = said();
+    assert_eq!(replies.len(), 1);
+    assert!(
+        replies[0].contains("Working mode: Check in with me."),
+        "{replies:?}"
+    );
+    assert!(
+        replies[0].contains("Boards with a mode of their own: 1."),
+        "{replies:?}"
+    );
+    assert!(
+        replies[0].contains("Decided for you: 4 \u{b7} need you: 1"),
+        "{replies:?}"
+    );
+    assert_eq!(chat_count(&e.db), 0, "no chat was opened");
+    assert!(telegram::load_tag(&e.ctx.tag_path).is_none());
+
+    // Set words, synonyms, a bot handle and mixed case: each reaches one app-scoped set and
+    // confirms the new mode on the phone.
+    for (words, want) in [
+        ("/mode run", "run"),
+        ("/mode complete", "run"),
+        ("/mode check", "check_in"),
+        ("/mode checkin", "check_in"),
+        ("/mode check-in", "check_in"),
+        ("/mode ask", "check_in"),
+        ("/mode@helm_bot run", "run"),
+    ] {
+        clear_calls();
+        sink.deliver(msg(&format!("w{words}"), words))
+            .await
+            .unwrap();
+        let sets = e
+            .ops
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(o, _)| o == "workmode_set")
+            .map(|(_, a)| a.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sets,
+            vec![json!({ "scope": "app", "mode": want })],
+            "{words}"
+        );
+        let replies = said();
+        let want_text = if want == "run" {
+            "Run to completion"
+        } else {
+            "Check in with me"
+        };
+        assert_eq!(replies.len(), 1, "{words}");
+        assert!(
+            replies[0].starts_with("Working mode is now ") && replies[0].contains(want_text),
+            "{words}: {replies:?}"
+        );
+    }
+    assert_eq!(chat_count(&e.db), 0, "still no chat");
+
+    // Something the command does not know gets the usage line, with no op at all.
+    clear_calls();
+    sink.deliver(msg("w2", "/mode sideways")).await.unwrap();
+    assert!(e.ops.calls.lock().unwrap().is_empty());
+    let replies = said();
+    assert_eq!(replies.len(), 1);
+    assert!(
+        replies[0].contains("\"/mode run\" and \"/mode check\""),
+        "{replies:?}"
+    );
+
+    // An op that fails gets a plain line, for a read and for a set.
+    e.ops
+        .fail_workmode
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    sink.deliver(msg("w3", "/mode")).await.unwrap();
+    sink.deliver(msg("w4", "/mode run")).await.unwrap();
+    let replies = said();
+    assert_eq!(replies.len(), 2);
+    assert!(
+        replies[0].contains("could not read the working mode"),
+        "{replies:?}"
+    );
+    assert!(
+        replies[1].contains("could not change the working mode"),
+        "{replies:?}"
+    );
+    e.ops
+        .fail_workmode
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+
+    // A household person's phone: this PC may well take her Telegram, but the working mode
+    // belongs to the person whose profile this machine is home to. Her `/mode` gets one plain
+    // line, reaches no op, opens no chat, and changes nothing.
+    e.db.write(|tx| helm_profiles::store::create(tx, "Her", None, Some("hub-h"), 0))
+        .unwrap();
+    clear_calls();
+    let mut hers = msg("wh1", "/mode run");
+    hers.person = Some("hub-h".into());
+    sink.deliver(hers).await.unwrap();
+    assert!(
+        e.ops.calls.lock().unwrap().is_empty(),
+        "a household person's /mode reached an op"
+    );
+    let replies = said();
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert!(
+        replies[0].contains("only its owner can change it from a phone"),
+        "{replies:?}"
+    );
+    assert_eq!(chat_count(&e.db), 0, "her /mode opened no chat");
+    // And her own messages still flow: a plain one opens her chat as usual.
+    let mut plain = msg("wh2", "how are things");
+    plain.person = Some("hub-h".into());
+    sink.deliver(plain).await.unwrap();
+    assert!(chat_count(&e.db) > 0, "her plain message opened no chat");
+
+    // `/modem` and a message merely starting "mode" are ordinary messages: stored in the chat.
+    clear_calls();
+    sink.deliver(msg("w5", "/modem run")).await.unwrap();
+    sink.deliver(msg("w6", "mode run")).await.unwrap();
+    assert!(
+        !e.ops
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(o, _)| o.starts_with("workmode")),
+        "the mode ops were called for plain messages"
+    );
+    let tag = telegram::load_tag(&e.ctx.tag_path).expect("the messages opened the telegram chat");
+    let stored: Vec<String> = subs(&e.db, &tag.chat_id)
+        .into_iter()
+        .map(|(_, origin, _, _, text)| {
+            assert_eq!(origin, "telegram");
+            text
+        })
+        .collect();
+    // (what is stored carries the inbound note in front, as every delivered message does)
+    assert_eq!(stored.len(), 2, "{stored:?}");
+    assert!(stored[0].ends_with("/modem run"), "{stored:?}");
+    assert!(stored[1].ends_with("mode run"), "{stored:?}");
+    assert!(said().is_empty(), "plain messages answered nothing");
+}
+
 /// Only a voice note the hub could understand answers an agent's question, and what it answers
 /// with is the transcript; a picture, a document or a recording nobody heard does not.
 #[test]
@@ -1603,12 +1877,12 @@ fn set_idle(e: &Env, chat: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn voice_turns_enter_one_chat_with_origin_voice_a_primer_once_and_a_new_chat_after_idle() {
+async fn voice_turns_enter_one_chat_with_origin_voice_its_mode_note_and_a_new_chat_after_idle() {
     let e = env();
     let c = vctx(&e, voice::PolicyFile::default());
     let t0 = helm_core::now_ms();
 
-    // The first turn starts "Voice <date>" on the saved model and effort, with the primer.
+    // The first turn starts "Voice <date>" on the saved model and effort.
     let p = vplace(
         &c,
         vturn("t1", "Synthetic question one.", "conversation"),
@@ -1637,10 +1911,9 @@ async fn voice_turns_enter_one_chat_with_origin_voice_a_primer_once_and_a_new_ch
     assert_eq!(s.len(), 1);
     assert_eq!(s[0].0, voice::submission_id("t1"));
     assert_eq!(s[0].1, "voice", "never the user's typed words");
-    assert!(s[0].4.starts_with(voice::PRIMER_START), "{}", s[0].4);
     assert!(
-        s[0].4.ends_with(
-            "\n[Voice · conversation: speak it, short, no markup]\nSynthetic question one."
+        s[0].4.starts_with(
+            "[Voice · conversation: speak it, short, no markup]\nSynthetic question one."
         ),
         "{}",
         s[0].4
@@ -1676,7 +1949,7 @@ async fn voice_turns_enter_one_chat_with_origin_voice_a_primer_once_and_a_new_ch
     );
     assert_eq!(subs(&e.db, &chat).len(), 1);
 
-    // The next turn goes to the same chat and conversation: no primer, its mode and its lateness.
+    // The next turn goes to the same chat and conversation: its mode and its lateness.
     let mut t2 = vturn("t2", "Synthetic question two.", "chat");
     t2.age_minutes = Some(5);
     t2.continues = Some("t1".into());
@@ -1733,7 +2006,7 @@ async fn voice_turns_enter_one_chat_with_origin_voice_a_primer_once_and_a_new_ch
         voice_heard::Pending::default()
     );
 
-    // Idle for longer than the limit: a new chat and conversation, and the primer again. A
+    // Idle for longer than the limit: a new chat and conversation. A
     // limit the user has set applies from the next turn.
     set_idle(&e, &chat);
     let c = vctx(
@@ -1755,7 +2028,7 @@ async fn voice_turns_enter_one_chat_with_origin_voice_a_primer_once_and_a_new_ch
     let (chat3, conversation3) = vchat(&p);
     assert_ne!(chat3, chat);
     assert_ne!(conversation3, conversation);
-    assert!(subs(&e.db, &chat3)[0].4.starts_with(voice::PRIMER_START));
+    assert!(subs(&e.db, &chat3)[0].4.starts_with("[Voice · "));
     let calls = e.ops.calls.lock().unwrap().clone();
     let last = &calls.iter().rfind(|(o, _)| o == "chat_create").unwrap().1;
     assert!(
@@ -1815,7 +2088,6 @@ async fn the_voice_sink_delivers_only_once_wired_and_stop_presence_and_fresh_act
     let tag_path = crate::people::voice_paths(&e.dir.path().join("prof"), &e.ctx.profile_id).tag;
     let tag = voice::load_tag(&tag_path).unwrap();
     assert_eq!(tag.conversation, live.conversation);
-    assert!(tag.primed, "the primer went with the first message");
 
     // Stop acts only on the turn being answered, and on the tagged chat.
     let stops = || {

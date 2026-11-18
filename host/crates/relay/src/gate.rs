@@ -45,8 +45,10 @@ pub const TABLE: &[(&str, Class)] = &[
     ("app_add_skill", Class::Denied(LOCAL)),
     ("app_answer_waiting", Class::Allowed),
     ("app_append_feedback", Class::Denied(LOCAL)),
+    ("app_attention", Class::Denied(LOCAL)),
     ("app_background_result", Class::Denied(LOCAL)),
     ("app_cancel_schedule", Class::Denied(SCHEDULES)),
+    ("app_chat", Class::Denied(CHANGES)),
     ("app_consent_check", Class::Denied(CONSENT)),
     ("app_create_chat", Class::Denied(CHANGES)),
     ("app_create_feedback", Class::Denied(LOCAL)),
@@ -65,13 +67,17 @@ pub const TABLE: &[(&str, Class)] = &[
     ("app_gmail_read", Class::Denied(MCP)),
     ("app_gmail_search", Class::Denied(MCP)),
     ("app_gmail_send", Class::Denied(MCP)),
+    ("app_helm_feedback", Class::Denied(LOCAL)),
+    ("app_help", Class::Denied(LOCAL)),
     ("app_ide_context", Class::Denied(EDITOR)),
     ("app_import_mcp_servers", Class::Denied(MCP)),
     ("app_link_item", Class::Denied(LOCAL)),
+    ("app_knowledge", Class::Denied(LOCAL)),
     ("app_list_attention", Class::Allowed),
     ("app_list_chats", Class::Allowed),
     ("app_list_feedback", Class::Denied(LOCAL)),
     ("app_list_knowledge", Class::Denied(LOCAL)),
+    ("app_memory_index", Class::Denied(LOCAL)),
     ("app_list_mcp_servers", Class::Denied(MCP)),
     ("app_list_pages", Class::Denied(LOCAL)),
     ("app_list_projects", Class::Allowed),
@@ -84,12 +90,18 @@ pub const TABLE: &[(&str, Class)] = &[
     ("app_make_room_for_speech", Class::Allowed),
     ("app_mcp_call", Class::Denied(MCP)),
     ("app_mcp_oauth_header", Class::Denied(LOCAL)),
+    ("app_mcp_servers", Class::Denied(MCP)),
     ("app_mcp_tools", Class::Denied(MCP)),
     ("app_offer_options", Class::Denied(LOCAL)),
     ("app_open_chat", Class::Denied(CHANGES)),
     ("app_orchestrator_on", Class::Denied(CONSENT)),
+    ("app_pages", Class::Denied(LOCAL)),
     ("app_pin_page", Class::Denied(LOCAL)),
+    ("app_project", Class::Denied(CHANGES)),
+    ("app_queue_action", Class::Denied(CHANGES)),
+    ("app_queue_status", Class::Denied(LOCAL)),
     ("app_read_chat", Class::Allowed),
+    ("app_project_startup", Class::Denied(CONSENT)),
     ("app_read_project_context", Class::Denied(LOCAL)),
     ("app_register_checkout", Class::Denied(CHANGES)),
     ("app_reload_configuration", Class::Denied(SETTINGS)),
@@ -100,12 +112,18 @@ pub const TABLE: &[(&str, Class)] = &[
     ("app_request_allow", Class::Denied(CONSENT)),
     ("app_resolve_side_chat", Class::Denied(CHANGES)),
     ("app_resume_saved_agent", Class::Denied(CHANGES)),
+    ("app_roll_over", Class::Denied(CHANGES)),
     ("app_save_item", Class::Denied(LOCAL)),
     ("app_save_rule", Class::Denied(LOCAL)),
+    ("app_saved", Class::Denied(LOCAL)),
+    ("app_schedule", Class::Denied(SCHEDULES)),
     ("app_send_message", Class::Allowed),
     ("app_set_chat_archived", Class::Denied(CHANGES)),
+    ("app_settings", Class::Denied(SETTINGS)),
     ("app_show_images", Class::Denied(LOCAL)),
     ("app_stage_settings", Class::Denied(CONSENT)),
+    ("app_startup_done", Class::Denied(LOCAL)),
+    ("app_startup_turn_end", Class::Denied(CONSENT)),
     ("app_stop_chat", Class::Allowed),
     ("app_telegram_ask", Class::Denied(LOCAL)),
     ("app_telegram_send", Class::Denied(LOCAL)),
@@ -207,6 +225,24 @@ pub fn check_caller(tool: &str, caller: &str) -> Result<(), String> {
 }
 /// Longest caller name shown in the frame.
 const MAX_CALLER: usize = 64;
+
+/// What an admitted call's result may carry past this PC. The chat list names the tool a chat is
+/// running and the local model servers' load; neither leaves the PC.
+pub fn for_outside(tool: &str, mut result: Value) -> Value {
+    if tool == "app_list_chats" {
+        if let Some(o) = result.as_object_mut() {
+            o.remove("localServers");
+        }
+        if let Some(chats) = result.get_mut("chats").and_then(Value::as_array_mut) {
+            for c in chats {
+                if let Some(state) = c.get_mut("state").and_then(Value::as_object_mut) {
+                    state.remove("name");
+                }
+            }
+        }
+    }
+    result
+}
 
 /// A call the gate let through: the tool and the checked arguments.
 #[derive(Clone, Debug, PartialEq)]
@@ -404,6 +440,22 @@ mod tests {
         for n in helm_hosttools::reserved::dropped() {
             assert!(matches!(classify(n), Class::Denied(_)), "{n}");
         }
+    }
+
+    #[test]
+    fn the_chat_list_leaves_without_tool_names_or_server_load() {
+        let list = json!({
+            "chats": [{"chatId": "c1", "state": {"kind": "tool", "name": "mcp__x__y", "since": 5}},
+                      {"chatId": "c2", "state": null}],
+            "localServers": [{"serverId": "s", "working": 1, "queued": 0}],
+        });
+        let out = for_outside("app_list_chats", list.clone());
+        assert_eq!(
+            out,
+            json!({"chats": [{"chatId": "c1", "state": {"kind": "tool", "since": 5}},
+                             {"chatId": "c2", "state": null}]})
+        );
+        assert_eq!(for_outside("app_list_projects", list.clone()), list);
     }
 
     #[test]

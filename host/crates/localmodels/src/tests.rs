@@ -194,6 +194,11 @@ fn fake_ollama(state: Arc<Mutex<OllamaState>>) -> Fake {
                 }
                 (200, json!({"done": true}))
             }
+            ("POST", "/api/embed") if name == "nomic-embed-text" => {
+                let n = r.body["input"].as_array().map_or(0, Vec::len);
+                (200, json!({"embeddings": vec![vec![0.5, -0.5]; n]}))
+            }
+            ("POST", "/api/embed") => (404, json!({"error": "model not found"})),
             _ => (404, json!({"error": "not found"})),
         }
     })
@@ -425,6 +430,7 @@ fn servers(strata: &str, ollama: &str) -> Changes {
         kind,
         base_url: url.into(),
         enabled: true,
+        chat_cap: None,
         model: None,
         auto_start: true,
         folder: None,
@@ -1155,6 +1161,24 @@ fn while_unloaded_nothing_loads_and_no_server_is_asked() {
     r.svc().set_key("strata", KEY).unwrap();
     assert!(r.svc().catalogue(true).iter().all(|m| m.reachable));
 
+    // Embedding: one vector per text, a missing model and a server that cannot embed in words.
+    let two = ["a".to_owned(), "b".to_owned()];
+    assert_eq!(
+        r.svc().embed("ollama", "nomic-embed-text", &two).unwrap(),
+        vec![vec![0.5, -0.5]; 2]
+    );
+    assert!(r
+        .svc()
+        .embed("ollama", "other", &two)
+        .unwrap_err()
+        .contains("does not have the model other"));
+    assert!(r
+        .svc()
+        .embed("strata", "nomic-embed-text", &two)
+        .unwrap_err()
+        .contains("cannot embed"));
+    assert!(!r.svc().local_chat_busy());
+
     // A turn waiting for memory that will not come (nothing idle to unload, 4 GB free, 6 needed)
     // stops waiting when the lock lands, long before its 5 s are up.
     let waiting = {
@@ -1199,6 +1223,10 @@ fn while_unloaded_nothing_loads_and_no_server_is_asked() {
         (
             "a worker's start",
             r.svc().server("ollama", "qwen3:8b-helm-64k").map(drop),
+        ),
+        (
+            "an embed",
+            r.svc().embed("ollama", "nomic-embed-text", &two).map(drop),
         ),
         ("a Test", {
             let t = r.svc().test("strata").unwrap();

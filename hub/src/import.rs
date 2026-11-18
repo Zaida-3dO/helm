@@ -4,8 +4,12 @@
 //! left out) becomes one memory keyed on its frontmatter `name` (falling
 //! back to the file stem when there is no frontmatter), so running the
 //! import again refreshes changed files and leaves the rest alone. Index
-//! files are skipped: they list memories, they are not one. With `prune`, a
-//! memory of the same source whose file is gone is removed.
+//! files are skipped: they list memories, they are not one. So is anything
+//! under a folder named `archived` or a `.bak` folder, any `*.bak.md` file, and
+//! any memory whose frontmatter `status` is `archived` or `superseded`: those
+//! are retired and must not be found by a search. With `prune`, a memory of the
+//! same source whose file is gone (or is now skipped for one of these reasons)
+//! is removed.
 
 use crate::store::{NewMemory, Store, StoreError, Upsert};
 use serde::Serialize;
@@ -39,6 +43,7 @@ pub struct Parsed {
     pub title: String,
     pub description: Option<String>,
     pub kind: Option<String>,
+    pub status: Option<String>,
     pub body: String,
     pub links: Vec<String>,
 }
@@ -49,14 +54,39 @@ pub struct ImportArgs {
     pub dir: PathBuf,
     pub source: String,
     pub prune: bool,
+    /// Allow a folder imported before under another source tag to be imported under this one.
+    pub retag: bool,
 }
 
-/// Reads `<dir> --source S [--prune]`. The source is required: it decides which memories a prune
+/// True when a path below the import folder is retired by where it sits: a folder named
+/// `archived` or ending `.bak` anywhere above it, or a file named `*.bak.md`.
+pub fn retired_path(rel: &str) -> bool {
+    let rel = rel.replace('\\', "/");
+    // A doc cut into parts is keyed `file#2`: the part number does not change what the file is.
+    let rel = match rel.rsplit_once('#') {
+        Some((file, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => file,
+        _ => rel.as_str(),
+    };
+    let mut parts: Vec<String> = rel.split('/').map(str::to_lowercase).collect();
+    let file = parts.pop().unwrap_or_default();
+    file.ends_with(".bak.md") || parts.iter().any(|d| d == "archived" || d.ends_with(".bak"))
+}
+
+/// True when the frontmatter `status` retires the memory.
+fn retired_status(status: Option<&str>) -> bool {
+    status.is_some_and(|s| {
+        let s = s.trim().to_lowercase();
+        s == "archived" || s == "superseded"
+    })
+}
+
+/// Reads `<dir> --source S [--prune] [--retag]`. The source is required: it decides which memories a prune
 /// may remove, and a default would quietly re-tag everything imported before.
 pub fn parse_args(args: &[String]) -> Result<ImportArgs, String> {
     let mut dir = None;
     let mut source = None;
     let mut prune = false;
+    let mut retag = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -65,6 +95,7 @@ pub fn parse_args(args: &[String]) -> Result<ImportArgs, String> {
                 None => return Err("--source needs a value".into()),
             },
             "--prune" => prune = true,
+            "--retag" => retag = true,
             d if !d.starts_with("--") && dir.is_none() => dir = Some(PathBuf::from(d)),
             other => return Err(format!("unexpected argument {other:?}")),
         }
@@ -75,6 +106,7 @@ pub fn parse_args(args: &[String]) -> Result<ImportArgs, String> {
             dir,
             source: s,
             prune,
+            retag,
         }),
         _ => Err(
             "import needs --source <tag>: say which source these memories come from, \
@@ -82,6 +114,61 @@ pub fn parse_args(args: &[String]) -> Result<ImportArgs, String> {
                 .into(),
         ),
     }
+}
+
+const ROOTS: &str = "CREATE TABLE IF NOT EXISTS import_roots (
+    path TEXT PRIMARY KEY,
+    source_tag TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+)";
+
+fn root_key(dir: &Path) -> Result<String, String> {
+    Ok(std::fs::canonicalize(dir)
+        .map_err(|e| format!("cannot read {}: {e}", dir.display()))?
+        .to_string_lossy()
+        .trim_start_matches(r"\\?\")
+        .to_owned())
+}
+
+/// Refuses to import a folder under a source tag other than the one it was imported under before:
+/// every memory would be written a second time under the new tag, and the old ones would sit beside
+/// them. `retag` says the source really did change. Nothing is remembered here: the folder and
+/// its tag are recorded by [`record_root`] once the import has succeeded, so a failed import
+/// leaves the guard as it was.
+pub fn check_root(store: &Store, dir: &Path, tag: &str, retag: bool) -> Result<(), String> {
+    let root = root_key(dir)?;
+    let conn = store.conn();
+    let fail = |e: rusqlite::Error| format!("cannot read the import folders: {e}");
+    conn.execute_batch(ROOTS).map_err(fail)?;
+    let before: Option<String> = conn
+        .query_row(
+            "SELECT source_tag FROM import_roots WHERE path = ?1",
+            [&root],
+            |r| r.get(0),
+        )
+        .ok();
+    if let Some(old) = before.filter(|old| old != tag && !retag) {
+        return Err(format!(
+            "{root} was imported as source {old:?}; importing it as {tag:?} would add every memory \
+             a second time. Use --source {old:?}, or add --retag if the source really changed."
+        ));
+    }
+    Ok(())
+}
+
+/// Remember the folder and the tag it was imported under, after the import has succeeded.
+pub fn record_root(store: &Store, dir: &Path, tag: &str) -> Result<(), String> {
+    let root = root_key(dir)?;
+    let conn = store.conn();
+    let fail = |e: rusqlite::Error| format!("cannot record the import folder: {e}");
+    conn.execute_batch(ROOTS).map_err(fail)?;
+    conn.execute(
+        "INSERT INTO import_roots (path, source_tag, updated_at) VALUES (?1, ?2, strftime('%s','now'))
+         ON CONFLICT(path) DO UPDATE SET source_tag = excluded.source_tag, updated_at = excluded.updated_at",
+        rusqlite::params![root, tag],
+    )
+    .map_err(fail)?;
+    Ok(())
 }
 
 /// Every `*.md` file under `dir`, folders sorted, hidden folders (and symlinked ones) skipped.
@@ -144,6 +231,7 @@ pub fn import_dir(
         if INDEX_FILES
             .iter()
             .any(|i| i.eq_ignore_ascii_case(&base_name))
+            || retired_path(&file_name)
         {
             report.skipped.push(file_name);
             continue;
@@ -162,6 +250,23 @@ pub fn import_dir(
             .to_string_lossy()
             .into_owned();
         let p = parse(&stem, &String::from_utf8_lossy(&bytes));
+        if retired_status(p.status.as_deref()) {
+            report.skipped.push(file_name);
+            continue;
+        }
+        // A memory is shared with the household once it is on the hub, so a file that holds a
+        // credential stays out; a copy imported before stays as it was.
+        if [&p.body, &p.title, &p.name]
+            .into_iter()
+            .chain(p.description.as_ref())
+            .any(|t| crate::secrets::looks_like_secret(t))
+        {
+            failed_sources.insert(source.clone());
+            report.failed.push(format!(
+                "{file_name}: looks like it holds a credential, so it is not imported"
+            ));
+            continue;
+        }
         // Two files claiming one name would silently overwrite each other.
         if let Some(first) = seen.get(&p.name) {
             failed_sources.insert(source.clone());
@@ -241,6 +346,7 @@ pub fn parse(stem: &str, text: &str) -> Parsed {
             .kind
             .map(|k| k.trim().to_lowercase())
             .filter(|k| !k.is_empty()),
+        status: fields.status,
         links: wiki_links(&body),
         body,
     }
@@ -268,6 +374,7 @@ struct Fields {
     name: Option<String>,
     description: Option<String>,
     kind: Option<String>,
+    status: Option<String>,
 }
 
 fn read_frontmatter(front: &str) -> Fields {
@@ -288,6 +395,10 @@ fn read_frontmatter(front: &str) -> Fields {
             name: get(&map, "name"),
             description: get(&map, "description"),
             kind: nested_kind.or_else(|| get(&map, "type")),
+            status: get(&map, "status").or_else(|| match map.get("metadata") {
+                Some(serde_yaml::Value::Mapping(meta)) => get(meta, "status"),
+                _ => None,
+            }),
         };
     }
     // Not valid YAML (an unquoted colon in a description is the usual cause):
@@ -302,6 +413,7 @@ fn read_frontmatter(front: &str) -> Fields {
         match (k.trim(), indented) {
             ("name", false) => f.name = Some(v),
             ("description", false) => f.description = Some(v),
+            ("status", _) if f.status.is_none() || indented => f.status = Some(v),
             ("type", _) if f.kind.is_none() || indented => f.kind = Some(v),
             _ => {}
         }
@@ -403,23 +515,23 @@ same name as a.md",
 
         let mut s = Store::open_in_memory().unwrap();
         let r1 = import_dir(&mut s, dir.path(), "default", false).unwrap();
-        assert_eq!((r1.inserted, r1.updated, r1.unchanged), (3, 0, 0));
-        assert_eq!(r1.skipped, vec!["MEMORY.md"]);
+        assert_eq!((r1.inserted, r1.updated, r1.unchanged), (2, 0, 0));
+        assert_eq!(r1.skipped, vec!["MEMORY.md", "archived/old.md"]);
         assert_eq!(r1.failed.len(), 1, "{:?}", r1.failed);
         assert!(r1.failed[0].starts_with("c.md"));
-        assert_eq!(s.count().unwrap(), 3);
+        assert_eq!(s.count().unwrap(), 2);
 
         let r2 = import_dir(&mut s, dir.path(), "default", false).unwrap();
-        assert_eq!((r2.inserted, r2.updated, r2.unchanged), (0, 0, 3));
-        assert_eq!(s.count().unwrap(), 3);
+        assert_eq!((r2.inserted, r2.updated, r2.unchanged), (0, 0, 2));
+        assert_eq!(s.count().unwrap(), 2);
 
         w(
             "a.md",
             "---\nname: alpha\ndescription: d\nmetadata:\n  type: lesson\n---\nalpha body v2",
         );
         let r3 = import_dir(&mut s, dir.path(), "default", false).unwrap();
-        assert_eq!((r3.inserted, r3.updated, r3.unchanged), (0, 1, 2));
-        assert_eq!(s.count().unwrap(), 3);
+        assert_eq!((r3.inserted, r3.updated, r3.unchanged), (0, 1, 1));
+        assert_eq!(s.count().unwrap(), 2);
 
         let a = s.get_by_name("alpha").unwrap();
         assert_eq!(a.body, "alpha body v2");
@@ -435,9 +547,92 @@ same name as a.md",
             .unwrap();
         assert_eq!(hits[0].summary.name.as_deref(), Some("b"));
         assert_eq!(s.list(Some("lesson"), None, 10).unwrap().len(), 1);
-        let old = s.get_by_name("old").unwrap();
-        assert_eq!(old.source.as_deref(), Some("default:archived/old.md"));
+        assert!(s.get_by_name("old").is_err(), "archived/ is not imported");
         assert!(s.get_by_name("hidden").is_err());
+    }
+
+    #[test]
+    fn retired_memories_are_skipped_and_prune_removes_ones_imported_earlier() {
+        let dir = tempfile::tempdir().unwrap();
+        // (file, text, memory name, imported)
+        let rows: &[(&str, &str, &str, bool)] = &[
+            ("live.md", "live body", "live", true),
+            ("sub/deep.md", "deep body", "deep", true),
+            ("archived/old.md", "old body", "old", false),
+            ("sub/Archived/older.md", "older body", "older", false),
+            ("copy.bak/x.md", "x body", "x", false),
+            ("draft.bak.md", "draft body", "draft.bak", false),
+            (
+                "a.md",
+                "---\nname: s-arch\nstatus: archived\n---\nb",
+                "s-arch",
+                false,
+            ),
+            (
+                "b.md",
+                "---\nname: s-sup\nmetadata:\n  status: Superseded\n---\nb",
+                "s-sup",
+                false,
+            ),
+            (
+                "c.md",
+                "---\nname: s-active\nstatus: active\n---\nb",
+                "s-active",
+                true,
+            ),
+        ];
+        for (n, t, _, _) in rows {
+            let p = dir.path().join(n);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, t).unwrap();
+        }
+        let mut s = Store::open_in_memory().unwrap();
+        // Memories imported before the rule existed, under this source and another one.
+        for (name, source) in [
+            ("old", "mine:archived/old.md"),
+            ("s-arch", "mine:a.md"),
+            ("other-old", "other:archived/x.md"),
+        ] {
+            s.insert(NewMemory {
+                name: Some(name.into()),
+                title: name.into(),
+                body: "b".into(),
+                source: Some(source.into()),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+
+        let r = import_dir(&mut s, dir.path(), "mine", false).unwrap();
+        assert_eq!(r.imported(), 3);
+        assert_eq!(r.skipped.len(), 6, "{:?}", r.skipped);
+        assert!(r.pruned.is_empty(), "no prune without the flag");
+        assert!(s.get_by_name("old").is_ok(), "kept until --prune is passed");
+
+        let r = import_dir(&mut s, dir.path(), "mine", true).unwrap();
+        assert_eq!(r.pruned, vec!["old", "s-arch"]);
+        for (file, _, name, imported) in rows {
+            assert_eq!(s.get_by_name(name).is_ok(), *imported, "{file}");
+        }
+        assert!(
+            s.get_by_name("other-old").is_ok(),
+            "another source is never touched"
+        );
+        // A file that holds a credential is reported and left out: the memory would be shared.
+        let leaked = format!(
+            "---\nname: keys\n---\nexport GITHUB_TOKEN=ghp_{}",
+            "a1B2".repeat(5)
+        );
+        std::fs::write(dir.path().join("keys.md"), leaked).unwrap();
+        let r = import_dir(&mut s, dir.path(), "mine", true).unwrap();
+        assert!(
+            r.failed.len() == 1
+                && r.failed[0].starts_with("keys.md")
+                && r.failed[0].contains("credential"),
+            "{:?}",
+            r.failed
+        );
+        assert!(s.get_by_name("keys").is_err());
     }
 
     #[test]
@@ -511,6 +706,42 @@ same name as a.md",
     }
 
     #[test]
+    fn a_folder_keeps_the_source_tag_it_was_first_imported_under() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(check_root(&s, dir.path(), "notes", false), Ok(()));
+        // A check alone remembers nothing: an import that failed leaves the guard as it was.
+        assert_eq!(check_root(&s, dir.path(), "default", false), Ok(()));
+        assert_eq!(record_root(&s, dir.path(), "notes"), Ok(()));
+        assert_eq!(check_root(&s, dir.path(), "notes", false), Ok(()));
+        let why = check_root(&s, dir.path(), "default", false).unwrap_err();
+        assert!(
+            why.contains("\"notes\"") && why.contains("--retag"),
+            "{why}"
+        );
+        assert_eq!(check_root(&s, dir.path(), "default", true), Ok(()));
+        assert_eq!(record_root(&s, dir.path(), "default"), Ok(()));
+        assert_eq!(check_root(&s, dir.path(), "default", false), Ok(()));
+        let other = tempfile::tempdir().unwrap();
+        assert_eq!(check_root(&s, other.path(), "notes", false), Ok(()));
+        for (rel, retired) in [
+            ("a.md", false),
+            ("archived/a.md", true),
+            ("x/Archived/a.md", true),
+            ("x.bak/a.md", true),
+            ("a.bak.md", true),
+            ("archive-notes.md", false),
+            ("x.bak.md#2", true),
+            ("archived\\x.md", true),
+            ("sub\\x.bak\\a.md#10", true),
+            ("a.md#2", false),
+            ("a.md#x", false),
+        ] {
+            assert_eq!(retired_path(rel), retired, "{rel}");
+        }
+    }
+
+    #[test]
     fn the_command_line_needs_a_folder_and_an_explicit_source() {
         let a = |v: &[&str]| parse_args(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>());
         let ok = |dir: &str, source: &str, prune: bool| {
@@ -518,6 +749,7 @@ same name as a.md",
                 dir: dir.into(),
                 source: source.into(),
                 prune,
+                retag: false,
             })
         };
         assert_eq!(a(&["/m", "--source", "notes"]), ok("/m", "notes", false));
@@ -525,6 +757,7 @@ same name as a.md",
             a(&["--prune", "--source", "notes", "/m"]),
             ok("/m", "notes", true)
         );
+        assert!(a(&["/m", "--source", "notes", "--retag"]).unwrap().retag);
         for bad in [
             &["/m"][..],
             &["/m", "--prune"],

@@ -178,9 +178,6 @@ impl ChatPort for ChannelPort {
     fn run_allowed(&self) -> bool {
         self.port.run_allowed()
     }
-    fn household_run(&self) -> bool {
-        self.port.household_run()
-    }
     fn hello(&self) -> BoxFut<'_, PortResult<Hello>> {
         self.port.hello()
     }

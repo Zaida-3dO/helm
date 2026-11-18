@@ -9,6 +9,7 @@
 
 mod pet;
 mod petworld;
+mod pref_rules;
 mod registrations;
 mod shell;
 mod system;
@@ -69,6 +70,37 @@ fn init_host_log(profile: &Profile) {
     let _ = profile;
 }
 
+/// Any thread's panic goes to the log with its backtrace before the thread (or the app) dies. The
+/// hook that was there before still runs after it, so a panic still reaches stderr as ever.
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let back = std::backtrace::Backtrace::force_capture();
+        log::error!("panic: {info}\n{back}");
+        previous(info);
+    }));
+}
+
+/// One line about the run that ended without closing its record.
+fn describe_unclean(u: &helm_core::trail::Unclean) -> String {
+    let run = u
+        .previous
+        .as_ref()
+        .map(|p| {
+            format!(
+                "started {}, version {}",
+                p["startedAt"].as_i64().unwrap_or(0),
+                p["version"].as_str().unwrap_or("?"),
+            )
+        })
+        .unwrap_or_else(|| "record unreadable".to_owned());
+    let beat = match u.last_heartbeat.as_ref().and_then(|h| h["at"].as_i64()) {
+        Some(at) => format!("last heartbeat at {}", helm_core::trail::clock_text(at)),
+        None => "no heartbeat".to_owned(),
+    };
+    format!("{run}, {beat}")
+}
+
 fn main() -> ExitCode {
     init_logging();
     let platform = Platform::native();
@@ -77,6 +109,8 @@ fn main() -> ExitCode {
         Err(e) => return fatal(&platform, &format!("Helm could not open its profile: {e}")),
     };
     init_host_log(&profile);
+    install_panic_hook();
+    helm_platform::crashdumps::install(&profile.path("diagnostics"));
     let lock = match profile.lock() {
         Ok(LockOutcome::Acquired(lock)) => lock,
         Ok(LockOutcome::AlreadyRunning) => {
@@ -92,6 +126,19 @@ fn main() -> ExitCode {
         }
         Err(e) => return fatal(&platform, &format!("Helm could not lock its profile: {e}")),
     };
+
+    // The trail of this run: its record, and what the run before it ended like.
+    let started = std::time::Instant::now();
+    if let Some(u) = helm_core::trail::start(
+        &profile.path("diagnostics"),
+        helm_core::now_ms(),
+        env!("CARGO_PKG_VERSION"),
+    ) {
+        log::warn!(
+            "previous run ended without a clean exit: {}",
+            describe_unclean(&u)
+        );
+    }
 
     // A restore the user staged last session applies now: the profile is ours (locked) and nothing
     // has opened its database yet.
@@ -136,7 +183,7 @@ fn main() -> ExitCode {
 
     let mut ops = OpRegistry::new();
     registrations::ops(&mut ops);
-    run_app(profile, db, platform, ops, clock);
+    run_app(profile, db, platform, ops, clock, started);
     drop(lock);
     ExitCode::SUCCESS
 }
@@ -268,8 +315,11 @@ fn run_app(
     platform: Platform,
     ops: OpRegistry,
     clock: Arc<helm_chats::clock::Clock>,
+    started: std::time::Instant,
 ) {
     let debug = cfg!(debug_assertions);
+    let diag = profile.path("diagnostics");
+    let diag_for_setup = diag.clone();
     // Previewed PDFs, audio, video and fonts are served in ranges through one custom scheme; the
     // same server is the `file_read` op's way of issuing the short-lived addresses.
     let private_roots = helm_panel::private::PrivateRoots::new(&{
@@ -366,6 +416,22 @@ fn run_app(
             let crashes = shell::WindowCrashes::new(&profile, debug, dialogs.clone());
             let quit = Arc::new(QuitCoordinator::new());
             let drain: Arc<dyn WorkerDrain> = Arc::new(helm_chats::RuntimeDrain(runtime.clone()));
+            // The heartbeat: a cheap line every so often, so a silent death has a time and a
+            // pile-up has a shape.
+            {
+                let workers = drain.clone();
+                let diag = diag_for_setup.clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(helm_core::trail::HEARTBEAT_EVERY);
+                    let working = workers.running_work().len();
+                    helm_core::trail::heartbeat(
+                        &diag,
+                        helm_core::now_ms(),
+                        started.elapsed().as_secs(),
+                        working,
+                    );
+                });
+            }
             // Chats that lose the connection or the computer's attention get a line saying so, and
             // are asked to carry on once things are back.
             let outages = helm_chats::outage::OutageWatch::new(runtime.clone());
@@ -485,8 +551,10 @@ fn run_app(
         .build(tauri::generate_context!())
         .expect("failed to build the Tauri app");
 
-    app.run(|app, event| {
+    app.run(move |app, event| {
         if let tauri::RunEvent::Exit = event {
+            // Close this run's record before anything else goes.
+            helm_core::trail::record_exit(&diag, helm_core::now_ms());
             // Release keep-awake and never take it again.
             if let Some(svc) = app.try_state::<Arc<helm_shell::ShellService>>() {
                 svc.shutdown();
@@ -554,6 +622,63 @@ mod tests {
             "unclassified tables (add a line to helm_core::db::tables::CLASSIFIED_TABLES): {missing:?}"
         );
         assert!(names.len() >= 6, "the migrations ran: {names:?}");
+    }
+
+    /// Every setting the tools list (a preference key or a key an extension owns) has exactly one
+    /// risk class, and every High one can be staged: a preference with options, or an extension key.
+    #[test]
+    fn every_setting_key_has_one_risk_class_and_every_high_one_can_be_staged() {
+        use helm_hosttools::settings_allow::{high_keys, risk, Risk, NAMED, READ_ONLY};
+        let dir = std::env::temp_dir().join(format!("helm-risk-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ext_keys: Vec<&str> = [
+            helm_workflow::settings_extension(),
+            helm_localmodels::settings_extension(),
+            helm_relay::settings_extension(&dir),
+            helm_chats::runtime_ext::settings_extension(dir.clone()),
+            helm_dictation::ext::settings_extension(),
+            helm_projects::repo_undo::settings_extension(&dir),
+            helm_skills::undo::settings_extension(&dir),
+        ]
+        .iter()
+        .flat_map(|x| x.keys())
+        .collect();
+        // The extensions that need a live service to build: their keys by name.
+        ext_keys.extend([
+            helm_mcp::unencrypted::KEY,
+            helm_governor::ext::KEY,
+            helm_relay::hub_view::KEY,
+            "webSearchInClaudeChats",
+        ]);
+        let _ = std::fs::remove_dir_all(&dir);
+        for k in &ext_keys {
+            assert!(
+                risk(k).is_some() != READ_ONLY.contains(k),
+                "{k} is an extension key: give it a class in settings_allow::NAMED"
+            );
+            assert!(
+                helm_core::prefs::classify(k).is_none(),
+                "{k} clashes with a preference key"
+            );
+        }
+        for (k, r, _) in NAMED {
+            if *r == Risk::Low {
+                assert!(
+                    ext_keys.contains(k),
+                    "{k} is named Low but no extension owns it"
+                );
+            }
+        }
+        // A High key is either a preference with options (so it has a validator) or an extension
+        // key (whose own apply is the validator).
+        for k in high_keys() {
+            let pref = helm_core::prefs::classify(k).is_some();
+            assert!(
+                (pref && helm_hosttools::settings_options::describe(k).is_some())
+                    || (!pref && ext_keys.contains(&k)),
+                "{k} is High but cannot be staged"
+            );
+        }
     }
 
     #[test]

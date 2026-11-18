@@ -832,8 +832,8 @@ fn split_board_args(args: Value) -> Result<(String, Value), ApiError> {
     Ok((chat_id, Value::Object(map.clone())))
 }
 
-/// `devices_pages`: the pages pinned on the other PCs of the household that the acting person
-/// may open, one entry per PC: `{devices: [{deviceUid, name, pages, problem?}]}`. A PC that is
+/// `devices_pages`: the pages pinned on the other PCs of the household, the acting person's own
+/// first, one entry per PC: `{devices: [{deviceUid, name, pages, problem?}]}`. A PC that is
 /// offline, or has its switch off, answers with a `problem` in words and no pages.
 async fn devices_pages(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
     serde_json::from_value::<NoArgs>(if args.is_null() { json!({}) } else { args })

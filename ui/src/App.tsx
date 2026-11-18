@@ -23,6 +23,7 @@ import './settings/profiles/index.tsx';
 import './settings/devices/index.tsx';
 import './settings/usage/index.tsx';
 import './settings/schedules/index.tsx';
+import './settings/queue/index.tsx';
 import './settings/orchestrator/index.tsx';
 import './settings/runtime/index.tsx';
 import './settings/github/index.tsx';
@@ -30,6 +31,7 @@ import './settings/websearch/index.tsx';
 import './settings/skills/index.tsx';
 import './settings/data/index.tsx';
 import './settings/localmodels/index.tsx';
+import './settings/memory/index.tsx';
 import './settings/gatekeeper/index.tsx';
 import './saved/SavedPane.tsx';
 import './orchestrator/index.ts'; // the composer's Orchestrator switch

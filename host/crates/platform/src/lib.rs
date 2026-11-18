@@ -10,6 +10,7 @@
 //! are implemented.
 
 pub mod audio;
+pub mod crashdumps;
 pub mod dialogs;
 pub mod external;
 pub mod fs;

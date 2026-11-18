@@ -1,14 +1,26 @@
 {
-  "description": "The question gate end to end. One script serves every claude the app starts. The gatekeeper helper's prompt (it carries a <card> block) is answered by the tag in the card's option descriptions: [GATE-DECIDE] takes Rename it, [GATE-ASK] escalates with a brief, [GATE-HANG] never answers. The titles helper gets a fixed title and the idle check says nothing is needed. A chat asked for one of the three flows asks one question; any other message is echoed.",
+  "description": "The question gate and the working mode end to end. One script serves every claude the app starts. The gatekeeper helper's prompt (it carries a <card> block) is answered by the tag in the card's option descriptions: [GATE-DECIDE] takes Rename it, [GATE-ASK] escalates with a brief, [GATE-HANG] never answers. The stop judge's prompt (it carries a <facts> block) answers from the chat's own last line: the sign-in line is a blocker, each phase line continues with a different question (so the run reaches the nudge limit). The titles helper gets a fixed title and the idle check says nothing is needed. A chat asked for one of the flows asks one question or ends on one line; any other message is echoed.",
   "steps": [
     {
       "repeat": [
-        { "await": { "type": "user" }, "as": "p", "timeoutMs": 600000 },
         {
-          "if": { "saved": "p", "contains": "<card>" },
+          "await": {
+            "type": "user"
+          },
+          "as": "p",
+          "timeoutMs": 600000
+        },
+        {
+          "if": {
+            "saved": "p",
+            "contains": "<card>"
+          },
           "then": [
             {
-              "if": { "saved": "p", "contains": "[GATE-DECIDE]" },
+              "if": {
+                "saved": "p",
+                "contains": "[GATE-DECIDE]"
+              },
               "then": [
                 {
                   "result": "{\"verdict\": \"decide\", \"choice\": \"Rename it\", \"reason\": \"renaming a scratch note is easy to undo and nothing depends on the old name\", \"confidence\": 0.9, \"risk\": \"low\", \"reversible\": true}"
@@ -16,8 +28,15 @@
               ],
               "else": [
                 {
-                  "if": { "saved": "p", "contains": "[GATE-HANG]" },
-                  "then": [{ "hang": true }],
+                  "if": {
+                    "saved": "p",
+                    "contains": "[GATE-HANG]"
+                  },
+                  "then": [
+                    {
+                      "hang": true
+                    }
+                  ],
                   "else": [
                     {
                       "result": "{\"verdict\": \"escalate\", \"reason\": \"Removing the backups cannot be undone.\", \"confidence\": 0.4, \"risk\": \"high\", \"reversible\": false, \"brief\": {\"problem\": \"The chat wants to remove the old backups and only you know whether they are still needed.\", \"options\": [{\"label\": \"Remove them\", \"means\": \"The old copies go away for good.\", \"pros\": \"Frees the disk.\", \"cons\": \"Nothing can be brought back.\", \"cost\": \"A few gigabytes.\"}, {\"label\": \"Keep them\", \"means\": \"Nothing is removed.\", \"pros\": \"Safe.\", \"cons\": \"The disk stays full.\", \"cost\": \"No effort.\"}], \"recommendation\": \"Keep them\", \"why\": \"Removing cannot be undone, and keeping costs nothing.\"}}"
@@ -29,112 +48,390 @@
           ],
           "else": [
             {
-              "if": { "saved": "p", "contains": "<first_request>" },
-              "then": [{ "result": "Gate check chat" }],
-              "else": [
+              "if": {
+                "saved": "p",
+                "contains": "<facts>"
+              },
+              "then": [
                 {
-                  "if": { "saved": "p", "contains": "<conversation>" },
-                  "then": [{ "result": "{\"needs\": false, \"reason\": \"\"}" }],
-                  "else": [
-                    { "init": { "tools": [] } },
+                  "if": {
+                    "saved": "p",
+                    "contains": "package registry"
+                  },
+                  "then": [
                     {
-                      "if": { "saved": "p", "contains": "gate flow one" },
+                      "result": "{\"class\": \"blocker\", \"question\": \"Sign in to the package registry?\", \"reason\": \"Only the user can sign in.\", \"confidence\": 0.95}"
+                    }
+                  ],
+                  "else": [
+                    {
+                      "if": {
+                        "saved": "p",
+                        "contains": "phase five"
+                      },
                       "then": [
                         {
-                          "emit": {
-                            "type": "control_request",
-                            "request_id": "q-decide",
-                            "request": {
-                              "subtype": "can_use_tool",
-                              "tool_name": "AskUserQuestion",
-                              "input": {
-                                "questions": [
-                                  {
-                                    "question": "Rename the scratch note?",
-                                    "header": "Naming",
-                                    "options": [
-                                      { "label": "Rename it", "description": "[GATE-DECIDE] New name: plan.md" },
-                                      { "label": "Keep it", "description": "Leave the file as it is" }
-                                    ],
-                                    "multiSelect": false
-                                  }
-                                ]
-                              },
-                              "tool_use_id": "tu_decide"
-                            }
-                          }
-                        },
-                        { "await": { "type": "control_response", "response": { "request_id": "q-decide" } }, "as": "ans", "timeoutMs": 600000 },
-                        { "text": "Renamed, carrying on." },
-                        { "result": "done" }
+                          "result": "{\"class\": \"continue\", \"question\": \"Start phase five?\", \"default\": \"Start phase five\", \"reason\": \"the plan carries on\", \"confidence\": 0.9}"
+                        }
                       ],
                       "else": [
                         {
-                          "if": { "saved": "p", "contains": "gate flow two" },
+                          "if": {
+                            "saved": "p",
+                            "contains": "phase four"
+                          },
                           "then": [
                             {
-                              "emit": {
-                                "type": "control_request",
-                                "request_id": "q-ask",
-                                "request": {
-                                  "subtype": "can_use_tool",
-                                  "tool_name": "AskUserQuestion",
-                                  "input": {
-                                    "questions": [
-                                      {
-                                        "question": "What should happen to the old backups?",
-                                        "header": "Backups",
-                                        "options": [
-                                          { "label": "Remove them", "description": "[GATE-ASK] They go away for good" },
-                                          { "label": "Keep them", "description": "Leave them where they are" }
-                                        ],
-                                        "multiSelect": false
-                                      }
-                                    ]
-                                  },
-                                  "tool_use_id": "tu_ask"
-                                }
-                              }
-                            },
-                            { "await": { "type": "control_response", "response": { "request_id": "q-ask" } }, "as": "ans", "timeoutMs": 600000 },
-                            { "text": "Kept the backups." },
-                            { "result": "done" }
+                              "result": "{\"class\": \"continue\", \"question\": \"Start phase four?\", \"default\": \"Start phase four\", \"reason\": \"the plan carries on\", \"confidence\": 0.9}"
+                            }
                           ],
                           "else": [
                             {
-                              "if": { "saved": "p", "contains": "gate flow three" },
+                              "if": {
+                                "saved": "p",
+                                "contains": "phase three"
+                              },
                               "then": [
                                 {
-                                  "emit": {
-                                    "type": "control_request",
-                                    "request_id": "q-hang",
-                                    "request": {
-                                      "subtype": "can_use_tool",
-                                      "tool_name": "AskUserQuestion",
-                                      "input": {
-                                        "questions": [
-                                          {
-                                            "question": "Which folder should the export go to?",
-                                            "header": "Export",
-                                            "options": [
-                                              { "label": "Reports", "description": "[GATE-HANG] The usual place" },
-                                              { "label": "Downloads", "description": "Somewhere else" }
-                                            ],
-                                            "multiSelect": false
-                                          }
-                                        ]
-                                      },
-                                      "tool_use_id": "tu_hang"
-                                    }
-                                  }
-                                },
-                                { "await": { "type": "control_response", "response": { "request_id": "q-hang" } }, "as": "ans", "timeoutMs": 600000 },
-                                { "text": "Exported." },
-                                { "result": "done" }
+                                  "result": "{\"class\": \"continue\", \"question\": \"Start phase three?\", \"default\": \"Start phase three\", \"reason\": \"the plan carries on\", \"confidence\": 0.9}"
+                                }
                               ],
                               "else": [
-                                { "text": "You said: {{p.message.content.0.text}}" },
-                                { "result": "done" }
+                                {
+                                  "if": {
+                                    "saved": "p",
+                                    "contains": "Shall I go ahead"
+                                  },
+                                  "then": [
+                                    {
+                                      "result": "{\"class\": \"continue\", \"question\": \"Go ahead with the next step?\", \"default\": \"Take the next step\", \"reason\": \"the next step is easy to undo\", \"confidence\": 0.9}"
+                                    }
+                                  ],
+                                  "else": [
+                                    {
+                                      "result": "{\"class\": \"continue\", \"question\": \"Start phase two?\", \"default\": \"Start phase two\", \"reason\": \"the plan carries on\", \"confidence\": 0.9}"
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "else": [
+                {
+                  "if": {
+                    "saved": "p",
+                    "contains": "<first_request>"
+                  },
+                  "then": [
+                    {
+                      "result": "Gate check chat"
+                    }
+                  ],
+                  "else": [
+                    {
+                      "if": {
+                        "saved": "p",
+                        "contains": "<conversation>"
+                      },
+                      "then": [
+                        {
+                          "result": "{\"needs\": false, \"reason\": \"\"}"
+                        }
+                      ],
+                      "else": [
+                        {
+                          "init": {
+                            "tools": []
+                          }
+                        },
+                        {
+                          "if": {
+                            "saved": "p",
+                            "contains": "stop flow one"
+                          },
+                          "then": [
+                            {
+                              "text": "The first part is done. Shall I go ahead with the next step?"
+                            },
+                            {
+                              "result": "done"
+                            }
+                          ],
+                          "else": [
+                            {
+                              "if": {
+                                "saved": "p",
+                                "contains": "Start phase two"
+                              },
+                              "then": [
+                                {
+                                  "text": "Phase two is done. Shall I start phase three?"
+                                },
+                                {
+                                  "result": "done"
+                                }
+                              ],
+                              "else": [
+                                {
+                                  "if": {
+                                    "saved": "p",
+                                    "contains": "Start phase three"
+                                  },
+                                  "then": [
+                                    {
+                                      "text": "Phase three is done. Shall I start phase four?"
+                                    },
+                                    {
+                                      "result": "done"
+                                    }
+                                  ],
+                                  "else": [
+                                    {
+                                      "if": {
+                                        "saved": "p",
+                                        "contains": "Start phase four"
+                                      },
+                                      "then": [
+                                        {
+                                          "text": "Phase four is done. Shall I start phase five?"
+                                        },
+                                        {
+                                          "result": "done"
+                                        }
+                                      ],
+                                      "else": [
+                                        {
+                                          "if": {
+                                            "saved": "p",
+                                            "contains": "Carry on without asking"
+                                          },
+                                          "then": [
+                                            {
+                                              "text": "All finished. Done."
+                                            },
+                                            {
+                                              "result": "done"
+                                            }
+                                          ],
+                                          "else": [
+                                            {
+                                              "if": {
+                                                "saved": "p",
+                                                "contains": "stop flow blocker"
+                                              },
+                                              "then": [
+                                                {
+                                                  "text": "I need you to sign in to the package registry before I can carry on."
+                                                },
+                                                {
+                                                  "result": "done"
+                                                }
+                                              ],
+                                              "else": [
+                                                {
+                                                  "if": {
+                                                    "saved": "p",
+                                                    "contains": "loop chat"
+                                                  },
+                                                  "then": [
+                                                    {
+                                                      "text": "Phase one is done. Shall I start phase two?"
+                                                    },
+                                                    {
+                                                      "result": "done"
+                                                    }
+                                                  ],
+                                                  "else": [
+                                                    {
+                                                      "if": {
+                                                        "saved": "p",
+                                                        "contains": "gate flow one"
+                                                      },
+                                                      "then": [
+                                                        {
+                                                          "emit": {
+                                                            "type": "control_request",
+                                                            "request_id": "q-decide",
+                                                            "request": {
+                                                              "subtype": "can_use_tool",
+                                                              "tool_name": "AskUserQuestion",
+                                                              "input": {
+                                                                "questions": [
+                                                                  {
+                                                                    "question": "Rename the scratch note?",
+                                                                    "header": "Naming",
+                                                                    "options": [
+                                                                      {
+                                                                        "label": "Rename it",
+                                                                        "description": "[GATE-DECIDE] New name: plan.md"
+                                                                      },
+                                                                      {
+                                                                        "label": "Keep it",
+                                                                        "description": "Leave the file as it is"
+                                                                      }
+                                                                    ],
+                                                                    "multiSelect": false
+                                                                  }
+                                                                ]
+                                                              },
+                                                              "tool_use_id": "tu_decide"
+                                                            }
+                                                          }
+                                                        },
+                                                        {
+                                                          "await": {
+                                                            "type": "control_response",
+                                                            "response": {
+                                                              "request_id": "q-decide"
+                                                            }
+                                                          },
+                                                          "as": "ans",
+                                                          "timeoutMs": 600000
+                                                        },
+                                                        {
+                                                          "text": "Renamed, carrying on."
+                                                        },
+                                                        {
+                                                          "result": "done"
+                                                        }
+                                                      ],
+                                                      "else": [
+                                                        {
+                                                          "if": {
+                                                            "saved": "p",
+                                                            "contains": "gate flow two"
+                                                          },
+                                                          "then": [
+                                                            {
+                                                              "emit": {
+                                                                "type": "control_request",
+                                                                "request_id": "q-ask",
+                                                                "request": {
+                                                                  "subtype": "can_use_tool",
+                                                                  "tool_name": "AskUserQuestion",
+                                                                  "input": {
+                                                                    "questions": [
+                                                                      {
+                                                                        "question": "What should happen to the old backups?",
+                                                                        "header": "Backups",
+                                                                        "options": [
+                                                                          {
+                                                                            "label": "Remove them",
+                                                                            "description": "[GATE-ASK] They go away for good"
+                                                                          },
+                                                                          {
+                                                                            "label": "Keep them",
+                                                                            "description": "Leave them where they are"
+                                                                          }
+                                                                        ],
+                                                                        "multiSelect": false
+                                                                      }
+                                                                    ]
+                                                                  },
+                                                                  "tool_use_id": "tu_ask"
+                                                                }
+                                                              }
+                                                            },
+                                                            {
+                                                              "await": {
+                                                                "type": "control_response",
+                                                                "response": {
+                                                                  "request_id": "q-ask"
+                                                                }
+                                                              },
+                                                              "as": "ans",
+                                                              "timeoutMs": 600000
+                                                            },
+                                                            {
+                                                              "text": "Kept the backups."
+                                                            },
+                                                            {
+                                                              "result": "done"
+                                                            }
+                                                          ],
+                                                          "else": [
+                                                            {
+                                                              "if": {
+                                                                "saved": "p",
+                                                                "contains": "gate flow three"
+                                                              },
+                                                              "then": [
+                                                                {
+                                                                  "emit": {
+                                                                    "type": "control_request",
+                                                                    "request_id": "q-hang",
+                                                                    "request": {
+                                                                      "subtype": "can_use_tool",
+                                                                      "tool_name": "AskUserQuestion",
+                                                                      "input": {
+                                                                        "questions": [
+                                                                          {
+                                                                            "question": "Which folder should the export go to?",
+                                                                            "header": "Export",
+                                                                            "options": [
+                                                                              {
+                                                                                "label": "Reports",
+                                                                                "description": "[GATE-HANG] The usual place"
+                                                                              },
+                                                                              {
+                                                                                "label": "Downloads",
+                                                                                "description": "Somewhere else"
+                                                                              }
+                                                                            ],
+                                                                            "multiSelect": false
+                                                                          }
+                                                                        ]
+                                                                      },
+                                                                      "tool_use_id": "tu_hang"
+                                                                    }
+                                                                  }
+                                                                },
+                                                                {
+                                                                  "await": {
+                                                                    "type": "control_response",
+                                                                    "response": {
+                                                                      "request_id": "q-hang"
+                                                                    }
+                                                                  },
+                                                                  "as": "ans",
+                                                                  "timeoutMs": 600000
+                                                                },
+                                                                {
+                                                                  "text": "Exported."
+                                                                },
+                                                                {
+                                                                  "result": "done"
+                                                                }
+                                                              ],
+                                                              "else": [
+                                                                {
+                                                                  "text": "You said: {{p.message.content.0.text}}"
+                                                                },
+                                                                {
+                                                                  "result": "done"
+                                                                }
+                                                              ]
+                                                            }
+                                                          ]
+                                                        }
+                                                      ]
+                                                    }
+                                                  ]
+                                                }
+                                              ]
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
                               ]
                             }
                           ]

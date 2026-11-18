@@ -10,6 +10,9 @@ pub const MIN_TIMEOUT_SECS: i64 = 60;
 pub const MAX_TIMEOUT_SECS: i64 = 86_400;
 /// Open waits per chat and in the whole app.
 pub const MAX_PER_CHAT: usize = 8;
+/// The watches a chat gets for the chats it creates have a room of their own, so a parent with
+/// many children still has its ordinary waits.
+pub const MAX_WATCHES_PER_CHAT: usize = 32;
 pub const MAX_IN_APP: usize = 64;
 /// A chat that was already idle when the wait was declared is given this long to show it began a
 /// turn (a message just sent may not have started yet) before the wait counts it as finished.

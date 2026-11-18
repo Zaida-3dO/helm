@@ -158,12 +158,71 @@ pub fn register_worker_lines(l: &mut WorkerLines) {
 
 /// [`check`] with real git, logging what it refused or let through.
 fn check_logged(db: &Database, chat: &str, c: &Check, now: i64) -> Answer {
+    note_risky_command(chat, c);
     let facts = GitFacts::default();
     let a = check(db, chat, c, &facts, now);
     if !a.allow {
         log::info!("chat {chat}: the landing guard refused a {} call", c.kind);
     }
     a
+}
+
+/// A line in the host log for commands that could end the host itself or other programs
+/// wholesale — the kind of thing that explains, hours later, why the host was gone. Logged,
+/// never blocked: such a command is often legitimate, and a kill aimed at one process the chat
+/// started (by pid) is ordinary and gets no line.
+fn note_risky_command(chat: &str, c: &Check) {
+    let Some(cmd) = c.command.as_deref() else {
+        return;
+    };
+    let Some(why) = risky_command(cmd) else {
+        return;
+    };
+    log::warn!(
+        "chat {chat}: for the trail, a {} command {why}: {}",
+        c.kind,
+        for_log(cmd)
+    );
+}
+
+/// Why a command deserves that line, or None. Matching is on the lowercased command.
+fn risky_command(cmd: &str) -> Option<&'static str> {
+    let l = cmd.to_lowercase();
+    let by_image = (l.contains("taskkill") && l.contains("/im"))
+        || (l.contains("stop-process") && l.contains("-name"))
+        || l.contains("pkill")
+        || l.contains("killall");
+    if by_image {
+        return Some("ends processes by image name");
+    }
+    if l.contains("helm.exe") {
+        return Some("names the app's own executable");
+    }
+    if l.contains("node.exe") {
+        return Some("names the worker executable");
+    }
+    None
+}
+
+/// Command text as it may go in the log: words that look like credentials replaced, and the
+/// whole cut to three hundred characters.
+fn for_log(cmd: &str) -> String {
+    let masked = cmd
+        .split_whitespace()
+        .map(|w| {
+            if helm_core::secrets::looks_like_secret(w) {
+                "[masked]"
+            } else {
+                w
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut out: String = masked.chars().take(300).collect();
+    if masked.chars().count() > 300 {
+        out.push('…');
+    }
+    out
 }
 
 /// What the guard reads from the host's records for one call, when it is in force.
@@ -935,6 +994,54 @@ mod tests {
     use crate::wftools::workflow_call;
     use helm_consent::AllowKinds;
     use helm_core::db::MigrationRegistry;
+
+    #[test]
+    fn risky_commands_are_noted_and_their_text_is_cut_and_masked() {
+        let rows: &[(&str, Option<&str>)] = &[
+            (
+                "taskkill /IM node.exe /F",
+                Some("ends processes by image name"),
+            ),
+            ("taskkill /PID 411 /F", None),
+            (
+                "Stop-Process -Name helm -Force",
+                Some("ends processes by image name"),
+            ),
+            ("Stop-Process -Id 411", None),
+            ("pkill -f chrome", Some("ends processes by image name")),
+            ("killall node", Some("ends processes by image name")),
+            (
+                r#""C:\Program Files\Helm\helm.exe" --version"#,
+                Some("names the app's own executable"),
+            ),
+            ("node build.js", None),
+            (
+                "node.exe scripts/run.mjs",
+                Some("names the worker executable"),
+            ),
+            ("git status", None),
+        ];
+        for (cmd, want) in rows {
+            assert_eq!(risky_command(cmd), *want, "{cmd}");
+        }
+        // The logged text: three hundred characters at most, and credential-shaped words gone.
+        let long = format!("pkill x {} password=hunter2hunter2", "y".repeat(400));
+        let logged = for_log(&long);
+        assert!(
+            logged.chars().count() <= 301,
+            "{} chars",
+            logged.chars().count()
+        );
+        assert!(logged.ends_with('…'));
+        assert!(
+            !logged.contains("hunter2hunter2"),
+            "the credential was masked"
+        );
+        assert!(
+            for_log("git status").contains("git status"),
+            "plain commands pass"
+        );
+    }
 
     const REPO: &str = "github.com/o/r";
 

@@ -79,6 +79,9 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         AutocompleteArgs,
         AutocompleteResult,
         SideChatResolveArgs,
+        QueueSignIn,
+        QueueSummary,
+        QueueActionArgs,
     );
     let mut files: Vec<String> = std::fs::read_dir(dir)
         .map_err(|e| e.to_string())?

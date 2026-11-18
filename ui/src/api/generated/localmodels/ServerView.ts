@@ -19,7 +19,12 @@ folder?: string,
 /**
  * Strata only: the preset to launch with; absent means the default.
  */
-preset?: string, hasKey: boolean, 
+preset?: string, 
+/**
+ * How many of our chats may work on this server at once; absent follows the global
+ * default, 0 switches the cap off.
+ */
+chatCap?: number, hasKey: boolean, 
 /**
  * Whether the server answered the last time Helm asked (a refresh or a test). Absent until
  * it has been asked; Helm never asks at start-up.

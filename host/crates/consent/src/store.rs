@@ -303,7 +303,7 @@ fn by_tool_use(tx: &Transaction<'_>, chat: &str, id: &str) -> rusqlite::Result<O
 }
 
 const COLUMNS: &str = "id, chat_id, kind, summary, reason, evidence, state, grant_minutes,
-    created_at, expires_at, decided_at, grant_expires_at, note, outcome";
+    created_at, expires_at, decided_at, grant_expires_at, note, outcome, decided_via";
 
 fn row_to_view(kinds: &AllowKinds, r: &rusqlite::Row<'_>) -> rusqlite::Result<ConsentRequest> {
     let kind: String = r.get(2)?;
@@ -326,6 +326,7 @@ fn row_to_view(kinds: &AllowKinds, r: &rusqlite::Row<'_>) -> rusqlite::Result<Co
         note: r.get(12)?,
         applies_on_allow: kinds.applies_on_allow(&kind),
         outcome: r.get(13)?,
+        decided_via: r.get(14)?,
         kind,
     })
 }
@@ -341,6 +342,36 @@ fn view(
         |r| row_to_view(kinds, r),
     )
     .optional()
+}
+
+/// One request by id.
+pub fn get(
+    db: &Database,
+    kinds: &AllowKinds,
+    id: &str,
+) -> Result<Option<ConsentRequest>, ApiError> {
+    db.snapshot(|tx| view(tx, kinds, id))
+        .map_err(|e| ApiError::internal(e.to_string()))
+}
+
+/// Every unexpired pending request of every chat (≤ 50, oldest first): what a surface other than
+/// the chat's own card offers to answer.
+pub fn pending_all(
+    db: &Database,
+    kinds: &AllowKinds,
+    now: i64,
+) -> Result<Vec<ConsentRequest>, ApiError> {
+    db.snapshot(|tx| {
+        let mut st = tx.prepare(&format!(
+            "SELECT {COLUMNS} FROM consent_requests WHERE state = 'pending' AND expires_at > ?1
+             ORDER BY created_at, id LIMIT {LIST_PENDING}"
+        ))?;
+        let pending = st
+            .query_map([now], |r| row_to_view(kinds, r))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(pending)
+    })
+    .map_err(|e: rusqlite::Error| ApiError::internal(e.to_string()))
 }
 
 /// The chat's cards: pending (≤ 50, oldest first, unexpired) and decided (≤ 20, newest first).
@@ -844,7 +875,7 @@ pub fn upkeep(db: &Database, kinds: &AllowKinds, now: i64) -> Result<Upkeep, Api
         ))?;
         let deliveries = st
             .query_map([], |r| {
-                Ok((row_to_view(kinds, r)?, r.get::<_, Option<i64>>(14)?))
+                Ok((row_to_view(kinds, r)?, r.get::<_, Option<i64>>(15)?))
             })?
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()

@@ -113,6 +113,13 @@ struct AddArgs {
 pub fn add(store: &McpStore, args: Value) -> Result<Value, AdminError> {
     let a: AddArgs = parse(args)?;
     let s = a.server;
+    if runs_broker(
+        s.transport.command.as_deref(),
+        &s.transport.args,
+        s.transport.env.keys(),
+    ) {
+        return Err(AdminError(BROKER_COPY.into()));
+    }
     if s.allow_private_http
         && (s.transport.kind == TransportKind::Stdio
             || s.transport.oauth.is_some()
@@ -161,6 +168,23 @@ struct EditArgs {
     allow_private_http: Option<bool>,
 }
 
+const BROKER_COPY: &str = "The browser broker is set up in Settings > MCP; an agent cannot add or change a server that runs it.";
+
+/// Whether a stdio server's arguments name the broker program, or its variables carry the
+/// broker's settings.
+fn runs_broker<'a>(
+    command: Option<&str>,
+    args: &[String],
+    env_names: impl Iterator<Item = &'a String>,
+) -> bool {
+    let names_tool = |t: &str| t.to_ascii_lowercase().contains("broker-tool");
+    command.is_some_and(names_tool)
+        || args.iter().any(|a| names_tool(a))
+        || env_names
+            .into_iter()
+            .any(|k| k.to_ascii_uppercase().starts_with("BROKER_"))
+}
+
 fn host_of(url: Option<&str>) -> Option<String> {
     url.and_then(|u| url::Url::parse(u).ok())
         .map(|u| format!("{}://{}", u.scheme(), u.host_str().unwrap_or("")))
@@ -197,6 +221,37 @@ fn apply_edit(s: &mut McpServer, e: EditArgs) -> Result<(), StoreError> {
         {
             return bad("The Google accounts' program, arguments and sign-in settings are changed in Settings > MCP.");
         }
+    }
+    // The browser server holds the person's own signed-in browser: an agent may rename it and
+    // nothing else. Its program, arguments, every variable (a loader or search-path variable
+    // would run the agent's own code inside the broker, which holds the token), its headers,
+    // address and sign-in are the user's alone.
+    if s.preset.as_deref() == Some(crate::presets::BROKER_PRESET_ID)
+        && (e.command.is_some()
+            || e.args.is_some()
+            || e.kind.is_some()
+            || e.url.is_some()
+            || e.env.is_some()
+            || e.remove_env.is_some()
+            || e.headers.is_some()
+            || e.remove_headers.is_some()
+            || e.oauth.is_some()
+            || e.remove_oauth
+            || e.allow_private_http.is_some())
+    {
+        return bad("The browser server can only be renamed by an agent; its program, settings, sites and token are changed in Settings > MCP.");
+    }
+    // Nor may an agent make a second copy of the broker, which none of the above would guard.
+    if runs_broker(
+        e.command.as_deref().or(s.transport.command.as_deref()),
+        e.args.as_ref().unwrap_or(&s.transport.args),
+        e.env
+            .iter()
+            .flat_map(|m| m.keys())
+            .chain(s.transport.env.keys()),
+    ) && (e.command.is_some() || e.args.is_some() || e.env.is_some())
+    {
+        return bad(BROKER_COPY);
     }
     if let Some(n) = e.name {
         s.name = n;
@@ -342,6 +397,14 @@ pub fn update(store: &McpStore, args: Value) -> Result<Value, AdminError> {
             .iter_mut()
             .find(|s| s.id == a.server_id)
             .ok_or_else(|| StoreError::Invalid(format!("No server has the id {}.", a.server_id)))?;
+        // Switching the user's browser back on is the user's own click; switching it off is not
+        // refused.
+        if a.enabled && !s.enabled && s.preset.as_deref() == Some(crate::presets::BROKER_PRESET_ID)
+        {
+            return Err(StoreError::Invalid(
+                "The browser server is switched on in Settings > MCP.".to_owned(),
+            ));
+        }
         s.enabled = a.enabled;
         Ok(())
     })?;
@@ -718,7 +781,8 @@ mod tests {
         let st = store(d.path());
         add_stdio(&st, "fake");
         // The person header is Helm's, and the Google preset's program, arguments and sign-in
-        // settings are the user's: an agent's edit of them is refused, other edits pass.
+        // settings and the browser preset's program, entry and every BROKER_* variable are the
+        // user's: an agent's edit of those is refused, other edits pass.
         call(
             &st,
             ADD,
@@ -726,9 +790,13 @@ mod tests {
                 "transport": {"type": "stdio", "command": "uvx.exe", "args": ["workspace-mcp"]}}}),
         )
         .unwrap();
+        add_stdio(&st, "browser");
         st.mutate(None, |l| {
             if let Some(g) = l.iter_mut().find(|s| s.id == "google") {
                 g.preset = Some(crate::google::PRESET_ID.into());
+            }
+            if let Some(b) = l.iter_mut().find(|s| s.id == "browser") {
+                b.preset = Some(crate::presets::BROKER_PRESET_ID.into());
             }
             Ok(())
         })
@@ -762,6 +830,63 @@ mod tests {
                 json!({"env": {"TZ": {"kind": "literal", "value": "UTC"}}}),
                 true,
             ),
+            (
+                "browser",
+                json!({"args": ["C:\\elsewhere\\broker-tool.js"]}),
+                false,
+            ),
+            ("browser", json!({"command": "cmd.exe"}), false),
+            (
+                "browser",
+                json!({"env": {"BROKER_ATTACHED_ACT_SITES": {"kind": "literal", "value": "shop.example"}}}),
+                false,
+            ),
+            (
+                "browser",
+                json!({"env": {"BROKER_ATTACHED_TOKEN": {"kind": "environment", "value": "X"}}}),
+                false,
+            ),
+            (
+                "browser",
+                json!({"removeEnv": ["BROKER_ATTACHED_TOKEN"]}),
+                false,
+            ),
+            // A loader or search-path variable would run the agent's code inside the broker
+            // that holds the token: the browser server takes no variable at all.
+            (
+                "browser",
+                json!({"env": {"NODE_OPTIONS": {"kind": "literal", "value": "--import=x"}}}),
+                false,
+            ),
+            (
+                "browser",
+                json!({"env": {"PATH": {"kind": "literal", "value": "C:\\mine"}}}),
+                false,
+            ),
+            ("browser", json!({"removeEnv": ["PATH"]}), false),
+            (
+                "browser",
+                json!({"headers": {"x-a": {"kind": "literal", "value": "1"}}}),
+                false,
+            ),
+            ("browser", json!({"url": "https://example.com/mcp"}), false),
+            ("browser", json!({"name": "My browser"}), true),
+            // No second copy of the broker, whether by its program or its settings.
+            (
+                "fake",
+                json!({"args": ["C:\\somewhere\\broker-tool.js"]}),
+                false,
+            ),
+            (
+                "fake",
+                json!({"env": {"BROKER_NOTHING": {"kind": "literal", "value": "1"}}}),
+                false,
+            ),
+            (
+                "fake",
+                json!({"env": {"TZ": {"kind": "literal", "value": "UTC"}}}),
+                true,
+            ),
         ] {
             let mut args = json!({"revision": rev(&st), "serverId": id});
             args.as_object_mut()
@@ -769,6 +894,28 @@ mod tests {
                 .extend(edit.as_object().unwrap().clone());
             assert_eq!(call(&st, EDIT, args).is_ok(), ok, "{id} {edit}");
         }
+        // A chat may switch the browser off but never back on, and cannot add a copy of the
+        // broker.
+        call(
+            &st,
+            UPDATE,
+            json!({"revision": rev(&st), "serverId": "browser", "enabled": false}),
+        )
+        .unwrap();
+        assert!(call(
+            &st,
+            UPDATE,
+            json!({"revision": rev(&st), "serverId": "browser", "enabled": true})
+        )
+        .is_err());
+        assert!(call(
+            &st,
+            ADD,
+            json!({"revision": rev(&st), "server": {"id": "copy", "name": "Copy", "enabled": true,
+                "transport": {"type": "stdio", "command": "node.exe",
+                    "args": ["C:\\x\\broker-tool.js"]}}}),
+        )
+        .is_err());
         st.mutate(None, |l| {
             l.retain(|s| s.id != "google");
             Ok(())

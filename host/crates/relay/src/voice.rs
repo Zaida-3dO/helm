@@ -8,8 +8,9 @@
 //! - **Origin.** A voice message enters its chat with [`VOICE_ORIGIN`], never as typed, so it
 //!   never counts as consent and no approval, plan or trust prompt is answered by it.
 //! - **The policy** ([`PolicyFile`], `relay/voice-policy.json`) is read again on every delivery.
-//! - **The words.** A fresh conversation's first message carries the [`PRIMER`]; every message
-//!   carries a one-line note naming its [`Mode`]. The transcript hides both.
+//! - **The words.** How the answer is heard comes from the chat's system prompt (the `channel`
+//!   section, [`crate::channel`]); every message carries a one-line note naming its [`Mode`],
+//!   which the transcript hides.
 //! - **The reply** ([`Reply`]) is what goes up the line, once per answer, with a fixed id so a
 //!   resend is recognised.
 
@@ -227,7 +228,8 @@ pub struct VoiceTag {
     /// An opaque id for this conversation, carried by every reply; it changes when a new chat
     /// starts. Never the chat's own id.
     pub conversation: String,
-    /// The primer has been delivered to this chat.
+    /// Older builds put a primer in the first message; it is now in the system prompt. Kept so
+    /// saved tags still read.
     #[serde(default)]
     pub primed: bool,
 }
@@ -352,19 +354,6 @@ fn hashed_id(name: &str) -> String {
 
 // ---- the words the chat is given ----------------------------------------------------------
 
-/// What a fresh conversation's first message starts with and ends with, so the transcript can
-/// hide the whole primer however its middle is worded.
-pub const PRIMER_START: &str = "[Voice chat: you are the user's voice assistant in Helm";
-pub const PRIMER_END: &str = "If not, answer exactly [quiet].]";
-
-/// Put in front of the first message of each fresh conversation.
-pub const PRIMER: &str = "[Voice chat: you are the user's voice assistant in Helm, heard through the voice screen of their phone app. Each message says its mode.
-CONVERSATION mode (heard, not read): answer in short spoken sentences. Lead with the answer. Aim for about 30 seconds (75 words) and never more than a minute. Offer more instead of giving it (\"Want the details?\"). No markdown, lists, tables, code, URLs, ids, hashes or file paths: say \"a link\", \"a file\", \"the build chat\". Summarise long results from other chats; the full text stays in that chat.
-Show something only when hearing it would be worse (a table of numbers, a picture, a link to open): call app_voice_show, and always say in a sentence what you put on screen.
-CHAT mode (read, not heard): normal formatting, links and longer answers are fine.
-You can reach other chats (app_list_chats, app_read_chat, app_send_message). When you hand work to a chat, declare app_wait_for chat_idle on it so you are woken when it finishes.
-When a message starts with [Wait finished] or [Attention], it is news, not the user: decide whether it is worth telling them. If yes, open with it (\"By the way, I just heard back from the build chat: it passed.\"). If not, answer exactly [quiet].]";
-
 /// The note on every voice message. It names the mode and, for a message that was spoken as a
 /// continuation of the one before it, says so. One bracketed line.
 pub fn mode_note(mode: Mode, continues: bool) -> String {
@@ -379,11 +368,9 @@ pub fn mode_note(mode: Mode, continues: bool) -> String {
     }
 }
 
-/// What a voice message is stored with: the primer (first message of a fresh conversation), the
-/// mode note, any notes of replies the user did not hear (bracketed single lines), a line saying
-/// how late a queued message is, then the message.
+/// What a voice message is stored with: the mode note, any notes of replies the user did not
+/// hear (bracketed single lines), a line saying how late a queued message is, then the message.
 pub fn delivered_text(
-    primer: bool,
     mode: Mode,
     continues: bool,
     age_minutes: Option<i64>,
@@ -391,10 +378,6 @@ pub fn delivered_text(
     text: &str,
 ) -> String {
     let mut out = String::new();
-    if primer {
-        out.push_str(PRIMER);
-        out.push('\n');
-    }
     out.push_str(&mode_note(mode, continues));
     out.push('\n');
     for note in heard_notes {
@@ -658,21 +641,18 @@ mod tests {
     #[test]
     fn messages_carry_their_notes_and_replies_their_frames() {
         let msg = delivered_text(
-            true,
             Mode::Conversation,
             true,
             Some(7),
             &["[Not heard by the user: x]".to_owned()],
             "  hello  ",
         );
-        assert!(msg.starts_with(PRIMER_START) && msg.contains(PRIMER_END));
-        let after = msg.split(PRIMER_END).nth(1).unwrap();
         assert_eq!(
-            after.trim_start_matches('\n'),
+            msg,
             "[Voice · conversation: speak it, short, no markup · continuing what they just said]\n[Not heard by the user: x]\n(sent 7 min ago, queued while Helm was offline)\nhello"
         );
         assert_eq!(
-            delivered_text(false, Mode::Chat, false, Some(0), &[], "hi"),
+            delivered_text(Mode::Chat, false, Some(0), &[], "hi"),
             "[Voice · chat: read on screen, formatting fine]\nhi"
         );
         assert_eq!(submission_id("t1"), submission_id("t1"));

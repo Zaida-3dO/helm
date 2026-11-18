@@ -42,3 +42,14 @@ export function linkLine(link: TelegramLink | null): string {
 export function linkable(profile: ProfileSummary | undefined): boolean {
   return !!profile?.hubPersonId;
 }
+
+/** What a prompt box shows about its text: whether Save and Reset apply. A blank box means "use
+ *  the default", so it counts as a change only while a replacement is saved. */
+export function promptState(
+  draft: string,
+  p: { text: string; default: string; custom: boolean },
+  max: number,
+): { dirty: boolean; tooLong: boolean; canReset: boolean } {
+  const d = draft.trim();
+  return { dirty: d !== p.text.trim() && !(d === '' && !p.custom), tooLong: d.length > max, canReset: p.custom };
+}

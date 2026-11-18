@@ -74,7 +74,7 @@ pub fn compose(me: &Profile, device: Option<&str>, others: &[String]) -> String 
     }
     if !others.is_empty() {
         out.push_str(&format!(
-            " Other people in this household: {}. Their chats and memories are not yours to read unless {} asks.",
+            " Other people in this household: {}. Their chats and memories may be read when you are asked to or it helps: \"my\" and \"I\" mean {}, a named person means that person. Credential and token stores are never read.",
             others.join(", "),
             me.name
         ));
@@ -109,7 +109,7 @@ mod tests {
                 sam.as_slice(),
                 "You are working with Alex (their Helm profile). Prefers plain words.\nCalled Al. \
                  This chat runs on Desk under that computer's Claude sign-in. Other people in this \
-                 household: Sam, Jo. Their chats and memories are not yours to read unless Alex asks.",
+                 household: Sam, Jo. Their chats and memories may be read when you are asked to or it helps: \"my\" and \"I\" mean Alex, a named person means that person. Credential and token stores are never read.",
             ),
             (
                 "",
@@ -167,8 +167,46 @@ mod tests {
         assert_eq!(
             text(&db).unwrap(),
             format!(
-                "You are working with Alex (their Helm profile). Likes short answers. This chat runs on {device} under that computer's Claude sign-in. Other people in this household: Sam. Their chats and memories are not yours to read unless Alex asks."
+                "You are working with Alex (their Helm profile). Likes short answers. This chat runs on {device} under that computer's Claude sign-in. Other people in this household: Sam. Their chats and memories may be read when you are asked to or it helps: \"my\" and \"I\" mean Alex, a named person means that person. Credential and token stores are never read."
             )
+        );
+
+        // Whatever started a chat (a schedule, Telegram or a chat's own tool all create it through
+        // the same store call), it is told who it works with: the person whose profile was
+        // active when it was made.
+        let make = |active: Option<&str>| {
+            db.write(|tx| -> Result<_, store::ProfileError> {
+                store::set_active(tx, active)?;
+                Ok(helm_chats::store::create_chat(
+                    tx,
+                    "C:/w/proj",
+                    None,
+                    None,
+                    5,
+                )?)
+            })
+            .unwrap()
+        };
+        let named = |id: &str| {
+            let t = db.snapshot(|tx| who_text(tx, id)).unwrap().unwrap();
+            t.strip_prefix("You are working with ")
+                .unwrap()
+                .split(' ')
+                .next()
+                .unwrap()
+                .to_owned()
+        };
+        let sam = db
+            .snapshot(|tx| store::list(tx))
+            .unwrap()
+            .into_iter()
+            .find(|p| p.name == "Sam")
+            .unwrap();
+        assert_eq!(named(&make(Some(&sam.id))), "Sam");
+        assert_eq!(
+            named(&make(None)),
+            "Alex",
+            "no choice means the home profile"
         );
     }
 }

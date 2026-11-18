@@ -10,7 +10,8 @@
 //! | [`lines`] | the `mcp_config` start line and re-send, and `mcp_status` from workers |
 //! | [`memory`] | one tool call to the hub's memory server from the host (Settings' memory lists) |
 //! | [`probe`] | Settings → MCP's Test connection: one handshake and a tool count |
-//! | [`presets`] | Agent Standup, Home Assistant, hub and Google accounts presets |
+//! | [`presets`] | Agent Standup, Home Assistant, hub, Google accounts and built-in browser presets |
+//! | [`doctor`] | the browser server's own checks, shown as its status row in Settings → MCP |
 //! | [`google`] | several Google accounts through `workspace-mcp`: the account list, sign-in and the permission level |
 //! | [`oauth`] | a reusable OAuth 2.x client: metadata discovery, dynamic registration, PKCE sign-in over a loopback redirect, tokens kept in the credential store |
 //! | [`oauth_ops`] | the Settings → MCP sign-in ops built on it: Connect, its status, Disconnect, and the worker's one-time ask for a fresh header |
@@ -26,6 +27,7 @@
 pub mod admin;
 pub mod bindings;
 pub mod config;
+pub mod doctor;
 pub mod gmail;
 pub mod google;
 pub mod lines;

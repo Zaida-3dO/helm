@@ -10,6 +10,7 @@ import { parseSendShortcut } from '../../hosttools/sendShortcut.ts';
 import { useScrollOnSend } from '../../composer/scrollOnSend.ts';
 import { useDoubleShift } from '../../panel/quickopen/doubleShift.ts';
 import type { SendShortcut } from '../../composer/keymap.ts';
+import { ROLL_OVER_TOKENS } from '../../transcript/rowMeta.ts';
 import { registerSettingsPane } from '../registry.ts';
 import { ELEMENTS, isShown, parseChatElements, type ChatElements } from './elements.ts';
 import { LONG_COMMANDS, parseSendBehavior, SEND_MODES, sendBehaviorDiff, WAIT_LIMITS, waitLimitLabel, type LongCommands, type SendMode } from './sendBehavior.ts';
@@ -33,6 +34,10 @@ function ChatPane() {
   const [bgClaude, setBgClaude] = useState('');
   const [bgLocal, setBgLocal] = useState('');
   const savedBg = useRef<{ claude: string | null; local: string | null }>({ claude: null, local: null });
+  // Tokens at which a quiet chat is asked to roll over into a fresh one (0 never asks);
+  // blank shows the default.
+  const [rollTokens, setRollTokens] = useState('');
+  const savedRoll = useRef<number | null>(null);
   useEffect(() => {
     void shell
       .api<unknown>('preference_get', { key: 'sendShortcut' })
@@ -70,6 +75,13 @@ function ChatPane() {
     void shell
       .api<unknown>('preference_get', { key: 'autocomplete' })
       .then((v) => setAc(Boolean(v && typeof v === 'object' && (v as { enabled?: unknown }).enabled === true)))
+      .catch(() => undefined);
+    void shell
+      .api<unknown>('preference_get', { key: 'rolloverTokens' })
+      .then((v) => {
+        savedRoll.current = typeof v === 'number' ? v : null;
+        setRollTokens(String(savedRoll.current ?? ROLL_OVER_TOKENS));
+      })
       .catch(() => undefined);
   }, [shell]);
   const saveError = (err: unknown) => toast.show({ kind: 'error', text: `Could not save: ${String((err as Error).message ?? err)}` });
@@ -111,6 +123,24 @@ function ChatPane() {
       savedBg.current = before;
       setBgClaude(before.claude ?? '');
       setBgLocal(before.local ?? '');
+      saveError(err);
+    });
+  };
+  const saveRolloverTokens = () => {
+    const before = savedRoll.current;
+    const shown = before ?? ROLL_OVER_TOKENS;
+    const n = Number(rollTokens.trim());
+    if (!Number.isInteger(n) || n < 0 || n > 2_000_000) return setRollTokens(String(shown));
+    if (n === shown) return setRollTokens(String(shown));
+    savedRoll.current = n;
+    setRollTokens(String(n));
+    shell.bus.dispatch({ kind: 'preferences', changed: { rolloverTokens: n } });
+    // The default is stored as no value at all, so the host's own default stays the truth.
+    const value = n === ROLL_OVER_TOKENS ? null : n;
+    void shell.api('preference', { key: 'rolloverTokens', value }).catch((err: unknown) => {
+      savedRoll.current = before;
+      setRollTokens(String(before ?? ROLL_OVER_TOKENS));
+      shell.bus.dispatch({ kind: 'preferences', changed: { rolloverTokens: before } });
       saveError(err);
     });
   };
@@ -276,6 +306,21 @@ function ChatPane() {
             onBlur={saveBackgroundModel}
           />
         </div>
+      </SettingRow>
+      <SettingRow
+        title="Ask a chat to roll over"
+        description="Tokens of context at which a quiet chat is asked to hand its work to a fresh chat: its agent writes a hand-off, the new chat carries on, and the old one archives. 0 never asks. The context line offers the same button at this size."
+        testId="setting-rollover-tokens"
+      >
+        <TextInput
+          aria-label="Ask a chat to roll over at this many tokens"
+          data-testid="settings-rollover-tokens"
+          placeholder="180000 (0 = never)"
+          spellCheck={false}
+          value={rollTokens}
+          onChange={(e) => setRollTokens(e.target.value)}
+          onBlur={saveRolloverTokens}
+        />
       </SettingRow>
       {ELEMENTS.map((e) => (
         <SettingRow key={e.id} title={e.title} description={e.description}>

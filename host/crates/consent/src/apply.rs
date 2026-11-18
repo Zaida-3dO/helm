@@ -20,10 +20,11 @@ use helm_ipc::{ApiError, AppEvent, EventSink, Services};
 use serde_json::Value;
 use std::sync::{Arc, OnceLock};
 
-/// Where the user may answer from. Slice by slice more surfaces call [`decide_and_apply`]; each
-/// names itself here: `app` for this PC's main window, `device:<name>` for another device of the
-/// household answering a card of a chat that runs here.
-pub const SURFACES: &[&str] = &["app", "device:"];
+/// Where the user may answer from. Each surface that calls [`decide_and_apply`] names itself
+/// here: `app` for this PC's main window, `device:<name>` for another device of the household
+/// answering a card of a chat that runs here, `telegram` for a tap on the Approve button of an
+/// ask the relay sent to the owner's own Telegram account.
+pub const SURFACES: &[&str] = &["app", "device:", "telegram"];
 
 /// Whether `via` names a surface that may answer.
 fn surface_ok(via: &str) -> bool {

@@ -27,6 +27,14 @@ export const DISALLOWED_TOOLS = ["CronCreate", "CronDelete", "CronList", "Schedu
  */
 const LOCAL_DISALLOWED_TOOLS = ["WebSearch", "SendMessage", "Workflow", "EnterPlanMode", "NotebookEdit", "ReportFindings", "ListAgents"];
 
+/**
+ * Built-ins only the orchestrator and review work uses, and among the largest schemas Claude Code
+ * sends: its own workflow runner, the review findings report and the agent listing. Every chat
+ * without Orchestrator on loses them; a chat with it on keeps ReportFindings and ListAgents (its
+ * workflow runner is already off there, see below).
+ */
+const ORCHESTRATOR_ONLY_TOOLS = ["Workflow", "ReportFindings", "ListAgents"];
+
 /** Claude Code's own worktree tools; kept off unless the user lets them through. */
 const WORKTREE_TOOLS = ["EnterWorktree", "ExitWorktree"];
 
@@ -51,8 +59,10 @@ export function disallowedTools(c: ClaudeLaunch, env: Record<string, string | un
   const allowSchedules = c.scheduleTools === true;
   const off: string[] = DISALLOWED_TOOLS.filter((t) => !(allowWorktrees && WORKTREE_TOOLS.includes(t)) && !(allowSchedules && SCHEDULE_TOOLS.includes(t)));
   if (gatesWanted(env)) off.push(...TASK_CHAT_DISALLOWED_TOOLS);
-  // A local chat loses more; a name the gates already removed is not listed twice.
-  return c.local ? [...new Set([...off, ...LOCAL_DISALLOWED_TOOLS])] : off;
+  if (c.orchestrator !== true) off.push(...ORCHESTRATOR_ONLY_TOOLS);
+  else off.push("Workflow");
+  // A local chat loses more; a name already removed is not listed twice.
+  return [...new Set(c.local ? [...off, ...LOCAL_DISALLOWED_TOOLS] : off)];
 }
 
 export interface ArgOptions {

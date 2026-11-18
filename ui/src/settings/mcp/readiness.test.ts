@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import type { McpPreset, McpServer } from '../../api/mcp.ts';
 import { CONSOLE_STEPS, GOOGLE_PRESET, SIGN_IN_WINDOW_MS, blockState, clientLooksSet, watchState, type GoogleAccountList } from './google.ts';
 import { canDisconnect, connectLabel } from './oauth.ts';
-import { blankServer, draftFromPreset, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable } from './readiness.ts';
+import { BROKER_PRESET, blankServer, draftFromPreset, isBrokerServer, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable } from './readiness.ts';
 
 const hub: McpPreset = {
   id: 'helm_hub',
@@ -57,6 +57,40 @@ test('a browser-signed-in server asks for the browser, never for a token field',
   assert.equal(canDisconnect({ connected: true }), true);
   assert.equal(canDisconnect({ connected: false }), false);
   assert.equal(canDisconnect(undefined), false);
+});
+
+test('the browser preset starts at the broker entry with its variables filled in as rows', () => {
+  const broker: McpPreset = {
+    id: BROKER_PRESET,
+    name: 'My browser',
+    description: '',
+    transport: 'stdio',
+    urlPlaceholder: '',
+    tokenHeader: '',
+    tokenPrefix: '',
+    suggestPrivateHttp: false,
+    expectTools: ['browser_act'],
+    guidance: '',
+    command: 'node.exe',
+    args: ['C:\\bb\\dist\\src\\bin\\broker-tool.js'],
+    secretEnv: ['BROKER_ATTACHED_TOKEN'],
+    draftEnv: ['BROKER_ATTACHED_BROWSERS', 'BROKER_ATTACHED_EXTENSION_ID', 'BROKER_ATTACHED_ACT_SITES', 'BROKER_ATTACHED_TOKEN'],
+  };
+  const d = draftFromPreset(broker, []);
+  assert.equal(d.id, BROKER_PRESET);
+  assert.equal(d.preset, BROKER_PRESET);
+  assert.equal(d.transport.command, 'node.exe', 'node directly, never a package runner');
+  assert.ok(d.transport.args?.[0]?.endsWith('broker-tool.js'));
+  assert.deepEqual(
+    Object.keys(d.transport.env ?? {}).sort(),
+    ['BROKER_ATTACHED_ACT_SITES', 'BROKER_ATTACHED_BROWSERS', 'BROKER_ATTACHED_EXTENSION_ID', 'BROKER_ATTACHED_TOKEN'],
+    'each variable the broker reads starts as an empty row (the token once, not twice)',
+  );
+  const r = serverReadiness(d, undefined, [broker]);
+  assert.deepEqual([r.state, r.reason, r.actionLabel], ['inactive', 'Needs its broker token.', 'Edit']);
+  // The doctor row belongs to the browser server only.
+  assert.ok(isBrokerServer(d));
+  assert.ok(!isBrokerServer(draftFromPreset(hub, [])));
 });
 
 test('the empty page names a reason and where to act', () => {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildClaudeArgs, disallowedTools } from "../src/drivers/claude/args.ts";
-import { decideGate, decideStop, gateHook, stopHook } from "../src/drivers/claude/gates.ts";
+import { decideGate, decideStop, gateHook, startupWanted, stopHook } from "../src/drivers/claude/gates.ts";
 import { cronTiming, NATIVE_SCHEDULE_TOOLS, scheduleRedirect } from "../src/drivers/claude/schedulecalls.ts";
 import { assertLoopbackHttp, buildClaudeEnv, contextRefusalNote, STRIPPED_UNLESS_API_KEY_MODE, takeLocalKey } from "../src/drivers/claude/env.ts";
 
@@ -181,17 +181,14 @@ test("Claude Code's schedule tools come off the disallowed list only on request,
   assert.equal(cronTiming("0 9 1 * *"), null);
   // The refusal names Helm's tool, clamps the wake-up delay and never repeats the prompt.
   const wake = scheduleRedirect("ScheduleWakeup", { delaySeconds: 5, prompt: "SECRET PROMPT" });
-  assert.ok(wake.includes("app_create_schedule") && wake.includes('"inSeconds":60') && !wake.includes("SECRET"));
+  assert.ok(wake.includes("app_schedule") && wake.includes('"inSeconds":60') && !wake.includes("SECRET"));
   assert.ok(scheduleRedirect("ScheduleWakeup", { delaySeconds: 99999 }).includes('"inSeconds":3600'));
   assert.ok(scheduleRedirect("CronCreate", { cron: "*/5 * * * *", prompt: "SECRET" }).includes('"seconds":300'));
-  assert.ok(scheduleRedirect("CronList", {}).includes("app_list_schedules"));
-  assert.ok(scheduleRedirect("CronDelete", {}).includes("app_cancel_schedule"));
-  assert.ok(scheduleRedirect("RemoteTrigger", {}).includes("app_create_schedule"));
-  // A local chat does not list the schedule tools, so the refusal says how to reach them; a
-  // Claude chat's refusal does not say it.
-  assert.ok(scheduleRedirect("CronList", {}, true).includes("through app_mcp_call"), "local: names the route");
-  assert.ok(!scheduleRedirect("CronList", {}, false).includes("app_mcp_call"), "Claude chat: no route needed");
-  assert.ok(scheduleRedirect("ScheduleWakeup", { delaySeconds: 120 }, true).includes("through app_mcp_call"));
+  assert.ok(scheduleRedirect("CronList", {}).includes('"action":"list"'));
+  assert.ok(scheduleRedirect("CronDelete", {}).includes('"action":"cancel"'));
+  assert.ok(scheduleRedirect("RemoteTrigger", {}).includes('"action":"create"'));
+  // Helm's schedule tool is in no chat's own list, so every refusal says how to reach it.
+  for (const t of ["CronList", "ScheduleWakeup", "RemoteTrigger"]) assert.ok(scheduleRedirect(t, {}).includes("app_list_tools") && scheduleRedirect(t, {}).includes("app_mcp_call"), t);
 });
 
 test("a local chat also loses the built-ins it will not use, and no name is listed twice", () => {
@@ -206,9 +203,14 @@ test("a local chat also loses the built-ins it will not use, and no name is list
   const gated = disallowedTools({ local }, { HELM_WORKFLOW_GATES: "1" });
   assert.equal(gated.filter((t) => t === "Workflow").length, 1, "deduped with the gate list");
   assert.ok(gated.includes("REPL"), "the gate list still applies beside the local one");
-  // A Claude chat keeps them: a gated one loses only the workflow runner and the REPL.
-  for (const t of localOnly) assert.equal(disallowedTools({}, {}).includes(t), false, `${t} stays for a plain Claude chat`);
-  const claudeGated = disallowedTools({}, { HELM_WORKFLOW_GATES: "1" });
+  // A Claude chat keeps the rest of them, but not the three only the orchestrator and review work use.
+  const orchestratorOnly = ["Workflow", "ReportFindings", "ListAgents"];
+  const plain = disallowedTools({}, {});
+  for (const t of localOnly) assert.equal(plain.includes(t), orchestratorOnly.includes(t), `${t} for a plain Claude chat`);
+  // With Orchestrator on, ReportFindings and ListAgents come back; its workflow runner stays off.
+  const orch = disallowedTools({ orchestrator: true }, {});
+  assert.deepEqual(orchestratorOnly.filter((t) => orch.includes(t)), ["Workflow"]);
+  const claudeGated = disallowedTools({ orchestrator: true }, { HELM_WORKFLOW_GATES: "1" });
   assert.ok(["Workflow", "REPL"].every((t) => claudeGated.includes(t)));
   assert.ok(localOnly.filter((t) => t !== "Workflow").every((t) => !claudeGated.includes(t)), "the rest stay for a gated Claude chat");
   // The flag carries the whole local set.
@@ -254,7 +256,7 @@ test("a too-long refusal names the window and the roll over; other faults and an
 test("a chat the workflow gates may act in loses the workflow runner and the REPL, and its messages to agents are asked of the host", async () => {
   const gated = { HELM_WORKFLOW_GATES: "1" };
   assert.ok(["Workflow", "REPL"].every((t) => disallowedTools({}, gated).includes(t)));
-  assert.ok(["Workflow", "REPL"].every((t) => !disallowedTools({}, {}).includes(t)), "other chats keep them");
+  assert.ok(!disallowedTools({}, {}).includes("REPL"), "other chats keep the REPL");
   assert.ok((gateHook().matcher as string).split("|").includes("SendMessage"));
   const asked: Array<[string, unknown]> = [];
   const channel = {
@@ -281,4 +283,30 @@ test("a chat the workflow gates may act in loses the workflow runner and the REP
   assert.deepEqual(await decideStop(stopWith(() => ({ ok: true, result: { block: false } })), {}), {});
   assert.deepEqual(await decideStop(stopWith(() => ({ ok: false, error: "no" })), {}), {});
   assert.deepEqual(await decideStop(stopWith(() => { throw new Error("timeout"); }), {}), {});
+  // The project's startup question comes first when the launch switched it on, then the workflow's;
+  // the first block wins, a failed question is skipped, and each question is asked only when its switch is on.
+  assert.ok(startupWanted({ HELM_STARTUP_GATE: "1" }) && !startupWanted({}) && !startupWanted({ HELM_STARTUP_GATE: "0" }));
+  stopAsked.length = 0;
+  const byOperation = (blocks: Record<string, boolean>) =>
+    ({
+      call: async (op: string) => {
+        stopAsked.push([op]);
+        if (op === "app_startup_turn_end" && blocks.throws) throw new Error("timeout");
+        return { ok: true, result: blocks[op] ? { block: true, reason: `${op} says wait` } : { block: false } };
+      },
+    }) as unknown as Parameters<typeof decideStop>[0];
+  const both = { startup: true, workflow: true };
+  assert.deepEqual(await decideStop(byOperation({ app_startup_turn_end: true, app_workflow_turn_end: true }), {}, both), { decision: "block", reason: "app_startup_turn_end says wait" });
+  assert.deepEqual(stopAsked, [["app_startup_turn_end"]], "the first block ends the asking");
+  stopAsked.length = 0;
+  assert.deepEqual(await decideStop(byOperation({ app_workflow_turn_end: true }), {}, both), { decision: "block", reason: "app_workflow_turn_end says wait" });
+  assert.deepEqual(stopAsked, [["app_startup_turn_end"], ["app_workflow_turn_end"]]);
+  stopAsked.length = 0;
+  assert.deepEqual(await decideStop(byOperation({ throws: true, app_workflow_turn_end: true }), {}, both), { decision: "block", reason: "app_workflow_turn_end says wait" }, "a failed startup question does not hide the workflow's");
+  stopAsked.length = 0;
+  assert.deepEqual(await decideStop(byOperation({ app_startup_turn_end: true, app_workflow_turn_end: true }), {}, { startup: true }), { decision: "block", reason: "app_startup_turn_end says wait" });
+  assert.deepEqual(await decideStop(byOperation({ app_startup_turn_end: true }), {}, { workflow: true }), {}, "a switch that is off is not asked");
+  assert.deepEqual(await decideStop(byOperation({ app_startup_turn_end: true }), { stop_hook_active: true }, both), {}, "a continuation is never blocked again");
+  // The startup switch alone leaves the workflow's tool restrictions and edit gate off.
+  assert.ok(!disallowedTools({}, { HELM_STARTUP_GATE: "1" }).includes("REPL"));
 });

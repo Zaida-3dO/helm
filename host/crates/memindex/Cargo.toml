@@ -1,0 +1,33 @@
+[package]
+name = "helm-memindex"
+description = "Memory feeds: read the local sources (notes, chat records, logs), cut them into the docs and chunks the hub indexes, and keep the hub's index in step."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+helm-core.workspace = true
+helm-ipc.workspace = true
+helm-chats.workspace = true
+helm-hosttools = { path = "../hosttools" }
+helm-consent = { path = "../consent" }
+helm-localmodels = { path = "../localmodels" }
+helm-profiles = { path = "../profiles" }
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+log.workspace = true
+base64 = "0.22"
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+ts-rs = { version = "10.1", features = ["serde-json-impl", "no-serde-warnings"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+helm-platform.workspace = true

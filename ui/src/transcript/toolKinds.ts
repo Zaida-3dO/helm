@@ -74,10 +74,10 @@ export function toolTarget(row: MessageRow): string | null {
   );
 }
 
-/** The Allow request an `app_request_allow` or `app_stage_settings` call filed: the id its result names, or null. */
+/** The Allow request an `app_request_allow`, `app_stage_settings` or `app_project_startup` call filed: the id its result names, or null. */
 export function allowRequestId(row: MessageRow): string | null {
   const id = toolIdentity(row);
-  if (id.source !== 'host' || (id.tool !== 'app_request_allow' && id.tool !== 'app_stage_settings')) return null;
+  if (id.source !== 'host' || !['app_request_allow', 'app_stage_settings', 'app_project_startup'].includes(id.tool)) return null;
   try {
     const v = JSON.parse(row.text) as { requestId?: unknown };
     return typeof v.requestId === 'string' && v.requestId ? v.requestId : null;

@@ -36,8 +36,9 @@ import { knowledgeFakeOps } from './fake-knowledge.ts';
 import { githubFakeOps } from './fake-github.ts';
 import { webSearchFakeOps } from './fake-websearch.ts';
 import { dictationFakeOps } from './fake-dictation.ts';
-import { fakeGateAddDecided, gatekeeperFakeOps } from './fake-gatekeeper.ts';
+import { fakeGateAddDecided, fakeGateAddStop, gatekeeperFakeOps } from './fake-gatekeeper.ts';
 import { localModelsFakeOps } from './fake-localmodels.ts';
+import { memindexFakeOps } from './fake-memindex.ts';
 import { gpuFakeOps } from './fake-gpu.ts';
 import { orchestratorFakeOps } from './fake-orchestrator.ts';
 import { newChatFakeOps } from '../newchat/fake.ts';
@@ -91,6 +92,7 @@ export function registerFakeOps(prefixes: string[], handler: FakeOpHandler): voi
 const localModels = localModelsFakeOps();
 registerFakeOps(localModels.prefixes, localModels.handler);
 { const gpu = gpuFakeOps(localModels.gpu); registerFakeOps(gpu.prefixes, gpu.handler); }
+{ const mi = memindexFakeOps(); registerFakeOps(mi.prefixes, mi.handler); }
 
 export function fakeOpFor(op: string): FakeOpHandler | undefined {
   return extraOps.find((r) => r.prefixes.some((p) => op.startsWith(p)))?.handler;
@@ -121,6 +123,25 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
   const gaveUp = new Set<string>();
   let sendBehavior: SendBehavior = { ...HOME_SEND_BEHAVIOR };
   const prefs = new Map<string, unknown>();
+
+  // A small capacity queue for the dev host: a held start so the Queue panel has a row to show.
+  type FakeHold = { chatId: string; title: string; reason: string; class: string; serverId: string | null; since: number; top: boolean };
+  let fakeHolds: FakeHold[] = [{ chatId: 'dev-queue-chat', title: 'Waiting chat', reason: 'local_cap', class: 'normal', serverId: 'strata', since: 0, top: false }];
+  const fakeQueueList = () => ({
+    entries: fakeHolds.map((h) => ({ ...h, since: Date.now() - 60_000 })),
+    servers: [{ serverId: 'strata', working: 3, queued: fakeHolds.filter((h) => h.serverId === 'strata').length }],
+    claudeQueued: 0,
+    claudeFull: false,
+    claudeUntil: null,
+    signIn: [],
+  });
+  const fakeQueueAct = (chatId: string, action: string) => {
+    if (action === 'cancel' || action === 'release') fakeHolds = fakeHolds.filter((h) => h.chatId !== chatId);
+    else if (action === 'hold') fakeHolds = fakeHolds.map((h) => (h.chatId === chatId ? { ...h, reason: 'manual', serverId: null } : h));
+    else if (action === 'release') fakeHolds = fakeHolds.map((h) => (h.chatId === chatId ? { ...h, reason: 'local_cap' } : h));
+    else if (action === 'top') fakeHolds = fakeHolds.map((h) => (h.chatId === chatId ? { ...h, top: true } : h));
+    return fakeQueueList();
+  };
   const answers = new Map<string, (a: Record<string, unknown>) => void>();
   /** forkId → the chat that fork made, so a repeated request answers the same chat. */
   const forks = new Map<string, string>();
@@ -238,7 +259,9 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         lastActivityAt: t,
         stalled: false,
         localAhead: null,
+        state: null,
         started: false,
+        queueReason: null,
         profileId: '',
         hostDeviceId: '',
         sharedWith: [],
@@ -529,6 +552,35 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
           emit({ kind: 'gate', askId: id, chatId: c.chat.id, what: mode === 'escalate' ? 'escalated' : 'failed' });
           const a = await answered;
           await streamText(c, `You picked ${String(a.value ?? 'nothing')}. `, cancelled);
+        }
+      }
+      // The working mode's stop check by eye: "stop" ends the turn with the quiet checking line,
+      // then Helm's nudge arrives and the chat carries on with the default; "stop blocker" ends
+      // on a Blocker row that counts in attention.
+      if (/stop/i.test(text)) {
+        const blocker = /blocker/i.test(text);
+        if (blocker) {
+          await streamText(c, 'I need you to sign in before I can carry on. ', cancelled);
+          c.thread = { ...c.thread, stopCheck: { startedAt: now() } };
+          emitThread(c);
+          await sleep(2500, cancelled);
+          c.thread = { ...c.thread, stopCheck: undefined };
+          emitThread(c);
+          addRow(c, { role: 'context', text: 'Only you can sign in, so it stopped.', details: { contextKind: 'stopBlocker' } });
+          const rec = fakeGateAddStop(c.chat.id, c.chat.title || 'Untitled', 'Sign in to continue?', 'blocker', undefined, 'Only you can sign in.');
+          emit({ kind: 'gate', askId: rec.id, chatId: c.chat.id, what: 'escalated' });
+          emitAttention();
+        } else {
+          await streamText(c, 'The first part is done. Shall I go ahead with the next step? ', cancelled);
+          c.thread = { ...c.thread, stopCheck: { startedAt: now() } };
+          emitThread(c);
+          await sleep(2500, cancelled);
+          c.thread = { ...c.thread, stopCheck: undefined };
+          emitThread(c);
+          const rec = fakeGateAddStop(c.chat.id, c.chat.title || 'Untitled', 'Start the next step?', 'asked', 'the next step', 'the plan names the next step and it is easy to undo');
+          emit({ kind: 'gate', askId: rec.id, chatId: c.chat.id, what: 'decided' });
+          addRow(c, { role: 'user', text: '[Helm · Run to completion] Carry on without asking. Go ahead with: «the next step». (You were about to ask: «Start the next step?».)' });
+          await streamText(c, 'Carrying on: I took the next step and kept it easy to undo. ', cancelled);
         }
       }
       if (/question/i.test(text)) {
@@ -1139,6 +1191,8 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     },
     intro_allowed: () => ({ allowed: true }),
     preference_get: (a) => (a.key === 'sendBehavior' ? sendBehavior : (prefs.get(String(a.key)) ?? null)),
+    queue_list: () => fakeQueueList(),
+    queue_action: (a) => fakeQueueAct(String(a.chatId), String(a.action)),
     preference: (a) => {
       if (a.key === 'sendBehavior') sendBehavior = { ...HOME_SEND_BEHAVIOR, ...(a.value as object) };
       else prefs.set(String(a.key), a.value);

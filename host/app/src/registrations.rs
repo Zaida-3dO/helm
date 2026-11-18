@@ -42,6 +42,7 @@ pub fn ops(reg: &mut OpRegistry) {
     crate::pet::register_ops(reg);
     crate::petworld::register_ops(reg);
     helm_dictation::register_ops(reg);
+    helm_memindex::register_ops(reg);
 }
 
 pub fn migrations(reg: &mut MigrationRegistry) {
@@ -69,6 +70,7 @@ pub fn migrations(reg: &mut MigrationRegistry) {
     helm_pages::register_migrations(reg);
     helm_devices::register_migrations(reg);
     helm_dictation::register_migrations(reg);
+    helm_memindex::register_migrations(reg);
 }
 
 /// Shared services a crate adds for op handlers (`ctx.services.need::<T>()`), called once at
@@ -96,6 +98,10 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     helm_governor::register_services(services, events);
     helm_localmodels::register_services(services, events);
     helm_relay::register_services(services, events);
+    // The memory indexer drives the hub's search index over that line.
+    if let Some(line) = services.get::<helm_relay::index_line::IndexLine>() {
+        helm_memindex::register_services(services, events, line);
+    }
     // Graphics memory is kept free for speech-to-text only once it is set up: a dictation server
     // saved, or the phone's voice screen used with this PC.
     if let (Some(local), Some(db), Some(profile)) = (
@@ -130,6 +136,21 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
         ))));
     }
     services.insert(Arc::new(host_tools()));
+    // The topics other crates add to app_help (rules, skills, the orchestrator's steps).
+    let help = Arc::new(helm_hosttools::help::HelpProviders::default());
+    services.insert(help.clone());
+    if let (Some(db), Some(profile)) = (
+        services.get::<helm_core::db::Database>(),
+        services.get::<helm_core::profile::Profile>(),
+    ) {
+        helm_skills::help::register(
+            &help,
+            profile.dir.clone(),
+            Arc::new(helm_skills::launch::DbLookup { db: db.clone() }),
+        );
+        helm_workflow::register_help(&help, db.clone());
+        helm_projects::startup::register_help(&help, db);
+    }
     // Settings that live outside the preference table but that chats read and change.
     let mut extensions = vec![
         helm_workflow::settings_extension(),
@@ -138,6 +159,12 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     if let Some(web) = services.get::<helm_webtools::WebSearch>() {
         extensions.push(helm_webtools::settings_extension(web));
     }
+    // What a chat may only stage for the user to approve: where the voice goes for dictation, and
+    // the governor that can stop chats.
+    extensions.push(helm_dictation::ext::settings_extension());
+    if let Some(governor) = services.get::<helm_governor::Governor>() {
+        extensions.push(helm_governor::ext::settings_extension(governor));
+    }
     // Servers a chat has opted in to plain http on the private network, with Undo.
     if let Some(store) = services.get::<helm_mcp::McpStore>() {
         extensions.push(helm_mcp::unencrypted::settings_extension(store));
@@ -145,6 +172,10 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     // The Telegram new-chat defaults: chats read the whole policy, change only model and effort.
     if let Some(profile) = services.get::<helm_core::profile::Profile>() {
         extensions.push(helm_relay::settings_extension(&profile.dir));
+        // The Claude Code launch switches kept in claude-runtime.json.
+        extensions.push(helm_chats::runtime_ext::settings_extension(
+            profile.dir.clone(),
+        ));
         // A chat's edits to the repository list, which Undo puts back.
         extensions.push(helm_projects::repo_undo::settings_extension(&profile.dir));
         // A chat's edits to the rules and skills, which Undo puts back.
@@ -153,9 +184,13 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     // Whether this PC is connected to the hub, read only (never the address, token or ids).
     extensions.extend(helm_relay::hub_view::settings_extension(services));
     services.insert(Arc::new(helm_hosttools::SettingsExtensions(extensions)));
+    // What the generic writer cannot know about a few preference keys' values.
+    let rules = crate::pref_rules::pref_rules(services, events);
+    services.insert(Arc::new(rules));
     services.insert(Arc::new(worker_lines()));
     // Other crates reach running workers through the chat runtime (helm_hosttools::lines).
     if let Some(rt) = services.get::<helm_chats::ChatRuntime>() {
+        services.insert(Arc::new(helm_hosttools::LaunchRecords(rt.clone())));
         services.insert(Arc::new(helm_hosttools::Broadcaster(rt)));
     }
     services.insert(Arc::new(allow_kinds()));
@@ -265,6 +300,10 @@ pub fn host_tools() -> helm_hosttools::HostToolRegistry {
     helm_webtools::register_host_tools(&mut reg);
     helm_skills::register_host_tools(&mut reg);
     helm_dictation::register_host_tools(&mut reg);
+    helm_memindex::register_host_tools(&mut reg);
+    helm_projects::startup::register_host_tools(&mut reg);
+    // Last: groups, the core list, merged tools, short descriptions and app_help.
+    helm_hosttools::surface::apply(&mut reg);
     reg
 }
 
@@ -313,6 +352,8 @@ pub fn attach_host_tools(
     helm_waits::start(runtime, &dispatcher.ctx().services);
     // Saved items: the reminder sweep, five seconds at worst.
     helm_saved::start(runtime, &dispatcher.ctx().services);
+    // Memory indexing: the thread that keeps the hub's search index current (off until switched on).
+    helm_memindex::start(&dispatcher.ctx().services);
 }
 
 /// The consent upkeep: every minute, and at once after a decision,
@@ -424,6 +465,8 @@ pub fn allow_kinds() -> helm_consent::AllowKinds {
     helm_workflow::register_allow_kinds(&mut k);
     helm_relay::register_allow_kinds(&mut k);
     helm_mcp::gmail::register_allow_kinds(&mut k);
+    helm_memindex::register_allow_kinds(&mut k);
+    helm_projects::startup::register_allow_kinds(&mut k);
     k
 }
 
@@ -469,9 +512,7 @@ pub fn launch_contributors(
         order: 20,
         inner: Arc::new(helm_panel::vault::VaultInstructions { db: db.clone() }),
     }))
-    .register_section(Arc::new(helm_hosttools::sections::GuidelinesSection {
-        registry: Arc::new(host_tools()),
-    }))
+    // Pictures and choices are not in a chat's own tool list: this line says where they are.
     .register_section(Arc::new(helm_hosttools::StaticSection {
         id: "cards",
         order: 35,
@@ -479,12 +520,20 @@ pub fn launch_contributors(
     }))
     .register_section(Arc::new(knowledge_section(db)))
     .register_section(Arc::new(helm_itemlinks::ItemLinksSection))
-    .register_section(Arc::new(helm_workflow::WorkflowSection { db: db.clone() }));
+    .register_section(Arc::new(helm_workflow::WorkflowSection { db: db.clone() }))
+    // How the user wants chats to work (run to completion, or check in), first in the addendum.
+    .register_section(Arc::new(helm_gatekeeper::workmode::WorkmodeSection {
+        db: db.clone(),
+    }));
     // The knowledge layers: who a chat is for (its profile and project), and the rules of everyone
     // and of that person.
     if let Some(profile_dir) = db.path().parent() {
         let lookup = Arc::new(helm_skills::launch::DbLookup { db: db.clone() });
         helm_skills::launch::set_lookup(lookup.clone());
+        a.register_section(Arc::new(helm_relay::channel::ChannelSection {
+            db: db.clone(),
+            profile_dir: profile_dir.to_path_buf(),
+        }));
         a.register_section(Arc::new(helm_skills::launch::RulesSection::new(
             profile_dir.to_path_buf(),
             lookup,
@@ -493,6 +542,10 @@ pub fn launch_contributors(
     let mut c = helm_workers::contrib::LaunchContributors::new();
     // Whose chat this is opens the system prompt, ahead of the addendum.
     c.add(Arc::new(helm_profiles::launch::WhoLaunch {
+        db: db.clone(),
+    }));
+    // Where the chat sits (its board and folder), and the switch for the startup Stop hook.
+    c.add(Arc::new(helm_projects::launch::ProjectLaunch {
         db: db.clone(),
     }));
     c.add(Arc::new(a));
@@ -536,6 +589,9 @@ mod host_tool_tests {
             "app_set_chat_archived",
             "app_stop_chat",
             "app_flag_attention",
+            "app_roll_over",
+            "app_queue_status",
+            "app_queue_action",
             "app_list_projects",
             "app_create_project",
             "app_update_project",
@@ -588,6 +644,21 @@ mod host_tool_tests {
             "app_remove_rule",
             "app_add_skill",
             "app_remove_skill",
+            "app_memory_index",
+            "app_startup_done",
+            "app_project_startup",
+            "app_help",
+            // The merged tools come after every tool; the tools above stay callable by their names.
+            "app_chat",
+            "app_attention",
+            "app_helm_feedback",
+            "app_schedule",
+            "app_mcp_servers",
+            "app_project",
+            "app_saved",
+            "app_knowledge",
+            "app_pages",
+            "app_settings",
         ];
         assert_eq!(names(Default::default()), base);
         let delta = |k: helm_hosttools::LaunchKeys| -> Vec<String> {
@@ -718,5 +789,138 @@ mod launch_tests {
             prompt.contains("Helm shows your links in a side panel"),
             "the fragment teaches the clickable link forms"
         );
+    }
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use helm_hosttools::{CatalogueEntry, LaunchKeys};
+
+    /// What the model is sent for one listed tool.
+    fn sent(e: &CatalogueEntry) -> usize {
+        serde_json::to_string(
+            &serde_json::json!({"name": e.name, "description": e.description, "inputSchema": e.input_schema}),
+        )
+        .unwrap()
+        .len()
+    }
+
+    fn everything_on() -> LaunchKeys {
+        LaunchKeys {
+            projects_mode: true,
+            all_settings: true,
+            mcp_enabled: true,
+            gmail_accounts: true,
+            web_tools: true,
+            ..Default::default()
+        }
+    }
+
+    /// What a chat pays for Helm's tools. A chat's own list holds only the core tools; the rest are
+    /// found by group, and families are merged. The caps leave a little room: a tool added to the
+    /// core list, or a description grown past its cap, fails here.
+    #[test]
+    fn a_chats_own_tool_list_stays_small_and_every_description_stays_short() {
+        let reg = super::host_tools();
+        for (label, keys, listed_cap, visible_cap) in [
+            ("default", LaunchKeys::default(), 10_500, 42),
+            ("everything on", everything_on(), 11_500, 51),
+        ] {
+            let all = reg.for_launch(&keys);
+            let visible: Vec<_> = all.iter().filter(|e| e.alias_of.is_none()).collect();
+            let listed: Vec<_> = visible.iter().filter(|e| e.core).collect();
+            let chars: usize = listed.iter().map(|e| sent(e)).sum();
+            if std::env::var("HELM_PRINT_BUDGET").is_ok() {
+                println!(
+                    "BUDGET {label}: {} entries, {} visible, {} listed ({chars} chars); visible total {} chars",
+                    all.len(),
+                    visible.len(),
+                    listed.len(),
+                    visible.iter().map(|e| sent(e)).sum::<usize>()
+                );
+            }
+            assert!(
+                chars <= listed_cap,
+                "{label}: the core tools are {chars} characters, over {listed_cap}"
+            );
+            assert!(
+                visible.len() <= visible_cap,
+                "{label}: {} tools",
+                visible.len()
+            );
+            for e in &visible {
+                // The orchestrator's two tools keep their whole action list: they are listed only
+                // while Orchestrator is on.
+                if e.core_with_orchestrator {
+                    continue;
+                }
+                assert!(
+                    e.description.chars().count() <= 520,
+                    "{} has a {}-character description; the rest belongs in its guidelines",
+                    e.name,
+                    e.description.chars().count()
+                );
+                assert!(!e.group.is_empty(), "{} has no group", e.name);
+            }
+            // A merged tool's old names stay in the catalogue, marked, so they still answer.
+            for f in reg.facades() {
+                for (_, member) in f.actions {
+                    if let Some(e) = all.iter().find(|e| e.name == *member) {
+                        assert_eq!(e.alias_of.as_ref().map(|a| a.tool.as_str()), Some(f.name));
+                    }
+                }
+            }
+        }
+        // Every help topic fits the cap, in parts if need be, and the merged tools say all they do.
+        let every = helm_hosttools::LaunchKeys {
+            projects_mode: true,
+            all_settings: true,
+            mcp_enabled: true,
+            gmail_accounts: true,
+            web_tools: true,
+            ..Default::default()
+        };
+        for name in reg.names() {
+            // The worker's own tools have no topic: no launch lists them.
+            if reg.get(name).unwrap().spec.availability.when == helm_hosttools::Condition::Worker {
+                continue;
+            }
+            let topic = format!("tool/{name}");
+            let mut part = 1;
+            loop {
+                let t = if part == 1 {
+                    topic.clone()
+                } else {
+                    format!("{topic}#{part}")
+                };
+                let v = helm_hosttools::help::answer(&reg, None, "c", &every, Some(&t), 0).unwrap();
+                assert!(
+                    v["text"].as_str().unwrap().chars().count()
+                        <= helm_hosttools::help::MAX_TOPIC_CHARS
+                );
+                if v.get("continues").is_none() {
+                    break;
+                }
+                part += 1;
+            }
+        }
+        for f in reg.facades() {
+            assert!(
+                f.guidelines.chars().count() <= helm_hosttools::help::MAX_TOPIC_CHARS,
+                "{}",
+                f.name
+            );
+            for (action, _) in f.actions {
+                helm_hosttools::help::answer(
+                    &reg,
+                    None,
+                    "c",
+                    &every,
+                    Some(&format!("tool/{}/{action}", f.name)),
+                    0,
+                )
+                .unwrap();
+            }
+        }
     }
 }

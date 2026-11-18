@@ -7,9 +7,9 @@
 //! is fast enough well past the tens of thousands of rows a personal memory
 //! store will hold.
 //!
-//! Every memory has an owner (a person id) and a visibility, `private` (the default: only its
-//! owner sees it) or `shared` (the whole household sees it). Reads that pass a viewer see their
-//! own memories plus shared ones; only the owner changes or deletes a memory. A memory with no
+//! Every memory has an owner (a person id) and a visibility, `shared` (the default: the whole
+//! household sees it) or `private` (only its owner sees it, set on purpose). Reads that pass a
+//! viewer see their own memories plus shared ones; only the owner changes or deletes a memory. A memory with no
 //! owner (stored before owners existed) is adopted by one person at start-up ([`Store::adopt_orphans`])
 //! and is invisible to everyone until then.
 
@@ -65,8 +65,9 @@ pub struct Embedding {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Visibility {
-    #[default]
     Private,
+    /// The default: the household's memory is one shared brain.
+    #[default]
     Shared,
 }
 
@@ -191,6 +192,8 @@ pub struct Store {
     conn: Connection,
     /// The owner given to a memory stored with none (the importer's person).
     default_owner: Option<i64>,
+    /// The sign-bit codes of every indexed vector (see `index.rs`).
+    codes: crate::index::Codes,
 }
 
 const SCHEMA: &str = r#"
@@ -243,7 +246,7 @@ END;
 /// Whether `s` is `YYYY-MM-DD`, optionally followed by `T` (or a space) and `HH:MM[:SS[.fff]]` and
 /// an optional `Z`. Text order of such a string is time order against `updated_at`, which is why
 /// nothing looser is let through: `since: "yesterday"` would otherwise match every memory.
-fn is_iso_since(s: &str) -> bool {
+pub(crate) fn is_iso_since(s: &str) -> bool {
     let b = s.as_bytes();
     let digits = |from: usize, n: usize| -> Option<u32> {
         let part = b.get(from..from + n)?;
@@ -312,10 +315,13 @@ pub(crate) fn move_owner(
             clashes.join(", ")
         )));
     }
-    Ok(Ok(conn.execute(
+    let moved = conn.execute(
         "UPDATE memories SET owner_person = ?2 WHERE owner_person = ?1",
         params![from, into],
-    )?))
+    )?;
+    // The search index follows its owners.
+    crate::index::move_owner(conn, from, into)?;
+    Ok(Ok(moved))
 }
 
 /// Rebuild `memories` without the hub-wide `UNIQUE` on `name` (SQLite cannot drop a column's
@@ -361,7 +367,7 @@ fn names_per_owner(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
-const SUMMARY_COLS: &str =
+pub(crate) const SUMMARY_COLS: &str =
     "m.id, m.name, m.title, m.description, m.kind, m.tags, m.updated_at, m.visibility, m.owner_person";
 
 impl Store {
@@ -377,8 +383,9 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
-        // Keep the page cache small: the hub's RAM budget is tens of MB.
-        conn.pragma_update(None, "cache_size", -2000)?;
+        // Keep the page cache modest (16 MB): the hub's RAM budget is tens of MB, and the search
+        // index's hot pages should stay in it.
+        conn.pragma_update(None, "cache_size", -16000)?;
         conn.execute_batch(SCHEMA)?;
         // A store made before owners existed gains the columns; its memories have no owner yet.
         let has_owner = conn
@@ -407,18 +414,31 @@ impl Store {
         )?;
         // The household's knowledge files share this database (see `knowledge.rs`).
         crate::knowledge::init(&conn)?;
+        // The search index mirrors the memories (see `index.rs`).
+        crate::index::init(&conn)?;
+        let codes = crate::index::Codes::load(&conn)?;
         Ok(Store {
             conn,
             default_owner: None,
+            codes,
         })
     }
 
+    /// The connection and the RAM vector table together, for the index's writes.
+    pub(crate) fn parts_mut(&mut self) -> (&mut Connection, &mut crate::index::Codes) {
+        (&mut self.conn, &mut self.codes)
+    }
+
+    pub(crate) fn codes(&self) -> &crate::index::Codes {
+        &self.codes
+    }
+
     /// The connection, for the knowledge files.
-    pub(crate) fn conn(&self) -> &Connection {
+    pub fn conn(&self) -> &Connection {
         &self.conn
     }
 
-    pub(crate) fn conn_mut(&mut self) -> &mut Connection {
+    pub fn conn_mut(&mut self) -> &mut Connection {
         &mut self.conn
     }
 
@@ -427,13 +447,21 @@ impl Store {
         self.default_owner = person;
     }
 
-    /// Give every memory with no owner to `person`, private. Returns how many moved.
+    /// Give every memory with no owner to `person`, shared with the household. Returns how many moved.
     pub fn adopt_orphans(&mut self, person: i64) -> Result<usize> {
-        Ok(self.conn.execute(
-            "UPDATE memories SET owner_person = ?1, visibility = 'private'
+        let tx = self.conn.transaction()?;
+        let n = tx.execute(
+            "UPDATE memories SET owner_person = ?1, visibility = 'shared'
              WHERE owner_person IS NULL",
             [person],
-        )?)
+        )?;
+        tx.execute(
+            "UPDATE ix_docs SET owner_person = ?1, visibility = 'shared'
+             WHERE source_id = 'memory' AND owner_person IS NULL",
+            [person],
+        )?;
+        tx.commit()?;
+        Ok(n)
     }
 
     pub fn count(&self) -> Result<i64> {
@@ -494,7 +522,9 @@ impl Store {
         )?;
         let id = tx.last_insert_rowid();
         write_tags(&tx, id, &tags)?;
+        let delta = crate::index::mirror_memory(&tx, id)?;
         tx.commit()?;
+        self.codes.apply(delta);
         Ok(id)
     }
 
@@ -818,17 +848,21 @@ impl Store {
             )?;
         }
         write_tags(&tx, id, &tags)?;
+        let delta = crate::index::mirror_memory(&tx, id)?;
         tx.commit()?;
+        self.codes.apply(delta);
         self.get(id)
     }
 
     pub fn delete(&mut self, id: i64) -> Result<()> {
-        let n = self
-            .conn
-            .execute("DELETE FROM memories WHERE id = ?1", [id])?;
+        let tx = self.conn.transaction()?;
+        let n = tx.execute("DELETE FROM memories WHERE id = ?1", [id])?;
         if n == 0 {
             return Err(StoreError::NotFound);
         }
+        let delta = crate::index::mirror_memory(&tx, id)?;
+        tx.commit()?;
+        self.codes.apply(delta);
         Ok(())
     }
 
@@ -896,7 +930,9 @@ impl Store {
             )?;
         }
         write_tags(&tx, cur.id, &tags)?;
+        let delta = crate::index::mirror_memory(&tx, cur.id)?;
         tx.commit()?;
+        self.codes.apply(delta);
         Ok(Upsert::Updated)
     }
 
@@ -916,7 +952,7 @@ pub enum Upsert {
     Unchanged,
 }
 
-fn summary_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Summary> {
+pub(crate) fn summary_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Summary> {
     Ok(Summary {
         id: r.get(0)?,
         name: r.get(1)?,
@@ -982,13 +1018,30 @@ fn tag_filter(tags: &[String], args: &mut Vec<rusqlite::types::Value>) -> String
     )
 }
 
+const STOP_WORDS: &[&str] = &[
+    "a", "about", "after", "all", "an", "and", "any", "are", "as", "at", "be", "by", "can", "did",
+    "do", "does", "each", "for", "from", "get", "had", "has", "have", "how", "i", "in", "is", "it",
+    "its", "me", "my", "of", "on", "or", "our", "out", "that", "the", "this", "to", "was", "we",
+    "what", "when", "which", "with", "you", "s", "t",
+];
+
+fn is_stop_word(w: &str) -> bool {
+    STOP_WORDS.contains(&w.to_lowercase().as_str())
+}
+
 /// Turns free text into a safe FTS5 expression: every word becomes a quoted
 /// term and the terms are OR-ed, so bm25 ranks rows matching more (and rarer)
 /// words first. Quoting means user input can never be parsed as FTS syntax.
 pub fn fts_query(text: &str) -> Option<String> {
-    let terms: Vec<String> = text
-        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .filter(|w| !w.is_empty())
+    let words = || {
+        text.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .filter(|w| !w.is_empty())
+    };
+    // Little words match nearly every passage and rank the shortest ones first, so they stay out
+    // unless the query is nothing else.
+    let meaningful = words().any(|w| !is_stop_word(w));
+    let terms: Vec<String> = words()
+        .filter(|w| !meaningful || !is_stop_word(w))
         .take(32)
         .map(|w| format!("\"{w}\""))
         .collect();
@@ -1030,7 +1083,7 @@ pub fn normalize_tags(tags: &[String]) -> Result<Vec<String>> {
     Ok(out)
 }
 
-fn check_vector(v: &[f32]) -> Result<()> {
+pub(crate) fn check_vector(v: &[f32]) -> Result<()> {
     if v.is_empty() || v.len() > MAX_DIM {
         return Err(StoreError::Invalid(format!(
             "vector must have 1 to {MAX_DIM} values"
@@ -1118,6 +1171,9 @@ mod tests {
             title: title.into(),
             body: body.into(),
             tags: tags.iter().map(|s| s.to_string()).collect(),
+            // The tests below are about who may see what, so their memories start private; the
+            // household's default (shared) is pinned in the ownership test.
+            visibility: Visibility::Private,
             ..Default::default()
         }
     }
@@ -1177,6 +1233,17 @@ mod tests {
             .unwrap();
         }
         assert!(fts_query("  ...  ").is_none());
+        // Little words drop out unless they are all there is.
+        for (text, want) in [
+            (
+                "the photo library and the move",
+                "\"photo\" OR \"library\" OR \"move\"",
+            ),
+            ("What is a Backup", "\"Backup\""),
+            ("the and of", "\"the\" OR \"and\" OR \"of\""),
+        ] {
+            assert_eq!(fts_query(text).as_deref(), Some(want), "{text}");
+        }
     }
 
     #[test]
@@ -1413,15 +1480,18 @@ mod tests {
         };
         assert_eq!((q(&s, None), q(&s, Some(1)), q(&s, Some(2))), (1, 0, 0));
         assert_eq!(s.adopt_orphans(1).unwrap(), 1);
-        assert_eq!((q(&s, Some(1)), q(&s, Some(2))), (1, 0));
+        // The household shares one memory: an adopted memory is shared, and so is a new one that
+        // names no visibility.
+        assert_eq!((q(&s, Some(1)), q(&s, Some(2))), (1, 1));
+        assert_eq!(NewMemory::default().visibility, Visibility::Shared);
 
         // Shared is seen by everyone, and marked as theirs only for its owner.
         let mut m = mem("shared one", "more words", &[]);
         m.owner = Some(2);
         m.visibility = Visibility::Shared;
         let shared = s.insert(m).unwrap();
-        assert_eq!((q(&s, Some(1)), q(&s, Some(2))), (2, 1));
-        assert!(matches!(s.get_visible(old, 2), Err(StoreError::NotFound)));
+        assert_eq!((q(&s, Some(1)), q(&s, Some(2))), (2, 2));
+        assert!(s.get_visible(old, 2).is_ok());
         assert!(!s.get_visible(shared, 1).unwrap().mine);
         assert!(s.get_visible(shared, 2).unwrap().mine);
         let listed = s.list_for(Some(1), None, None, 10).unwrap();
@@ -1456,9 +1526,10 @@ mod tests {
         let m = s.get_visible(1, 7).unwrap();
         assert_eq!(
             (m.title.as_str(), m.visibility.as_str(), m.tags.len()),
-            ("kept", "private", 0)
+            ("kept", "shared", 0)
         );
-        assert!(matches!(s.get_visible(1, 8), Err(StoreError::NotFound)));
+        // Adopted into the household's shared memory: another person finds it too.
+        assert!(s.get_visible(1, 8).is_ok());
         // Its name is now unique per owner, and its tag row survived the move.
         let tagged: i64 = s
             .conn
@@ -1518,5 +1589,111 @@ mod tests {
         again.owner = None;
         assert_eq!(s.upsert_named(&again).unwrap(), Upsert::Updated);
         assert_eq!(s.get(mine).unwrap().body, "b");
+    }
+
+    #[test]
+    fn the_search_index_follows_every_memory_write_and_catches_up_an_older_store() {
+        let mut s = Store::open_in_memory().unwrap();
+        let hits = |s: &Store, viewer: i64, text: &str| {
+            crate::index::search(
+                s,
+                &crate::index::Query {
+                    viewer,
+                    text: text.into(),
+                    k: 10,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .hits
+            .len()
+        };
+        let docs = |s: &Store| -> i64 {
+            s.conn
+                .query_row(
+                    "SELECT count(*) FROM ix_docs WHERE source_id = 'memory'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let mut m = with_vec(mem("Gateway", "restarts on change", &["ops"]), &[1.0, 0.0]);
+        m.owner = Some(1);
+        let id = s.insert(m).unwrap();
+        // Insert: found by its words and its tag, by its owner only, and its caller's vector is
+        // kept for the vector search.
+        assert_eq!(
+            (
+                hits(&s, 1, "restarts"),
+                hits(&s, 1, "ops"),
+                hits(&s, 2, "restarts")
+            ),
+            (1, 1, 0)
+        );
+        assert_eq!(s.codes().len(), 1);
+        // Update: a new body is found, the old words are not; the vector went with the old body.
+        s.update(
+            id,
+            MemoryPatch {
+                body: Some("reboots on change".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!((hits(&s, 1, "restarts"), hits(&s, 1, "reboots")), (0, 1));
+        assert_eq!(s.codes().len(), 0);
+        // Sharing it opens it to everyone.
+        s.update(
+            id,
+            MemoryPatch {
+                visibility: Some(Visibility::Shared),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(hits(&s, 2, "reboots"), 1);
+        s.update(
+            id,
+            MemoryPatch {
+                visibility: Some(Visibility::Private),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(hits(&s, 2, "reboots"), 0);
+        // The importer's upsert and `person merge` keep the mirror in step.
+        let mut named = mem("Named", "walrus facts", &[]);
+        named.name = Some("n".into());
+        named.owner = Some(1);
+        assert_eq!(s.upsert_named(&named).unwrap(), Upsert::Inserted);
+        named.body = "narwhal facts".into();
+        assert_eq!(s.upsert_named(&named).unwrap(), Upsert::Updated);
+        assert_eq!((hits(&s, 1, "walrus"), hits(&s, 1, "narwhal")), (0, 1));
+        assert!(move_owner(&s.conn, 1, 3).unwrap().is_ok());
+        assert_eq!(
+            (
+                hits(&s, 1, "narwhal"),
+                hits(&s, 3, "narwhal"),
+                hits(&s, 3, "reboots")
+            ),
+            (0, 1, 1)
+        );
+        // Delete takes the mirror with it.
+        s.delete(id).unwrap();
+        assert_eq!((hits(&s, 3, "reboots"), docs(&s)), (0, 1));
+
+        // A store from before the index: its memories get a mirror once, however often it opens.
+        s.conn
+            .execute(
+                "INSERT INTO memories (title, body, created_at, updated_at, owner_person)
+                 VALUES ('Old note', 'ancient words', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z', 1)",
+                [],
+            )
+            .unwrap();
+        assert_eq!(hits(&s, 1, "ancient"), 0);
+        for _ in 0..2 {
+            crate::index::init(&s.conn).unwrap();
+            assert_eq!((hits(&s, 1, "ancient"), docs(&s)), (1, 2));
+        }
     }
 }

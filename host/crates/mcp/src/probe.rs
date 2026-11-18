@@ -733,6 +733,7 @@ mod tests {
         let resolved = ResolvedServer {
             id: "fake".into(),
             name: "Fake".into(),
+            preset: None,
             transport: TransportKind::Http,
             command: None,
             args: vec![],

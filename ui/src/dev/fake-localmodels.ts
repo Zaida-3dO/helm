@@ -47,6 +47,7 @@ export function localModelsFakeOps(): { prefixes: string[]; handler: FakeOpHandl
   /** The names the user gave models, by id. */
   const aliases = new Map<string, string>();
   const ranges = {
+    chatCapRange: { min: 0, max: 12, default: 3 },
     ollamaContextRange: { min: 8192, max: 262144, default: 65536 },
     keepAliveRange: { min: 1, max: 240, default: 15 },
     strataNeedRange: { min: 4, max: 48, default: 12 },
@@ -113,6 +114,7 @@ export function localModelsFakeOps(): { prefixes: string[]; handler: FakeOpHandl
               ...(x.model ? { model: x.model } : {}),
               ...('folder' in x && x.folder ? { folder: x.folder } : {}),
               ...('preset' in x && x.preset ? { preset: x.preset } : {}),
+              ...(x.chatCap != null ? { chatCap: Number(x.chatCap) } : {}),
             });
           }
           servers.splice(0, servers.length, ...next);

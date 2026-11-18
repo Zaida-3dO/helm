@@ -11,7 +11,7 @@
 //!
 //! No step here involves a model.
 
-use crate::model::{self, Observation, Target, Wait};
+use crate::model::{self, Observation, Outcome, Target, Wait};
 use crate::probes::Probes;
 use crate::store::{self, AddError};
 use helm_core::db::Database;
@@ -87,10 +87,59 @@ impl WaitsService {
         Ok(done)
     }
 
+    /// The wait `app_create_chat` declares for the chat that made `child`: its turn ends, it
+    /// stops, errors or goes away, for a day at most. The baseline is taken now, like any other
+    /// chat wait. Returns the wait's id, or why there is none.
+    pub fn watch_child(
+        &self,
+        parent: &str,
+        child: &str,
+        child_title: &str,
+    ) -> Result<String, String> {
+        let now = helm_core::now_ms();
+        let busy = self
+            .probes
+            .chat(child)
+            .ok()
+            .flatten()
+            .is_some_and(|c| c.busy);
+        let title: String = child_title.chars().take(120).collect();
+        let w = Wait {
+            id: uuid::Uuid::new_v4().to_string(),
+            chat_id: parent.to_owned(),
+            target: Target::ChatIdle {
+                chat_id: child.to_owned(),
+            },
+            note: Some(format!(
+                "Declared for you when you created the chat \"{title}\" (watch is on)."
+            )),
+            created_at: now,
+            expires_at: now + model::MAX_TIMEOUT_SECS * 1000,
+            state: serde_json::json!({"seenBusy": busy, "watch": true}),
+        };
+        match self.declare(&w) {
+            Ok(Ok(())) => Ok(w.id),
+            Ok(Err(AddError::ChatFull)) => Err(format!(
+                "You already watch {} chats you created, so none was declared for this chat.",
+                model::MAX_WATCHES_PER_CHAT
+            )),
+            Ok(Err(AddError::AppFull)) => {
+                Err("Helm already watches the most waits it will; none was declared.".to_owned())
+            }
+            Ok(Err(AddError::NoChat)) => Err("The chat no longer exists.".to_owned()),
+            Err(e) => Err(format!("The wait could not be saved: {e}")),
+        }
+    }
+
     /// Settle `w` if the observation says so, else keep what the watcher learned.
     fn step(&self, mut w: Wait, obs: &Observation, now: i64) {
         let before = w.state.clone();
         match model::judge(&mut w, obs, now) {
+            Some(o) if self.child_watch_is_redundant(&w, &o) => {
+                // The parent already has one message about this turn: the wait ends quietly.
+                let _ = self.db.write(|tx| store::cancel(tx, &w.id, None, now));
+                self.polls.lock().unwrap().remove(&w.id);
+            }
             Some(o) => {
                 match self.db.write(|tx| store::fire(tx, &w.id, &o, now)) {
                     Ok(true) => {
@@ -109,6 +158,21 @@ impl WaitsService {
             }
             None => {}
         }
+    }
+
+    /// A watch declared for a created chat that fires because the child's turn ended, when the
+    /// parent already has a message about that turn (the child reported, or it ended unfinished
+    /// and the parent was told so): firing too would wake the parent twice.
+    fn child_watch_is_redundant(&self, w: &Wait, o: &Outcome) -> bool {
+        let Target::ChatIdle { chat_id: child } = &w.target else {
+            return false;
+        };
+        if o.code != "finished" || !store::is_watch(&w.state) {
+            return false;
+        }
+        self.db
+            .snapshot(|tx| helm_chats::childnote::watch_redundant(tx, &w.chat_id, child))
+            .unwrap_or(false)
     }
 
     /// Cancel the waits of a chat that was stopped or archived. Deleting the chat removes them.
@@ -401,6 +465,83 @@ mod tests {
         }
     }
 
+    /// The wait a chat gets for a chat it creates: a chat_idle on the child for a day, with the
+    /// child's busy baseline, and a plain reason when the parent has no room for one.
+    #[test]
+    fn watch_child_declares_a_day_long_chat_wait_and_says_why_when_it_cannot() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = MigrationRegistry::new();
+        crate::register_migrations(&mut reg);
+        helm_chats::register_migrations(&mut reg);
+        let db = Arc::new(Database::open(&dir.path().join("t.sqlite3"), &reg).unwrap());
+        let kids: Vec<String> = (0..=model::MAX_WATCHES_PER_CHAT)
+            .map(|i| format!("k{i}"))
+            .collect();
+        db.write(|tx| {
+            tx.execute("INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 1)", [])?;
+            for id in kids.iter().map(String::as_str).chain(["par"]) {
+                tx.execute(
+                    "INSERT INTO chats(id, project_id, created_at, updated_at) VALUES (?1, 'p', 1, 1)",
+                    [id],
+                )?;
+            }
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+        let probes = Arc::new(Fake::default());
+        for id in &kids {
+            probes.chats.lock().unwrap().insert(id.clone(), idle());
+        }
+        probes.chats.lock().unwrap().insert(
+            "k0".into(),
+            ChatObs {
+                busy: true,
+                ..idle()
+            },
+        );
+        let svc = WaitsService::new(db, probes);
+        let before = helm_core::now_ms();
+        let id = svc.watch_child("par", "k0", "Doc builder").unwrap();
+        let open = svc.list(Some("par")).unwrap();
+        assert_eq!(open.len(), 1);
+        let w = &open[0];
+        assert_eq!(w.id, id);
+        assert_eq!(
+            w.target,
+            Target::ChatIdle {
+                chat_id: "k0".into()
+            }
+        );
+        assert_eq!(
+            w.state["seenBusy"], true,
+            "a child already working is the baseline"
+        );
+        assert!(w.expires_at - before >= model::MAX_TIMEOUT_SECS * 1000);
+        assert!(w.note.as_deref().unwrap().contains("Doc builder"));
+        // The watches have a room of their own: a parent's ordinary waits fill theirs and a watch
+        // still fits, and the watches' room is bounded in turn.
+        for n in 0..model::MAX_PER_CHAT {
+            let w = wait(
+                &format!("o{n}"),
+                "par",
+                Target::Process {
+                    pid: 900 + n as u32,
+                },
+                before,
+                600,
+            );
+            assert_eq!(svc.declare(&w).unwrap(), Ok(()));
+        }
+        for k in &kids[1..model::MAX_WATCHES_PER_CHAT] {
+            svc.watch_child("par", k, "x").unwrap();
+        }
+        let last = &kids[model::MAX_WATCHES_PER_CHAT];
+        let full = svc.watch_child("par", last, "x").unwrap_err();
+        assert!(full.contains("watch"), "{full}");
+        let gone = svc.watch_child("nobody", last, "x").unwrap_err();
+        assert!(gone.contains("no longer exists"), "{gone}");
+    }
+
     #[test]
     fn waits_are_capped_fire_once_survive_a_restart_and_follow_their_chat() {
         let dir = tempfile::tempdir().unwrap();
@@ -648,6 +789,28 @@ mod tests {
         // A running chat reads as busy while its turn lasts; messages never hold it open.
         let real = crate::probes::RealProbes { db: db.clone() };
         assert!(!real.chat("c7").unwrap().unwrap().busy);
+        // A turn end the stop judge is still checking reads as busy while the hold is recent, and
+        // not once it is old (a crash could leave one behind) or gone.
+        let now = helm_core::now_ms();
+        let hold = |since: Option<i64>| {
+            db.write(|tx| {
+                tx.execute("DELETE FROM chat_stop_holds", [])?;
+                if let Some(s) = since {
+                    tx.execute(
+                        "INSERT INTO chat_stop_holds(chat_id, since) VALUES ('c7', ?1)",
+                        [s],
+                    )?;
+                }
+                Ok::<_, rusqlite::Error>(())
+            })
+            .unwrap();
+            real.chat("c7").unwrap().unwrap().busy
+        };
+        assert!(hold(Some(now)));
+        assert!(!hold(Some(
+            now - helm_chats::runtime::STOP_HOLD_BUSY_MS - 1_000
+        )));
+        assert!(!hold(None));
         assert!(real.chat("nope").unwrap().is_none());
     }
 }

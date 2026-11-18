@@ -22,6 +22,7 @@ import { SignInAgain } from './SignInAgain.tsx';
 import { isSignInError } from './signin.ts';
 import { ToolCard } from './ToolCard.tsx';
 import { GatekeeperReviewLink } from '../gatekeeper/ReviewLink.tsx';
+import { stopCheckLine, stopClass, stopKindLabel } from '../gatekeeper/model.ts';
 import { usePacedText, useThinkingPreview } from './usePaced.ts';
 import { formatElapsed, type RowFlags } from './workBlocks.ts';
 
@@ -44,6 +45,8 @@ export interface RowContext {
   remoteDevice?: string;
   /** Edit and resend: the message being edited, if any. */
   editing?: EditState | null;
+  /** A turn end is being checked against the working mode: the quiet line under the latest reply. */
+  stopChecking?: boolean;
   onEdit?: (row: MessageRow) => void;
   onResend?: (text: string) => Promise<void>;
   onCancelEdit?: () => void;
@@ -98,6 +101,8 @@ const CONTEXT_LABEL: Record<string, string> = {
   afk: 'AFK',
   gatekeeper: 'Answered for you',
   interruption: 'Interruption',
+  signIn: 'Sign-in',
+  startup: 'Startup',
 };
 
 function Thinking({ text, streaming, onLink }: { text: string; streaming: boolean; onLink: RowContext['onLink'] }) {
@@ -195,7 +200,10 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
   }
   if (row.role === 'context') {
     const kind = row.details?.contextKind ?? 'notice';
-    const label = CONTEXT_LABEL[kind] ?? 'Notice';
+    // A checked stop that was legitimate stands on its own line: the class word (Blocker, Plan
+    // limit, Failure, Stopped to ask) on a chip, with the one-line reason Helm filed.
+    const stop = stopKindLabel(kind);
+    const label = stop ?? CONTEXT_LABEL[kind] ?? 'Notice';
     // A notice says why something did not happen (a local model that cannot load, say): its words are
     // plain text, not the muted side note the other context rows are.
     const notice = kind === 'notice';
@@ -204,8 +212,9 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
       // as the reader scrolls, and a live region is announced when it appears, so marking every old
       // notice would re-read the chat's history of refusals each time a row scrolls into view.
       <div className={`row row-context${notice ? ' row-notice' : ''}${place}`} {...common} role={notice && noticeLive ? 'status' : undefined}>
-        <span className="context-label">{label}</span>
+        <span className={`context-label${stop ? ' stop-chip' : ''}`} data-testid={stop ? 'stop-row' : undefined} data-class={stop ? stopClass(kind) : undefined}>{label}</span>
         {row.text && <span className={notice ? 'context-notice-text' : 'muted'}> · {row.text}</span>}
+        {kind === 'signIn' && ctx.canSignIn !== false && <SignInAgain message="Claude Code could not refresh its sign-in for about half an hour. Sign in again, then send a message to carry on." />}
         {/* A decision taken for you can be reviewed or reversed from Settings → Gatekeeper. */}
         {kind === 'gatekeeper' && (
           <span className="muted">
@@ -236,6 +245,13 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
       {retry && (
         <div className={`retry-row retry-${retry.state}`} data-testid="retry-row" data-state={retry.state}>
           {RETRY_TEXT[retry.state]} {retry.attempt > 1 ? `(attempt ${retry.attempt})` : ''}
+        </div>
+      )}
+      {/* Run to completion checks every stop: while that check runs, this line sits under the
+          reply that ended the turn, and no "finished" notice has been given yet. */}
+      {ctx.stopChecking && row.id === ctx.latestAssistantId && row.status === 'complete' && (
+        <div className="stop-check-row muted" data-testid="stop-check-line">
+          {stopCheckLine()}
         </div>
       )}
       <ReplyActions

@@ -4,7 +4,7 @@
 //!
 //! | Table | Holds |
 //! |---|---|
-//! | `project_local` | per project, local-only state: pin, position, collapse, icon (and the uploaded picture), description, archive, closed, a board project's local rename and whether the board has it yet, primary folder, CAS revision |
+//! | `project_local` | per project, local-only state: pin, position, collapse, icon (and the uploaded picture), description, startup instructions, archive, closed, a board project's local rename and whether the board has it yet, primary folder, CAS revision |
 //! | `project_parents` | local nesting: one parent per project, `source` board or local |
 //! | `chat_groups` | the group a chat is shown under when it is not its folder project |
 //! | `project_archive_members` | exactly which chats a project archive archived, so restore brings back only those |
@@ -31,6 +31,9 @@ pub fn register(reg: &mut MigrationRegistry) {
         .one_time("projects-board-completed", add_board_completed)
         .one_time("projects-closed", add_closed)
         .one_time("projects-icon-and-description", add_icon_and_description)
+        .one_time("projects-startup-instructions", add_startup_instructions)
+        .one_time("projects-startup-set", add_startup_set)
+        .initializer("projects-startup", crate::startup::init)
         .initializer("projects-repositories", crate::repos::init);
 }
 
@@ -48,6 +51,9 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              primary_folder_project_id  TEXT REFERENCES projects(id) ON DELETE SET NULL,
              revision                   INTEGER NOT NULL DEFAULT 0,
              description                TEXT,
+             startup_instructions       TEXT,
+             startup_files              TEXT,
+             startup_servers            TEXT,
              icon_image                 BLOB,
              title_pending              INTEGER NOT NULL DEFAULT 0
          );
@@ -176,6 +182,38 @@ fn add_icon_and_description(tx: &Transaction<'_>) -> rusqlite::Result<()> {
         )?;
         if !present {
             tx.execute_batch(ddl)?;
+        }
+    }
+    Ok(())
+}
+
+/// The startup instructions arrived after the table did: a profile made before them gets the
+/// column here. A new profile already has it from `init`.
+fn add_startup_instructions(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    let present: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('project_local') WHERE name = 'startup_instructions')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !present {
+        tx.execute_batch("ALTER TABLE project_local ADD COLUMN startup_instructions TEXT")?;
+    }
+    Ok(())
+}
+
+/// The startup set's context files and MCP servers arrived after the instructions: a profile made
+/// before them gets the columns here. A new profile already has them from `init`.
+fn add_startup_set(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    for column in ["startup_files", "startup_servers"] {
+        let present: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('project_local') WHERE name = ?1)",
+            [column],
+            |r| r.get(0),
+        )?;
+        if !present {
+            tx.execute_batch(&format!(
+                "ALTER TABLE project_local ADD COLUMN {column} TEXT"
+            ))?;
         }
     }
     Ok(())

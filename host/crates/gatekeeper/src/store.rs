@@ -18,19 +18,17 @@ use ts_rs::TS;
 pub const KEEP_AFTER_MS: i64 = 7 * 24 * 3_600_000;
 pub const RETENTION_MS: i64 = 180 * 24 * 3_600_000;
 
-pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
-    tx.execute_batch(
-        "CREATE TABLE IF NOT EXISTS gate_settings (
-             profile_id TEXT NOT NULL PRIMARY KEY,
-             value      TEXT NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS gate_asks (
+/// The audit table's definition under `name`. The channel check names every kind of ask the
+/// gate keeps, `stop` (a chat's own stop at the end of a turn) among them.
+fn asks_ddl(name: &str) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {name} (
              id            TEXT PRIMARY KEY,
              profile_id    TEXT NOT NULL DEFAULT '',
              chat_id       TEXT NOT NULL,
              chat_title    TEXT NOT NULL DEFAULT '',
              channel       TEXT NOT NULL
-                 CHECK (channel IN ('question', 'plan', 'flag', 'telegram_ask', 'board_pick')),
+                 CHECK (channel IN ('question', 'plan', 'flag', 'telegram_ask', 'board_pick', 'stop')),
              request_ref   TEXT NOT NULL,
              asked_at      INTEGER NOT NULL,
              question      TEXT NOT NULL DEFAULT '',
@@ -54,15 +52,96 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              answered_at   INTEGER,
              review        TEXT NOT NULL DEFAULT 'pending'
                  CHECK (review IN ('pending', 'fine', 'should_have_asked', 'didnt_need_me')),
-             review_note   TEXT
-         );
-         CREATE UNIQUE INDEX IF NOT EXISTS gate_asks_ref ON gate_asks(chat_id, request_ref);
+             review_note   TEXT,
+             stop_class    TEXT
+         );"
+    )
+}
+
+const ASK_INDEXES: &str =
+    "CREATE UNIQUE INDEX IF NOT EXISTS gate_asks_ref ON gate_asks(chat_id, request_ref);
          CREATE INDEX IF NOT EXISTS gate_asks_asked ON gate_asks(asked_at DESC);
          CREATE INDEX IF NOT EXISTS gate_asks_chat ON gate_asks(chat_id);
          CREATE INDEX IF NOT EXISTS gate_asks_review
-             ON gate_asks(verdict, state, review, asked_at DESC);",
-    )?;
+             ON gate_asks(verdict, state, review, asked_at DESC);";
+
+/// Every column of `gate_asks`, in the order the rebuild copies them.
+const ASK_COLUMNS: &str = "id, profile_id, chat_id, chat_title, channel, request_ref, asked_at,     question, question_json, verdict, pass_reason, decided_by, model, confidence, risk, reason,     choice, brief_json, took_ms, state, answer, answered_via, answered_at, review, review_note,     stop_class";
+
+pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute_batch(&format!(
+        "CREATE TABLE IF NOT EXISTS gate_settings (
+             profile_id TEXT NOT NULL PRIMARY KEY,
+             value      TEXT NOT NULL
+         );
+         {}
+         -- Where a chat's run of automatic nudges stands: how many were sent, and the last
+         -- question one answered. It ends with the run, or when the user writes in the chat.
+         CREATE TABLE IF NOT EXISTS gate_stop_chains (
+             chat_id        TEXT NOT NULL PRIMARY KEY,
+             started_at     INTEGER NOT NULL,
+             nudges         INTEGER NOT NULL DEFAULT 0,
+             last_question  TEXT NOT NULL DEFAULT ''
+         );
+         -- A board's own working mode; no row means the app's.
+         CREATE TABLE IF NOT EXISTS board_working_modes (
+             project_id  TEXT NOT NULL PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+             mode        TEXT NOT NULL CHECK (mode IN ('run', 'check_in')),
+             updated_at  INTEGER NOT NULL
+         );
+         -- A chat another chat's tool placed on a board, and the board it was placed on: how it
+         -- works is not changed by that board's own mode (see `workmode`). A mode here pins it;
+         -- none means the app's. The user's own move of the chat clears the row.
+         CREATE TABLE IF NOT EXISTS chat_agent_moves (
+             chat_id     TEXT NOT NULL PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+             board_id    TEXT NOT NULL,
+             mode        TEXT CHECK (mode IS NULL OR mode IN ('run', 'check_in')),
+             created_at  INTEGER NOT NULL
+         );",
+        asks_ddl("gate_asks")
+    ))?;
+    add_stop_class(tx)?;
+    tx.execute_batch(ASK_INDEXES)?;
     Ok(())
+}
+
+/// The table gained its stop class after the first version was written.
+fn add_stop_class(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    let has_class: bool = tx.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('gate_asks') WHERE name = 'stop_class'",
+        [],
+        |r| r.get::<_, i64>(0).map(|n| n > 0),
+    )?;
+    if !has_class {
+        tx.execute("ALTER TABLE gate_asks ADD COLUMN stop_class TEXT", [])?;
+    }
+    Ok(())
+}
+
+/// One-time: a table made before stops existed refuses the `stop` channel in its check. Rebuild
+/// it under the new definition, keeping every row and index. Safe to run on any table: one that
+/// already names `stop` is left alone.
+pub fn allow_stop_channel(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    let sql: String = tx
+        .query_row(
+            "SELECT COALESCE(sql, '') FROM sqlite_master WHERE type = 'table' AND name = 'gate_asks'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or_default();
+    if sql.is_empty() || sql.contains("'stop'") {
+        return Ok(());
+    }
+    add_stop_class(tx)?;
+    tx.execute_batch(&format!(
+        "{}
+         INSERT INTO gate_asks_rebuilt ({ASK_COLUMNS}) SELECT {ASK_COLUMNS} FROM gate_asks;
+         DROP TABLE gate_asks;
+         ALTER TABLE gate_asks_rebuilt RENAME TO gate_asks;
+         {ASK_INDEXES}",
+        asks_ddl("gate_asks_rebuilt")
+    ))
 }
 
 /// Whose chat this is, falling back to the machine's current person, then to none. The profiles
@@ -182,6 +261,10 @@ pub struct GateAsk {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub review_note: Option<String>,
+    /// For a stop: `blocker`, `limit`, `failure` or `asked`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub stop_class: Option<String>,
 }
 
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<GateAsk> {
@@ -211,13 +294,14 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<GateAsk> {
         answered_at: r.get(21)?,
         review: r.get(22)?,
         review_note: r.get(23)?,
+        stop_class: r.get(24)?,
     })
 }
 
 const COLS: &str = "id, profile_id, chat_id, chat_title, channel, request_ref, asked_at, \
                     question, verdict, pass_reason, decided_by, model, confidence, risk, \
                     reason, choice, brief_json, took_ms, state, answer, \
-                    answered_via, answered_at, review, review_note";
+                    answered_via, answered_at, review, review_note, stop_class";
 
 /// Open a card the gate is holding. One row per (chat, request): a re-request of the same id
 /// answers `false` and writes nothing, so a worker replay cannot stack rows.
@@ -250,6 +334,158 @@ pub fn open_ask(
             card_json
         ],
     )? > 0)
+}
+
+/// Open a turn end the stop judge is holding: one row per (chat, run), so a replay stacks
+/// nothing. False when the run already has its row.
+pub fn open_stop_ask(
+    tx: &Transaction<'_>,
+    id: &str,
+    profile_id: &str,
+    chat_id: &str,
+    chat_title: &str,
+    run_id: &str,
+    now: i64,
+) -> rusqlite::Result<bool> {
+    Ok(tx.execute(
+        "INSERT INTO gate_asks
+             (id, profile_id, chat_id, chat_title, channel, request_ref, asked_at,
+              verdict, state)
+         VALUES (?1, ?2, ?3, ?4, 'stop', ?5, ?6, 'checking', 'open')
+         ON CONFLICT(chat_id, request_ref) DO NOTHING",
+        params![id, profile_id, chat_id, chat_title, run_id, now],
+    )? > 0)
+}
+
+/// What the judge made of one held stop, for the record.
+pub struct StopRecord<'a> {
+    /// `decided` (a nudge), `escalated` (a stop), `passed` (done) or `failed`.
+    pub verdict: &'a str,
+    pub pass_reason: Option<&'a str>,
+    /// Who decided: `claude` after a model's answer, `rule` for the host's own table.
+    pub decided_by: &'a str,
+    pub model: Option<&'a str>,
+    pub confidence: Option<f64>,
+    /// What the chat would have asked.
+    pub question: &'a str,
+    pub reason: Option<&'a str>,
+    /// The default the nudge told it to take.
+    pub choice: Option<&'a str>,
+    pub stop_class: Option<&'a str>,
+    pub took_ms: i64,
+    /// `open`, or `withdrawn` when the verdict never reached the held turn end.
+    pub state: &'a str,
+}
+
+/// Move a checking stop row to its outcome, once. False when another path already settled it.
+pub fn finish_stop_ask(
+    tx: &Transaction<'_>,
+    id: &str,
+    r: &StopRecord<'_>,
+) -> rusqlite::Result<bool> {
+    Ok(tx.execute(
+        "UPDATE gate_asks SET verdict = ?2, pass_reason = ?3, decided_by = ?4, model = ?5,
+                 confidence = ?6, question = ?7, reason = ?8, choice = ?9, stop_class = ?10,
+                 took_ms = ?11, state = ?12
+         WHERE id = ?1 AND verdict = 'checking' AND channel = 'stop'",
+        params![
+            id,
+            r.verdict,
+            r.pass_reason,
+            r.decided_by,
+            r.model,
+            r.confidence,
+            r.question,
+            r.reason,
+            r.choice,
+            r.stop_class,
+            r.took_ms,
+            r.state
+        ],
+    )? > 0)
+}
+
+/// One audit row for a turn end the judge let through without a model, with the reason.
+#[allow(clippy::too_many_arguments)]
+pub fn pass_stop(
+    tx: &Transaction<'_>,
+    id: &str,
+    profile_id: &str,
+    chat_id: &str,
+    chat_title: &str,
+    run_id: &str,
+    why: &str,
+    now: i64,
+) -> rusqlite::Result<()> {
+    if open_stop_ask(tx, id, profile_id, chat_id, chat_title, run_id, now)? {
+        tx.execute(
+            "UPDATE gate_asks SET verdict = 'passed', pass_reason = ?2, decided_by = 'rule'
+             WHERE id = ?1",
+            params![id, why],
+        )?;
+    }
+    Ok(())
+}
+
+/// The kinds of message that are the user's own side of a conversation: they end a run of
+/// nudges. Notes Helm or another chat sent do not.
+const USER_SIDE: &str =
+    "'typed', 'answer', 'remote', 'telegram', 'voice', 'action', 'notification'";
+
+/// A run of nudges older than this starts again.
+pub const CHAIN_MAX_AGE_MS: i64 = 6 * 3_600_000;
+
+/// Where the chat's current run of nudges stands: how many were sent and the last question
+/// one answered. A run ends when the user writes in the chat after it started, or after six
+/// hours; either way it reads as not started.
+pub fn chain(tx: &Transaction<'_>, chat_id: &str, now: i64) -> rusqlite::Result<(i64, String)> {
+    let row: Option<(i64, i64, String)> = tx
+        .query_row(
+            "SELECT started_at, nudges, last_question FROM gate_stop_chains WHERE chat_id = ?1",
+            [chat_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((started, nudges, last)) = row else {
+        return Ok((0, String::new()));
+    };
+    let spoke: bool = tx.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM submissions s
+                            JOIN submission_meta m ON m.submission_id = s.id
+                            WHERE s.chat_id = ?1 AND s.created_at > ?2
+                              AND m.origin IN ({USER_SIDE}))"
+        ),
+        params![chat_id, started],
+        |r| r.get(0),
+    )?;
+    if spoke || now - started > CHAIN_MAX_AGE_MS {
+        end_chain(tx, chat_id)?;
+        return Ok((0, String::new()));
+    }
+    Ok((nudges, last))
+}
+
+/// Count one more nudge, remembering the question it answered.
+pub fn add_nudge(
+    tx: &Transaction<'_>,
+    chat_id: &str,
+    question: &str,
+    now: i64,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO gate_stop_chains (chat_id, started_at, nudges, last_question)
+         VALUES (?1, ?2, 1, ?3)
+         ON CONFLICT(chat_id) DO UPDATE SET nudges = nudges + 1, last_question = ?3",
+        params![chat_id, now, question],
+    )?;
+    Ok(())
+}
+
+/// The run is over: the next stop starts a new count.
+pub fn end_chain(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<()> {
+    tx.execute("DELETE FROM gate_stop_chains WHERE chat_id = ?1", [chat_id])?;
+    Ok(())
 }
 
 /// Move a checking row to its verdict, once. False when another path already settled it.
@@ -448,6 +684,10 @@ pub fn mark_kept(tx: &Transaction<'_>, now: i64) -> rusqlite::Result<usize> {
 /// Rows older than the retention are pruned.
 pub fn prune(tx: &Transaction<'_>, now: i64) -> rusqlite::Result<usize> {
     tx.execute(
+        "DELETE FROM gate_stop_chains WHERE started_at < ?1",
+        [now - CHAIN_MAX_AGE_MS],
+    )?;
+    tx.execute(
         "DELETE FROM gate_asks WHERE asked_at < ?1",
         [now - RETENTION_MS],
     )
@@ -495,6 +735,175 @@ mod tests {
         reg.initializer("gate", init);
         let db = Arc::new(Database::open(&dir.path().join("t.db"), &reg).unwrap());
         (dir, db)
+    }
+
+    /// The table as it was before stops existed: no `stop` channel and no stop class.
+    const OLD_TABLE: &str = "DROP TABLE gate_asks;
+        CREATE TABLE gate_asks (
+             id TEXT PRIMARY KEY, profile_id TEXT NOT NULL DEFAULT '', chat_id TEXT NOT NULL,
+             chat_title TEXT NOT NULL DEFAULT '',
+             channel TEXT NOT NULL
+                 CHECK (channel IN ('question', 'plan', 'flag', 'telegram_ask', 'board_pick')),
+             request_ref TEXT NOT NULL, asked_at INTEGER NOT NULL,
+             question TEXT NOT NULL DEFAULT '', question_json TEXT NOT NULL DEFAULT '',
+             verdict TEXT NOT NULL
+                 CHECK (verdict IN ('checking', 'decided', 'escalated', 'failed', 'passed')),
+             pass_reason TEXT, decided_by TEXT, model TEXT, confidence REAL, risk TEXT,
+             reason TEXT, choice TEXT, brief_json TEXT, took_ms INTEGER,
+             state TEXT NOT NULL
+                 CHECK (state IN ('open', 'answered', 'parked', 'withdrawn', 'kept',
+                                  'vetoed', 'expired')),
+             answer TEXT, answered_via TEXT, answered_at INTEGER,
+             review TEXT NOT NULL DEFAULT 'pending', review_note TEXT
+         );
+         CREATE UNIQUE INDEX gate_asks_ref ON gate_asks(chat_id, request_ref);
+         INSERT INTO gate_asks (id, chat_id, channel, request_ref, asked_at, question, verdict, state, choice, review)
+             VALUES ('old1', 'c1', 'question', 'r1', 1799999999990, 'Which file?', 'decided', 'open', 'a.txt', 'fine'),
+                    ('old2', 'c1', 'question', 'r2', 1799999999991, 'Which dir?', 'escalated', 'open', NULL, 'pending');";
+
+    #[test]
+    fn stops_have_their_own_rows_runs_and_a_table_that_can_hold_them() {
+        let (_dir, db) = env();
+        let chat = db
+            .write(|tx| helm_chats::store::create_chat(tx, "C:/w", None, None, T0))
+            .unwrap();
+        // A table made before stops existed keeps every row and index through the rebuild,
+        // and then takes a stop; one that is already current is left alone.
+        db.write(|tx| tx.execute_batch(OLD_TABLE)).unwrap();
+        assert!(
+            db.write(|tx| open_stop_ask(tx, "s0", "", "c1", "t", "run-0", T0))
+                .is_err(),
+            "the old table refuses a stop"
+        );
+        db.write(allow_stop_channel).unwrap();
+        let after = db
+            .snapshot(|tx| list(tx, "", "all", "", 50, T0 + 10))
+            .unwrap();
+        let kept: Vec<(&str, &str, Option<&str>)> = after
+            .iter()
+            .map(|r| (r.id.as_str(), r.review.as_str(), r.choice.as_deref()))
+            .collect();
+        assert_eq!(
+            kept,
+            [("old2", "pending", None), ("old1", "fine", Some("a.txt"))]
+        );
+        assert!(after.iter().all(|r| r.stop_class.is_none()));
+        // Running both again changes nothing.
+        db.write(init).unwrap();
+        db.write(allow_stop_channel).unwrap();
+        let indexes: i64 = db
+            .snapshot(|tx| {
+                tx.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN
+                     ('gate_asks_ref', 'gate_asks_asked', 'gate_asks_chat', 'gate_asks_review')",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(indexes, 4);
+
+        // A stop is one row per run, and its outcome is kept once.
+        assert!(db
+            .write(|tx| open_stop_ask(tx, "s1", "", &chat, "Fix it", "run-1", T0))
+            .unwrap());
+        assert!(
+            !db.write(|tx| open_stop_ask(tx, "s2", "", &chat, "Fix it", "run-1", T0))
+                .unwrap(),
+            "a replay of the same run stacks nothing"
+        );
+        let record = |class: Option<&'static str>, verdict: &'static str| StopRecord {
+            verdict,
+            pass_reason: None,
+            decided_by: "claude",
+            model: Some("sonnet"),
+            confidence: Some(0.9),
+            question: "Start phase two?",
+            reason: Some("it is next"),
+            choice: None,
+            stop_class: class,
+            took_ms: 800,
+            state: "open",
+        };
+        assert!(db
+            .write(|tx| finish_stop_ask(tx, "s1", &record(Some("blocker"), "escalated")))
+            .unwrap());
+        assert!(
+            !db.write(|tx| finish_stop_ask(tx, "s1", &record(None, "decided")))
+                .unwrap(),
+            "the first outcome stands"
+        );
+        let row = db.snapshot(|tx| ask(tx, "s1")).unwrap().unwrap();
+        assert_eq!(
+            (
+                row.channel.as_str(),
+                row.verdict.as_str(),
+                row.stop_class.as_deref()
+            ),
+            ("stop", "escalated", Some("blocker"))
+        );
+        // A stop is a question Helm handed over, so it lists under "asked" and can be marked.
+        let asked = db
+            .snapshot(|tx| list(tx, "", "asked", "", 50, T0 + 10))
+            .unwrap();
+        assert!(asked.iter().any(|r| r.id == "s1"));
+        assert!(mark_fits(&row.verdict, "didnt_need_me"));
+        // A passed turn end is audited without a judgement.
+        db.write(|tx| pass_stop(tx, "s3", "", &chat, "Fix it", "run-3", "limit", T0))
+            .unwrap();
+        let passed = db.snapshot(|tx| ask(tx, "s3")).unwrap().unwrap();
+        assert_eq!(
+            (passed.verdict.as_str(), passed.pass_reason.as_deref()),
+            ("passed", Some("limit"))
+        );
+
+        // The count of nudges in a run: it grows, the user writing ends it, Helm's own notes
+        // do not, and a run left for hours starts again.
+        let add = |q: &str, at: i64| db.write(|tx| add_nudge(tx, &chat, q, at)).unwrap();
+        let state = |at: i64| db.write(|tx| chain(tx, &chat, at)).unwrap();
+        assert_eq!(state(T0), (0, String::new()));
+        add("one", T0);
+        add("two", T0 + 1);
+        assert_eq!(state(T0 + 2), (2, "two".into()));
+        let says = |id: &str, origin: &str, at: i64| {
+            db.write(|tx| {
+                tx.execute(
+                    "INSERT INTO submissions (id, chat_id, text, mode, state, created_at)
+                     VALUES (?1, ?2, 'x', 'prompt', 'complete', ?3)",
+                    params![id, chat, at],
+                )?;
+                tx.execute(
+                    "INSERT INTO submission_meta (submission_id, origin) VALUES (?1, ?2)",
+                    params![id, origin],
+                )
+            })
+            .unwrap();
+        };
+        says("note-a", "app", T0 + 5);
+        says("note-b", "other_chat", T0 + 6);
+        says("note-c", "typed", T0 - 5);
+        assert_eq!(
+            state(T0 + 7).0,
+            2,
+            "notes, and words from before the run, never end it"
+        );
+        says("note-d", "telegram", T0 + 8);
+        assert_eq!(
+            state(T0 + 9),
+            (0, String::new()),
+            "the user writing ends the run"
+        );
+        add("three", T0 + 20);
+        assert_eq!(state(T0 + 21).0, 1);
+        assert_eq!(
+            state(T0 + 20 + CHAIN_MAX_AGE_MS + 1).0,
+            0,
+            "an old run starts again"
+        );
+        add("four", T0 + 30);
+        db.write(|tx| prune(tx, T0 + 30 + CHAIN_MAX_AGE_MS + 1))
+            .unwrap();
+        assert_eq!(state(T0 + 31).0, 0);
     }
 
     #[test]

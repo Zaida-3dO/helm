@@ -62,6 +62,10 @@
 .sb-root .sb-act,
 .sb-root .sb-toggle,
 .sb-root .sb-children,
+.sb-prompt-error {
+  color: var(--sb-danger, #d46a6a);
+}
+
 .sb-root .sb-error-x {
   display: inline-flex;
   align-items: center;
@@ -978,6 +982,27 @@
 /* Running with no output for a while: the wheel dims (no glyph of its own). */
 .sb-ind[data-stalled='true'] .sb-ind-wheel {
   opacity: 0.5;
+}
+
+/* The live state chip: one short word (or a tool name) beside a running row's wheel. */
+.sb-chip {
+  flex: none;
+  align-self: center;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-right: 5px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--sb-muted);
+  border: 1px solid var(--sb-border, var(--sb-muted));
+  border-radius: 7px;
+  padding: 0 5px;
+}
+
+.sb-chip[data-kind='silent'] {
+  color: var(--warning-text, var(--sb-secondary));
 }
 
 /* A flagged busy row: the 57 px reserve moves from the title to after the flag, so the flag stays

@@ -95,14 +95,25 @@ as `const MY_KEY: PrefKey = PrefKey::classified("myKey");`. An unclassified name
 Write through `helm_core::prefs::set`; never write SQL against `preferences` (a test scans
 every host source file and allows only `prefs/store.rs`).
 
+**A new preference is agent-settable by default.** Classify it `Registry(Base)` and add its entry
+(shape, default, one sentence) to `hosttools/src/settings_options.rs`: chats then change it
+themselves with `app_update_settings`, with the Undo notice, and a test fails until the entry
+exists. Only two other classes exist, and each needs a one-line reason beside it. `High`: the change
+changes what runs, what agents may read or who may reach this PC, so a chat only stages it
+(`app_stage_settings`) and it applies after the user clicks Approve; it still needs its options
+entry, which is how the staged value is checked. `UserOnly`: no tool at all, for the few settings
+that change what approval means, and for secrets. Settings that are not preferences (an extension's
+keys, a file's) are classed in `NAMED` in `hosttools/src/settings_allow.rs`; a test in the app
+crate pins that every key has exactly one class and that every `High` one can be staged.
+
 ### Editor selection for agents
 
 `app_ide_context` (`crates/hosttools/src/ide.rs`) gives an agent the code editor's open file and
 selection. Helm never connects to the editor: the extension in `tools/vscode-editor-context` writes one
 JSON file per VS Code window to `<profile>/ide-context/` (see its README for what it holds and how to
 install it: copy the folder into `.vscode/extensions`, no build). The tool reads those files. It
-answers `available: false` with a reason when the user-only `ideContext` preference (Settings > Chat,
-off by default) is off, or when no file was written or touched in the last two minutes. Selections are cut
+answers `available: false` with a reason when the `ideContext` preference (Settings > Chat; a chat can only stage a change,
+for the user to approve; off by default) is off, or when no file was written or touched in the last two minutes. Selections are cut
 to 12 KiB each and the reply keeps to 40 KiB of selected text.
 
 ## Design decisions
@@ -133,3 +144,25 @@ to 12 KiB each and the reply keeps to 40 KiB of selected text.
 
 Linux: POSIX modes and `O_NOFOLLOW`, a Unix socket in the profile for the focus signal, and no
 credential store yet (credentials refuse rather than fall back to plaintext).
+
+## When Helm stops: the trail in `diagnostics`
+
+The profile's `diagnostics` folder holds small files that say how the host's last run ended.
+All of them hold numbers, ids and the app version — never message text or tokens — and none of
+them leaves the machine.
+
+| File | What it says |
+|---|---|
+| `host.log` | the host's own log (rolling, one older file kept) |
+| `run.json` | this run: when it started, its pid, the version. An orderly end adds an `exit` line with the time and the reason (user quit, update restart, sign-out or shutdown). A record without that line when the next run starts means the run before was cut short |
+| `heartbeat.json` | rewritten every 45 s while the app runs: the time, pid, uptime and how many chats were working — it pins the moment of a silent death to about a minute |
+| `unclean.json` | written at a start that follows a cut-short run: the previous run's record and its last heartbeat, kept together |
+| `host-gone.log` | the workers' side: each worker appends one line when its host's stdin closes without a shutdown — an outside kill, seen from the workers (512 KiB cap, one older file) |
+| `crash-<time>.dmp` | on a native fault (Windows only): the smallest kind of crash dump — thread stacks and the module list. It holds the process's memory at that moment (that is its purpose), so it stays here, rolling, three newest kept |
+| `ui-process.log` | one line per web view fault: the page stopped answering (the watchdog reloads it), or WebView2 reported a failed process, with what was done about it |
+
+A panic on any thread is written to `host.log` with its backtrace. A command that names the
+app's own executable, or ends processes by image name rather than by pid, gets a line in
+`host.log` from the landing guard (noted, never blocked). Start-up after an unclean end logs
+`previous run ended without a clean exit` with the last heartbeat time and the previous
+version.

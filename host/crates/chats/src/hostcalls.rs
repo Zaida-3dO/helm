@@ -173,6 +173,10 @@ pub(crate) fn launch(
         web_tools,
         ..keys
     };
+    sh.launched_keys
+        .lock()
+        .unwrap()
+        .insert(chat_id.to_owned(), keys);
     let tools = serde_json::to_value(seam.tools.registry().for_launch(&keys)).ok()?;
     Some(crate::runtime::HostLaunch {
         tools,
@@ -196,6 +200,12 @@ pub(crate) fn launch_keys(tx: &rusqlite::Connection) -> helm_hosttools::LaunchKe
         projects_mode: truthy(helm_core::prefs::read(tx, "projectsMode")),
         all_settings: truthy(helm_core::prefs::read(tx, "agentSettingsAll")),
         ..Default::default()
+    }
+}
+
+impl helm_hosttools::LaunchRecord for crate::ChatRuntime {
+    fn keys_of(&self, chat_id: &str) -> Option<helm_hosttools::LaunchKeys> {
+        self.sh.launched_keys.lock().unwrap().get(chat_id).copied()
     }
 }
 

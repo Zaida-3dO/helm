@@ -8,4 +8,8 @@ export type GateAsk = { id: string, profileId: string, chatId: string, chatTitle
 /**
  * The question as asked, in one line.
  */
-question: string, verdict: string, passReason?: string, decidedBy?: string, model?: string, confidence?: number, risk?: string, reason?: string, choice?: string, brief?: GateBrief, tookMs?: number | null, state: string, answer?: string, answeredVia?: string, answeredAt?: number | null, review: string, reviewNote?: string, };
+question: string, verdict: string, passReason?: string, decidedBy?: string, model?: string, confidence?: number, risk?: string, reason?: string, choice?: string, brief?: GateBrief, tookMs?: number | null, state: string, answer?: string, answeredVia?: string, answeredAt?: number | null, review: string, reviewNote?: string, 
+/**
+ * For a stop: `blocker`, `limit`, `failure` or `asked`.
+ */
+stopClass?: string, };

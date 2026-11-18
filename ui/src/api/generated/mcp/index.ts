@@ -2,6 +2,9 @@
 // regenerate with `HELM_UPDATE_BINDINGS=1 cargo test -p helm-mcp bindings_are_current`.
 export type { AgentServerView } from './AgentServerView.ts';
 export type { AgentSnapshot } from './AgentSnapshot.ts';
+export type { DoctorArgs } from './DoctorArgs.ts';
+export type { DoctorCheck } from './DoctorCheck.ts';
+export type { DoctorOutcome } from './DoctorOutcome.ts';
 export type { GoogleAccount } from './GoogleAccount.ts';
 export type { GoogleAccountList } from './GoogleAccountList.ts';
 export type { GoogleClientState } from './GoogleClientState.ts';

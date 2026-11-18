@@ -36,25 +36,33 @@ use std::time::{Duration, Instant};
 
 /// The limits, and the signal a waiting judgement listens for when a running one ends.
 #[derive(Default)]
-struct Gate {
+pub(crate) struct Gate {
     limits: Mutex<Limiter>,
     freed: Condvar,
 }
 
 impl Gate {
-    fn lock(&self) -> MutexGuard<'_, Limiter> {
+    /// A gate with limits of its own.
+    pub(crate) fn with_caps(caps: route::Caps) -> Self {
+        Self {
+            limits: Mutex::new(Limiter::with_caps(caps)),
+            freed: Condvar::new(),
+        }
+    }
+
+    pub(crate) fn lock(&self) -> MutexGuard<'_, Limiter> {
         self.limits.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Give a slot back and wake the judgements waiting for one.
-    fn release(&self, slot: Slot) {
+    pub(crate) fn release(&self, slot: Slot) {
         self.lock().release(slot);
         self.freed.notify_all();
     }
 
     /// Wait, at most `within`, until the job in `slot` may run. False when it never could:
     /// the slot is still the caller's to release.
-    fn wait_to_run(&self, slot: Slot, within: Duration) -> bool {
+    pub(crate) fn wait_to_run(&self, slot: Slot, within: Duration) -> bool {
         let deadline = Instant::now() + within;
         let mut l = self.lock();
         loop {
@@ -145,15 +153,12 @@ impl GateService {
             .map_err(|e| ApiError::internal(e.to_string()))
     }
 
-    /// One record of the current person (or of no one); another person's reads as missing.
+    /// One record, whoever's it is: the list shows the current person's rows first, but any
+    /// row can be marked or changed by id.
     fn own(&self, id: &str) -> Result<GateAsk, ApiError> {
-        let (row, profile) = self
-            .db
-            .snapshot(|tx| {
-                Ok::<_, rusqlite::Error>((store::ask(tx, id)?, store::active_profile(tx)))
-            })
-            .map_err(|e| ApiError::internal(e.to_string()))?;
-        row.filter(|r| r.profile_id.is_empty() || r.profile_id == profile)
+        self.db
+            .snapshot(|tx| store::ask(tx, id))
+            .map_err(|e| ApiError::internal(e.to_string()))?
             .ok_or_else(|| ApiError::new("not_found", "No gatekeeper record has that id."))
     }
 
@@ -973,13 +978,32 @@ mod tests {
         assert!(rows[0].0.contains("\u{ab}Pay\u{bb}"));
         assert!(rows[0].0.contains("\u{ab}Use the slower plan\u{bb}"));
         assert!(rows[0].0.contains("never by rewriting history"));
+        // The nudge a stop sends is a note from Helm as well: never the user's own words.
+        let nudge_id = uuid::Uuid::new_v4().to_string();
+        let _ = crate::stops::Host::send(
+            &svc.rt,
+            &chat,
+            &nudge_id,
+            &crate::stoproute::nudge_text(&crate::stoproute::Nudge::UseLocal),
+        );
+        let origin: String = db
+            .snapshot(|tx| {
+                tx.query_row(
+                    "SELECT origin FROM submission_meta WHERE submission_id = ?1",
+                    [&nudge_id],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(origin, "app", "a nudge is never typed");
         // The decided row left the review list and remembers the new answer.
         let row = svc.get("a1").unwrap().unwrap();
         assert_eq!(row.answer.as_deref(), Some("Use the slower plan"));
         // A second change of the same record is refused: the first closed it.
         assert!(svc.change_answer("a1", "again").is_err());
 
-        // Another person's record is out of reach: not listed, not markable, not changeable.
+        // Another person's record is not in the list (it shows the current person's rows), but
+        // it can be marked and changed by id like any other.
         db.write(|tx| {
             let asked = helm_core::now_ms();
             crate::store::open_ask(tx, "b1", "p1", &chat, "t", "req-2", "Which?", "{}", asked)?;
@@ -1013,16 +1037,10 @@ mod tests {
         );
         assert!(
             listed.iter().all(|r| r.id != "b1"),
-            "another person's never does"
+            "another person's is left out of the list"
         );
-        assert_eq!(
-            svc.review("b1", "fine", None).unwrap_err().code,
-            "not_found"
-        );
-        assert_eq!(
-            svc.change_answer("b1", "Right").unwrap_err().code,
-            "not_found"
-        );
+        assert_eq!(svc.review("b1", "fine", None).unwrap().review, "fine");
+        assert!(svc.change_answer("b1", "Right").is_ok());
         // The same person sees and acts on it.
         db.write(|tx| {
             helm_core::prefs::set_raw(tx, "activeProfile", &json!("p1"))

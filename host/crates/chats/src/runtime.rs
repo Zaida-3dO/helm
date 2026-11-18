@@ -63,6 +63,14 @@ pub struct Limits {
     /// as a normal card (75 s). The gate's own helper timeout is shorter, so it fails quietly
     /// inside this.
     pub gate_deadline: Duration,
+    /// How long the stop judge gets with a held turn end before the actor lets the chat finish as
+    /// usual (75 s). The judge's own helper timeout is shorter, so it fails quietly inside this.
+    pub stop_deadline: Duration,
+    /// Spread for Claude workers that start together (after a restart, say): each start beyond
+    /// the second within a few seconds waits a random part of this much per start already in
+    /// that burst, capped at ten times it. Many Claude Code processes starting at once on one
+    /// sign-in race to refresh its token. Zero turns it off.
+    pub start_stagger: Duration,
 }
 
 impl Default for Limits {
@@ -86,12 +94,22 @@ impl Default for Limits {
                 std::env::var(TEST_GATE_HOLD_ENV).ok().as_deref(),
             )
             .unwrap_or(GATE_HOLD),
+            stop_deadline: STOP_HOLD,
+            start_stagger: Duration::from_millis(400),
         }
     }
 }
 
 /// How long the question gate holds a card by default.
 pub const GATE_HOLD: Duration = Duration::from_secs(75);
+
+/// How long the stop judge holds a turn end by default.
+pub const STOP_HOLD: Duration = Duration::from_secs(75);
+
+/// A turn end held for the stop judge reads as busy to anything watching the chat for 90 s from
+/// when the hold began, so a watcher fires only when the chain of turns really ends, and a hold
+/// a crash left behind cannot keep a chat busy for good.
+pub const STOP_HOLD_BUSY_MS: i64 = 90_000;
 
 /// The test override for the question gate's hold: in debug builds only,
 /// `HELM_TEST_GATE_HOLD_MS` sets [`Limits::gate_deadline`], so an end-to-end check of a hold
@@ -178,6 +196,14 @@ pub struct HostLaunch {
 pub trait WorkerLink: Send + Sync {
     fn send(&self, command: &Value) -> bool;
     fn terminate(&self);
+
+    /// How many processes the worker's kill-group still holds: the worker itself, the CLI it
+    /// runs, and whatever those have started. A number above two means something this chat ran
+    /// (a build, say) is still going even with no tool call open — the silent check reads it.
+    /// `None` when the link cannot say.
+    fn tree_size(&self) -> Option<u32> {
+        None
+    }
 }
 
 pub type Spawned = (Arc<dyn WorkerLink>, mpsc::Receiver<WorkerOutput>);
@@ -240,6 +266,9 @@ impl WorkerLink for ProcessLink {
     }
     fn terminate(&self) {
         self.0.terminate()
+    }
+    fn tree_size(&self) -> Option<u32> {
+        self.0.job().active_processes()
     }
 }
 
@@ -362,6 +391,7 @@ impl Spawner for ProcessSpawner {
         }
         if extras.orchestrator_on {
             claude.subagent_soft_turns = runtime.subagent_turns(true);
+            claude.orchestrator = true;
         }
         claude.fork_session = req.fork_session;
         let worker_dir = PathBuf::from(&self.data_root)
@@ -375,10 +405,12 @@ impl Spawner for ProcessSpawner {
                 crate::hostcalls::sweep_tools_dir(&dir);
                 helm_core::privfs::create_private_dir_all(&dir)
                     .map_err(|e| format!("Helm could not make the host-tool folder: {e}"))?;
-                (
-                    Some(h.tools.clone()),
-                    Some(dir.to_string_lossy().into_owned()),
-                )
+                // The workflow tools are in the chat's own list while Orchestrator is on for it.
+                let mut tools = h.tools.clone();
+                if extras.orchestrator_on {
+                    helm_hosttools::spec::promote_for_orchestrator(&mut tools);
+                }
+                (Some(tools), Some(dir.to_string_lossy().into_owned()))
             }
             None => (None, None),
         };
@@ -607,6 +639,27 @@ pub(crate) struct Live {
     /// known. The mirror of the chat record's `localAhead` (the [`crate::store`] read); set and
     /// cleared by the maintenance tick's check, the first output, and the turn's end.
     pub local_ahead: Option<i64>,
+    /// This chat's turn is held at its start because the server already carries its cap of our
+    /// chats: the place it took in the line (smaller goes first). A chat held here is not working,
+    /// so it does not count against the cap, and the oldest waiter starts first.
+    pub held_at_start: Option<u64>,
+    /// The queue class of this chat's held turn start, while one is held ([`crate::queue`]).
+    /// Lets the chats waiting on the same place order themselves.
+    pub hold_class: Option<crate::queue::QueueClass>,
+    /// Why this chat's turn start waits (`crate::queue` reason code), while it does. The mirror
+    /// of the chat record's `queueReason`.
+    pub hold_reason: Option<&'static str>,
+    /// The queue pushed this chat's held start to the front of its line.
+    pub hold_top: bool,
+}
+
+/// One local model server's load right now: chats with a turn open on it and working, and chats
+/// whose turn is open but waits in the server's queue. See [`ChatRuntime::local_load`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServerLoad {
+    pub server_id: String,
+    pub working: usize,
+    pub queued: usize,
 }
 
 /// What a local server last said about requests waiting on it, and when. Filled only while some
@@ -647,9 +700,15 @@ pub(crate) struct Shared {
     pub host: std::sync::OnceLock<crate::hostcalls::HostSeam>,
     /// AFK's say over interactions and turns ([`crate::seams::AfkPolicy`]), installed once.
     pub afk: std::sync::OnceLock<Arc<dyn crate::seams::AfkPolicy>>,
+    /// A project's startup instructions for a chat's first message ([`crate::seams::StartupSeam`]),
+    /// installed once. Without it no message carries any.
+    pub startup: std::sync::OnceLock<Arc<dyn crate::seams::StartupSeam>>,
     /// The question gate ([`crate::seams::QuestionGate`]), installed once. Without it every card
     /// follows the normal path.
     pub gate: std::sync::OnceLock<Arc<dyn crate::seams::QuestionGate>>,
+    /// The stop judge ([`crate::seams::StopJudge`]), installed once. Without it every clean turn
+    /// end finishes at once.
+    pub stop_judge: std::sync::OnceLock<Arc<dyn crate::seams::StopJudge>>,
     /// The local model servers ([`crate::local::LocalModels`]), installed once.
     pub local: std::sync::OnceLock<crate::local::SharedLocal>,
     /// Per local server: what it last said about requests waiting on it ([`QueueSeen`]).
@@ -657,6 +716,9 @@ pub(crate) struct Shared {
     /// Every worker exit, logged, grouped into incidents, and its crashes remembered for the
     /// outage watch ([`crate::exits`]).
     pub exits: crate::exits::ExitLog,
+    /// The launch keys each chat's worker was last launched with ([`crate::hostcalls::launch`]),
+    /// for `app_help` to teach only the tools that launch lists.
+    pub launched_keys: Mutex<HashMap<String, helm_hosttools::LaunchKeys>>,
 }
 
 /// The runtime service.
@@ -694,10 +756,13 @@ impl ChatRuntime {
                 autocomplete: Mutex::new(Default::default()),
                 host: std::sync::OnceLock::new(),
                 afk: std::sync::OnceLock::new(),
+                startup: std::sync::OnceLock::new(),
                 gate: std::sync::OnceLock::new(),
+                stop_judge: std::sync::OnceLock::new(),
                 local: std::sync::OnceLock::new(),
                 local_queue: Mutex::new(HashMap::new()),
                 exits: crate::exits::ExitLog::new(&cfg_profile),
+                launched_keys: Mutex::new(HashMap::new()),
             }),
         };
         rt.start_tick();
@@ -739,6 +804,9 @@ impl ChatRuntime {
                     .snapshot(|tx| Ok::<_, rusqlite::Error>(stall_minutes(tx)))
                     .unwrap_or(DEFAULT_STALL_MINUTES);
                 let after = sh.cfg.limits.stall_unit * minutes;
+                // A local server answers one request at a time, so a local chat's gaps between
+                // outputs are longer by nature: it gets twice the quiet before a silent.
+                let local_after = after * 2;
                 let busy: Vec<ActorHandle> = sh
                     .actors
                     .lock()
@@ -748,13 +816,41 @@ impl ChatRuntime {
                     .cloned()
                     .collect();
                 for h in busy {
-                    let _ = enqueue(&h.tx, Cmd::StallCheck { after });
+                    let _ = enqueue(&h.tx, Cmd::StallCheck { after, local_after });
                 }
                 crate::attention::publish(&sh);
                 crate::triage::pass(&sh);
                 ChatRuntime { sh: sh.clone() }.apply_send_behavior();
             }
         });
+    }
+
+    /// What each local model server is busy with right now: how many of this PC's chats have a
+    /// turn open on it, and how many of those wait in the server's queue. Read from the actors'
+    /// live state — it asks the servers nothing and starts nothing, so a coordinator can check
+    /// the load cheaply before opening another local chat.
+    pub fn local_load(&self) -> Vec<ServerLoad> {
+        let mut per: std::collections::BTreeMap<String, ServerLoad> = Default::default();
+        for h in self.sh.actors.lock().unwrap().values() {
+            let live = h.live.lock().unwrap();
+            let Some(server) = live.server_id.as_ref() else {
+                continue;
+            };
+            if !live.thread.status.is_busy() {
+                continue;
+            }
+            let e = per.entry(server.clone()).or_insert_with(|| ServerLoad {
+                server_id: server.clone(),
+                working: 0,
+                queued: 0,
+            });
+            if live.local_ahead.is_some() {
+                e.queued += 1;
+            } else {
+                e.working += 1;
+            }
+        }
+        per.into_values().collect()
     }
 
     /// Hand every chat the stored send behaviour. An actor whose worker was
@@ -1016,6 +1112,14 @@ impl ChatRuntime {
         }
     }
 
+    /// Install the project startup seam (once). Without it no first message carries startup
+    /// instructions.
+    pub fn set_startup_seam(&self, s: Arc<dyn crate::seams::StartupSeam>) {
+        if self.sh.startup.set(s).is_err() {
+            log::warn!("a startup seam is already installed; keeping the first");
+        }
+    }
+
     /// Install the question gate (once). Without it no card is ever held.
     pub fn set_question_gate(&self, g: Arc<dyn crate::seams::QuestionGate>) {
         if self.sh.gate.set(g).is_err() {
@@ -1047,19 +1151,48 @@ impl ChatRuntime {
             outcome: Box::new(outcome),
             reply: reply_tx,
         };
-        // The caller is a plain thread, so a full channel gets a short wait rather than losing
-        // the verdict (the card would otherwise sit until its hold ran out).
-        let deadline = Instant::now() + GATE_VERDICT_RETRY;
-        let mut cmd = cmd;
-        loop {
-            match enqueue(&tx, cmd) {
-                Ok(()) => break,
-                Err(_) if tx.is_closed() || Instant::now() >= deadline => return false,
-                Err(c) => cmd = c,
-            }
-            std::thread::sleep(SEND_SOON_POLL);
+        if !enqueue_blocking(&tx, cmd) {
+            return false;
         }
         // The actor answers from its own loop, which never waits on the caller.
+        reply_rx.recv().unwrap_or(false)
+    }
+
+    /// Install the stop judge (once). Without it no turn end is ever held.
+    pub fn set_stop_judge(&self, j: Arc<dyn crate::seams::StopJudge>) {
+        if self.sh.stop_judge.set(j).is_err() {
+            log::warn!("a stop judge is already installed; keeping the first");
+        }
+    }
+
+    /// Answer for a turn end the judge is holding ([`crate::seams::StopOffer::Hold`]). The
+    /// command goes to the chat's actor, which owns the hold: a verdict that arrives after the
+    /// hold ended (a message was sent, the deadline passed, the chat was archived) or for an
+    /// earlier turn finds nothing and answers false, and the caller then sends nothing. True when
+    /// the verdict was applied. Blocks the calling thread until the actor answers, so call it from
+    /// a plain or blocking thread, never from an actor.
+    pub fn stop_verdict(
+        &self,
+        chat_id: &str,
+        run_id: &str,
+        outcome: crate::seams::StopOutcome,
+    ) -> bool {
+        if self.sh.shutting_down.load(Ordering::SeqCst) {
+            return false;
+        }
+        let tx = match self.sh.actors.lock().unwrap().get(chat_id) {
+            Some(h) if !h.tx.is_closed() => h.tx.clone(),
+            _ => return false,
+        };
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        let cmd = Cmd::StopVerdict {
+            run_id: run_id.to_owned(),
+            outcome,
+            reply: reply_tx,
+        };
+        if !enqueue_blocking(&tx, cmd) {
+            return false;
+        }
         reply_rx.recv().unwrap_or(false)
     }
 
@@ -1145,6 +1278,26 @@ impl ChatRuntime {
         let map = self.sh.actors.lock().unwrap();
         map.get(chat_id)
             .map(|h| h.live.lock().unwrap().thread.clone())
+    }
+
+    /// Whether this chat has a turn open that is really under way: busy, and not just waiting at
+    /// its start in the queue.
+    pub(crate) fn turn_under_way(&self, chat_id: &str) -> bool {
+        let map = self.sh.actors.lock().unwrap();
+        map.get(chat_id).is_some_and(|h| {
+            let l = h.live.lock().unwrap();
+            l.thread.status.is_busy() && l.held_at_start.is_none()
+        })
+    }
+
+    /// Tell a waiting chat's actor, at once, that the queue pushed it to the front (or took it
+    /// back): the other chats' gates read this copy, and waiting for the actor's own next look
+    /// at the queue would let an older send slip in ahead of it.
+    pub(crate) fn set_hold_top(&self, chat_id: &str, top: bool) {
+        let map = self.sh.actors.lock().unwrap();
+        if let Some(h) = map.get(chat_id) {
+            h.live.lock().unwrap().hold_top = top;
+        }
     }
 
     /// Ask the actor something and wait for the answer (from a blocking op or async code).
@@ -1434,8 +1587,23 @@ pub(crate) async fn send_soon(
 
 const SEND_SOON_POLL: Duration = Duration::from_millis(25);
 
-/// How long a gate verdict keeps trying a full actor channel before it is given up.
+/// How long a gate or stop verdict keeps trying a full actor channel before it is given up.
 const GATE_VERDICT_RETRY: Duration = Duration::from_secs(2);
+
+/// Hand a command to an actor from a plain thread. A full channel gets a short wait rather than
+/// losing a verdict (the card or the held turn end would otherwise sit until its hold ran out).
+/// False when the actor is gone or never took it.
+fn enqueue_blocking(tx: &mpsc::Sender<Cmd>, mut cmd: Cmd) -> bool {
+    let deadline = Instant::now() + GATE_VERDICT_RETRY;
+    loop {
+        match enqueue(tx, cmd) {
+            Ok(()) => return true,
+            Err(_) if tx.is_closed() || Instant::now() >= deadline => return false,
+            Err(c) => cmd = c,
+        }
+        std::thread::sleep(SEND_SOON_POLL);
+    }
+}
 
 pub const DEFAULT_STALL_MINUTES: u32 = 5;
 

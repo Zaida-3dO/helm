@@ -73,9 +73,21 @@ pub(crate) enum Cmd {
     Archived,
     /// The chat was restored while a worker was still winding down from its archive.
     Restored,
-    /// The maintenance tick: mark the chat stalled if it has had no output for `after`.
+    /// The queue moved this chat's held start to a new place in line (the row is already
+    /// written; this keeps the actor's own place in step with it).
+    QueueSeq(u64),
+    /// The queue cancelled this chat's held start: the waiting sends go back to their owners,
+    /// the hold and its record go (a hand park stays when `keep_park` says so).
+    QueueCancel {
+        /// The chat stands parked by hand: what waits goes back, the park stays.
+        keep_park: bool,
+    },
+    /// The maintenance tick: refresh the chat's live state, and mark it stalled if it has had
+    /// no output for `after` (longer for a chat on a local model server, which answers one
+    /// request at a time and gaps between outputs in between).
     StallCheck {
         after: std::time::Duration,
+        local_after: std::time::Duration,
     },
     /// Apply the staged edit once the worker has closed, then send its submission.
     ApplyEdit,
@@ -108,6 +120,14 @@ pub(crate) enum Cmd {
     GateVerdict {
         interaction_id: String,
         outcome: Box<crate::seams::GateOutcome>,
+        reply: std::sync::mpsc::Sender<bool>,
+    },
+    /// The stop judge answered for the held end of the turn `run_id` names. The actor owns the
+    /// hold, so every race (a message was sent, the deadline passed, a later turn began) settles
+    /// here; `reply` gets whether the verdict was applied.
+    StopVerdict {
+        run_id: String,
+        outcome: crate::seams::StopOutcome,
         reply: std::sync::mpsc::Sender<bool>,
     },
     /// A local chat's model is being made ready for the turn `token` names: a line to show.
@@ -165,6 +185,14 @@ enum Timer {
     WaitLimit(String),
     /// A held question-card's hold ends: the card becomes a normal card. One per held card.
     GateDeadline(String),
+    /// A held turn end's check ends: the chat finishes as it would have with no judge.
+    StopCheck,
+}
+
+/// A turn end the stop judge is holding: the turn's finish is not announced until the judge
+/// answers, a message is sent, or the hold runs out.
+struct StopHold {
+    run_id: String,
 }
 
 struct LiveMsg {
@@ -211,6 +239,30 @@ struct Actor {
     /// The submission that opened the current turn. Until Claude has read it, a worker that dies
     /// is not a crash to carry on from: Claude never saw what it would be continuing.
     turn_opener: Option<String>,
+    /// The submission that opened the current turn, for the turn's whole life ([`Self::turn_opener`]
+    /// is only its life before Claude has read it). A provider switch that stops a quiet turn to
+    /// restart it on the new model sends this one again.
+    turn_opened_by: Option<String>,
+    /// When a note about this chat going silent last reached its parent: one per hour at most.
+    silent_noted_at: Option<Instant>,
+    /// This child's last turn end was already reported to its parent as unfinished; set again
+    /// only after the chat works once more ([`crate::childnote`]).
+    unreported_noted: bool,
+    /// When those notes reached the parent in the last hour: a child that never reports costs
+    /// its parent at most [`UNREPORTED_NOTES_PER_HOUR`] turns an hour, however often it is nudged.
+    unreported_at: Vec<Instant>,
+    /// The open turn has produced something: an assistant message began or a tool call started.
+    /// A turn that has acted is never opened again by a provider switch (its side effects would
+    /// repeat); the change waits for the next idle point instead.
+    turn_acted: bool,
+    /// How many processes the worker's kill-group held when the worker was ready and when the
+    /// turn opened, whichever is larger: what a chat's own helpers (native tool servers, a
+    /// language server) keep running all the time. Only a tree grown past it means something the
+    /// chat started is still working.
+    tree_base: u32,
+    /// A provider switch stopped this turn to restart it: the submission to open the next turn
+    /// once the stop has settled, on a fresh worker for the new model.
+    switch_restart: Option<String>,
     stopping: Option<StopState>,
     /// A Stop ended this run, so an exit before the next run is one Helm asked for, even once
     /// `stopping` has been settled (a worker that ends itself after an interrupt).
@@ -234,6 +286,8 @@ struct Actor {
     /// The chat is archived: a late event from the dying worker changes nothing the user sees
     /// (no completion, no unread mark) and nothing is sent.
     archived: bool,
+    /// The held end of the last turn, while the stop judge decides about it.
+    stop_hold: Option<StopHold>,
     finished: bool,
     /// The last worker output (or turn start).
     last_output: Instant,
@@ -272,6 +326,10 @@ struct Actor {
     me: mpsc::WeakSender<Cmd>,
     /// A local chat's turn waiting for its model to be made ready.
     prepare: Option<Prepare>,
+    /// A local chat's turn held at its very start because the server already carries the cap
+    /// of working chats: the opening submission and those held behind it. The maintenance tick
+    /// reopens it when a place frees.
+    start_wait: Option<(String, Vec<String>)>,
     prepare_count: u64,
     /// The submission that is opening its turn now that its preparation is done.
     opening: Option<String>,
@@ -281,6 +339,9 @@ struct Actor {
     launched_local: Option<(String, String)>,
     /// The prompt carrying a message fork's saved history, until the worker answers it.
     carry_in_flight: Option<String>,
+    /// The live state the maintenance tick last published (the `chat_activity.state` mirror);
+    /// only this actor writes it, so the cache needs no lock.
+    state: Option<crate::types::ChatState>,
     /// A model warm-up ran (or was attempted) since this chat's last turn started; typing does
     /// not start another until one does.
     warmed: bool,
@@ -325,8 +386,17 @@ fn recent_reading(
 ) -> Option<crate::local::QueueInfo> {
     good_at.filter(|t| t.elapsed() < QUEUE_KEEP).and(info)
 }
+/// The most notes an unreported child's turn ends may send its parent in an hour.
+const UNREPORTED_NOTES_PER_HOUR: usize = 3;
 /// Typing does not start a second model warm-up within this long of the last one.
 const WARM_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(300);
+/// The soft cap of this PC's chats a local model server carries before new local turns queue at
+/// their start rather than piling onto the server (the stored `localChatCap` overrides; 0 is off).
+/// A local server answers one request at a time, so this is how many chats can be "working"
+/// there at once; the rest wait, visibly, with their place in line.
+const DEFAULT_LOCAL_CAP: u64 = 3;
+/// The least time between two notes from one child to its parent about the child being silent.
+const SILENT_NOTE_GAP: std::time::Duration = std::time::Duration::from_secs(3600);
 
 pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
     let (tx, rx) = mpsc::channel(64);
@@ -356,6 +426,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
             subagents_running: 0,
             compacting: None,
             loading: None,
+            stop_check: None,
             capabilities: Capabilities::default(),
             send_behavior: crate::send_behavior::HOME_DEFAULTS,
             revision: 0,
@@ -371,6 +442,10 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         server_id: None,
         turn_opened_ms: None,
         local_ahead: None,
+        held_at_start: None,
+        hold_class: None,
+        hold_reason: None,
+        hold_top: false,
     }));
     let actor = Actor {
         sh: sh.clone(),
@@ -386,6 +461,13 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         timers: Vec::new(),
         run_id: None,
         turn_opener: None,
+        turn_opened_by: None,
+        turn_acted: false,
+        tree_base: 2,
+        silent_noted_at: None,
+        unreported_noted: false,
+        unreported_at: Vec::new(),
+        switch_restart: None,
         stopping: None,
         stop_ended: false,
         stream: HashMap::new(),
@@ -401,6 +483,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         host_calls: HashMap::new(),
         retiring: false,
         archived: false,
+        stop_hold: None,
         finished: false,
         last_output: Instant::now(),
         activity_written: None,
@@ -417,11 +500,13 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         worker_started: None,
         me: tx.downgrade(),
         prepare: None,
+        start_wait: None,
         prepare_count: 0,
         opening: None,
         prepared: None,
         launched_local: None,
         carry_in_flight: None,
+        state: None,
         warmed: false,
         last_warm: None,
     };
@@ -511,6 +596,8 @@ impl Actor {
                 break;
             }
         }
+        // However the actor ended, a turn end it was holding still finishes (once).
+        self.release_stop_hold(true);
         self.sh.actors.lock().unwrap().remove(&self.chat_id);
         // Its blocking requests (if any) leave the waiting tracker with it.
         crate::attention::publish(&self.sh);
@@ -760,6 +847,8 @@ impl Actor {
             } else {
                 live.turn_opened_ms = None;
                 live.server_id = None;
+                live.held_at_start = None;
+                live.hold_class = None;
                 // The waiting flag belongs to the turn; it is gone with it.
                 live.local_ahead.take()
             }
@@ -768,10 +857,24 @@ impl Actor {
             let id = self.chat_id.clone();
             self.write(|t| {
                 t.execute(
-                    "UPDATE chat_activity SET local_ahead = NULL WHERE chat_id = ?1",
+                    "UPDATE chat_activity SET local_ahead = NULL, queue_reason = NULL WHERE chat_id = ?1",
                     [&id],
                 )
             });
+        }
+        if !busy {
+            // A turn start that was held is over the moment a turn ends or settles: the hold
+            // row goes with it (a hand-parked chat keeps its row, for the next start to obey).
+            if self.live.lock().unwrap().hold_reason.take().is_some() {
+                let id = self.chat_id.clone();
+                self.write(|t| {
+                    t.execute(
+                        "UPDATE chat_activity SET queue_reason = NULL WHERE chat_id = ?1",
+                        [&id],
+                    )
+                });
+            }
+            crate::queue::clear_auto_hold(&self.sh.db, &self.chat_id);
         }
         if !status.is_busy() && self.live.lock().unwrap().stalled {
             // A turn that ends is no longer stalled.
@@ -1029,6 +1132,125 @@ impl Actor {
         true
     }
 
+    /// A clean turn end, offered to the stop judge. True when the judge holds it: the turn's
+    /// finish (the completion row, its event and the "finished" notice) waits until the judge's
+    /// verdict, the next message, or the hold ending. Never offered: a stop the user or the
+    /// governor asked for, an interrupted turn, an archived or retiring chat, a quit, a chat with
+    /// messages waiting to go out, or one whose background agents still run (it is not over).
+    fn stop_hold_offer(&mut self, run: Option<String>) -> bool {
+        let Some(judge) = self.sh.stop_judge.get().cloned() else {
+            return false;
+        };
+        let Some(run_id) = run else {
+            return false;
+        };
+        if self.archived
+            || self.retiring
+            || self.finished
+            || self.agents_running()
+            || self
+                .sh
+                .shutting_down
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return false;
+        }
+        let chat = self.chat_id.clone();
+        let waiting: i64 = self
+            .sh
+            .db
+            .snapshot(|t| {
+                t.query_row(
+                    "SELECT count(*) FROM submissions
+                     WHERE chat_id = ?1 AND state IN ('saved', 'dispatching')",
+                    [&chat],
+                    |r| r.get(0),
+                )
+            })
+            // A chat that cannot be read is not judged: it finishes as it always did.
+            .unwrap_or(1);
+        if waiting > 0 {
+            return false;
+        }
+        let ended_at = now();
+        let end = crate::seams::TurnEnd {
+            run_id: run_id.clone(),
+            ended_at,
+        };
+        if judge.offer(&self.chat_id, &end) != crate::seams::StopOffer::Hold {
+            return false;
+        }
+        self.write(|t| {
+            t.execute(
+                "INSERT INTO chat_stop_holds(chat_id, since) VALUES (?1, ?2)
+                 ON CONFLICT(chat_id) DO UPDATE SET since = excluded.since",
+                (&chat, ended_at),
+            )
+        });
+        self.stop_hold = Some(StopHold { run_id });
+        self.live.lock().unwrap().thread.stop_check = Some(StopCheck {
+            started_at: ended_at,
+        });
+        self.add_timer(self.sh.cfg.limits.stop_deadline, Timer::StopCheck);
+        self.emit_thread();
+        true
+    }
+
+    /// End the hold on the last turn's finish, whichever way it ended: the verdict, the
+    /// deadline, a message, an archive, a stop, or the worker leaving. With `complete` the
+    /// finish the hold deferred is written and announced now (exactly once); without it (the
+    /// chat is carrying on) it is dropped. False when nothing was held.
+    fn release_stop_hold(&mut self, complete: bool) -> bool {
+        if self.stop_hold.take().is_none() {
+            return false;
+        }
+        self.clear_timer(|t| matches!(t, Timer::StopCheck));
+        let chat = self.chat_id.clone();
+        self.write(|t| t.execute("DELETE FROM chat_stop_holds WHERE chat_id = ?1", [&chat]));
+        self.live.lock().unwrap().thread.stop_check = None;
+        self.emit_thread();
+        if complete {
+            self.complete_turn();
+            self.notify_parent_unreported();
+        }
+        true
+    }
+
+    /// Apply the stop judge's verdict to the held turn end of run `run_id`. A verdict for a hold
+    /// that is gone (released by a message, the deadline, an archive) or for an earlier turn is
+    /// refused, and the judge then sends nothing.
+    fn stop_verdict(&mut self, run_id: &str, outcome: crate::seams::StopOutcome) -> bool {
+        if self.stop_hold.as_ref().map(|h| h.run_id.as_str()) != Some(run_id) {
+            return false;
+        }
+        use crate::seams::{StopKind, StopOutcome};
+        match outcome {
+            StopOutcome::Continue => {
+                self.release_stop_hold(false);
+            }
+            StopOutcome::Stop { kind, line } => {
+                let kind = match kind {
+                    StopKind::Blocker => ContextKind::StopBlocker,
+                    StopKind::Limit => ContextKind::StopLimit,
+                    StopKind::Failure => ContextKind::StopFailure,
+                    StopKind::Asked => ContextKind::StopAsked,
+                };
+                self.context_row(kind, &line);
+                self.release_stop_hold(true);
+            }
+            StopOutcome::Done { line } => {
+                if let Some(line) = line.filter(|l| !l.trim().is_empty()) {
+                    self.context_row(ContextKind::Gatekeeper, &line);
+                }
+                self.release_stop_hold(true);
+            }
+            StopOutcome::Failed => {
+                self.release_stop_hold(true);
+            }
+        }
+        true
+    }
+
     fn context_row(&mut self, kind: ContextKind, text: &str) {
         self.record(Entry::Context(ContextEntry {
             id: format!("c:{}", uuid::Uuid::new_v4()),
@@ -1179,6 +1401,7 @@ impl Actor {
         // The start itself runs on the blocking pool; a failure comes back as `SpawnFailed`.
         let (link, out) = crate::spawning::spawn_off_actor(&self.sh, req);
         self.link = Some(link);
+        self.tree_base = 2;
         self.worker_started = Some(Instant::now());
         self.out = Some(out);
         self.ready = false;
@@ -1305,6 +1528,7 @@ impl Actor {
             }
         }
         self.ready = true;
+        self.sample_tree_base();
         // Registered start lines (for example `mcp_config`) go ahead of anything deferred.
         let start = crate::hostcalls::start_lines(&self.sh, &self.chat_id);
         for cmd in start.into_iter().chain(std::mem::take(&mut self.deferred)) {
@@ -1329,6 +1553,8 @@ impl Actor {
 
     fn on_exit(&mut self, reason: String) {
         self.stop_ended = false;
+        // The timers go with the worker, and a verdict could no longer be followed by a nudge.
+        self.release_stop_hold(true);
         crate::hostcalls::sweep_tools_dir(&crate::hostcalls::tools_dir(
             &self.sh.cfg.profile_dir,
             &self.chat_id,
@@ -1364,6 +1590,9 @@ impl Actor {
             }
         }
         self.timers.clear();
+        // A switch waiting on this turn's stop is over: the outage watch carries a crashed
+        // turn on in its own words, and a half-sent opener must not go out twice.
+        self.switch_restart = None;
         // Whatever the worker had not settled is unknowable now, busy or not: a message left
         // "accepted" by a worker that went away must not outlive it.
         self.mark_in_flight_uncertain();
@@ -1375,6 +1604,10 @@ impl Actor {
                 self.give_back(p.sid.into_iter().chain(p.held).collect());
                 self.clear_loading();
             }
+            if let Some((sid, held)) = self.start_wait.take() {
+                self.give_back(std::iter::once(sid).chain(held).collect());
+            }
+            self.set_held_at_start(false);
             let error = if self
                 .sh
                 .shutting_down
@@ -1398,6 +1631,9 @@ impl Actor {
             }
             self.emit_pending();
             if let Some(s) = self.stopping.take() {
+                // Stopped on purpose, the worker killed: a roll over the chat asked for is
+                // dropped, as it is when the stop ends the turn quietly.
+                crate::rollover::turn_stopped(&self.chat_id);
                 self.settle_dropped(s.resend);
                 for r in s.replies {
                     let _ = r.send(ChatStatus::Interrupted);
@@ -1464,6 +1700,8 @@ impl Actor {
 
     /// Start a run in memory: the caller writes the row (see `insert_run`).
     fn new_run_id(&mut self) -> String {
+        // Whatever starts a turn ends a hold on the one before.
+        self.release_stop_hold(true);
         self.last_output = Instant::now();
         self.stop_ended = false;
         let run = uuid::Uuid::new_v4().to_string();
@@ -1512,6 +1750,11 @@ impl Actor {
             });
         }
         self.stream.clear();
+        self.turn_opened_by = None;
+        self.turn_acted = false;
+        if self.state.is_some() {
+            self.publish_state(None);
+        }
         let tool_keys: Vec<String> = self.tools.keys().map(|t| format!("t:{t}")).collect();
         for key in &tool_keys {
             let id = self.chat_id.clone();
@@ -1652,6 +1895,153 @@ impl Actor {
             )
         });
         self.emit_chat();
+    }
+
+    /// What the busy chat is doing right now, for the chip, the chat list and the silent check.
+    /// A card waiting on the person outranks a tool call: the turn cannot move without them.
+    /// Nothing here asks a model or a server — it reads only what the actor already knows.
+    fn compute_state(&self, silent_limit: std::time::Duration) -> Option<crate::types::ChatState> {
+        use crate::types::ChatState;
+        if !self.status().is_busy() {
+            return None;
+        }
+        if !self.live.lock().unwrap().thread.interactions.is_empty() {
+            return Some(ChatState::WaitingUser);
+        }
+        if let Some(rec) = self.tools.values().min_by_key(|r| r.started_at) {
+            return Some(ChatState::Tool {
+                name: rec.name.clone(),
+                since: rec.started_at,
+            });
+        }
+        {
+            // A turn start held at the chat's start — by the server's cap, the plan windows or
+            // the app's limit — is queued whoever counts the line.
+            let live = self.live.lock().unwrap();
+            if live.hold_reason.is_some() || live.local_ahead.is_some() {
+                return Some(ChatState::Queued {
+                    ahead: live.local_ahead.filter(|a| *a >= 0),
+                });
+            }
+        }
+        let last_ms = now() - self.last_output.elapsed().as_millis() as i64;
+        if self.last_output.elapsed() >= silent_limit {
+            return Some(ChatState::Silent { since: last_ms });
+        }
+        Some(ChatState::Generating { since: last_ms })
+    }
+
+    /// Store and announce the live state (the `chat_activity.state` column, read into the chat
+    /// record's `state`); writes only when it changed.
+    fn publish_state(&mut self, state: Option<crate::types::ChatState>) {
+        if self.state == state {
+            return;
+        }
+        self.state = state.clone();
+        let json = state.as_ref().and_then(|s| serde_json::to_string(s).ok());
+        let id = self.chat_id.clone();
+        self.write(|t| {
+            t.execute(
+                "INSERT INTO chat_activity(chat_id, last_activity_at, state) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(chat_id) DO UPDATE SET state = excluded.state",
+                rusqlite::params![id, now(), json],
+            )
+        });
+        self.emit_chat();
+    }
+
+    /// A child chat went silent: say so in its parent, so an orchestrator learns of it without
+    /// polling. The stalled flag on the child covers the person watching the board; this covers
+    /// the chat that made the child.
+    ///
+    /// The note goes only to a parent that is busy: it joins the turn already open, as a message
+    /// does. An idle parent is left idle (a timer must not start a model call), and finds the
+    /// child's silence in the chat list when it next looks. A child tells its parent once per
+    /// [`SILENT_NOTE_GAP`] at most, however often it flips between silent and talking.
+    fn notify_parent_silent(&mut self, since: i64) {
+        let Some(chat) = self.chat() else { return };
+        let Some(parent) = chat.parent_chat_id.clone() else {
+            return;
+        };
+        if self
+            .silent_noted_at
+            .is_some_and(|t| t.elapsed() < SILENT_NOTE_GAP)
+        {
+            return;
+        }
+        let parent_busy = self
+            .sh
+            .actors
+            .lock()
+            .unwrap()
+            .get(&parent)
+            .is_some_and(|h| h.live.lock().unwrap().thread.status.is_busy());
+        if !parent_busy {
+            return;
+        }
+        self.silent_noted_at = Some(Instant::now());
+        let minutes = ((now() - since) / 60_000).max(1);
+        let text = format!(
+            "Helm noticed: your subchat \"{}\" has been silent for {minutes} minute{} — its turn \
+             is open with no output, no tool call and no queue wait. Check it, or send it a \
+             message or stop it if it looks lost.",
+            chat.title,
+            if minutes == 1 { "" } else { "s" }
+        );
+        self.send_note_to_parent(parent, text, "silent-child");
+    }
+
+    /// A child's turn ended without reporting: tell its parent once, so an orchestrator whose
+    /// child stalled by ending early (a tool call printed as text, say) hears of it. Unlike the
+    /// silent note, this goes to an idle parent too: a turn ending is an event, not a timer, and
+    /// the idle parent is the one that would otherwise wait for ever. Once per turn end, and the
+    /// flag resets when the child works again.
+    fn notify_parent_unreported(&mut self) {
+        if self.unreported_noted {
+            return;
+        }
+        let hour = std::time::Duration::from_secs(3600);
+        self.unreported_at.retain(|t| t.elapsed() < hour);
+        if self.unreported_at.len() >= UNREPORTED_NOTES_PER_HOUR {
+            return;
+        }
+        let id = self.chat_id.clone();
+        let found = self
+            .sh
+            .db
+            .snapshot(|tx| crate::childnote::unreported_turn(tx, &id));
+        let Ok(Some((parent, why))) = found else {
+            return;
+        };
+        let Some(chat) = self.chat() else { return };
+        self.unreported_noted = true;
+        self.unreported_at.push(Instant::now());
+        self.send_note_to_parent(
+            parent,
+            crate::childnote::note_text(&chat.title, why),
+            "unreported-child",
+        );
+    }
+
+    /// Send `text` into the parent as the app, off the actor's task. A refusal is logged only.
+    fn send_note_to_parent(&self, parent: String, text: String, what: &'static str) {
+        let sh = self.sh.clone();
+        self.sh.handle.spawn(async move {
+            let rt = crate::runtime::ChatRuntime { sh };
+            let sid = uuid::Uuid::new_v4().to_string();
+            let sent = crate::submit::host_send(
+                &rt,
+                crate::submit::HostSend {
+                    chat_id: &parent,
+                    submission_id: &sid,
+                    text: &text,
+                    origin: crate::types::SubmissionOrigin::App,
+                },
+            );
+            if let Err(e) = sent {
+                log::debug!("{what} note not sent to {parent}: {}", e.message);
+            }
+        });
     }
 
     /// The maintenance tick's other question about a busy chat: is its turn waiting on a local
@@ -1931,6 +2321,14 @@ impl Actor {
                 let applied = self.gate_verdict(&interaction_id, *outcome);
                 let _ = reply.send(applied);
             }
+            Cmd::StopVerdict {
+                run_id,
+                outcome,
+                reply,
+            } => {
+                let applied = self.stop_verdict(&run_id, outcome);
+                let _ = reply.send(applied);
+            }
             Cmd::ApplyModel { model, effort } => {
                 // A send that is waiting on the old model's preparation must not go out on it:
                 // take that preparation down first and put the send back through the model the
@@ -2083,18 +2481,50 @@ impl Actor {
                 }
             }
             Cmd::Warm => self.warm_now(),
-            Cmd::StallCheck { after } => {
+            Cmd::StallCheck { after, local_after } => {
                 self.check_local_wait();
+                // A turn held at the start — by the server's cap, by the plan windows or by
+                // hand — gets first look at a freed place. This runs after the queue-position
+                // check: a chat held before its turn ever opened has no launched model, so
+                // nothing else would keep its place on show. Reopening goes through the same
+                // gate that held it: the gate answers again, keeps the place if the wait still
+                // stands, and lifts the hold row the moment the reason has gone.
+                if let Some((sid, held)) = self.start_wait.take() {
+                    self.restart_prepare(sid, held);
+                }
+                // What the chat is doing right now, then the silent question: a turn that is
+                // queued, generating, running a tool or waiting on the person is doing
+                // something; only the state with none of those, past its limit, is silent.
+                let base = if self.is_local_chat() {
+                    local_after
+                } else {
+                    after
+                };
+                // Something this chat started (a build) is still in the worker's process tree:
+                // its silence is that process working, so the limit stretches.
+                let busy_tree = self.link.as_ref().and_then(|l| l.tree_size()).unwrap_or(0);
+                let limit = if busy_tree > self.tree_base {
+                    base * 3
+                } else {
+                    base
+                };
+                let state = self.compute_state(limit);
+                let silent_now = matches!(state, Some(crate::types::ChatState::Silent { .. }));
+                // A turn held at its start for longer than the silent limit is flagged too, so a
+                // line that never moves does not read as "Queued" for ever. It stays Queued: it
+                // is waiting, not silent, and a parent is not told it is lost.
+                let held_long = self.start_wait.is_some() && self.last_output.elapsed() >= limit;
                 let stalled = self.live.lock().unwrap().stalled;
-                let waiting = self.live.lock().unwrap().local_ahead.is_some();
-                // A chat waiting at the model server is explained: waiting time is not "may be
-                // stuck" time, so the stall flag waits until the model starts answering.
-                if self.status().is_busy()
-                    && !stalled
-                    && !waiting
-                    && self.last_output.elapsed() >= after
-                {
+                self.publish_state(state.clone());
+                if silent_now && !stalled {
                     self.set_stalled(true);
+                    if let Some(crate::types::ChatState::Silent { since }) = state {
+                        self.notify_parent_silent(since);
+                    }
+                } else if held_long && !stalled {
+                    self.set_stalled(true);
+                } else if !silent_now && !held_long && stalled {
+                    self.set_stalled(false);
                 }
             }
             Cmd::LocalNote { token, text } => {
@@ -2126,11 +2556,41 @@ impl Actor {
                     self.retiring = false;
                 }
             }
+            Cmd::QueueSeq(seq) => {
+                // The queue re-ordered this chat's held start; the row is written, this keeps
+                // the actor's own place in step. It stays where the queue put it until its
+                // next gate.
+                self.live.lock().unwrap().held_at_start = Some(seq);
+            }
+            Cmd::QueueCancel { keep_park } => {
+                // The queue ended this chat's held start: what waited goes back to its owners
+                // (typed text to the draft, as ever), and the hold and its record go.
+                let waiting = self.start_wait.take();
+                let was_waiting = waiting.is_some();
+                if let Some((sid, held)) = waiting {
+                    self.give_back(std::iter::once(sid).chain(held).collect());
+                }
+                self.set_local_ahead(None);
+                self.set_held_at_start(false);
+                self.set_queue_reason(None);
+                self.live.lock().unwrap().hold_class = None;
+                if !keep_park {
+                    crate::queue::clear_hold(&self.sh.db, &self.chat_id);
+                }
+                // A held start sat at Starting; with nothing waiting the chat is simply idle.
+                // A chat that only carries a hand park while its turn runs has no wait to end:
+                // its turn goes on, and only the park goes.
+                if was_waiting {
+                    self.end_run(ChatStatus::Idle, None, "cancelled");
+                }
+                self.emit_pending();
+            }
             Cmd::Retire => {
                 if self.link.is_none() {
                     // No worker to shut down: the actor itself goes (archive, delete).
                     self.finished = true;
-                } else if !self.status().is_busy() {
+                } else if !self.status().is_busy() && self.stop_hold.is_none() {
+                    // A chat whose turn end is being checked is not closed under the check.
                     self.retiring = true;
                     if let Some(l) = &self.link {
                         self.link_closing = true;
@@ -2145,6 +2605,11 @@ impl Actor {
     /// deadline (the kill path is the ordinary stop deadline). Nothing sends from here on.
     fn on_archived(&mut self) {
         self.archived = true;
+        // An archived chat rolls over no more: a roll over it asked for is dropped.
+        crate::rollover::turn_stopped(&self.chat_id);
+        // An archived chat announces nothing (the completion is not written for it), but the hold
+        // and the busy mark go.
+        self.release_stop_hold(true);
         if !self.status().is_busy() {
             self.on_cmd(Cmd::Retire);
             return;
@@ -2188,6 +2653,9 @@ impl Actor {
         if sub.state != SubmissionState::Saved {
             return;
         }
+        // A message ends any hold on the last turn's finish: that is written and announced first,
+        // exactly as it would have been, and the judge's late verdict then finds nothing.
+        self.release_stop_hold(true);
         let priority: Option<String> = self
             .sh
             .db
@@ -2203,6 +2671,14 @@ impl Actor {
             .ok()
             .flatten()
             .flatten();
+        if let Some(w) = self.start_wait.as_mut() {
+            // The turn is waiting at the model server's start capacity: this send waits in
+            // front of it, and the maintenance tick reopens the pair when a place frees.
+            if w.0 != sid && !w.1.iter().any(|h| h == sid) {
+                w.1.push(sid.to_owned());
+            }
+            return;
+        }
         // A warm-up started for the model the chat has since left cannot answer for this send:
         // drop it first (its late answers are ignored by token) and prepare the current model.
         let stale = self.prepare.as_ref().is_some_and(|p| {
@@ -2282,6 +2758,10 @@ impl Actor {
         }
         if !busy {
             self.turn_opener = Some(sid.to_owned());
+            self.turn_opened_by = Some(sid.to_owned());
+            self.turn_acted = false;
+            self.unreported_noted = false;
+            self.sample_tree_base();
         }
         let row = if !busy {
             // A prompt that opens a turn: its user row shows at once, as saved.
@@ -2413,6 +2893,16 @@ impl Actor {
             (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
             (a, b) => a.or(b),
         };
+        // The stop judge's own line (a changed working mode, say) rides beside AFK's.
+        let judge_text = self
+            .sh
+            .stop_judge
+            .get()
+            .and_then(|j| j.turn_line(&self.chat_id));
+        let context = match (context, judge_text) {
+            (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
+            (a, b) => a.or(b),
+        };
         if let Some(c) = context {
             // A separate content block after the text.
             cmd["context"] = json!(c);
@@ -2528,8 +3018,30 @@ impl Actor {
             // live retelling below, where the worker turns the new effort into the
             // local model's thinking budget without a respawn.
             if self.status().is_busy() || self.agents_running() {
-                self.relaunch_on_idle = true;
-                self.provider_switch_pending = true;
+                if self.agents_running()
+                    || !self.turn_quiet()
+                    || self.turn_opened_by.is_none()
+                    || self.turn_acted
+                {
+                    // Something is in flight, or the turn has already replied or run a tool
+                    // (starting it again would repeat what it did): the change lands at the
+                    // next idle point, as it always did.
+                    self.relaunch_on_idle = true;
+                    self.provider_switch_pending = true;
+                } else {
+                    // The turn is open but nothing is running: for a local chat this is the
+                    // wait in the model server's queue, which is not work in progress. Stop
+                    // the turn now and send its opening message again on the new model,
+                    // rather than letting the queued request answer on the old one.
+                    self.context_row(
+                        ContextKind::Notice,
+                        "The model was changed: the turn stops now and starts again on the new model.",
+                    );
+                    self.switch_restart = self.turn_opened_by.clone();
+                    self.provider_switch_pending = true;
+                    let (tx, _rx) = oneshot::channel();
+                    self.stop(tx, true);
+                }
             } else {
                 self.relaunch_worker();
             }
@@ -2568,7 +3080,12 @@ impl Actor {
         if self.begin_prepare(&sid) {
             match self.prepare.as_mut() {
                 Some(p) => p.held = held,
-                None => self.give_back(held), // refused: nothing to prepare with
+                // Back at the start-capacity wait (the server refilled meanwhile): the held
+                // sends go in front of it too. Only a refusal leaves them nowhere.
+                None => match self.start_wait.as_mut() {
+                    Some(w) => w.1.extend(held),
+                    None => self.give_back(held),
+                },
             }
             return;
         }
@@ -2579,20 +3096,293 @@ impl Actor {
         }
     }
 
-    /// A chat on a local model gets its model made ready before each turn it opens (the memory
-    /// check, the load, Ollama's variant). Starts that on the blocking pool and answers true;
-    /// the turn goes ahead, or is refused, when it reports back.
+    /// Where this chat stands in the queue right now: the class of `sid`'s send, and its place
+    /// in line — the one it took when it started to wait, or a fresh one (which puts it behind
+    /// every chat already waiting). The pushed-to-top flag is re-read from the queue's own table,
+    /// so a change made from outside the actor takes effect on the next look.
+    fn my_place(&self, sid: &str) -> (crate::queue::QueueClass, u64) {
+        let class = crate::queue::class_for_origin(
+            self.submission(sid)
+                .map(|s| s.origin)
+                .unwrap_or(SubmissionOrigin::Typed)
+                .as_str(),
+        );
+        let top = crate::queue::top_of(&self.sh.db, &self.chat_id);
+        let mut live = self.live.lock().unwrap();
+        live.hold_top = top;
+        let seq = live.held_at_start.unwrap_or_else(crate::queue::next_seq);
+        (class, seq)
+    }
+
+    /// The other chats of ours busy on local model `server`: how many are working, and the ones
+    /// held at their start with their standing.
+    fn server_line(&self, server: &str) -> (usize, Vec<crate::queue::Waiter>) {
+        let handles: Vec<ActorHandle> = self
+            .sh
+            .actors
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| **id != self.chat_id)
+            .map(|(_, h)| h.clone())
+            .collect();
+        let mut working = 0usize;
+        let mut waiters = Vec::new();
+        for h in handles {
+            let l = h.live.lock().unwrap();
+            if !l.thread.status.is_busy() || l.server_id.as_deref() != Some(server) {
+                continue;
+            }
+            match l.held_at_start {
+                None => working += 1,
+                Some(seq) => waiters.push(crate::queue::Waiter {
+                    class: l.hold_class.unwrap_or(crate::queue::QueueClass::Normal),
+                    top: l.hold_top,
+                    seq,
+                }),
+            }
+        }
+        (working, waiters)
+    }
+
+    /// The other chats of ours waiting for the Claude plan windows to open again.
+    fn plan_line(&self) -> Vec<crate::queue::Waiter> {
+        let handles: Vec<ActorHandle> = self
+            .sh
+            .actors
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| **id != self.chat_id)
+            .map(|(_, h)| h.clone())
+            .collect();
+        let mut waiters = Vec::new();
+        for h in handles {
+            let l = h.live.lock().unwrap();
+            match (l.held_at_start, l.hold_reason) {
+                (Some(seq), Some(r)) if r != crate::queue::LOCAL_CAP => {
+                    waiters.push(crate::queue::Waiter {
+                        class: l.hold_class.unwrap_or(crate::queue::QueueClass::Normal),
+                        top: l.hold_top,
+                        seq,
+                    })
+                }
+                _ => {}
+            }
+        }
+        waiters
+    }
+
+    /// How many of our chats have a turn open right now, not counting this one.
+    fn working_chats(&self) -> usize {
+        self.sh
+            .actors
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| **id != self.chat_id)
+            .filter(|(_, h)| {
+                // A chat held at its start is waiting, not working.
+                let l = h.live.lock().unwrap();
+                l.thread.status.is_busy() && l.held_at_start.is_none()
+            })
+            .count()
+    }
+
+    /// The queue's whole answer to "may this turn open now", for the saved send `sid`. Only
+    /// asked where no turn of this chat is open: a chat mid-turn is never preempted.
+    ///
+    /// A local chat's place is the line on its server: the server carries at most its own cap
+    /// (set in the server's settings) or else `localChatCap` (0 switches the cap off), and only
+    /// chats that are working
+    /// count against it — a chat held at its start is not working, so waiters never block each
+    /// other; they go pushed-to-top first, then normal before background, then in the order
+    /// they began to wait. The cap is deliberately soft at the margin: a chat that has passed
+    /// this check but has not opened its turn yet counts as neither working nor waiting, so
+    /// briefly one chat more than the cap can be preparing; it settles as soon as the turn
+    /// opens. A chat on Claude instead asks the plan windows (`claudeHoldPct`) and the app's
+    /// own working-chat limit. In every case an interactive start is never held, and a
+    /// hand-parked chat waits whatever the rest answers.
+    fn turn_gate(&self, sid: &str) -> (crate::queue::QueueClass, crate::queue::Verdict) {
+        use crate::queue;
+        let Some(chat) = self.chat() else {
+            return (queue::QueueClass::Normal, queue::Verdict::Go);
+        };
+        let local = local_of(&chat);
+        let (class, seq) = self.my_place(sid);
+        let mine = queue::Mine {
+            class,
+            top: self.live.lock().unwrap().hold_top,
+            seq,
+        };
+        let manual = queue::is_manual(&self.sh.db, &self.chat_id);
+        let (working, waiters, cap) = match &local {
+            Some((server, _)) => {
+                // The server's own cap (its settings) beats the default preference.
+                let cap = queue::server_cap(&self.sh.db, server).unwrap_or_else(|| {
+                    self.sh
+                        .db
+                        .snapshot(|tx| {
+                            Ok::<_, rusqlite::Error>(helm_core::prefs::read(tx, "localChatCap"))
+                        })
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(DEFAULT_LOCAL_CAP)
+                }) as usize;
+                // Cap off still orders the waiters; only the working-chat count is lifted.
+                let cap = if cap == 0 { usize::MAX } else { cap };
+                let (w, waits) = self.server_line(server);
+                (w, waits, cap)
+            }
+            None => (0, self.plan_line(), usize::MAX),
+        };
+        // The plan windows answer only for chats that run on Claude; local chats cost the plan
+        // nothing.
+        let claude_full =
+            local.is_none() && helm_core::usage_windows::claude_full(&self.sh.db, now()).is_some();
+        let at_limit = self.working_chats() >= self.sh.cfg.limits.max_active;
+        (
+            class,
+            queue::decide(&mine, &waiters, working, cap, claude_full, at_limit, manual),
+        )
+    }
+
+    /// Park this turn start at the chat's start: the send stays saved, the chat shows as
+    /// starting and queued, and the queue's own table keeps the reason, class, server and line
+    /// place until it opens, goes back or is released.
+    fn arm_hold(
+        &mut self,
+        sid: &str,
+        class: crate::queue::QueueClass,
+        reason: crate::queue::Reason,
+        server: Option<&str>,
+        ahead: Option<usize>,
+    ) {
+        if self.start_wait.is_none() {
+            self.last_output = Instant::now();
+        }
+        let seq = self.set_held_at_start(true);
+        self.set_queue_reason(Some(reason));
+        self.live.lock().unwrap().hold_class = Some(class);
+        let hold_server = if reason == crate::queue::LOCAL_CAP {
+            server
+        } else {
+            None
+        };
+        crate::queue::write_hold(
+            &self.sh.db,
+            &self.chat_id,
+            reason,
+            class,
+            hold_server,
+            seq,
+            now(),
+        );
+        self.set_local_ahead(ahead.map(|a| a as i64));
+        self.set_status(ChatStatus::Starting, None);
+        self.start_wait = Some((sid.to_owned(), Vec::new()));
+    }
+
+    /// Record and announce why this chat's turn start waits (the `chat_activity.queue_reason`
+    /// column, read into the chat record's `queueReason`); writes only when it changed.
+    fn set_queue_reason(&self, on: Option<&'static str>) {
+        {
+            let mut live = self.live.lock().unwrap();
+            if live.hold_reason == on {
+                return;
+            }
+            live.hold_reason = on;
+        }
+        let id = self.chat_id.clone();
+        self.write(|t| {
+            t.execute(
+                "INSERT INTO chat_activity(chat_id, last_activity_at, queue_reason) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(chat_id) DO UPDATE SET queue_reason = excluded.queue_reason",
+                rusqlite::params![id, now(), on],
+            )
+        });
+        self.emit_chat();
+    }
+
+    /// The plain sentence a full plan window answers an interactive start with, in the
+    /// transcript and (through the relay's own reply line) back to the speaker or Telegram.
+    fn claude_full_notice(&self) -> String {
+        match crate::queue::claude_full(&self.sh.db, now()) {
+            Some(cap) => crate::queue::claude_full_line(&cap, now()),
+            None => "Claude's plan allowance is used up right now — nothing was started, so \
+                     please send it again in a little while."
+                .to_owned(),
+        }
+    }
+
+    /// Note that this chat's turn is held at its start (keeping its place if it already was) or
+    /// is not. The place is a sequence number taken when the wait began.
+    fn set_held_at_start(&self, on: bool) -> u64 {
+        let mut live = self.live.lock().unwrap();
+        live.held_at_start = match (on, live.held_at_start) {
+            (true, None) => Some(crate::queue::next_seq()),
+            (true, kept) => kept,
+            (false, _) => None,
+        };
+        live.held_at_start.unwrap_or(0)
+    }
+
+    /// Every turn start passes the queue's gate here ([`Self::turn_gate`]): one that may go on
+    /// a local model gets its model made ready before the turn opens (the memory check, the
+    /// load, Ollama's variant), started on the blocking pool, answering true; the turn goes
+    /// ahead, or is refused, when it reports back. One that may not yet go waits at the chat's
+    /// start — it queues here, where a place is known to free, rather than piling requests
+    /// onto a server or a full plan window — and a turn that may open straight away on Claude
+    /// answers false, so the caller sends it.
     fn begin_prepare(&mut self, sid: &str) -> bool {
         let Some(chat) = self.chat() else {
             return false;
         };
-        let Some((server_id, model)) = local_of(&chat) else {
+        let local = local_of(&chat);
+        // The queue first: nothing refuses a start — what cannot open now waits at the chat's
+        // start, and an interactive start with Claude's windows full is answered in words
+        // instead of started. A Claude chat's turn opens straight after this answer.
+        let (class, verdict) = self.turn_gate(sid);
+        let server = local.as_ref().map(|(s, _)| s.as_str());
+        match verdict {
+            crate::queue::Verdict::Go => {
+                crate::queue::clear_auto_hold(&self.sh.db, &self.chat_id);
+                self.set_queue_reason(None);
+                self.live.lock().unwrap().hold_class = None;
+                // A chat that waited is a working chat from here on, Claude or local, so the
+                // cap counts it.
+                self.set_held_at_start(false);
+            }
+            crate::queue::Verdict::Refuse => {
+                let line = if crate::queue::is_manual(&self.sh.db, &self.chat_id) {
+                    "This chat is parked in Helm's queue, so nothing was started. Release it in \
+                     the queue on the PC, then send it again."
+                        .to_owned()
+                } else {
+                    self.claude_full_notice()
+                };
+                self.refuse_local(&[sid.to_owned()], &line);
+                return true;
+            }
+            crate::queue::Verdict::Behind(a) => {
+                self.arm_hold(sid, class, crate::queue::LOCAL_CAP, server, Some(a));
+                return true;
+            }
+            crate::queue::Verdict::Hold(reason, a) => {
+                let ahead = (reason != crate::queue::MANUAL).then_some(a);
+                self.arm_hold(sid, class, reason, server, ahead);
+                return true;
+            }
+        }
+        let Some((server_id, model)) = local else {
             return false;
         };
         let Some(seam) = self.sh.local.get().cloned() else {
             self.refuse_local(&[sid.to_owned()], crate::local::NOT_AVAILABLE);
             return true;
         };
+        self.set_held_at_start(false);
         // The chat shows as starting while its model is made ready; Stop works as usual. The wait
         // is not silence: the stall flag counts from here, not from the chat's last output.
         self.last_output = Instant::now();
@@ -2754,6 +3544,8 @@ impl Actor {
     fn stop(&mut self, reply: oneshot::Sender<ChatStatus>, resend: bool) {
         let status = self.status();
         if !status.is_busy() {
+            // A Stop on a chat whose turn end is being checked ends the check: it finishes now.
+            self.release_stop_hold(true);
             let _ = reply.send(status);
             return;
         }
@@ -2763,6 +3555,15 @@ impl Actor {
             // chat is idle, and the stop returns before this.)
             self.give_back(p.sid.into_iter().chain(p.held).collect());
             self.clear_loading();
+        }
+        if let Some((sid, held)) = self.start_wait.take() {
+            // Waiting at the start — the server's cap, the plan windows, the app's limit or a
+            // hand-park: nothing reached the server or the plan either.
+            self.give_back(std::iter::once(sid).chain(held).collect());
+            self.set_local_ahead(None);
+            self.set_held_at_start(false);
+            self.set_queue_reason(None);
+            crate::queue::clear_auto_hold(&self.sh.db, &self.chat_id);
         }
         if let Some(s) = self.stopping.as_mut() {
             s.replies.push(reply);
@@ -2938,6 +3739,10 @@ impl Actor {
                         self.deliver_now(&sid, "wait_limit");
                     }
                 }
+                Timer::StopCheck => {
+                    // A verdict that never arrived: the chat finishes as it would with no judge.
+                    self.release_stop_hold(true);
+                }
                 Timer::GateDeadline(id) => {
                     // A verdict that never arrived. Nothing is ever dropped: the card becomes
                     // a normal card again, shown and counted, and AFK gets its usual say.
@@ -3091,6 +3896,7 @@ impl Actor {
                 let msg = v.get("message").cloned().unwrap_or_default();
                 let role = str_of(&msg, "role").unwrap_or_default();
                 if role == "assistant" {
+                    self.turn_acted = true;
                     let key = self.msg_key(&str_of(&msg, "id").unwrap_or_default());
                     self.stream.insert(
                         key.clone(),
@@ -3130,6 +3936,7 @@ impl Actor {
             "message_end" => self.on_message_end(&v),
             "usage" => self.on_turn_usage(&v),
             "tool_execution_start" => {
+                self.turn_acted = true;
                 let id = str_of(&v, "toolCallId").unwrap_or_default();
                 let name = str_of(&v, "toolName").unwrap_or_default();
                 let args = v.get("args").map(Value::to_string).unwrap_or_default();
@@ -3556,9 +4363,29 @@ impl Actor {
         self.live.lock().unwrap().thread.subagents_running > 0
     }
 
+    /// Nothing is in flight: no tool call running and no message being generated. A turn in
+    /// this state is waiting — at the model server's queue, or between requests — not working,
+    /// so a provider change need not wait for it.
+    fn turn_quiet(&self) -> bool {
+        self.tools.is_empty() && self.stream.is_empty()
+    }
+
+    /// Remember how many processes the worker's group holds now, as what the chat's own helpers
+    /// account for ([`Self::tree_base`]). Never below the worker and the CLI themselves.
+    fn sample_tree_base(&mut self) {
+        let now = self.link.as_ref().and_then(|l| l.tree_size()).unwrap_or(0);
+        self.tree_base = self.tree_base.max(now).max(2);
+    }
+
     /// The turn has settled or the last background agent ended: a relaunch held for this point
     /// runs once nothing is left running, and the idle-worker cap is applied.
     fn on_quiet(&mut self) {
+        self.on_quiet_after(false);
+    }
+
+    /// [`Self::on_quiet`]; `stopped` says the turn that ended was stopped on purpose, which
+    /// cancels a roll over waiting for the turn's end rather than starting one.
+    fn on_quiet_after(&mut self, stopped: bool) {
         if self.status().is_busy() {
             return;
         }
@@ -3576,6 +4403,13 @@ impl Actor {
         }
         if self.relaunch_on_idle && !self.agents_running() {
             self.relaunch_worker();
+        }
+        // A chat that has grown past the roll-over setting is asked for a hand-off right here,
+        // while it is quiet (helm-chats' rollover). Cheap reads; it never interrupts a turn.
+        if stopped {
+            crate::rollover::turn_stopped(&self.chat_id);
+        } else {
+            crate::rollover::on_turn_end(&self.sh, &self.chat_id);
         }
         crate::runtime::ChatRuntime {
             sh: self.sh.clone(),
@@ -4104,6 +4938,23 @@ impl Actor {
                 // The stop's answer is how the turn ended; what Claude had not read is sent
                 // again right after, which may open the next turn at once.
                 let final_status = self.status();
+                // A provider switch stopped a quiet turn to restart it: its opening message
+                // goes out first, on the new worker the dispatch below starts. If the turn
+                // actually finished before the stop landed, its answer stands and nothing is
+                // sent again — the worker relaunches at this quiet point instead.
+                if let Some(sid) = self.switch_restart.take() {
+                    if outcome == "stopped" || outcome == "interrupted" {
+                        self.write(|t| {
+                            t.execute(
+                                "UPDATE submissions SET state = 'saved', mode = 'prompt' WHERE id = ?1",
+                                [&sid],
+                            )
+                        });
+                        self.dispatch(&sid);
+                    } else {
+                        self.relaunch_on_idle = true;
+                    }
+                }
                 self.settle_dropped(stop.resend);
                 self.emit_pending();
                 for r in stop.replies {
@@ -4129,7 +4980,13 @@ impl Actor {
                 self.end_run(status, err.as_deref(), outcome);
                 self.emit_pending();
                 if status == ChatStatus::Idle {
-                    self.complete_turn();
+                    let held = outcome == "complete" && self.stop_hold_offer(run);
+                    if !held {
+                        self.complete_turn();
+                        if outcome == "complete" {
+                            self.notify_parent_unreported();
+                        }
+                    }
                 }
             }
         }
@@ -4141,7 +4998,7 @@ impl Actor {
             }
         }
         if !self.status().is_busy() {
-            self.on_quiet();
+            self.on_quiet_after(outcome == "stopped");
         }
     }
 }

@@ -351,6 +351,20 @@ button.danger {
   color: var(--text);
 }
 
+/* A legitimate stop (checked against the working mode) shows its class word on a thin chip. */
+.stop-chip {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 12px;
+}
+
+/* The quiet line while a turn end is being checked: no "finished" notice yet. */
+.stop-check-row {
+  margin-top: 4px;
+  font-size: 13px;
+}
+
 /* A notice's sentence (why a send did not start) reads as text, not as a side note. */
 .row-notice {
   line-height: 1.5;

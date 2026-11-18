@@ -12,7 +12,7 @@
 
 use crate::wire::{Push, MAX_ROW_BYTES, TRIMMED_TEXT_BYTES};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -84,25 +84,6 @@ struct Watcher {
     chats: Option<Sub>,
     /// Oldest first.
     chat: Vec<(String, Sub)>,
-    /// The read set for this watcher's list: the hub people whose chats it may see, as a
-    /// convenience filter. `None` shows every chat (the watcher acts for this PC's own person).
-    scope: Option<Vec<String>>,
-    /// The chats a scoped watcher's list holds, so a chat that stops being theirs is taken out.
-    listed: HashSet<String>,
-}
-
-/// Whether a chat (as other devices see it) belongs to the person or is shared with them.
-pub fn visible_to(chat: &Value, person_id: &str) -> bool {
-    owned_by(chat, person_id)
-        || chat
-            .get("sharedWith")
-            .and_then(Value::as_array)
-            .is_some_and(|l| l.iter().any(|p| p.as_str() == Some(person_id)))
-}
-
-/// Whether a chat is visible to anyone in the read set.
-pub fn visible_to_any(chat: &Value, people: &[String]) -> bool {
-    people.iter().any(|p| visible_to(chat, p))
 }
 
 /// Whether a chat (as other devices see it) belongs to the person.
@@ -118,26 +99,6 @@ pub struct Subs {
 impl Subs {
     pub fn add_chats(&mut self, uid: &str) {
         self.watchers.entry(uid.to_owned()).or_default().chats = Some(Sub::new());
-    }
-
-    /// The read set for a watcher's list: `Some(people)` limits the list to chats owned by or
-    /// shared with anyone in the set, `None` shows every chat. `true` when the set changed, so
-    /// the caller can re-send the whole list.
-    pub fn set_scope(&mut self, uid: &str, scope: Option<&[String]>) -> bool {
-        let w = self.watchers.entry(uid.to_owned()).or_default();
-        if w.scope.as_deref() != scope {
-            w.scope = scope.map(|s| s.to_vec());
-            w.listed.clear();
-            return true;
-        }
-        false
-    }
-
-    /// The chats a scoped watcher's list was answered with.
-    pub fn listed(&mut self, uid: &str, ids: impl IntoIterator<Item = String>) {
-        if let Some(w) = self.watchers.get_mut(uid) {
-            w.listed.extend(ids);
-        }
     }
 
     /// Subscribe to a chat (afresh if it already was). Returns the chat whose subscription was
@@ -184,33 +145,11 @@ impl Subs {
             .any(|w| w.chat.iter().any(|(c, _)| c == chat_id))
     }
 
-    /// A chat changed: every list subscription hears the whole record. A watcher with a read set
-    /// hears only chats owned by or shared with anyone in the set, and hears a chat that stopped
-    /// being so as removed (its chat subscription ends too).
+    /// A chat changed: every list subscription hears the whole record.
     pub fn chat_changed(&mut self, chat: Value) -> Vec<Out> {
-        let id = chat
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
         let event = json!({ "kind": "chat", "chat": chat });
-        let removed = json!({ "kind": "chat_removed", "chatId": id });
         let mut out = Vec::new();
         for (uid, w) in &mut self.watchers {
-            let event = match &w.scope {
-                None => &event,
-                Some(p) if visible_to_any(&chat, p) => {
-                    w.listed.insert(id.clone());
-                    &event
-                }
-                Some(_) => {
-                    w.chat.retain(|(c, _)| *c != id);
-                    if !w.listed.remove(&id) {
-                        continue;
-                    }
-                    &removed
-                }
-            };
             if let Some(s) = &mut w.chats {
                 out.extend(s.emit(uid, CHATS_SUB, event.clone()));
             }
@@ -218,16 +157,12 @@ impl Subs {
         out
     }
 
-    /// A chat is gone: list subscriptions hear it (a scoped one only if it held the chat), and
-    /// its chat subscriptions end.
+    /// A chat is gone: list subscriptions hear it, and its chat subscriptions end.
     pub fn chat_removed(&mut self, chat_id: &str) -> Vec<Out> {
         let event = json!({ "kind": "chat_removed", "chatId": chat_id });
         let mut out = Vec::new();
         for (uid, w) in &mut self.watchers {
             w.chat.retain(|(c, _)| c != chat_id);
-            if w.scope.is_some() && !w.listed.remove(chat_id) {
-                continue;
-            }
             if let Some(s) = &mut w.chats {
                 out.extend(s.emit(uid, CHATS_SUB, event.clone()));
             }

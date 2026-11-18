@@ -7,14 +7,14 @@ import { UNDO_LIMIT, UndoStack } from './undo.ts';
 
 const noop = () => undefined;
 const chatActs: ChatMenuActions = { fork: noop, rename: noop, compact: noop, rollOver: noop, cost: noop, exportMarkdown: noop, moveTo: noop, nestUnder: noop, topLevel: noop, toggleChildren: noop, markUnread: noop, pin: noop, mute: noop, archive: noop, restore: noop, remove: noop };
-const projActs: ProjectMenuActions = { newChat: noop, pin: noop, rename: noop, changeIcon: noop, editDescription: noop, cost: noop, nestUnder: noop, topLevel: noop, archive: noop, restore: noop, close: noop, colour: noop, customColour: noop };
+const projActs: ProjectMenuActions = { newChat: noop, pin: noop, rename: noop, changeIcon: noop, editDescription: noop, editStartup: noop, cost: noop, nestUnder: noop, topLevel: noop, archive: noop, restore: noop, close: noop, colour: noop, customColour: noop };
 
 function row(chatId: string, over: Partial<SidebarRow> = {}): SidebarRow {
   return { chatId, title: chatId, groupProjectId: 'g', folderProjectId: 'g', folderPath: 'C:/w', depth: 0, parentChatId: null, hasChildren: false, status: 'idle', attention: null, pinned: false, unread: false, muted: false, stalled: false, local: false, localAhead: null, hasDraft: false, lastActivityAt: 1, archived: false, position: null, createdAt: 1, updatedAt: 1, revision: 1, ...over };
 }
 
 function project(id: string, over: Partial<ProjectNode> = {}): ProjectNode {
-  return { id, kind: 'folder', name: id, path: null, parentId: null, parentSource: null, icon: null, description: null, colour: null, pinned: false, collapsed: false, position: null, archived: false, closed: false, board: null, primaryFolderProjectId: null, chatCount: 0, createdAt: 1, revision: 0, ...over };
+  return { id, kind: 'folder', name: id, path: null, parentId: null, parentSource: null, icon: null, description: null, startupInstructions: null, startupFiles: [], startupServers: [], colour: null, pinned: false, collapsed: false, position: null, archived: false, closed: false, board: null, primaryFolderProjectId: null, chatCount: 0, createdAt: 1, revision: 0, ...over };
 }
 
 test('drag starts only after 4 px', () => {
@@ -203,4 +203,7 @@ test('the project menu places Primary folder… right after Rename', () => {
   const ids = projectMenuItems(project('a'), [project('a')], projActs).map((i) => i.id);
   assert.equal(ids[ids.indexOf('rename') + 1], 'primary-folder');
   assert.ok(ids.includes('description'), 'a one-line description can be edited from the menu');
+  const label = (p: ProjectNode) => projectMenuItems(p, [p], projActs).find((i) => i.id === 'startup')!.label;
+  assert.equal(label(project('a')), 'Edit startup instructions…');
+  assert.equal(label(project('a', { startupInstructions: 'Make a worktree.' })), 'Edit startup instructions… (set)', 'the menu says when a project has startup instructions');
 });

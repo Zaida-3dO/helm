@@ -31,8 +31,8 @@ impl SystemWatcher for AppSystem {
         self.outages.resumed();
     }
 
-    fn session_ending(&self, budget: Duration) {
-        log::info!("the session is ending; running the quit sequence");
+    fn session_ending(&self, budget: Duration, reason: &str) {
+        log::info!("the session is ending ({reason}); running the quit sequence");
         let (done, wait) = std::sync::mpsc::channel();
         let quit = self.quit.clone();
         let events = self.events.clone();

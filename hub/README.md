@@ -4,7 +4,7 @@ The always-on service that runs on a home server, beside the PCs that run Helm. 
 the people of one household, each with one or more machines. It serves:
 
 - **Memory**: SQLite with an FTS5 index and optional vectors, as MCP over streamable HTTP. Each
-  memory belongs to one person and is private to them unless they share it.
+  memory belongs to one person and is shared with the household unless they mark it private.
 - **The relay lines**: every machine running Helm keeps its own outbound WebSocket open to
   `/relay`. Helm tools the hub offers over MCP travel down it, so the PC needs no inbound port.
 - **The household view**: one person's Helm asks the hub about another person's chats, over the
@@ -23,8 +23,8 @@ else from the repo.
 
 | Tool | What it does |
 |---|---|
-| `memory_search {query, k?, vector?, model?, tags?, person?}` | Keyword search (FTS5, porter stemming, bm25 with title > description > tags > body). With `vector`, a hybrid: keyword and cosine rankings fused by reciprocal rank. Only vectors of the same dimension (and `model`, if given) are compared. Every listed tag must match. |
-| `memory_read {id}` | One memory in full, by numeric id or by name |
+| `memory_search {query, k?, sources?, tier?, chat?, folder?, after?, before?, parseDates?, vector?, model?, tags?, person?}` | One search over memories, watched notes and chat history (see [Search](#search)): keywords and meaning together, dates in the query understood, results ranked by source, person and age. A caller's own `vector` still works |
+| `memory_read {id}` or `{ref, around?}` | One memory in full, by numeric id or by name; or a search hit by its `ref`: the chunk and `around` chunks (default 1) either side |
 | `memory_write {title, body, tags?, source?, name?, scope?, visibility?, vector?, model?}` | New memory, owned by the caller's person and for that person only unless `scope` is `everyone`. A vector must come with the id of the model that made it |
 | `memory_list {tag?, since?, limit?, person?}` | Newest first; `since` is an ISO-8601 date (`2026-11-01`) or UTC timestamp (`2026-11-01T09:30:00Z`), and anything else is refused |
 | `memory_update`, `memory_delete` | Only when `HUB_ALLOW_MUTATE=1`, and only on the caller's own memories (`memory_update` may also change `scope`). A new body without a new vector clears the old vector |
@@ -36,12 +36,12 @@ exactly like one that does not exist. The owner is always the caller's person (o
 call acts as, below), never something a caller can set. A memory's optional `name` is unique per
 owner: two people may each keep a memory of the same name, and `memory_read` by name finds the
 caller's own first, else a shared one. Memories stored before people existed (no owner) become
-private to the legacy person (`HUB_LEGACY_PERSON`, default `owner`) the first time the hub starts,
+the legacy person's (`HUB_LEGACY_PERSON`, default `owner`), shared, the first time the hub starts,
 so set `HUB_LEGACY_PERSON` to the name you pair your own PC under **before the first start** (see
 `HUB_TOKENS` below; `helm-hub person merge` fixes a hub that started with the wrong one).
 
-**Scope and person.** `scope` on `memory_write` and `memory_update` is `me` (the default: only the
-owner sees it) or `everyone`; `private` and `shared`, and the older `visibility`, mean the same, and
+**Scope and person.** `scope` on `memory_write` and `memory_update` is `everyone` (the default: the
+household sees it) or `me` (only the owner sees it, chosen on purpose); `private` and `shared`, and the older `visibility`, mean the same, and
 naming two that disagree is an error. `person` on `memory_search` and `memory_list` is `me` or `any`
 (the default: the caller's own memories and the ones shared with everyone) or a person's name or id
 (only what that person wrote, among what the caller may see). Nothing crosses privacy: another
@@ -534,7 +534,8 @@ What is being typed in an answer survives every refresh.
 
 ```
 helm-hub serve                       # HUB_DB, HUB_BIND, HUB_TOKENS, HUB_LEGACY_PERSON, HUB_ALLOW_MUTATE, HUB_TELEGRAM_*, HUB_VOICE*
-helm-hub import <dir> --source S [--prune]   # S: the source tag the imported memories carry (required)
+helm-hub import <dir> --source S [--prune] [--retag]   # S: the source tag the imported memories carry (required)
+helm-hub share-existing [--dry-run] [--keep ID,ID] [--list FILE] [--revert]   # the one-off private -> shared move (below)
 helm-hub person|client|pair ...      # people, machines and pairing codes (see above)
 ```
 
@@ -546,13 +547,49 @@ files are updated in place, and a changed body drops that memory's stored vector
 described the old text. `MEMORY.md` and `README.md` are index files and are skipped. Two files
 claiming one name are reported as failures rather than overwriting each other. Imported memories
 are tagged `imported`, the source tag, and their type, and carry the file's path below the folder
-as their source (`<tag>:sub/a.md`). They are private to `HUB_LEGACY_PERSON`.
+as their source (`<tag>:sub/a.md`). They belong to `HUB_LEGACY_PERSON` and are shared with the
+household, so a file whose text looks like a credential (a key block, a token, a password line) is
+reported as failed and left out, whatever else it holds.
+
+Retired memories are never imported: anything under a folder named `archived` (or ending `.bak`),
+any `*.bak.md` file, and any file whose frontmatter `status` (top level or under `metadata`) is
+`archived` or `superseded`. They are listed as skipped. With `--prune`, a memory of the source that
+was imported before such a rule applied is removed on the next run.
+
+A folder keeps the source tag it was first imported under, recorded once an import has finished (a
+failed import leaves it as it was): importing the same folder (by its real
+path) under another tag is refused, because every memory would be written a second time beside the
+old ones. `--retag` says the source really did change; the run then says how many memories it
+rewrote. A hub from before this check has no record of its folders, so the first import after an
+upgrade is not compared with anything: always pass the source tag the folder was imported under
+before (the tag its memories carry), never a new one. The index door follows the same rule: a
+`folder` source's doc whose key sits under `archived` or a `.bak` folder, or is a `*.bak.md` file, is
+refused with "not indexed", whichever machine sends it.
 
 `--source` is required, so a re-import cannot re-tag memories under another source by accident; keep
 using the same tag for the same folder. `--prune` then removes the memories of that source (and
 only that source) whose files are gone or whose `name` changed. Memories written by agents, or
 imported under another source, are never touched. A file that failed to import keeps its old
 memory, and a run that finds no memory files prunes nothing (an unmounted folder looks empty).
+
+### Moving existing private memories to shared
+
+Memories written before sharing was the default are private to their owner, and importing a folder
+again does not change a memory's visibility, so one source can end up mixed. `helm-hub
+share-existing` moves them in one reversible step, at the redeploy:
+
+1. `helm-hub share-existing --dry-run` lists every private, owned memory (id, name, source, title)
+   and changes nothing. Read it: the hub does not record whether a memory was made private on
+   purpose or only by default, so any you want to keep private go in `--keep`.
+2. `helm-hub share-existing --keep 12,40` backs the database up next to it
+   (`hub.db.before-share-<time>.bak`), moves the rest (and their search copies) to shared, writes
+   the moved ids to `share-existing-<time>.txt` beside the database (or the `--list` file) and
+   records them in the `visibility_flips` table.
+3. `helm-hub share-existing --revert` puts the latest run back to private. A memory someone has
+   changed since stays as it is.
+
+Notes and sessions that a PC indexes are not touched: their visibility is the source's own setting
+on that PC and arrives with its next index pass.
 
 ## Build, test, run
 
@@ -575,12 +612,66 @@ before the first start, or the hub cannot open its database. A folder left owned
 example one the Docker daemon made itself, fails the same way. The memory folder at `/mnt/memory`
 is mounted read-only and only needs to be readable by that user.
 
+## Search
+
+Everything searchable is a *doc* made of *chunks* in `ix_*` tables beside `memories` (`src/index.rs`).
+A memory is mirrored as a doc of the `memory` source in the same transaction as every write
+(insert, update, delete, import, person merge), and a store from before the index gets its
+mirrors when it opens, once. Notes and chat history are pushed by a person's Helm over the relay
+line. Nothing here changes what the memory tools did: a memory hit keeps its old fields.
+
+**Privacy.** A viewer sees the docs they own, the ones shared with everyone, and the ones that name
+them as a reader. That filter is part of every candidate query, so another person's private text is
+never a candidate. Their *shared* items are down-weighted to 0.3 but still win when they are the
+only match.
+
+**Ranking** (`src/rank.rs`, one table of constants): keyword (bm25: title 8, heading 4, text 1)
+and vector candidates are fused by reciprocal rank, then multiplied by the source (memory 1.0, note
+0.8, conversation 0.5), by 0.3 for another person's item unless `person` names them, and for
+conversations with no date window by age (half-life 120 days, floor 0.6). A doc scores its best
+chunk plus a tenth of its second and shows at most two chunks (a memory one); a chunk whose vector
+is within 0.95 of a higher one is dropped. A result is `{kind: memory|note|chat, ref, title, where,
+at, owner, snippet, score, matched}`, with `ref` `m:<id>` or `d:<doc>#<chunk>`, and the answer's
+`searched` says `{sources, window?, widened?, meaning}`. `meaning` is `pc` or `nas` (who embedded
+the query), `caller` (a `vector` was sent) or `off: <why>` (keywords only).
+
+**Dates.** `after`/`before` (ISO) win; otherwise a phrase in the query (`when.rs`) becomes a window
+on the passage's time. A window with fewer than three docs widens by half, once (`widened`).
+`parseDates: false` turns the phrases off. The zone is the container's `TZ` (`Europe/London`, else UTC).
+
+**Vectors.** int8 on disk (a scale and a byte per dimension), keyed by model (the `:tag` is
+dropped, so `nomic-embed-text:latest` is `nomic-embed-text`); the hub also keeps one sign bit per
+dimension of every vector in RAM (about 20 MB at 200k chunks), scans the allowed docs' codes by
+Hamming distance and re-scores the closest 200 exactly. It never embeds documents. A query is
+embedded by the asker's own PC (`ix_embed`, 600 ms; a PC with busy local models answers `locked`),
+else by the server at `HUB_EMBED_URL` (OpenAI-style `/v1/embeddings`, 2.5 s, one query at a time),
+else not at all. Queries go out as `search_query: <text>`, documents carry no prefix. The last 512
+query vectors are kept.
+
+**Trace.** `tier: "trace"` with `chat` searches the working steps of one chat. The hub checks the
+asker may read the chat, then asks the PC that holds it (`ix_trace`, 3 s); with the PC off the
+answer says `trace: "unavailable while the PC is off"`.
+
+**Index frames** (peer scope; see the table in `src/relay.rs`): `ix_hello` registers sources and
+returns each one's doc count and digest (sha256 of the lines `key:hash`, sorted by key bytes and
+joined by newlines); `ix_manifest` pages `{key, hash}`; `ix_put` stores up to 200 chunks and 2 MiB
+of docs, one transaction per doc (`inserted`, `replaced`, `unchanged` or `refused`: the owner must
+be the machine's person or one it may act for, and a source belongs to the first machine that names
+it; a chunk whose text is unchanged keeps its vector); `ix_delete`; `ix_pending` lists chunks with
+no vector for the hub's model, only of docs the machine's people may read; `ix_vectors` stores
+them. The welcome frame carries `features: ["index"]`, so a Helm on an older hub knows to wait.
+
+Environment: `HUB_EMBED_URL` (unset: only a PC embeds queries), `HUB_EMBED_MODEL` (default
+`nomic-embed-text`), `TZ`. The database work of a search and of every index write runs on the
+blocking pool, so the hub's one thread keeps serving Telegram and the lines meanwhile.
+
 ## Budget
 
 One-thread runtime, two SQLite connections (memories, and the registry that token checks read), a
-2 MB page cache. A release build idles at about 7 MB
-of working set with ~340 memories loaded (measured on Windows). Vector search is a brute-force
-scan, which is fine below roughly 50k rows.
+16 MB page cache, plus about 20 MB for the vector codes at 200k chunks (search is a Hamming scan of
+the codes, not of the vectors). A release build idles at about 7 MB
+of working set with ~340 memories loaded (measured on Windows). Vector search is a Hamming
+scan of the codes, a few milliseconds at 200k chunks.
 
 **The peak.** Idle is small, but the queues may fill, and every one of them is capped for the whole
 hub: Telegram files waiting for Helm about 150 MB (as base64), plus up to 64 MB of frames a

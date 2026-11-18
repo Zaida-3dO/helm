@@ -6,13 +6,11 @@
 //! to do it on the PC the chat runs on.
 //!
 //! Who asks decides the rest. A PC that is not paired with a person on the hub answers no one.
-//! A device acting as this PC's own person reads freely and runs chats while the switch "Let
-//! other devices use chats on this PC" is on. One acting as anyone else needs the switch "Let
-//! people in my household run their chats on this PC". The person says who is acting, not what
-//! they may touch: a chat is not hidden from a person who acts here, but attribution holds —
+//! A device, whoever it acts for, reads freely and runs chats while the switch "Let other
+//! devices use chats on this PC" is on. The person says who is acting, not what they may touch: a chat is not hidden from a person who acts here, but attribution holds —
 //! a chat started from afar belongs to the acting person, and their words on a chat that is not
 //! theirs arrive framed as a message from them, never as the owner's own words. The list a
-//! watcher subscribes to is filtered to its read set as a convenience, not as access control.
+//! watcher subscribes to holds every chat of this PC, whoever it belongs to.
 //!
 //! Chat events from this install reach the service through [`Service::observe`] (the app's event
 //! tap), and go to the watchers that subscribed as pushes ([`crate::subs`]).
@@ -52,12 +50,11 @@ pub struct PanelRead {
     pub args: Value,
 }
 
-/// Who is asking for pages: the hub person acting, and whether that is this PC's own person
-/// (who also sees the pages pinned before profiles existed).
+/// Who is asking for pages: the hub person acting. Every pinned page is open to them; the
+/// person only puts the pages filed under their own profiles first.
 #[derive(Clone, Debug)]
 pub struct PageScope {
     pub person_id: String,
-    pub own: bool,
 }
 
 /// A file carried from another device, with its bytes, ready to hand to the chat.
@@ -94,8 +91,6 @@ pub trait ChatPort: Send + Sync {
     fn device(&self) -> DeviceInfo;
     /// Whether this person's other devices may run chats here.
     fn run_allowed(&self) -> bool;
-    /// Whether people in the household may run their own chats here.
-    fn household_run(&self) -> bool;
     /// The hub people this PC acts for, one per linked profile, the home profile's first,
     /// with the channels it takes for each. They are announced in the `device` frame.
     fn people(&self) -> Vec<DevicePerson> {
@@ -563,14 +558,10 @@ impl Inner {
         let run = async {
             let (asker, acting) = self.asker(from)?;
             // The switch for other devices gates every op that runs or changes a chat here,
-            // whoever is asking; the household switch is a further gate for other people.
+            // whoever is asking.
             if op.is_run() && !self.port.run_allowed() {
                 return Err(WireError::not_allowed());
             }
-            let op = match &asker {
-                Asker::Own => op,
-                Asker::Household { .. } => self.household_op(op)?,
-            };
             if op.is_run() {
                 log::info!(
                     "devices: {op_name} from device:{} acting as {}",
@@ -624,52 +615,6 @@ impl Inner {
         }
     }
 
-    /// Check a request that acts as someone other than this PC's own person against that
-    /// person's switch. There is no per-person limit on which chats they may touch: profiles
-    /// keep concerns apart, they are not access control.
-    fn household_op(&self, op: Op) -> Result<Op, WireError> {
-        if !self.port.household_run() {
-            return Err(WireError::new(
-                code::NOT_ALLOWED,
-                "This PC doesn't let people in the household run their chats here.",
-            ));
-        }
-        Ok(op)
-    }
-
-    /// A household member may hand a chat to a profile or change who it is shared with only
-    /// when it is theirs; a person it is merely shared with may only take themselves off it.
-    /// Otherwise the move would make someone else's chat read as theirs.
-    async fn owner_only(
-        &self,
-        asker: &Asker,
-        chat_id: &str,
-        leaving: bool,
-    ) -> Result<(), WireError> {
-        let Asker::Household { person_id, .. } = asker else {
-            return Ok(());
-        };
-        let chat = self.port.chat(chat_id.to_owned()).await?.chat.to_value();
-        if subs::owned_by(&chat, person_id) || (leaving && subs::visible_to(&chat, person_id)) {
-            Ok(())
-        } else {
-            Err(WireError::not_allowed())
-        }
-    }
-
-    /// The read set for this caller's subscriptions: the people its `as` covers, as a filter on
-    /// the list it hears. `None` (no filter) when the set includes this PC's own person, which
-    /// it does in practice for every paired PC.
-    fn read_scope(&self, from: &Caller) -> Option<Vec<String>> {
-        let me = self.link.person_id()?;
-        let set: Vec<String> = if from.people.is_empty() {
-            from.person_id.iter().cloned().collect()
-        } else {
-            from.people.iter().map(|p| p.person_id.clone()).collect()
-        };
-        (!set.contains(&me)).then_some(set)
-    }
-
     async fn run_parsed(
         &self,
         from: &Caller,
@@ -678,26 +623,18 @@ impl Inner {
     ) -> Result<(Value, Option<String>), WireError> {
         let uid = from.uid.as_str();
         let done = |v: Value| -> Result<(Value, Option<String>), WireError> { Ok((v, None)) };
-        let scope = self.read_scope(from);
         match op {
             Op::Hello => done(to_value(&self.port.hello().await?)?),
             Op::ChatsSub(a) => {
                 {
                     let mut subs = lock(&self.subs);
-                    subs.set_scope(uid, scope.as_deref());
                     subs.add_chats(uid);
                 }
                 match self.port.chats(a.since).await {
-                    Ok((mut chats, cursor)) => {
-                        if let Some(p) = &scope {
-                            chats.retain(|c| subs::visible_to_any(&c.to_value(), p));
-                            lock(&self.subs).listed(uid, chats.iter().map(|c| c.id().to_owned()));
-                        }
-                        Ok((
-                            json!({ "chats": chats, "cursor": cursor }),
-                            Some(CHATS_SUB.to_owned()),
-                        ))
-                    }
+                    Ok((chats, cursor)) => Ok((
+                        json!({ "chats": chats, "cursor": cursor }),
+                        Some(CHATS_SUB.to_owned()),
+                    )),
                     Err(e) => {
                         lock(&self.subs).remove_chats(uid);
                         Err(e)
@@ -707,7 +644,6 @@ impl Inner {
             Op::ChatSub(a) => {
                 {
                     let mut subs = lock(&self.subs);
-                    subs.set_scope(uid, scope.as_deref());
                     subs.add_chat(uid, &a.chat_id);
                 }
                 let read = async {
@@ -816,9 +752,6 @@ impl Inner {
                 done(json!({}))
             }
             Op::Share(a) => {
-                let leaving = !a.shared
-                    && matches!(asker, Asker::Household { person_id, .. } if *person_id == a.person_id);
-                self.owner_only(asker, &a.chat_id, leaving).await?;
                 self.port.share(a).await?;
                 done(json!({}))
             }
@@ -840,7 +773,6 @@ impl Inner {
                 done(json!({}))
             }
             Op::MoveProfile(a) => {
-                self.owner_only(asker, &a.chat_id, false).await?;
                 self.port.move_profile(a).await?;
                 done(json!({}))
             }
@@ -937,7 +869,8 @@ impl Inner {
             }
             Op::DefaultsGet(a) => done(self.port.defaults_get(a.chat_id).await?),
             Op::DefaultsSet(a) => {
-                // The new-chat defaults are this PC's own person's pick.
+                // The new-chat defaults include the default permission mode, which grants
+                // authority: they are this PC's own person's pick.
                 if matches!(asker, Asker::Household { .. }) {
                     return Err(WireError::not_allowed());
                 }
@@ -952,11 +885,9 @@ impl Inner {
         match asker {
             Asker::Own => PageScope {
                 person_id: self.link.person_id().unwrap_or_default(),
-                own: true,
             },
             Asker::Household { person_id, .. } => PageScope {
                 person_id: person_id.clone(),
-                own: false,
             },
         }
     }

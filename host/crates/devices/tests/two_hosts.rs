@@ -732,7 +732,7 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
             [("c1".to_owned(), "img-1".to_owned())]
         );
         // The person the hub says is asking is who the pages are for.
-        let asked: Vec<&str> = st.pages_asked.iter().map(|(w, _, _)| w.as_str()).collect();
+        let asked: Vec<&str> = st.pages_asked.iter().map(|(w, _)| w.as_str()).collect();
         assert_eq!(
             asked,
             [
@@ -742,10 +742,7 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
                 "read pg-1 Some(\"a.png\")"
             ]
         );
-        assert!(st
-            .pages_asked
-            .iter()
-            .all(|(_, p, own)| p == "person-a" && *own));
+        assert!(st.pages_asked.iter().all(|(_, p)| p == "person-a"));
         assert_eq!(st.folders_asked, ["c1"]);
         assert_eq!(
             st.panel_reads.iter().map(|(op, _)| *op).collect::<Vec<_>>(),
@@ -2366,9 +2363,8 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
         Ok::<_, rusqlite::Error>(())
     })
     .unwrap();
-    let who = |person: &str, own: bool| helm_devices::serve::PageScope {
+    let who = |person: &str| helm_devices::serve::PageScope {
         person_id: person.to_owned(),
-        own,
     };
     let titles = |v: serde_json::Value| -> Vec<String> {
         let mut t: Vec<String> = v["pages"]
@@ -2380,19 +2376,19 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
         t.sort();
         t
     };
-    assert_eq!(
-        titles(port.pages_list(who("person-a", true)).await.unwrap()),
-        ["Before profiles", "Plan"]
-    );
-    assert_eq!(
-        titles(port.pages_list(who("person-b", false)).await.unwrap()),
-        ["Theirs"]
-    );
+    // Every pinned page is open to every person, whoever pinned it.
+    for person in ["person-a", "person-b"] {
+        assert_eq!(
+            titles(port.pages_list(who(person)).await.unwrap()),
+            ["Before profiles", "Plan", "Theirs"],
+            "{person}"
+        );
+    }
     let page = |id: &str| helm_devices::wire::PageIdArgs {
         page_id: id.to_owned(),
     };
     let files = port
-        .pages_files(who("person-a", true), page("pg-a"))
+        .pages_files(who("person-a"), page("pg-a"))
         .await
         .unwrap();
     let names: Vec<&str> = files["files"]
@@ -2402,16 +2398,13 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
         .map(|f| f["path"].as_str().unwrap())
         .collect();
     assert_eq!(names, ["pic.png", "style.css"]);
-    assert_eq!(
-        port.pages_files(who("person-b", false), page("pg-a"))
-            .await
-            .unwrap_err()
-            .code,
-        "not_found"
-    );
+    assert!(port
+        .pages_files(who("person-b"), page("pg-a"))
+        .await
+        .is_ok());
     let read = |id: &str, path: Option<&str>, offset: u64| {
         port.pages_read(
-            who("person-a", true),
+            who("person-a"),
             helm_devices::wire::PagesReadArgs {
                 page_id: id.to_owned(),
                 path: path.map(str::to_owned),
@@ -2425,6 +2418,7 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
         (Some(5), Some(true))
     );
     for bad in [
+        "unused.png",
         "unused.html",
         "../away/secret.png",
         "plan.html",
@@ -2432,7 +2426,11 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
     ] {
         assert!(read("pg-a", Some(bad), 0).await.is_err(), "{bad}");
     }
-    assert_eq!(read("pg-b", None, 0).await.unwrap_err().code, "not_found");
+    assert!(read("pg-b", None, 0).await.is_ok());
+    assert_eq!(
+        read("pg-none", None, 0).await.unwrap_err().code,
+        "not_found"
+    );
 
     // A board is a place to start a chat from afar: the chat runs in the folder the board starts
     // its chats in and is shown on the board. The projects crate's tables and the ops that use
@@ -2569,6 +2567,42 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
     }
     assert!(calls.lock().unwrap().is_empty());
 
+    // Another person of the household does the same as the PC's own person: a new project is a
+    // board when a task board is connected, a board that already has a folder can be pointed at
+    // another, and pinning works.
+    remote
+        .project_create(new_project("Sam's", Some("proj-w")))
+        .await
+        .unwrap();
+    assert_eq!(
+        calls.lock().unwrap().remove(0),
+        (
+            "board_project_create".to_owned(),
+            json!({"title": "Sam's", "description": "About", "folder": workp})
+        )
+    );
+    remote
+        .project_set(set("brd-1", None, Some("proj-w")))
+        .await
+        .unwrap();
+    assert_eq!(
+        calls.lock().unwrap().remove(0),
+        (
+            "project_update".to_owned(),
+            json!({"projectId": "brd-1", "revision": 4, "primaryFolderProjectId": "proj-w"})
+        )
+    );
+    remote
+        .project_set(set("brd-2", Some(true), Some("proj-w")))
+        .await
+        .unwrap();
+    remote
+        .project_set(set("brd-1", Some(true), None))
+        .await
+        .unwrap();
+    assert_eq!(calls.lock().unwrap().len(), 2);
+    calls.lock().unwrap().clear();
+
     // The catalogue op failing (here: no profile folder for it to read) is logged, not fatal:
     // the hello still answers, with no catalogue.
     let mut bare = Services::new();
@@ -2589,7 +2623,7 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_household_member_gets_their_own_view_of_the_list_but_is_refused_nothing() {
+async fn a_household_member_reads_the_whole_list_and_is_refused_nothing() {
     let router = MemRouter::new();
     let port = Arc::new(FakePort::new("dev-a", "Desk"));
     port.st().people.push("person-b".to_owned());
@@ -2603,7 +2637,7 @@ async fn a_household_member_gets_their_own_view_of_the_list_but_is_refused_nothi
     let own = Watcher::new(&router, "dev-o", "Alex's laptop", true);
     settle().await;
 
-    // The list holds only Sam's chat and the one shared with her; the owner's device sees all.
+    // The list holds every chat of the PC for her as for the owner's device.
     let ids = |v: Value| -> Vec<String> {
         v["chats"]
             .as_array()
@@ -2616,39 +2650,35 @@ async fn a_household_member_gets_their_own_view_of_the_list_but_is_refused_nothi
         .rpc
         .call("dev-a", "chats_sub", json!({"since": 0}))
         .await;
-    assert_eq!(ids(list.unwrap()), ["hers", "shared"]);
+    assert_eq!(ids(list.unwrap()), ["mine", "hers", "shared"]);
     let list = own
         .rpc
         .call("dev-a", "chats_sub", json!({"since": 0}))
         .await;
     assert_eq!(ids(list.unwrap()), ["mine", "hers", "shared"]);
-    // A change to the owner's chat never reaches her; a chat no longer shared is taken out.
+    // A change to any chat reaches her as it reaches the owner's device.
     host.observe(
         &ChatEvent::Chat {
             chat: fake_record("mine", "Renamed", 13),
         }
         .to_app_event(),
     );
-    // (The fake reads every changed record as the owner's own, shared with no one.)
     host.observe(
         &ChatEvent::Chat {
-            chat: fake_record("shared", "No longer shared", 14),
+            chat: fake_record("shared", "Renamed too", 14),
         }
         .to_app_event(),
     );
-    until(|| own.heard("chats").len() == 2).await;
+    until(|| own.heard("chats").len() == 2 && sam.heard("chats").len() == 2).await;
     settle().await;
-    let heard: Vec<(String, String)> = sam
-        .heard("chats")
-        .iter()
-        .map(|p| {
-            (
-                p.event["kind"].as_str().unwrap().to_owned(),
-                p.event["chatId"].as_str().unwrap_or_default().to_owned(),
-            )
-        })
-        .collect();
-    assert_eq!(heard, [("chat_removed".to_owned(), "shared".to_owned())]);
+    let kinds = |w: &Watcher| -> Vec<String> {
+        w.heard("chats")
+            .iter()
+            .map(|p| p.event["kind"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(kinds(&sam), kinds(&own));
+    assert_eq!(kinds(&sam), ["chat", "chat"]);
     port.st().chats.retain(|c| c.id() != "shared");
     port.add_chat_of("shared", "Shared again", 15, "person-a", &["person-b"]);
 
@@ -2734,27 +2764,31 @@ async fn a_household_member_gets_their_own_view_of_the_list_but_is_refused_nothi
         );
         // A chat she starts is hers, whoever she names.
         assert_eq!(st.created[0].person_id, "person-b");
+        // Her project ops are served like anyone's.
+        assert_eq!(st.projects_created.len(), 1);
+        assert_eq!(st.projects_set.len(), 1);
     }
-    // She cannot hand a chat that is neither hers nor shared with her to a profile or share it
-    // (that would make it read as hers), nor change this PC's new-chat defaults.
+    // She can hand any chat to a profile or change its sharing, as the PC's own person can;
+    // only the new-chat defaults (they include the default permission mode) stay the PC's own
+    // person's.
     port.add_chat_of("his", "Pat's", 16, "person-a", &[]);
     for (op, args, ok) in [
         (
             "move_profile",
             json!({"chatId": "his", "profileId": "p"}),
-            false,
+            true,
         ),
         (
             "share",
             json!({"chatId": "his", "personId": "person-b", "shared": true}),
-            false,
+            true,
         ),
         (
             "move_profile",
             json!({"chatId": "hers", "profileId": "p"}),
             true,
         ),
-        // A chat merely shared with her: she can leave it, not move it or change its sharing.
+        // A chat merely shared with her: she can leave it, move it or change its sharing.
         (
             "share",
             json!({"chatId": "shared", "personId": "person-b", "shared": false}),
@@ -2763,12 +2797,12 @@ async fn a_household_member_gets_their_own_view_of_the_list_but_is_refused_nothi
         (
             "share",
             json!({"chatId": "shared", "personId": "person-a", "shared": false}),
-            false,
+            true,
         ),
         (
             "move_profile",
             json!({"chatId": "shared", "profileId": "p"}),
-            false,
+            true,
         ),
         (
             "defaults_set",
@@ -2782,7 +2816,7 @@ async fn a_household_member_gets_their_own_view_of_the_list_but_is_refused_nothi
             false => assert_eq!(got.unwrap_err().code, code::NOT_ALLOWED, "{op}"),
         }
     }
-    assert_eq!(port.st().profiles_moved.len(), 1);
+    assert_eq!(port.st().profiles_moved.len(), 3);
 
     // A card for a change Helm applies itself (settings, pairing, the update folder) can only
     // be approved by this PC's own person; a plain card is answerable by anyone with the chat.
@@ -2811,12 +2845,6 @@ async fn a_household_member_gets_their_own_view_of_the_list_but_is_refused_nothi
         .await
         .is_ok());
 
-    // With the household switch off she is refused, even reading; the owner's devices are not.
-    port.set_household(false);
-    let e = sam.rpc.call("dev-a", "hello", json!({})).await.unwrap_err();
-    assert_eq!(e.code, code::NOT_ALLOWED);
-    assert!(own.rpc.call("dev-a", "hello", json!({})).await.is_ok());
-    port.set_household(true);
     // The switch for other devices gates a household member's run ops too: with it off, every op
     // that runs or changes a chat is refused, card answers and uploads included; reads stay.
     port.set_run(false);
@@ -2879,8 +2907,7 @@ async fn a_household_member_gets_their_own_view_of_the_list_but_is_refused_nothi
         .call("dev-a", "attach_put", part(u3, 0, true))
         .await
         .unwrap();
-    // A person this PC has no profile for is still served: the switch is per household, not
-    // per person.
+    // A person this PC has no profile for is still served.
     port.st().people.retain(|p| p != "person-b");
     assert!(sam.rpc.call("dev-a", "hello", json!({})).await.is_ok());
 
@@ -3132,11 +3159,11 @@ async fn one_pc_acts_as_each_of_its_profiles() {
     assert_eq!(port.st().created.len(), 1);
 }
 
-/// A profile linked after the first sync widens the copy: the app's event tap, handed the
-/// mirror, asks the other PC again with the wider read set, and the chat of the new person
-/// arrives without the hub line dropping.
+/// The copy of another PC holds every chat of that PC from the first sync, whoever the laptop
+/// acts for; a profile linked later changes nothing about which chats arrive, and the hub line
+/// does not drop.
 #[tokio::test(start_paused = true)]
-async fn a_profile_linked_later_brings_its_chats_into_the_copy() {
+async fn the_copy_holds_every_chat_of_the_pc_whoever_the_laptop_acts_for() {
     let router = MemRouter::new();
     let port = Arc::new(FakePort::new("dev-d", "Desk"));
     port.st().people = vec!["person-p".to_owned(), "person-s".to_owned()];
@@ -3154,10 +3181,10 @@ async fn a_profile_linked_later_brings_its_chats_into_the_copy() {
         "Sam",
         &[("person-s", true, true)],
     );
-    until(|| b.mirror.owner("own-s").is_some()).await;
-    assert!(b.mirror.owner("own-t").is_none());
+    until(|| b.mirror.owner("own-s").is_some() && b.mirror.owner("own-t").is_some()).await;
 
-    // The laptop now announces Tia as well; the tap hears the profile change.
+    // The laptop now announces Tia as well; the tap hears the profile change, and the copy
+    // still holds both chats.
     b.link
         .set_people(vec!["person-s".to_owned(), "person-t".to_owned()]);
     b.link.send(Frame::Device(DeviceFrame {
@@ -3177,5 +3204,6 @@ async fn a_profile_linked_later_brings_its_chats_into_the_copy() {
     let tap = helm_devices::EventTap::default();
     tap.attach_mirror(b.mirror.clone());
     tap.observe(&AppEvent::new("profiles_changed"));
-    until(|| b.mirror.owner("own-t").is_some()).await;
+    settle().await;
+    assert!(b.mirror.owner("own-s").is_some() && b.mirror.owner("own-t").is_some());
 }

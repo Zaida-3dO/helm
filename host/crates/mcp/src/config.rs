@@ -302,11 +302,28 @@ impl McpStore {
         person: Option<&str>,
         without_chat_person: bool,
     ) -> Result<(String, Vec<ResolvedServer>), StoreError> {
+        self.resolve_enabled_scoped(env, person, without_chat_person, false)
+    }
+
+    /// As [`McpStore::resolve_enabled_where`], also leaving out the servers that belong to this
+    /// PC's own person (the signed-in browser) when `not_home` says the chat belongs to another
+    /// profile than the home one.
+    pub fn resolve_enabled_scoped(
+        &self,
+        env: &dyn Fn(&str) -> Option<String>,
+        person: Option<&str>,
+        without_chat_person: bool,
+        not_home: bool,
+    ) -> Result<(String, Vec<ResolvedServer>), StoreError> {
         let servers = self.load()?;
         let revision = revision_of(&servers);
         let resolved = servers
             .iter()
-            .filter(|s| s.enabled && !(without_chat_person && sends_chat_person(s)))
+            .filter(|s| {
+                s.enabled
+                    && !(without_chat_person && sends_chat_person(s))
+                    && !(not_home && is_home_only(s))
+            })
             .map(|s| self.resolve_one(s, env, person))
             .collect();
         Ok((revision, resolved))
@@ -315,7 +332,10 @@ impl McpStore {
     /// Whether any enabled server sends the chat's person, so its config differs per chat.
     pub fn uses_chat_person(&self) -> bool {
         self.load()
-            .map(|l| l.iter().any(|s| s.enabled && sends_chat_person(s)))
+            .map(|l| {
+                l.iter()
+                    .any(|s| s.enabled && (sends_chat_person(s) || is_home_only(s)))
+            })
             .unwrap_or(false)
     }
 
@@ -368,6 +388,7 @@ impl McpStore {
         let mut out = ResolvedServer {
             id: s.id.clone(),
             name: s.name.clone(),
+            preset: s.preset.clone(),
             transport: t.kind,
             command: t.command.clone(),
             args: t.args.clone(),
@@ -382,20 +403,28 @@ impl McpStore {
             host_served: false,
         };
         let mut secrets = Vec::new();
+        // The variables a preset names that are not secrets (the browser's list of sites, say):
+        // ordinary words that must not be blanked out of tool results.
+        let plain_env: Vec<String> = crate::presets::presets()
+            .into_iter()
+            .find(|p| s.preset.as_deref() == Some(p.id.as_str()))
+            .map(|p| {
+                p.draft_env
+                    .into_iter()
+                    .filter(|n| !p.secret_env.contains(n))
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut run = || -> Result<(StrMap, StrMap), String> {
             let mut e = BTreeMap::new();
             for (k, r) in &t.env {
-                e.insert(
-                    k.clone(),
-                    self.resolve_ref(
-                        &s.id,
-                        r,
-                        false,
-                        &format!("Environment {k}"),
-                        env,
-                        &mut secrets,
-                    )?,
-                );
+                let mut kept = Vec::new();
+                let value =
+                    self.resolve_ref(&s.id, r, false, &format!("Environment {k}"), env, &mut kept)?;
+                if !plain_env.contains(k) {
+                    secrets.extend(kept);
+                }
+                e.insert(k.clone(), value);
             }
             let mut h = BTreeMap::new();
             for (k, r) in &t.headers {
@@ -536,6 +565,12 @@ pub const PERSON_HEADER: &str = "X-Helm-Person";
 /// Written beside the config once existing hub servers have been given [`PERSON_HEADER`].
 const PERSON_MARKER: &str = ".mcp-person-header";
 
+/// A server that reaches the home person's own things — the signed-in browser — and so goes to
+/// the chats of the home profile only, never to a household person's or a guest's.
+fn is_home_only(s: &McpServer) -> bool {
+    s.preset.as_deref() == Some(crate::presets::BROKER_PRESET_ID)
+}
+
 fn sends_chat_person(s: &McpServer) -> bool {
     s.transport
         .headers
@@ -622,8 +657,67 @@ pub(crate) mod tests {
         }
     }
 
+    /// A saved built-in browser server: stdio, broker preset, the broker tool entry named.
+    pub fn browser_server(id: &str) -> McpServer {
+        McpServer {
+            id: id.into(),
+            name: "My browser".into(),
+            enabled: true,
+            transport: Transport {
+                kind: TransportKind::Stdio,
+                command: Some("node.exe".into()),
+                args: vec!["bb/dist/src/bin/broker-tool.js".into()],
+                env: BTreeMap::new(),
+                url: None,
+                headers: BTreeMap::new(),
+                oauth: None,
+            },
+            allow_private_http: false,
+            preset: Some(crate::presets::BROKER_PRESET_ID.into()),
+        }
+    }
+
     fn no_env(_: &str) -> Option<String> {
         None
+    }
+
+    #[test]
+    fn the_resolved_server_carries_its_preset() {
+        let d = tempfile::tempdir().unwrap();
+        let st = store(d.path());
+        st.mutate(None, |l| {
+            let mut b = browser_server("bb");
+            for (k, v) in [
+                ("BROKER_ATTACHED_BROWSERS", "chrome"),
+                ("BROKER_ATTACHED_TOKEN", "tok-secret-1234"),
+            ] {
+                b.transport.env.insert(
+                    k.into(),
+                    ValueRef {
+                        kind: RefKind::Literal,
+                        value: Some(v.into()),
+                        secret_id: None,
+                        prefix: None,
+                    },
+                );
+            }
+            l.push(b);
+            Ok(())
+        })
+        .unwrap();
+        let (_, r) = st.resolve_enabled(&no_env).unwrap();
+        assert_eq!(
+            r[0].preset.as_deref(),
+            Some(crate::presets::BROKER_PRESET_ID),
+            "the worker recognises the built-in browser server by its preset"
+        );
+        assert_eq!(
+            r[0].secrets,
+            ["tok-secret-1234"],
+            "the token is blanked out of results; the plain browser name is an ordinary word"
+        );
+        assert_eq!(r[0].env["BROKER_ATTACHED_BROWSERS"], "chrome");
+        assert_eq!(st.resolve_draft(&hub("t")).preset, None);
     }
 
     #[test]

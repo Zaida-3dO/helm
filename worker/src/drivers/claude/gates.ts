@@ -1,8 +1,10 @@
 // The orchestrator workflow's dispatch, message and edit gates, asked of the host before an agent
 // spawn, a message to an agent or a main-thread file edit.
 //
-// The hook is registered only when the launch carries HELM_WORKFLOW_GATES=1, which the host sets
-// for a chat whose Orchestrator may be on; every other chat launches exactly as before. The host
+// The hooks are registered only when the launch carries HELM_WORKFLOW_GATES=1, which the host sets
+// for a chat whose Orchestrator may be on; every other chat launches exactly as before. The Stop
+// hook alone is also registered for HELM_STARTUP_GATE=1, which the host sets while a chat owes the
+// report of its project's startup instructions. The host
 // decides from its own records and answers allow wherever no workflow task is active. These gates
 // are soft: a call the host cannot answer in time, or any other failure, is let through.
 
@@ -14,6 +16,9 @@ export const WORKFLOW_STOP_HOOK_ID = "helm-workflow-stop";
 export const GATES_ENV = "HELM_WORKFLOW_GATES";
 export const GATE_OPERATION = "app_workflow_gate";
 export const TURN_END_OPERATION = "app_workflow_turn_end";
+// A chat told its project's startup instructions: the host sets this until the chat reports them done.
+export const STARTUP_ENV = "HELM_STARTUP_GATE";
+export const STARTUP_TURN_END_OPERATION = "app_startup_turn_end";
 export const SPAWN_TOOLS = ["Agent", "Task"];
 export const MESSAGE_TOOLS = ["SendMessage"];
 export const EDIT_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit"];
@@ -21,6 +26,11 @@ export const GATE_TIMEOUT_MS = 5_000;
 
 export function gatesWanted(env: Record<string, string | undefined>): boolean {
   return env[GATES_ENV] === "1";
+}
+
+/** The launch asks the host whether the turn may end before the project's startup is reported. */
+export function startupWanted(env: Record<string, string | undefined>): boolean {
+  return env[STARTUP_ENV] === "1";
 }
 
 /** The PreToolUse registration for the gated tools. */
@@ -73,15 +83,25 @@ export async function decideGate(channel: Pick<RequestChannel, "call">, input: J
  * handed off, and blocks the stop once per set of tips with the words to tell the agent. A stop
  * that is already the continuation of a block (`stop_hook_active`) is never blocked again, and an
  * unanswered question lets the turn end: the host's Needs you row is the fallback.
+ *
+ * `asks` names what the launch switched on. The startup question comes first, then the workflow's;
+ * the first block wins, and a question that fails or times out is skipped, not the ones after it.
  */
-export async function decideStop(channel: Pick<RequestChannel, "call">, input: Json): Promise<Json> {
+export async function decideStop(
+  channel: Pick<RequestChannel, "call">,
+  input: Json,
+  asks: { startup?: boolean; workflow?: boolean } = { workflow: true },
+): Promise<Json> {
   if (input.stop_hook_active === true) return {};
-  try {
-    const r = await channel.call(TURN_END_OPERATION, {}, { limitBytes: 32 * 1024, timeoutMs: GATE_TIMEOUT_MS, mutating: false, caller: { child: false } });
-    const res = r.ok ? obj(r.result) : {};
-    if (res.block === true && typeof res.reason === "string" && res.reason) return { decision: "block", reason: res.reason };
-  } catch {
-    // Soft: an unanswered question lets the turn end.
+  const operations = [...(asks.startup ? [STARTUP_TURN_END_OPERATION] : []), ...(asks.workflow ? [TURN_END_OPERATION] : [])];
+  for (const operation of operations) {
+    try {
+      const r = await channel.call(operation, {}, { limitBytes: 32 * 1024, timeoutMs: GATE_TIMEOUT_MS, mutating: false, caller: { child: false } });
+      const res = r.ok ? obj(r.result) : {};
+      if (res.block === true && typeof res.reason === "string" && res.reason) return { decision: "block", reason: res.reason };
+    } catch {
+      // Soft: an unanswered question lets the turn end.
+    }
   }
   return {};
 }

@@ -13,6 +13,13 @@ export interface Readiness {
   actionTarget?: string;
 }
 
+/** The built-in browser server (the broker on this PC). Its settings are the user's alone. */
+export const BROKER_PRESET = 'browser_broker';
+
+export function isBrokerServer(s: McpServer): boolean {
+  return s.preset === BROKER_PRESET;
+}
+
 function tokenMissing(s: McpServer, presets: McpPreset[]): boolean {
   const p = presets.find((x) => x.id === s.preset);
   if (!p || s.transport.type === 'stdio') return false;
@@ -51,7 +58,13 @@ export function serverReadiness(s: McpServer, status: ServerStatus | undefined, 
     return { state: 'inactive', reason: 'Needs you to connect in your browser.', actionLabel: 'Connect', actionTarget: s.id };
   }
   if (tokenMissing(s, presets)) return { state: 'inactive', reason: 'Needs its token.', actionLabel: 'Add token', actionTarget: s.id };
-  if (envMissing(s, presets)) return { state: 'inactive', reason: 'Needs its client id and secret.', actionLabel: 'Edit', actionTarget: s.id };
+  if (envMissing(s, presets))
+    return {
+      state: 'inactive',
+      reason: s.preset === BROKER_PRESET ? 'Needs its broker token.' : 'Needs its client id and secret.',
+      actionLabel: 'Edit',
+      actionTarget: s.id,
+    };
   switch (status?.state) {
     case 'failed':
       return { state: 'inactive', reason: status.error ?? 'The last connection failed.', actionLabel: 'Edit', actionTarget: s.id };
@@ -83,12 +96,14 @@ export function draftFromPreset(p: McpPreset, taken: string[]): McpServer {
   let id = p.id;
   for (let i = 2; taken.includes(id); i++) id = `${p.id.slice(0, 21)}_${i}`;
   if (p.transport === 'stdio') {
-    // A program preset: what to run, and an empty secret for each name the user types in. A
-    // Google accounts server types none: its client is set in the accounts dialog.
+    // A program preset: what to run, and an empty row for each variable it expects (a secret
+    // one for each name whose value must be typed in). A Google accounts server types none:
+    // its client is set in the accounts dialog.
+    const names = [...new Set([...(p.secretEnv ?? []), ...(p.draftEnv ?? [])])];
     const env =
       p.id === GOOGLE_PRESET
         ? {}
-        : Object.fromEntries((p.secretEnv ?? []).map((k) => [k, { kind: 'literal' as const, value: '' }]));
+        : Object.fromEntries(names.map((k) => [k, { kind: 'literal' as const, value: '' }]));
     return {
       id,
       name: p.name,

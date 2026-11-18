@@ -13,7 +13,7 @@ use std::sync::Arc;
 /// One section of the addendum. Sections capture whatever they read (the database, a vault list)
 /// when they are built.
 pub trait AddendumSection: Send + Sync {
-    /// Stable id, unique across sections: `verbosity`, `links`, `tools.guidelines`, `itemlinks`...
+    /// Stable id, unique across sections: `verbosity`, `links`, `cards`, `itemlinks`...
     fn id(&self) -> &'static str;
     /// Lower comes first; ties keep registration order.
     fn order(&self) -> i32;
@@ -108,13 +108,14 @@ pub fn knowledge_text(note: Option<&str>, hub_server: Option<&str>) -> Option<St
         let note: String = note.chars().take(NOTE_PROMPT_CHARS).collect();
         parts.push(format!(
             "Project note for the folder this chat runs in (shared by every chat working there; \
-             keep it current with app_update_project_context):\n{note}"
+             keep it current with app_project update_context):\n{note}"
         ));
     }
     if let Some(id) = hub_server.map(str::trim).filter(|i| !i.is_empty()) {
         parts.push(format!(
             "Shared memories are connected (MCP server {id}). When its memory_search tool is \
-             available, search it before non-trivial work for lessons and conventions that apply."
+             available, search it before non-trivial work for lessons and conventions that apply; \
+             cite hits by title and date, and read a hit in full before relying on it."
         ));
     }
     (!parts.is_empty()).then(|| parts.join("\n\n"))

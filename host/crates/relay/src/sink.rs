@@ -20,6 +20,9 @@
 //!   question is remembered by its hub id in the profile, so a resend after a restart is not
 //!   taken as a new prompt.
 //! - `/stop` stops the tagged chat's turn.
+//! - `/mode` shows or sets the working mode. Like `/stop` it is answered between the phone and
+//!   Helm and never reaches a chat. Only a sender the hub paired with someone on this PC gets
+//!   that far, so the command is always one person's own words, never an agent's text.
 //!
 //! **Out.** While a Telegram turn runs, a mirror task watches the chat (its stored status, the
 //! live tools and the transcript) and sends ONE status line up the line, only when it changes and
@@ -44,7 +47,7 @@ use helm_chats::ChatRuntime;
 use helm_core::db::Database;
 use helm_hosttools::OpInvoker;
 use rusqlite::OptionalExtension;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1122,6 +1125,146 @@ impl ChatSink {
         })
     }
 
+    /// A tap on a staged settings change: the same one decision the card in Helm makes, so the
+    /// first answer wins. The chat must still belong to the profile that was asked; whatever the
+    /// outcome the tap is spent and the person is told what happened.
+    async fn answer_consent(
+        &self,
+        c: &Ctx,
+        ask: &crate::approve::Ask,
+        index: usize,
+        up: &Arc<dyn Upstream>,
+    ) {
+        let label = ask.options[index].clone();
+        let unused = |why: &str| format!("Your \"{label}\" was not used: {why}");
+        let Some(w) = self.exec.wiring() else {
+            up.notify(&c.person, &unused("Helm is still starting."));
+            return;
+        };
+        let (services, events) = (w.services.clone(), w.events.clone());
+        let (db, chat, profile) = (c.db.clone(), ask.chat_id.clone(), c.profile_id.clone());
+        let owned = tokio::task::spawn_blocking(move || {
+            db.snapshot(|tx| helm_profiles::store::profile_of_chat(tx, &chat))
+                .ok()
+                .flatten()
+                .is_some_and(|p| p.id == profile)
+        })
+        .await
+        .unwrap_or(false);
+        if !owned {
+            up.notify(&c.person, &unused("that chat is not yours."));
+            return;
+        }
+        let ask2 = ask.clone();
+        let done = tokio::task::spawn_blocking(move || {
+            let d = crate::approve::decide_consent(&services, &events, &ask2, index)?;
+            let allowed = d.request.state != helm_consent::RequestState::Denied;
+            if let Some(applying) = d.applying {
+                let _ = applying.join();
+            }
+            let kinds = services.get::<helm_consent::AllowKinds>();
+            let db = services.need::<Database>()?;
+            let outcome = kinds
+                .and_then(|k| {
+                    helm_consent::store::get(&db, &k, &d.request.id)
+                        .ok()
+                        .flatten()
+                })
+                .and_then(|r| r.outcome);
+            Ok::<_, helm_ipc::ApiError>((allowed, outcome))
+        })
+        .await;
+        match done {
+            Ok(Ok((allowed, outcome))) => {
+                c.rt.add_context_row(
+                    &ask.chat_id,
+                    helm_chats::types::ContextKind::Telegram,
+                    &format!("Answered from Telegram: {label}"),
+                );
+                let said = match (allowed, outcome) {
+                    (true, Some(o)) => format!("Approved. {o}"),
+                    (true, None) => "Approved.".to_owned(),
+                    (false, _) => "Denied: nothing changed.".to_owned(),
+                };
+                up.notify(&c.person, &said);
+            }
+            Ok(Err(e)) if e.code == "conflict" => {
+                // Somebody answered first: say where, from the shared record.
+                let (db, id) = (c.db.clone(), ask.request_id.clone());
+                let services = self.exec.wiring().map(|w| w.services.clone());
+                let note = tokio::task::spawn_blocking(move || {
+                    let kinds = services?.get::<helm_consent::AllowKinds>()?;
+                    let r = helm_consent::store::get(&db, &kinds, &id).ok().flatten();
+                    Some(crate::approve::settled_note(
+                        r.as_ref(),
+                        helm_core::now_ms(),
+                    ))
+                })
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "It was answered already.".into());
+                up.notify(&c.person, &unused(&note));
+            }
+            Ok(Err(e)) => up.notify(
+                &c.person,
+                &unused(&format!("Helm could not answer it ({}).", e.message)),
+            ),
+            Err(_) => up.notify(&c.person, &unused("Helm could not answer it.")),
+        }
+    }
+
+    /// Answer a `/mode` command between the phone and Helm: it reads and changes the working
+    /// mode through the same ops the window's chip uses, and reaches no chat.
+    async fn answer_mode(&self, c: &Ctx, up: &Arc<dyn Upstream>, cmd: ModeCommand) {
+        // The working mode governs every chat on this PC, so only the person whose profile this
+        // machine is home to may use it from a phone. A household person whose Telegram this PC
+        // takes, or anyone else, gets a plain line and nothing changes.
+        let is_home =
+            c.db.snapshot(|tx| helm_profiles::store::home(tx))
+                .ok()
+                .flatten()
+                .is_some_and(|h| h.id == c.profile_id);
+        if !is_home {
+            up.notify(
+                &c.person,
+                "The working mode belongs to the PC that runs Helm: only its owner can change it from a phone.",
+            );
+            return;
+        }
+        let (op, args) = match cmd {
+            ModeCommand::Show => ("workmode_get", json!({})),
+            ModeCommand::Set(m) => ("workmode_set", json!({ "scope": "app", "mode": m })),
+            ModeCommand::Usage => {
+                up.notify(
+                    &c.person,
+                    "Working mode: \"/mode\" shows it, \"/mode run\" and \"/mode check\" change it.",
+                );
+                return;
+            }
+        };
+        match c.ops.invoke(op, args).await {
+            Ok(view) => match mode_answer(cmd, &view) {
+                Some(text) => up.notify(&c.person, &text),
+                None => up.notify(
+                    &c.person,
+                    "Helm answered the working mode in words it could not read.",
+                ),
+            },
+            Err(e) => {
+                let what = if op == "workmode_get" {
+                    "read"
+                } else {
+                    "change"
+                };
+                up.notify(
+                    &c.person,
+                    &format!("Helm could not {what} the working mode ({}).", e.message),
+                );
+            }
+        }
+    }
+
     /// Watch `chat` for its profile unless it is already being watched. One task per chat; a
     /// new exchange in a watched chat reuses the task, a chat whose task ended gets a new one.
     fn watch(&self, c: &Ctx, chat: &str, baseline: i64) {
@@ -1148,12 +1291,94 @@ impl ChatSink {
     }
 }
 
+/// What a `/mode` message is asking for. Only the two user words reach the op; anything else
+/// after the command gets the usage line instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModeCommand {
+    /// Show the mode, the board overrides and the counts.
+    Show,
+    /// Set the app's mode to the op's word (`run` or `check_in`).
+    Set(&'static str),
+    /// Something the command does not understand.
+    Usage,
+}
+
+/// The command behind a Telegram text: the first word exactly `/mode` (a bot handle after `@`
+/// allowed, and the word itself read without minding case, as Telegram's own commands are).
+/// `None` for anything else — `/modem`, `mode run` and ordinary sentences all stay messages.
+pub fn mode_command(text: &str) -> Option<ModeCommand> {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+    let mut words = trimmed.split_whitespace();
+    let head = words.next()?;
+    // The word after the slash, before any `@handle`: exactly `mode`, in any case. This keeps
+    // `/modem` and `/modeX` out.
+    if !head[1..].split('@').next()?.eq_ignore_ascii_case("mode") {
+        return None;
+    }
+    Some(match words.next() {
+        None => ModeCommand::Show,
+        Some(w) => match w.to_ascii_lowercase().as_str() {
+            "run" | "complete" => ModeCommand::Set("run"),
+            "check" | "checkin" | "check-in" | "check_in" | "ask" => ModeCommand::Set("check_in"),
+            _ => ModeCommand::Usage,
+        },
+    })
+}
+
+/// The user's words for one of the op's mode names.
+fn mode_label(word: &str) -> Option<&'static str> {
+    match word {
+        "run" => Some("Run to completion"),
+        "check_in" => Some("Check in with me"),
+        _ => None,
+    }
+}
+
+/// The phone's reply, from the view the ops answered with: the mode and counts for a show, the
+/// new mode for a set. `None` when the view does not read as one (which never happens with the
+/// real op).
+fn mode_answer(cmd: ModeCommand, view: &serde_json::Value) -> Option<String> {
+    let mode = mode_label(view.get("app")?.as_str()?)?;
+    match cmd {
+        ModeCommand::Show => {
+            let boards = view
+                .get("overrides")
+                .and_then(Value::as_array)
+                .map_or(0, |a| a.len());
+            let counts = view.get("counts")?;
+            let decided = counts.get("decided").and_then(Value::as_u64)?;
+            let needs = counts.get("needsYou").and_then(Value::as_u64)?;
+            Some(format!(
+                "Working mode: {mode}.\nBoards with a mode of their own: {boards}.\n\
+                 Decided for you: {decided} \u{b7} need you: {needs}"
+            ))
+        }
+        ModeCommand::Set(_) => Some(format!("Working mode is now {mode}.")),
+        // Usage is answered to the phone before any op runs, so it never comes here.
+        ModeCommand::Usage => None,
+    }
+}
+
 impl TelegramSink for ChatSink {
     fn deliver<'a>(&'a self, msg: TelegramMessage) -> BoxFut<'a, Result<(), String>> {
         Box::pin(async move {
             // One at a time: two messages with no tag must not start two chats.
             let _turn = self.serial.lock().await;
             let c = self.ctx(msg.person.as_deref())?;
+            // A working-mode command is answered between the phone and Helm: it opens no chat,
+            // sets no tag and starts no watch. One with a picture or file attached is left as a
+            // message, so nothing the person sent is silently dropped.
+            if msg.images.is_empty() && msg.files.is_empty() {
+                if let Some(cmd) = mode_command(&msg.text) {
+                    if let Some(up) = self.up.get() {
+                        self.answer_mode(&c, up, cmd).await;
+                    }
+                    return Ok(());
+                }
+            }
             let c2 = c.clone();
             let placed = tokio::task::spawn_blocking(move || place(&c2, &msg, helm_core::now_ms()))
                 .await
@@ -1212,21 +1437,31 @@ impl TelegramSink for ChatSink {
                 return;
             };
             let who = person.clone().unwrap_or_default();
-            let Some(ask) = self.asks.take(&id, index) else {
-                up.notify(
-                    &who,
-                    "That request is no longer waiting, so your tap was not used.",
-                );
-                return;
-            };
             // The tap must come from the person the question was asked of.
-            if ask.person != who {
-                up.notify(
-                    &who,
-                    "That request was not asked of you, so your tap was not used.",
-                );
-                return;
-            }
+            let ask = match self.asks.tap(&id, index, &who, helm_core::now_ms()) {
+                crate::approve::Tap::Taken(ask) => ask,
+                crate::approve::Tap::Gone => {
+                    up.notify(
+                        &who,
+                        "That request is no longer waiting, so your tap was not used.",
+                    );
+                    return;
+                }
+                crate::approve::Tap::Foreign => {
+                    up.notify(
+                        &who,
+                        "That request was not asked of you, so your tap was not used.",
+                    );
+                    return;
+                }
+                crate::approve::Tap::Expired => {
+                    up.notify(
+                        &who,
+                        "That request has expired, so your tap was not used. Open Helm to answer it.",
+                    );
+                    return;
+                }
+            };
             let label = ask.options[index].clone();
             let nothing =
                 format!("Your \"{label}\" was not used: that request is no longer waiting.");
@@ -1241,6 +1476,10 @@ impl TelegramSink for ChatSink {
                         "Your \"{label}\" was not used: approving from Telegram is off in Helm."
                     ),
                 );
+                return;
+            }
+            if ask.consent {
+                self.answer_consent(&c, &ask, index, &up).await;
                 return;
             }
             if let Some(question) = &ask.question {

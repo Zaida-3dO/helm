@@ -191,6 +191,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       latestAssistantId,
       running: busy,
       interactionOpen,
+      stopChecking: thread?.stopCheck != null,
       elements,
       editing,
       remoteDevice: remote?.state.deviceName,
@@ -215,7 +216,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       // shows any refusal in the shell's toast slot itself.
       onLink: (t: LinkTarget) => void handleLink(t, { chatId }),
     }),
-    [behavior.toolStop, thread?.capabilities.stopTool, stopTool, chatId, latestAssistantId, busy, interactionOpen, editing, ops, elements, mentionRepo, remote?.state.deviceName, chat?.model],
+    [behavior.toolStop, thread?.capabilities.stopTool, thread?.stopCheck, stopTool, chatId, latestAssistantId, busy, interactionOpen, editing, ops, elements, mentionRepo, remote?.state.deviceName, chat?.model],
   );
 
   // Escape while the chat works stops the turn; whatever it had not read goes back to it at

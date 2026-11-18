@@ -49,6 +49,11 @@ pub struct ClaudeLaunch {
     pub subagent_hard_stop: bool,
     /// Cut very long outputs of Helm's own tools to a head and a tail.
     pub tool_output_cap: bool,
+    /// Orchestrator is on for this chat, so Claude Code's own Workflow, ReportFindings and
+    /// ListAgents tools stay offered; every other chat does not list them (their schemas are
+    /// large and only the orchestrator and review work uses them).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub orchestrator: bool,
     /// Claude Code's own schedule tools may be offered (every call is refused with directions to
     /// Helm's schedules). Absent unless the user turned them on in Settings > Runtime.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -173,8 +178,8 @@ pub struct ClaudeRuntime {
     pub shell_changes: bool,
     /// Run chats' agents, their tools and Helm's helpers at below-normal priority, so games and
     /// the rest of the PC stay responsive. On by default: a missing key means on. It reaches a
-    /// chat at its next worker start. It lives in this file, not in preferences, so no agent can
-    /// change it.
+    /// chat at its next worker start. It lives in this file, not in preferences; a chat
+    /// changes it through the settings tools.
     #[serde(default = "yes")]
     pub low_priority: bool,
 }
@@ -314,6 +319,7 @@ pub fn claude_launch(
         subagent_soft_turns: runtime.subagent_turns(false),
         subagent_hard_stop: runtime.subagent_hard_stop,
         tool_output_cap: runtime.tool_output_cap,
+        orchestrator: false,
         schedule_tools: runtime.schedule_tools,
         shell_changes: runtime.shell_changes,
         local: None,

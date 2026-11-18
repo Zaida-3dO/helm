@@ -1,6 +1,7 @@
 use helm_hub::admin;
 use helm_hub::auth::Tokens;
-use helm_hub::import::{import_dir, parse_args};
+use helm_hub::embed::{self, QueryEmbedder};
+use helm_hub::import::{check_root, import_dir, parse_args, record_root};
 use helm_hub::lines::Lines;
 use helm_hub::mcp::Options;
 use helm_hub::registry::Registry;
@@ -22,10 +23,18 @@ fn usage() -> String {
 
 USAGE:
   helm-hub serve                       run the server
-  helm-hub import <dir> --source S [--prune]
+  helm-hub import <dir> --source S [--prune] [--retag]
                                        import a folder of Markdown memories, subfolders
                                        included; --source is required; --prune removes
-                                       this source's memories whose files are gone
+                                       this source's memories whose files are gone;
+                                       a folder keeps the source it was first imported
+                                       under unless --retag is given
+  helm-hub share-existing [--dry-run] [--keep ID,ID] [--list FILE] [--revert]
+                                       the one-off move of memories that were private by
+                                       default to shared: --dry-run lists them and changes
+                                       nothing; a run backs the database up first, writes the
+                                       ids it moved to a file and records them; --keep leaves
+                                       those ids private; --revert undoes the latest run
 {}
   helm-hub --version
 
@@ -40,6 +49,10 @@ ENVIRONMENT:
                     people existed, and Telegram users with no person (default owner); set
                     it to the name your own PC is paired under before the first start
   HUB_ALLOW_MUTATE  1 to offer memory_update and memory_delete
+  HUB_EMBED_URL     an OpenAI-style embeddings server (base URL, .../v1 or .../v1/embeddings) that embeds
+                    search queries when the asker's PC cannot; unset: keywords only then
+  HUB_EMBED_MODEL   the embedding model all vectors must come from (default nomic-embed-text)
+  TZ                Europe/London reads dates in queries in UK time; anything else reads as UTC
   HUB_TELEGRAM_BOT_TOKEN      the bot's token; without it the bot stays off
   HUB_TELEGRAM_ALLOWED_USERS  numeric Telegram user ids, each optionally followed by :person
                               (123456:Sam) to route that user to that person's Helm;
@@ -88,6 +101,7 @@ fn main() -> ExitCode {
     match args.first().map(String::as_str) {
         None | Some("serve") => serve(),
         Some("import") => import(&args[1..]),
+        Some("share-existing") => share_existing(&args[1..]),
         Some(c) if admin::is_admin_command(c) => admin_command(&args),
         Some("--version") | Some("-V") => {
             println!("helm-hub {}", env!("CARGO_PKG_VERSION"));
@@ -153,14 +167,29 @@ fn import(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // Imported memories are the owner's own, private.
+    // Imported memories are the owner's own, shared with the household.
     store.set_default_owner(Some(owner.id));
     if let Err(e) = store.adopt_orphans(owner.id) {
         eprintln!("cannot adopt older memories: {e}");
         return ExitCode::FAILURE;
     }
+    if let Err(e) = check_root(&store, &args.dir, &args.source, args.retag) {
+        eprintln!("{e}");
+        return ExitCode::from(2);
+    }
     match import_dir(&mut store, &args.dir, &args.source, args.prune) {
         Ok(r) => {
+            // Only a finished import changes what the folder is remembered as.
+            if let Err(e) = record_root(&store, &args.dir, &args.source) {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+            if args.retag {
+                println!(
+                    "retagged under source {:?}: {} memories were rewritten, {} added",
+                    args.source, r.updated, r.inserted
+                );
+            }
             println!(
                 "imported {} of {} files: {} new, {} updated, {} unchanged; {} skipped (index files), {} failed",
                 r.imported(),
@@ -198,6 +227,142 @@ fn import(args: &[String]) -> ExitCode {
         }
         Err(e) => {
             eprintln!("import failed: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn share_existing(args: &[String]) -> ExitCode {
+    use helm_hub::share;
+    let args = match share::parse_args(args) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!(
+                "{e}
+
+{}",
+                usage()
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let db = db_path();
+    let mut store = match Store::open(&db) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("cannot open the database: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let now = now_ms();
+    if args.dry_run {
+        match (
+            share::plan(store.conn(), &args.keep),
+            share::cutoff(store.conn()),
+        ) {
+            (Ok(plan), Ok(cutoff)) => {
+                if let Some(c) = cutoff {
+                    println!(
+                        "an earlier run stands: only memories last changed before {c} are looked at"
+                    );
+                }
+                println!(
+                    "{} private memories would move to shared (id, name, source, title):",
+                    plan.flip.len()
+                );
+                for r in &plan.flip {
+                    println!("  {}", r.line());
+                }
+                if !plan.secret.is_empty() {
+                    println!(
+                        "{} stay private because they look like they hold a credential:",
+                        plan.secret.len()
+                    );
+                    for r in &plan.secret {
+                        println!("  {}", r.line());
+                    }
+                }
+                println!("nothing was changed; --keep <ids> leaves memories private");
+                return ExitCode::SUCCESS;
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                eprintln!("cannot read the memories: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let backup = match share::backup(store.conn(), &db, now) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("the backup failed, so nothing was changed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("backup of the database: {}", backup.display());
+    if args.revert {
+        return match share::revert(store.conn_mut(), now) {
+            Ok(Some((batch, ids))) => {
+                println!(
+                    "put {} memories of batch {batch} back to private",
+                    ids.len()
+                );
+                ExitCode::SUCCESS
+            }
+            Ok(None) => {
+                println!("no earlier run is left to undo");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("the undo failed: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    match share::share(store.conn_mut(), &args.keep, now) {
+        Ok(done) => {
+            let list = args.list.unwrap_or_else(|| share::list_path(&db, now));
+            let mut text: String = done
+                .moved
+                .iter()
+                .map(|r| {
+                    format!(
+                        "{}
+",
+                        r.line()
+                    )
+                })
+                .collect();
+            for r in &done.secret {
+                text.push_str(&format!(
+                    "skipped: looks like a secret	{}
+",
+                    r.line()
+                ));
+            }
+            if let Err(e) = std::fs::write(&list, text) {
+                eprintln!(
+                    "the move stands (batch {}), but the list of moved ids could not be written: {e};                      `helm-hub share-existing --revert` still undoes it",
+                    done.batch
+                );
+                return ExitCode::FAILURE;
+            }
+            println!(
+                "moved {} memories to shared (batch {}); the list is in {}",
+                done.moved.len(),
+                done.batch,
+                list.display()
+            );
+            if !done.secret.is_empty() {
+                println!(
+                    "{} memories look like they hold a credential and stay private (listed as skipped)",
+                    done.secret.len()
+                );
+            }
+            println!("`helm-hub share-existing --revert` undoes it");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("the move failed and nothing was changed: {e}");
             ExitCode::FAILURE
         }
     }
@@ -243,7 +408,7 @@ fn serve() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // Memories stored before people existed become the owner's, private.
+    // Memories stored before people existed become the owner's, shared with the household.
     match store.adopt_orphans(owner.id) {
         Ok(0) => {}
         Ok(n) => eprintln!(
@@ -348,6 +513,23 @@ fn serve() -> ExitCode {
         telegram.clone(),
     );
     state.voice = voice.clone();
+    // Queries are embedded by the asker's PC first, then by this server, else not at all.
+    let embed_url = std::env::var("HUB_EMBED_URL").ok();
+    let embed_model =
+        std::env::var("HUB_EMBED_MODEL").unwrap_or_else(|_| embed::DEFAULT_MODEL.into());
+    state.embedder = Arc::new(QueryEmbedder::new(
+        lines.clone(),
+        embed_url.clone(),
+        &embed_model,
+    ));
+    eprintln!(
+        "search: meaning model {embed_model}; NAS embedder {}",
+        if embed_url.is_some() {
+            "configured"
+        } else {
+            "off (the PC embeds, else keywords only)"
+        }
+    );
     let state = Arc::new(state);
 
     // One thread is plenty for a household's memory store and keeps RSS small.

@@ -3,7 +3,7 @@
 // only ever sees a saved secret's id, never its value.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { mcpOps, type McpPreset, type McpServer, type RefKind, type RepoServer, type ServerStatus, type TestOutcome, type ValueRef } from '../../api/mcp.ts';
+import { mcpOps, type DoctorOutcome, type McpPreset, type McpServer, type RefKind, type RepoServer, type ServerStatus, type TestOutcome, type ValueRef } from '../../api/mcp.ts';
 import { shellOps } from '../../api/shell.ts';
 import { useShell } from '../../shell/context.ts';
 import { Button, Checkbox, Segmented, TextArea, TextInput, toast } from '../../ui/index.ts';
@@ -12,7 +12,7 @@ import { WheelMark } from '../../ui/status/index.ts';
 import { GoogleAccountsDialog } from './GoogleAccounts.tsx';
 import { GOOGLE_PRESET, googleOps, isGoogleServer } from './google.ts';
 import { WAITING_NOTE, canDisconnect, connectLabel, isOAuthServer, oauthOps, type OAuthStatus } from './oauth.ts';
-import { blankServer, draftFromPreset, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable } from './readiness.ts';
+import { BROKER_PRESET, blankServer, draftFromPreset, isBrokerServer, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable } from './readiness.ts';
 
 type Refs = { [key in string]?: ValueRef };
 
@@ -139,6 +139,12 @@ function Editor({
         <p className="mcp-help">
           Gmail is served by Helm itself: your sign-in client and accounts are set in the Google accounts dialog, not here. Leave Environment empty unless
           this server is an older one that carries its own client.
+        </p>
+      ) : preset?.id === BROKER_PRESET ? (
+        <p className="mcp-help">
+          Under Environment: BROKER_ATTACHED_BROWSERS names your browser, BROKER_ATTACHED_EXTENSION_ID is the id your browser shows for the broker's
+          extension, BROKER_ATTACHED_ACT_SITES lists the sites chats may act on, and BROKER_ATTACHED_TOKEN goes in as a secret. Chats never change any of
+          these, and never act on a site that is not listed.
         </p>
       ) : preset?.secretEnv?.length ? (
         <p className="mcp-help">Under Environment, enter {preset.secretEnv.join(' and ')} as secrets.</p>
@@ -330,6 +336,16 @@ export function McpPane() {
   const [native, setNative] = useState(true);
   const [allOn, setAllOn] = useState(true);
   const [repo, setRepo] = useState<RepoServer[]>([]);
+  // For the browser server: its last doctor run ('running' while it is open).
+  const [doctor, setDoctor] = useState<Record<string, DoctorOutcome | 'running'>>({});
+
+  const runDoctor = (id: string) => {
+    setDoctor((d) => ({ ...d, [id]: 'running' }));
+    ops
+      .doctor(id)
+      .then((o) => setDoctor((d) => ({ ...d, [id]: o })))
+      .catch((e: unknown) => setDoctor((d) => ({ ...d, [id]: { ok: false, message: errorText(e), checks: [] } })));
+  };
 
   const reload = useCallback(() => {
     ops
@@ -487,6 +503,7 @@ export function McpPane() {
             const signInLabel = isOAuthServer(s) ? connectLabel(oauthState[s.id], status[s.id]?.state) : undefined;
             // An empty note is a sign-in that is open; a worded one is what went wrong.
             const waiting = signInNote[s.id] === '';
+            const doc = doctor[s.id];
             return (
               <li key={s.id} className="mcp-server" data-testid={`mcp-server-${s.id}`} data-state={r.state}>
                 <div className="mcp-server-main">
@@ -521,6 +538,11 @@ export function McpPane() {
                     Accounts
                   </Button>
                 )}
+                {isBrokerServer(s) && (
+                  <Button className="mcp-act" data-testid={`mcp-doctor-${s.id}`} disabled={busy || doc === 'running'} onClick={() => runDoctor(s.id)}>
+                    {doc === 'running' ? 'Checking…' : 'Check the browser'}
+                  </Button>
+                )}
                 <Button className="mcp-act" data-testid={`mcp-edit-${s.id}`} onClick={() => setDraft({ server: structuredClone(s), isNew: false })}>
                   Edit
                 </Button>
@@ -531,6 +553,24 @@ export function McpPane() {
                   <p className="mcp-test" data-testid={`mcp-oauth-note-${s.id}`} data-state={signInNote[s.id] ? 'failed' : 'running'} role="status">
                     {signInNote[s.id] ? signInNote[s.id] : (<><WheelMark size={14} state="working" /> {WAITING_NOTE}</>)}
                   </p>
+                )}
+                {isBrokerServer(s) && doc && doc !== 'running' && (
+                  <div className="mcp-doctor" data-testid={`mcp-doctor-result-${s.id}`} role="status">
+                    <p className="mcp-test" data-state={doc.ok ? 'ok' : 'failed'}>
+                      {doc.ok ? <IconCheck size={14} /> : <IconWarning size={14} />}
+                      {doc.message}
+                    </p>
+                    {doc.checks && doc.checks.length > 0 && (
+                      <ul className="mcp-doctor-checks">
+                        {doc.checks.map((c) => (
+                          <li key={c.id} data-testid={`mcp-doctor-${s.id}-${c.id}`} data-state={c.status}>
+                            {c.title}: {c.detail}
+                            {c.remedy ? ` — ${c.remedy}` : ''}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
                 )}
               </li>
             );

@@ -11,6 +11,7 @@
 // - A config change replaces only the servers whose definition changed; their loaded tools are
 //   dropped, so a child can call only tools that are discovered and still registered.
 
+import { BROKER_PRESET, HOLD_CAP_MS, RENEW_EVERY_MS, holdEvent, holdFinished, type HoldEvent } from "./browser.ts";
 import { HttpTransport, type Resolver } from "./http.ts";
 import { generatedName, label, matches, terms, toolNameOk } from "./naming.ts";
 import { formatResult } from "./output.ts";
@@ -45,8 +46,11 @@ export interface BridgeOptions {
   limits?: Partial<McpLimits>;
   resolver?: Resolver;
   now?: () => number;
-  /** Ask the host an op through the chat's request channel (the header ask above). */
-  hostRequest?: (operation: string, args: Json, opts: { timeoutMs: number }) => Promise<{ ok: boolean; result?: unknown; error?: string }>;
+  /** Ask the host an op through the chat's request channel (the header ask above, and the
+   * browser hold reports). */
+  hostRequest?: (operation: string, args: Json, opts: { timeoutMs: number; mutating?: boolean }) => Promise<{ ok: boolean; result?: unknown; error?: string }>;
+  /** Override for the browser lease hold (tests use short timings). */
+  browser?: { renewMs?: number; capMs?: number };
 }
 
 export interface McpBridge {
@@ -137,6 +141,97 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
   /** Header asks waiting for their `mcp_oauth_header` line, by server id. */
   const headerWaiters = new Map<string, ((header: string | undefined) => void)[]>();
 
+  // ── The built-in browser: holding a lease while the person does their part ──────────
+  // See `browser.ts`. A lease is renewed while its hold is open, and the chat's flag plus the
+  // Telegram ask are raised through the host. Timings are overridable so the checks stay fast.
+  const renewMs = opts.browser?.renewMs ?? RENEW_EVERY_MS;
+  const capMs = opts.browser?.capMs ?? HOLD_CAP_MS;
+  const holds = new Map<string, ReturnType<typeof setInterval>>();
+  const holdStartedAt = new Map<string, number>();
+  /** When this chat's browser asks went out in the last hour: a chat that keeps retrying a gated
+   * action must not use up the shared Telegram budget. */
+  const askTimes: number[] = [];
+  const ASKS_PER_HOUR = 6;
+  /** The host of the last navigation for a lease, to name the site in the report. */
+  const leaseHosts = new Map<string, string>();
+  const holdKey = (serverId: string, leaseKey: string) => `${serverId}\u0000${leaseKey}`;
+  const stopHold = (key: string) => {
+    const t = holds.get(key);
+    if (t !== undefined) clearInterval(t);
+    holds.delete(key);
+    holdStartedAt.delete(key);
+  };
+  const stopHoldsFor = (serverId: string) => {
+    for (const k of [...holds.keys()]) if (k.startsWith(`${serverId}\u0000`)) stopHold(k);
+  };
+
+  const startHold = (e: Entry, ev: HoldEvent) => {
+    const key = holdKey(ev.serverId, ev.leaseKey);
+    stopHold(key);
+    holdStartedAt.set(key, now());
+    const t = setInterval(() => {
+      if (now() - (holdStartedAt.get(key) ?? 0) > capMs) {
+        stopHold(key);
+        return;
+      }
+      const s = e.session;
+      if (!s || s.closed) return;
+      // `browser_status` with the lease key is the broker's renew verb. A failed renewal is
+      // left to the next tick: a dead lease stops needing one on its own.
+      void s.callTool("browser_status", { lease_key: ev.leaseKey }).catch(() => {});
+    }, renewMs);
+    t.unref?.();
+    holds.set(key, t);
+  };
+
+  const reportHold = (ev: HoldEvent) => {
+    if (!opts.hostRequest) return;
+    const t = now();
+    while (askTimes.length && t - askTimes[0]! > 3_600_000) askTimes.shift();
+    if (askTimes.length >= ASKS_PER_HOUR) return;
+    askTimes.push(t);
+    const host = leaseHosts.get(holdKey(ev.serverId, ev.leaseKey));
+    const where = host ? `${host}: ` : "";
+    const question = ev.kind === "sign_in" ? "Your browser needs a sign-in" : "A browser step needs you";
+    // The chat's attention item first: it lists the chat under "needs you" everywhere, the
+    // phone included, whatever the Telegram ask below answers.
+    void opts
+      .hostRequest("app_flag_attention", { question, reason: `${where}${ev.sentence}`.slice(0, 240), priority: "high" }, { timeoutMs: 5_000, mutating: true })
+      .catch(() => {});
+    void opts
+      .hostRequest("app_telegram_ask", { question: `${where}${ev.sentence}`.slice(0, 1000), options: ["Done", "Not yet"] }, { timeoutMs: 5_000, mutating: true })
+      .catch(() => {});
+  };
+
+  const noteBrowserCall = (e: Entry, tool: string, args: Json, r: { content: Json[]; isError?: boolean }) => {
+    const lease = typeof args.lease_key === "string" ? args.lease_key : "";
+    if (!lease) return;
+    const key = holdKey(e.server.id, lease);
+    if (tool === "browser_navigate" && !r.isError && typeof args.url === "string") {
+      try {
+        leaseHosts.set(key, new URL(args.url).host);
+      } catch {
+        /* not a url worth naming */
+      }
+    }
+    if (holdFinished(tool, args, r.isError)) {
+      stopHold(key);
+      leaseHosts.delete(key);
+      return;
+    }
+    const text = r.content
+      .filter((c) => c.type === "text")
+      .map((c) => String(c.text ?? ""))
+      .join(" ");
+    const ev = holdEvent(e.server.id, tool, args, r.isError, text);
+    if (!ev) return;
+    // One open ask per lease: a repeat refusal while the hold is open neither asks again nor
+    // restarts the cap, which counts from the first event.
+    if (holds.has(key)) return;
+    startHold(e, ev);
+    reportHold(ev);
+  };
+
   /** Start waiting for the host's header line for `serverId` (register before asking, so a line
    * that beats the reply to the ask is not missed). */
   const expectHeader = (serverId: string, ms: number): { done: Promise<string | undefined>; cancel: () => void } => {
@@ -184,6 +279,7 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
   };
 
   const retire = (e: Entry) => {
+    stopHoldsFor(e.server.id);
     e.session?.close("configuration changed");
     e.session = undefined;
     e.connecting = undefined;
@@ -400,6 +496,7 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
           throw pe;
         }
         const r = formatResult(raw, e.red, limits);
+        if (e.server.preset === BROKER_PRESET) noteBrowserCall(e, l.tool, (args ?? {}) as Json, r);
         return { content: r.content, isError: r.isError || undefined, source: { kind: "mcp", server: e.red.text(e.server.name), tool: e.red.text(l.tool) } };
       });
     },
@@ -407,6 +504,7 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
     close() {
       closed = true;
       for (const e of entries.values()) retire(e);
+      for (const k of [...holds.keys()]) stopHold(k);
       entries.clear();
       loaded.clear();
     },

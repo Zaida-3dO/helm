@@ -14,8 +14,50 @@
 use crate::runtime::{Shared, SpawnRequest, Spawned, WorkerLink};
 use helm_workers::WorkerOutput;
 use serde_json::Value;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+
+/// Claude worker starts in the last [`BURST_WINDOW`], oldest first.
+static RECENT_STARTS: Mutex<VecDeque<Instant>> = Mutex::new(VecDeque::new());
+/// Starts this close together count as one burst.
+const BURST_WINDOW: Duration = Duration::from_secs(10);
+/// Starts in a burst that go out at once, before any is spread.
+const FREE_STARTS: usize = 2;
+
+/// How long a start waits when `earlier` starts already went out in its burst: nothing for the
+/// first [`FREE_STARTS`], then a share of `unit` per earlier start (capped at ten units),
+/// scaled by `roll` (any number; only its remainder counts).
+pub(crate) fn stagger_delay(earlier: usize, unit: Duration, roll: u64) -> Duration {
+    if earlier < FREE_STARTS || unit.is_zero() {
+        return Duration::ZERO;
+    }
+    let cap = unit.saturating_mul(10);
+    let top = unit
+        .saturating_mul((earlier - FREE_STARTS + 1) as u32)
+        .min(cap);
+    let top_ms = top.as_millis().max(1) as u64;
+    Duration::from_millis(roll % top_ms)
+}
+
+/// Note a Claude worker start now and say how long it should wait.
+fn claim_stagger(unit: Duration) -> Duration {
+    let now = Instant::now();
+    let earlier = {
+        let mut recent = RECENT_STARTS.lock().unwrap();
+        while recent
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > BURST_WINDOW)
+        {
+            recent.pop_front();
+        }
+        let n = recent.len();
+        recent.push_back(now);
+        n
+    };
+    stagger_delay(earlier, unit, uuid::Uuid::new_v4().as_u128() as u64)
+}
 
 enum State {
     Starting { queued: Vec<Value>, terminate: bool },
@@ -76,6 +118,16 @@ impl WorkerLink for PendingLink {
             State::Failed => {}
         }
     }
+
+    fn tree_size(&self) -> Option<u32> {
+        // Not a mutable borrow: read the state, then answer outside the lock so a process
+        // query never blocks the worker's own end of the link.
+        let link = match &*self.state.lock().unwrap() {
+            State::Running(link) => link.clone(),
+            _ => return None,
+        };
+        link.tree_size()
+    }
 }
 
 /// Start the worker on the blocking pool; the link and output channel are usable at once.
@@ -85,7 +137,17 @@ pub(crate) fn spawn_off_actor(sh: &Shared, req: SpawnRequest) -> Spawned {
     let spawner = sh.spawner.clone();
     let local = sh.local.get().cloned();
     let link = pending.clone();
+    // Claude Code processes starting together all try to refresh the one sign-in at once; a
+    // random wait per start, growing with the burst, keeps most of them from colliding.
+    let wait = if req.local.is_none() {
+        claim_stagger(sh.cfg.limits.start_stagger)
+    } else {
+        Duration::ZERO
+    };
     sh.handle.spawn(async move {
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
         let start = move || {
             let mut req = req;
             // A chat on a local model server: its address and key are looked up here, off the
@@ -141,6 +203,26 @@ mod tests {
         fn terminate(&self) {
             *self.terminated.lock().unwrap() = true;
         }
+    }
+
+    #[test]
+    fn a_burst_of_starts_is_spread_and_a_lone_start_is_not() {
+        let unit = Duration::from_millis(400);
+        // The first two go out at once; later ones wait up to a growing share, never over ten units.
+        for (earlier, roll, max_ms) in [
+            (0, 12345, 0),
+            (1, 99, 0),
+            (2, 123_456, 399),
+            (3, 123_456, 799),
+            (5, u64::MAX, 1_599),
+            (60, u64::MAX, 3_999),
+        ] {
+            let d = stagger_delay(earlier, unit, roll);
+            assert!(d.as_millis() as u64 <= max_ms, "{earlier}: {d:?}");
+        }
+        assert!(stagger_delay(40, unit, 3_999) > Duration::ZERO);
+        // Off means off.
+        assert_eq!(stagger_delay(40, Duration::ZERO, 7), Duration::ZERO);
     }
 
     #[test]

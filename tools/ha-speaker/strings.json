@@ -1,0 +1,28 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Helm",
+        "description": "Point this speaker at your Helm hub.",
+        "data": {
+          "url": "Hub address (for example http://hub.example:8480)",
+          "token": "Speaker token from Helm",
+          "room": "Room label (optional)",
+          "hint": "Identity hint for a second wake word (optional, not used yet)",
+          "led_entity": "Light entity to colour while unlocked (optional)",
+          "allow_plain_http": "Allow plain http: the token is sent unencrypted on my network"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not reach that address.",
+      "plain_http": "That address is plain http, so the token would cross the network readable. Use https, or tick the box to allow it.",
+      "bad_auth": "The hub refused that token.",
+      "bad_response": "The hub answered, but not in the expected way.",
+      "already_configured": "This hub is already set up."
+    },
+    "abort": {
+      "already_configured": "This hub is already set up."
+    }
+  }
+}

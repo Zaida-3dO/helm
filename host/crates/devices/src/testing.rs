@@ -60,6 +60,8 @@ pub fn fake_record(id: &str, title: &str, revision: i64) -> ChatRecord {
         last_activity_at: 1,
         stalled: false,
         local_ahead: None,
+        queue_reason: None,
+        state: None,
         started: false,
         profile_id: "profile-local".to_owned(),
         host_device_id: "host".to_owned(),
@@ -159,8 +161,8 @@ pub struct FakeState {
     pub folders_asked: Vec<String>,
     /// Each picture read: the chat and the attachment.
     pub attachments_asked: Vec<(String, String)>,
-    /// Each pages request: what was asked, the person and whether it is the PC's own person.
-    pub pages_asked: Vec<(String, String, bool)>,
+    /// Each pages request: what was asked and the person.
+    pub pages_asked: Vec<(String, String)>,
     /// Each side-panel read: the op it answers and the (confined) arguments it was given.
     pub panel_reads: Vec<(&'static str, Value)>,
     /// Each stage/unstage: (args, whether it was a stage).
@@ -191,7 +193,6 @@ pub struct FakePort {
     uid: String,
     name: String,
     run: AtomicBool,
-    household: AtomicBool,
     pub state: Mutex<FakeState>,
 }
 
@@ -201,7 +202,6 @@ impl FakePort {
             uid: uid.to_owned(),
             name: name.to_owned(),
             run: AtomicBool::new(true),
-            household: AtomicBool::new(true),
             state: Mutex::new(FakeState {
                 people: vec!["person-a".to_owned()],
                 cursor: 100,
@@ -212,10 +212,6 @@ impl FakePort {
 
     pub fn set_run(&self, on: bool) {
         self.run.store(on, Ordering::SeqCst);
-    }
-
-    pub fn set_household(&self, on: bool) {
-        self.household.store(on, Ordering::SeqCst);
     }
 
     pub fn st(&self) -> std::sync::MutexGuard<'_, FakeState> {
@@ -295,10 +291,6 @@ impl ChatPort for FakePort {
 
     fn run_allowed(&self) -> bool {
         self.run.load(Ordering::SeqCst)
-    }
-
-    fn household_run(&self) -> bool {
-        self.household.load(Ordering::SeqCst)
     }
 
     fn people(&self) -> Vec<DevicePerson> {
@@ -705,14 +697,14 @@ impl ChatPort for FakePort {
     fn pages_list(&self, who: PageScope) -> BoxFut<'_, PortResult<Value>> {
         self.st()
             .pages_asked
-            .push(("list".to_owned(), who.person_id, who.own));
+            .push(("list".to_owned(), who.person_id));
         ready(Ok(json!({ "pages": [fake_pin()] })))
     }
 
     fn pages_files(&self, who: PageScope, a: PageIdArgs) -> BoxFut<'_, PortResult<Value>> {
         self.st()
             .pages_asked
-            .push((format!("files {}", a.page_id), who.person_id, who.own));
+            .push((format!("files {}", a.page_id), who.person_id));
         ready(if a.page_id == "pg-1" {
             Ok(json!({
                 "name": "plan.html", "title": "Plan", "size": FAKE_PAGE.len(),
@@ -725,11 +717,9 @@ impl ChatPort for FakePort {
     }
 
     fn pages_read(&self, who: PageScope, a: PagesReadArgs) -> BoxFut<'_, PortResult<Value>> {
-        self.st().pages_asked.push((
-            format!("read {} {:?}", a.page_id, a.path),
-            who.person_id,
-            who.own,
-        ));
+        self.st()
+            .pages_asked
+            .push((format!("read {} {:?}", a.page_id, a.path), who.person_id));
         let whole: &[u8] = match a.path.as_deref() {
             None => FAKE_PAGE.as_bytes(),
             Some("a.png") => FAKE_ASSET,

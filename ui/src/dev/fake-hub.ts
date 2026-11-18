@@ -22,6 +22,7 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
     voice: VoiceSettings;
     linked: boolean;
     pinned: string[];
+    prompts: Record<string, string>;
   }
   const profiles = new Map<string, ProfileState>();
   const state = (id: string): ProfileState => {
@@ -32,6 +33,7 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         voice: { chat: null, model: 'claude-sonnet-5-5', effort: 'low', idleMinutes: 240, maxAgeHours: 24, maxTokens: 300_000, watch: 'flags', takeVoice: id === 'home' },
         linked: false,
         pinned: [],
+        prompts: {},
       };
       profiles.set(id, p);
     }
@@ -108,6 +110,33 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         v.watch = a.watch === 'off' || a.watch === 'flags+done' ? a.watch : 'flags';
         if (typeof a.takeVoice === 'boolean') v.takeVoice = a.takeVoice;
         return v;
+      }
+      case 'relay_prompts_get':
+      case 'relay_prompts_save': {
+        const saved = state(scope(a)).prompts;
+        const kinds = [
+          ['speaker', 'Speaker'],
+          ['household', 'Household speaker'],
+          ['voice', 'Voice app'],
+          ['telegram', 'Telegram'],
+        ] as const;
+        if (op === 'relay_prompts_save') {
+          const text = typeof a.text === 'string' ? a.text.trim() : '';
+          const channel = String(a.channel);
+          if (!kinds.some(([k]) => k === channel)) throw new ApiError('bad_args', 'Expected channel to be speaker, household, voice or telegram.');
+          if (text === '' || text === `Default ${channel} prompt.`) delete saved[channel];
+          else saved[channel] = text;
+        }
+        return {
+          maxChars: 8000,
+          channels: kinds.map(([channel, label]) => ({
+            channel,
+            label,
+            default: `Default ${channel} prompt.`,
+            text: saved[channel] ?? `Default ${channel} prompt.`,
+            custom: channel in saved,
+          })),
+        };
       }
       case 'relay_voice_reset': {
         const st = state(scope(a));

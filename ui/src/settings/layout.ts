@@ -17,7 +17,7 @@ export const OTHER_GROUP_TITLE = 'Other';
 export const SETTINGS_TAB_GROUPS: readonly SettingsTabGroupDef[] = [
   {
     title: 'Chat & agents',
-    ids: ['chat', 'runtime', 'localmodels', 'skills', 'agents', 'orchestrator', 'actions', 'schedules', 'afk', 'governor'],
+    ids: ['chat', 'runtime', 'localmodels', 'queue', 'skills', 'agents', 'memory', 'orchestrator', 'actions', 'schedules', 'afk', 'governor'],
   },
   { title: 'Appearance', ids: ['general', 'appearance', 'shell', 'keyboard'] },
   { title: 'Tools & integrations', ids: ['projects', 'mcp', 'websearch', 'vaults', 'github', 'saved'] },

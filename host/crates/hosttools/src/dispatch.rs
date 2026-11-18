@@ -117,6 +117,29 @@ impl HostTools {
         &self.registry
     }
 
+    /// A call to a merged tool becomes the call to the member tool its action names; any other
+    /// call stands. Everything after this (the gates, the lock, the timeout, the handler) sees the
+    /// member's own name and arguments, so a call through a merged tool is checked exactly as one
+    /// made by the member's own name.
+    pub fn rewrite(&self, req: &ChatRequest) -> Result<ChatRequest, ToolError> {
+        if req.operation.len() > crate::spec::MAX_TOOL_NAME_BYTES {
+            return Ok(req.clone());
+        }
+        let args = if req.args.is_null() {
+            json!({})
+        } else {
+            req.args.clone()
+        };
+        Ok(match self.registry.rewrite(&req.operation, &args)? {
+            Some((member, args)) => ChatRequest {
+                operation: member.to_owned(),
+                args,
+                ..req.clone()
+            },
+            None => req.clone(),
+        })
+    }
+
     /// The gates, in order. `Ok` names the tool to run.
     pub fn gate(&self, caller: &Caller, req: &ChatRequest) -> Result<&RegisteredTool, ToolError> {
         let name = req.operation.as_str();
@@ -194,6 +217,8 @@ impl HostTools {
         caller: &Caller,
         req: &ChatRequest,
     ) -> Result<Value, ToolError> {
+        let rewritten = self.rewrite(req)?;
+        let req = &rewritten;
         let tool = self.gate(caller, req)?;
         let Some(_slot) = self.take_slot(&caller.chat_id) else {
             return Err(ToolError::refused(format!(
@@ -469,6 +494,112 @@ mod tests {
         let big = json!({"s": "x".repeat(32 * 1024)});
         let r = call(&t, &me(), &req("app_update_settings", big, false)).await;
         assert!(r["error"].as_str().unwrap().contains("at most 32 KiB"));
+    }
+
+    #[tokio::test]
+    async fn a_merged_tool_is_checked_and_run_as_the_member_its_action_names() {
+        use crate::facade::FacadeSpec;
+        let mut r = HostToolRegistry::new();
+        r.blocking(
+            ToolSpec::read("app_get_settings", "Read.", obj()),
+            |_, a| Ok(json!({"read": a})),
+        )
+        .blocking(
+            ToolSpec::write("app_update_settings", "Write.", obj()).large(),
+            |_, a| Ok(json!({"wrote": a})),
+        )
+        .facade(FacadeSpec {
+            name: "app_settings",
+            group: "settings",
+            description: "Settings.",
+            guidelines: "",
+            core: false,
+            actions: &[
+                ("get", "app_get_settings"),
+                ("update", "app_update_settings"),
+            ],
+            fixed: &[],
+        });
+        let t = HostTools::new(Arc::new(r));
+        let r = call(
+            &t,
+            &me(),
+            &req("app_settings", json!({"action": "update", "key": 1}), false),
+        )
+        .await;
+        assert_eq!(
+            r["result"],
+            json!({"wrote": {"key": 1}}),
+            "the action is not passed on"
+        );
+        // The old name still works, and means the same.
+        let r = call(
+            &t,
+            &me(),
+            &req("app_get_settings", json!({"key": 1}), false),
+        )
+        .await;
+        assert_eq!(r["result"], json!({"read": {"key": 1}}));
+        // The member's size limit (8 KiB for a read, 32 KiB for a write) and the parent-only rule apply.
+        let big = json!({"action": "get", "s": "x".repeat(9 * 1024)});
+        let r = call(&t, &me(), &req("app_settings", big.clone(), false)).await;
+        assert!(r["error"]
+            .as_str()
+            .unwrap()
+            .contains("app_get_settings takes at most 8 KiB"));
+        let big = json!({"action": "update", "s": "x".repeat(9 * 1024)});
+        assert_eq!(
+            call(&t, &me(), &req("app_settings", big, false)).await["ok"],
+            true
+        );
+        let r = call(
+            &t,
+            &me(),
+            &req("app_settings", json!({"action": "get"}), true),
+        )
+        .await;
+        assert!(r["error"]
+            .as_str()
+            .unwrap()
+            .contains("app_get_settings is only available to the parent chat"));
+        // A restricted chat is checked against the member's name, so allowing the merged tool's
+        // name alone grants nothing.
+        let only_read = Caller {
+            chat_id: "chat-1".into(),
+            restricted: Some(vec!["app_get_settings".into()]),
+        };
+        assert_eq!(
+            call(
+                &t,
+                &only_read,
+                &req("app_settings", json!({"action": "get"}), false)
+            )
+            .await["ok"],
+            true
+        );
+        let r = call(
+            &t,
+            &only_read,
+            &req("app_settings", json!({"action": "update"}), false),
+        )
+        .await;
+        assert!(r["error"].as_str().unwrap().contains("restricted"));
+        let by_facade_name = Caller {
+            chat_id: "chat-1".into(),
+            restricted: Some(vec!["app_settings".into()]),
+        };
+        let r = call(
+            &t,
+            &by_facade_name,
+            &req("app_settings", json!({"action": "get"}), false),
+        )
+        .await;
+        assert!(r["error"].as_str().unwrap().contains("restricted"));
+        // No action, or an unknown one, says which are valid.
+        for bad in [json!({}), json!({"action": "drop"})] {
+            let r = call(&t, &me(), &req("app_settings", bad, false)).await;
+            assert!(r["error"].as_str().unwrap().contains("get, update"), "{r}");
+        }
     }
 
     #[tokio::test]

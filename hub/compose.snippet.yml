@@ -26,6 +26,8 @@ services:
       # - HUB_TELEGRAM_STT_URL=http://<stt-host>:<stt-port>/v1/audio/transcriptions # unset: voice notes off
       # - HUB_TELEGRAM_STT_MODEL=large-v3-turbo
       # - HUB_TELEGRAM_STT_LANGUAGE=en
+      # - HUB_EMBED_URL=http://<embed-host>:<port> # an embeddings server for search queries; unset: only a PC embeds them
+      # - HUB_EMBED_MODEL=nomic-embed-text
     volumes:
       - ./helm-hub/data:/data # hub.db (SQLite, WAL)
       - /path/to/memory-folder:/mnt/memory:ro # source for `helm-hub import`
@@ -33,3 +35,15 @@ services:
       - "<host-port>:8000" # LAN and VPN only; never behind a public proxy
     mem_limit: 512m # every queue full at once peaks near 320 MB (README, Budget)
     cpus: 0.5
+
+  # Optional: an embeddings server for CPUs without AVX, so search understands meaning while no PC
+  # is up. The model is mounted, not baked in. Not published on a host port: the hub reaches it by
+  # its service name on the same network.
+  # helm-embed:
+  #   image: helm-embed:latest
+  #   container_name: helm-embed
+  #   restart: unless-stopped
+  #   volumes:
+  #     - <models-folder>:/models:ro
+  #   mem_limit: 512m
+  #   cpus: 1.0

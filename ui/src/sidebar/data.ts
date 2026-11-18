@@ -166,6 +166,7 @@ export class SidebarData {
       stalled: c.stalled,
       local: isLocalModelId(c.model),
       localAhead: c.localAhead,
+      state: c.state ?? undefined,
       hasDraft: c.draft.trim() !== '',
       lastActivityAt: c.lastActivityAt,
     };

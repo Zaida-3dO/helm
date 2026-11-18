@@ -8,7 +8,7 @@ use helm_core::profile::Profile;
 use helm_ipc::{Caller, Dispatcher, OpCtx, OpRegistry, RecordingSink, Services};
 use helm_workers::WorkerOutput;
 use serde_json::{json, Map, Value};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -17,9 +17,15 @@ struct FakeLink {
     cmds: mpsc::UnboundedSender<Value>,
     out: mpsc::Sender<WorkerOutput>,
     terminated: AtomicBool,
+    /// How many processes this worker's group reports (the worker and the CLI make two).
+    tree: Arc<AtomicU32>,
 }
 
 impl WorkerLink for FakeLink {
+    fn tree_size(&self) -> Option<u32> {
+        Some(self.tree.load(Ordering::SeqCst))
+    }
+
     fn send(&self, command: &Value) -> bool {
         self.cmds.send(command.clone()).is_ok()
     }
@@ -40,6 +46,8 @@ pub struct FakeWorker {
     pub req: SpawnRequest,
     cmds: mpsc::UnboundedReceiver<Value>,
     out: mpsc::Sender<WorkerOutput>,
+    /// The size of the group this worker reports; a test grows it to play a build starting.
+    pub tree: Arc<AtomicU32>,
 }
 
 impl FakeWorker {
@@ -149,6 +157,8 @@ pub struct FakeSpawner {
     /// The triage helper's answer.
     pub triage: Mutex<Result<(bool, String), String>>,
     pub triage_jobs: Mutex<Vec<Value>>,
+    /// The group size a worker reports when it starts.
+    pub tree_at_launch: AtomicU32,
 }
 
 impl Spawner for FakeSpawner {
@@ -158,16 +168,19 @@ impl Spawner for FakeSpawner {
         }
         let (ctx, crx) = mpsc::unbounded_channel();
         let (otx, orx) = mpsc::channel(256);
+        let tree = Arc::new(AtomicU32::new(self.tree_at_launch.load(Ordering::SeqCst)));
         let link = Arc::new(FakeLink {
             cmds: ctx,
             out: otx.clone(),
             terminated: AtomicBool::new(false),
+            tree: tree.clone(),
         });
         // A test that has already finished no longer listens; that is not this test's failure.
         let _ = self.tx.send(FakeWorker {
             req: req.clone(),
             cmds: crx,
             out: otx,
+            tree,
         });
         Ok((link, orx))
     }
@@ -229,6 +242,10 @@ pub fn limits() -> Limits {
         // Long enough that a test handing a verdict by hand always beats the hold ending;
         // the row that wants the hold to end shortens it.
         gate_deadline: Duration::from_secs(10),
+        // As the gate's: a verdict handed by hand always beats the hold ending.
+        stop_deadline: Duration::from_secs(10),
+        // Tests start workers by the dozen and never wait on one another's spread.
+        start_stagger: Duration::ZERO,
     }
 }
 
@@ -262,6 +279,7 @@ pub fn harness_with_services(limits: Limits, extra: impl FnOnce(&mut Services)) 
         title_jobs: Mutex::new(Vec::new()),
         triage: Mutex::new(Err("no triage in this test".into())),
         triage_jobs: Mutex::new(Vec::new()),
+        tree_at_launch: AtomicU32::new(2),
     });
     let rt = ChatRuntime::new(
         db.clone(),
@@ -431,7 +449,7 @@ async fn reply(h: &H, w: &FakeWorker, mid: &str, text: &str) {
         .await;
 }
 
-async fn ack(w: &FakeWorker, prompt: &Value) {
+pub async fn ack(w: &FakeWorker, prompt: &Value) {
     w.respond(
         prompt,
         json!({"submissionId": prompt["submissionId"], "state": "accepted"}),
@@ -439,7 +457,7 @@ async fn ack(w: &FakeWorker, prompt: &Value) {
     .await;
 }
 
-async fn echo(w: &FakeWorker, sid: &str) {
+pub async fn echo(w: &FakeWorker, sid: &str) {
     w.emit(json!({"type": "message_end", "message": {"id": sid, "role": "user", "content": [], "status": "complete", "submissionId": sid}}))
         .await;
 }
@@ -1317,6 +1335,392 @@ async fn the_question_gate_holds_cards_until_it_judges_them() {
     }
 }
 
+/// The stop judge's hold, one table beside the question gate's. A fake judge only says whether to
+/// hold a turn end and records what it was offered; the test plays the judge's verdict by hand
+/// (`stop_verdict`), a message during the hold, the worker leaving, an archive, a Stop and the
+/// deadline (shortened). Every wait is on a state the actor has already settled, never on a
+/// sleep; every row ends with the turn finished exactly once, or dropped on purpose.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_stop_judge_holds_a_turn_end_until_it_answers() {
+    use crate::seams::{StopJudge, StopKind, StopOffer, StopOutcome, TurnEnd};
+    use crate::types::ContextKind;
+
+    struct FakeJudge {
+        offer: StopOffer,
+        ends: Mutex<Vec<TurnEnd>>,
+        line: Option<String>,
+    }
+    impl StopJudge for FakeJudge {
+        fn offer(&self, _: &str, end: &TurnEnd) -> StopOffer {
+            self.ends.lock().unwrap().push(end.clone());
+            self.offer
+        }
+        fn turn_line(&self, _: &str) -> Option<String> {
+            self.line.clone()
+        }
+    }
+    struct AfkText;
+    impl crate::seams::AfkPolicy for AfkText {
+        fn turn_text(&self, _: &str) -> Option<String> {
+            Some("[AFK] away".into())
+        }
+        fn decide(
+            &self,
+            _: &str,
+            _: &crate::types::Interaction,
+            _: bool,
+        ) -> crate::seams::AfkAction {
+            crate::seams::AfkAction::Leave
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum Then {
+        /// No judge installed: the turn finishes at once.
+        NoJudge,
+        /// The judge passes: the same.
+        Pass,
+        Continue,
+        Stop(StopKind, ContextKind),
+        Done(Option<&'static str>),
+        Failed,
+        /// The hold ends by itself (shortened).
+        Deadline,
+        /// A message during the hold: the finish is announced first, the late verdict is false,
+        /// and the next turn's end is a hold of its own.
+        Send,
+        WorkerExit,
+        Archive,
+        /// The user's Stop on the checked chat finishes it.
+        StopWhileHeld,
+        /// Never offered: an interrupted turn.
+        Interrupted,
+        /// Never offered: a Stop the user asked for while the turn ran.
+        UserStopped,
+        /// Never offered: a message waiting to go out when the turn ends.
+        MessageWaiting,
+        /// Never offered, and the chat keeps running: Claude has an unread steer.
+        UnreadSteer,
+        /// Never offered: a background agent is still running.
+        AgentRunning,
+    }
+    use Then::*;
+    let cases = [
+        NoJudge,
+        Pass,
+        Continue,
+        Stop(StopKind::Blocker, ContextKind::StopBlocker),
+        Stop(StopKind::Limit, ContextKind::StopLimit),
+        Stop(StopKind::Failure, ContextKind::StopFailure),
+        Stop(StopKind::Asked, ContextKind::StopAsked),
+        Done(Some("Run finished: 2 choices were made for you.")),
+        Done(None),
+        Failed,
+        Deadline,
+        Send,
+        WorkerExit,
+        Archive,
+        StopWhileHeld,
+        Interrupted,
+        UserStopped,
+        MessageWaiting,
+        UnreadSteer,
+        AgentRunning,
+    ];
+
+    fn completions(h: &H) -> usize {
+        h.events("completion").len()
+    }
+    fn holds(h: &H) -> Vec<String> {
+        h.col("SELECT chat_id FROM chat_stop_holds")
+    }
+    fn checking(h: &H, chat: &str) -> bool {
+        h.rt.live_thread(chat)
+            .is_some_and(|t| t.stop_check.is_some())
+    }
+    fn context_rows(h: &H) -> Vec<String> {
+        h.col("SELECT json_extract(details, '$.contextKind') || ': ' || text FROM messages WHERE role = 'context'")
+    }
+    fn kind_name(k: ContextKind) -> String {
+        serde_json::to_value(k)
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    for then in cases {
+        let mut lim = limits();
+        if matches!(then, Deadline) {
+            lim.stop_deadline = Duration::from_millis(150);
+        }
+        let mut h = harness_with(lim);
+        let judge = Arc::new(FakeJudge {
+            offer: if matches!(then, Pass) {
+                StopOffer::Pass
+            } else {
+                StopOffer::Hold
+            },
+            ends: Mutex::new(Vec::new()),
+            line: None,
+        });
+        if !matches!(then, NoJudge) {
+            h.rt.set_stop_judge(judge.clone());
+        }
+        let (chat, _, mut w) = running_turn(&mut h).await;
+        let ended = |j: &FakeJudge| j.ends.lock().unwrap().clone();
+
+        // How the turn ends: most rows end it cleanly with a question in its last message.
+        match then {
+            Interrupted => {
+                w.emit(json!({"type": "agent_settled", "outcome": "error", "error": "API error"}))
+                    .await;
+                h.until("the turn failed", |h| h.status(&chat) == "interrupted")
+                    .await;
+                assert!(
+                    ended(&judge).is_empty(),
+                    "an interrupted turn is never offered"
+                );
+                continue;
+            }
+            UserStopped => {
+                let (api, c2) = (h.api.clone(), chat.clone());
+                let stop = tokio::spawn(async move {
+                    api.call(&main(), "chat_stop", json!({"chatId": c2})).await
+                });
+                w.expect("abort").await;
+                w.emit(json!({"type": "agent_settled", "outcome": "stopped"}))
+                    .await;
+                h.until("stopped", |h| h.status(&chat) == "stopped").await;
+                stop.await.unwrap().ok();
+                assert!(
+                    ended(&judge).is_empty(),
+                    "a Stop by the user is never offered"
+                );
+                assert!(holds(&h).is_empty());
+                continue;
+            }
+            UnreadSteer => {
+                let (steer, _) = h.send(&chat, "also this", "default").await;
+                let p = w.expect("prompt").await;
+                ack(&w, &p).await;
+                h.until("the steer is accepted", |h| h.state(&steer) == "accepted")
+                    .await;
+                reply(&h, &w, "m1", "Shall I go ahead?").await;
+                w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+                    .await;
+                // The CLI opens its next turn on the steer by itself: the chat stays running.
+                h.until("the settle was handled", |h| {
+                    h.col("SELECT status FROM chats") == ["running"]
+                })
+                .await;
+                assert!(
+                    ended(&judge).is_empty(),
+                    "a chat with an unread steer is not over"
+                );
+                assert_eq!(completions(&h), 0);
+                continue;
+            }
+            MessageWaiting => {
+                let (waiting, _) = h.send(&chat, "also this", "default").await;
+                let _p = w.expect("prompt").await; // handed over, not yet read by Claude
+                assert_ne!(h.state(&waiting), "accepted");
+            }
+            AgentRunning => {
+                w.emit(json!({"type": "subagent_start", "toolCallId": "sa_1", "name": "background job"}))
+                    .await;
+                h.until("the agent is running", |h| {
+                    h.rt.live_thread(&chat)
+                        .is_some_and(|t| t.subagents_running == 1)
+                })
+                .await;
+            }
+            _ => {}
+        }
+        reply(&h, &w, "m1", "Shall I go ahead?").await;
+        w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+            .await;
+
+        match then {
+            NoJudge | Pass | MessageWaiting | AgentRunning => {
+                h.until("the turn finished", |h| completions(h) == 1).await;
+                assert!(holds(&h).is_empty() && !checking(&h, &chat));
+                let seen = ended(&judge);
+                if matches!(then, Pass) {
+                    assert_eq!(seen.len(), 1, "the judge was asked about the turn end once");
+                } else {
+                    assert!(seen.is_empty(), "this turn end is never offered");
+                }
+                continue;
+            }
+            _ => {}
+        }
+
+        // Everything else is held: the finish waits, the chat reads as being checked, and the
+        // hold is on record for anything watching the chat.
+        h.until("the turn end is held", |h| {
+            ended(&judge).len() == 1 && checking(h, &chat)
+        })
+        .await;
+        let end = ended(&judge).remove(0);
+        assert_eq!(holds(&h), [chat.as_str()], "the hold is recorded");
+        assert_eq!(h.status(&chat), "idle");
+        assert_eq!(completions(&h), 0, "no finish while the judge checks");
+        assert!(h.col("SELECT 1 FROM chat_completions").is_empty());
+
+        match then {
+            Continue => {
+                assert!(h.rt.stop_verdict(&chat, &end.run_id, StopOutcome::Continue));
+                assert!(holds(&h).is_empty() && !checking(&h, &chat));
+                assert_eq!(completions(&h), 0, "carrying on drops the finish");
+                assert!(h.col("SELECT 1 FROM chat_completions").is_empty());
+            }
+            Stop(kind, ck) => {
+                let ok = h.rt.stop_verdict(
+                    &chat,
+                    &end.run_id,
+                    StopOutcome::Stop {
+                        kind,
+                        line: "Blocker: needs a sign-in.".into(),
+                    },
+                );
+                assert!(ok);
+                h.until("the class row, then the finish", |h| completions(h) == 1)
+                    .await;
+                assert_eq!(
+                    context_rows(&h),
+                    [format!("{}: Blocker: needs a sign-in.", kind_name(ck))]
+                );
+                assert!(holds(&h).is_empty() && !checking(&h, &chat));
+            }
+            Done(line) => {
+                let ok = h.rt.stop_verdict(
+                    &chat,
+                    &end.run_id,
+                    StopOutcome::Done {
+                        line: line.map(str::to_owned),
+                    },
+                );
+                assert!(ok);
+                h.until("the finish", |h| completions(h) == 1).await;
+                let want: Vec<String> = line
+                    .map(|l| format!("{}: {l}", kind_name(ContextKind::Gatekeeper)))
+                    .into_iter()
+                    .collect();
+                assert_eq!(context_rows(&h), want);
+            }
+            Failed => {
+                assert!(h.rt.stop_verdict(&chat, &end.run_id, StopOutcome::Failed));
+                h.until("the finish", |h| completions(h) == 1).await;
+                assert!(context_rows(&h).is_empty());
+            }
+            Deadline => {
+                h.until("the hold ends by itself", |h| completions(h) == 1)
+                    .await;
+                assert!(holds(&h).is_empty() && !checking(&h, &chat));
+            }
+            Send => {
+                let (nudge, _) = h.send(&chat, "go on", "default").await;
+                let p = w.expect("prompt").await;
+                assert_eq!(p["submissionId"], nudge.as_str());
+                // The prompt left only after the earlier finish was written and announced.
+                assert_eq!(completions(&h), 1);
+                assert!(holds(&h).is_empty() && !checking(&h, &chat));
+                assert!(
+                    !h.rt.stop_verdict(&chat, &end.run_id, StopOutcome::Continue),
+                    "the late verdict finds the hold gone"
+                );
+                // The next turn's end is held on its own, under its own run: the old verdict
+                // still lands nowhere, the new one does.
+                ack(&w, &p).await;
+                w.emit(json!({"type": "agent_start"})).await;
+                w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+                    .await;
+                h.until("the next end is held", |h| {
+                    ended(&judge).len() == 2 && checking(h, &chat)
+                })
+                .await;
+                let second = ended(&judge).remove(1);
+                assert_ne!(second.run_id, end.run_id);
+                assert!(!h.rt.stop_verdict(&chat, &end.run_id, StopOutcome::Failed));
+                assert!(
+                    checking(&h, &chat),
+                    "an earlier turn's verdict ends no later hold"
+                );
+                assert!(h
+                    .rt
+                    .stop_verdict(&chat, &second.run_id, StopOutcome::Continue));
+                assert_eq!(
+                    completions(&h),
+                    1,
+                    "one finish in all: the dropped one is silent"
+                );
+            }
+            WorkerExit => {
+                w.exit().await;
+                h.until("the finish", |h| completions(h) == 1).await;
+                assert!(holds(&h).is_empty() && !checking(&h, &chat));
+                assert!(!h.rt.stop_verdict(&chat, &end.run_id, StopOutcome::Continue));
+            }
+            Archive => {
+                h.call("chat_archive", json!({"chatId": chat}))
+                    .await
+                    .unwrap();
+                h.until("the hold is gone", |h| {
+                    holds(h).is_empty() && !checking(h, &chat)
+                })
+                .await;
+                assert_eq!(completions(&h), 0, "an archived chat announces nothing");
+                assert!(!h.rt.stop_verdict(&chat, &end.run_id, StopOutcome::Continue));
+            }
+            StopWhileHeld => {
+                h.call("chat_stop", json!({"chatId": chat})).await.unwrap();
+                h.until("the finish", |h| completions(h) == 1).await;
+                assert!(holds(&h).is_empty() && !checking(&h, &chat));
+                assert!(!h.rt.stop_verdict(&chat, &end.run_id, StopOutcome::Continue));
+            }
+            _ => unreachable!(),
+        }
+        if !matches!(then, Continue | Archive | Send) {
+            // A verdict twice finishes nothing twice.
+            assert!(!h.rt.stop_verdict(&chat, &end.run_id, StopOutcome::Failed));
+            assert_eq!(completions(&h), 1);
+        }
+    }
+
+    // The judge's own line rides each turn's context beside AFK's text.
+    for (afk, line, want) in [
+        (
+            false,
+            Some("[Helm] Mode changed."),
+            Some("[Helm] Mode changed."),
+        ),
+        (
+            true,
+            Some("[Helm] Mode changed."),
+            Some("[AFK] away\n\n[Helm] Mode changed."),
+        ),
+        (true, None, Some("[AFK] away")),
+        (false, None, None),
+    ] {
+        let mut h = harness();
+        if afk {
+            h.rt.set_afk_policy(Arc::new(AfkText));
+        }
+        h.rt.set_stop_judge(Arc::new(FakeJudge {
+            offer: StopOffer::Pass,
+            ends: Mutex::new(Vec::new()),
+            line: line.map(str::to_owned),
+        }));
+        let chat = h.create().await;
+        h.send(&chat, "start", "default").await;
+        let mut w = h.worker().await;
+        w.ready().await;
+        let p = w.expect("prompt").await;
+        assert_eq!(p.get("context").and_then(Value::as_str), want);
+    }
+}
+
 /// Tool start and end are written as they happen, with the live tool on the thread.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tools_are_written_at_start_and_end() {
@@ -1551,32 +1955,295 @@ async fn the_wait_limit_retries_while_waiting_then_stops() {
     );
 }
 
-/// Beyond the active-chat cap a send is refused and the draft is kept.
+/// Beyond the active-chat cap a send is not refused: it is taken and waits at the chat's
+/// start — visibly, with a record in the queue — and opens when a place frees.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sends_beyond_the_active_cap_are_refused_with_the_draft_kept() {
+async fn sends_beyond_the_active_cap_wait_in_the_queue_and_open_when_one_frees() {
     let mut l = limits();
     l.max_active = 1;
     let mut h = harness_with(l);
-    let (_busy, _, _w) = running_turn(&mut h).await;
+    let (busy, _, w) = running_turn(&mut h).await;
     let other = h.create().await;
-    h.call(
-        "draft_save",
-        json!({"chatId": other, "text": "keep me", "revision": 10}),
+    let (sid, _) = h.send(&other, "wait for me", "default").await;
+    h.until(
+        "the second start waits at its start, with its reason recorded",
+        |h| {
+            h.status(&other) == "starting"
+                && h.state(&sid) == "saved"
+                && h.col(&format!(
+                "SELECT COALESCE(queue_reason, 'x') FROM chat_activity WHERE chat_id = '{other}'"
+            )) == ["at_limit"]
+                && h.col(&format!(
+                    "SELECT reason FROM chat_dispatch_holds WHERE chat_id = '{other}'"
+                )) == ["at_limit"]
+        },
     )
-    .await
+    .await;
+    // A second waiting chat must not count against the first: chats held at their start are
+    // waiting, not working, so the freed place still goes to the oldest.
+    let third = h.create().await;
+    let (sid3, _) = h.send(&third, "me too", "default").await;
+    h.until("the third start waits as well", |h| {
+        h.status(&third) == "starting" && h.state(&sid3) == "saved"
+    })
+    .await;
+    // The freed place takes it: no new send, the same submission opens the turn.
+    w.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-q1"}))
+        .await;
+    let mut w2 = h.worker().await;
+    w2.ready().await;
+    let p = w2.expect("prompt").await;
+    assert_eq!(p["submissionId"], sid.as_str());
+    h.until("the hold is gone once it opens", |h| {
+        h.col(&format!(
+            "SELECT count(*) FROM chat_dispatch_holds WHERE chat_id = '{other}'"
+        )) == ["0"]
+            && h.col(&format!(
+                "SELECT COALESCE(queue_reason, 'x') FROM chat_activity WHERE chat_id = '{other}'"
+            )) == ["x"]
+    })
+    .await;
+    // The chat that waited is working now and counts against the cap: the third stays waiting
+    // behind it instead of opening beside it.
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    assert_eq!(
+        h.col(&format!(
+            "SELECT reason FROM chat_dispatch_holds WHERE chat_id = '{third}'"
+        )),
+        ["at_limit"],
+        "a chat that waited and then opened still counts as working"
+    );
+    assert_eq!(h.status(&third), "starting");
+    let _ = busy;
+}
+
+/// While the plan allowance reads used up, a new start waits at its start with that reason
+/// recorded, and the window's own reset releases it — no new send. An interactive send instead
+/// gets an answer in words and is never left waiting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_used_up_plan_allowance_holds_a_start_and_the_reset_releases_it() {
+    use crate::submit::{host_send, HostSend};
+    let mut h = harness();
+    let seed = |h: &H, pct: f64, reset_in: i64| {
+        let now = helm_core::now_ms();
+        let body = json!({ "fiveHour": { "pct": pct, "at": now, "resetsAt": now + reset_in } });
+        h.db.write(move |tx| {
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS plan_usage (\
+                     id INTEGER PRIMARY KEY CHECK (id = 1), body TEXT NOT NULL, \
+                     updated_at INTEGER NOT NULL);",
+            )?;
+            tx.execute(
+                "INSERT OR REPLACE INTO plan_usage(id, body, updated_at) VALUES (1, ?1, ?2)",
+                rusqlite::params![body.to_string(), now],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+    };
+    // A window that resets in four seconds: the wait is real but short.
+    seed(&h, 96.0, 4_000);
+    let chat = h.create().await;
+    let (sid, _) = h.send(&chat, "hold me", "default").await;
+    h.until("the start waits with the allowance as its reason", |h| {
+        h.status(&chat) == "starting"
+            && h.state(&sid) == "saved"
+            && h.col(&format!(
+                "SELECT reason FROM chat_dispatch_holds WHERE chat_id = '{chat}'"
+            )) == ["claude_capacity"]
+    })
+    .await;
+    h.until("the reset clears the hold", |h| {
+        h.col(&format!(
+            "SELECT count(*) FROM chat_dispatch_holds WHERE chat_id = '{chat}'"
+        )) == ["0"]
+    })
+    .await;
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    assert_eq!(
+        p["submissionId"],
+        sid.as_str(),
+        "the same send opens the turn once the window reopens"
+    );
+    // A window that will not reopen for an hour: an interactive send is answered, not held.
+    seed(&h, 96.0, 3_600_000);
+    let remote = h.create().await;
+    host_send(
+        &h.rt,
+        HostSend {
+            chat_id: &remote,
+            submission_id: "tg-1",
+            text: "get the shopping list",
+            origin: crate::types::SubmissionOrigin::Telegram,
+        },
+    )
     .unwrap();
-    let e = h
-        .call(
-            "chat_send",
-            json!({"chatId": other, "submissionId": uuid::Uuid::new_v4().to_string(), "text": "keep me", "action": "default", "draftRevision": 10}),
+    h.until("the interactive send is answered, not left waiting", |h| {
+        h.state("tg-1") == "rejected" && h.status(&remote) == "idle"
+    })
+    .await;
+    assert_eq!(
+        h.col(&format!(
+            "SELECT count(*) FROM chat_dispatch_holds WHERE chat_id = '{remote}'"
+        )),
+        ["0"],
+        "an interactive start is never parked"
+    );
+}
+
+/// The queue line, moved by hand: to the front, parked until released, and sent back. Against a
+/// local server's cap of one, where every opening is a real turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_queue_line_can_be_reordered_parked_and_sent_back() {
+    let mut h = harness_with(Limits {
+        tick: Duration::from_millis(50),
+        ..limits()
+    });
+    h.db.write(|tx| helm_core::prefs::set_generic(tx, "localChatCap", &json!(1)))
+        .unwrap();
+    let local = Arc::new(FakeLocal {
+        turns: Mutex::new(Vec::new()),
+        outcome: Mutex::new(Ok("m-one".into())),
+        gate: Mutex::new(None),
+        finished: Mutex::new(Vec::new()),
+        refreshed: Mutex::new(Vec::new()),
+        held_outcome: Mutex::new(None),
+        queue: Mutex::new(None),
+    });
+    h.rt.set_local_models(local.clone());
+    let cwd = h.work.to_string_lossy().into_owned();
+    let asked = |id: &str| -> bool { local.turns.lock().unwrap().iter().any(|t| t.chat_id == id) };
+    let new_id = |r: Value| r["id"].as_str().unwrap().to_owned();
+    let a = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
         )
         .await
-        .unwrap_err();
-    assert_eq!(e.code, "capacity");
-    assert_eq!(
-        h.col(&format!("SELECT draft FROM chats WHERE id = '{other}'")),
-        ["keep me"]
+        .unwrap(),
     );
+    h.send(&a, "job a", "default").await;
+    let mut wa = h.worker().await;
+    wa.ready().await;
+    let pa = wa.expect("prompt").await;
+    ack(&wa, &pa).await;
+    wa.emit(json!({"type": "agent_start"})).await;
+    let b = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
+        )
+        .await
+        .unwrap(),
+    );
+    let (sidb, _) = h.send(&b, "job b", "default").await;
+    let c = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
+        )
+        .await
+        .unwrap(),
+    );
+    let (sidc, _) = h.send(&c, "job c", "default").await;
+    h.until("both waits are recorded", |h| {
+        h.status(&b) == "starting"
+            && h.state(&sidb) == "saved"
+            && h.status(&c) == "starting"
+            && h.state(&sidc) == "saved"
+            && h.col("SELECT count(*) FROM chat_dispatch_holds") == ["2"]
+    })
+    .await;
+    // C goes to the front of the line.
+    crate::queue::action(&h.rt, &c, "top").unwrap();
+    assert_eq!(
+        h.col(&format!(
+            "SELECT top FROM chat_dispatch_holds WHERE chat_id = '{c}'"
+        )),
+        ["1"]
+    );
+    // The freed place takes C, not the older B.
+    wa.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-q-a"}))
+        .await;
+    h.until("the front of the line goes first", |_h| asked(&c))
+        .await;
+    assert!(
+        !asked(&b),
+        "the older send waits its turn behind the one at the front"
+    );
+    let mut wc = h.worker().await;
+    wc.ready().await;
+    let pc = wc.expect("prompt").await;
+    assert_eq!(pc["submissionId"], sidc.as_str());
+    ack(&wc, &pc).await;
+    wc.emit(json!({"type": "agent_start"})).await;
+    // Park B by hand: a freed place does not take it until it is released.
+    crate::queue::action(&h.rt, &b, "hold").unwrap();
+    wc.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-q-c"}))
+        .await;
+    h.until("C's turn ends", |h| h.status(&c) == "idle").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!asked(&b), "a hand-held chat waits past a free place");
+    assert_eq!(
+        h.col(&format!(
+            "SELECT reason FROM chat_dispatch_holds WHERE chat_id = '{b}'"
+        )),
+        ["manual"]
+    );
+    crate::queue::action(&h.rt, &b, "release").unwrap();
+    h.until("the released chat takes the free place", |_h| asked(&b))
+        .await;
+    let mut wb = h.worker().await;
+    wb.ready().await;
+    let pb = wb.expect("prompt").await;
+    assert_eq!(pb["submissionId"], sidb.as_str());
+    ack(&wb, &pb).await;
+    wb.emit(json!({"type": "agent_start"})).await;
+    // A running chat parked by hand has no wait to cancel: the cancel is refused and its turn
+    // goes on; releasing the park is the way out.
+    crate::queue::action(&h.rt, &b, "hold").unwrap();
+    assert!(crate::queue::action(&h.rt, &b, "cancel").is_err());
+    assert_ne!(
+        h.status(&b),
+        "idle",
+        "a live turn is not ended by the queue"
+    );
+    assert_eq!(
+        h.col(&format!(
+            "SELECT count(*) FROM chat_dispatch_holds WHERE chat_id = '{b}'"
+        )),
+        ["1"]
+    );
+    crate::queue::action(&h.rt, &b, "release").unwrap();
+    // Cancel: a waiting send goes back to its sender.
+    let d = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
+        )
+        .await
+        .unwrap(),
+    );
+    let (sidd, _) = h.send(&d, "job d", "default").await;
+    h.until("D waits in the line", |h| {
+        h.status(&d) == "starting"
+            && h.state(&sidd) == "saved"
+            && h.col(&format!(
+                "SELECT count(*) FROM chat_dispatch_holds WHERE chat_id = '{d}'"
+            )) == ["1"]
+    })
+    .await;
+    crate::queue::action(&h.rt, &d, "cancel").unwrap();
+    h.until("the cancelled send is given back", |h| {
+        h.state(&sidd) == "rejected"
+            && h.status(&d) == "idle"
+            && h.col(&format!(
+                "SELECT count(*) FROM chat_dispatch_holds WHERE chat_id = '{d}'"
+            )) == ["0"]
+    })
+    .await;
 }
 
 /// Withdraw: the text comes back as a newer draft revision.
@@ -2365,6 +3032,97 @@ async fn composer_sends_carry_the_built_context_block() {
     assert_eq!(calls[1].1, 0, "before the first launch the generation is 0");
 }
 
+/// A chat that has not started is offered its project's startup text with its first message: the
+/// text rides the prompt ahead of the rest of the context, one visible line says so, a roll-over
+/// successor's predecessor is passed on, and a chat that has run is never asked again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_chats_first_message_carries_the_startup_text_and_a_started_chat_is_not_asked() {
+    use crate::types::SendOrigin;
+    struct Seam(Mutex<Vec<(String, Option<String>)>>);
+    impl crate::seams::StartupSeam for Seam {
+        fn first_send(
+            &self,
+            _tx: &rusqlite::Transaction<'_>,
+            _chat_id: &str,
+            submission_id: &str,
+            predecessor: Option<&str>,
+        ) -> rusqlite::Result<Option<crate::seams::StartupInjection>> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((submission_id.to_owned(), predecessor.map(Into::into)));
+            Ok(Some(crate::seams::StartupInjection {
+                context: "Startup: make a worktree.".into(),
+                row: "Startup instructions were added to this chat".into(),
+            }))
+        }
+    }
+    let mut h = harness();
+    let chat = h.create().await;
+    let seam = Arc::new(Seam(Mutex::new(vec![])));
+    h.rt.set_startup_seam(seam.clone());
+    h.rt.db()
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO chat_succession(chat_id, predecessor_id) VALUES (?1, 'old-chat')",
+                [&chat],
+            )
+        })
+        .unwrap();
+    let builder = crate::seams::SendContext(Arc::new(Ctx(Mutex::new(vec![]))));
+    let rt = h.rt.clone();
+    let (c2, b2) = (chat.clone(), builder.clone());
+    tokio::task::spawn_blocking(move || {
+        crate::submit::chat_send(
+            &rt,
+            send_args(&c2, SendOrigin::Composer, json!({"path": "src/a.rs"})),
+            Some(&b2),
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    assert_eq!(
+        p["context"], "Startup: make a worktree.\n\nLooking at: src/a.rs",
+        "the startup text comes first"
+    );
+    assert_eq!(
+        h.col("SELECT text FROM messages WHERE role = 'context' AND json_extract(details, '$.contextKind') = 'startup'"),
+        ["Startup instructions were added to this chat"]
+    );
+    ack(&w, &p).await;
+    w.emit(json!({"type": "agent_start"})).await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("idle", |h| h.status(&chat) == "idle").await;
+    let rt = h.rt.clone();
+    let c2 = chat.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::submit::chat_send(&rt, send_args(&c2, SendOrigin::Action, json!({})), None)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let p = w.expect("prompt").await;
+    assert!(
+        p.get("context").is_none(),
+        "a chat that has run carries no startup text"
+    );
+    assert_eq!(
+        seam.0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|c| c.1.clone())
+            .collect::<Vec<_>>(),
+        [Some("old-chat".to_owned())],
+        "asked once, with the predecessor"
+    );
+}
+
 /// An approval puts the chat in Needs you and on the badge; answering it takes it off.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn attention_follows_the_waiting_tracker() {
@@ -2648,42 +3406,210 @@ async fn a_worker_that_never_answers_the_stop_is_killed_at_the_archive_limit() {
     assert!(h.events("completion").is_empty());
 }
 
-/// A running chat with no output for the stall limit is flagged and counted; the
-/// next output clears it.
+/// A busy chat reports a live state (generating, tool, waitingUser, silent) that the tick
+/// maintains without asking any model. Only the silent one is flagged, and when it is, the flag,
+/// the attention row and a note to a busy parent chat all say the same thing (at most one note
+/// per child per hour, and none to an idle parent: a timer starts no model call); a running tool
+/// call and a card waiting on the person never raise it, and the next output ends the whole
+/// thing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_silent_running_chat_shows_as_stalled_until_output() {
     let mut h = harness_with(Limits {
         tick: Duration::from_millis(50),
         ..limits()
     });
-    // One minute is 100 ms in the test limits.
-    h.db.write(|tx| helm_core::prefs::set_generic(tx, "stallMinutes", &json!(10)))
-        .unwrap();
-    // The limit (10 x 100 ms) counts from the chat's last output, which `running_turn` produces
-    // after `t0`. Under a heavily loaded full run the harness can itself take longer than the
-    // limit to get past `running_turn`, and then the flag is rightly set already, so "not yet" is
-    // claimed only while less than the limit has passed since `t0`.
-    let t0 = std::time::Instant::now();
+    // The parent is mid-turn on a tool call, which is never silent, so only the child is flagged.
+    let (parent, _, pw) = running_turn(&mut h).await;
+    pw.emit(json!({"type": "tool_execution_start", "toolCallId": "pt", "toolName": "Bash", "args": {"command": "sleep"}, "stoppable": true}))
+        .await;
+    // The silent window starts parked (the harness default): on a loaded machine the start-up
+    // itself can outlast a short window, which would let the first observed state be `silent`
+    // rather than `generating`. The window is shortened once the turn is demonstrably open.
     let (chat, _, w) = running_turn(&mut h).await;
+    h.db.write(|tx| {
+        tx.execute(
+            "UPDATE chats SET parent_chat_id = ?1 WHERE id = ?2",
+            [&parent, &chat],
+        )
+    })
+    .unwrap();
     let flag = |h: &H| {
         h.col(&format!(
             "SELECT stalled FROM chat_activity WHERE chat_id = '{chat}'"
         ))
     };
+    let state = |h: &H| -> String {
+        serde_json::from_str::<Value>(
+            &h.col(&format!(
+                "SELECT COALESCE(state, 'null') FROM chat_activity WHERE chat_id = '{chat}'"
+            ))[0],
+        )
+        .unwrap()["kind"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned()
+    };
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let early = flag(&h);
-    if t0.elapsed() < Duration::from_millis(1000) {
-        assert_ne!(early, ["1"], "not before the limit");
-    }
+    assert_eq!(flag(&h), ["0"], "not flagged while the window is parked");
+    h.until("generating", |h| state(h) == "generating").await;
+    // One minute is 100 ms in the test limits: from here the silent window is a second.
+    h.db.write(|tx| helm_core::prefs::set_generic(tx, "stallMinutes", &json!(10)))
+        .unwrap();
+
+    // A tool call genuinely running: the state names it, and it is never silent no matter how
+    // long it runs.
+    w.emit(json!({"type": "tool_execution_start", "toolCallId": "tc1", "toolName": "Bash", "args": {"command": "cargo build"}, "stoppable": true}))
+        .await;
+    h.until("tool", |h| state(h) == "tool").await;
+    tokio::time::sleep(Duration::from_millis(1150)).await;
+    assert_eq!(flag(&h), ["0"], "a running tool call is not a silent");
+    assert_eq!(state(&h), "tool", "and it keeps its state");
+    w.emit(json!({"type": "tool_execution_end", "toolCallId": "tc1", "toolName": "Bash", "result": {"text": "done"}, "isError": false}))
+        .await;
+
+    // A card waiting on the person: a different state, and equally not a silent.
+    w.emit(json!({"type": "extension_ui_request", "id": "ui-1", "method": "select", "attention": "approval",
+                  "title": "Run ls?", "options": ["Allow once", "Deny"]}))
+        .await;
+    h.until("waitingUser", |h| state(h) == "waitingUser").await;
+    tokio::time::sleep(Duration::from_millis(1150)).await;
+    assert_eq!(flag(&h), ["0"], "waiting on the person is not a silent");
+    h.call(
+        "interaction_answer",
+        json!({"chatId": chat, "requestId": "ui-1", "value": "Allow once"}),
+    )
+    .await
+    .unwrap();
+
+    // Now nothing is running and nothing answers: the silent arrives, and it is the one state
+    // that raises a voice.
     h.until("stalled", |h| flag(h) == ["1"]).await;
+    assert_eq!(state(&h), "silent", "the state says which one");
     let a = h.call("attention_get", json!({})).await.unwrap();
     assert_eq!(a["stalled"][0]["chatId"], chat.as_str());
     assert_eq!(a["badge"], 1);
     let got = h.call("chat_get", json!({"chatId": chat})).await.unwrap();
     assert_eq!(got["chat"]["stalled"], true);
+    assert_eq!(got["chat"]["state"]["kind"], "silent");
+    // The parent hears about it once, as a message it can act on.
+    h.until("the parent was told", |h| {
+        h.col(&format!(
+            "SELECT m.origin FROM submissions s \
+             JOIN submission_meta m ON m.submission_id = s.id \
+             WHERE s.chat_id = '{parent}' AND m.origin = 'app'"
+        )) == ["app"]
+    })
+    .await;
+    assert!(
+        h.col(&format!(
+            "SELECT text FROM submissions WHERE chat_id = '{parent}' AND text LIKE 'Helm noticed%'"
+        ))[0]
+            .contains("silent for"),
+        "the note says what and how long"
+    );
     w.emit(json!({"type": "message_start", "message": {"id": "m9", "role": "assistant", "content": []}}))
         .await;
     h.until("unstalled", |h| flag(h) == ["0"]).await;
+    h.until("generating again", |h| state(h) == "generating")
+        .await;
+    // The note goes once per hour per child: this chat recovered and went silent again, and the
+    // parent is not told a second time.
+    let notes = |h: &H| {
+        h.col(&format!(
+            "SELECT count(*) FROM submissions WHERE chat_id = '{parent}' AND text LIKE 'Helm noticed%'"
+        ))
+    };
+    tokio::time::sleep(Duration::from_millis(1150)).await;
+    h.until("stalled again", |h| flag(h) == ["1"]).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        notes(&h),
+        ["1"],
+        "a second spell adds nothing within the hour"
+    );
+
+    // A parent that is idle is left idle: its silent child raises the flag and nothing else.
+    let idle = h.create().await;
+    let (child2, _, _w2) = running_turn(&mut h).await;
+    h.db.write(|tx| {
+        tx.execute(
+            "UPDATE chats SET parent_chat_id = ?1 WHERE id = ?2",
+            [&idle, &child2],
+        )
+    })
+    .unwrap();
+    h.until("the second child is flagged", |h| {
+        h.col(&format!(
+            "SELECT stalled FROM chat_activity WHERE chat_id = '{child2}'"
+        )) == ["1"]
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        h.col(&format!(
+            "SELECT count(*) FROM submissions WHERE chat_id = '{idle}'"
+        )),
+        ["0"],
+        "no turn is opened in an idle parent"
+    );
+
+    // A chat whose own helpers (tool servers, say) keep its process group at three from the
+    // start still goes silent at the ordinary limit; only a group that grows past what it
+    // began with (a build left running) stretches the limit and clears the flag.
+    h.spawner.tree_at_launch.store(3, Ordering::SeqCst);
+    let (c3, _, w3) = running_turn(&mut h).await;
+    let flag3 = |h: &H| {
+        h.col(&format!(
+            "SELECT stalled FROM chat_activity WHERE chat_id = '{c3}'"
+        ))
+    };
+    h.until("silent at the ordinary limit", |h| flag3(h) == ["1"])
+        .await;
+    w3.tree.store(4, Ordering::SeqCst);
+    h.until("a grown group stretches the limit", |h| flag3(h) == ["0"])
+        .await;
+}
+
+/// A child that ends a turn without having reported (its last reply is a tool call printed as
+/// text) tells its parent once, even when the parent is idle: an idle parent is the one that
+/// would otherwise wait for ever. A turn that closes normally says nothing, and the next
+/// unfinished turn is a new spell with a new note.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_child_that_ends_its_turn_unfinished_tells_its_parent_once_per_spell() {
+    let mut h = harness();
+    let parent = h.create().await;
+    let (child, _, mut w) = running_turn(&mut h).await;
+    h.db.write(|tx| {
+        tx.execute(
+            "UPDATE chats SET parent_chat_id = ?1 WHERE id = ?2",
+            [&parent, &child],
+        )
+    })
+    .unwrap();
+    let notes = |h: &H| {
+        h.col(&format!(
+            "SELECT text FROM submissions WHERE chat_id = '{parent}'              AND text LIKE 'Helm noticed:%ended its turn without reporting%'"
+        ))
+    };
+    // The first turn ends on a printed tool call: the idle parent is told, once.
+    w.emit(json!({"type": "message_start", "message": {"id": "m1", "role": "assistant", "content": []}}))
+        .await;
+    w.emit(json!({"type": "message_end", "message": {"id": "m1", "role": "assistant", "content": [{"type": "text", "text": "<tool_call>{\"name\": \"Bash\"}</tool_call>"}], "status": "complete"}}))
+        .await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("the parent was told", |h| notes(h).len() == 1)
+        .await;
+    assert!(notes(&h)[0].contains("printed as text"), "{:?}", notes(&h));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(notes(&h).len(), 1, "once per spell");
+    // A turn that closes with words says nothing.
+    finished_turn(&h, &mut w, &child, "again", "m2", "Done: all twelve pass.").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(notes(&h).len(), 1, "a normal close is not reported");
+    // The next unfinished turn is a new spell.
+    finished_turn(&h, &mut w, &child, "once more", "m3", "<function=Read>").await;
+    h.until("a second note", |h| notes(h).len() == 2).await;
 }
 
 /// A muted chat leaves the badge and every group, but keep-awake still counts it.
@@ -5522,6 +6448,18 @@ async fn roll_over_hands_the_work_to_a_successor_and_archives_the_old_chat() {
     w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
         .await;
     h.until("idle", |h| h.status(&chat) == "idle").await;
+    // The chat belongs to someone other than the home person, and is shown to a second profile.
+    h.db.write(|tx| {
+        tx.execute(
+            "UPDATE chats SET profile_id = 'p-sam' WHERE id = ?1",
+            [&chat],
+        )?;
+        tx.execute(
+            "INSERT INTO chat_shares(chat_id, profile_id) VALUES (?1, 'p-ann')",
+            [&chat],
+        )
+    })
+    .unwrap();
 
     let started = h
         .call("chat_roll_over", json!({"chatId": chat}))
@@ -5548,6 +6486,18 @@ async fn roll_over_hands_the_work_to_a_successor_and_archives_the_old_chat() {
         text.contains(&chat) && text.contains("Left to do: part two."),
         "{text}"
     );
+    // The successor's first turn is already under the old chat's person, not the home profile.
+    let succ = h.col(&format!(
+        "SELECT chat_id FROM chat_succession WHERE predecessor_id = '{chat}'"
+    ))[0]
+        .clone();
+    assert_eq!(
+        h.col(&format!(
+            "SELECT profile_id || '/' || (SELECT group_concat(profile_id) FROM chat_shares WHERE chat_id = '{succ}') FROM chats WHERE id = '{succ}'"
+        )),
+        ["p-sam/p-ann"],
+        "the owner and shares are set before the first turn"
+    );
     h.until("old chat archived", |h| {
         h.col(&format!("SELECT archived FROM chats WHERE id = '{chat}'")) == ["1"]
     })
@@ -5564,6 +6514,156 @@ async fn roll_over_hands_the_work_to_a_successor_and_archives_the_old_chat() {
     assert_eq!(
         h.col(&format!("SELECT project_id = (SELECT project_id FROM chats WHERE id = '{chat}') FROM chats WHERE id = '{new}'")),
         ["1"]
+    );
+}
+
+/// Attach a host seam carrying the harness's own services, so a flow started from inside the
+/// runtime (the automatic roll-over trigger) can run its ops.
+pub fn attach_ops_host(h: &H) {
+    let mut s = Services::new();
+    s.insert(Arc::new(h.profile.clone()));
+    s.insert(h.db.clone());
+    s.insert(Arc::new(Clock::new(0)));
+    s.insert(Arc::new(h.rt.clone()));
+    h.rt.attach_host(crate::hostcalls::HostSeam {
+        ctx: OpCtx {
+            services: Arc::new(s),
+            events: h.sink.clone(),
+        },
+        tools: Arc::new(helm_hosttools::HostTools::new(Arc::new(
+            helm_hosttools::HostToolRegistry::new(),
+        ))),
+        lines: Arc::new(helm_hosttools::WorkerLines::new()),
+    });
+}
+
+/// A quiet chat grown past the roll-over setting runs the same flow the button runs, at the end
+/// of its turn: the hand-off request goes out while the chat is idle, and the turn's end inside
+/// that roll over is not itself a roll-over trigger (the in-flight guard holds).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chat_grown_past_the_setting_rolls_itself_over_at_its_turn_end() {
+    let mut h = harness();
+    attach_ops_host(&h);
+    h.db.write(|tx| helm_core::prefs::set_generic(tx, "rolloverTokens", &json!(100)))
+        .unwrap();
+    let chat = h.create().await;
+    let (sid, _) = h.send(&chat, "build the thing", "default").await;
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    ack(&w, &p).await;
+    w.emit(json!({"type": "agent_start"})).await;
+    echo(&w, &sid).await;
+    // The reply's usage puts the chat at 462 tokens of context — over the setting.
+    reply(&h, &w, "msg_1", "Built part one.").await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    let p = w.expect("prompt").await;
+    assert!(
+        p["text"].as_str().unwrap().contains("rolled over"),
+        "the trigger asked for a hand-off at the turn's end"
+    );
+    ack(&w, &p).await;
+    w.emit(json!({"type": "agent_start"})).await;
+    w.emit(json!({"type": "message_end", "message": {"id": "msg_2", "role": "assistant", "content": [{"type": "text", "text": "Goal: finish it. Left to do: part two."}], "status": "complete"}}))
+        .await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    let mut w2 = h.worker().await;
+    w2.ready().await;
+    let first = w2.expect("prompt").await;
+    let text = first["text"].as_str().unwrap();
+    assert!(
+        text.contains(&chat) && text.contains("Left to do: part two."),
+        "{text}"
+    );
+    h.until("old chat archived", |h| {
+        h.col(&format!("SELECT archived FROM chats WHERE id = '{chat}'")) == ["1"]
+    })
+    .await;
+}
+
+/// The automatic trigger, one pass over every case that leaves a chat alone: the setting off,
+/// context below it, no usage recorded, a side chat, an archived chat, a busy chat — and the
+/// one row that fires. The asked-again case rides the in-flight guard in the firing row: the
+/// roll over it starts is still running when its turn ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_auto_roll_over_trigger_checks_every_case_in_one_pass() {
+    let h = harness();
+    attach_ops_host(&h);
+    let asked = |chat: &str| {
+        h.col(&format!(
+            "SELECT COUNT(*) FROM submissions WHERE chat_id = '{chat}' \
+             AND text LIKE 'This chat is being rolled over%'"
+        )) == ["1"]
+    };
+    for (label, pref, tokens, extra, expect) in [
+        ("off", 0, 9_999, "", false),
+        ("below", 100, 99, "", false),
+        ("no usage", 100, 0, "", false),
+        (
+            "side chat",
+            100,
+            999,
+            "UPDATE chats SET side_source_id = 'src' WHERE id = '{c}';",
+            false,
+        ),
+        (
+            "archived",
+            100,
+            999,
+            "UPDATE chats SET archived = 1 WHERE id = '{c}';",
+            false,
+        ),
+        (
+            "busy",
+            100,
+            999,
+            "UPDATE chats SET status = 'running' WHERE id = '{c}';",
+            false,
+        ),
+        ("over the line", 100, 999, "", true),
+    ] {
+        let chat = h.create().await;
+        if tokens > 0 {
+            h.db
+                .write(|tx| {
+                    tx.execute(
+                        "INSERT INTO messages(chat_id, source_key, role, text, timestamp, details)
+                         VALUES (?1, 'x1', 'assistant', 'done', ?2, ?3)",
+                        rusqlite::params![
+                            &chat,
+                            helm_core::now_ms(),
+                            format!(
+                                r#"{{"usage": {{"inputTokens": {tokens}, "cacheReadTokens": 0, "cacheWriteTokens": 0}}}}"#
+                            )
+                        ],
+                    )
+                })
+                .unwrap();
+        }
+        if !extra.is_empty() {
+            h.db.write(|tx| tx.execute_batch(&extra.replace("{c}", &chat)))
+                .unwrap();
+        }
+        h.db.write(|tx| helm_core::prefs::set_generic(tx, "rolloverTokens", &json!(pref)))
+            .unwrap();
+        crate::rollover::on_turn_end(&h.rt.sh, &chat);
+        assert_eq!(asked(&chat), expect, "{label}");
+    }
+    // The chat the trigger fired for is not asked a second time at the hand-off turn's end:
+    // its roll over is still in flight.
+    let last = h
+        .col("SELECT id FROM chats WHERE archived = 0 ORDER BY rowid DESC LIMIT 1")
+        .remove(0);
+    crate::rollover::on_turn_end(&h.rt.sh, &last);
+    assert_eq!(
+        h.col(&format!(
+            "SELECT COUNT(*) FROM submissions WHERE chat_id = '{last}' \
+             AND text LIKE 'This chat is being rolled over%'"
+        )),
+        ["1"],
+        "still exactly one ask"
     );
 }
 
@@ -6207,6 +7307,189 @@ async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
         "the local worker resumes the chat's Claude session: the conversation carries over"
     );
     assert!(wl.req.local.is_some(), "launched against the local server");
+}
+
+/// A provider change while the turn is open but nothing is in flight — the wait in a local
+/// model server's queue is a wait, not work — stops the turn at once and opens it again on
+/// the new model, instead of letting the queued request be answered on the old one. The same
+/// in the other direction. A tool call genuinely running is held to the idle point as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_model_change_while_only_a_queue_wait_runs_restarts_the_turn_now() {
+    let mut h = harness();
+    let local = Arc::new(FakeLocal {
+        turns: Mutex::new(Vec::new()),
+        outcome: Mutex::new(Ok("qwen3:8b-helm-64k".into())),
+        gate: Mutex::new(None),
+        finished: Mutex::new(Vec::new()),
+        refreshed: Mutex::new(Vec::new()),
+        held_outcome: Mutex::new(None),
+        queue: Mutex::new(None),
+    });
+    h.rt.set_local_models(local.clone());
+
+    // Local chat to Claude: the turn is open, no tool and no output — a queue wait.
+    let lc = h.create().await;
+    h.call(
+        "chat_set_model",
+        json!({"chatId": &lc, "model": "local/ollama/qwen3:8b"}),
+    )
+    .await
+    .unwrap();
+    let (sid, _) = h.send(&lc, "carry the plan", "default").await;
+    let mut lw = h.worker().await;
+    assert!(
+        lw.req.local.is_some(),
+        "the first worker is on the local server"
+    );
+    lw.ready().await;
+    let p = lw.expect("prompt").await;
+    ack(&lw, &p).await;
+    lw.emit(json!({"type": "agent_start"})).await;
+    h.until("running", |h| h.status(&lc) == "running").await;
+    h.call("chat_set_model", json!({"chatId": &lc, "model": "opus"}))
+        .await
+        .unwrap();
+    let abort = lw.expect("abort").await;
+    lw.respond(
+        &abort,
+        json!({"state": "stopping", "cancelledSubmissionIds": []}),
+    )
+    .await;
+    lw.emit(json!({"type": "agent_settled", "outcome": "stopped"}))
+        .await;
+    lw.expect("shutdown").await;
+    let mut cw2 = h.worker().await;
+    assert!(
+        cw2.req.local.is_none(),
+        "the restarted turn's worker runs the chat's new model"
+    );
+    cw2.ready().await;
+    let p = cw2.expect("prompt").await;
+    assert_eq!(
+        p["submissionId"],
+        sid.as_str(),
+        "the turn's opening message is sent again, not a fresh one"
+    );
+    assert!(
+        p.get("streamingBehavior").is_none(),
+        "it opens the restarted turn"
+    );
+    assert!(
+        texts(&h, &lc)
+            .iter()
+            .any(|t| t.contains("The model was changed")),
+        "the transcript says the turn restarts on the new model"
+    );
+    // Claude chat to local, same shape: the open turn stops and reopens on the local server.
+    let cc = h.create().await;
+    let (sid2, _) = h.send(&cc, "run it", "default").await;
+    let mut cw = h.worker().await;
+    cw.ready().await;
+    let p = cw.expect("prompt").await;
+    ack(&cw, &p).await;
+    cw.emit(json!({"type": "agent_start"})).await;
+    h.until("running", |h| h.status(&cc) == "running").await;
+    h.call(
+        "chat_set_model",
+        json!({"chatId": &cc, "model": "local/ollama/qwen3:8b"}),
+    )
+    .await
+    .unwrap();
+    let abort = cw.expect("abort").await;
+    cw.respond(
+        &abort,
+        json!({"state": "stopping", "cancelledSubmissionIds": []}),
+    )
+    .await;
+    cw.emit(json!({"type": "agent_settled", "outcome": "stopped"}))
+        .await;
+    cw.expect("shutdown").await;
+    let mut lw2 = h.worker().await;
+    assert_eq!(
+        lw2.req.local.as_ref().map(|l| l.model.as_str()),
+        Some("qwen3:8b-helm-64k"),
+        "the reopened turn's worker is launched for the local model it was made ready for"
+    );
+    lw2.ready().await;
+    let p = lw2.expect("prompt").await;
+    assert_eq!(
+        p["submissionId"],
+        sid2.as_str(),
+        "and its message goes out again"
+    );
+
+    // A tool call genuinely running: nothing is stopped now; the change lands at the idle
+    // point after the turn, as it always did.
+    let hc = h.create().await;
+    h.send(&hc, "work", "default").await;
+    let mut hw = h.worker().await;
+    hw.ready().await;
+    let p = hw.expect("prompt").await;
+    ack(&hw, &p).await;
+    hw.emit(json!({"type": "agent_start"})).await;
+    hw.emit(json!({"type": "tool_execution_start", "toolCallId": "tc1", "toolName": "Bash", "args": {"command": "cargo build"}, "stoppable": true}))
+        .await;
+    h.until("the actor has the tool in hand", |h| {
+        !h.col(&format!(
+            "SELECT id FROM messages WHERE chat_id = '{hc}' AND tool_call_id = 'tc1'"
+        ))
+        .is_empty()
+    })
+    .await;
+    h.call(
+        "chat_set_model",
+        json!({"chatId": &hc, "model": "local/ollama/qwen3:8b"}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        hw.no_command_for(Duration::from_millis(200))
+            .await
+            .is_none(),
+        "a running tool call is left alone"
+    );
+    hw.emit(json!({"type": "tool_execution_end", "toolCallId": "tc1", "toolName": "Bash", "result": {"text": "done"}, "isError": false}))
+        .await;
+    hw.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-held"}))
+        .await;
+    hw.expect("shutdown").await;
+
+    // Between steps of a turn that has already replied and run a tool: nothing is in flight,
+    // but starting the turn again would repeat what it did. The change waits for the idle point
+    // and the opening message is not sent a second time.
+    let bc = h.create().await;
+    h.send(&bc, "ship it", "default").await;
+    let mut bw = h.worker().await;
+    bw.ready().await;
+    let p = bw.expect("prompt").await;
+    ack(&bw, &p).await;
+    bw.emit(json!({"type": "agent_start"})).await;
+    reply(&h, &bw, "mb1", "Pushing now.").await;
+    bw.emit(json!({"type": "tool_execution_start", "toolCallId": "tb1", "toolName": "Bash", "args": {"command": "git push"}, "stoppable": true}))
+        .await;
+    bw.emit(json!({"type": "tool_execution_end", "toolCallId": "tb1", "toolName": "Bash", "result": {"text": "pushed"}, "isError": false}))
+        .await;
+    h.until("the tool call finished", |h| {
+        h.col(&format!(
+            "SELECT status FROM messages WHERE chat_id = '{bc}' AND tool_call_id = 'tb1'"
+        )) == ["complete"]
+    })
+    .await;
+    h.call(
+        "chat_set_model",
+        json!({"chatId": &bc, "model": "local/ollama/qwen3:8b"}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        bw.no_command_for(Duration::from_millis(200))
+            .await
+            .is_none(),
+        "a turn that has acted is not stopped and opened again"
+    );
+    bw.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-b"}))
+        .await;
+    bw.expect("shutdown").await;
 }
 
 /// A send that lands while the previous worker is still winding down (a relaunch from any
@@ -6869,6 +8152,30 @@ async fn local_chats_say_who_the_model_server_is_busy_with() {
         );
     }
 
+    // The state both chats show is `queued`, with the queue position, and the server summary
+    // counts them as waiting rather than working — what an orchestrator reads before starting
+    // yet another local chat.
+    let state_json = |h: &H, id: &str| -> Value {
+        serde_json::from_str(
+            &h.col(&format!(
+                "SELECT COALESCE(state, 'null') FROM chat_activity WHERE chat_id = '{id}'"
+            ))[0],
+        )
+        .unwrap()
+    };
+    assert_eq!(state_json(&h, &second)["kind"], "queued");
+    assert_eq!(
+        state_json(&h, &second)["ahead"],
+        1,
+        "the later chat's queued state names its place in the queue"
+    );
+    assert_eq!(state_json(&h, &first)["kind"], "queued");
+    let loads = h.rt.local_load();
+    assert_eq!(loads.len(), 1, "one server carries both");
+    assert_eq!(loads[0].server_id, "strata");
+    assert_eq!(loads[0].queued, 2, "both turns are waiting, not working");
+    assert_eq!(loads[0].working, 0);
+
     // The model's first words end the wait for that chat…
     w2.emit(json!({"type": "message_start", "message": {"id": "m1", "role": "assistant", "content": []}}))
         .await;
@@ -6907,4 +8214,203 @@ async fn local_chats_say_who_the_model_server_is_busy_with() {
     assert_eq!(record(&h, &second), None, "an idle chat carries no flag");
     w1.exit().await;
     w2.exit().await;
+}
+
+/// A local model server carries a soft cap of our chats. A new local turn whose server already
+/// carries the cap waits at its start — visibly queued, with its place in line, and nothing
+/// asked of the server — and opens by itself when a place frees.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn new_local_turns_wait_when_the_server_carries_its_cap() {
+    let mut h = harness_with(Limits {
+        tick: Duration::from_millis(50),
+        ..limits()
+    });
+    h.db.write(|tx| helm_core::prefs::set_generic(tx, "localChatCap", &json!(2)))
+        .unwrap();
+    let local = Arc::new(FakeLocal {
+        turns: Mutex::new(Vec::new()),
+        outcome: Mutex::new(Ok("m-one".into())),
+        gate: Mutex::new(None),
+        finished: Mutex::new(Vec::new()),
+        refreshed: Mutex::new(Vec::new()),
+        held_outcome: Mutex::new(None),
+        queue: Mutex::new(None),
+    });
+    h.rt.set_local_models(local.clone());
+    let cwd = h.work.to_string_lossy().into_owned();
+    let asked =
+        |_: &H, id: &str| -> bool { local.turns.lock().unwrap().iter().any(|t| t.chat_id == id) };
+
+    let new_id = |r: Value| r["id"].as_str().unwrap().to_owned();
+    let first = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
+        )
+        .await
+        .unwrap(),
+    );
+    h.send(&first, "job one", "default").await;
+    let mut w1 = h.worker().await;
+    w1.ready().await;
+    let p1 = w1.expect("prompt").await;
+    ack(&w1, &p1).await;
+    w1.emit(json!({"type": "agent_start"})).await;
+    let second = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
+        )
+        .await
+        .unwrap(),
+    );
+    h.send(&second, "job two", "default").await;
+    let mut w2 = h.worker().await;
+    w2.ready().await;
+    let p2 = w2.expect("prompt").await;
+    ack(&w2, &p2).await;
+    w2.emit(json!({"type": "agent_start"})).await;
+
+    // The cap (two) stands: the third chat's turn waits at its start.
+    let third = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
+        )
+        .await
+        .unwrap(),
+    );
+    let (sid3, _) = h.send(&third, "job three", "default").await;
+    h.until("the third waits at its start", |h| {
+        h.status(&third) == "starting" && h.state(&sid3) == "saved" && !asked(h, &third)
+    })
+    .await;
+    h.until("and shows its place in line", |h| {
+        h.col(&format!(
+            "SELECT local_ahead FROM chat_activity WHERE chat_id = '{third}'"
+        )) == ["1"]
+            && serde_json::from_str::<Value>(
+                &h.col(&format!(
+                    "SELECT COALESCE(state, 'null') FROM chat_activity WHERE chat_id = '{third}'"
+                ))[0],
+            )
+            .unwrap()["kind"]
+                == "queued"
+    })
+    .await;
+    assert_eq!(h.state(&sid3), "saved", "nothing was sent to the server");
+    assert!(!asked(&h, &third), "and its model was never asked to load");
+    let loads = h.rt.local_load();
+    assert_eq!(
+        loads[0].working + loads[0].queued,
+        3,
+        "the summary counts the wait with the work"
+    );
+    assert!(
+        loads[0].queued >= 1,
+        "the waiting chat shows as queued, not working"
+    );
+
+    // A place frees when the first turn ends: the waiting one goes out on its own, no new send.
+    w1.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-c1"}))
+        .await;
+    h.until("the freed place takes the third turn", |h| asked(h, &third))
+        .await;
+    let mut w3 = h.worker().await;
+    assert_eq!(
+        w3.req.local.as_ref().map(|l| l.model.as_str()),
+        Some("m-one"),
+        "launched on the server, not piled onto it"
+    );
+    w3.ready().await;
+    let p3 = w3.expect("prompt").await;
+    assert_eq!(
+        p3["submissionId"],
+        sid3.as_str(),
+        "the same message opens the turn"
+    );
+
+    // Cap one, one chat working and two waiting: the waiters do not count each other as busy,
+    // so the oldest starts the moment the place frees, and the next only after it.
+    ack(&w3, &p3).await;
+    w3.emit(json!({"type": "agent_start"})).await;
+    w2.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-c2"}))
+        .await;
+    w3.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-c3"}))
+        .await;
+    h.until("the first three chats are idle", |h| {
+        [&first, &second, &third]
+            .iter()
+            .all(|c| h.status(c) == "idle")
+    })
+    .await;
+    h.db.write(|tx| helm_core::prefs::set_generic(tx, "localChatCap", &json!(1)))
+        .unwrap();
+    let c4 = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
+        )
+        .await
+        .unwrap(),
+    );
+    h.send(&c4, "job four", "default").await;
+    let mut w4 = h.worker().await;
+    w4.ready().await;
+    let p4 = w4.expect("prompt").await;
+    ack(&w4, &p4).await;
+    w4.emit(json!({"type": "agent_start"})).await;
+    let c5 = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
+        )
+        .await
+        .unwrap(),
+    );
+    let (sid5, _) = h.send(&c5, "job five", "default").await;
+    h.until("the fifth waits for the place", |h| {
+        h.status(&c5) == "starting" && !asked(h, &c5)
+    })
+    .await;
+    let c6 = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
+        )
+        .await
+        .unwrap(),
+    );
+    let (sid6, _) = h.send(&c6, "job six", "default").await;
+    let ahead_of = |h: &H, id: &str| {
+        h.col(&format!(
+            "SELECT COALESCE(local_ahead, 'NULL') FROM chat_activity WHERE chat_id = '{id}'"
+        ))
+    };
+    h.until("the sixth waits behind the fifth", |h| {
+        ahead_of(h, &c5) == ["1"] && ahead_of(h, &c6) == ["2"] && !asked(h, &c6)
+    })
+    .await;
+    w4.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-c4"}))
+        .await;
+    h.until("the oldest waiter takes the place", |h| asked(h, &c5))
+        .await;
+    let mut w5 = h.worker().await;
+    w5.ready().await;
+    let p5 = w5.expect("prompt").await;
+    assert_eq!(p5["submissionId"], sid5.as_str(), "in the order they sent");
+    ack(&w5, &p5).await;
+    w5.emit(json!({"type": "agent_start"})).await;
+    h.until("the sixth keeps waiting while the fifth works", |h| {
+        ahead_of(h, &c6) == ["1"] && !asked(h, &c6)
+    })
+    .await;
+    w5.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-c5"}))
+        .await;
+    h.until("and the sixth goes when it ends", |h| asked(h, &c6))
+        .await;
+    let mut w6 = h.worker().await;
+    w6.ready().await;
+    let p6 = w6.expect("prompt").await;
+    assert_eq!(p6["submissionId"], sid6.as_str());
 }

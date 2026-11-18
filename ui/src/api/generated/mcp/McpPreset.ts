@@ -30,4 +30,9 @@ expectTools: Array<string>,
 /**
  * Given to the agent with this server's discovered tools.
  */
-guidance: string, command?: string, args?: Array<string>, secretEnv?: Array<string>, };
+guidance: string, command?: string, args?: Array<string>, secretEnv?: Array<string>, 
+/**
+ * Environment names the form starts with an empty row for, so the user sees what the
+ * program needs without looking it up. Values stay empty until the user types them.
+ */
+draftEnv?: Array<string>, };

@@ -237,6 +237,10 @@ pub struct McpServerEnableArgs {
 pub struct ResolvedServer {
     pub id: String,
     pub name: String,
+    /// The preset the server was created from, if any. The worker uses it to recognise Helm's
+    /// built-in browser server; no value here is ever a secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
     pub transport: TransportKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,

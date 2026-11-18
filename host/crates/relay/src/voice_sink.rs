@@ -878,7 +878,7 @@ pub fn place(c: &Ctx, turn: &VoiceTurn, notes: &[String], now: i64) -> Result<Pl
         ignored: std::sync::Mutex::new(None),
         profile_id: Some(c.profile_id.clone()),
     };
-    let (mut tag, _created) = voice::active_chat(&c.tag_path, &port, &c.policy, now)?;
+    let (tag, _created) = voice::active_chat(&c.tag_path, &port, &c.policy, now)?;
     let ignored = port
         .ignored
         .lock()
@@ -887,7 +887,6 @@ pub fn place(c: &Ctx, turn: &VoiceTurn, notes: &[String], now: i64) -> Result<Pl
     let baseline = max_row(&c.db, &tag.chat_id);
     let (said, _) = cut_chars(&turn.text, voice::MAX_TEXT_CHARS);
     let mut text = voice::delivered_text(
-        !tag.primed,
         Mode::parse(&turn.mode),
         turn.continues.is_some(),
         turn.age_minutes,
@@ -919,13 +918,6 @@ pub fn place(c: &Ctx, turn: &VoiceTurn, notes: &[String], now: i64) -> Result<Pl
                 std::thread::sleep(Duration::from_secs(1));
             }
             Err(e) => return Err(e.message),
-        }
-    }
-    if !tag.primed {
-        tag.primed = true;
-        if voice::save_tag(&c.tag_path, Some(&tag)).is_err() {
-            // The next message repeats the primer, which does no harm.
-            log::warn!("relay: the voice chat tag could not be updated");
         }
     }
     Ok(Placed::Sent {

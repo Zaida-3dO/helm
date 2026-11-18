@@ -23,6 +23,9 @@ pub struct ChatPerson {
     /// The chat's own profile is not the home one and is linked to no one on the hub: a server
     /// that sends the chat's person would answer as this PC's owner, so it is left out.
     pub unlinked: bool,
+    /// The chat belongs to a profile other than the home one. The servers that reach the home
+    /// person's own browser are left out of its config.
+    pub not_home: bool,
 }
 
 /// The `mcp_config` line for one chat. With the MCP master switch off it lists no servers.
@@ -35,13 +38,41 @@ pub fn config_line_for(services: &Services, store: &McpStore, who: &ChatPerson) 
         return Some(json!({ "type": "mcp_config", "revision": revision, "servers": [] }));
     }
     let (revision, servers) = store
-        .resolve_enabled_where(
+        .resolve_enabled_scoped(
             &|k| std::env::var(k).ok(),
             who.person.as_deref(),
             who.unlinked,
+            who.not_home,
         )
         .ok()?;
     Some(json!({ "type": "mcp_config", "revision": revision, "servers": servers }))
+}
+
+/// [`config_line_for`] for one chat: its project may name the servers it gets, and the line then
+/// lists only those (by id or name). A project that names none leaves the line whole.
+pub fn config_line_for_chat(
+    services: &Services,
+    store: &McpStore,
+    who: &ChatPerson,
+    chat_id: &str,
+) -> Option<Value> {
+    let mut line = config_line_for(services, store, who)?;
+    let allowed = services
+        .get::<helm_hosttools::McpServerFilterGate>()
+        .and_then(|g| g.0.allowed(chat_id));
+    if let (Some(allowed), Some(list)) = (
+        allowed,
+        line.get_mut("servers").and_then(Value::as_array_mut),
+    ) {
+        list.retain(|s| {
+            ["id", "name"].iter().any(|k| {
+                s.get(k)
+                    .and_then(Value::as_str)
+                    .is_some_and(|v| allowed.iter().any(|a| a.eq_ignore_ascii_case(v)))
+            })
+        });
+    }
+    Some(line)
 }
 
 /// Who a chat is on the hub (see [`ChatPerson`]).
@@ -58,11 +89,11 @@ pub fn chat_person(services: &Services, chat_id: &str) -> ChatPerson {
                 |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)? != 0)),
             )
             .optional()?;
-        let (person, unlinked) = match own {
+        let (person, unlinked, not_home) = match own {
             Some((person, home)) => {
                 let person = person.filter(|p| !p.is_empty());
                 let unlinked = person.is_none() && !home;
-                (person, unlinked)
+                (person, unlinked, !home)
             }
             None => (
                 tx.query_row(
@@ -74,9 +105,14 @@ pub fn chat_person(services: &Services, chat_id: &str) -> ChatPerson {
                 .map(Option::flatten)?
                 .filter(|p| !p.is_empty()),
                 false,
+                false,
             ),
         };
-        Ok::<_, rusqlite::Error>(ChatPerson { person, unlinked })
+        Ok::<_, rusqlite::Error>(ChatPerson {
+            person,
+            unlinked,
+            not_home,
+        })
     })
     .unwrap_or_default()
 }
@@ -105,13 +141,16 @@ impl ServicesCell {
         let (Some(store), Some(b)) = (s.get::<McpStore>(), s.get::<Broadcaster>()) else {
             return;
         };
-        // A config that sends the chat's person differs from chat to chat.
-        if store.uses_chat_person() {
+        // A config that sends the chat's person, or that a project narrows, differs from chat to chat.
+        let narrowed = s
+            .get::<helm_hosttools::McpServerFilterGate>()
+            .is_some_and(|g| g.0.any());
+        if store.uses_chat_person() || narrowed {
             let running = b.0.running_chats();
             if !running.is_empty() {
                 for chat in running {
                     let who = chat_person(&s, &chat);
-                    if let Some(line) = config_line_for(&s, &store, &who) {
+                    if let Some(line) = config_line_for_chat(&s, &store, &who, &chat) {
                         b.0.send_to_worker(&chat, &line);
                     }
                 }
@@ -144,7 +183,7 @@ pub fn register_worker_lines(l: &mut WorkerLines) {
             cell.set(services);
         }
         let who = chat_person(services, chat);
-        config_line_for(services, &*services.get::<McpStore>()?, &who)
+        config_line_for_chat(services, &*services.get::<McpStore>()?, &who, chat)
     });
 }
 
@@ -164,6 +203,52 @@ mod tests {
         fn send_to_worker(&self, _: &str, _: &Value) -> bool {
             false
         }
+    }
+
+    /// A project that names servers gives its chats those and no others; one that names none, and a
+    /// chat of no project, get every server.
+    #[test]
+    fn a_projects_server_list_narrows_what_its_chats_get() {
+        struct Only;
+        impl helm_hosttools::McpServerFilter for Only {
+            fn allowed(&self, chat: &str) -> Option<Vec<String>> {
+                (chat == "narrow").then(|| vec!["OTHER".to_owned()])
+            }
+            fn any(&self) -> bool {
+                true
+            }
+        }
+        let d = tempfile::tempdir().unwrap();
+        let st = Arc::new(store(d.path()));
+        st.mutate(None, |l| {
+            let mut a = hub("tok-123456");
+            a.id = "helm_hub".into();
+            let mut b = hub("tok-654321");
+            b.id = "other".into();
+            b.name = "Other".into();
+            l.push(a);
+            l.push(b);
+            Ok(())
+        })
+        .unwrap();
+        let mut services = Services::new();
+        services.insert(st);
+        services.insert(Arc::new(helm_hosttools::McpServerFilterGate(Arc::new(
+            Only,
+        ))));
+        let services = Arc::new(services);
+        let mut l = WorkerLines::new();
+        register_worker_lines(&mut l);
+        let ids = |chat: &str| -> Vec<String> {
+            l.start_lines(chat, &services)[0]["servers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s["id"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(ids("narrow"), ["other"], "ids match without regard to case");
+        assert_eq!(ids("free"), ["helm_hub", "other"]);
     }
 
     #[test]
@@ -190,6 +275,12 @@ mod tests {
             s.preset = Some("helm_hub".into());
             s.id = "helm_hub".into();
             l.push(s);
+            // The signed-in browser belongs to the home person: no other profile's chat gets it.
+            let mut b = hub("tok-123456");
+            b.id = "browser".into();
+            b.transport.headers.clear();
+            b.preset = Some(crate::presets::BROKER_PRESET_ID.into());
+            l.push(b);
             Ok(())
         })
         .unwrap();
@@ -212,6 +303,17 @@ mod tests {
             let headers = &start[0]["servers"][0]["headers"];
             assert_eq!(headers["X-Helm-Person"].as_str(), want, "{chat}");
             assert_eq!(headers["Authorization"], "Bearer tok-123456");
+            let ids: Vec<&str> = start[0]["servers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|s| s["id"].as_str())
+                .collect();
+            assert_eq!(
+                ids.contains(&"browser"),
+                chat != "c-sam",
+                "{chat}: the browser goes to the home person's chats only"
+            );
         }
         let guest = l.start_lines("c-guest", &services);
         assert_eq!(guest[0]["servers"], json!([]), "c-guest");

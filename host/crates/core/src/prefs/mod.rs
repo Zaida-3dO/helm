@@ -46,11 +46,9 @@ pub const SEND_SHORTCUT: PrefKey = PrefKey::classified("sendShortcut");
 pub const NATIVE_MCP: PrefKey = PrefKey::classified("nativeMcp");
 /// Settings > MCP: the master switch. Off, no chat loads any MCP server (default on).
 pub const MCP_ENABLED: PrefKey = PrefKey::classified("mcpEnabled");
-/// Settings > Devices: whether the user's other devices may run chats on this PC (on when unset).
+/// Settings > Devices: whether other devices, the user's own and the household's, may run chats
+/// on this PC (on when unset).
 pub const DEVICE_RUN_FROM_OTHERS: PrefKey = PrefKey::classified("deviceRunFromOthers");
-/// Settings > Devices: whether people in the household may run their own chats on this PC (on
-/// when unset).
-pub const DEVICE_HOUSEHOLD_RUN: PrefKey = PrefKey::classified("deviceHouseholdRun");
 /// The device whose chats New creates and the sidebar toggle shows (a device uid);
 /// unset or null is this device.
 pub const SELECTED_DEVICE: PrefKey = PrefKey::classified("selectedDevice");
@@ -89,6 +87,15 @@ pub const DESKTOP_PET: PrefKey = PrefKey::classified("desktopPet");
 pub const KEYBINDINGS: PrefKey = PrefKey::classified("keybindings");
 /// Minutes without worker output before a running chat shows as stalled (1 to 1440, default 5).
 pub const STALL_MINUTES: PrefKey = PrefKey::classified("stallMinutes");
+/// Context size at which an idle chat is asked to roll over into a fresh one (0 to 2 000 000;
+/// 0 switches it off). The default lives in `helm-chats` with the roll-over flow.
+pub const ROLLOVER_TOKENS: PrefKey = PrefKey::classified("rolloverTokens");
+/// How many of our chats one local model server may carry at once (0 to 12, default 3;
+/// 0 switches the cap off). A new local chat waits at its start while the cap is carried.
+pub const LOCAL_CHAT_CAP: PrefKey = PrefKey::classified("localChatCap");
+/// The percent of the Claude plan windows at which a new Claude chat waits for the window to
+/// reset (0 to 100, default 95; 0 switches it off). The default lives in `helm-chats`.
+pub const CLAUDE_HOLD_PCT: PrefKey = PrefKey::classified("claudeHoldPct");
 /// Transcript element toggles: `{tokens, turnTime, fileChanges, timeline}` each
 /// `shown` or `hidden`; strict on write, a missing key reads as shown.
 pub const CHAT_ELEMENTS: PrefKey = PrefKey::classified("chatElements");
@@ -121,7 +128,6 @@ pub const GENERIC_ALLOWLIST: &[PrefKey] = &[
     NATIVE_MCP,
     MCP_ENABLED,
     DEVICE_RUN_FROM_OTHERS,
-    DEVICE_HOUSEHOLD_RUN,
     SELECTED_DEVICE,
     IDE_CONTEXT,
     SCROLL_ON_SEND,
@@ -133,6 +139,8 @@ pub const GENERIC_ALLOWLIST: &[PrefKey] = &[
     SOUNDS,
     KEYBINDINGS,
     STALL_MINUTES,
+    ROLLOVER_TOKENS,
+    LOCAL_CHAT_CAP,
     CHAT_ELEMENTS,
     AUTOCOMPLETE,
     TASK_TRIAGE,
@@ -231,7 +239,7 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
             }
         }
         "nativeMcp" | "mcpEnabled" | "ideContext" | "scrollOnSend" | "doubleShift"
-        | "pauseAnimationsOnScroll" | "deviceRunFromOthers" | "deviceHouseholdRun" => {
+        | "pauseAnimationsOnScroll" | "deviceRunFromOthers" => {
             if value.is_boolean() {
                 Ok(())
             } else {
@@ -289,6 +297,9 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
         "inspectorWidth" => int_in(280, 4096, "must be 280 to 4096"),
         "terminalHeight" => int_in(80, 4096, "must be 80 to 4096"),
         "stallMinutes" => int_in(1, 1440, "must be 1 to 1440"),
+        "rolloverTokens" => int_in(0, 2_000_000, "must be 0 to 2000000 (0 switches it off)"),
+        "localChatCap" => int_in(0, 12, "must be 0 to 12"),
+        "claudeHoldPct" => int_in(0, 100, "must be 0 to 100 (0 switches it off)"),
         "autocomplete" => match value.as_object() {
             Some(m) if m.len() == 1 && m.get("enabled").is_some_and(Value::is_boolean) => Ok(()),
             _ => Err(PrefError::Invalid {
@@ -361,6 +372,30 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
             |n| !n.is_empty() && n.len() <= 128 && !n.starts_with('$'),
             "lists skill names without a leading $, each once",
         ),
+        "dictationMic" => match value.as_object() {
+            Some(m)
+                if m.len() == 2
+                    && m.get("uid")
+                        .and_then(Value::as_str)
+                        .is_some_and(|u| !u.is_empty() && u.len() <= 512)
+                    && m.get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|n| n.len() <= 256) =>
+            {
+                Ok(())
+            }
+            _ => Err(PrefError::Invalid {
+                key: k,
+                why: "is {uid (1 to 512 bytes), name (at most 256 bytes)}",
+            }),
+        },
+        "globalHotkey" => match value.as_str() {
+            Some(s) if s.len() <= 64 => Ok(()),
+            _ => Err(PrefError::Invalid {
+                key: k,
+                why: "must be a shortcut of at most 64 bytes, or empty",
+            }),
+        },
         "selection" => validate_selection(value),
         "appearance" => match value.as_str() {
             Some("system" | "light" | "dark") => Ok(()),
@@ -748,6 +783,8 @@ mod tests {
             ("ideContext", json!(true), json!(1)),
             ("scrollOnSend", json!(false), json!("no")),
             ("doubleShift", json!(false), json!("no")),
+            ("rolloverTokens", json!(180_000), json!("soon")),
+            ("rolloverTokens", json!(0), json!(2_000_001)),
             (
                 "fontSizes",
                 json!({"interface": 14, "response": 16}),

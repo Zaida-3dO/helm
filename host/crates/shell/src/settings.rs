@@ -1,5 +1,6 @@
-//! Reading and writing the shell's preferences. Every key but `keepAwake` is user-only (only the
-//! user, in Settings → Shell); the classes are in `helm_core::prefs::classes`.
+//! Reading and writing the shell's preferences. A chat changes `keepAwake`, `notifications` and
+//! `dictationMic` itself; it only stages `globalHotkey` and `terminalShell` for the user to
+//! approve. The classes are in `helm_core::prefs::classes`.
 
 use crate::types::{
     KeepAwake, MicChoice, NotificationMode, ShellSettings, TerminalShell, DEFAULT_HOTKEY,

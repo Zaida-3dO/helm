@@ -108,6 +108,23 @@ export interface VoiceSettings {
   takeVoice: boolean;
 }
 
+/** One channel's prompt for one profile, as the host holds it. */
+export interface ChannelPrompt {
+  channel: 'speaker' | 'household' | 'voice' | 'telegram';
+  label: string;
+  /** What applies when nothing is saved. */
+  default: string;
+  /** What a new conversation is told now: the saved text, else the default. */
+  text: string;
+  /** Whether a saved replacement is in force. */
+  custom: boolean;
+}
+
+export interface ChannelPrompts {
+  channels: ChannelPrompt[];
+  maxChars: number;
+}
+
 /** The profile a channel op acts on; absent: the home profile (the host's own default). */
 export interface ChannelScope {
   profileId?: string | null;
@@ -152,6 +169,10 @@ export function hubOps(api: Api) {
         ...scope(s),
       }),
     resetVoice: (s: ChannelScope = {}) => api<VoiceSettings>('relay_voice_reset', scope(s)),
+    prompts: (s: ChannelScope = {}) => api<ChannelPrompts>('relay_prompts_get', scope(s)),
+    /** Replace one channel's prompt; blank puts the default back. Applies to new conversations. */
+    savePrompt: (s: ChannelScope & { channel: ChannelPrompt['channel']; text: string }) =>
+      api<ChannelPrompts>('relay_prompts_save', { ...scope(s), channel: s.channel, text: s.text }),
     /** Ask the hub for a one-tap address that links this profile's person's Telegram account. */
     tgLink: (s: ChannelScope = {}) => api<TelegramLinkOffer>('relay_tg_link', scope(s)),
     /** Whether the profile's person already has a linked Telegram account, and the bot's handle. */

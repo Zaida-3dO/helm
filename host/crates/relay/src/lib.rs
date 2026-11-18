@@ -21,9 +21,11 @@
 //! | [`voice_watch`] | the voice chat watching the other chats: attention notes, coalesced and rate-limited, and telling the sink when the chat wakes |
 //! | [`voice_show`] | the `app_voice_show` tool: pictures, tables, lists, links, text and files queued for the phone's screen |
 //! | [`pair`] | pairing with the hub by a one-time code: token, names, the shared-memory server and the home profile in one step |
-//! | [`setup`] | `app_stage_settings`: a chat stages pairing, the update folder and the Devices switches; Helm applies them when the user clicks Approve |
+//! | [`setup`] | `app_stage_settings`: a chat stages pairing and any setting that needs approval; Helm applies them when the user clicks Approve |
+//! | [`pref_rules`] | the update folder's and the household switches' own rules, used by the settings tools and by approved changes |
 //! | [`household`] | other people's Helms through the hub: the three sharing switches, serving their calls, and asking theirs |
 //! | [`knowledge_line`] | the household's knowledge files over the line: pull and push, the hub's people as profiles, and the sync loop |
+//! | [`index_line`] | the hub's search index over the line: requests and their answers, and the hub's questions to this PC |
 //! | [`devlink`] | the household's devices over the line: the device crate's frames up and down, and the service that answers other devices |
 //!
 //! Wiring: [`register_services`] adds the line (its [`client::LineHandle`] and
@@ -53,6 +55,9 @@
 //! new chat). Chats see the same policy through the `voice` key of `app_get_settings` and
 //! `app_update_settings`, and may change only the model and effort.
 //!
+//! `relay_prompts_get` and `relay_prompts_save` ([`channel`]): each channel's prompt for a
+//! profile and its default; blank puts the default back.
+//!
 //! Identity and the household (Settings → Hub, the sidebar's profile popover). All of these are
 //! the user's own; no agent tool reaches them, except that a chat may stage a pairing with
 //! `app_stage_settings` ([`setup`]) for the user to approve.
@@ -73,6 +78,7 @@
 
 pub mod agent_settings;
 pub mod approve;
+pub mod channel;
 pub mod client;
 pub mod config;
 pub mod devlink;
@@ -80,10 +86,12 @@ pub mod exec;
 pub mod gate;
 pub mod household;
 pub mod hub_view;
+pub mod index_line;
 pub mod knowledge_line;
 pub mod notify;
 pub mod pair;
 pub mod people;
+pub mod pref_rules;
 pub mod remote;
 pub mod setup;
 pub mod sink;
@@ -171,6 +179,10 @@ pub fn register_services(services: &mut Services, events: &Arc<dyn EventSink>) {
             }
         }));
     }
+    // The hub's search index: the memory indexer drives it, and answers what the hub asks.
+    let index = index_line::IndexLine::new(client.handle());
+    client.attach_index(Arc::new(index_line::IndexSinkHandle(index.clone())));
+    services.insert(index);
     services.insert(sink);
     services.insert(voice.shown());
     services.insert(voice);
@@ -211,6 +223,7 @@ pub fn start(handle: &tokio::runtime::Handle, ctx: &OpCtx, tools: Arc<helm_hostt
             afk,
             line,
             sink,
+            ctx.services.clone(),
             profile.dir.clone(),
         );
     }
@@ -261,6 +274,8 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("relay_voice_get", OpClass::Blocking, voice_get)
         .blocking("relay_voice_save", OpClass::Blocking, voice_save)
         .blocking("relay_voice_reset", OpClass::Blocking, voice_reset)
+        .blocking("relay_prompts_get", OpClass::Blocking, prompts_get)
+        .blocking("relay_prompts_save", OpClass::Blocking, prompts_save)
         .async_op("relay_tg_link", tg_link)
         .async_op("relay_tg_status", tg_status)
         .async_op("relay_tg_unlink", tg_unlink)
@@ -302,7 +317,7 @@ fn connection_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
 /// The profile a channel op acts on: `{profileId}` when it names one that exists here, else
 /// the home profile. Each linked profile keeps its own Telegram and voice files and switches;
 /// the settings window says which profile it is showing.
-fn channel_profile(ctx: &OpCtx, args: &Value) -> Result<String, ApiError> {
+pub(crate) fn channel_profile(ctx: &OpCtx, args: &Value) -> Result<String, ApiError> {
     let db = ctx.services.need::<helm_core::db::Database>()?;
     // A Settings op may be the first thing to read the channel files after a start.
     if let Some(profile) = ctx.services.get::<Profile>() {
@@ -472,6 +487,46 @@ fn voice_view(ctx: &OpCtx, args: &Value) -> Result<Value, ApiError> {
         &pid,
         helm_core::now_ms(),
     ))
+}
+
+/// `relay_prompts_get {profileId?}`: each channel's prompt for that profile, with its default.
+fn prompts_get(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let profile = ctx.services.need::<Profile>()?;
+    let pid = channel_profile(ctx, &args)?;
+    let channels: Vec<Value> = channel::CHANNELS
+        .iter()
+        .map(|c| {
+            let saved = channel::load_override(&profile.dir, &pid, *c);
+            json!({
+                "channel": c.id(),
+                "label": c.label(),
+                "default": c.default_text(),
+                "text": saved.clone().unwrap_or_else(|| c.default_text().to_owned()),
+                "custom": saved.is_some(),
+            })
+        })
+        .collect();
+    Ok(json!({ "channels": channels, "maxChars": channel::MAX_PROMPT_CHARS }))
+}
+
+/// `relay_prompts_save {profileId?, channel, text}`: replace one channel's prompt; blank (or the
+/// default's own text) puts the default back. Applies to new conversations.
+fn prompts_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let profile = ctx.services.need::<Profile>()?;
+    let pid = channel_profile(ctx, &args)?;
+    let which = args
+        .get("channel")
+        .and_then(Value::as_str)
+        .and_then(channel::Channel::parse)
+        .ok_or_else(|| {
+            ApiError::bad_args("Expected channel to be speaker, household, voice or telegram.")
+        })?;
+    let text = args
+        .get("text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_args("Expected text."))?;
+    channel::save_override(&profile.dir, &pid, which, text).map_err(ApiError::bad_args)?;
+    prompts_get(ctx, args)
 }
 
 fn voice_get(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {

@@ -6,6 +6,7 @@
 //! ```
 
 use crate::store::GateAsk;
+use crate::workmode::{BoardMode, Mode, ModeCounts, ModeSource, WorkModeView};
 use std::path::{Path, PathBuf};
 use ts_rs::TS;
 
@@ -17,6 +18,7 @@ pub fn committed_dir() -> PathBuf {
 pub fn export(dir: &Path) -> Result<Vec<String>, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     GateAsk::export_all_to(dir).map_err(|e| e.to_string())?;
+    WorkModeView::export_all_to(dir).map_err(|e| e.to_string())?;
     // The write-up types come from the chats crate and are already generated one folder up,
     // with the card's own shapes: point at that copy rather than keep a second one here.
     let ask = dir.join(format!("{}.ts", GateAsk::ident()));
@@ -26,7 +28,16 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         return Err("GateAsk.ts does not import GateBrief as expected".into());
     }
     std::fs::write(&ask, fixed).map_err(|e| e.to_string())?;
-    let mut names = vec![GateAsk::ident()];
+    // The shapes that live in this folder (the working mode's), then the two re-exported ones.
+    let own = [
+        GateAsk::ident(),
+        BoardMode::ident(),
+        Mode::ident(),
+        ModeCounts::ident(),
+        ModeSource::ident(),
+        WorkModeView::ident(),
+    ];
+    let mut names: Vec<String> = own.to_vec();
     for extra in [
         helm_chats::types::GateBrief::ident(),
         helm_chats::types::GateBriefOption::ident(),
@@ -46,12 +57,14 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
     for n in &names {
         index.push_str(&format!(
             "export type {{ {n} }} from '{}{n}.ts';\n",
-            if *n == GateAsk::ident() { "./" } else { "../" }
+            if own.contains(n) { "./" } else { "../" }
         ));
     }
     std::fs::write(dir.join("index.ts"), index).map_err(|e| e.to_string())?;
-    // Only this folder's own file is written; the two re-exported ones live one level up.
-    Ok(vec![format!("{}.ts", GateAsk::ident()), "index.ts".into()])
+    // Only this folder's own files are written; the two re-exported ones live one level up.
+    let mut written: Vec<String> = own.iter().map(|n| format!("{n}.ts")).collect();
+    written.push("index.ts".into());
+    Ok(written)
 }
 
 #[cfg(test)]

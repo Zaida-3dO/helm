@@ -169,7 +169,6 @@ pub fn chat_send(
     let sid = uuid::Uuid::parse_str(&a.submission_id)
         .map_err(|_| ApiError::bad_args("submissionId must be a UUID."))?
         .to_string();
-    let limits = rt.limits().clone();
     let sb = rt
         .db()
         .snapshot(|t| {
@@ -207,19 +206,10 @@ pub fn chat_send(
                 return Ok(Err(ApiError::new("refused", "This chat is stopping; your message is kept, send it again in a moment.")));
             }
             let busy = status.is_busy();
-            if !busy {
-                let active: i64 = tx.query_row(
-                    "SELECT count(*) FROM chats WHERE status IN ('starting', 'running', 'stopping')",
-                    [],
-                    |r| r.get(0),
-                )?;
-                if active as usize >= limits.max_active {
-                    return Ok(Err(ApiError::new(
-                        "capacity",
-                        format!("{} chats are already working, which is the most Helm runs at once. Your message is kept in the draft.", limits.max_active),
-                    )));
-                }
-            }
+            // Nothing here refuses a start for being one chat too many: the message is saved
+            // and handed to the chat, and the queue's gate at the turn open decides whether it
+            // starts now or waits (and at most `max_active` chats work at once anyway — the
+            // runaway guard lives in the gate, where a held start is visible).
             // What Send means: idle, always a prompt; busy, the action or the mode.
             let (mode, state, priority) = if !busy {
                 (SubmissionMode::Prompt, SubmissionState::Saved, None)
@@ -274,7 +264,9 @@ pub fn chat_send(
             } else {
                 crate::attachments::refs_for(tx, &sid)?
             };
+            let startup = startup_context(rt, tx, &a.chat_id, &sid, now)?;
             let context_text: Vec<String> = [
+                startup,
                 block.map(|b| b.text),
                 crate::attachments::refs_section(&refs),
             ]
@@ -439,11 +431,7 @@ enum Intake {
     Open { busy: bool },
 }
 
-fn host_intake(
-    tx: &Transaction<'_>,
-    s: &HostSend<'_>,
-    max_active: usize,
-) -> rusqlite::Result<Intake> {
+fn host_intake(tx: &Transaction<'_>, s: &HostSend<'_>) -> rusqlite::Result<Intake> {
     let existing = store::get_submission(tx, s.submission_id)?;
     let Some((status, archived)) = chat_status(tx, s.chat_id)? else {
         return Ok(Intake::Refused(crate::ops::not_found()));
@@ -465,20 +453,10 @@ fn host_intake(
             hand_off: existing.state == SubmissionState::Saved,
         });
     }
+    // Nothing is refused for being one chat too many: the message is stored and handed to
+    // the chat, and the queue's gate at the turn open makes it wait — at most `max_active`
+    // chats work at once is a rule of the gate now, where a held start shows in the queue.
     let busy = status.is_busy();
-    if !busy {
-        let active: i64 = tx.query_row(
-            "SELECT count(*) FROM chats WHERE status IN ('starting', 'running', 'stopping')",
-            [],
-            |r| r.get(0),
-        )?;
-        if active as usize >= max_active {
-            return Ok(Intake::Refused(ApiError::new(
-                "capacity",
-                "Too many chats are already working.",
-            )));
-        }
-    }
     Ok(Intake::Open { busy })
 }
 
@@ -609,18 +587,13 @@ fn host_send_inner(
         return Err(ApiError::new("too_large", "The message is too large."));
     }
     let now = helm_core::now_ms();
-    let max_active = rt.limits().max_active;
     let dir = rt.sh.cfg.profile_dir.join("attachments");
     sweep_once(rt, &dir);
     // Look first, with nothing written: a send that is refused as it stands, or already stored (the
     // hub sends a message again every 45 s until it is acknowledged), must not save its files.
     let mut staged_images = Vec::new();
     let mut staged_files = Vec::new();
-    match rt
-        .db()
-        .snapshot(|tx| host_intake(tx, &s, max_active))
-        .map_err(sql)?
-    {
+    match rt.db().snapshot(|tx| host_intake(tx, &s)).map_err(sql)? {
         Intake::Refused(e) => return Err(e),
         Intake::Already { .. } => {}
         Intake::Open { .. } => {
@@ -649,7 +622,7 @@ fn host_send_inner(
     let stored_by_this_send = std::cell::Cell::new(false);
     let written: Result<Result<(bool, bool), ApiError>, rusqlite::Error> = rt.db().write(|tx| {
         // The same look again, now that nothing else can write: it may have changed.
-        let busy = match host_intake(tx, &s, max_active)? {
+        let busy = match host_intake(tx, &s)? {
             Intake::Refused(e) => return Ok(Err(e)),
             // Already recorded: it is handed to Claude now if that never happened.
             Intake::Already { hand_off } => return Ok(Ok((true, hand_off))),
@@ -701,11 +674,17 @@ fn host_send_inner(
                 return Ok(Err(ApiError::new(code, r.message)));
             }
         }
-        // The files are listed for the agent beside the prompt, as data.
-        if let Some(section) = crate::attachments::refs_section(&refs) {
+        // The project's startup instructions, then the files listed for the agent beside the
+        // prompt, as data.
+        let startup = startup_context(rt, tx, s.chat_id, s.submission_id, now)?;
+        let context_text: Vec<String> = [startup, crate::attachments::refs_section(&refs)]
+            .into_iter()
+            .flatten()
+            .collect();
+        if !context_text.is_empty() {
             tx.execute(
                 "INSERT INTO submission_context(submission_id, text) VALUES (?1, ?2)",
-                params![s.submission_id, section],
+                params![s.submission_id, context_text.join("\n\n")],
             )?;
         }
         tx.execute(
@@ -730,6 +709,58 @@ fn host_send_inner(
     Ok(HostSent {
         delivered: dispatch,
     })
+}
+
+/// The project's startup instructions for a chat's first message: the hidden context to carry, with
+/// its one visible transcript line written. Only a chat that has not started is offered them, and
+/// the seam says whether this message is the one that carries them. A roll-over successor is told
+/// which chat it continues.
+fn startup_context(
+    rt: &ChatRuntime,
+    tx: &Transaction<'_>,
+    chat_id: &str,
+    submission_id: &str,
+    now: i64,
+) -> rusqlite::Result<Option<String>> {
+    let Some(seam) = rt.sh.startup.get() else {
+        return Ok(None);
+    };
+    let started: bool = tx.query_row(
+        &format!(
+            "SELECT {} FROM chats c WHERE c.id = ?1",
+            crate::local::STARTED_SQL
+        ),
+        [chat_id],
+        |r| r.get(0),
+    )?;
+    if started {
+        return Ok(None);
+    }
+    let predecessor: Option<String> = tx
+        .query_row(
+            "SELECT predecessor_id FROM chat_succession WHERE chat_id = ?1",
+            [chat_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(inj) = seam.first_send(tx, chat_id, submission_id, predecessor.as_deref())? else {
+        return Ok(None);
+    };
+    let row = RowWrite {
+        source_key: format!("c:startup:{submission_id}"),
+        role: "context",
+        text: inj.row,
+        thinking: String::new(),
+        tool_name: None,
+        tool_call_id: None,
+        status: "complete",
+        timestamp: now,
+        details: json!({"contextKind": "startup"}),
+        entry_id: None,
+        parent_id: None,
+    };
+    session_log::upsert_row(tx, &rt.sh.cfg.artifacts(), chat_id, &row, rt.clock().next())?;
+    Ok(Some(inj.context))
 }
 
 /// Send the restart continuation (origin `harness`, a plain prompt: it never interrupts and never

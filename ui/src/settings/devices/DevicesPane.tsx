@@ -1,13 +1,13 @@
 // Settings → Devices: this PC's name, whether other devices may run chats on it, and the other
 // devices on the household hub. A chat always runs on the device it was started on, under that
-// device's Claude sign-in and plan; the switches here decide whether another device, and whether
-// someone else in the household, may start and steer chats on this PC. Reading chats needs only
-// pairing, not these switches.
+// device's Claude sign-in and plan; the switch here decides whether another device, yours or
+// someone else's in the household, may start and steer chats on this PC. Reading chats needs only
+// pairing, not this switch.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useShell } from '../../shell/context.ts';
 import { Button, Checkbox, SettingRow, TextInput } from '../../ui/index.ts';
-import { devicesOps, HOUSEHOLD_RUN_KEY, RUN_FROM_OTHERS_KEY, type DeviceRow } from './api.ts';
+import { devicesOps, RUN_FROM_OTHERS_KEY, type DeviceRow } from './api.ts';
 import { nameOk, NAME_MAX, otherDevices, peopleLine, presence } from './model.ts';
 import './devices.css';
 
@@ -21,7 +21,6 @@ export function DevicesPane() {
   const [savedName, setSavedName] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [runFromOthers, setRunFromOthers] = useState(true);
-  const [householdRun, setHouseholdRun] = useState(true);
   const [others, setOthers] = useState<DeviceRow[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -65,17 +64,10 @@ export function DevicesPane() {
         .runFromOthers()
         .then(setRunFromOthers)
         .catch(() => undefined);
-    const readHousehold = () =>
-      ops
-        .householdRun()
-        .then(setHouseholdRun)
-        .catch(() => undefined);
     void readRun();
-    void readHousehold();
     return shell.bus.on('preferences', (e) => {
       const changed = (e as { changed?: object }).changed ?? {};
       if (RUN_FROM_OTHERS_KEY in changed) void readRun();
-      if (HOUSEHOLD_RUN_KEY in changed) void readHousehold();
     });
   }, [shell, ops]);
 
@@ -104,16 +96,6 @@ export function DevicesPane() {
     });
   };
 
-  const setHousehold = (on: boolean) => {
-    const before = householdRun;
-    setHouseholdRun(on);
-    setError(null);
-    ops.setHouseholdRun(on).catch((e: unknown) => {
-      setHouseholdRun(before);
-      setError(errorText(e));
-    });
-  };
-
   return (
     <div className="hub-pane" data-testid="settings-devices">
       <h3 className="hub-heading">This PC</h3>
@@ -135,20 +117,9 @@ export function DevicesPane() {
       </SettingRow>
       <SettingRow
         title="Let other devices use chats on this PC"
-        description="They run here, on this PC's Claude sign-in and plan."
+        description="Yours and your household's devices: chats run here, on this PC's Claude sign-in and plan."
       >
         <Checkbox checked={runFromOthers} aria-label="Let other devices use chats on this PC" data-testid="device-run-switch" onChange={setRun} />
-      </SettingRow>
-      <SettingRow
-        title="Let people in my household run their chats on this PC"
-        description="Their chats run here, on this PC's Claude sign-in and plan."
-      >
-        <Checkbox
-          checked={householdRun}
-          aria-label="Let people in my household run their chats on this PC"
-          data-testid="device-household-run-switch"
-          onChange={setHousehold}
-        />
       </SettingRow>
       {error && (
         <div className="ui-field-error" role="alert" data-testid="devices-error">

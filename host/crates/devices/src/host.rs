@@ -55,6 +55,15 @@ fn page_wire(e: helm_pages::server::PageError) -> WireError {
     }
 }
 
+/// Every pin, the ones filed under one of `mine` first, each group in its own order.
+fn own_pins_first(all: Vec<Value>, mine: &[String]) -> Vec<Value> {
+    let (own, rest): (Vec<Value>, Vec<Value>) = all.into_iter().partition(|p| {
+        let profile = p["profileId"].as_str().unwrap_or_default();
+        mine.iter().any(|m| m == profile)
+    });
+    own.into_iter().chain(rest).collect()
+}
+
 fn db_err(e: rusqlite::Error) -> WireError {
     WireError::internal(e.to_string())
 }
@@ -228,8 +237,8 @@ impl HostPort {
             .ok_or_else(|| WireError::internal("Pages are not available."))
     }
 
-    /// The pinned pages this person may open from another PC: those filed under the profiles
-    /// that act for them here, and (for this PC's own person) the ones pinned before profiles.
+    /// The pinned pages on this PC, for whoever asks from another PC. Every paired person may
+    /// open any of them; the ones filed under the profiles that act for the asker come first.
     fn visible_pins(&self, who: &PageScope) -> PortResult<Vec<Value>> {
         let db = self.db()?;
         db.snapshot(|tx| {
@@ -240,15 +249,10 @@ impl HostPort {
                         .collect()
                 })
                 .unwrap_or_default();
-            let all = helm_pages::store::list(tx, None)?;
-            Ok::<_, rusqlite::Error>(
-                all.into_iter()
-                    .filter(|p| match p["profileId"].as_str().unwrap_or_default() {
-                        "" => who.own,
-                        profile => profiles.iter().any(|x| x == profile),
-                    })
-                    .collect(),
-            )
+            Ok::<_, rusqlite::Error>(own_pins_first(
+                helm_pages::store::list(tx, None)?,
+                &profiles,
+            ))
         })
         .map_err(db_err)
     }
@@ -524,10 +528,6 @@ impl ChatPort for HostPort {
 
     fn run_allowed(&self) -> bool {
         self.switch("deviceRunFromOthers")
-    }
-
-    fn household_run(&self) -> bool {
-        self.switch("deviceHouseholdRun")
     }
 
     /// The hub people of this install's linked profiles, the home profile's first. The home
@@ -1341,11 +1341,21 @@ impl ChatPort for HostPort {
             let path = pin["path"].as_str().unwrap_or_default().to_owned();
             let server = self.page_server()?;
             let rel = a.path.clone();
-            let whole =
-                tokio::task::spawn_blocking(move || server.bundle_read(&path, rel.as_deref()))
-                    .await
-                    .map_err(|e| WireError::internal(e.to_string()))?
-                    .map_err(page_wire)?;
+            let whole = tokio::task::spawn_blocking(move || {
+                // Only the files the page names are served, never another file of its folder.
+                if let Some(r) = rel.as_deref() {
+                    let list = server.bundle_list(&path)?;
+                    if !list.files.iter().any(|(p, _)| p == r) {
+                        return Err(helm_pages::server::PageError::NotFound(
+                            "That file is not part of the page.".into(),
+                        ));
+                    }
+                }
+                server.bundle_read(&path, rel.as_deref())
+            })
+            .await
+            .map_err(|e| WireError::internal(e.to_string()))?
+            .map_err(page_wire)?;
             let from = usize::try_from(a.offset)
                 .unwrap_or(usize::MAX)
                 .min(whole.len());
@@ -1761,5 +1771,39 @@ impl ChatPort for HostPort {
                 .map_err(db_err)?;
             Ok(record.map(|r| self.remote_chat(r)))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::own_pins_first;
+    use serde_json::{json, Value};
+
+    /// Every pinned page is open to every paired person; their own profiles' pages come first.
+    #[test]
+    fn every_pin_is_listed_for_everyone_the_askers_own_first() {
+        let pins: Vec<Value> = [
+            ("a", "p-owner"),
+            ("b", ""),
+            ("c", "p-guest"),
+            ("d", "p-owner"),
+        ]
+        .iter()
+        .map(|(id, profile)| json!({"id": id, "profileId": profile}))
+        .collect();
+        let ids = |mine: &[&str]| -> Vec<String> {
+            let mine: Vec<String> = mine.iter().map(|s| s.to_string()).collect();
+            own_pins_first(pins.clone(), &mine)
+                .iter()
+                .map(|p| p["id"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        for (mine, want) in [
+            (vec!["p-guest"], vec!["c", "a", "b", "d"]),
+            (vec!["p-owner"], vec!["a", "d", "b", "c"]),
+            (vec![], vec!["a", "b", "c", "d"]),
+        ] {
+            assert_eq!(ids(&mine), want, "{mine:?}");
+        }
     }
 }

@@ -271,7 +271,7 @@ async fn pairing_connects_machines_side_by_side_and_a_revoke_drops_only_that_one
 }
 
 #[tokio::test]
-async fn memories_are_private_unless_shared_and_only_the_owner_changes_them() {
+async fn memories_are_shared_unless_made_private_and_only_the_owner_changes_them() {
     let hub = start().await;
     let ann = add(&hub, "Ann", "desk", "memory:rw");
     let bea = add(&hub, "Bea", "laptop", "memory:rw");
@@ -283,7 +283,7 @@ async fn memories_are_private_unless_shared_and_only_the_owner_changes_them() {
             &hub,
             &ann,
             "memory_write",
-            json!({ "title": "Gift plan", "body": "ring size secret" }),
+            json!({ "title": "Gift plan", "body": "ring size secret", "scope": "me" }),
         )
         .await,
     );
@@ -292,7 +292,7 @@ async fn memories_are_private_unless_shared_and_only_the_owner_changes_them() {
             &hub,
             &ann,
             "memory_write",
-            json!({ "title": "Garden notes", "body": "tomatoes in May", "visibility": "shared" }),
+            json!({ "title": "Garden notes", "body": "tomatoes in May" }),
         )
         .await,
     );
@@ -301,12 +301,34 @@ async fn memories_are_private_unless_shared_and_only_the_owner_changes_them() {
             &hub,
             &bea,
             "memory_write",
-            json!({ "title": "Her list", "body": "tomatoes too" }),
+            json!({ "title": "Her list", "body": "tomatoes too", "scope": "me" }),
         )
         .await,
     );
 
-    // Her searches, lists and reads find her own and the shared one, never his private one.
+    // A credential is refused on write and on update, private or not: nothing screens a memory
+    // once it can be shared.
+    let token = format!("export GITHUB_TOKEN=ghp_{}", "a1B2".repeat(9));
+    let r = tool(
+        &hub,
+        &ann,
+        "memory_write",
+        json!({ "title": "Deploy", "body": token }),
+    )
+    .await;
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(r.to_string().contains("credential"), "{r}");
+    let r = tool(
+        &hub,
+        &ann,
+        "memory_update",
+        json!({ "id": shared, "body": token }),
+    )
+    .await;
+    assert_eq!(r["isError"], true, "{r}");
+
+    // Her searches, lists and reads find her own and the household's (a memory that names no scope
+    // is the household's), never his private one.
     let found = tool(&hub, &bea, "memory_search", json!({ "query": "secret" })).await;
     assert_eq!(count(&found), 0);
     let found = tool(&hub, &bea, "memory_search", json!({ "query": "tomatoes" })).await;
@@ -1126,8 +1148,8 @@ async fn a_helm_acts_as_the_person_it_names_and_memories_say_who_wrote_them() {
         .set_acts_for(desk, "Bea", true)
         .unwrap();
 
-    // What Ann's machine writes while acting as Bea is Bea's: private by default, hers to read.
-    let write = json!({ "title": "Tea", "body": "likes green tea" });
+    // What Ann's machine writes while acting as Bea is Bea's: private when asked to be, hers to read.
+    let write = json!({ "title": "Tea", "body": "likes green tea", "scope": "me" });
     let (status, w) = tool_as(&hub, &ann, Some(bea), "memory_write", write).await;
     assert_eq!((status, w["isError"].clone()), (200, json!(false)));
     let tea = w["structuredContent"]["id"].as_i64().unwrap();

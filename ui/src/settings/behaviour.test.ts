@@ -6,7 +6,7 @@ import { changedBy, changeText, describeValue, keyTitle, parseChanges } from './
 import { parseNameList } from './applied.ts';
 import { stepZoom } from './generalOptions.ts';
 import { pairedLine } from './hub/pairedLine.ts';
-import { defaultProfileId, linkLine, linkable, profileChoices } from './hub/channelScope.ts';
+import { defaultProfileId, linkLine, linkable, profileChoices, promptState } from './hub/channelScope.ts';
 import type { ProfileSummary } from '../api/profiles.ts';
 
 test('send behaviour reads a stored difference and writes back only what differs from the defaults', () => {
@@ -99,4 +99,22 @@ test('the hub pane picks which profile its channels speak for, and words the Tel
   );
   // Only a profile that is a person on the hub can link a Telegram account.
   assert.deepEqual([linkable(other), linkable(plain), linkable(undefined)], [true, false, false]);
+});
+
+test('a channel prompt box saves only a real change, refuses a too-long one and resets only a saved one', () => {
+  const stock = { text: 'Default.', default: 'Default.', custom: false };
+  const mine = { text: 'Mine.', default: 'Default.', custom: true };
+  // [draft, prompt, max, dirty, tooLong, canReset]
+  const cases: [string, typeof stock, number, boolean, boolean, boolean][] = [
+    ['Default.', stock, 100, false, false, false],
+    ['  Default.  ', stock, 100, false, false, false],
+    ['Changed.', stock, 100, true, false, false],
+    ['', stock, 100, false, false, false],
+    ['Mine.', mine, 100, false, false, true],
+    ['', mine, 100, true, false, true],
+    ['x'.repeat(11), stock, 10, true, true, false],
+  ];
+  for (const [draft, p, max, dirty, tooLong, canReset] of cases) {
+    assert.deepEqual(promptState(draft, p, max), { dirty, tooLong, canReset }, draft);
+  }
 });

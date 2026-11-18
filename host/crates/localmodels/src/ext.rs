@@ -9,11 +9,16 @@
 //! | `localSpeechReserveGb` | graphics memory (GB, 0 to 24) also freed for speech-to-text when a model load has to unload others |
 //! | `localToolsSetup` | `lean` or `full`: the tools a local chat is offered |
 //! | `localCompareModel` | `opus`, `sonnet` or `haiku`: the Claude model local usage is priced against |
+//! | `localGameLiftMinutes` | minutes after the last listed game closes before local models come back, 1 to 60 |
+//! | `localGames` | **needs approval:** the programs that unload local models while they run (a list of names like `game.exe`) |
+//! | `localRestartTask` | **needs approval:** the Windows scheduled task Helm ends while local models are unloaded and starts after |
+//! | `localPauseFile` | **needs approval:** the file Helm writes while local models are unloaded |
 //!
-//! These are in the base tier: each is bounded, shows in "Changed by chats" with Undo, and none
-//! can reach outside this machine. **Never here:** a server's address, name or key, the games that
-//! unload local models, the restart task Helm ends and the pause file it writes. Those are the
-//! user's, in Settings > Local models.
+//! The first seven are changed by a chat itself: each is bounded, shows in "Changed by chats" with
+//! Undo, and none can reach outside this machine. The last three decide what Helm stops, starts
+//! and writes outside its own window, so a chat only stages them (`app_stage_settings`) for the
+//! user to approve. **Never here:** a server's address, name or key, and whether local models are
+//! unloaded right now. Those are the user's, in Settings > Local models.
 
 use crate::settings::{self, Changes, CompareModel, LocalSettings, ToolsSetup};
 use helm_hosttools::SettingsExtension;
@@ -28,6 +33,10 @@ pub const ENABLED: &str = "localServersEnabled";
 pub const SPEECH_RESERVE: &str = "localSpeechReserveGb";
 pub const TOOLS: &str = "localToolsSetup";
 pub const COMPARE: &str = "localCompareModel";
+pub const GAME_LIFT: &str = "localGameLiftMinutes";
+pub const GAMES: &str = "localGames";
+pub const RESTART_TASK: &str = "localRestartTask";
+pub const PAUSE_FILE: &str = "localPauseFile";
 
 const PAGE: &str = "Settings > Local models";
 
@@ -45,6 +54,11 @@ fn value_of(s: &LocalSettings, key: &str) -> Value {
         ENABLED => Value::Object(settings::enabled_map(s)),
         SPEECH_RESERVE => json!(s.speech_reserve_gb),
         TOOLS => serde_json::to_value(s.tools).unwrap_or(Value::Null),
+        GAME_LIFT => json!(s.game_lift_minutes),
+        GAMES => json!(s.games),
+        // Empty text is "none".
+        RESTART_TASK => json!(s.restart_task.clone().unwrap_or_default()),
+        PAUSE_FILE => json!(s.pause_file.clone().unwrap_or_default()),
         _ => serde_json::to_value(s.compare_with).unwrap_or(Value::Null),
     }
 }
@@ -124,6 +138,43 @@ fn change(key: &str, cur: &LocalSettings, value: &Value) -> Result<Changes, Stri
                     .map_err(|_| format!("{key} is \"lean\" or \"full\"."))?,
             )
         }
+        GAME_LIFT => {
+            c.game_lift_minutes = Some(v.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or_else(
+                || {
+                    format!(
+                        "{key} is a whole number of minutes from {} to {}.",
+                        settings::MIN_GAME_LIFT,
+                        settings::MAX_GAME_LIFT
+                    )
+                },
+            )?)
+        }
+        GAMES => {
+            let list = v
+                .as_array()
+                .ok_or_else(|| format!("{key} is a list of program names like game.exe."))?;
+            c.games = Some(
+                list.iter()
+                    .map(|g| {
+                        g.as_str().map(str::to_owned).ok_or_else(|| {
+                            format!("{key} is a list of program names like game.exe.")
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+        }
+        RESTART_TASK | PAUSE_FILE => {
+            let text = match &v {
+                Value::Null => String::new(),
+                Value::String(t) => t.clone(),
+                _ => return Err(format!("{key} is text, or empty for none.")),
+            };
+            if key == RESTART_TASK {
+                c.restart_task = Some(text);
+            } else {
+                c.pause_file = Some(text);
+            }
+        }
         COMPARE => {
             c.compare_with = Some(
                 serde_json::from_value::<CompareModel>(v)
@@ -151,6 +202,7 @@ fn change(key: &str, cur: &LocalSettings, value: &Value) -> Result<Changes, Stri
                     auto_start: s.auto_start,
                     folder: s.folder.clone(),
                     preset: s.preset.clone(),
+                    chat_cap: s.chat_cap,
                 });
             }
             if let Some(unknown) = map
@@ -183,7 +235,18 @@ fn put(
 
 impl SettingsExtension for LocalKeys {
     fn keys(&self) -> Vec<&'static str> {
-        vec![CONTEXT, KEEP_ALIVE, ENABLED, SPEECH_RESERVE, TOOLS, COMPARE]
+        vec![
+            CONTEXT,
+            KEEP_ALIVE,
+            ENABLED,
+            SPEECH_RESERVE,
+            TOOLS,
+            COMPARE,
+            GAME_LIFT,
+            GAMES,
+            RESTART_TASK,
+            PAUSE_FILE,
+        ]
     }
 
     fn describe(&self, key: &str) -> Option<Value> {
@@ -228,6 +291,32 @@ impl SettingsExtension for LocalKeys {
                 "allowed": ["opus", "sonnet", "haiku"],
                 "default": "sonnet",
                 "about": format!("{PAGE}, Compare local chats with: the Claude model the cost report prices local tokens against (\"would have cost about $X on Sonnet\"). Local chats themselves cost nothing and never count toward the plan's usage."),
+            })),
+            GAME_LIFT => Some(json!({
+                "type": "integer",
+                "min": settings::MIN_GAME_LIFT,
+                "max": settings::MAX_GAME_LIFT,
+                "default": d.game_lift_minutes,
+                "about": format!("{PAGE}, Wait after a game closes: minutes after the last listed game closes before local models come back."),
+            })),
+            GAMES => Some(json!({
+                "type": "array",
+                "valueType": "string",
+                "maxItems": settings::MAX_GAMES,
+                "default": [],
+                "about": format!("{PAGE}, Games: program names (like game.exe, no folder) that unload local models while they run. An empty list watches nothing. The list is replaced whole."),
+            })),
+            RESTART_TASK => Some(json!({
+                "type": "string",
+                "maxLength": settings::MAX_TASK,
+                "default": "",
+                "about": format!("{PAGE}, Restart task: the name of a Windows scheduled task that restarts a model server. Helm ends it while local models are unloaded and starts it again after. Empty means none."),
+            })),
+            PAUSE_FILE => Some(json!({
+                "type": "string",
+                "maxLength": settings::MAX_PAUSE_FILE,
+                "default": "",
+                "about": format!("{PAGE}, Pause file: a full path of a file Helm writes while local models are unloaded, for the user's own restart script to check. Empty means none."),
             })),
             _ => None,
         }
@@ -277,7 +366,7 @@ mod tests {
                 .unwrap()
         };
         // The keys, their descriptions and their defaults.
-        assert_eq!(ext.keys().len(), 6);
+        assert_eq!(ext.keys().len(), 10);
         for k in ext.keys() {
             assert!(ext.describe(k).is_some(), "{k}");
             assert!(!ext.needs_all_settings(k), "{k}");
@@ -346,6 +435,38 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(read(KEEP_ALIVE), json!(60));
+        // The wait, and the three a chat only stages: the games, the restart task, the pause file.
+        assert_eq!(apply(GAME_LIFT, json!(10)).unwrap(), (json!(5), json!(10)));
+        assert!(apply(GAME_LIFT, json!(99)).unwrap_err().contains("minutes"));
+        let (before, after) = apply(GAMES, json!(["Some.EXE", " other.exe ", "some.exe"])).unwrap();
+        assert_eq!(
+            (before, after),
+            (json!([]), json!(["Some.EXE", "other.exe"]))
+        );
+        assert!(apply(GAMES, json!(["C:\\Games\\x.exe"]))
+            .unwrap_err()
+            .contains("program name"));
+        assert!(apply(GAMES, json!("game.exe"))
+            .unwrap_err()
+            .contains("list"));
+        assert_eq!(
+            apply(RESTART_TASK, json!(" Model Restart ")).unwrap(),
+            (json!(""), json!("Model Restart"))
+        );
+        assert!(apply(RESTART_TASK, json!("a\"b"))
+            .unwrap_err()
+            .contains("task"));
+        assert_eq!(apply(RESTART_TASK, Value::Null).unwrap().1, json!(""));
+        assert_eq!(
+            apply(PAUSE_FILE, json!("D:\\models\\paused.flag"))
+                .unwrap()
+                .1,
+            json!("D:\\models\\paused.flag")
+        );
+        assert!(apply(PAUSE_FILE, json!("paused.flag"))
+            .unwrap_err()
+            .contains("full path"));
+        assert_eq!(read(GAMES), json!(["Some.EXE", "other.exe"]));
         assert_eq!(ext.changed_event(CONTEXT).kind, "local_models");
     }
 }

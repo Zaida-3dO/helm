@@ -46,7 +46,9 @@ pub fn register_services(services: &mut Services, _events: &Arc<dyn EventSink>) 
         return;
     };
     let probes = Arc::new(probes::RealProbes { db: db.clone() });
-    services.insert(Arc::new(WaitsService::new(db, probes)));
+    let svc = Arc::new(WaitsService::new(db, probes));
+    services.insert(Arc::new(helm_chats::seams::ChildWatcher(svc.clone())));
+    services.insert(svc);
 }
 
 /// Start the watcher loops and point delivery at the chat runtime.
@@ -75,4 +77,10 @@ pub fn start(runtime: &helm_chats::ChatRuntime, services: &Services) {
                 tokio::task::spawn_blocking(move || svc.sweep_network(helm_core::now_ms())).await;
         }
     });
+}
+
+impl helm_chats::seams::ChildWatch for WaitsService {
+    fn watch_child(&self, parent: &str, child: &str, child_title: &str) -> Result<String, String> {
+        WaitsService::watch_child(self, parent, child, child_title)
+    }
 }
