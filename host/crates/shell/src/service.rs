@@ -720,7 +720,7 @@ mod tests {
         s.finished = chats
             .iter()
             .map(|c| AttentionRow {
-                chat_id: c.into(),
+                chat_id: (*c).into(),
                 title: "T".into(),
                 project: "P".into(),
                 kind: AttentionKind::Unread,

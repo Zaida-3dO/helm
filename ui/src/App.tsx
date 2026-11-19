@@ -47,7 +47,7 @@ import { TopBar } from './topbar/TopBar.tsx';
 import { EmptyMain } from './shell/EmptyMain.tsx';
 import { ShellShortcuts } from './shell/Shortcuts.tsx';
 import { SidebarResizer } from './shell/SidebarResizer.tsx';
-import { decideOpen } from './shell/follow.ts';
+import { decideOpen, type OpenEvent } from './shell/follow.ts';
 import { SIDEBAR_VISIBLE_PREF, SIDEBAR_WIDTH_PREF, sidebarLayout } from './shell/layout.ts';
 import { TerminalDock } from './terminal/TerminalDock.tsx';
 import { SavedDueNotice } from './saved/SavedDueNotice.tsx';
@@ -91,7 +91,7 @@ export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers:
   useEffect(
     () =>
       bus.on('shell_open_chat', (e) => {
-        const d = decideOpen(e, shell.selection.chatId);
+        const d = decideOpen(e as OpenEvent, shell.selection.chatId);
         if (!d) return;
         if (d.kind === 'select') {
           shell.select(d.chatId, d.messageId ? { messageId: d.messageId } : {});
