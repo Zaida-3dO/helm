@@ -7,6 +7,36 @@ export const REDACTED = "[redacted]";
 /** Secrets shorter than this are not redacted: replacing "a" everywhere would wreck output. */
 const MIN_SECRET = 4;
 
+/*
+ * Shape-based redaction, for secrets Helm never resolved (a token a tool prints from its own
+ * config, say). The rule is deliberately narrow, so ordinary output survives:
+ *  - a long run (32 or more characters of base64, base64url or hex) is redacted only when it sits
+ *    right after a keyword: token, key, secret, password, authorization, bearer, api_key or apikey
+ *    (any case), separated by ":", "=" or a space, with optional quotes. A bare 40- or 64-character
+ *    hex run is never touched on its own, so git commit ids and file hashes stay readable.
+ *  - well-known prefixed tokens are redacted wherever they appear: sk-..., ghp_/gho_/ghu_/ghs_/ghr_
+ *    and github_pat_..., xoxa-/xoxb-/xoxp-..., AKIA... and JWTs (eyJ... with two dots).
+ */
+const KEYWORD_RUN = /((?:token|key|secret|password|passwd|authorization|bearer|api_key|apikey)["']?(?:\s*[:=]\s*|\s+)["']?(?:bearer\s+)?)[A-Za-z0-9+/_=-]{32,}/gi;
+const PREFIXED = new RegExp(
+  String.raw`\b(?:` +
+    [
+    String.raw`sk-[A-Za-z0-9_-]{20,}`,
+    String.raw`gh[pousr]_[A-Za-z0-9]{30,}`,
+    String.raw`github_pat_[A-Za-z0-9_]{30,}`,
+    String.raw`xox[abp]-[A-Za-z0-9-]{10,}`,
+    String.raw`AKIA[0-9A-Z]{16}`,
+    String.raw`eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*`,
+    ].join("|") +
+    ")",
+  "g",
+);
+
+/** Redacts secret-looking runs by shape (see the rule above). */
+export function redactShapes(text: string): string {
+  return text.replace(KEYWORD_RUN, `$1${REDACTED}`).replace(PREFIXED, REDACTED);
+}
+
 export class Redactor {
   private secrets: string[];
   private readonly set = new Set<string>();
@@ -50,7 +80,7 @@ export class Redactor {
   text(text: string): string {
     let out = text;
     for (const s of this.secrets) if (out.includes(s)) out = out.split(s).join(REDACTED);
-    return out;
+    return redactShapes(out);
   }
 
   /**

@@ -77,3 +77,25 @@ test("encoded forms of a secret are scrubbed too; very short values are left alo
   assert.equal(red.text("a%22b%5Cc-secret"), "[redacted]");
   assert.equal(red.text("xy stays"), "xy stays");
 });
+
+test("secret-looking runs are redacted by shape; git ids and prose are not", () => {
+  const sha = "3b18e512dba79e4c8300dd08aeb37f8e93a1c2d4";
+  const sha256 = "a".repeat(64);
+  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r";
+  const rows: Array<[string, string]> = [
+    [`commit ${sha} on main`, `commit ${sha} on main`],
+    [`sha256 ${sha256}`, `sha256 ${sha256}`],
+    [`token: ${sha}`, "token: [redacted]"],
+    [`{"api_key":"${"Ab3".repeat(12)}"}`, '{"api_key":"[redacted]"}'],
+    [`SECRET=${sha256}`, "SECRET=[redacted]"],
+    [`Authorization: Bearer ${"Zy9".repeat(12)}`, "Authorization: Bearer [redacted]"],
+    [`jwt ${jwt} end`, "jwt [redacted] end"],
+    ["key sk-abcdefghijklmnopqrstuvwx", "key [redacted]"],
+    [`ghp_${"a1".repeat(18)} and github_pat_${"B2".repeat(20)}`, "[redacted] and [redacted]"],
+    ["xoxb-123456789012-abcdef and AKIAABCDEFGHIJKLMNOP", "[redacted] and [redacted]"],
+    ["the key to a good token is a short one", "the key to a good token is a short one"],
+    ["Passwords must be rotated every ninety days.", "Passwords must be rotated every ninety days."],
+  ];
+  const r = new Redactor([]);
+  for (const [input, want] of rows) assert.equal(r.text(input), want, input);
+});
