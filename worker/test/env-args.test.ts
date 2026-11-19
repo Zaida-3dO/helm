@@ -328,7 +328,7 @@ test("--agents follows the CLI's version: a file, the inline JSON, or a clear re
   }
   assert.equal(agentsArg("a.json", "2.1.289", "claude.exe", read), "a.json");
   assert.equal(agentsArg("a.json", "2.0.5", "claude.exe", read), '{"reviewer":{"description":"d"}}');
-  assert.throws(() => agentsArg("a.json", "1.0.20", "C:/bin/claude.exe", read), /1\.0\.20.*C:\/bin\/claude\.exe.*update/);
+  assert.throws(() => agentsArg("a.json", "1.0.20", "C:/bin/claude.exe", read), /C:\/bin\/claude\.exe.*1\.0\.20.*update/);
   assert.equal(flag(buildClaudeArgs({ agentsFile: "a.json" }, { agentsArg: "{}" }), "--agents"), "{}");
   let runs = 0;
   const run = () => (runs++, "2.1.5 (Claude Code)");
