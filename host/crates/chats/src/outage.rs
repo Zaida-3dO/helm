@@ -150,6 +150,44 @@ pub fn is_token_refresh_error(error: &str) -> bool {
         .contains("failed to refresh oauth token")
 }
 
+/// Whether the error text reads as a failed sign-in or token refresh (the refresh race, an expired
+/// or rejected login). Text only.
+pub fn is_sign_in_error(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    is_token_refresh_error(error)
+        || e.contains("/login")
+        || e.contains("token has expired")
+        || e.contains("invalid authentication credentials")
+        || e.contains("not logged in")
+}
+
+/// What to show for a failed turn while a plan window reads used up. A sign-in style failure then
+/// is the plan's limit in disguise, so it says so, with the window's reset time, and keeps the
+/// raw error after a blank line for the details fold under the banner. Anything else, and any
+/// turn while no window is full, is `None`: the error stands.
+pub fn plan_limit_error<Tz: TimeZone>(
+    tz: &Tz,
+    error: &str,
+    cap: Option<helm_core::usage_windows::Capacity>,
+) -> Option<String>
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let cap = cap.filter(|c| c.pct >= 100.0)?;
+    if !is_sign_in_error(error) {
+        return None;
+    }
+    let head = match cap.until.and_then(|u| tz.timestamp_millis_opt(u).single()) {
+        Some(at) => format!("Plan limit reached, resets at {}", at.format("%H:%M")),
+        None => "Plan limit reached".to_owned(),
+    };
+    Some(format!(
+        "{head}
+
+{error}"
+    ))
+}
+
 /// A few seconds of spread, fixed per chat and attempt, added to the wait before a token-refresh
 /// retry: chats that failed together do not retry together, and the same chat's spread is the
 /// same on every look. At most a quarter of the wait.
@@ -907,6 +945,45 @@ mod tests {
     use super::*;
 
     const MIN: i64 = 60_000;
+
+    #[test]
+    fn a_full_plan_window_turns_a_sign_in_failure_into_the_limit_notice() {
+        use helm_core::usage_windows::Capacity;
+        let tz = chrono::FixedOffset::east_opt(0).unwrap();
+        let at = 1_700_000_000_000i64 + 3 * 3_600_000; // 01:13 UTC
+        let full = |pct: f64, until: Option<i64>| Some(Capacity { pct, until });
+        let refresh = "Failed to refresh OAuth token: another Claude Code process is refreshing it";
+        let rows: &[(&str, Option<Capacity>, Option<&str>)] = &[
+            (
+                refresh,
+                full(100.0, Some(at)),
+                Some("Plan limit reached, resets at 01:13"),
+            ),
+            (
+                "Please run /login",
+                full(100.0, None),
+                Some("Plan limit reached"),
+            ),
+            (refresh, full(99.0, Some(at)), None),
+            (refresh, None, None),
+            ("fetch failed", full(100.0, Some(at)), None),
+        ];
+        for (error, cap, want) in rows {
+            let got = plan_limit_error(&tz, error, *cap);
+            match want {
+                Some(head) => assert_eq!(
+                    got,
+                    Some(format!(
+                        "{head}
+
+{error}"
+                    )),
+                    "{error}"
+                ),
+                None => assert_eq!(got, None, "{error}"),
+            }
+        }
+    }
 
     #[test]
     fn only_recent_internet_chats_stopped_by_an_outage_are_picked_up() {

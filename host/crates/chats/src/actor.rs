@@ -4889,6 +4889,16 @@ impl Actor {
         self.emit_pending();
     }
 
+    /// A sign-in style failure while a Claude plan window reads used up is the limit, not a
+    /// sign-in problem: the chat's error says so (and is no longer retried as a token refresh).
+    fn limit_notice_for(&self, error: String) -> String {
+        if self.launched_local.is_some() {
+            return error;
+        }
+        let cap = helm_core::usage_windows::capacity(&self.sh.db, now());
+        crate::outage::plan_limit_error(&chrono::Local, &error, cap).unwrap_or(error)
+    }
+
     /// The turn is over (`agent_settled`, or a forced end).
     fn settle(&mut self, outcome: &str, error: Option<String>) {
         self.clear_timer(|t| matches!(t, Timer::StopDeadline | Timer::WaitLimit(_)));
@@ -4974,7 +4984,8 @@ impl Actor {
                         ChatStatus::Interrupted,
                         error
                             .or_else(|| self.worker_error.clone())
-                            .or_else(|| Some("The task ended without completing.".to_owned())),
+                            .or_else(|| Some("The task ended without completing.".to_owned()))
+                            .map(|e| self.limit_notice_for(e)),
                     ),
                 };
                 self.end_run(status, err.as_deref(), outcome);

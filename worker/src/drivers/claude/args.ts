@@ -70,6 +70,8 @@ export interface ArgOptions {
   promptRule?: string;
   /** Register Helm's in-process `helm` MCP server (`--mcp-config` with the SDK entry). */
   mcpConfig?: string;
+  /** What to pass to `--agents` in place of the launch's file path (the file's JSON, for an older CLI). */
+  agentsArg?: string;
 }
 
 /** Pre-approves every tool of Helm's own server. */
@@ -106,7 +108,7 @@ export function buildClaudeArgs(c: ClaudeLaunch, opts: ArgOptions = {}): string[
   // Helm-managed plugin folders (its own skills): loaded whatever the project's setting sources are.
   for (const dir of c.pluginDirs ?? []) args.push("--plugin-dir", dir);
   // Helm-managed agent definitions, by plain name: one file of them.
-  if (c.agentsFile) args.push("--agents", c.agentsFile);
+  if (c.agentsFile) args.push("--agents", opts.agentsArg ?? c.agentsFile);
   const append = [c.appendSystemPrompt, opts.promptRule].filter((x): x is string => typeof x === "string" && x.length > 0).join("\n\n");
   if (append) args.push("--append-system-prompt", append);
   // fastMode is always explicit: the launch's own field is its only owner.
