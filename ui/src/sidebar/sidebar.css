@@ -754,6 +754,10 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* The collapse chevron always sits in the row's left gutter, between the left bar and the status
+   mark, at the same place for every row that has one. It never shifts the title: rows with and
+   without children keep their titles on the level's left edge, and each nesting level's step
+   carries the chevron in with it. */
 .sb-root .sb-children {
   position: absolute;
   z-index: 4;
@@ -765,17 +769,9 @@
   color: var(--sb-muted);
 }
 
-.sb-root .sb-children[data-snug='true'] {
-  left: 30.5px;
-}
-
 .sb-root .sb-children:hover {
   background: var(--sb-surface);
   color: var(--sb-text);
-}
-
-.sb-chat-wrap .sb-children[data-snug='true'] ~ .sb-chat .sb-chat-text {
-  padding-left: 17px;
 }
 
 /* Unread result: a quiet cue next to the open chat's card. No fill and no ring, only a full-colour
