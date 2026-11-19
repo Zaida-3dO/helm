@@ -12,16 +12,15 @@
 //!   it sits in `finished` instead, so the finished notices (a toast's withdraw-on-read, the
 //!   away alerts) keep the chat while the reply stays unread and drop it once it is read.
 //!   Stopped or failed chats count only when manually marked. A muted chat counts for nothing
-//!   and is in no group but `busy`; what it holds
-//!   (a live request or its agent's flag) is listed in `muted` so the user can still find it.
+//!   and is in no group but `busy`; what it holds (a live request or its agent's flag) is
+//!   listed in `muted` so the user can still find it.
 //!   `triage` carries the idle check's priority for the chats it listed, and the chats it gave up
 //!   on; it is never counted.
 //! - `busy` counts starting, running and stopping chats.
-//! - The running, stalled, unread and finished groups list at most [`MAX_ROWS`], newest activity
-//!   first. The
-//!   needs-you and flagged groups are never cut short: each row there is a flag drawn on a
-//!   sidebar row, and a flag that is counted in the badge must have a row to sit on. A chat can be
-//!   in both of them (the consumers show it once).
+//! - The running, stalled, unread and finished groups list at most [`MAX_ROWS`], newest
+//!   activity first. The needs-you and flagged groups are never cut short: each row there is a
+//!   flag drawn on a sidebar row, and a flag that is counted in the badge must have a row to
+//!   sit on. A chat can be in both of them (the consumers show it once).
 //!
 //! [`publish`] recomputes the summary and emits an `attention` event when it changed. The actor
 //! calls it on every status change and every change to its interactions; ops that change marks,

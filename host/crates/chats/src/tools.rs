@@ -2056,12 +2056,17 @@ async fn stop_chat(ctx: ToolCtx, a: Value) -> ToolResult {
 async fn open_chat(ctx: ToolCtx, a: Value) -> ToolResult {
     let id = chat_id_arg(&a)?;
     let target = meta(&ctx, &id)?;
-    // ifViewing is the calling chat: the window follows only while the user is still looking at
-    // the chat that asked; otherwise the UI shows the opened chat's title as a notice with an
-    // Open button.
+    // ifViewing is the chat the user is looking at: the calling chat, or the chat a calling
+    // side chat is shown beside. The window follows only while the user is still on that
+    // chat; otherwise the UI shows the opened chat's title as a notice with an Open button.
+    let viewing = db(&ctx)?
+        .snapshot(|tx| chat_row(tx, &ctx.caller_chat_id))
+        .map_err(|e| refuse(e.to_string()))?
+        .and_then(|(_, _, side)| side)
+        .unwrap_or_else(|| ctx.caller_chat_id.clone());
     let mut e = helm_ipc::AppEvent::new("shell_open_chat")
         .with("chatId", id.clone())
-        .with("ifViewing", ctx.caller_chat_id.clone());
+        .with("ifViewing", viewing);
     if let Some(t) = target["title"].as_str() {
         e = e.with("title", t.to_owned());
     }

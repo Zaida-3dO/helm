@@ -1307,7 +1307,6 @@ function ChatRow({
         <button
           type="button"
           className="sb-children"
-          data-snug={r.attention === null || trailing ? 'true' : undefined}
           aria-expanded={item.expanded}
           aria-label={`${item.expanded ? 'Collapse' : 'Expand'} ${item.children} started chats under ${r.title}`}
           onClick={onToggle}

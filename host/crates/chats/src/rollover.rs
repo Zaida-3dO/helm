@@ -97,14 +97,14 @@ pub fn successor_message(old_title: &str, old_id: &str, handoff: &str) -> String
     )
 }
 
-/// Make a title safe inside Markdown link text: backslashes and square brackets get a backslash
-/// so a title cannot break the link, and newlines collapse to spaces (the message stays one line
-/// where the link sits).
+/// Make a title safe inside Markdown link text: backslashes, square brackets and backticks get a
+/// backslash so a title cannot break the link or open a code span, and newlines collapse to
+/// spaces (the message stays one line where the link sits).
 fn escape_link_text(title: &str) -> String {
     let mut out = String::with_capacity(title.len());
     for c in title.chars() {
         match c {
-            '\\' | '[' | ']' => {
+            '\\' | '[' | ']' | '`' => {
                 out.push('\\');
                 out.push(c);
             }
@@ -709,6 +709,7 @@ mod tests {
                 "[Fix \\[a\\] \\\\ b](helm://chats/abc) (chat id abc)",
             ),
             ("two\nlines", "[two lines](helm://chats/abc)"),
+            ("code `a]`", "[code \\`a\\]\\`](helm://chats/abc)"),
         ] {
             let m = successor_message(title, "abc", "Goal: x");
             assert!(m.contains(expect) && m.ends_with("Goal: x"), "{m}");
