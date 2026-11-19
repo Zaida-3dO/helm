@@ -235,7 +235,7 @@ function WorkspaceStatus({ attention, onClose, onOpen }: { attention: AttentionS
           key: 'ready',
           title: 'Ready to open',
           rows: ready,
-          state: (r) => (finished.has(r) ? 'Finished' : 'Marked unread'),
+          state: (r: AttentionRow) => (finished.has(r) ? 'Finished' : 'Marked unread'),
         },
       ].filter((s) => s.rows.length > 0)
     : [];
