@@ -177,3 +177,21 @@ export function targetFromAttrs(get: (name: string) => string | null): LinkTarge
   if (vault !== null) target.vault = vault;
   return target;
 }
+
+/** The slice of a click event the link delegation reads (a React mouse event fits it). */
+export interface ClickLike {
+  target: unknown;
+  currentTarget: { contains(node: unknown): boolean };
+  preventDefault(): void;
+}
+
+/**
+ * The target of a click on a rendered link inside `currentTarget`, or null when the click was not
+ * on one. A link click is always cancelled, so the webview never navigates by itself.
+ */
+export function linkFromClick(event: ClickLike): LinkTarget | null {
+  const anchor = (event.target as Element).closest<HTMLElement>('a[data-md-kind]');
+  if (!anchor || !event.currentTarget.contains(anchor)) return null;
+  event.preventDefault();
+  return targetFromAttrs((name) => anchor.getAttribute(name));
+}

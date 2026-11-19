@@ -7,7 +7,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { QuickItem } from '../../api/panel.ts';
 import { panelOps } from '../../api/panel.ts';
-import { Dialog, useBinding, useLayer } from '../../ui/index.ts';
+import { Button, Dialog, useBinding, useLayer } from '../../ui/index.ts';
 import { FileTextIcon, FolderOpenIcon, ReloadIcon } from '../icons.tsx';
 import { onQuickOpenRequest } from '../links.ts';
 import { openInPanel, panelStore } from '../registry.ts';
@@ -235,10 +235,10 @@ function QuickOpenDialog({ chatId, initialQuery, onClose }: { chatId: string | n
               </span>
             )}
             {remote?.mode === 'files' && (
-              <button type="button" className="fv-button bordered" onClick={() => setReload((n) => n + 1)}>
+              <Button onClick={() => setReload((n) => n + 1)}>
                 <ReloadIcon />
                 <span>Reload</span>
-              </button>
+              </Button>
             )}
           </div>
         </>

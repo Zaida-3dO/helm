@@ -5,6 +5,7 @@
 // app's own origin); a ZIP is listed from its directory and never extracted.
 
 import { useEffect, useMemo, useState } from 'react';
+import { Button } from '../../ui/index.ts';
 import type { ArchiveView, PanelOps } from '../../api/panel.ts';
 import { archiveRows, delimiterFor, entriesOf, filterRows, jsonMatches, parseDelimited, parseJson, sizeLabel, stepZoom } from './preview.ts';
 
@@ -147,12 +148,12 @@ export function ImagePreview({ url, name, size }: { url: string | null; name: st
           <button type="button" className="fv-icon-btn" aria-label="Zoom in" title="Zoom in" onClick={() => setZoom((z) => stepZoom(z === 'fit' ? 1 : z, 1))}>
             +
           </button>
-          <button type="button" className="fv-button bordered" aria-pressed={zoom === 'fit'} onClick={() => setZoom('fit')}>
+          <Button pressed={zoom === 'fit'} onClick={() => setZoom('fit')}>
             Fit
-          </button>
-          <button type="button" className="fv-button bordered" aria-pressed={zoom === 1} onClick={() => setZoom(1)}>
+          </Button>
+          <Button pressed={zoom === 1} onClick={() => setZoom(1)}>
             100%
-          </button>
+          </Button>
         </span>
       </div>
       <div className="pv-canvas">

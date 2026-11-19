@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { linkFromClick } from '../markdown/links.ts';
 import { configureLinks, gateTarget, handleLink, onQuickOpenRequest, REFUSED, registerLinkRoute, registerWebRoute } from './links.ts';
 
 const r = String.raw;
@@ -204,4 +205,22 @@ test('a web route may open an address in the app; a route that declines, an unma
   off();
   await click('https://example.com/app/four');
   assert.equal(seen.length, 2);
+});
+
+test('a click on a link inside the panel is cancelled and read back, and anything else is left alone', () => {
+  const anchorFor = (attrs: Record<string, string>) => ({ getAttribute: (n: string) => attrs[n] ?? null });
+  const click = (anchor: ReturnType<typeof anchorFor> | null, inside = true) => {
+    let prevented = false;
+    const event = {
+      target: { closest: (sel: string) => (sel === 'a[data-md-kind]' ? anchor : null) },
+      currentTarget: { contains: () => inside },
+      preventDefault: () => void (prevented = true),
+    };
+    return { target: linkFromClick(event), prevented };
+  };
+  const hit = click(anchorFor({ 'data-md-kind': 'url', 'data-md-href': 'https://example.com/a' }));
+  assert.deepEqual(hit, { target: { kind: 'url', href: 'https://example.com/a' }, prevented: true });
+  assert.deepEqual(gateTarget(hit.target!), { action: 'external', url: 'https://example.com/a' });
+  assert.deepEqual(click(null), { target: null, prevented: false }, 'not on a link');
+  assert.deepEqual(click(anchorFor({ 'data-md-kind': 'url' }), false), { target: null, prevented: false }, 'a link outside this panel');
 });

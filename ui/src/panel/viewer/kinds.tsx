@@ -15,7 +15,7 @@ import type { TabContext } from '../registry.ts';
 import { FileViewer } from './FileViewer.tsx';
 import type { Location } from './FileViewer.tsx';
 import { FilesTree } from './FilesTree.tsx';
-import { useLayer } from '../../ui/index.ts';
+import { Button, useLayer } from '../../ui/index.ts';
 import { report } from '../context/store.ts';
 import { basename, displayPath, joinPath, pathKey } from './paths.ts';
 import { openPageTab } from '../../pages/open.ts';
@@ -141,9 +141,8 @@ function OpenInApp({ path, loaded }: { path: string; loaded: boolean }) {
   const label =
     app.state === 'ready' ? `Open in ${app.name}` : app.state === 'none' ? 'No default app' : 'Open in default app';
   return (
-    <button
-      type="button"
-      className="fv-button fv-open-app"
+    <Button
+      className="fv-open-app"
       data-testid="open-in-app"
       disabled={app.state !== 'ready'}
       title={app.state === 'refused' ? app.reason : label}
@@ -151,16 +150,14 @@ function OpenInApp({ path, loaded }: { path: string; loaded: boolean }) {
     >
       <ExternalIcon />
       <span>{label}</span>
-    </button>
+    </Button>
   );
 }
 
 /** Header action "Run page": an HTML file previews inertly; this opens it as a sealed page that runs its scripts. */
 function RunPage({ path }: { path: string }) {
   return (
-    <button
-      type="button"
-      className="fv-button"
+    <Button
       data-testid="run-page"
       title="Run this page with its scripts in a sealed frame"
       onClick={() => {
@@ -169,7 +166,7 @@ function RunPage({ path }: { path: string }) {
     >
       <IconPlay size={13} />
       <span>Run page</span>
-    </button>
+    </Button>
   );
 }
 
