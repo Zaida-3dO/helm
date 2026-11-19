@@ -10,6 +10,8 @@ export interface RuntimeCheck {
   blocked: boolean;
   /** Everything the check reported, for the card's details. */
   problems: string[];
+  /** The command that upgrades a Node that is too old, when one is known. */
+  upgradeCommand?: string | null;
   /** False until the first check has answered (or failed to). */
   checked: boolean;
 }
@@ -52,7 +54,7 @@ export const runtimeCheck = {
     inflight ??= api('runtime_status', {})
       .then((s) => {
         const status = s as RuntimeStatus;
-        state = { blocked: isBlocked(status), problems: status.problems ?? [], checked: true };
+        state = { blocked: isBlocked(status), problems: status.problems ?? [], upgradeCommand: status.node.upgradeCommand ?? null, checked: true };
         listeners.forEach((l) => l());
       })
       .catch(giveUp)

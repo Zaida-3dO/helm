@@ -8,6 +8,8 @@ export interface Found {
   source: string | null;
   version: string | null;
   problem: string | null;
+  /** A command that fixes the problem (Node too old). Shown to copy; Helm never runs it. */
+  upgradeCommand?: string | null;
 }
 
 export interface RuntimeStatus {

@@ -1,7 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { MouseEvent } from 'react';
 import { LONG_TEXT_CHARS, renderShort, sharedOffloader } from './engine.ts';
-import { targetFromAttrs } from './links.ts';
+import { linkFromClick, targetFromAttrs } from './links.ts';
 import type { LinkTarget } from './links.ts';
 import { ImageViewer } from '../transcript/ImageViewer.tsx';
 import { loadLocalImage } from './localImages.ts';
@@ -357,13 +357,7 @@ export function Markdown({
     };
   }, [html, interactive, resolveEmbed, incremental]);
 
-  const linkFor = (event: MouseEvent<HTMLElement>): LinkTarget | null => {
-    const anchor = (event.target as Element).closest<HTMLElement>('a[data-md-kind]');
-    if (!anchor || !event.currentTarget.contains(anchor)) return null;
-    // The webview must never navigate by itself: every link goes through the app.
-    event.preventDefault();
-    return targetFromAttrs((name) => anchor.getAttribute(name));
-  };
+  const linkFor = (event: MouseEvent<HTMLElement>): LinkTarget | null => linkFromClick(event);
 
   return (
     <>

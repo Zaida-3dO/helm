@@ -105,3 +105,22 @@
 .rt-exe {
   width: 240px;
 }
+
+/* The upgrade command for a Node that is too old: the command and its copy button on one row. */
+.rt-upgrade {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(8 * var(--ui-unit));
+  margin-top: calc(6 * var(--ui-unit));
+  font-size: calc(11 * var(--ui-unit));
+  color: var(--secondary);
+}
+
+.rt-upgrade code {
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--hover);
+  color: var(--text);
+  font-family: var(--font-mono);
+}

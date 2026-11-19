@@ -20,7 +20,11 @@ import {
   type SettingsPatch,
   type SubagentScope,
 } from './model.ts';
+import { UpgradeCommand } from './UpgradeCommand.tsx';
 import './runtime.css';
+
+/** How often the open pane asks again while Node or Claude Code is not ready. */
+const RECHECK_MS = 4000;
 
 function Component({ name, found, testId }: { name: string; found: Found | null; testId: string }) {
   const line = found ? statusLine(found) : null;
@@ -34,6 +38,7 @@ function Component({ name, found, testId }: { name: string; found: Found | null;
         </div>
         {line && <div className={line.ready ? 'rt-component-line' : 'rt-component-line rt-problem'}>{line.text}</div>}
         {found?.path && <div className="rt-component-path">{found.path}</div>}
+        {found?.upgradeCommand && !line?.ready && <UpgradeCommand command={found.upgradeCommand} />}
       </div>
     </div>
   );
@@ -55,6 +60,24 @@ export function RuntimePane() {
       .catch((e: unknown) => toast.show({ kind: 'error', text: `Could not check the runtime: ${String((e as Error).message ?? e)}` }))
       .finally(() => setChecking(false));
   }, [shell]);
+
+  // While this pane is open and something is not ready, ask again every few seconds and when the
+  // window comes back, so an upgrade done in a terminal shows up without a click.
+  const unready = !status || !statusLine(status.node).ready || !statusLine(status.claude).ready;
+  useEffect(() => {
+    if (!unready) return;
+    const quiet = () =>
+      void shell
+        .api<RuntimeStatus>('runtime_status', {})
+        .then(setStatus)
+        .catch(() => undefined);
+    const timer = setInterval(quiet, RECHECK_MS);
+    window.addEventListener('focus', quiet);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', quiet);
+    };
+  }, [shell, unready]);
 
   useEffect(() => {
     check();

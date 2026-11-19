@@ -1,4 +1,4 @@
-// The sidebar footer's Pages entry: the pinned pages for the active profile. Clicking one opens
+// The sidebar's Pages entry: the pinned pages for the active profile. Clicking one opens
 // it as a tab in the side panel; Unpin removes it from the list (its saved state stays, so
 // pinning it again finds it as it was). The mounting sidebar passes the active profile's id, or
 // nothing for every page.

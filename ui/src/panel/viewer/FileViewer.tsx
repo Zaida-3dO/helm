@@ -414,10 +414,10 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
         </span>
       ) : null}
       {parent && (
-        <button type="button" className="fv-button browse" title="Open this folder in its own tab" onClick={openFolderTab}>
+        <Button className="fv-tool browse" title="Open this folder in its own tab" onClick={openFolderTab}>
           <BrowseFolderIcon />
           <span className="fv-btn-text">Browse folder</span>
-        </button>
+        </Button>
       )}
     </div>
   );
@@ -503,9 +503,9 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
     body = (
       <div className="fv-message">
         An embedded preview isn&rsquo;t available for this file.
-        <button type="button" className="fv-button" onClick={() => void ops.openDefault(loc.path).catch(() => undefined)}>
+        <Button onClick={() => void ops.openDefault(loc.path).catch(() => undefined)}>
           Open in default app
-        </button>
+        </Button>
       </div>
     );
   } else {

@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useLayoutEffect, useReducer, useRef } from 'react';
 import type { KeyboardEvent } from 'react';
 import type { PanelOps } from '../../api/panel.ts';
+import { Button } from '../../ui/index.ts';
 import { report } from '../context/store.ts';
 import { ChevronIcon, EyeIcon, EyeOffIcon, FileTextIcon, FolderOpenIcon, ReloadIcon } from '../icons.tsx';
 import { openInPanel, panelStore } from '../registry.ts';
@@ -215,9 +216,9 @@ export function FilesTree({ ops, chatId, root, visible }: FilesTreeProps) {
               <div key={row.id} className="ft-note" style={{ paddingLeft: 12 + row.depth * 14 }} data-testid="files-note">
                 {row.text}
                 {row.retry && (
-                  <button type="button" className="fv-button bordered" onClick={() => void load(row.retry as string, false)}>
+                  <Button onClick={() => void load(row.retry as string, false)}>
                     Retry
-                  </button>
+                  </Button>
                 )}
               </div>
             );

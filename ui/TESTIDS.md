@@ -213,7 +213,7 @@ Send now `Ctrl+Alt+Enter`, Stop and send waiting messages `Esc`.
 
 | Hook | Element | Attributes |
 |---|---|---|
-| `nav-pages` / `nav-pages-count` | The sidebar footer's Pages entry and its pinned-page count | |
+| `nav-pages` / `nav-pages-count` | The sidebar's Pages entry (under the top buttons) and its pinned-page count | |
 | `nav-archived` / `nav-settings` | The sidebar footer's Archived chats and Settings entries | `nav-archived`: `aria-pressed` while the archived list shows |
 | `pages-list` / `pages-row` / `pages-empty` | The Pages dialog, one pinned page in it (click opens it as a tab), and the empty note | |
 | `pages-device` / `pages-remote-row` | A PC of the household in the Pages dialog, and one page pinned on it (click brings it across and opens it as a tab) | |

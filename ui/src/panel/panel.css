@@ -380,7 +380,6 @@ html[data-panel-maximized] .shell-main {
   flex-wrap: wrap;
 }
 
-.fv-button,
 .fv-segmented button,
 .fv-nav-button,
 .fv-crumb {
@@ -392,22 +391,11 @@ html[data-panel-maximized] .shell-main {
   font-size: calc(12 * var(--sp-u));
 }
 
-.fv-button,
 .fv-icon-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-}
-
-/* Bordered text-and-icon buttons (Copy, Copy path, Open in an app). */
-.fv-button.bordered,
-.fv-open-app {
-  padding: 5px 11px;
-  border-color: var(--sp-line-strong);
-  border-radius: 6px;
-  color: var(--sp-text);
-  background: var(--sp-surface);
 }
 
 /* Icon-only buttons; a pressed one (word wrap) keeps a filled square. */
@@ -421,7 +409,6 @@ html[data-panel-maximized] .shell-main {
   color: var(--sp-secondary);
 }
 
-.fv-button:hover:not(:disabled),
 .fv-icon-btn:hover:not(:disabled),
 .fv-nav-button:hover:not(:disabled),
 .fv-crumb:hover {
@@ -429,14 +416,12 @@ html[data-panel-maximized] .shell-main {
   color: var(--sp-text);
 }
 
-.fv-button:active:not(:disabled),
 .fv-icon-btn:active:not(:disabled),
 .fv-nav-button:active:not(:disabled),
 .fv-crumb:active {
   background: var(--sp-line);
 }
 
-.fv-button:focus-visible,
 .fv-icon-btn:focus-visible,
 .fv-nav-button:focus-visible,
 .fv-crumb:focus-visible,
@@ -446,14 +431,12 @@ html[data-panel-maximized] .shell-main {
   outline-offset: -2px;
 }
 
-.fv-button:disabled,
 .fv-icon-btn:disabled,
 .fv-nav-button:disabled {
   opacity: 0.35;
   cursor: default;
 }
 
-.fv-button[aria-pressed='true'],
 .fv-icon-btn[aria-pressed='true'] {
   color: var(--sp-text);
   background: var(--sp-hover);
@@ -498,7 +481,6 @@ html[data-panel-maximized] .shell-main {
   display: none;
 }
 
-.fv-toolbar.compact .fv-button.bordered,
 .fv-toolbar.compact .fv-tool {
   width: 28px;
   height: 28px;
@@ -508,7 +490,7 @@ html[data-panel-maximized] .shell-main {
   color: var(--sp-secondary);
 }
 
-.fv-button.browse {
+.fv-tool.browse {
   margin-left: auto;
   flex: none;
 }
@@ -537,7 +519,6 @@ html[data-panel-maximized] .shell-main {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  border-color: var(--sp-line);
 }
 
 .fv-nav {
