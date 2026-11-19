@@ -216,11 +216,18 @@ pub fn mark_delivered(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Remove settled, delivered rows past the keep window.
+/// The chat refused the message every time: nothing is owed any more, but it was never delivered
+/// (`delivered = 2`).
+pub fn mark_given_up(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<()> {
+    tx.execute("UPDATE agent_waits SET delivered = 2 WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+/// Remove settled rows past the keep window that are delivered or given up on.
 pub fn prune(tx: &Transaction<'_>, now: i64) -> rusqlite::Result<()> {
     tx.execute(
         "DELETE FROM agent_waits WHERE state != 'open' AND settled_at < ?1
-           AND (state = 'cancelled' OR delivered = 1)",
+           AND (state = 'cancelled' OR delivered <> 0)",
         [now - KEEP_SETTLED_MS],
     )?;
     Ok(())
