@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildClaudeArgs, disallowedTools } from "../src/drivers/claude/args.ts";
+import { agentsArg, agentsMode, cliVersion, parseCliVersion } from "../src/drivers/claude/cliversion.ts";
 import { decideGate, decideStop, gateHook, startupWanted, stopHook } from "../src/drivers/claude/gates.ts";
 import { cronTiming, NATIVE_SCHEDULE_TOOLS, scheduleRedirect } from "../src/drivers/claude/schedulecalls.ts";
 import { assertLoopbackHttp, buildClaudeEnv, contextRefusalNote, STRIPPED_UNLESS_API_KEY_MODE, takeLocalKey } from "../src/drivers/claude/env.ts";
@@ -309,4 +310,29 @@ test("a chat the workflow gates may act in loses the workflow runner and the REP
   assert.deepEqual(await decideStop(byOperation({ app_startup_turn_end: true }), { stop_hook_active: true }, both), {}, "a continuation is never blocked again");
   // The startup switch alone leaves the workflow's tool restrictions and edit gate off.
   assert.ok(!disallowedTools({}, { HELM_STARTUP_GATE: "1" }).includes("REPL"));
+});
+
+test("--agents follows the CLI's version: a file, the inline JSON, or a clear refusal", () => {
+  const read = () => '{ "reviewer": { "description": "d" } }';
+  const rows: Array<[string, string | undefined, string]> = [
+    ["2.1.289 (Claude Code)", "2.1.289", "file"],
+    ["2.1.0", "2.1.0", "file"],
+    ["2.0.5 (Claude Code)", "2.0.5", "inline"],
+    ["1.0.60", "1.0.60", "inline"],
+    ["1.0.59 (Claude Code)", "1.0.59", "unsupported"],
+    ["garbled output", undefined, "file"],
+  ];
+  for (const [out, version, mode] of rows) {
+    assert.equal(parseCliVersion(out), version, out);
+    assert.equal(agentsMode(version), mode, out);
+  }
+  assert.equal(agentsArg("a.json", "2.1.289", "claude.exe", read), "a.json");
+  assert.equal(agentsArg("a.json", "2.0.5", "claude.exe", read), '{"reviewer":{"description":"d"}}');
+  assert.throws(() => agentsArg("a.json", "1.0.20", "C:/bin/claude.exe", read), /1\.0\.20.*C:\/bin\/claude\.exe.*update/);
+  assert.equal(flag(buildClaudeArgs({ agentsFile: "a.json" }, { agentsArg: "{}" }), "--agents"), "{}");
+  let runs = 0;
+  const run = () => (runs++, "2.1.5 (Claude Code)");
+  assert.equal(cliVersion("C:/x/claude.exe", run), "2.1.5");
+  assert.equal(cliVersion("C:/x/claude.exe", run), "2.1.5");
+  assert.equal(runs, 1, "read once per binary");
 });

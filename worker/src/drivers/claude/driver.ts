@@ -16,6 +16,7 @@ import { Interactions } from "./interactions.ts";
 import { BUDGET_HOOK_ID, SubagentBudget, subagentRule } from "./limits.ts";
 import { isLongCommandLevel, LongCommandPolicy, PROMPT_RULE, SHELL_TOOLS_MATCHER } from "./longcmd.ts";
 import { LANDING_GUARD_HOOK_ID, LANDING_GUARD_MATCHER, LandingGuard } from "./guard.ts";
+import { agentsArg, cliVersion } from "./cliversion.ts";
 import { assertNotShim, resolveClaude, type Resolved } from "./resolve.ts";
 import { NATIVE_SCHEDULE_MATCHER, SCHEDULE_REDIRECT_HOOK_ID, scheduleRedirect } from "./schedulecalls.ts";
 import { SUBAGENT_MODEL_HOOK_ID, SUBAGENT_MODEL_MATCHER, SubagentModelGuard } from "./subagentmodel.ts";
@@ -267,9 +268,11 @@ export class ClaudeDriver implements Driver {
       this.resolved = resolveClaude({ env: this.deps.env });
       command = this.resolved.path;
     }
+    // An older CLI gets the agents inline, or the spawn fails here naming its version and path.
+    const agents = c.agentsFile ? agentsArg(c.agentsFile, cliVersion(command), command) : undefined;
     const args = [
       ...(c.commandArgs ?? []),
-      ...buildClaudeArgs(c, { promptRule: this.promptRule(), mcpConfig: this.hostTools ? sdkMcpConfig() : undefined }),
+      ...buildClaudeArgs(c, { promptRule: this.promptRule(), mcpConfig: this.hostTools ? sdkMcpConfig() : undefined, agentsArg: agents }),
     ];
     const env = buildClaudeEnv(this.deps.env, { apiKeyMode: c.apiKeyMode === true, chatId: this.launch.chatId, local: c.local, localKey: this.deps.localKey, effort: this.effort });
     const child = spawn(command, args, {
