@@ -332,10 +332,11 @@ export class ClaudeDriver implements Driver {
     const models = Array.isArray(init.models)
       ? (init.models as Json[]).map((m) => ({ id: m.value ?? m.id, name: m.displayName ?? m.value, description: m.description }))
       : [];
-    let cliVersion: string | null = null;
+    // Not named cliVersion: that would shadow the import used above and throw before this line.
+    let binaryVersion: string | null = null;
     try {
       const v = await this.control({ subtype: "get_binary_version" }, VERSION_PROBE_MS);
-      if (typeof v.version === "string") cliVersion = v.version;
+      if (typeof v.version === "string") binaryVersion = v.version;
     } catch {
       // An older CLI without the request: the version stays unknown.
     }
@@ -344,7 +345,7 @@ export class ClaudeDriver implements Driver {
       harness: "claude",
       executable: this.resolved.path,
       executableSource: this.resolved.source,
-      cliVersion,
+      cliVersion: binaryVersion,
       model: this.model ?? null,
       // A local model has no effort setting, but its effort still sets the thinking budget.
       effort: this.isLocal || modelTakesEffort(this.model) ? this.effort : null,
