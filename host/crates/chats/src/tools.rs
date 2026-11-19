@@ -1860,7 +1860,8 @@ async fn update_chat(ctx: ToolCtx, a: Value) -> ToolResult {
             )));
         }
     }
-    // Only the chat that made this chat, or the user, may mute or unmute it.
+    // Only the chat that made this chat (or a roll-over successor of it), or the user, may mute or
+    // unmute it.
     let muted = match a.get("muted") {
         None => None,
         Some(m) => Some(
@@ -1869,10 +1870,10 @@ async fn update_chat(ctx: ToolCtx, a: Value) -> ToolResult {
         ),
     };
     if muted.is_some() {
-        let by = db(&ctx)?
-            .snapshot(|tx| crate::mute::created_by(tx, &id))
+        let allowed = db(&ctx)?
+            .snapshot(|tx| crate::mute::made_by_chain(tx, &id, &ctx.caller_chat_id))
             .map_err(|e| ToolError::maybe(e.to_string()))?;
-        if by.as_deref() != Some(ctx.caller_chat_id.as_str()) {
+        if !allowed {
             return Err(refuse(
                 "Only the chat that created this chat, or the user, can mute it; ask the user to mute it from the chat's menu.",
             ));

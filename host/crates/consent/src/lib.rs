@@ -20,7 +20,7 @@
 //! | `consent_decide` | blocking | [`ConsentDecideArgs`] to [`ConsentRequest`] (`conflict` when no longer pending); emits `consent {chatId}` |
 //!
 //! Kinds register through `registrations::allow_kinds` (one [`AllowKinds::register`] line per
-//! kind). The MCP crate has `mcp_repo_server` and, in tests and debug builds only,
+//! kind). The MCP crate registers the Gmail send kind and, in tests and debug builds only,
 //! [`kinds::test_kind`].
 //!
 //! **Applying kinds** ([`AllowKinds::register_applying`], [`apply`]): a change Helm makes itself

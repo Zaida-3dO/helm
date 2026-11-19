@@ -2,7 +2,7 @@
 //!
 //! A kind says what one Allow grant permits. The **host** builds the canonical target and the
 //! card's one-line summary from its own records; the agent's target is only the key it looks
-//! records up by. The MCP crate registers `mcp_repo_server` and, in tests and debug builds
+//! records up by. The MCP crate registers the Gmail send kind and, in tests and debug builds
 //! only, [`test_kind`].
 //!
 //! An **applying** kind ([`AllowKinds::register_applying`]) is one Helm applies itself the moment

@@ -116,25 +116,52 @@ pub(crate) fn front_description(path: &Path) -> String {
     if lines.next().map(str::trim) != Some("---") {
         return String::new();
     }
-    let mut folded = false;
+    // Set once a `description:` key opens a block (or an empty value): the indented lines after
+    // it are the text. `literal` keeps their line breaks (`|`); otherwise they join with spaces
+    // (`>`, or an empty value), and a blank line becomes a line break.
+    let mut block: Option<(bool, Vec<String>)> = None;
     for line in lines {
         let t = line.trim_end();
+        if let Some((literal, parts)) = block.as_mut() {
+            if t.trim().is_empty() {
+                parts.push(String::new());
+                continue;
+            }
+            if t.starts_with(' ') || t.starts_with('\t') {
+                parts.push(t.trim_start().to_owned());
+                continue;
+            }
+            return join_block(*literal, parts);
+        }
         if t == "---" {
             break;
         }
         if let Some(v) = t.strip_prefix("description:") {
             let v = v.trim();
             if v.is_empty() || v.starts_with('>') || v.starts_with('|') {
-                folded = true;
+                block = Some((v.starts_with('|'), Vec::new()));
                 continue;
             }
             return v.trim_matches(|c| c == '"' || c == '\'').to_owned();
         }
-        if folded && !t.is_empty() {
-            return t.to_owned();
-        }
     }
-    String::new()
+    match block {
+        Some((literal, parts)) => join_block(literal, &parts),
+        None => String::new(),
+    }
+}
+
+fn join_block(literal: bool, parts: &[String]) -> String {
+    let mut out = String::new();
+    for part in parts {
+        if literal || part.is_empty() {
+            out.push('\n');
+        } else if !out.is_empty() && !out.ends_with('\n') {
+            out.push(' ');
+        }
+        out.push_str(part);
+    }
+    out.trim().to_owned()
 }
 
 pub(crate) fn norm_path(p: &Path) -> String {
@@ -389,6 +416,33 @@ mod tests {
             ["review"]
         );
         assert_eq!(remove(&p, "gone").unwrap_err().kind(), ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn front_description_reads_plain_quoted_and_block_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("SKILL.md");
+        for (front, want) in [
+            ("description: Plain text", "Plain text"),
+            ("description: \"Quoted\"", "Quoted"),
+            (
+                "description: >\n  first line\n  second line\nname: x",
+                "first line second line",
+            ),
+            ("description: >-\n    one\n\n    two\n---\nbody", "one\ntwo"),
+            (
+                "description: |\n  line a\n    indented\n  line b\nname: x",
+                "line a\nindented\nline b",
+            ),
+            (
+                "description:\n  on the next line\nname: x",
+                "on the next line",
+            ),
+            ("name: x", ""),
+        ] {
+            write(&f, &format!("---\n{front}\n---\nbody\n"));
+            assert_eq!(front_description(&f), want, "{front}");
+        }
     }
 
     #[test]
