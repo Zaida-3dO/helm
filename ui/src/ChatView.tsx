@@ -356,7 +356,22 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       <div className="composer-dock-stack">
       {chat.status === 'interrupted' && (
         <div className="banner" data-testid="interrupted-banner">
-          <span>{chat.error ?? 'This chat was interrupted. Nothing saved was lost; check the chat before continuing.'}</span>
+          {(() => {
+            // An error written as a headline, a blank line and the raw text keeps the raw text
+            // behind a fold (the plan-limit notice does this).
+            const text = chat.error ?? 'This chat was interrupted. Nothing saved was lost; check the chat before continuing.';
+            const cut = text.indexOf('\n\n');
+            if (cut < 0) return <span>{text}</span>;
+            return (
+              <span>
+                {text.slice(0, cut)}
+                <details data-testid="interrupted-details">
+                  <summary>Details</summary>
+                  {text.slice(cut + 2)}
+                </details>
+              </span>
+            );
+          })()}
           {isTooLargeRefusal(chat.error) && (
             // The turn died on a prompt too large for the model's window. "Continue" would send
             // the same oversized prompt and fail again; the roll over is the way out.
