@@ -244,7 +244,9 @@ mod tests {
         a.on_completion(&completion("k1", "c1", 0), 0);
         a.on_completion(&completion("k2", "c2", 0), 0);
         // A finished, unmarked chat holds its toast from the summary's `finished` group.
-        assert!(a.withdrawals(&summary_with(&[], &["c1", "c2"], &[])).is_empty());
+        assert!(a
+            .withdrawals(&summary_with(&[], &["c1", "c2"], &[]))
+            .is_empty());
         assert_eq!(a.withdrawals(&summary_with(&[], &["c2"], &[])), ["c1"]);
         assert!(!a.is_posted("c1"));
         assert!(
