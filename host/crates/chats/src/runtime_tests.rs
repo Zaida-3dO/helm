@@ -4344,6 +4344,28 @@ async fn a_configured_background_model_rides_on_the_helper_job() {
         "an unset preference changes nothing"
     );
 
+    // A local chat with no local model chosen never hands its words to Claude: no job runs and
+    // the fallback title stays.
+    let made = h
+        .call(
+            "chat_create",
+            json!({"cwd": h.work.to_string_lossy(), "model": "local/ollama/qwen3-8b"}),
+        )
+        .await
+        .unwrap();
+    let unset_local = made["id"].as_str().unwrap().to_owned();
+    h.send(&unset_local, "private words for the local model", "default")
+        .await;
+    h.until("local fallback", |h| {
+        title_of(h, &unset_local).1 == "fallback/failed"
+    })
+    .await;
+    assert_eq!(
+        h.spawner.title_jobs.lock().unwrap().len(),
+        1,
+        "no title job ran for the local chat"
+    );
+
     // The generic writer behind the `preference` op (the op itself lives in core, outside this
     // crate's harness; the writer is the part that classifies and validates).
     h.db.write(|tx| {
