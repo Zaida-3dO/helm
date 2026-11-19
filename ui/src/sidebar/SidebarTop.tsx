@@ -218,16 +218,25 @@ function Beacon({ attention, onOpenChat }: { attention: AttentionSummary | null;
 const FIRST = 8;
 
 function WorkspaceStatus({ attention, onClose, onOpen }: { attention: AttentionSummary | null; onClose: () => void; onOpen: (chatId: string) => void }) {
+  // The chats worth opening: the marked-unread and the just-finished ones. The two groups
+  // never share a chat.
+  const ready: AttentionRow[] = attention ? [...attention.unread, ...attention.finished] : [];
+  const finished = new Set(attention?.finished ?? []);
   const counts: [string, number | null][] = [
     ['Running', attention ? attention.busy : null],
     ['Needs input', attention ? attention.needsYou.length : null],
-    ['Unread', attention ? attention.unread.length : null],
+    ['Unread', attention ? ready.length : null],
   ];
   const sections: { key: string; title: string; rows: AttentionRow[]; state: (r: AttentionRow) => string }[] = attention
     ? [
         { key: 'input', title: 'Needs your input', rows: attention.needsYou, state: () => 'Needs input' },
         { key: 'progress', title: 'In progress', rows: attention.running, state: () => 'Running' },
-        { key: 'ready', title: 'Ready to open', rows: attention.unread, state: () => 'Finished' },
+        {
+          key: 'ready',
+          title: 'Ready to open',
+          rows: ready,
+          state: (r) => (finished.has(r) ? 'Finished' : 'Marked unread'),
+        },
       ].filter((s) => s.rows.length > 0)
     : [];
   return (

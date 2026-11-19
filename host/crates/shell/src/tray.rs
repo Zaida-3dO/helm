@@ -127,12 +127,15 @@ pub fn menu_model(
     devices: &[CaptureDevice],
     settings: &ShellSettings,
 ) -> TrayMenu {
+    // The unread group also lists chats that just finished a reply the user has not read:
+    // the tray should still offer to open them. The two groups never share a chat.
     let groups = summary
         .map(|s| {
+            let ready: Vec<AttentionRow> = s.unread.iter().chain(&s.finished).cloned().collect();
             [
                 group("Needs you", &s.needs_you),
                 group("Running", &s.running),
-                group("Unread", &s.unread),
+                group("Unread", &ready),
             ]
             .into_iter()
             .flatten()
@@ -197,7 +200,7 @@ mod tests {
                 .map(|i| row(&format!("r{i}"), "R", AttentionKind::Running))
                 .collect(),
             unread: vec![],
-            finished: vec![],
+            finished: vec![row("f", "Done", AttentionKind::Unread)],
             stalled: vec![],
             flagged: vec![],
             muted: vec![],
@@ -206,9 +209,10 @@ mod tests {
         };
         let m = menu_model(Some(&s), &[], &ShellSettings::default());
         let labels: Vec<_> = m.groups.iter().map(|g| g.label.as_str()).collect();
-        assert_eq!(labels, ["Needs you", "Running"]);
+        assert_eq!(labels, ["Needs you", "Running", "Unread"]);
         assert_eq!(m.groups[1].items.len(), 8);
         assert_eq!(m.groups[0].items[0].label, "A · proj");
+        assert_eq!(m.groups[2].items[0].label, "Done · proj");
         assert!(menu_model(None, &[], &ShellSettings::default())
             .groups
             .is_empty());
