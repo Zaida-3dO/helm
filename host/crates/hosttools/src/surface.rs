@@ -320,7 +320,7 @@ pub const FACADES: &[FacadeSpec] = &[
         name: "app_pages",
         group: "pages",
         description: "Pinned pages: a local .html file (a dashboard, tracker or checklist you built) shown in the user's Pages list. Pin one (pin) or list the pinned pages (list). How a page is built: app_help helm/pages.",
-        guidelines: "pin: path (absolute or relative to this chat's folder) and optional title. Pinning the same file again updates its title. Only when the user asked for a page.\nlist: id, title, path and linked chat of each.",
+        guidelines: "pin: path (absolute or relative to this chat's folder) and optional title. Pinning the same file again updates its title and links the page to this chat. Only when the user asked for a page.\nlist: id, title, path and linked chat of each.",
         core: false,
         actions: &[("pin", "app_pin_page"), ("list", "app_list_pages")],
         fixed: &[],

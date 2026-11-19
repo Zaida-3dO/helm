@@ -32,11 +32,17 @@ async fn pin(ctx: ToolCtx, a: Value) -> ToolResult {
     }
     let r = ctx.op("page_pin", chat_arg(&ctx, args)).await?;
     let page = &r["page"];
+    let note = if r["created"] == json!(true) {
+        "The page is in the user's Pages list and linked to this chat, so its messages arrive here. \
+         It opens in the side panel when they click it; rewrite the file to change what they see."
+    } else {
+        "The page was already pinned: it is now linked to this chat, so its messages arrive here. \
+         It opens in the side panel when they click it; rewrite the file to change what they see."
+    };
     Ok(json!({
         "pinned": {"id": page["id"], "title": page["title"], "path": page["path"]},
         "created": r["created"],
-        "note": "The page is in the user's Pages list. It opens in the side panel when they click it; \
-                 rewrite the file to change what they see.",
+        "note": note,
     }))
 }
 
@@ -65,7 +71,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
         ToolSpec::write(
             "app_pin_page",
             format!(
-                "Pin a local HTML page so the user can open it from Helm's Pages list and keep using it: a dashboard, tracker, checklist or approval page you built as an .html file. It is linked to this chat, which is where the page's messages arrive. Give the path of the file (absolute, or relative to this chat's folder) and optionally a title. Pinning the same file again updates its title.{EXPLICIT}"
+                "Pin a local HTML page so the user can open it from Helm's Pages list and keep using it: a dashboard, tracker, checklist or approval page you built as an .html file. It is linked to this chat, which is where the page's messages arrive. Give the path of the file (absolute, or relative to this chat's folder) and optionally a title. Pinning the same file again updates its title (when you give one) and links the page to this chat, so its messages now arrive here.{EXPLICIT}"
             ),
             json!({
                 "type": "object",
