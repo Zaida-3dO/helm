@@ -161,6 +161,11 @@ pub fn is_sign_in_error(error: &str) -> bool {
         || e.contains("not logged in")
 }
 
+/// The head of the notice built for a sign-in style failure while a plan window reads used up.
+/// The stored text starts with it, so `classify` can tell the notice apart from the raw sign-in
+/// error behind it and stop retrying it as a token refresh.
+pub const PLAN_LIMIT_HEAD: &str = "Plan limit reached";
+
 /// What to show for a failed turn while a plan window reads used up. A sign-in style failure then
 /// is the plan's limit in disguise, so it says so, with the window's reset time, and keeps the
 /// raw error after a blank line for the details fold under the banner. Anything else, and any
@@ -178,8 +183,8 @@ where
         return None;
     }
     let head = match cap.until.and_then(|u| tz.timestamp_millis_opt(u).single()) {
-        Some(at) => format!("Plan limit reached, resets at {}", at.format("%H:%M")),
-        None => "Plan limit reached".to_owned(),
+        Some(at) => format!("{PLAN_LIMIT_HEAD}, resets at {}", at.format("%H:%M")),
+        None => PLAN_LIMIT_HEAD.to_owned(),
     };
     Some(format!(
         "{head}
@@ -203,6 +208,11 @@ pub fn refresh_spread_ms(chat_id: &str, attempts: u32) -> i64 {
 /// Read a turn's error text. `None` for everything that is not an outage (a usage limit, a
 /// refusal, a crash, the user's stop): those are not carried on by themselves.
 pub fn classify(error: &str) -> Option<Cause> {
+    // A plan-limit notice carries the raw sign-in error after its head. Retrying it while the
+    // window is full would just fail again, so it is never an outage.
+    if error.starts_with(PLAN_LIMIT_HEAD) {
+        return None;
+    }
     if is_token_refresh_error(error) {
         return Some(Cause::TokenRefresh);
     }
@@ -1116,6 +1126,11 @@ mod tests {
             ),
             ("failed to refresh oauth token", Some(Cause::TokenRefresh)),
             // Not outages.
+            (
+                "Plan limit reached, resets at 01:13\n\nFailed to refresh OAuth token: another Claude Code process is refreshing it",
+                None,
+            ),
+            ("Plan limit reached\n\nfailed to refresh oauth token", None),
             ("Failed to authenticate: OAuth session expired", None),
             ("Rate limit reached (429)", None),
             ("Claude usage limit reached", None),
