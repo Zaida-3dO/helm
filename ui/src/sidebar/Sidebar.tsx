@@ -770,6 +770,9 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         onOpenChat={onSelect}
         remoteChatId={selected && (remote || other.hosts.has(selected)) ? selected : null}
       />
+      <div className="sb-pages">
+        <PagesEntry api={api} bus={bus} profileId={activeProfile} />
+      </div>
       {(error ?? snap.error) && (
         <p className="sb-error" role="alert">
           {error ?? snap.error}
@@ -862,6 +865,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         )}
       </div>
       <div className="sb-footer">
+        <ProfileItem api={api} bus={bus} />
         <button
           type="button"
           className="sb-foot"
@@ -872,8 +876,6 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           <IconArchive />
           <span>{archived ? 'Back to projects' : 'Archived chats'}</span>
         </button>
-        <PagesEntry api={api} bus={bus} profileId={activeProfile} />
-        <ProfileItem api={api} bus={bus} />
         {openSettings && (
           <button type="button" className="sb-foot" data-testid="nav-settings" onClick={openSettings}>
             <IconSettings />

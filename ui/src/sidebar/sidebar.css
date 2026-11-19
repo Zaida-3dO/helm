@@ -911,6 +911,10 @@
 
 /* ---- footer ---- */
 
+.sb-pages {
+  padding: 2px 12px 0;
+}
+
 .sb-footer {
   padding: 7px 12px 10px;
   display: flex;
