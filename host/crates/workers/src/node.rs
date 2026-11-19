@@ -224,12 +224,12 @@ mod tests {
                 Some("winget upgrade OpenJS.NodeJS.LTS"),
             ),
             (
-                r"C:\Users\a\AppData\Roaming\nvm\v20.1.0\node.exe",
+                r"C:\nvm4w\nvm\v20.1.0\node.exe",
                 true,
                 Some("nvm install lts"),
             ),
             (
-                r"C:\Users\a\AppData\Local\Volta\bin\node.exe",
+                r"C:\Program Files\Volta\node.exe",
                 true,
                 Some("volta install node@lts"),
             ),
