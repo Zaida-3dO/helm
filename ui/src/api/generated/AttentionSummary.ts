@@ -8,7 +8,18 @@ import type { TriageRow } from "./TriageRow";
  * busy count, and at most 8 rows per group. Published as an `attention` event on every
  * change and read by `attention_get`.
  */
-export type AttentionSummary = { badge: number, busy: number, needsYou: Array<AttentionRow>, running: Array<AttentionRow>, unread: Array<AttentionRow>, 
+export type AttentionSummary = { badge: number, busy: number, needsYou: Array<AttentionRow>, running: Array<AttentionRow>,
+/**
+ * Chats the user marked unread.
+ */
+unread: Array<AttentionRow>,
+/**
+ * Chats that finished a reply the user has not read. Not counted in the badge and not a
+ * group the inbox lists: it exists so the finished notices stay tied to the reply's read
+ * state — a finished toast comes back down once the chat is read, and an away alert can
+ * still name the finish.
+ */
+finished: Array<AttentionRow>,
 /**
  * Running chats with no output for the stall limit; they count in the badge.
  */

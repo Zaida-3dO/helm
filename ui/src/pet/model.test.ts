@@ -56,6 +56,17 @@ test('events move the state, and the next change is the nearest timer', () => {
   assert.deepEqual([s.needsYou, s.running, s.unread, s.lastEventAt], [1, 2, 1, T0 + 5]);
   // The same counts again are not an event (the pet may sleep through a repeated summary).
   assert.equal(withSummary(s, summary(['a'], ['b', 'c'], ['d']), T0 + 99).lastEventAt, T0 + 5);
+  // A finished reply the user has not read counts as done from the summary's `finished` group.
+  assert.equal(
+    withSummary(s, { needsYou: [], running: [], unread: [row('m')], finished: [row('d'), row('e')] }, T0 + 7)
+      .unread,
+    3,
+  );
+  assert.equal(
+    clickTarget({ needsYou: [], unread: [], finished: [row('z')] }),
+    'z',
+    'a click opens the finished chat',
+  );
   // A summary that is not one reads as empty.
   assert.deepEqual([withSummary(s, null, T0 + 6).needsYou, withSummary(s, { needsYou: 'x' }, T0 + 6).running], [0, 0]);
   s = withCompletion(s, T0 + 100);

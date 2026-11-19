@@ -358,7 +358,14 @@ pub struct AttentionSummary {
     pub busy: u32,
     pub needs_you: Vec<AttentionRow>,
     pub running: Vec<AttentionRow>,
+    /// Chats the user marked unread.
     pub unread: Vec<AttentionRow>,
+    /// Chats that finished a reply the user has not read. Not counted in the badge and not a
+    /// group the inbox lists: it exists so the finished notices stay tied to the reply's read
+    /// state — a finished toast comes back down once the chat is read, and an away alert can
+    /// still name the finish.
+    #[serde(default)]
+    pub finished: Vec<AttentionRow>,
     /// Running chats with no output for the stall limit; they count in the badge.
     pub stalled: Vec<AttentionRow>,
     /// Quiet chats the idle check thinks still need you; the reason is the check's own.

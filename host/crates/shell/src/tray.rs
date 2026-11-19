@@ -197,6 +197,7 @@ mod tests {
                 .map(|i| row(&format!("r{i}"), "R", AttentionKind::Running))
                 .collect(),
             unread: vec![],
+            finished: vec![],
             stalled: vec![],
             flagged: vec![],
             muted: vec![],

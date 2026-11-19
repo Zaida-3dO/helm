@@ -62,15 +62,22 @@ impl Announcer {
         true
     }
 
-    /// Chats whose posted notification must be withdrawn: they are no longer unread in the
-    /// summary (read, dismissed, started new work, archived). Withdraw-on-read reads the chats crate's
-    /// attention summary, as the brief says.
+    /// Chats whose posted notification must be withdrawn: they are no longer unread or finished
+    /// in the summary (read, dismissed, started new work, archived). A chat that only finished
+    /// sits in the summary's `finished` group, never in `unread`, and holds its toast up from
+    /// there; the inbox no longer lists such chats, but the finished notice lives until the
+    /// reply is read.
     pub fn withdrawals(&mut self, s: &AttentionSummary) -> Vec<String> {
-        let unread: HashSet<&str> = s.unread.iter().map(|r| r.chat_id.as_str()).collect();
+        let held: HashSet<&str> = s
+            .unread
+            .iter()
+            .chain(&s.finished)
+            .map(|r| r.chat_id.as_str())
+            .collect();
         let mut gone: Vec<String> = self
             .posted
             .keys()
-            .filter(|c| !unread.contains(c.as_str()))
+            .filter(|c| !held.contains(c.as_str()))
             .cloned()
             .collect();
         gone.sort();
@@ -157,6 +164,14 @@ mod tests {
     }
 
     fn summary(unread: &[&str], needs: &[(&str, AttentionKind)]) -> AttentionSummary {
+        summary_with(unread, &[], needs)
+    }
+
+    fn summary_with(
+        unread: &[&str],
+        finished: &[&str],
+        needs: &[(&str, AttentionKind)],
+    ) -> AttentionSummary {
         let row = |c: &str, k| AttentionRow {
             chat_id: c.into(),
             title: "T".into(),
@@ -170,6 +185,10 @@ mod tests {
             needs_you: needs.iter().map(|(c, k)| row(c, *k)).collect(),
             running: vec![],
             unread: unread
+                .iter()
+                .map(|c| row(c, AttentionKind::Unread))
+                .collect(),
+            finished: finished
                 .iter()
                 .map(|c| row(c, AttentionKind::Unread))
                 .collect(),
@@ -220,14 +239,20 @@ mod tests {
     }
 
     #[test]
-    fn withdraws_when_the_chat_is_no_longer_unread() {
+    fn withdraws_when_the_chat_is_no_longer_unread_or_finished() {
         let mut a = Announcer::new();
         a.on_completion(&completion("k1", "c1", 0), 0);
         a.on_completion(&completion("k2", "c2", 0), 0);
-        assert!(a.withdrawals(&summary(&["c1", "c2"], &[])).is_empty());
-        assert_eq!(a.withdrawals(&summary(&["c2"], &[])), ["c1"]);
+        // A finished, unmarked chat holds its toast from the summary's `finished` group.
+        assert!(a.withdrawals(&summary_with(&[], &["c1", "c2"], &[])).is_empty());
+        assert_eq!(a.withdrawals(&summary_with(&[], &["c2"], &[])), ["c1"]);
         assert!(!a.is_posted("c1"));
-        assert!(a.withdrawals(&summary(&["c2"], &[])).is_empty(), "once");
+        assert!(
+            a.withdrawals(&summary_with(&[], &["c2"], &[])).is_empty(),
+            "once"
+        );
+        // A mark keeps it up as well.
+        assert!(a.withdrawals(&summary(&["c2"], &[])).is_empty());
         assert_eq!(a.withdraw_all(), ["c2"]);
     }
 

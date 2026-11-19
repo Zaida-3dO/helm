@@ -2,19 +2,23 @@
 //!
 //! One host-side summary feeds every consumer: the taskbar badge, keep-awake and the tray menu,
 //! the sidebar's row marks, and the in-app toasts' withdraw-on-read (a toast is withdrawn once
-//! its chat leaves `unread`). Nobody computes it twice.
+//! its chat leaves both `unread` and `finished`). Nobody computes it twice.
 //!
 //! Rules:
 //! - Only unarchived chats that are not unpromoted side chats count.
-//! - The badge counts **chats**, each once, that have any of: a manual unread mark; an unread
-//!   completion while idle with no error; a pending blocking request (approval, question or plan,
-//!   from the waiting tracker: the live interactions). Stopped or failed chats count only when
-//!   manually marked. A muted chat counts for nothing and is in no group but `busy`; what it holds
+//! - The badge counts **chats**, each once, that have any of: a manual unread mark; a pending
+//!   blocking request (approval, question or plan, from the waiting tracker: the live
+//!   interactions). A chat that merely finished a reply the user has not read does not count:
+//!   it sits in `finished` instead, so the finished notices (a toast's withdraw-on-read, the
+//!   away alerts) keep the chat while the reply stays unread and drop it once it is read.
+//!   Stopped or failed chats count only when manually marked. A muted chat counts for nothing
+//!   and is in no group but `busy`; what it holds
 //!   (a live request or its agent's flag) is listed in `muted` so the user can still find it.
 //!   `triage` carries the idle check's priority for the chats it listed, and the chats it gave up
 //!   on; it is never counted.
 //! - `busy` counts starting, running and stopping chats.
-//! - The running, stalled and unread groups list at most [`MAX_ROWS`], newest activity first. The
+//! - The running, stalled, unread and finished groups list at most [`MAX_ROWS`], newest activity
+//!   first. The
 //!   needs-you and flagged groups are never cut short: each row there is a flag drawn on a
 //!   sidebar row, and a flag that is counted in the badge must have a row to sit on. A chat can be
 //!   in both of them (the consumers show it once).
@@ -215,6 +219,7 @@ pub fn compute(
         needs_you: vec![],
         running: vec![],
         unread: vec![],
+        finished: vec![],
         stalled: vec![],
         flagged: vec![],
         muted: vec![],
@@ -264,7 +269,12 @@ pub fn compute(
         // A live request (approval, question, plan) comes first; else the agent's own flag.
         let live_need = needs.get(&c.id).copied();
         let need = live_need.or(c.asked.as_ref().map(|_| AttentionKind::Question));
-        let unread = c.marked || (c.completion && c.status == ChatStatus::Idle && !c.error);
+        let unread = c.marked;
+        // A chat that only finished and has not been read is not listed as needing attention and
+        // never counted; it sits in `finished` so the finished notices (a toast's withdraw-on-read,
+        // the away alerts) still hold it while the reply is unread. A chat the user marked is in
+        // `unread` and does not need the second row.
+        let finished = c.completion && !c.marked && c.status == ChatStatus::Idle && !c.error;
         let stalled = c.stalled && c.status.is_busy();
         // The idle check only speaks for a chat the host is not already listing.
         let flagged = c.flagged.is_some() && !c.status.is_busy();
@@ -284,6 +294,9 @@ pub fn compute(
         }
         if unread && s.unread.len() < MAX_ROWS {
             s.unread.push(row(c, AttentionKind::Unread));
+        }
+        if finished && s.finished.len() < MAX_ROWS {
+            s.finished.push(row(c, AttentionKind::Unread));
         }
         if flagged {
             let mut r = row(c, AttentionKind::Triage);
@@ -395,6 +408,10 @@ mod tests {
         assert_eq!(s.needs_you[0].kind, AttentionKind::Approval);
         assert_eq!(s.unread.len(), 1);
         assert_eq!(s.unread[0].project, "proj");
+        assert!(
+            s.finished.is_empty(),
+            "a marked chat is not also held as finished"
+        );
     }
 
     #[test]
@@ -427,35 +444,57 @@ mod tests {
     }
 
     #[test]
-    fn completions_count_only_on_idle_error_free_chats() {
+    fn finished_chats_are_held_not_listed_and_only_marks_need_attention() {
         let (_d, db) = temp_db();
-        let a = chat(&db, "");
+        let (a, b) = (chat(&db, ""), chat(&db, "marked"));
+        for c in [&a, &b] {
+            exec(
+                &db,
+                "INSERT INTO chat_completions(chat_id, id, completed_at) VALUES (?1, ?2, 1)",
+                &[c.as_str(), c.as_str()],
+            );
+        }
         exec(
             &db,
-            "INSERT INTO chat_completions(chat_id, id, completed_at) VALUES (?1, 'k1', 1)",
-            &[&a],
+            "INSERT INTO unread_marks(chat_id, token, marked_at) VALUES (?1, 't', 1)",
+            &[&b],
         );
+        // A finished, unread, unmarked chat is held in `finished`, never listed or counted; a
+        // marked chat is listed and counted, whatever its status. The marked chat is not held a
+        // second time.
         let s = summary(&db, &Needs::new());
-        assert_eq!((s.badge, s.unread[0].title.as_str()), (1, "Untitled"));
+        assert_eq!(
+            (s.badge, s.unread.len(), s.finished.len()),
+            (1, 1, 1),
+            "only the mark needs attention"
+        );
+        assert_eq!(s.unread[0].chat_id, b);
+        assert_eq!(s.unread[0].reason, "Marked unread");
+        assert_eq!(
+            (
+                s.finished[0].chat_id.as_str(),
+                s.finished[0].title.as_str(),
+                s.finished[0].reason.as_str()
+            ),
+            (a.as_str(), "Untitled", "Finished; not read yet")
+        );
         exec(
             &db,
             "UPDATE chats SET status = 'stopped' WHERE id = ?1",
             &[&a],
         );
-        assert_eq!(
-            summary(&db, &Needs::new()).badge,
-            0,
-            "stopped counts only when marked"
+        assert!(
+            summary(&db, &Needs::new()).finished.is_empty(),
+            "a stopped chat holds nothing"
         );
         exec(
             &db,
             "UPDATE chats SET status = 'idle', error = 'boom' WHERE id = ?1",
             &[&a],
         );
-        assert_eq!(
-            summary(&db, &Needs::new()).badge,
-            0,
-            "an error keeps it out"
+        assert!(
+            summary(&db, &Needs::new()).finished.is_empty(),
+            "an error holds nothing"
         );
         exec(&db, "UPDATE chats SET error = NULL WHERE id = ?1", &[&a]);
         exec(
@@ -463,25 +502,9 @@ mod tests {
             "UPDATE chat_completions SET read = 1 WHERE chat_id = ?1",
             &[&a],
         );
-        assert_eq!(
-            summary(&db, &Needs::new()).badge,
-            0,
-            "a read completion is not unread"
-        );
-        exec(
-            &db,
-            "UPDATE chats SET status = 'stopped' WHERE id = ?1",
-            &[&a],
-        );
-        exec(
-            &db,
-            "INSERT INTO unread_marks(chat_id, token, marked_at) VALUES (?1, 't', 1)",
-            &[&a],
-        );
-        assert_eq!(
-            summary(&db, &Needs::new()).badge,
-            1,
-            "a manual mark counts whatever the status"
+        assert!(
+            summary(&db, &Needs::new()).finished.is_empty(),
+            "a read completion holds nothing"
         );
     }
 
@@ -546,7 +569,12 @@ mod tests {
         needs.insert(ask.clone(), AttentionKind::Approval);
         let s = summary(&db, &needs);
         assert_eq!(s.badge, 0, "muted chats raise nothing");
-        assert!(s.needs_you.is_empty() && s.unread.is_empty() && s.flagged.is_empty());
+        assert!(
+            s.needs_you.is_empty()
+                && s.unread.is_empty()
+                && s.finished.is_empty()
+                && s.flagged.is_empty()
+        );
         let held: Vec<(&str, MutedKind)> =
             s.muted.iter().map(|r| (r.title.as_str(), r.kind)).collect();
         assert_eq!(held.len(), 2, "{held:?}");
@@ -602,7 +630,12 @@ mod tests {
         assert_eq!(s.muted.len(), 2);
         assert!(s.muted.iter().all(|r| r.kind == MutedKind::Flag));
         assert_eq!(s.badge, 1, "only the unmuted chat's request counts");
-        assert!(s.stalled.is_empty() && s.unread.is_empty() && s.flagged.is_empty());
+        assert!(
+            s.stalled.is_empty()
+                && s.unread.is_empty()
+                && s.finished.is_empty()
+                && s.flagged.is_empty()
+        );
         assert!(
             s.running.is_empty(),
             "a muted chat is not in Running either"

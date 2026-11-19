@@ -94,10 +94,17 @@ interface Rows {
 const ids = (rows: unknown): string[] =>
   Array.isArray(rows) ? rows.map((r) => (r as Rows)?.chatId).filter((id): id is string => typeof id === 'string') : [];
 
-/** An attention summary: the three counts. A change in them counts as something happening. */
+/** An attention summary: the three counts. A change in them counts as something happening.
+ *  The "done" count reads both groups: a chat the user marked unread sits in `unread`, and one
+ *  that only finished a reply the user has not read sits in `finished`. */
 export function withSummary(s: PetState, summary: unknown, now: number): PetState {
   const o = (summary && typeof summary === 'object' ? summary : {}) as Record<string, unknown>;
-  const next = { ...s, needsYou: ids(o.needsYou).length, running: ids(o.running).length, unread: ids(o.unread).length };
+  const next = {
+    ...s,
+    needsYou: ids(o.needsYou).length,
+    running: ids(o.running).length,
+    unread: ids(o.unread).length + ids(o.finished).length,
+  };
   const same = next.needsYou === s.needsYou && next.running === s.running && next.unread === s.unread;
   return same ? next : { ...next, lastEventAt: now };
 }
@@ -140,10 +147,10 @@ export class FailureWatch {
   }
 }
 
-/** Which chat a click opens: the first that needs you, else the newest unread, else none. */
+/** Which chat a click opens: the first that needs you, else the newest unread or finished, else none. */
 export function clickTarget(summary: unknown): string | null {
   const o = (summary && typeof summary === 'object' ? summary : {}) as Record<string, unknown>;
-  return ids(o.needsYou)[0] ?? ids(o.unread)[0] ?? null;
+  return ids(o.needsYou)[0] ?? ids(o.unread)[0] ?? ids(o.finished)[0] ?? null;
 }
 
 // --- moved reports ---------------------------------------------------------------------------

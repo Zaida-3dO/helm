@@ -704,12 +704,30 @@ mod tests {
                 .iter()
                 .map(|c| row(c, AttentionKind::Unread))
                 .collect(),
+            finished: vec![],
             stalled: vec![],
             flagged: vec![],
             muted: vec![],
             triage: vec![],
             revision: 1,
         }
+    }
+
+    /// A summary as the host would publish it after a clean finish: the chat sits in the
+    /// finished group, not in the inbox's unread list.
+    fn finished_summary(chats: &[&str]) -> AttentionSummary {
+        let mut s = summary(0, 0, &[], &[]);
+        s.finished = chats
+            .iter()
+            .map(|c| AttentionRow {
+                chat_id: c.into(),
+                title: "T".into(),
+                project: "P".into(),
+                kind: AttentionKind::Unread,
+                reason: String::new(),
+            })
+            .collect();
+        s
     }
 
     fn completion(chat: &str) -> Completion {
@@ -956,6 +974,8 @@ mod tests {
         r.svc
             .observe(&event("completion", "completion", completion("c1")));
         r.svc
+            .observe(&event("attention", "summary", finished_summary(&["c1"])));
+        r.svc
             .observe(&event("attention", "summary", summary(0, 0, &[], &[])));
         assert_eq!(
             r.host
@@ -963,7 +983,8 @@ mod tests {
                 .into_iter()
                 .filter(|l| l.starts_with("toast") || l.starts_with("withdraw"))
                 .collect::<Vec<_>>(),
-            ["toast c1", "withdraw c1"]
+            ["toast c1", "withdraw c1"],
+            "the finished row holds the toast up until the chat is read"
         );
     }
 

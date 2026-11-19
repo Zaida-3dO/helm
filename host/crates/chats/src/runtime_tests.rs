@@ -3158,21 +3158,25 @@ async fn attention_follows_the_waiting_tracker() {
     );
     w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
         .await;
-    // The approval leaves Needs you; the clean finish leaves an unread completion instead.
+    // The approval leaves Needs you; the clean finish is held in the finished group instead, not
+    // listed as needing attention.
     h.until("needs you cleared", |h| {
         h.events("attention").last().is_some_and(|e| {
             e["summary"]["busy"] == 0
                 && e["summary"]["needsYou"]
                     .as_array()
                     .is_some_and(|v| v.is_empty())
-                && e["summary"]["unread"][0]["reason"] == "Finished; not read yet"
+                && e["summary"]["unread"]
+                    .as_array()
+                    .is_some_and(|v| v.is_empty())
+                && e["summary"]["finished"][0]["reason"] == "Finished; not read yet"
         })
     })
     .await;
 }
 
-/// A clean finish writes one completion, announced once, counted as unread; the next turn
-/// drops it; acknowledging it clears the badge.
+/// A clean finish writes one completion, announced once, and holds the chat in the finished
+/// group without counting it; the next turn drops it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_clean_turn_leaves_one_unread_completion() {
     let mut h = harness();
@@ -3189,8 +3193,9 @@ async fn a_clean_turn_leaves_one_unread_completion() {
     assert_eq!(ev[0]["completion"]["preview"], "All done: the tests pass.");
     let k = ev[0]["completion"]["id"].as_str().unwrap().to_owned();
     let a = h.call("attention_get", json!({})).await.unwrap();
-    assert_eq!(a["badge"], 1);
-    assert_eq!(a["unread"][0]["chatId"], chat.as_str());
+    assert_eq!(a["badge"], 0, "a finished, unread chat is not counted");
+    assert!(a["unread"].as_array().unwrap().is_empty(), "and not listed");
+    assert_eq!(a["finished"][0]["chatId"], chat.as_str());
     // A new turn drops the completion.
     h.send(&chat, "again", "default").await;
     let p = w.expect("prompt").await;
@@ -3209,17 +3214,25 @@ async fn a_clean_turn_leaves_one_unread_completion() {
     let _ = k;
 }
 
-/// Acknowledging the completion takes the chat off the badge, also when a summary read lands
-/// between the write and the writer's own publish (the read must publish what it found, or the
-/// event-only listeners such as the taskbar badge never hear of it).
+/// Acknowledging the completion takes the chat out of the finished group, also when a summary
+/// read lands between the write and the writer's own publish (the read must publish what it
+/// found, or the event-only listeners such as the toast withdrawals never hear of it).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn acknowledging_the_completion_clears_the_badge() {
+async fn acknowledging_the_completion_clears_the_finished_row() {
     let mut h = harness();
     let (chat, _, mut w) = running_turn(&mut h).await;
     w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
         .await;
     h.until("completion", |h| !h.events("completion").is_empty())
         .await;
+    h.until("finished", |h| {
+        h.events("attention").last().is_some_and(|e| {
+            e["summary"]["finished"]
+                .as_array()
+                .is_some_and(|v| !v.is_empty())
+        })
+    })
+    .await;
     let k = h.events("completion")[0]["completion"]["id"]
         .as_str()
         .unwrap()
@@ -3227,10 +3240,12 @@ async fn acknowledging_the_completion_clears_the_badge() {
     h.call("completion_ack", json!({"chatId": chat, "completionId": k}))
         .await
         .unwrap();
-    h.until("badge 0", |h| {
-        h.events("attention")
-            .last()
-            .is_some_and(|e| e["summary"]["badge"] == 0)
+    h.until("finished cleared", |h| {
+        h.events("attention").last().is_some_and(|e| {
+            e["summary"]["finished"]
+                .as_array()
+                .is_some_and(|v| v.is_empty())
+        })
     })
     .await;
     // A second finish, marked read behind the publisher's back, then read through attention_get.
@@ -3239,16 +3254,21 @@ async fn acknowledging_the_completion_clears_the_badge() {
     ack(&w, &p).await;
     w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
         .await;
-    h.until("badge 1", |h| {
-        h.events("attention")
-            .last()
-            .is_some_and(|e| e["summary"]["badge"] == 1)
+    h.until("finished again", |h| {
+        h.events("attention").last().is_some_and(|e| {
+            e["summary"]["finished"]
+                .as_array()
+                .is_some_and(|v| !v.is_empty())
+        })
     })
     .await;
     h.db.write(|tx| tx.execute("UPDATE chat_completions SET read = 1", []))
         .unwrap();
     let a = h.call("attention_get", json!({})).await.unwrap();
-    assert_eq!(a["badge"], 0);
+    assert!(
+        a["finished"].as_array().unwrap().is_empty(),
+        "a read completion is not held"
+    );
     let last = h.events("attention").last().cloned().unwrap();
     assert_eq!(
         (&last["summary"]["badge"], &last["summary"]["revision"]),

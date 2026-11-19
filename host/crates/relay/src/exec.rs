@@ -453,7 +453,7 @@ impl AppExecutor {
             keep(rows);
         }
         for key in [
-            "needsYou", "running", "unread", "stalled", "flagged", "muted",
+            "needsYou", "running", "unread", "finished", "stalled", "flagged", "muted",
         ] {
             if let Some(rows) = r.get_mut(key).and_then(Value::as_array_mut) {
                 keep(rows);
@@ -669,6 +669,7 @@ mod tests {
             "needsYou": [{"chatId": "b"}],
             "running": [{"chatId": "a"}, {"chatId": "z"}],
             "unread": [],
+            "finished": [{"chatId": "b"}, {"chatId": "a"}],
             "stalled": [{"chatId": "c"}],
             "flagged": [{"chatId": "b"}, {"chatId": "c"}],
             "muted": [{"chatId": "a"}],
@@ -676,6 +677,7 @@ mod tests {
         let r = AppExecutor::filter_visible(attention, &ids);
         assert_eq!(r["needsYou"].as_array().unwrap().len(), 0);
         assert_eq!(r["running"].as_array().unwrap().len(), 1);
+        assert_eq!(r["finished"].as_array().unwrap().len(), 1);
         assert_eq!(r["stalled"].as_array().unwrap().len(), 1);
         assert_eq!(r["flagged"].as_array().unwrap().len(), 1);
         assert_eq!(r["muted"].as_array().unwrap().len(), 1);

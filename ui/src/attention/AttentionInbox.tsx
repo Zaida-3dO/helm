@@ -143,7 +143,7 @@ export function AttentionInbox({ summary, ops, onOpen, onClose }: AttentionInbox
       onClose={onClose}
       wide
       testId="attention-inbox"
-      intro="Chats waiting on you, quiet chats that may still need you, chats that may be stuck, and results you have not read. Mark addressed or snooze one to set it aside until something new happens in it."
+      intro="Chats waiting on you, quiet chats that may still need you, chats that may be stuck, and chats you marked unread. Mark addressed or snooze one to set it aside until something new happens in it."
     >
       <div className="att-body">
         {!summary && <p className="att-note">Checking chats…</p>}
@@ -151,7 +151,7 @@ export function AttentionInbox({ summary, ops, onOpen, onClose }: AttentionInbox
           <div className="att-empty">
             <IconCheck size={20} />
             <strong>Nothing needs you</strong>
-            <span>Chats that wait on you, go quiet with work left, stall or finish unread appear here.</span>
+            <span>Chats that wait on you, go quiet with work left, stall, or that you mark as unread appear here.</span>
           </div>
         )}
         <div className="att-cards">

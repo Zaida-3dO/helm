@@ -644,16 +644,19 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     const awaiting = (i: Interaction) => i.attention && i.gate?.state !== 'checking';
     const busy = list.filter((c) => ['starting', 'running', 'stopping'].includes(c.chat.status));
     const needs = list.filter((c) => c.thread.interactions.some(awaiting));
-    const unread = list.filter((c) => c.chat.unread.markToken || (c.chat.unread.completionId && c.chat.status === 'idle' && !c.chat.error));
+    // Like the host: only a manual mark needs attention; a clean finish is held in `finished`.
+    const marked = list.filter((c) => c.chat.unread.markToken);
+    const finished = list.filter((c) => !c.chat.unread.markToken && c.chat.unread.completionId && c.chat.status === 'idle' && !c.chat.error);
     return {
-      badge: new Set([...needs, ...unread]).size,
+      badge: new Set([...needs, ...marked]).size,
       busy: all.filter((c) => ['starting', 'running', 'stopping'].includes(c.chat.status)).length,
       needsYou: needs.slice(0, 8).map((c) => {
         const a = c.thread.interactions.find(awaiting)?.attention;
         return row(c, a === 'trust' ? 'approval' : String(a));
       }),
       running: busy.slice(0, 8).map((c) => row(c, 'running')),
-      unread: unread.slice(0, 8).map((c) => row(c, 'unread')),
+      unread: marked.slice(0, 8).map((c) => row(c, 'unread')),
+      finished: finished.slice(0, 8).map((c) => row(c, 'unread')),
       stalled: [],
       muted: all
         .filter((c) => c.chat.muted && c.thread.interactions.some(awaiting))
@@ -666,7 +669,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         ...list.filter((c) => gaveUp.has(c.chat.id)).map((c) => ({ chatId: c.chat.id, title: c.chat.title || 'Untitled', project: folderName(c.chat.cwd), priority: null, failed: true })),
       ],
       flagged: list
-        .filter((c) => flags.has(c.chat.id) && !['starting', 'running', 'stopping'].includes(c.chat.status) && !needs.includes(c) && !unread.includes(c))
+        .filter((c) => flags.has(c.chat.id) && !['starting', 'running', 'stopping'].includes(c.chat.status) && !needs.includes(c) && !marked.includes(c) && !finished.includes(c))
         .slice(0, 8)
         .map((c) => ({ ...row(c, 'triage'), reason: flags.get(c.chat.id) ?? '' })),
       revision,

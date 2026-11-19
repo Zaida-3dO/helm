@@ -316,6 +316,7 @@ mod tests {
                 .map(|i| row(&format!("r{i}"), AttentionKind::Running, ""))
                 .collect(),
             unread: vec![],
+            finished: vec![],
             stalled: vec![],
             flagged: (0..flagged)
                 .map(|i| row(&format!("f{i}"), AttentionKind::Triage, ""))

@@ -10,6 +10,7 @@ const summary = (over: Partial<AttentionSummary> = {}): AttentionSummary => ({
   needsYou: [],
   running: [],
   unread: [],
+  finished: [],
   stalled: [],
   flagged: [],
   muted: [],
@@ -25,11 +26,13 @@ test('the inbox lists waiting-on-you, then quiet-but-flagged, then stuck, then u
     flagged: [row('f', 'triage'), row('b', 'triage')],
     stalled: [row('c', 'stalled'), row('a', 'stalled')],
     unread: [row('d', 'unread'), row('b', 'unread')],
+    finished: [row('g', 'unread')],
     running: [row('r', 'running')],
   });
   assert.deepEqual(
     inboxRows(s).map((r) => `${r.chatId}:${r.group}`),
     ['a:needsYou', 'b:needsYou', 'f:flagged', 'c:stalled', 'd:unread'],
+    'a finished, unmarked chat is held for the finished notices, never listed',
   );
   assert.deepEqual(
     inboxRows(s, { flagged: false }).map((r) => r.chatId),

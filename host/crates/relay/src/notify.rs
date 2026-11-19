@@ -93,13 +93,15 @@ pub struct Alert {
     pub keys: Vec<Key>,
 }
 
-/// The rows an away alert is about: chats that need the user, have stalled, or finished a reply
-/// they have not read.
+/// The rows an away alert is about: chats that need the user (marked unread among them), have
+/// stalled, or finished a reply they have not read — which the summary holds in `finished` even
+/// though the inbox no longer lists them.
 pub fn alertable(a: &AttentionSummary) -> Vec<AttentionRow> {
     a.needs_you
         .iter()
         .chain(&a.stalled)
         .chain(&a.unread)
+        .chain(&a.finished)
         .cloned()
         .collect()
 }

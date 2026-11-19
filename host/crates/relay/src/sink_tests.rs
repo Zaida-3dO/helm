@@ -2452,6 +2452,7 @@ fn a_note(chat: &str) -> voice_watch::Note {
         needs_you: vec![],
         running: vec![],
         unread: vec![],
+        finished: vec![],
         stalled: vec![],
         flagged: vec![],
         muted: vec![],

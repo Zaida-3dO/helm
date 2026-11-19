@@ -1,7 +1,9 @@
 // The Needs attention inbox as pure functions
 // over the host's one attention summary (`host/crates/chats/src/attention.rs`): chats waiting on
 // you, quiet chats the idle check thinks still need you (with its reason), chats that may be
-// stuck, and unread results. Mark addressed and Snooze take a chat out until new activity.
+// stuck, and chats you marked unread. A chat that merely finished sits in the summary's `finished`
+// group for the finished notices, and is not listed here. Mark addressed and Snooze take a chat
+// out until new activity.
 
 import type { AttentionRow, AttentionSummary, MutedKind, MutedRow, TriageRow } from '../api/types.ts';
 
@@ -11,8 +13,9 @@ export interface InboxRow extends AttentionRow {
   group: InboxGroup;
 }
 
-/** Waiting on you first, then quiet chats that may still need you, then possibly stuck, then unread
- *  results; each chat once. `flagged: false` leaves the idle check's rows out (it was switched off
+/** Waiting on you first, then quiet chats that may still need you, then possibly stuck, then chats
+ *  you marked unread; each chat once. The summary's `finished` rows (a reply that ended unread) are
+ *  not listed. `flagged: false` leaves the idle check's rows out (it was switched off
  *  and the host has not published yet). */
 export function inboxRows(s: AttentionSummary | null, opts: { flagged?: boolean } = {}): InboxRow[] {
   if (!s) return [];

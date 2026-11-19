@@ -429,6 +429,7 @@ mod tests {
             needs_you: needs,
             running: vec![],
             unread: vec![],
+            finished: vec![],
             stalled,
             flagged,
             muted: vec![],
