@@ -35,6 +35,12 @@ function SavedPane() {
         page,
       })
       .then((p) => {
+        // A removal can leave the page past the last one: step back to the last page.
+        const last = Math.max(1, Math.ceil(p.total / PAGE_SIZE));
+        if (page > last) {
+          setPage(last);
+          return;
+        }
         setItems(p.items);
         setTotal(p.total);
       })
