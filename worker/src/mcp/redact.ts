@@ -17,7 +17,42 @@ const MIN_SECRET = 4;
  *  - well-known prefixed tokens are redacted wherever they appear: sk-..., ghp_/gho_/ghu_/ghs_/ghr_
  *    and github_pat_..., xoxa-/xoxb-/xoxp-..., AKIA... and JWTs (eyJ... with two dots).
  */
-const KEYWORD_RUN = /((?:token|key|secret|password|passwd|authorization|bearer|api_key|apikey)["']?(?:\s*[:=]\s*|\s+)["']?(?:bearer\s+)?)[A-Za-z0-9+/_=-]{32,}/gi;
+/*
+ * The keyword only counts as a name of its own or as the end of a credential-style name
+ * (access_token, refresh_token, client_secret, api_key, x-api-key): the whole name starts at a
+ * word boundary, so "monkey" no longer hands its "key" to the next run. Paging and cursor words
+ * (pageToken, page_token, sync token, continuation token...) are not credentials, so a name
+ * after page/next/sync/continuation/cursor is left alone. A run may hold "/" only after
+ * authorization or bearer (where URLs and opaque strings legitimately carry one); after any
+ * other keyword a "key src/some/long/path" is a path, not a secret.
+ */
+const NAME_TAIL = String.raw`(?:(?:access|refresh|client|session|x-api|api)[-_])?`;
+const AUTH_KW = String.raw`(?:authorization|bearer)`;
+const OTHER_KW = String.raw`(?:passwd|password|api[-_]?key|apikey|secret|token|key)`;
+const NOT_PAGING = String.raw`(?<![-\w])(?<!page )(?<!next )(?<!sync )(?<!continuation )(?<!cursor )`;
+const KEYWORD_RUN = new RegExp(
+  // authorization/bearer: the value may hold "/" (opaque strings do); after any other keyword
+  // it may not, unless the value is introduced by "bearer". Each branch captures the keyword
+  // name and separator; the run after it is replaced.
+  NOT_PAGING +
+    "(" +
+    NAME_TAIL +
+    AUTH_KW +
+    String.raw`["']?(?:\s*[:=]\s*|\s+)["']?(?:bearer\s+)?)[A-Za-z0-9+/=-]{32,}` +
+    "|" +
+    NOT_PAGING +
+    "(" +
+    NAME_TAIL +
+    OTHER_KW +
+    String.raw`["']?(?:\s*[:=]\s*|\s+)["']?bearer\s+)[A-Za-z0-9+/=-]{32,}` +
+    "|" +
+    NOT_PAGING +
+    "(" +
+    NAME_TAIL +
+    OTHER_KW +
+    String.raw`["']?(?:\s*[:=]\s*|\s+)["']?)[A-Za-z0-9+_-]{32,}`,
+  "gi",
+);
 const PREFIXED = new RegExp(
   String.raw`\b(?:` +
     [
@@ -34,7 +69,12 @@ const PREFIXED = new RegExp(
 
 /** Redacts secret-looking runs by shape (see the rule above). */
 export function redactShapes(text: string): string {
-  return text.replace(KEYWORD_RUN, `$1${REDACTED}`).replace(PREFIXED, REDACTED);
+  return text
+    .replace(KEYWORD_RUN, (_m, auth: string, credBearer: string, cred: string) => {
+      const name = auth ?? credBearer ?? cred ?? "";
+      return `${name}${REDACTED}`;
+    })
+    .replace(PREFIXED, REDACTED);
 }
 
 export class Redactor {

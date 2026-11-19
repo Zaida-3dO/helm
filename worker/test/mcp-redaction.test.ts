@@ -95,6 +95,16 @@ test("secret-looking runs are redacted by shape; git ids and prose are not", () 
     ["xoxb-123456789012-abcdef and AKIAABCDEFGHIJKLMNOP", "[redacted] and [redacted]"],
     ["the key to a good token is a short one", "the key to a good token is a short one"],
     ["Passwords must be rotated every ninety days.", "Passwords must be rotated every ninety days."],
+    [`{"nextPageToken":"${sha}"}`, `{"nextPageToken":"${sha}"}`],
+    [`{"page_token":"${sha}"}`, `{"page_token":"${sha}"}`],
+    [`monkey ${sha}`, `monkey ${sha}`],
+    [
+      "key src/components/settings/runtime/UpgradeCommand",
+      "key src/components/settings/runtime/UpgradeCommand",
+    ],
+    [`sync token: ${sha}`, `sync token: ${sha}`],
+    [`access_token: ${sha}`, "access_token: [redacted]"],
+    [`x-api-key: ${sha}`, "x-api-key: [redacted]"],
   ];
   const r = new Redactor([]);
   for (const [input, want] of rows) assert.equal(r.text(input), want, input);
