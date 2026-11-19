@@ -6506,11 +6506,18 @@ async fn roll_over_hands_the_work_to_a_successor_and_archives_the_old_chat() {
         !h.events("shell_open_chat").is_empty()
     })
     .await;
-    let new = h.events("shell_open_chat")[0]["chatId"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let opened = h.events("shell_open_chat").remove(0);
+    let new = opened["chatId"].as_str().unwrap().to_owned();
     assert_ne!(new, chat);
+    assert_eq!(
+        opened["ifViewing"].as_str(),
+        Some(chat.as_str()),
+        "the window follows only while the old chat is still on screen"
+    );
+    assert!(
+        opened["title"].as_str().is_some_and(|t| !t.is_empty()),
+        "the notice names the successor: {opened:?}"
+    );
     assert_eq!(
         h.col(&format!("SELECT project_id = (SELECT project_id FROM chats WHERE id = '{chat}') FROM chats WHERE id = '{new}'")),
         ["1"]
@@ -8030,10 +8037,17 @@ async fn a_model_change_too_large_for_the_target_offers_a_roll_over() {
         !h.events("shell_open_chat").is_empty()
     })
     .await;
-    let new = h.events("shell_open_chat")[0]["chatId"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let opened = h.events("shell_open_chat").remove(0);
+    let new = opened["chatId"].as_str().unwrap().to_owned();
+    assert_eq!(
+        opened["ifViewing"].as_str(),
+        Some(chat.as_str()),
+        "the window follows only while the old chat is still on screen"
+    );
+    assert!(
+        opened["title"].as_str().is_some_and(|t| !t.is_empty()),
+        "the notice names the successor: {opened:?}"
+    );
     assert_eq!(
         h.col(&format!(
             "SELECT provider || '|' || model FROM chats WHERE id = '{new}'"

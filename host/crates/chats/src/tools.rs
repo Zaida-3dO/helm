@@ -2055,13 +2055,21 @@ async fn stop_chat(ctx: ToolCtx, a: Value) -> ToolResult {
 
 async fn open_chat(ctx: ToolCtx, a: Value) -> ToolResult {
     let id = chat_id_arg(&a)?;
-    meta(&ctx, &id)?;
-    let mut e = helm_ipc::AppEvent::new("shell_open_chat").with("chatId", id.clone());
+    let target = meta(&ctx, &id)?;
+    // ifViewing is the calling chat: the window follows only while the user is still looking at
+    // the chat that asked; otherwise the UI shows the opened chat's title as a notice with an
+    // Open button.
+    let mut e = helm_ipc::AppEvent::new("shell_open_chat")
+        .with("chatId", id.clone())
+        .with("ifViewing", ctx.caller_chat_id.clone());
+    if let Some(t) = target["title"].as_str() {
+        e = e.with("title", t.to_owned());
+    }
     if let Some(m) = a.get("messageId").and_then(Value::as_i64) {
         e = e.with("messageId", m);
     }
     ctx.events.emit(e);
-    Ok(json!({"navigated": true, "chatId": id, "link": chat_link(&id, None)}))
+    Ok(json!({"navigated": "if_viewing", "chatId": id, "link": chat_link(&id, None)}))
 }
 
 /// `app_flag_attention`: the calling chat's own root agent files one question for the user (the
@@ -2172,7 +2180,7 @@ By default the list covers your own profile's chats, including chats shared with
     .async_tool(
         ToolSpec::read(
             "app_open_chat",
-            "Show a chat in Helm's main window (it does not run or message it).",
+            "Opens the chat in Helm's main window if the user is looking at this chat; otherwise the user gets a notice with an Open button (it never runs or messages the chat).",
             obj(json!({"chatId": id, "messageId": {"type": "integer"}}), &["chatId"]),
         ),
         open_chat,

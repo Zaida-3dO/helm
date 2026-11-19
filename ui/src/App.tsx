@@ -47,6 +47,7 @@ import { TopBar } from './topbar/TopBar.tsx';
 import { EmptyMain } from './shell/EmptyMain.tsx';
 import { ShellShortcuts } from './shell/Shortcuts.tsx';
 import { SidebarResizer } from './shell/SidebarResizer.tsx';
+import { decideOpen } from './shell/follow.ts';
 import { SIDEBAR_VISIBLE_PREF, SIDEBAR_WIDTH_PREF, sidebarLayout } from './shell/layout.ts';
 import { TerminalDock } from './terminal/TerminalDock.tsx';
 import { SavedDueNotice } from './saved/SavedDueNotice.tsx';
@@ -85,12 +86,23 @@ export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers:
       if (KEYBINDINGS_PREF in changed) keys.loadUserMap(changed[KEYBINDINGS_PREF]);
     });
   }, [api, bus]);
-  // The tray, a toast or the hotkey asked to open a chat.
+  // The tray, a toast or the hotkey asked to open a chat; a chat another chat started follows
+  // the window only while the user is still looking at the one it came from, else it notices.
   useEffect(
     () =>
       bus.on('shell_open_chat', (e) => {
-        const id = (e as { chatId?: unknown }).chatId;
-        if (typeof id === 'string') shell.select(id);
+        const d = decideOpen(e, shell.selection.chatId);
+        if (!d) return;
+        if (d.kind === 'select') {
+          shell.select(d.chatId, d.messageId ? { messageId: d.messageId } : {});
+          return;
+        }
+        toast.show({
+          kind: 'info',
+          text: d.title ? `New chat started: ${d.title}` : 'A new chat is ready',
+          action: { label: 'Open', run: () => shell.select(d.chatId) },
+          ttlMs: 8000,
+        });
       }),
     [bus, shell],
   );

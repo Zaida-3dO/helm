@@ -9,7 +9,9 @@
 //! first if it is somehow working again.
 //!
 //! The op answers at once with `{started: true}`; the rest runs in the background. When the
-//! successor exists the app opens it (`shell_open_chat`). A failure before the successor is
+//! successor exists the app sends `shell_open_chat`, naming the old chat under `ifViewing`: the
+//! window follows to the successor only while the user is still looking at the old chat;
+//! otherwise the user gets a notice with an Open button. A failure before the successor is
 //! started changes nothing: the old chat stays as it was and a `chat_roll_over_failed` event
 //! carries a plain message for the UI to show.
 //!
@@ -85,11 +87,32 @@ pub(crate) fn turn_stopped(chat_id: &str) {
     PENDING.lock().unwrap().remove(chat_id);
 }
 
-/// The first message of the successor chat.
+/// The first message of the successor chat. The old chat's title is a `helm://chats/<id>` link
+/// so the successor's first message reaches back to the chat it came from; the id is kept in the
+/// text as well for agents that read rather than click.
 pub fn successor_message(old_title: &str, old_id: &str, handoff: &str) -> String {
     format!(
-        "This chat continues \"{old_title}\" (chat id {old_id}), which was rolled over because its context had grown large. Below is the hand-off its agent wrote. Check the actual state of the repository and any running work yourself, then carry on from \"Left to do\".\n\n---\n\n{handoff}"
+        "This chat continues [{}](helm://chats/{old_id}) (chat id {old_id}), which was rolled over because its context had grown large. Below is the hand-off its agent wrote. Check the actual state of the repository and any running work yourself, then carry on from \"Left to do\".\n\n---\n\n{handoff}",
+        escape_link_text(old_title)
     )
+}
+
+/// Make a title safe inside Markdown link text: backslashes and square brackets get a backslash
+/// so a title cannot break the link, and newlines collapse to spaces (the message stays one line
+/// where the link sits).
+fn escape_link_text(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    for c in title.chars() {
+        match c {
+            '\\' | '[' | ']' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\n' | '\r' => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn cut(s: &str, max: usize) -> String {
@@ -524,7 +547,8 @@ async fn carry_on(
         );
     }
     let title: String = chat.title.chars().take(200).collect();
-    let _ = crate::titles::rename(rt, &new_id, &format!("{title} (continued)"));
+    let successor_title = format!("{title} (continued)");
+    let _ = crate::titles::rename(rt, &new_id, &successor_title);
     let sent = crate::submit::chat_send(
         rt,
         ChatSendArgs {
@@ -586,8 +610,14 @@ async fn carry_on(
                 e.message
             )
         })?;
-    ctx.events
-        .emit(AppEvent::new("shell_open_chat").with("chatId", new_id));
+    // ifViewing is the old chat: the window follows only while the user is still looking at it,
+    // otherwise the UI shows the title as a notice with an Open button.
+    ctx.events.emit(
+        AppEvent::new("shell_open_chat")
+            .with("chatId", new_id)
+            .with("ifViewing", chat.id.clone())
+            .with("title", successor_title),
+    );
     Ok(())
 }
 
@@ -669,9 +699,20 @@ mod tests {
     }
 
     #[test]
-    fn the_successor_message_names_the_old_chat_and_the_cut_respects_characters() {
-        let m = successor_message("Fix login", "abc", "Goal: x");
-        assert!(m.contains("\"Fix login\" (chat id abc)") && m.ends_with("Goal: x"));
+    fn the_successor_message_links_the_old_chat_and_the_cut_respects_characters() {
+        // (title, what the message must contain): the title goes into a chat link, escaped so
+        // it cannot break it, with the id kept in the plain text next to it.
+        for (title, expect) in [
+            ("Fix login", "[Fix login](helm://chats/abc) (chat id abc)"),
+            (
+                "Fix [a] \\ b",
+                "[Fix \\[a\\] \\\\ b](helm://chats/abc) (chat id abc)",
+            ),
+            ("two\nlines", "[two lines](helm://chats/abc)"),
+        ] {
+            let m = successor_message(title, "abc", "Goal: x");
+            assert!(m.contains(expect) && m.ends_with("Goal: x"), "{m}");
+        }
         let s = "é".repeat(10);
         let c = cut(&s, 5);
         assert!(c.starts_with("éé") && c.contains("cut here"));
