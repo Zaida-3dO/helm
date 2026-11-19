@@ -29,6 +29,9 @@ pub struct Found {
     pub version: Option<String>,
     /// What stops a worker from using it, in words for the user.
     pub problem: Option<String>,
+    /// A command the user can run to fix `problem` (Node too old), when one is known. Helm shows
+    /// it with a copy button and never runs it.
+    pub upgrade_command: Option<String>,
 }
 
 /// Node, as a worker launch would resolve it.
@@ -45,9 +48,11 @@ pub fn node(env: &EnvMap) -> Found {
             source: Some(source.into()),
             version: Some(n.version),
             problem: None,
+            upgrade_command: None,
         },
         Err(e) => Found {
             problem: Some(e.to_string()),
+            upgrade_command: e.upgrade_command(),
             ..Default::default()
         },
     }
@@ -208,6 +213,7 @@ pub fn claude(
             source: Some("HELM_TEST_CLAUDE".into()),
             version: None,
             problem: None,
+            upgrade_command: None,
         };
     }
     match resolve_claude(env, &runtime.executable, home) {
@@ -220,6 +226,7 @@ pub fn claude(
                 path: Some(path.display().to_string()),
                 source: Some(source.into()),
                 version,
+                upgrade_command: None,
             }
         }
         Err(problem) => Found {

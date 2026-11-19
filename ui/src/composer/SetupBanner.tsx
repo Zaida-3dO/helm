@@ -9,6 +9,7 @@ import { SETTINGS_DIALOG } from '../settings/SettingsDialog.tsx';
 import { runtimeCheck, type RuntimeCheck } from './runtimeCheck.ts';
 import { Button } from '../ui/controls.tsx';
 import { IconChevronRight, IconWarning } from '../ui/icons.tsx';
+import { UpgradeCommand } from '../settings/runtime/UpgradeCommand.tsx';
 
 /**
  * What the runtime check found. One check serves the whole app; it is asked again when the window
@@ -54,6 +55,7 @@ export function SetupBanner({ check, onRetry }: { check: RuntimeCheck; onRetry: 
             ))}
           </ul>
         )}
+        {details && check.upgradeCommand && <UpgradeCommand command={check.upgradeCommand} />}
       </div>
       <Button variant="text" data-testid="composer-setup-retry" onClick={onRetry}>
         Check again

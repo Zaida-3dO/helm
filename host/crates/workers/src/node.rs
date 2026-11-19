@@ -56,10 +56,45 @@ pub enum NodeError {
     NotFound,
     #[error("{0} is a wrapper script; Helm needs the real node executable (set HELM_NODE_PATH).")]
     Wrapper(String),
-    #[error("Node {found} is too old; Helm needs {}.{} or newer.", MIN_NODE.0, MIN_NODE.1)]
-    TooOld { found: String },
+    #[error("Node {found} (at {path}) is too old; Helm needs Node {}.{} or newer. Upgrade it, or get a current version from nodejs.org.", MIN_NODE.0, MIN_NODE.1)]
+    TooOld { found: String, path: String },
     #[error("could not run {path}: {why}")]
     Unusable { path: String, why: String },
+}
+
+impl NodeError {
+    /// The command that upgrades the Node that was found, when how it was installed can be told.
+    /// Helm only offers it for the user to copy and run; it never runs it.
+    pub fn upgrade_command(&self) -> Option<String> {
+        match self {
+            NodeError::TooOld { path, .. } => upgrade_command(path, cfg!(windows)),
+            _ => None,
+        }
+    }
+}
+
+/// The upgrade command for a Node at `path`: its own version manager when the path shows one,
+/// otherwise winget on Windows. Elsewhere there is no single right command, so none is given.
+pub fn upgrade_command(path: &str, windows: bool) -> Option<String> {
+    let lower = path.to_ascii_lowercase();
+    if lower.contains("volta") {
+        Some("volta install node@lts".into())
+    } else if lower.contains("fnm") {
+        Some("fnm install --lts".into())
+    } else if lower.contains("nvm") {
+        Some(
+            if windows {
+                "nvm install lts"
+            } else {
+                "nvm install --lts"
+            }
+            .into(),
+        )
+    } else if windows {
+        Some("winget upgrade OpenJS.NodeJS.LTS".into())
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -129,7 +164,10 @@ pub fn resolve_node(lookup: &NodeLookup) -> Result<Node, NodeError> {
     };
     let version = cached_version(&path)?;
     if !version_ok(&version) {
-        return Err(NodeError::TooOld { found: version });
+        return Err(NodeError::TooOld {
+            found: version,
+            path: path.display().to_string(),
+        });
     }
     Ok(Node { path, version })
 }
@@ -175,6 +213,49 @@ mod tests {
         assert!(!version_ok("v22.18.9"));
         assert!(!version_ok("v20.30.0"));
         assert!(!version_ok("garbage"));
+    }
+
+    #[test]
+    fn the_upgrade_command_follows_how_node_was_installed() {
+        let rows: [(&str, bool, Option<&str>); 7] = [
+            (
+                r"C:\Program Files\nodejs\node.exe",
+                true,
+                Some("winget upgrade OpenJS.NodeJS.LTS"),
+            ),
+            (
+                r"C:\Users\a\AppData\Roaming\nvm\v20.1.0\node.exe",
+                true,
+                Some("nvm install lts"),
+            ),
+            (
+                r"C:\Users\a\AppData\Local\Volta\bin\node.exe",
+                true,
+                Some("volta install node@lts"),
+            ),
+            (
+                "/home/a/.nvm/versions/node/v20.1.0/bin/node",
+                false,
+                Some("nvm install --lts"),
+            ),
+            (
+                "/home/a/.local/share/fnm/node-versions/v20/installation/bin/node",
+                false,
+                Some("fnm install --lts"),
+            ),
+            ("/usr/bin/node", false, None),
+            ("/usr/local/bin/node", false, None),
+        ];
+        for (path, windows, want) in rows {
+            assert_eq!(upgrade_command(path, windows).as_deref(), want, "{path}");
+        }
+        let old = NodeError::TooOld {
+            found: "v20.1.0".into(),
+            path: "/usr/bin/node".into(),
+        };
+        let said = old.to_string();
+        assert!(said.contains("v20.1.0") && said.contains("22.19"), "{said}");
+        assert_eq!(NodeError::NotFound.upgrade_command(), None);
     }
 
     #[test]
