@@ -4207,6 +4207,27 @@ async fn a_crash_between_stage_and_apply_is_repaired_at_startup() {
     crate::edit::recover_all(&h.db, &h.profile.path(""), 3);
     assert!(h.col("SELECT chat_id FROM pending_edits").is_empty());
     assert_eq!(h.state(&sid), "rejected");
+    // The repair leaves the chat editable: the same message can be staged again, and that is
+    // not refused as a second pending edit.
+    let o = crate::edit::open(&h.db, &broken, first).unwrap();
+    let again = uuid::Uuid::new_v4().to_string();
+    crate::edit::stage(
+        &h.db,
+        &h.profile.path("sessions"),
+        &h.profile.path("attachments"),
+        &crate::types::MessageResendArgs {
+            chat_id: broken.clone(),
+            message_id: first,
+            revision: o.revision,
+            submission_id: again.clone(),
+            text: "first, edited again".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        h.col("SELECT chat_id FROM pending_edits"),
+        std::slice::from_ref(&broken)
+    );
 }
 
 /// Edits are refused while the chat works, and only for the user's sent messages.

@@ -9,7 +9,8 @@
 //!
 //! Cleanup only ever touches strictly patterned names inside the profile's own `sessions/`,
 //! `workers/`, `attachments/`, `thumbs/` and `artifacts/` folders ([`allowed`]); anything else in
-//! the queue is dropped unremoved, with a log line.
+//! the queue is dropped unremoved, with a log line. An artifact is named by its content, so one a
+//! chat saved again after the delete is left alone: its queue row is settled without removing it.
 
 use crate::archive::Refusal;
 use crate::types::ChatStatus;
@@ -169,6 +170,34 @@ pub fn run_cleanup(db: &Database, profile_root: &Path) -> usize {
                 continue;
             }
             let path = profile_root.join(rel);
+            if let Some(name) = rel.strip_prefix("artifacts/") {
+                // An artifact is named by its content, so another chat may have saved the same one
+                // since this was queued. Decide and remove under the database's write lock, so no
+                // message can start using it between the check and the removal.
+                let r = db.write(|tx| {
+                    let used: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM messages WHERE artifact = ?1)",
+                        [name],
+                        |r| r.get(0),
+                    )?;
+                    Ok::<_, rusqlite::Error>(if used {
+                        Ok(())
+                    } else {
+                        std::fs::remove_file(&path)
+                    })
+                });
+                match r {
+                    Ok(Ok(())) => done.push(rel.clone()),
+                    Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                        done.push(rel.clone())
+                    }
+                    Ok(Err(e)) => {
+                        log::warn!("file cleanup: {rel} not removed yet ({e}); retried at startup")
+                    }
+                    Err(e) => log::warn!("file cleanup: {rel} not checked yet ({e})"),
+                }
+                continue;
+            }
             // A saved file's folder is a real folder (never a link) under attachments/.
             let folder = rel.starts_with("attachments/")
                 && std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir());
@@ -228,7 +257,7 @@ mod tests {
     fn delete_needs_archived_idle_and_removes_rows_files_and_search_text() {
         let (dir, db) = temp_db();
         let root = dir.path().join("profile");
-        let (a, _b) = db
+        let (a, b) = db
             .write(|tx| {
                 let a = store::create_chat(tx, "C:/w", None, None, 1)?;
                 let b = store::create_chat(tx, "C:/w", None, None, 1)?;
@@ -290,16 +319,26 @@ mod tests {
             })
             .unwrap();
         assert_eq!((chats, msgs, hits), (0, 0, 0));
+        // Another chat saves the same artifact after the delete queued it: it must survive.
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO messages(chat_id, source_key, role, text, timestamp, artifact) VALUES (?1, 'k4', 'user', 'again', 1, ?2)",
+                params![b, "a".repeat(64) + ".json"],
+            )
+        })
+        .unwrap();
         assert_eq!(
             run_cleanup(&db, &root),
             5,
-            "four named files plus the unshared artifact"
+            "four named files plus the artifact, settled either way"
         );
         assert!(!root.join(format!("sessions/{a}.jsonl")).exists());
         assert!(!root.join(format!("workers/{a}")).exists());
-        assert!(!root
-            .join(format!("artifacts/{}.json", "a".repeat(64)))
-            .exists());
+        assert!(
+            root.join(format!("artifacts/{}.json", "a".repeat(64)))
+                .exists(),
+            "an artifact saved again after the delete is kept"
+        );
         assert!(
             root.join(format!("artifacts/{}.json", "b".repeat(64)))
                 .exists(),
