@@ -30,9 +30,14 @@ async function steerDuringTool(s: Started): Promise<string> {
 
 describe("asap steers", () => {
   test("a mid-turn steer is accepted at once and delivered only at the next tool boundary", async () => {
-    const s = startWithFixture("steer-read");
+    // An agents file makes the start read the CLI's version first, by a name the ready reply also uses.
+    const agentsFile = path.join(os.tmpdir(), `helm-agents-${uuid()}.json`);
+    fs.writeFileSync(agentsFile, "{}");
+    const s = startWithFixture("steer-read", { claude: { agentsFile } });
     try {
       const ready = await s.host.ready();
+      const argv = (s.fakeStart()?.argv as string[] | undefined) ?? [];
+      assert.equal(argv[argv.indexOf("--agents") + 1], agentsFile);
       assert.deepEqual((ready.data as Json).capabilities, { withdraw: true, deliverNow: true, stopTool: true, compact: true, stopSubagent: true });
       assert.equal((ready.data as Json).cliVersion, "0.0.0-fake");
       const first = uuid();
@@ -62,6 +67,7 @@ describe("asap steers", () => {
       assert.ok(at((e) => e.type === "agent_settled") > deliveredAt, "same turn");
       assert.equal(s.host.ofType("agent_start").length, 1, "one turn");
     } finally {
+      fs.rmSync(agentsFile, { force: true });
       await s.done();
     }
   });
