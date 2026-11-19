@@ -147,7 +147,12 @@ pub fn start(rt: &ChatRuntime, chat_id: &str, job_body: Value) {
         return;
     }
     let mut job_body = job_body;
-    crate::background::decorate(&rt.sh, chat_id, &mut job_body);
+    // A local chat's words never go to Claude: with no usable local model the fallback title stays.
+    if let Err(why) = crate::background::decorate_local_only(&rt.sh, chat_id, &mut job_body) {
+        log::warn!("chat {chat_id}: no automatic title ({why}); the fallback stays");
+        set_job(rt, chat_id, Some("failed"));
+        return;
+    }
     set_job(rt, chat_id, Some("generating"));
     let rt = rt.clone();
     let chat = chat_id.to_owned();
@@ -391,7 +396,12 @@ pub async fn suggest(rt: &ChatRuntime, chat_id: &str) -> Result<Vec<String>, hel
     body["siblingTitles"] = json!(siblings);
     body["profileTitles"] = json!(profile);
     body["timeoutMs"] = json!(SUGGEST_TIMEOUT.as_millis() as u64 - 2_000);
-    crate::background::decorate(&rt.sh, chat_id, &mut body);
+    if let Err(why) = crate::background::decorate_local_only(&rt.sh, chat_id, &mut body) {
+        return Err(helm_ipc::ApiError::new(
+            "unavailable",
+            format!("No suggestion: {why}."),
+        ));
+    }
     let spawner = rt.sh.spawner.clone();
     let r = tokio::time::timeout(
         SUGGEST_TIMEOUT,

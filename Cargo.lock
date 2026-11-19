@@ -2298,6 +2298,7 @@ dependencies = [
  "helm-chats",
  "helm-core",
  "helm-ipc",
+ "log",
  "rusqlite",
  "serde",
  "serde_json",

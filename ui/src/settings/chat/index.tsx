@@ -283,7 +283,7 @@ function ChatPane() {
       </SettingRow>
       <SettingRow
         title="Background model"
-        description="The model quiet behind-the-scenes jobs ask: naming a chat, completing your sentence and the idle check. Leave blank for the small built-in model. For chats that run on a local model server, name a model on that server; it is only used there."
+        description="The model quiet behind-the-scenes jobs ask: naming a chat, completing your sentence and, for Claude chats only, the idle check. Leave blank for the small built-in model. For chats that run on a local model server, name a model on that server; it is only used there, and with none named those chats get no automatic title or completion."
         testId="setting-background-model"
       >
         <div style={{ display: 'grid', gap: 6, minWidth: 240 }}>

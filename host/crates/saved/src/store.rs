@@ -74,10 +74,12 @@ pub enum StoreError {
 }
 
 // Database::write and snapshot need E: From<rusqlite::Error>, so the store's error can drive them
-// directly; a host failure is rare and shows as a plain message.
+// directly; a host failure is rare, shows as a plain message and keeps the database's own words in
+// the log.
 impl From<rusqlite::Error> for StoreError {
     fn from(e: rusqlite::Error) -> Self {
-        StoreError::Host(format!("Helm could not read the saved items: {e}"))
+        log::warn!("saved items: database error: {e}");
+        StoreError::Host("Helm could not read the saved items. Try again in a moment.".to_owned())
     }
 }
 

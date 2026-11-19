@@ -9,6 +9,8 @@
 //!   helper through its environment (`ProcessSpawner::run_helper` moves it there out of the job),
 //!   exactly as a worker launch does; the helper builds the child's environment with the worker's
 //!   own loopback-only rule.
+//! - A local chat's title and draft are not run at all when no `local` name is chosen
+//!   ([`decorate_local_only`], [`decorate_checked`]); the idle check skips local chats entirely.
 //! - A missing field or a chat with no name chosen leaves the job untouched, and the job runs on
 //!   the default it would have used. A name that is chosen but cannot be used (a server that does
 //!   not resolve) is reported to the caller: [`decorate_checked`] answers the reason, and a job
@@ -94,6 +96,33 @@ pub(crate) fn decorate_checked(sh: &Shared, chat_id: &str, job: &mut Value) -> R
             }
         }
         _ => {}
+    }
+    Ok(())
+}
+
+/// [`decorate_checked`] for a job that carries a local chat's own words and so must never reach
+/// Claude: besides a chosen model that cannot be used, a local chat with no local model chosen at
+/// all is an error.
+pub(crate) fn decorate_local_only(
+    sh: &Shared,
+    chat_id: &str,
+    job: &mut Value,
+) -> Result<(), String> {
+    decorate_checked(sh, chat_id, job)?;
+    let local = sh
+        .db
+        .snapshot(|tx| {
+            tx.query_row(
+                "SELECT provider IS NOT NULL AND provider != '' FROM chats WHERE id = ?1",
+                [chat_id],
+                |r| r.get::<_, bool>(0),
+            )
+            .optional()
+        })
+        .map_err(|_| "the chat could not be read".to_owned())?
+        .unwrap_or(false);
+    if local && job.get("localBaseUrl").is_none() {
+        return Err("no background model is chosen for chats on a local model server".into());
     }
     Ok(())
 }

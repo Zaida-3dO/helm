@@ -31,6 +31,8 @@ pub enum Delivery {
     Sent,
     /// The chat can no longer be told (archived or deleted): stop trying.
     Gone,
+    /// The chat refused every try: stop trying, but do not call the message delivered.
+    GaveUp,
     /// A passing problem: try again at the next sweep.
     Retry,
 }
@@ -298,6 +300,9 @@ impl WaitsService {
                 Delivery::Sent | Delivery::Gone => {
                     let _ = self.db.write(|tx| store::mark_delivered(tx, &w.id));
                 }
+                Delivery::GaveUp => {
+                    let _ = self.db.write(|tx| store::mark_given_up(tx, &w.id));
+                }
                 Delivery::Retry => {}
             }
         }
@@ -381,7 +386,7 @@ impl Deliver for RuntimeSink {
             }
         }
         log::warn!("wait message for {chat_id} was refused every time; giving up");
-        Delivery::Gone
+        Delivery::GaveUp
     }
 }
 
