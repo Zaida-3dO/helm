@@ -259,6 +259,9 @@ pub trait Spawner: Send + Sync {
 /// The longest a helper waits at the sign-in gate before it runs anyway.
 pub const SIGN_IN_HELPER_WAIT: Duration = Duration::from_secs(90);
 
+/// The least time a helper job gets to run after its wait at the sign-in gate.
+const HELPER_MIN_RUN: Duration = Duration::from_secs(3);
+
 /// How long the gatekeeper helper gets for one job. It sits inside the actor's hold deadline
 /// ([`Limits::gate_deadline`], 75 s), so a helper that hangs fails the hold quietly.
 pub const GATEKEEPER_TIMEOUT: Duration = Duration::from_secs(60);
@@ -574,7 +577,8 @@ impl ProcessSpawner {
     /// [`Self::run_helper`], ended early once `cancel` is set. A helper on Claude passes the
     /// sign-in gate first ([`helm_core::signin_gate`]): it waits while another start checks the
     /// sign-in (at most [`SIGN_IN_HELPER_WAIT`], or its own timeout when that is shorter), and
-    /// says how its request went. Autocomplete never waits: while the gate holds, it suggests
+    /// says how its request went. The wait comes out of the job's timeout, so the whole job still
+    /// ends within it (the job always keeps a few seconds to run). Autocomplete never waits: while the gate holds, it suggests
     /// nothing. A job on a local model server has no sign-in and passes straight through.
     fn run_helper_until(
         &self,
@@ -587,6 +591,7 @@ impl ProcessSpawner {
             return self.run_helper_job(name, job, timeout, cancel);
         }
         let gate = helm_core::signin_gate::global();
+        let began = std::time::Instant::now();
         let ticket = if name == "autocomplete" {
             gate.admit_background(helm_core::now_ms())
                 .ok_or("Claude's sign-in is being checked; no suggestion for now.")?
@@ -594,7 +599,10 @@ impl ProcessSpawner {
             let stop = || cancel.is_some_and(|c| c.load(Ordering::SeqCst));
             gate.admit_blocking(SIGN_IN_HELPER_WAIT.min(timeout), &stop)
         };
-        let out = self.run_helper_job(name, job, timeout, cancel);
+        let left = timeout
+            .saturating_sub(began.elapsed())
+            .max(HELPER_MIN_RUN.min(timeout));
+        let out = self.run_helper_job(name, job, left, cancel);
         let refresh = match &out {
             Ok(v) => v.get("error").and_then(Value::as_str),
             Err(e) => Some(e.as_str()),

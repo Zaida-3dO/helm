@@ -79,17 +79,18 @@ impl ProcessReader {
 
 impl PlanReader for ProcessReader {
     fn read(&self) -> ControlAnswer {
-        self.read_job(HELPER_TIMEOUT_MS, HOST_TIMEOUT)
+        self.read_job(HELPER_TIMEOUT_MS, HOST_TIMEOUT, false)
     }
 
     /// A read for a caller with its own deadline: the helper's own cutoff drops to `at_most` less
     /// the node start-up it does not count, and the host waits a little longer still, so a helper
-    /// that stays up past its cutoff is the one cut off, not the caller.
+    /// that stays up past its cutoff is the one cut off, not the caller. A wait at the sign-in
+    /// gate comes out of both.
     fn read_within(&self, at_most: Duration) -> ControlAnswer {
         let helper_ms = (at_most.as_millis() as u64)
             .saturating_sub(STARTUP_SLACK_MS)
-            .clamp(3_000, HELPER_TIMEOUT_MS);
-        self.read_job(helper_ms, at_most + Duration::from_secs(2))
+            .clamp(MIN_HELPER_MS, HELPER_TIMEOUT_MS);
+        self.read_job(helper_ms, at_most + Duration::from_secs(2), true)
     }
 }
 
@@ -97,8 +98,36 @@ impl PlanReader for ProcessReader {
 /// `timeoutMs` measures.
 const STARTUP_SLACK_MS: u64 = 4_000;
 
+/// The least time the helper is given for the binary's answer.
+const MIN_HELPER_MS: u64 = 3_000;
+
 impl ProcessReader {
-    fn read_job(&self, helper_timeout_ms: u64, host_wait: Duration) -> ControlAnswer {
+    /// `keep_deadline`: the caller has its own deadline, so time spent at the sign-in gate is
+    /// taken out of the helper's.
+    fn read_job(
+        &self,
+        helper_timeout_ms: u64,
+        host_wait: Duration,
+        keep_deadline: bool,
+    ) -> ControlAnswer {
+        // The binary asks Claude with the user's sign-in, so it passes the sign-in gate like
+        // every other Claude process Helm starts: it waits while another start checks the
+        // sign-in (at most the caller's own deadline), and says how its request went.
+        let gate = helm_core::signin_gate::global();
+        let began = std::time::Instant::now();
+        let ticket = gate.admit_blocking(SIGN_IN_WAIT.min(host_wait), &|| false);
+        let (helper_timeout_ms, host_wait) = if keep_deadline {
+            let waited = began.elapsed();
+            let helper = helper_timeout_ms
+                .saturating_sub(waited.as_millis() as u64)
+                .max(MIN_HELPER_MS);
+            let host = host_wait
+                .saturating_sub(waited)
+                .max(Duration::from_millis(helper + STARTUP_SLACK_MS + 2_000));
+            (helper, host)
+        } else {
+            (helper_timeout_ms, host_wait)
+        };
         let mut job = json!({ "kind": "plan", "timeoutMs": helper_timeout_ms });
         let (runtime, _) = ClaudeRuntime::load(&self.profile_dir);
         if let Some(t) = test_claude(
@@ -110,11 +139,6 @@ impl ProcessReader {
         } else if !runtime.executable.is_empty() {
             job["command"] = Value::String(runtime.executable);
         }
-        // The binary asks Claude with the user's sign-in, so it passes the sign-in gate like
-        // every other Claude process Helm starts: it waits while another start checks the
-        // sign-in (at most the caller's own deadline), and says how its request went.
-        let gate = helm_core::signin_gate::global();
-        let ticket = gate.admit_blocking(SIGN_IN_WAIT.min(host_wait), &|| false);
         let answer = match self.run_job(&job, host_wait) {
             Ok(v) => parse_answer(&v),
             Err(e) => failed("error", e),
