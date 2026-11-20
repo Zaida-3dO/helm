@@ -116,6 +116,14 @@ export function priorityFor(s: AttentionSummary | null, chatId: string): 'normal
   return p === 'high' || p === 'normal' ? p : null;
 }
 
+/** What the idle check judged about one listed chat: a stall offers Resume; anything else, including a verdict from before kinds, is a decision. */
+export function triageKindFor(s: AttentionSummary | null, chatId: string): 'decision' | 'stalled' {
+  return s?.triage?.find((r) => r.chatId === chatId && !r.failed)?.kind === 'stalled' ? 'stalled' : 'decision';
+}
+
+/** The short message Resume sends to a stalled chat. */
+export const RESUME_TEXT = 'Please carry on with the work you were doing. It looks like it stopped moving.';
+
 /** Chats whose idle check gave up, each with a Retry button; not counted in the badge, and left out while the check is off. */
 export function failedChecks(s: AttentionSummary | null, enabled = true): TriageRow[] {
   return s && enabled ? (s.triage ?? []).filter((r) => r.failed) : [];

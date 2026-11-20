@@ -7,8 +7,8 @@ import { useEffect, useMemo, useState } from 'react';
 import type { AttentionSummary } from '../api/types.ts';
 import { useShell } from '../shell/context.ts';
 import { Button, Checkbox, ContextMenu, Dialog, TextArea, TextInput, toast, type MenuItem } from '../ui/index.ts';
-import { IconCheck, IconClock, IconExternalLink, IconFlag, IconMute } from '../ui/icons.tsx';
-import { failedChecks, groupLabel, inboxRows, mutedKindLabel, mutedRows, parseDelayMinutes, priorityFor, snoozeChoices, type InboxRow, type TriageSettings } from './model.ts';
+import { IconCheck, IconClock, IconExternalLink, IconFlag, IconMute, IconPlay } from '../ui/icons.tsx';
+import { failedChecks, groupLabel, inboxRows, mutedKindLabel, mutedRows, parseDelayMinutes, priorityFor, RESUME_TEXT, snoozeChoices, triageKindFor, type InboxRow, type TriageSettings } from './model.ts';
 import { gateOps } from '../gatekeeper/api.ts';
 import { agoText, reviewLine } from '../gatekeeper/model.ts';
 import type { GateAsk } from '../gatekeeper/types.ts';
@@ -23,6 +23,8 @@ export interface AttentionActions {
   /** Whether the idle check is on, and a way to switch it. */
   /** Check a chat again whose idle check gave up. */
   triageRetry?: (chatId: string) => Promise<unknown>;
+  /** Send a stalled chat a short message asking it to carry on. */
+  resume?: (chatId: string, text: string) => Promise<unknown>;
   triageEnabled: () => Promise<boolean>;
   setTriageEnabled: (enabled: boolean) => Promise<unknown>;
   /** The alert delay and the custom prompt, read and saved together with the switch. */
@@ -205,6 +207,12 @@ export function AttentionInbox({ summary, ops, onOpen, onClose }: AttentionInbox
                   <IconCheck size={13} />
                   Mark addressed
                 </Button>
+                {r.group === 'stalled' && triageKindFor(summary, r.chatId) === 'stalled' && ops.resume && (
+                  <Button variant="primary" disabled={busy === r.chatId} data-testid="triage-resume" onClick={() => void act(r.chatId, () => ops.resume!(r.chatId, RESUME_TEXT))}>
+                    <IconPlay size={13} />
+                    Resume
+                  </Button>
+                )}
               </div>
             </article>
           ))}

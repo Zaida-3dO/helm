@@ -665,8 +665,8 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
           return { ...row(c, a === 'trust' ? 'approval' : String(a)), reason: a === 'plan' ? 'Has a plan for you to review' : 'Waiting for your approval' };
         }),
       triage: [
-        ...list.filter((c) => flags.has(c.chat.id) && !gaveUp.has(c.chat.id)).map((c) => ({ chatId: c.chat.id, title: c.chat.title || 'Untitled', project: folderName(c.chat.cwd), priority: flagPriority.get(c.chat.id) ?? null, failed: false })),
-        ...list.filter((c) => gaveUp.has(c.chat.id)).map((c) => ({ chatId: c.chat.id, title: c.chat.title || 'Untitled', project: folderName(c.chat.cwd), priority: null, failed: true })),
+        ...list.filter((c) => flags.has(c.chat.id) && !gaveUp.has(c.chat.id)).map((c) => ({ chatId: c.chat.id, title: c.chat.title || 'Untitled', project: folderName(c.chat.cwd), priority: flagPriority.get(c.chat.id) ?? null, failed: false, kind: null })),
+        ...list.filter((c) => gaveUp.has(c.chat.id)).map((c) => ({ chatId: c.chat.id, title: c.chat.title || 'Untitled', project: folderName(c.chat.cwd), priority: null, failed: true, kind: null })),
       ],
       flagged: list
         .filter((c) => flags.has(c.chat.id) && !['starting', 'running', 'stopping'].includes(c.chat.status) && !needs.includes(c) && !marked.includes(c) && !finished.includes(c))

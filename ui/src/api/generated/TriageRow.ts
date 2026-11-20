@@ -11,4 +11,9 @@ priority: string | null,
 /**
  * All its tries ended without a verdict: the inbox offers Retry.
  */
-failed: boolean, };
+failed: boolean, 
+/**
+ * `decision` or `stalled` when the check judged the chat needs you (a stall offers Resume);
+ * `null` for a verdict from before kinds, which reads as a decision.
+ */
+kind: string | null, };

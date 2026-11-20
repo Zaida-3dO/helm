@@ -13,7 +13,8 @@
 //!   apart, so the spend is small and bounded; the Needs attention dialog says so and holds the
 //!   switch.
 //! - **Which chats** ([`decide`], one table-driven test): idle, stopped or interrupted; not
-//!   archived, not on a local model (its words stay off Claude), not a side chat, not muted; not already listed by the host (a pending request, an
+//!   waiting on helpers of its own (a declared wait that is still open, or a chat it started that
+//!   is working: it will carry on when they report); not archived, not on a local model (its words stay off Claude), not a side chat, not muted; not already listed by the host (a pending request, an
 //!   unread result or mark); not set aside (addressed or snoozed since the last activity); has a
 //!   message from you; quiet for at least the delay and no longer than [`WINDOW_MS`] (so turning
 //!   it on never walks old history); and not yet checked for this stretch of quiet. The stretch
@@ -23,6 +24,11 @@
 //! - **The verdict** carries a priority (none, normal or high) and a next step beside the reason.
 //!   The priority is its own column (`chat_triage.priority`, shown as a chip); the flag's line is
 //!   the reason and the next step. A helper that gives neither (an older one) still works.
+//! - **The kind** says what sort of quiet it is ([`Kind`], `chat_triage.kind`). A decision is a
+//!   flag that leads with what the person must decide. A stall is listed with the stuck chats and
+//!   offers Resume. A chat waiting on helpers of its own is never listed, and a flag or a stall is
+//!   hidden the moment the chat gains an open wait or a working helper chat
+//!   ([`helpers_working_sql`]). An older helper answer with no kind and a yes is a decision.
 //! - **A check that gave up** (all [`MAX_TRIES`] ended without a verdict) is listed in the
 //!   summary's `triage` rows as failed, with a Retry button: `triage_retry` ([`retry`]) resets its
 //!   tries so the next pass checks it again.
@@ -56,6 +62,10 @@ pub const MAX_PROMPT_CHARS: usize = 2_000;
 /// A failed check is tried again after this long, up to [`MAX_TRIES`] checks per quiet stretch.
 pub const RETRY_AFTER_MS: i64 = 20 * 60_000;
 pub const MAX_TRIES: i64 = 3;
+/// A chat that says it waits on helpers of its own and has been quiet for more than this many
+/// minutes has probably lost them: such a verdict is checked once more past it (the helper turns a
+/// repeated wait into a stall). The helper keeps the same figure.
+pub const STALL_MINUTES: i64 = 180;
 
 /// One check at a time.
 #[derive(Default)]
@@ -102,18 +112,48 @@ pub enum Priority {
     High,
 }
 
-/// `chat_triage` gained the priority column after the first table was written; older databases get
-/// it here.
+/// `chat_triage` gained the priority and kind columns after the first table was written; older
+/// databases get them here.
 pub(crate) fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
-    let has: bool = tx.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('chat_triage') WHERE name = 'priority'",
-        [],
-        |r| r.get::<_, i64>(0).map(|n| n > 0),
-    )?;
-    if !has {
-        tx.execute("ALTER TABLE chat_triage ADD COLUMN priority TEXT", [])?;
+    for column in ["priority", "kind"] {
+        let has: bool = tx.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('chat_triage') WHERE name = ?1",
+            [column],
+            |r| r.get::<_, i64>(0).map(|n| n > 0),
+        )?;
+        if !has {
+            tx.execute(
+                &format!("ALTER TABLE chat_triage ADD COLUMN {column} TEXT"),
+                [],
+            )?;
+        }
     }
     Ok(())
+}
+
+/// A SQL condition on the chat `c` (a row of `chats`): it is waiting on helpers of its own, either
+/// a declared wait that is still open or a chat it started that is working now. The waits table
+/// belongs to another crate, so where it has not been made (a database without it) there are none.
+///
+/// The condition is a plain set that does not mention `c`, so SQLite builds it once per statement
+/// instead of searching the chats again for every row. The `IS NOT NULL` filters matter: one NULL
+/// in the set would make `NOT (c.id IN (...))` unknown for every chat.
+pub(crate) fn helpers_working_sql(tx: &Transaction<'_>) -> rusqlite::Result<String> {
+    let waits: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_waits')",
+        [],
+        |r| r.get(0),
+    )?;
+    let mut sql = String::from(
+        "(c.id IN (SELECT k.parent_chat_id FROM chats k WHERE k.archived = 0                       AND k.status IN ('starting', 'running', 'stopping') AND k.parent_chat_id IS NOT NULL                    UNION ALL                    SELECT k.created_by_chat FROM chats k WHERE k.archived = 0                       AND k.status IN ('starting', 'running', 'stopping') AND k.created_by_chat IS NOT NULL",
+    );
+    if waits {
+        sql.push_str(
+            " UNION ALL SELECT w.chat_id FROM agent_waits w WHERE w.state = 'open' AND w.chat_id IS NOT NULL",
+        );
+    }
+    sql.push_str("))");
+    Ok(sql)
 }
 
 impl Priority {
@@ -136,6 +176,36 @@ impl Priority {
     }
 }
 
+/// What sort of quiet a check found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// Only the person can answer: a question, a choice, an approval or a credential.
+    Decision,
+    /// Work they asked for is not moving and nothing asks them anything.
+    Stalled,
+    /// The chat is waiting on helpers it started itself; it does not need the person.
+    Waiting,
+}
+
+impl Kind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Decision => "decision",
+            Self::Stalled => "stalled",
+            Self::Waiting => "waiting",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "decision" => Some(Self::Decision),
+            "stalled" => Some(Self::Stalled),
+            "waiting" => Some(Self::Waiting),
+            _ => None,
+        }
+    }
+}
+
 /// What one check decided.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Verdict {
@@ -143,6 +213,8 @@ pub struct Verdict {
     pub reason: String,
     pub priority: Option<Priority>,
     pub next_step: String,
+    /// `None` for an older helper's answer: a yes then is a decision.
+    pub kind: Option<Kind>,
 }
 
 impl Verdict {
@@ -153,6 +225,7 @@ impl Verdict {
             reason,
             priority: None,
             next_step: String::new(),
+            kind: None,
         }
     }
 }
@@ -218,6 +291,11 @@ pub struct Cand {
     pub failed: bool,
     /// Checks claimed for this stretch of quiet so far.
     pub tries: i64,
+    /// A declared wait is still open, or a chat it started is working: it is waiting on helpers
+    /// of its own.
+    pub helpers: bool,
+    /// The kind the last finished check gave.
+    pub checked_kind: Option<Kind>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -227,6 +305,7 @@ pub enum Skip {
     Local,
     Side,
     Busy,
+    HelpersWorking,
     Muted,
     Waiting,
     Unread,
@@ -250,6 +329,8 @@ pub fn decide(c: &Cand, s: &Settings, now: i64) -> Result<(), Skip> {
         Err(Skip::Side)
     } else if c.status.is_busy() {
         Err(Skip::Busy)
+    } else if c.helpers {
+        Err(Skip::HelpersWorking)
     } else if c.muted {
         Err(Skip::Muted)
     } else if c.waiting {
@@ -266,6 +347,7 @@ pub fn decide(c: &Cand, s: &Settings, now: i64) -> Result<(), Skip> {
         Err(Skip::TooOld)
     } else if c.checked_stamp == Some(c.stamp)
         && !(c.failed && c.tries < MAX_TRIES && now - c.checked_at >= RETRY_AFTER_MS)
+        && !wait_is_due_again(c, now)
     {
         Err(Skip::AlreadyChecked)
     } else {
@@ -273,21 +355,35 @@ pub fn decide(c: &Cand, s: &Settings, now: i64) -> Result<(), Skip> {
     }
 }
 
+/// A chat judged to be waiting on its own helpers is checked once more when it has been quiet for
+/// more than [`STALL_MINUTES`] and the check that said so was made before that: if the helpers are
+/// still not back, the helper reports a stall.
+fn wait_is_due_again(c: &Cand, now: i64) -> bool {
+    let quiet = |at: i64| (at - c.stamp) / 60_000;
+    !c.failed
+        && c.checked_kind == Some(Kind::Waiting)
+        && quiet(now) > STALL_MINUTES
+        && quiet(c.checked_at) <= STALL_MINUTES
+}
+
 /// The chats worth looking at: those active within the window, least recently checked first.
 fn candidates(tx: &Transaction<'_>, needs: &Needs, now: i64) -> rusqlite::Result<Vec<Cand>> {
-    let mut st = tx.prepare(concat!(
+    let mut st = tx.prepare(&format!(
+        concat!(
         "SELECT c.id, c.title, c.status, c.archived, c.side_source_id IS NOT NULL, \
                 EXISTS(SELECT 1 FROM chat_mutes m WHERE m.chat_id = c.id), \
                 EXISTS(SELECT 1 FROM unread_marks u WHERE u.chat_id = c.id) \
                   OR EXISTS(SELECT 1 FROM chat_completions k WHERE k.chat_id = c.id AND k.read = 0), ",
         crate::quiet_sql!(),
         ", EXISTS(SELECT 1 FROM messages x WHERE x.chat_id = c.id AND x.role = 'user' AND x.active = 1 AND x.text <> ''), \
-           MAX(c.updated_at, COALESCE(a.last_activity_at, 0)), t.stamp, c.provider IS NOT NULL,            COALESCE(t.checked_at, 0), COALESCE(t.failed, 0), COALESCE(t.tries, 0) \
+           MAX(c.updated_at, COALESCE(a.last_activity_at, 0)), t.stamp, c.provider IS NOT NULL,            COALESCE(t.checked_at, 0), COALESCE(t.failed, 0), COALESCE(t.tries, 0), {helpers}, t.kind \
          FROM chats c LEFT JOIN chat_activity a ON a.chat_id = c.id \
                       LEFT JOIN chat_triage t ON t.chat_id = c.id \
          WHERE MAX(c.updated_at, COALESCE(a.last_activity_at, 0)) > ?1 - ?2 \
          ORDER BY COALESCE(t.checked_at, 0), MAX(c.updated_at, COALESCE(a.last_activity_at, 0)) DESC \
          LIMIT 200"
+        ),
+        helpers = helpers_working_sql(tx)?
     ))?;
     let rows = st.query_map(params![now, WINDOW_MS], |r| {
         let id: String = r.get(0)?;
@@ -308,6 +404,11 @@ fn candidates(tx: &Transaction<'_>, needs: &Needs, now: i64) -> rusqlite::Result
             checked_at: r.get(12)?,
             failed: r.get(13)?,
             tries: r.get(14)?,
+            helpers: r.get(15)?,
+            checked_kind: r
+                .get::<_, Option<String>>(16)?
+                .as_deref()
+                .and_then(Kind::parse),
         })
     })?;
     rows.collect()
@@ -395,7 +496,7 @@ pub(crate) fn pass(sh: &Arc<Shared>) {
         tx.execute(
             "INSERT INTO chat_triage(chat_id, stamp, checked_at, needs, reason, failed, tries) VALUES (?1, ?2, ?3, 0, '', 1, 1)
              ON CONFLICT(chat_id) DO UPDATE SET tries = CASE WHEN stamp = ?2 THEN tries + 1 ELSE 1 END,
-                 stamp = ?2, checked_at = ?3, needs = 0, reason = '', priority = NULL, failed = 1",
+                 stamp = ?2, checked_at = ?3, needs = 0, reason = '', priority = NULL, kind = NULL, failed = 1",
             params![c.id, c.stamp, now],
         )?;
         let mut job = json!({
@@ -444,11 +545,24 @@ pub(crate) fn pass(sh: &Arc<Shared>) {
     });
 }
 
+/// What a verdict is stored as: whether it needs the person, and its kind. A yes with no kind is a
+/// decision. A chat waiting on helpers of its own is not waiting on the person, whatever else was
+/// said, and neither is one the helper gave a priority of none. A chat that needs nobody has no
+/// kind, except a wait, which keeps it so the check can look again once the wait has run long.
+fn stored(v: &Verdict) -> (bool, Option<&'static str>) {
+    let kind = v.kind.unwrap_or(Kind::Decision);
+    let needs = v.needs && v.priority != Some(Priority::None) && kind != Kind::Waiting;
+    (
+        needs,
+        (needs || kind == Kind::Waiting).then(|| kind.as_str()),
+    )
+}
+
 /// Write a verdict, unless the chat has moved on since the check was claimed or triage was
 /// switched off meanwhile.
 fn finish(sh: &Arc<Shared>, chat_id: &str, stamp: i64, verdict: &Verdict) {
     let reason = display_reason(verdict);
-    let needs = verdict.needs && verdict.priority != Some(Priority::None);
+    let (needs, kind) = stored(verdict);
     let wrote = sh
         .db
         .write(|tx| {
@@ -456,7 +570,7 @@ fn finish(sh: &Arc<Shared>, chat_id: &str, stamp: i64, verdict: &Verdict) {
                 return Ok(false);
             }
             let n = tx.execute(
-                "UPDATE chat_triage SET needs = ?1, reason = ?2, priority = ?5, failed = 0
+                "UPDATE chat_triage SET needs = ?1, reason = ?2, priority = ?5, kind = ?6, failed = 0
                  WHERE chat_id = ?3 AND stamp = ?4
                    AND (SELECT archived FROM chats WHERE id = ?3) = 0
                    AND stamp = (SELECT MAX(c.updated_at, COALESCE(a.last_activity_at, 0)) FROM chats c
@@ -466,7 +580,8 @@ fn finish(sh: &Arc<Shared>, chat_id: &str, stamp: i64, verdict: &Verdict) {
                     reason,
                     chat_id,
                     stamp,
-                    verdict.priority.and_then(Priority::as_str)
+                    verdict.priority.and_then(Priority::as_str),
+                    kind
                 ],
             )?;
             Ok::<_, rusqlite::Error>(n > 0)
@@ -508,18 +623,23 @@ pub fn retry(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<bool> {
 
 /// The summary's `triage` rows: chats listed because of the idle check, with the check's priority,
 /// and chats whose check gave up (all [`MAX_TRIES`] without a verdict, for the quiet stretch they
-/// are in). Chats that are archived, muted, side chats or set aside are left out.
+/// are in). Chats that are archived, muted, side chats, set aside or waiting on helpers of their
+/// own are left out.
 pub fn rows(tx: &Transaction<'_>, now: i64) -> rusqlite::Result<Vec<TriageRow>> {
-    let mut st = tx.prepare(concat!(
-        "SELECT c.id, c.title, COALESCE(p.name, ''), t.priority, t.failed \
+    let mut st = tx.prepare(&format!(
+        concat!(
+        "SELECT c.id, c.title, COALESCE(p.name, ''), t.priority, t.failed, t.kind \
          FROM chat_triage t JOIN chats c ON c.id = t.chat_id JOIN projects p ON p.id = c.project_id \
          WHERE c.archived = 0 AND c.side_source_id IS NULL \
            AND NOT EXISTS(SELECT 1 FROM chat_mutes m WHERE m.chat_id = c.id) \
            AND NOT ",
         crate::quiet_sql!(),
-        " AND t.stamp = MAX(c.updated_at, COALESCE((SELECT a.last_activity_at FROM chat_activity a WHERE a.chat_id = c.id), 0)) \
+        " AND NOT {helpers} \
+           AND t.stamp = MAX(c.updated_at, COALESCE((SELECT a.last_activity_at FROM chat_activity a WHERE a.chat_id = c.id), 0)) \
            AND ((t.needs = 1 AND t.failed = 0) OR (t.failed = 1 AND t.reason <> '' AND t.tries >= ?2)) \
          ORDER BY c.updated_at DESC, c.id"
+        ),
+        helpers = helpers_working_sql(tx)?
     ))?;
     let out = st
         .query_map(params![now, MAX_TRIES], |r| {
@@ -534,6 +654,7 @@ pub fn rows(tx: &Transaction<'_>, now: i64) -> rusqlite::Result<Vec<TriageRow>> 
                 project: r.get(2)?,
                 priority: r.get(3)?,
                 failed: r.get(4)?,
+                kind: r.get(5)?,
             })
         })?
         .collect();
@@ -564,6 +685,8 @@ mod tests {
             checked_at: 0,
             failed: false,
             tries: 0,
+            helpers: false,
+            checked_kind: None,
         }
     }
 
@@ -589,6 +712,19 @@ mod tests {
             (
                 "starting",
                 |c| c.status = ChatStatus::Starting,
+                Err(Skip::Busy),
+            ),
+            (
+                "waiting on helpers it started: a declared wait or a working helper chat",
+                |c| c.helpers = true,
+                Err(Skip::HelpersWorking),
+            ),
+            (
+                "busy beats helpers",
+                |c| {
+                    c.helpers = true;
+                    c.status = ChatStatus::Running
+                },
                 Err(Skip::Busy),
             ),
             ("archived", |c| c.archived = true, Err(Skip::Archived)),
@@ -669,6 +805,55 @@ mod tests {
                 Err(Skip::AlreadyChecked),
             ),
             (
+                "waiting on helpers when checked: not looked at again while it is quiet",
+                |c| {
+                    c.checked_stamp = Some(c.stamp);
+                    c.checked_kind = Some(Kind::Waiting);
+                    c.checked_at = c.stamp + 15 * MIN;
+                },
+                Err(Skip::AlreadyChecked),
+            ),
+            (
+                "waiting on helpers, checked early, now quiet past three hours: checked once more",
+                |c| {
+                    c.stamp -= 3 * 60 * MIN + MIN;
+                    c.checked_stamp = Some(c.stamp);
+                    c.checked_kind = Some(Kind::Waiting);
+                    c.checked_at = c.stamp + 15 * MIN;
+                },
+                Ok(()),
+            ),
+            (
+                "waiting on helpers, quiet past three hours, already checked after that",
+                |c| {
+                    c.stamp -= 3 * 60 * MIN + MIN;
+                    c.checked_stamp = Some(c.stamp);
+                    c.checked_kind = Some(Kind::Waiting);
+                    c.checked_at = c.stamp + 3 * 60 * MIN + 2 * MIN;
+                },
+                Err(Skip::AlreadyChecked),
+            ),
+            (
+                "waiting on helpers, quiet for exactly three hours: not yet",
+                |c| {
+                    c.stamp -= 3 * 60 * MIN - 20 * MIN;
+                    c.checked_stamp = Some(c.stamp);
+                    c.checked_kind = Some(Kind::Waiting);
+                    c.checked_at = c.stamp + 15 * MIN;
+                },
+                Err(Skip::AlreadyChecked),
+            ),
+            (
+                "a decision is not looked at again past three hours",
+                |c| {
+                    c.stamp -= 3 * 60 * MIN + MIN;
+                    c.checked_stamp = Some(c.stamp);
+                    c.checked_kind = Some(Kind::Decision);
+                    c.checked_at = c.stamp + 15 * MIN;
+                },
+                Err(Skip::AlreadyChecked),
+            ),
+            (
                 "checked before the last activity",
                 |c| c.checked_stamp = Some(c.stamp - MIN),
                 Ok(()),
@@ -711,6 +896,52 @@ mod tests {
             gate.may_start(1_000_000 + 3_600_000 + 1),
             "the oldest has aged out"
         );
+        let verdict = |needs, priority, kind| Verdict {
+            needs,
+            reason: "r".into(),
+            priority,
+            next_step: String::new(),
+            kind,
+        };
+        for (name, v, want) in [
+            (
+                "a yes with no kind is a decision",
+                verdict(true, None, None),
+                (true, Some("decision")),
+            ),
+            (
+                "a stall",
+                verdict(true, None, Some(Kind::Stalled)),
+                (true, Some("stalled")),
+            ),
+            (
+                "a decision",
+                verdict(true, Some(Priority::High), Some(Kind::Decision)),
+                (true, Some("decision")),
+            ),
+            (
+                "a wait never needs the person",
+                verdict(true, None, Some(Kind::Waiting)),
+                (false, Some("waiting")),
+            ),
+            (
+                "a priority of none needs nobody",
+                verdict(true, Some(Priority::None), Some(Kind::Decision)),
+                (false, None),
+            ),
+            (
+                "a no with no kind",
+                verdict(false, None, None),
+                (false, None),
+            ),
+            (
+                "a no that was a stall",
+                verdict(false, None, Some(Kind::Stalled)),
+                (false, None),
+            ),
+        ] {
+            assert_eq!(stored(&v), want, "{name}");
+        }
         let eager = Settings { delay_ms: 0, ..s };
         let said = |p, r: &str, n: &str| {
             display_reason(&Verdict {
@@ -718,6 +949,7 @@ mod tests {
                 reason: r.into(),
                 priority: p,
                 next_step: n.into(),
+                kind: None,
             })
         };
         assert_eq!(said(None, "It failed.", ""), "It failed.");
@@ -737,6 +969,10 @@ mod tests {
         assert_eq!(said(Some(Priority::Normal), "Ask.", ""), "Ask.");
         assert_eq!(Priority::parse(" High "), Some(Priority::High));
         assert_eq!(Priority::parse("urgent"), None);
+        assert_eq!(
+            [" Stalled ", "waiting", "decision", "other"].map(|k| Kind::parse(k).map(Kind::as_str)),
+            [Some("stalled"), Some("waiting"), Some("decision"), None]
+        );
         assert_eq!(
             decide(&c, &eager, c.stamp),
             Ok(()),

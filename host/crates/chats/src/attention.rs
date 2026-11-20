@@ -14,8 +14,9 @@
 //!   Stopped or failed chats count only when manually marked. A muted chat counts for nothing
 //!   and is in no group but `busy`; what it holds (a live request or its agent's flag) is
 //!   listed in `muted` so the user can still find it.
-//!   `triage` carries the idle check's priority for the chats it listed, and the chats it gave up
-//!   on; it is never counted.
+//!   `triage` carries the idle check's priority and kind for the chats it listed, and the chats it
+//!   gave up on; it is never counted. A check's decision is a flagged row; its stall is a stalled
+//!   row; neither shows while the chat has an open wait or a working helper chat.
 //! - `busy` counts starting, running and stopping chats.
 //! - The running, stalled, unread and finished groups list at most [`MAX_ROWS`], newest
 //!   activity first. The needs-you and flagged groups are never cut short: each row there is a
@@ -82,6 +83,8 @@ struct Cand {
     quiet: bool,
     /// The idle check's reason, while its verdict is current and triage is on.
     flagged: Option<String>,
+    /// What sort of verdict that is: a stall is listed with the stuck chats, not flagged.
+    flagged_kind: Option<crate::triage::Kind>,
     /// The question its own agent flagged for the user ([`crate::flags`]).
     asked: Option<(String, String)>,
 }
@@ -147,16 +150,26 @@ pub fn compute(
     let triage_on = crate::triage::settings(tx).enabled;
     // `quiet`: addressed after the last activity, or snoozed into the future with no activity
     // since the snooze (?1 is now).
-    // The idle check's verdict counts only while it was made for the chat's current activity.
-    const COLS: &str = concat!(
+    // The idle check's verdict counts only while it was made for the chat's current activity, and
+    // only while the chat is not waiting on helpers of its own: it clears the moment one appears.
+    const COLS_HEAD: &str = concat!(
         "c.id, c.title, COALESCE(p.name, ''), c.status, c.error IS NOT NULL, \
          EXISTS(SELECT 1 FROM unread_marks u WHERE u.chat_id = c.id), \
          EXISTS(SELECT 1 FROM chat_completions k WHERE k.chat_id = c.id AND k.read = 0), \
          EXISTS(SELECT 1 FROM chat_mutes m WHERE m.chat_id = c.id), \
          COALESCE((SELECT a.stalled FROM chat_activity a WHERE a.chat_id = c.id), 0), ",
         crate::quiet_sql!(),
-        ", (SELECT g.reason FROM chat_triage g WHERE g.chat_id = c.id AND g.needs = 1 AND g.failed = 0 \
-             AND g.stamp = MAX(c.updated_at, COALESCE((SELECT a.last_activity_at FROM chat_activity a WHERE a.chat_id = c.id), 0))),          (SELECT f.question FROM chat_flags f WHERE f.chat_id = c.id),          (SELECT f.reason FROM chat_flags f WHERE f.chat_id = c.id)"
+    );
+    let current = format!(
+        "g.chat_id = c.id AND g.needs = 1 AND g.failed = 0 AND NOT {} \
+         AND g.stamp = MAX(c.updated_at, COALESCE((SELECT a.last_activity_at FROM chat_activity a WHERE a.chat_id = c.id), 0))",
+        crate::triage::helpers_working_sql(tx)?
+    );
+    let cols = format!(
+        "{COLS_HEAD}, (SELECT g.reason FROM chat_triage g WHERE {current}), \
+         (SELECT f.question FROM chat_flags f WHERE f.chat_id = c.id), \
+         (SELECT f.reason FROM chat_flags f WHERE f.chat_id = c.id), \
+         (SELECT COALESCE(g.kind, 'decision') FROM chat_triage g WHERE {current})"
     );
     let read = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Cand> {
         Ok(Cand {
@@ -178,11 +191,15 @@ pub fn compute(
                 (Some(q), Some(why)) => Some((q, why)),
                 _ => None,
             },
+            flagged_kind: r
+                .get::<_, Option<String>>(13)?
+                .as_deref()
+                .and_then(crate::triage::Kind::parse),
         })
     };
     let mut cands: Vec<Cand> = {
         let mut st = tx.prepare(&format!(
-            "SELECT {COLS} FROM chats c JOIN projects p ON p.id = c.project_id
+            "SELECT {cols} FROM chats c JOIN projects p ON p.id = c.project_id
              WHERE c.archived = 0 AND c.side_source_id IS NULL
                AND (c.status IN ('starting', 'running', 'stopping')
                     OR EXISTS(SELECT 1 FROM unread_marks u WHERE u.chat_id = c.id)
@@ -197,7 +214,7 @@ pub fn compute(
     let seen: HashSet<String> = cands.iter().map(|c| c.id.clone()).collect();
     for id in needs.keys().filter(|id| !seen.contains(*id)) {
         let mut st = tx.prepare_cached(&format!(
-            "SELECT {COLS} FROM chats c JOIN projects p ON p.id = c.project_id
+            "SELECT {cols} FROM chats c JOIN projects p ON p.id = c.project_id
              WHERE c.id = ?2 AND c.archived = 0 AND c.side_source_id IS NULL"
         ))?;
         let mut rows = st.query_map(params![now, id], read)?;
@@ -275,13 +292,20 @@ pub fn compute(
         // `unread` and does not need the second row.
         let finished = c.completion && !c.marked && c.status == ChatStatus::Idle && !c.error;
         let stalled = c.stalled && c.status.is_busy();
-        // The idle check only speaks for a chat the host is not already listing.
-        let flagged = c.flagged.is_some() && !c.status.is_busy();
-        if need.is_some() || unread || stalled || flagged {
+        // The idle check only speaks for a chat the host is not already listing. A decision is
+        // flagged; a stall is listed with the stuck chats (the inbox offers Resume).
+        let checked = c.flagged.is_some() && !c.status.is_busy();
+        let idle_stalled = checked && c.flagged_kind == Some(crate::triage::Kind::Stalled);
+        let flagged = checked && !idle_stalled;
+        if need.is_some() || unread || stalled || idle_stalled || flagged {
             s.badge += 1;
         }
-        if stalled && s.stalled.len() < MAX_ROWS {
-            s.stalled.push(row(c, AttentionKind::Stalled));
+        if (stalled || idle_stalled) && s.stalled.len() < MAX_ROWS {
+            let mut r = row(c, AttentionKind::Stalled);
+            if let Some(why) = c.flagged.as_ref().filter(|w| idle_stalled && !w.is_empty()) {
+                r.reason = why.clone();
+            }
+            s.stalled.push(r);
         }
         if let Some(k) = need {
             let mut r = row(c, k);
@@ -702,6 +726,148 @@ mod tests {
         })
         .unwrap();
         assert_eq!(summary(&db, &Needs::new()).triage.len(), 1);
+    }
+
+    #[test]
+    fn the_idle_checks_kind_decides_where_a_chat_is_listed_and_helpers_clear_it() {
+        let (_d, db) = temp_db();
+        let (old, decision, stalled, waiting, helped, waited) = (
+            chat(&db, "old"),
+            chat(&db, "decision"),
+            chat(&db, "stalled"),
+            chat(&db, "waiting"),
+            chat(&db, "helped"),
+            chat(&db, "waited"),
+        );
+        let tri = |c: &str, needs: i64, reason: &str, kind: Option<&str>| {
+            db.write(|tx| {
+                tx.execute(
+                    "INSERT OR REPLACE INTO chat_triage(chat_id, stamp, checked_at, needs, reason, failed, tries, kind)
+                     SELECT id, MAX(updated_at, COALESCE((SELECT last_activity_at FROM chat_activity WHERE chat_id = ?1), 0)), 1, ?2, ?3, 0, 1, ?4
+                     FROM chats WHERE id = ?1",
+                    rusqlite::params![c, needs, reason, kind],
+                )
+            })
+            .unwrap();
+        };
+        // A verdict from before kinds is a decision.
+        tri(&old, 1, "Pick the blue one.", None);
+        tri(&decision, 1, "Approve the release.", Some("decision"));
+        tri(&stalled, 1, "Never started.", Some("stalled"));
+        tri(&waiting, 0, "", Some("waiting"));
+        tri(&helped, 1, "Approve the release.", Some("decision"));
+        tri(&waited, 1, "Never started.", Some("stalled"));
+        let listed = |s: &AttentionSummary| {
+            let names = |rows: &[AttentionRow]| {
+                let mut v: Vec<String> = rows.iter().map(|r| r.title.clone()).collect();
+                v.sort();
+                v
+            };
+            (names(&s.flagged), names(&s.stalled), s.badge)
+        };
+        let s = summary(&db, &Needs::new());
+        assert_eq!(
+            listed(&s),
+            (
+                vec![
+                    "decision".to_owned(),
+                    "helped".to_owned(),
+                    "old".to_owned()
+                ],
+                vec!["stalled".to_owned(), "waited".to_owned()],
+                5
+            ),
+            "a decision is flagged, a stall is listed with the stuck chats, a chat waiting on its helpers is not listed"
+        );
+        let stall = s.stalled.iter().find(|r| r.title == "stalled").unwrap();
+        assert_eq!(
+            (stall.kind, stall.reason.as_str()),
+            (AttentionKind::Stalled, "Never started.")
+        );
+        let kinds: Vec<(String, Option<String>)> = {
+            let mut v: Vec<_> = s
+                .triage
+                .iter()
+                .map(|r| (r.title.clone(), r.kind.clone()))
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(kinds[0], ("decision".to_owned(), Some("decision".into())));
+        assert!(kinds.contains(&("stalled".to_owned(), Some("stalled".into()))));
+        assert!(!kinds.iter().any(|(t, _)| t == "waiting"));
+
+        // A chat that starts a helper chat, or declares a wait, drops out at once.
+        exec(
+            &db,
+            "UPDATE chats SET status = 'running', created_by_chat = ?1 WHERE id = ?2",
+            &[&helped, &waiting],
+        );
+        // A nested chat that is working clears its parent too; an archived or an idle helper chat
+        // does not.
+        let (parented, archived_kid, idle_kid) = (
+            chat(&db, "parented"),
+            chat(&db, "archived kid"),
+            chat(&db, "idle kid"),
+        );
+        let (kid, archived_child, idle_child) = (
+            chat(&db, "kid"),
+            chat(&db, "archived child"),
+            chat(&db, "idle child"),
+        );
+        for c in [&parented, &archived_kid, &idle_kid] {
+            tri(c, 1, "Approve the release.", Some("decision"));
+        }
+        exec(
+            &db,
+            "UPDATE chats SET status = 'running', parent_chat_id = ?1 WHERE id = ?2",
+            &[&parented, &kid],
+        );
+        exec(
+            &db,
+            "UPDATE chats SET status = 'running', archived = 1, created_by_chat = ?1 WHERE id = ?2",
+            &[&archived_kid, &archived_child],
+        );
+        exec(
+            &db,
+            "UPDATE chats SET status = 'idle', parent_chat_id = ?1, created_by_chat = ?1 WHERE id = ?2",
+            &[&idle_kid, &idle_child],
+        );
+        exec(
+            &db,
+            "CREATE TABLE agent_waits(chat_id TEXT NOT NULL, state TEXT NOT NULL)",
+            &[],
+        );
+        exec(
+            &db,
+            "INSERT INTO agent_waits(chat_id, state) VALUES (?1, 'open')",
+            &[&waited],
+        );
+        exec(
+            &db,
+            "INSERT INTO agent_waits(chat_id, state) VALUES (?1, 'fired')",
+            &[&stalled],
+        );
+        let s = summary(&db, &Needs::new());
+        let (flagged, stuck, badge) = listed(&s);
+        assert_eq!(
+            (flagged, stuck, badge),
+            (
+                vec![
+                    "archived kid".to_owned(),
+                    "decision".to_owned(),
+                    "idle kid".to_owned(),
+                    "old".to_owned()
+                ],
+                vec!["stalled".to_owned()],
+                5
+            ),
+            "a working helper chat or an open wait clears the flag; a settled wait, an archived or an idle helper does not"
+        );
+        assert!(s
+            .triage
+            .iter()
+            .all(|r| !["helped", "waited", "parented"].contains(&r.title.as_str())));
     }
 
     #[test]
