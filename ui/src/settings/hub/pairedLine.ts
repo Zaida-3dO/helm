@@ -27,4 +27,4 @@ export function canRetryLine(conn: HubConnection | null): boolean {
 /** What to say when a hub line stays offline: the hub restarts itself, so the person's own
  * step is only the last one, and only if that fails too. */
 export const HUB_OFFLINE_STEPS =
-  'If Tailscale is on and this keeps failing, the hub itself may be down. It restarts by itself within a few minutes; if it does not, restart the helm-hub container on the home server.';
+  'If you reach the hub over a VPN, check it is on. If this keeps failing, the hub itself may be down: it restarts by itself within a few minutes, otherwise restart it on the server.';
