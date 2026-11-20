@@ -7,7 +7,10 @@
 //   - every folder under `helpers/` that has `src/main.ts` is a bundled resource at the path the
 //     host looks in (`<resources>/helpers/<name>/src/`), and so is the worker source;
 //   - every relative import a bundled file makes lands inside something that is bundled too;
-//   - downgrades are allowed, so an older build installs over a newer one in place.
+//   - downgrades are allowed, so an older build installs over a newer one in place;
+//   - the always-on launcher is built and bundled beside helm.exe, the installer ends it before
+//     the template closes Helm (else it would take the close for a crash and start Helm again
+//     mid-install), and the uninstaller ends it and removes its logon entry.
 //
 // Run: `npm run e2e -w checks` (cheap; reads files only).
 
@@ -72,7 +75,23 @@ describe("installer: what the NSIS bundle carries", () => {
     const overlay = JSON.parse(fs.readFileSync(path.join(REPO, "host", "app", "tauri.installer.json"), "utf8")) as { bundle: { resources: Record<string, string> } };
     assert.equal(overlay.bundle.resources["../../target/release/helm-git.exe"], "helm-git.exe", "helm-git.exe lands next to helm.exe, where the host looks for it");
     const script = (JSON.parse(fs.readFileSync(path.join(REPO, "package.json"), "utf8")) as { scripts: Record<string, string> }).scripts["build:installer"]!;
-    assert.match(script, /cargo build --release -p helm-gitshim && tauri build .*--config host\/app\/tauri\.installer\.json/, "the stand-in is built before the bundle and the overlay is applied");
+    assert.match(script, /cargo build --release -p helm-gitshim -p helm-launcher && tauri build .*--config host\/app\/tauri\.installer\.json/, "the stand-in and the launcher are built before the bundle and the overlay is applied");
+  });
+
+  test("the installer carries the launcher and ends it before Helm is closed", () => {
+    const overlay = JSON.parse(fs.readFileSync(path.join(REPO, "host", "app", "tauri.installer.json"), "utf8")) as { bundle: { resources: Record<string, string> } };
+    assert.equal(overlay.bundle.resources["../../target/release/helm-launcher.exe"], "helm-launcher.exe", "helm-launcher.exe lands next to helm.exe, where Helm looks for it");
+    const hooks = fs.readFileSync(path.resolve(path.dirname(confPath), conf.bundle.windows!.nsis!.installerHooks!), "utf8");
+    // The body of one macro: from its `!macro <name>` line to the next `!macroend`.
+    const macro = (name: string) => {
+      const start = hooks.indexOf(`!macro ${name}\n`);
+      return start < 0 ? "" : hooks.slice(start, hooks.indexOf("!macroend", start));
+    };
+    assert.ok(macro("HELM_END_LAUNCHER").includes(`taskkill.exe" /F /IM helm-launcher.exe`), "the launcher is ended by its own name only");
+    assert.ok(macro("NSIS_HOOK_PREINSTALL").includes("!insertmacro HELM_END_LAUNCHER"), "an install or update ends the launcher first");
+    const pre = macro("NSIS_HOOK_PREUNINSTALL");
+    assert.ok(pre.includes("!insertmacro HELM_END_LAUNCHER"), "an uninstall ends it");
+    assert.ok(pre.includes(String.raw`DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Helm launcher"`), "and removes its logon entry");
   });
 
   test("every relative import in a bundled file lands inside the bundle", () => {
