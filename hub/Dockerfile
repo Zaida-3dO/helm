@@ -13,6 +13,10 @@ USER 1000:100
 ENV HUB_DB=/data/hub.db HUB_BIND=0.0.0.0:8000
 VOLUME /data
 EXPOSE 8000
+# This healthcheck only marks the container unhealthy; Docker will not restart an
+# unhealthy container on its own. The hub's own watchdog exits the process when
+# its runtime stops answering, and the service needs `restart: unless-stopped`
+# in its compose definition so that exit brings a fresh container up.
 HEALTHCHECK --interval=60s --timeout=5s --retries=3 \
   CMD wget -qO- http://127.0.0.1:8000/health >/dev/null || exit 1
 ENTRYPOINT ["helm-hub"]
