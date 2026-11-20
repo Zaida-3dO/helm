@@ -4,7 +4,7 @@ resolver = "2"
 members = ["host/crates/*", "host/app"]
 
 [workspace.package]
-version = "2.3.2"
+version = "2.3.3"
 edition = "2021"
 license = "UNLICENSED"
 publish = false
