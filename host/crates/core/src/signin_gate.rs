@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 /// A probe with no answer for this long opens the gate for everyone.
 pub const PROBE_LIMIT_MS: i64 = 90_000;
 /// A background probe with no answer for this long stops being the probe: the next start probes.
-pub const BACKGROUND_PROBE_LIMIT_MS: i64 = 15_000;
+pub const BACKGROUND_PROBE_LIMIT_MS: i64 = 10_000;
 /// The last answer is trusted for this long; after it the next start probes again.
 pub const FRESH_MS: i64 = 30 * 60_000;
 /// After a refresh failure, everyone waits this long before the next probe.
@@ -563,7 +563,7 @@ mod tests {
                 go(None),
                 open(95 * S),
             ),
-            // A background job may probe, but after 15 s with no answer the next start probes
+            // A background job may probe, but after 10 s with no answer the next start probes
             // instead; an answer it brings later still opens the gate.
             (
                 "background: probe",
@@ -575,16 +575,16 @@ mod tests {
             (
                 "background probe: wait",
                 background(0),
-                Do::Acquire(14 * S, None),
+                Do::Acquire(9 * S, None),
                 Some(Admit::Wait),
                 background(0),
             ),
             (
                 "background probe overdue: next start probes",
                 background(0),
-                Do::Acquire(15 * S, None),
+                Do::Acquire(10 * S, None),
                 go(Some(1)),
-                probing(15 * S),
+                probing(10 * S),
             ),
             (
                 "overdue background probe answers late",
@@ -671,7 +671,7 @@ mod tests {
             state: background(0),
             probes: 0,
         };
-        assert!(g.must_wait(14 * S, None, 0), "a background probe holds");
+        assert!(g.must_wait(9 * S, None, 0), "a background probe holds");
         assert!(
             !g.must_wait(BACKGROUND_PROBE_LIMIT_MS, None, 0),
             "but not past its limit"
