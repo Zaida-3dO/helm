@@ -247,7 +247,17 @@ pub trait Spawner: Send + Sync {
 
     /// The app is quitting: end any gatekeeper helper still running, so none outlives it.
     fn close_helpers(&self) {}
+
+    /// The sign-in gate the Claude processes this spawner starts share
+    /// ([`helm_core::signin_gate`]); `None` holds nothing (a fake worker has no sign-in to
+    /// refresh).
+    fn sign_in_gate(&self) -> Option<Arc<helm_core::signin_gate::SignInGate>> {
+        None
+    }
 }
+
+/// The longest a helper waits at the sign-in gate before it runs anyway.
+pub const SIGN_IN_HELPER_WAIT: Duration = Duration::from_secs(90);
 
 /// How long the gatekeeper helper gets for one job. It sits inside the actor's hold deadline
 /// ([`Limits::gate_deadline`], 75 s), so a helper that hangs fails the hold quietly.
@@ -343,7 +353,7 @@ impl ProcessSpawner {
         let source = self
             .worker_source
             .clone()
-            .ok_or("Helm could not find its worker files.")?;
+            .ok_or("Helm could not find its worker files. Reinstall Helm; your chats and settings are kept.")?;
         let main = stage::stage_worker(&source, &PathBuf::from(&self.data_root).join("runtime"))
             .map_err(|e| format!("Helm could not prepare its worker: {e}"))?;
         *staged = Some(main.clone());
@@ -547,6 +557,11 @@ impl Spawner for ProcessSpawner {
     fn close_helpers(&self) {
         self.closing.store(true, Ordering::SeqCst);
     }
+
+    /// Every real Claude process of the app shares one sign-in, so they share one gate.
+    fn sign_in_gate(&self) -> Option<Arc<helm_core::signin_gate::SignInGate>> {
+        Some(helm_core::signin_gate::global().clone())
+    }
 }
 
 impl ProcessSpawner {
@@ -556,8 +571,46 @@ impl ProcessSpawner {
         self.run_helper_until(name, job, timeout, None)
     }
 
-    /// [`Self::run_helper`], ended early once `cancel` is set.
+    /// [`Self::run_helper`], ended early once `cancel` is set. A helper on Claude passes the
+    /// sign-in gate first ([`helm_core::signin_gate`]): it waits while another start checks the
+    /// sign-in (at most [`SIGN_IN_HELPER_WAIT`], or its own timeout when that is shorter), and
+    /// says how its request went. Autocomplete never waits: while the gate holds, it suggests
+    /// nothing. A job on a local model server has no sign-in and passes straight through.
     fn run_helper_until(
+        &self,
+        name: &str,
+        job: &Value,
+        timeout: Duration,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Value, String> {
+        if job.get("localKey").is_some() {
+            return self.run_helper_job(name, job, timeout, cancel);
+        }
+        let gate = helm_core::signin_gate::global();
+        let ticket = if name == "autocomplete" {
+            gate.admit(helm_core::now_ms(), None)
+                .ok_or("Claude's sign-in is being checked; no suggestion for now.")?
+        } else {
+            let stop = || cancel.is_some_and(|c| c.load(Ordering::SeqCst));
+            gate.admit_blocking(SIGN_IN_HELPER_WAIT.min(timeout), &stop)
+        };
+        let out = self.run_helper_job(name, job, timeout, cancel);
+        let refresh = match &out {
+            Ok(v) => v.get("error").and_then(Value::as_str),
+            Err(e) => Some(e.as_str()),
+        }
+        .map(crate::outage::is_token_refresh_error);
+        match refresh {
+            // No error: Claude answered.
+            None => ticket.answered(helm_core::now_ms()),
+            Some(true) => ticket.refresh_failed(helm_core::now_ms()),
+            // Any other failure says nothing about the sign-in: dropping the ticket frees it.
+            Some(false) => drop(ticket),
+        }
+        out
+    }
+
+    fn run_helper_job(
         &self,
         name: &str,
         job: &Value,
@@ -651,6 +704,9 @@ pub(crate) struct Live {
     pub hold_reason: Option<&'static str>,
     /// The queue pushed this chat's held start to the front of its line.
     pub hold_top: bool,
+    /// Unix ms when this chat's start began to wait for the sign-in check, while it does; no
+    /// start waits there past [`helm_core::signin_gate::MAX_WAIT_MS`].
+    pub sign_in_since: Option<i64>,
 }
 
 /// One local model server's load right now: chats with a turn open on it and working, and chats
@@ -719,6 +775,11 @@ pub(crate) struct Shared {
     /// The launch keys each chat's worker was last launched with ([`crate::hostcalls::launch`]),
     /// for `app_help` to teach only the tools that launch lists.
     pub launched_keys: Mutex<HashMap<String, helm_hosttools::LaunchKeys>>,
+    /// Chats whose outage retry the person asked for now ([`crate::outage::retry_now`]), until
+    /// the outage watch's next look takes them.
+    pub retry_now: Mutex<std::collections::HashSet<String>>,
+    /// Brings the outage watch's next look forward.
+    pub outage_poke: tokio::sync::Notify,
 }
 
 /// The runtime service.
@@ -763,6 +824,8 @@ impl ChatRuntime {
                 local_queue: Mutex::new(HashMap::new()),
                 exits: crate::exits::ExitLog::new(&cfg_profile),
                 launched_keys: Mutex::new(HashMap::new()),
+                retry_now: Mutex::new(Default::default()),
+                outage_poke: tokio::sync::Notify::new(),
             }),
         };
         rt.start_tick();

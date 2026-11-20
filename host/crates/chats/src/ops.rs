@@ -68,6 +68,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("attention_get", OpClass::Blocking, attention_get)
         .blocking("queue_list", OpClass::Blocking, queue_list)
         .blocking("queue_action", OpClass::Maintenance, queue_action)
+        .blocking("chat_retry_now", OpClass::Maintenance, chat_retry_now)
         .blocking("chat_rename", OpClass::Maintenance, chat_rename)
         .async_op("title_suggest", title_suggest)
         .blocking("skills_list", OpClass::Blocking, skills_list)
@@ -130,6 +131,15 @@ fn queue_action(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: QueueActionArgs = parse_args(args)?;
     let rt = runtime(ctx)?;
     to_value(&crate::queue::action(&rt, &a.chat_id, &a.action)?)
+}
+
+/// `chat_retry_now {chatId}` → `{scheduled}`: try this chat's pending outage retry at once
+/// instead of after its wait (a chat Helm stopped retrying gets one more try). Refused, in plain
+/// words, when Helm is not carrying the chat on by itself.
+fn chat_retry_now(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ChatIdArgs = parse_args(args)?;
+    let scheduled = crate::outage::retry_now(&runtime(ctx)?, &a.chat_id)?;
+    Ok(serde_json::json!({ "scheduled": scheduled }))
 }
 
 /// `attention_get`: the summary as it stands. Without a runtime (tests) it is
@@ -769,6 +779,8 @@ pub(crate) mod tests {
             // The capacity queue: who waits, and moving one start.
             ("queue_list", OpClass::Blocking),
             ("queue_action", OpClass::Maintenance),
+            // A failed turn's retry, now.
+            ("chat_retry_now", OpClass::Maintenance),
         ];
         for (name, class) in expected {
             assert_eq!(reg.class_of(name), Some(class), "{name}");
