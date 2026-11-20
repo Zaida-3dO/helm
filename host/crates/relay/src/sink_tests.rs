@@ -205,6 +205,144 @@ fn a_turn_that_never_starts_is_not_left_silent() {
     assert!(m.done);
 }
 
+/// A turn that stopped on an error never sends the error up. While Helm retries it by itself the
+/// phone gets one line saying so and the exchange waits for the continued turn's answer; when
+/// Helm gives up on the sign-in, or the wait runs out, the last word says what to do; any other
+/// error goes up as its headline; and a stop from before the exchange began is not its own.
+#[test]
+fn a_stopped_turn_says_so_in_words_and_waits_for_helms_own_retry() {
+    use helm_chats::outage::SIGN_IN_BUSY_HEAD;
+    let raw = "Failed to refresh OAuth token: another Claude Code process is refreshing it";
+    let worded = format!("{SIGN_IN_BUSY_HEAD}\n\n{raw}");
+    let busy_sign_in = Stop::Retrying {
+        sign_in: true,
+        headline: SIGN_IN_BUSY_HEAD.into(),
+    };
+    // (status, error, local, typing, gave up) -> the stop.
+    type Row<'a> = (&'a str, Option<&'a str>, bool, bool, bool, Option<Stop>);
+    let rows: Vec<Row> = vec![
+        (
+            "interrupted",
+            Some(&worded),
+            false,
+            false,
+            false,
+            Some(busy_sign_in.clone()),
+        ),
+        (
+            "interrupted",
+            Some(raw),
+            false,
+            false,
+            true,
+            Some(Stop::SignInNeeded),
+        ),
+        (
+            "interrupted",
+            Some("fetch failed"),
+            false,
+            false,
+            false,
+            Some(Stop::Retrying {
+                sign_in: false,
+                headline: "fetch failed".into(),
+            }),
+        ),
+        // Helm does not carry on a chat the user is writing in, or a local model's outage.
+        (
+            "interrupted",
+            Some("fetch failed"),
+            false,
+            true,
+            false,
+            Some(Stop::Error("fetch failed".into())),
+        ),
+        (
+            "interrupted",
+            Some("fetch failed"),
+            true,
+            false,
+            false,
+            Some(Stop::Error("fetch failed".into())),
+        ),
+        (
+            "interrupted",
+            Some("Plan limit reached, resets at 01:13\n\nFailed to refresh OAuth token"),
+            false,
+            false,
+            false,
+            Some(Stop::Error("Plan limit reached, resets at 01:13".into())),
+        ),
+        ("idle", Some(raw), false, false, false, None),
+        ("interrupted", None, false, false, false, None),
+    ];
+    for (status, error, local, typing, gave_up, want) in rows {
+        assert_eq!(
+            Stop::of(status, error, local, typing, gave_up),
+            want,
+            "{error:?}"
+        );
+    }
+    let snap = |stop: Stop, id: i64| Snap {
+        stopped: Some(stop),
+        max_id: id,
+        ..Default::default()
+    };
+    // Retried by Helm: one line, the exchange stays open, the continued turn's answer goes up.
+    let mut m = Mirror::new(0, T0);
+    step_ok(&mut m, &busy(&[], &[]), T0);
+    assert_eq!(
+        step_ok(&mut m, &snap(busy_sign_in.clone(), 9), T0 + 3_000),
+        [Up::Status(telegram::SIGN_IN_RETRYING.into())]
+    );
+    for i in 1..6 {
+        assert!(step_ok(&mut m, &snap(busy_sign_in.clone(), 9), T0 + 3_000 + i * 500).is_empty());
+    }
+    let answered = Snap {
+        busy: true,
+        turn_done: Some((12, "All done.".into())),
+        max_id: 12,
+        ..Default::default()
+    };
+    assert_eq!(
+        step_ok(&mut m, &answered, T0 + 60_000),
+        [Up::Final("All done.".into())]
+    );
+    // Helm gave up on the sign-in, or the wait ran out: the last word says what to do.
+    for (late, last) in [
+        (snap(Stop::SignInNeeded, 9), 0),
+        (snap(busy_sign_in.clone(), 9), telegram::RETRY_HOLD_MS),
+    ] {
+        let mut m = Mirror::new(0, T0);
+        step_ok(&mut m, &busy(&[], &[]), T0);
+        step_ok(&mut m, &snap(busy_sign_in.clone(), 9), T0 + 1);
+        let at = T0 + 1 + last;
+        let mut out = step_ok(&mut m, &late, at);
+        out.extend(step_ok(&mut m, &late, at + 500));
+        assert_eq!(out, [Up::Final(telegram::SIGN_IN_NEEDED.into())]);
+        assert!(m.done);
+    }
+    // Any other error: its headline, never the raw detail or a reply it cut short.
+    let mut m = Mirror::new(0, T0);
+    step_ok(&mut m, &busy(&[], &[]), T0);
+    let stopped = Snap {
+        final_text: Some("Let me look".into()),
+        ..snap(Stop::Error("Plan limit reached, resets at 01:13".into()), 9)
+    };
+    step_ok(&mut m, &stopped, T0 + 500);
+    assert_eq!(
+        step_ok(&mut m, &stopped, T0 + 1_000),
+        [Up::Final(
+            "The turn stopped before it finished: Plan limit reached, resets at 01:13".into()
+        )]
+    );
+    // A stop the chat had before this exchange's message reached it is not this exchange's.
+    let mut m = Mirror::new(9, T0);
+    assert!(step_ok(&mut m, &snap(Stop::Error("old".into()), 9), T0 + 500).is_empty());
+    assert!(step_ok(&mut m, &snap(Stop::Error("old".into()), 9), T0 + 1_000).is_empty());
+    assert!(!m.done);
+}
+
 #[test]
 fn verbatim_prefixes_are_dropped() {
     assert_eq!(
@@ -490,6 +628,57 @@ async fn a_snapshot_lists_the_last_three_calls_in_their_own_words() {
         ],
         "the last three, in words, with the bare name as fallback"
     );
+    // An error row is never the answer, even one that carries words (as older rows do).
+    let row = |tx: &rusqlite::Transaction<'_>, key: &str, role: &str, text: &str, status: &str| {
+        tx.execute(
+            "INSERT INTO messages(chat_id, source_key, role, text, status, timestamp, details)
+             VALUES (?1, ?2, ?3, ?4, ?5, 2000, '{\"stopReason\":\"end_turn\"}')",
+            rusqlite::params![&chat, key, role, text, status],
+        )
+        .map(|_| ())
+    };
+    let refresh = "Failed to refresh OAuth token: another Claude Code process is refreshing it";
+    e.db.write(|tx| {
+        row(tx, "m:a", "assistant", "Here is the plan.", "complete")?;
+        row(tx, "m:b", "assistant", refresh, "error")?;
+        tx.execute(
+            "UPDATE chats SET status = 'interrupted', error = ?2 WHERE id = ?1",
+            rusqlite::params![&chat, refresh],
+        )
+        .map(|_| ())
+    })
+    .unwrap();
+    let snap = snapshot(&e.ctx.rt, &e.db, &chat, 0, false);
+    assert_eq!(snap.final_text.as_deref(), Some("Here is the plan."));
+    assert_eq!(
+        snap.turn_done.map(|t| t.1).as_deref(),
+        Some("Here is the plan.")
+    );
+    assert!(matches!(
+        snap.stopped,
+        Some(Stop::Retrying { sign_in: true, .. })
+    ));
+    // Helm's give-up line makes it a sign-in to ask for; a continuation sent after it (a sign-in
+    // re-armed the chat) makes it a retry again.
+    let text = helm_chats::outage::SIGN_IN_AGAIN_TEXT;
+    e.db.write(|tx| row(tx, "c:gave-up", "context", text, "complete"))
+        .unwrap();
+    let stopped = |e: &Env| snapshot(&e.ctx.rt, &e.db, &chat, 0, false).stopped;
+    assert_eq!(stopped(&e), Some(Stop::SignInNeeded));
+    e.db.write(|tx| {
+        row(
+            tx,
+            "c:outage:again",
+            "context",
+            "Helm asked Claude to carry on",
+            "complete",
+        )
+    })
+    .unwrap();
+    assert!(matches!(
+        stopped(&e),
+        Some(Stop::Retrying { sign_in: true, .. })
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -236,6 +236,47 @@ pub fn prepare(cmd: &mut tokio::process::Command, low: bool) {
     }
 }
 
+/// Whether a process with this id is running. A process this user may not look at counts as
+/// running: a caller deciding whether something it owns was abandoned must never take a live
+/// owner for gone.
+#[cfg(windows)]
+pub fn process_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    if pid == 0 {
+        return false;
+    }
+    // SAFETY: query-only handle, closed before returning.
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return GetLastError() == ERROR_ACCESS_DENIED;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(h, &mut code);
+        CloseHandle(h);
+        ok != 0 && code == STILL_ACTIVE as u32
+    }
+}
+
+/// Whether a process with this id is running (one this user may not signal counts as running).
+#[cfg(unix)]
+pub fn process_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: signal 0 only checks that the process exists.
+    let sent = unsafe { libc::kill(pid, 0) } == 0;
+    sent || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
@@ -323,24 +364,6 @@ mod tests {
             let class = GetPriorityClass(h);
             CloseHandle(h);
             class
-        }
-    }
-
-    fn process_alive(pid: u32) -> bool {
-        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
-        use windows_sys::Win32::System::Threading::{
-            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-        };
-        // SAFETY: query-only handle, closed before returning.
-        unsafe {
-            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if h.is_null() {
-                return false;
-            }
-            let mut code = 0u32;
-            let ok = GetExitCodeProcess(h, &mut code);
-            CloseHandle(h);
-            ok != 0 && code == STILL_ACTIVE as u32
         }
     }
 }

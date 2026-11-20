@@ -35,7 +35,9 @@
 use crate::client::{BoxFut, LineHandle, VoiceSink, VoiceTurn};
 use crate::exec::AppExecutor;
 use crate::notify::title_of;
-use crate::sink::{chat_facts, max_row, plain_path, snapshot, RealPort, Snap, STATUS_GAP_MS};
+use crate::sink::{
+    chat_facts, max_row, plain_path, snapshot, RealPort, RetryHold, Snap, Stop, STATUS_GAP_MS,
+};
 use crate::telegram::{cut_chars, ChatPort};
 use crate::voice::{self, Mode, Reply, TagPolicy, WatchLevel, VOICE_ORIGIN};
 use crate::voice_heard::HeardStore;
@@ -202,6 +204,8 @@ pub struct Mirror {
     /// Carried on for a message that may already have been answered: if nothing happens, it
     /// finishes without a word instead of saying the turn never started.
     resumed: bool,
+    /// How long the exchange has waited on Helm's own retry of its stopped turn.
+    retry: RetryHold,
     pub done: bool,
 }
 
@@ -220,6 +224,7 @@ impl Mirror {
             answered: false,
             closing: false,
             resumed: false,
+            retry: RetryHold::default(),
             done: false,
         }
     }
@@ -277,9 +282,12 @@ impl Mirror {
             // An answer is owed to the phone: offer it again before anything new.
             return vec![Up::Final(p.clone())];
         }
+        // The exchange's message is in the transcript: a stop seen now is this exchange's.
+        let begun = self.started || s.max_id > self.baseline;
         if s.busy {
             self.started = true;
             self.idle_seen = 0;
+            self.retry.reset();
             if let Some((id, text)) = &s.turn_done {
                 if *id > self.sent_through {
                     // The turn's answer exists. Hand it up now instead of waiting for an idle
@@ -313,19 +321,43 @@ impl Mirror {
                 return vec![Up::Status(st)];
             }
             vec![]
-        } else if self.started || s.final_text.is_some() {
+        } else if self.retry.holds(s, begun, now) {
+            // Helm carries the stopped turn on by itself: the exchange stays open for the
+            // continued turn's answer, with a line saying so instead of the error.
+            self.started = true;
+            self.idle_seen = 0;
+            let st = s
+                .stopped
+                .as_ref()
+                .and_then(Stop::status)
+                .unwrap_or_default();
+            let due = self.last_at.is_none_or(|t| now - t >= STATUS_GAP_MS);
+            if self.last_status.as_deref() != Some(st) && due {
+                self.last_status = Some(st.to_owned());
+                self.last_at = Some(now);
+                return vec![Up::Status(st.to_owned())];
+            }
+            vec![]
+        } else if self.started || s.final_text.is_some() || (begun && s.stopped.is_some()) {
             // Settled: seen idle twice in a row, so the last streamed row is flushed.
             self.idle_seen += 1;
             if self.idle_seen < 2 {
                 return vec![];
             }
-            let due = match (&s.turn_done, &s.final_text) {
+            let unsent = s
+                .turn_done
+                .as_ref()
+                .is_some_and(|(id, _)| *id > self.sent_through);
+            let due = match (&s.stopped, &s.turn_done, &s.final_text) {
+                // A turn that stopped on an error says so in words, never with the error row or
+                // a reply the error cut short.
+                (Some(stop), _, _) if !unsent => Some((None, What::Answer(stop.last_word()))),
                 // Its answer went up while the chat was still busy: the exchange just closes.
-                (Some((id, _)), _) if *id <= self.sent_through => None,
-                (Some((id, text)), _) => Some((Some(*id), What::Answer(text.clone()))),
-                (None, Some(text)) => Some((None, What::Answer(text.clone()))),
-                (None, None) if self.answered => None,
-                (None, None) => Some((None, What::Nothing)),
+                (_, Some((id, _)), _) if *id <= self.sent_through => None,
+                (_, Some((id, text)), _) => Some((Some(*id), What::Answer(text.clone()))),
+                (_, None, Some(text)) => Some((None, What::Answer(text.clone()))),
+                (_, None, None) if self.answered => None,
+                (_, None, None) => Some((None, What::Nothing)),
             };
             match due {
                 Some((row, what)) => self.owe(row, what, true),

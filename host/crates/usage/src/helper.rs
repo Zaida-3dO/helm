@@ -110,12 +110,31 @@ impl ProcessReader {
         } else if !runtime.executable.is_empty() {
             job["command"] = Value::String(runtime.executable);
         }
-        match self.run_job(&job, host_wait) {
+        // The binary asks Claude with the user's sign-in, so it passes the sign-in gate like
+        // every other Claude process Helm starts: it waits while another start checks the
+        // sign-in (at most the caller's own deadline), and says how its request went.
+        let gate = helm_core::signin_gate::global();
+        let ticket = gate.admit_blocking(SIGN_IN_WAIT.min(host_wait), &|| false);
+        let answer = match self.run_job(&job, host_wait) {
             Ok(v) => parse_answer(&v),
             Err(e) => failed("error", e),
+        };
+        match &answer {
+            ControlAnswer::Reading { .. } => ticket.answered(helm_core::now_ms()),
+            ControlAnswer::Failed { message, .. }
+                if helm_chats::outage::is_token_refresh_error(message) =>
+            {
+                ticket.refresh_failed(helm_core::now_ms())
+            }
+            // Anything else says nothing about the sign-in: dropping the ticket frees it.
+            ControlAnswer::Failed { .. } => drop(ticket),
         }
+        answer
     }
 }
+
+/// The longest a reading waits at the sign-in gate before it runs anyway.
+const SIGN_IN_WAIT: Duration = Duration::from_secs(90);
 
 /// Start `node <script>`, write the job to stdin, read one JSON line back.
 fn run_helper(

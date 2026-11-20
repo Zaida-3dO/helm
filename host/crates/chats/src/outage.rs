@@ -17,7 +17,11 @@
 //!   process held the refresh) is tried again after about 20 s, 1, 3, 5, 8 and 10 min, each wait
 //!   spread by a few seconds per chat and at most two chats started a look, so chats do not retry
 //!   together; only after the sixth, about half an hour in, does the chat get one "sign in again"
-//!   card and an attention flag.
+//!   card and an attention flag. Every retry still passes the sign-in gate
+//!   ([`helm_core::signin_gate`]). Once the gate opens (a Claude request was answered, so the
+//!   sign-in works again) the chats still waiting to retry go at the next look instead of after
+//!   their wait; and once a sign-in finishes, the chats Helm had given up on are tried once more
+//!   and lose their flag. The person can also ask for a chat's retry now ([`retry_now`]).
 //! - **Probe.** Whether the connection is back is read by opening (and at once closing) a plain
 //!   TCP connection to Claude's API host: no request is made and no credential is involved. It
 //!   only runs while a chat is working or waiting to be continued.
@@ -95,7 +99,12 @@ not repeat an action that may already have completed. Then continue the task.";
 pub const REFRESH_CONTINUATION_TEXT: &str = "Your last turn failed because Claude Code could not refresh its sign-in token at that moment (another Claude Code process was refreshing it), not because of anything you did. Before you carry on, check the current state (files, branches, running processes and any command you had started) and do not repeat an action that may already have completed. Then continue the task.";
 
 /// The card and flag text for a chat whose token refresh kept failing.
-pub const SIGN_IN_AGAIN_TEXT: &str = "Claude Code could not refresh its sign-in for about half an hour. Sign in again, then send a message to carry on.";
+pub const SIGN_IN_AGAIN_TEXT: &str = "Claude Code could not refresh its sign-in for about half an hour. Sign in again; Helm carries on by itself once it works.";
+
+/// The head of a chat's error after a failed token refresh, before the raw line (kept after a
+/// blank line for the details fold under the banner). The raw line still follows it, so the error
+/// still reads as a token refresh everywhere it is checked.
+pub const SIGN_IN_BUSY_HEAD: &str = "Claude's sign-in was busy (another Claude Code process was refreshing it). Helm tries again by itself.";
 
 /// The attention flag left on a chat whose token refresh kept failing; the queue view lists
 /// every chat that holds it.
@@ -191,6 +200,18 @@ where
 
 {error}"
     ))
+}
+
+/// What to show for a turn that failed on a token refresh: [`SIGN_IN_BUSY_HEAD`], then the raw
+/// error after a blank line. `None` for any other error, and for one already worded so.
+pub fn sign_in_busy_error(error: &str) -> Option<String> {
+    if !is_token_refresh_error(error)
+        || error.starts_with(SIGN_IN_BUSY_HEAD)
+        || error.starts_with(PLAN_LIMIT_HEAD)
+    {
+        return None;
+    }
+    Some(format!("{SIGN_IN_BUSY_HEAD}\n\n{error}"))
 }
 
 /// A few seconds of spread, fixed per chat and attempt, added to the wait before a token-refresh
@@ -343,6 +364,8 @@ struct Stopped {
     gave_up: bool,
     /// Seen stopped in the current look (cleared by [`Outages::begin_look`]).
     stopped_now: bool,
+    /// Tried at the next look, whatever its wait and the per-look limit say.
+    now_asked: bool,
 }
 
 /// The state machine. Every method takes the time it happens at, and nothing here touches the
@@ -481,6 +504,7 @@ impl Outages {
                         next_at: now + wait_before_try(cause, 0) + extra,
                         gave_up: false,
                         stopped_now: true,
+                        now_asked: false,
                     },
                 );
             }
@@ -490,6 +514,46 @@ impl Outages {
     /// How many continuations this chat has had for its current run of failures.
     pub fn attempts(&self, chat_id: &str) -> u32 {
         self.stopped.get(chat_id).map_or(0, |s| s.attempts)
+    }
+
+    /// Claude's sign-in works again (the gate opened): every chat waiting to retry a token
+    /// refresh goes at this look instead of after its wait. A chat given up on stays given up.
+    pub fn sign_in_open(&mut self) {
+        for s in self.stopped.values_mut() {
+            if s.cause == Cause::TokenRefresh && !s.gave_up && s.attempts < max_attempts(s.cause) {
+                s.now_asked = true;
+            }
+        }
+    }
+
+    /// A sign-in finished: every chat given up on after token refreshes is tried once more.
+    /// Answers the chats it re-armed.
+    pub fn signed_in(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (id, s) in self.stopped.iter_mut() {
+            if s.cause == Cause::TokenRefresh && s.gave_up {
+                s.gave_up = false;
+                s.attempts = max_attempts(s.cause) - 1;
+                s.now_asked = true;
+                out.push(id.clone());
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// The person asked for this chat's retry now: it goes at the next look (a chat Helm gave
+    /// up on gets one more try). Answers whether the chat is waiting to be carried on at all.
+    pub fn retry_now(&mut self, chat_id: &str) -> bool {
+        let Some(s) = self.stopped.get_mut(chat_id) else {
+            return false;
+        };
+        if s.gave_up || s.attempts >= max_attempts(s.cause) {
+            s.gave_up = false;
+            s.attempts = max_attempts(s.cause) - 1;
+        }
+        s.now_asked = true;
+        true
     }
 
     /// The chat is working again, idle, stopped by the user, archived or gone.
@@ -510,11 +574,14 @@ impl Outages {
             let ready = s.stopped_now
                 && !s.gave_up
                 && s.attempts < max_attempts(s.cause)
-                && now >= s.next_at
+                && (now >= s.next_at || s.now_asked)
                 && (s.cause != Cause::Connection || online);
-            let held = s.cause == Cause::TokenRefresh && refreshes >= REFRESH_RETRIES_PER_LOOK;
+            let held = s.cause == Cause::TokenRefresh
+                && refreshes >= REFRESH_RETRIES_PER_LOOK
+                && !s.now_asked;
             if ready && !held {
-                refreshes += usize::from(s.cause == Cause::TokenRefresh);
+                refreshes += usize::from(s.cause == Cause::TokenRefresh && !s.now_asked);
+                s.now_asked = false;
                 s.attempts += 1;
                 s.next_at = now + AFTER_SEND_MS;
                 out.push(Due {
@@ -536,6 +603,7 @@ impl Outages {
         for (id, s) in self.stopped.iter_mut() {
             if s.stopped_now
                 && !s.gave_up
+                && !s.now_asked
                 && s.attempts >= max_attempts(s.cause)
                 && now >= s.next_at
             {
@@ -760,33 +828,125 @@ fn flag_gave_up(rt: &ChatRuntime, chat_id: &str, question: &str, now: i64) -> ru
     Ok(())
 }
 
+/// Clear the attention flag a chat got when Helm gave up on its token refresh (and no other).
+fn clear_sign_in_flag(rt: &ChatRuntime, chat_id: &str) -> rusqlite::Result<()> {
+    let n = rt.db().write(|tx| {
+        tx.execute(
+            "DELETE FROM chat_flags WHERE chat_id = ?1 AND question = ?2",
+            rusqlite::params![chat_id, SIGN_IN_FLAG_QUESTION],
+        )
+    })?;
+    if n > 0 {
+        rt.publish_attention();
+    }
+    Ok(())
+}
+
+/// `chat_retry_now`: the person asks for a chat's pending retry now (the "Try now" button on a
+/// failed turn). The outage watch takes it at its next look, which the ask brings forward. Only
+/// a chat Helm would carry on by itself has a retry to bring forward; anything else is refused in
+/// plain words.
+pub fn retry_now(rt: &ChatRuntime, chat_id: &str) -> Result<bool, ApiError> {
+    // status, error, provider, draft, archived
+    type ChatRow = (String, Option<String>, Option<String>, Option<String>, bool);
+    let row: Option<ChatRow> = rt
+        .db()
+        .snapshot(|tx| {
+            tx.query_row(
+                "SELECT status, error, provider, draft, archived FROM chats WHERE id = ?1",
+                [chat_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()
+        })
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let Some((status, error, provider, draft, archived)) = row else {
+        return Err(ApiError::new("not_found", "That chat does not exist."));
+    };
+    let nothing = || {
+        ApiError::new(
+            "refused",
+            "Helm is not waiting to try that chat again, so there is nothing to try now. Send a \
+             message to carry on.",
+        )
+    };
+    if archived || status != "interrupted" {
+        return Err(nothing());
+    }
+    if draft.is_some_and(|d| !d.trim().is_empty()) {
+        return Err(ApiError::new(
+            "refused",
+            "That chat has a message being written: send it to carry on.",
+        ));
+    }
+    let local = provider.is_some_and(|p| !p.is_empty());
+    let outage = !local && error.as_deref().and_then(classify).is_some();
+    let crashed = rt
+        .sh
+        .exits
+        .recent_crashes(helm_core::now_ms())
+        .contains_key(chat_id);
+    if !outage && !crashed {
+        return Err(nothing());
+    }
+    rt.sh.retry_now.lock().unwrap().insert(chat_id.to_owned());
+    rt.sh.outage_poke.notify_one();
+    Ok(true)
+}
+
 /// Watches for outages and sleep on behalf of the chats. Created once by the app; the system's
 /// sleep and wake notices call [`Self::suspending`] and [`Self::resumed`].
 pub struct OutageWatch {
     rt: ChatRuntime,
     probe: Arc<dyn Probe>,
     state: Mutex<Outages>,
+    /// Claude Code's config folder, where an abandoned sign-in lock is cleared before a
+    /// token-refresh retry ([`crate::oauth_lock`]); `None` leaves every lock alone.
+    lock_dir: Option<std::path::PathBuf>,
+    /// The sign-ins the sign-in gate had counted at the last look.
+    sign_ins_seen: std::sync::atomic::AtomicU64,
 }
 
 impl OutageWatch {
     pub fn new(rt: ChatRuntime) -> Arc<Self> {
-        Self::with_probe(rt, Arc::new(TcpProbe(PROBE_TARGET.to_owned())))
+        Self::with_parts(
+            rt,
+            Arc::new(TcpProbe(PROBE_TARGET.to_owned())),
+            crate::oauth_lock::claude_dir(),
+        )
     }
 
+    /// A watch with its own probe, that never touches a sign-in lock.
     pub fn with_probe(rt: ChatRuntime, probe: Arc<dyn Probe>) -> Arc<Self> {
+        Self::with_parts(rt, probe, None)
+    }
+
+    /// A watch with its own probe and config folder for the sign-in lock.
+    pub fn with_parts(
+        rt: ChatRuntime,
+        probe: Arc<dyn Probe>,
+        lock_dir: Option<std::path::PathBuf>,
+    ) -> Arc<Self> {
+        let seen = rt.sh.spawner.sign_in_gate().map_or(0, |g| g.sign_ins());
         Arc::new(Self {
             rt,
             probe,
             state: Mutex::new(Outages::default()),
+            lock_dir,
+            sign_ins_seen: std::sync::atomic::AtomicU64::new(seen),
         })
     }
 
-    /// Start looking every [`WATCH_EVERY`] until the app quits.
+    /// Start looking every [`WATCH_EVERY`] until the app quits, and at once when someone asks
+    /// for a chat's retry now.
     pub fn start(self: &Arc<Self>) {
         let me = self.clone();
         self.rt.sh.handle.spawn(async move {
             loop {
-                tokio::time::sleep(WATCH_EVERY).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(WATCH_EVERY) => {}
+                    _ = me.rt.sh.outage_poke.notified() => {}
+                }
                 if me
                     .rt
                     .sh
@@ -819,10 +979,50 @@ impl OutageWatch {
         let _ = wait.recv_timeout(Duration::from_millis(1200));
     }
 
-    /// The computer woke.
+    /// The computer woke. What the sign-in gate knew is stale too: the token may have expired
+    /// while it slept, so the next Claude start checks it.
     pub fn resumed(&self) {
+        if let Some(gate) = self.rt.sh.spawner.sign_in_gate() {
+            gate.reset();
+        }
         let marker = self.state.lock().unwrap().resume(helm_core::now_ms());
         self.write_marker(marker);
+    }
+
+    /// Before token-refresh retries go out: clear a sign-in lock its holder left behind, and say
+    /// so in the chats being retried. Nothing happens unless one of them is a refresh retry.
+    async fn heal_lock(&self, due: &[Due]) {
+        let refreshing: Vec<&str> = due
+            .iter()
+            .filter(|d| d.cause == Cause::TokenRefresh)
+            .map(|d| d.chat_id.as_str())
+            .collect();
+        let Some(dir) = self.lock_dir.clone().filter(|_| !refreshing.is_empty()) else {
+            return;
+        };
+        let healed = tokio::task::spawn_blocking(move || {
+            crate::oauth_lock::heal(
+                &dir,
+                std::time::SystemTime::now(),
+                &helm_workers::job::process_alive,
+            )
+        })
+        .await;
+        match healed {
+            Ok(Ok(true)) => {
+                log::info!("{}", crate::oauth_lock::CLEARED_LOG);
+                // An interruption line, not a sign-in card: nobody has to sign in.
+                for id in refreshing {
+                    self.rt.add_context_row(
+                        id,
+                        ContextKind::Interruption,
+                        crate::oauth_lock::CLEARED_TEXT,
+                    );
+                }
+            }
+            Ok(Ok(false)) | Err(_) => {}
+            Ok(Err(e)) => log::warn!("the Claude Code sign-in lock could not be cleared: {e}"),
+        }
     }
 
     fn write_marker(&self, marker: Option<Marker>) {
@@ -869,7 +1069,8 @@ impl OutageWatch {
         } else {
             None
         };
-        let (marker, due, gave_up) = {
+        let gate = self.rt.sh.spawner.sign_in_gate();
+        let (marker, due, gave_up, rearmed) = {
             let mut t = self.state.lock().unwrap();
             for (id, stamp, cause) in &look.interrupted {
                 match (cause, seen.get(id)) {
@@ -907,9 +1108,37 @@ impl OutageWatch {
                 }
             }
             let marker = reached.and_then(|ok| t.probe(now, ok, &look.working));
-            (marker, t.due(now), t.give_up(now))
+            // The sign-in gate: a sign-in that finished since the last look re-arms the chats
+            // given up on, and an open gate (a Claude request was answered) lets the chats
+            // waiting to retry a token refresh go now.
+            let mut rearmed = Vec::new();
+            if let Some(gate) = &gate {
+                let signs = gate.sign_ins();
+                let seen = self
+                    .sign_ins_seen
+                    .swap(signs, std::sync::atomic::Ordering::SeqCst);
+                if signs != seen {
+                    rearmed = t.signed_in();
+                }
+                if gate.is_open(helm_core::now_ms()) {
+                    t.sign_in_open();
+                }
+            }
+            // Chats the person asked to try now.
+            for id in std::mem::take(&mut *self.rt.sh.retry_now.lock().unwrap()) {
+                t.retry_now(&id);
+            }
+            (marker, t.due(now), t.give_up(now), rearmed)
         };
         self.write_marker(marker);
+        self.heal_lock(&due).await;
+        for id in rearmed {
+            let rt = self.rt.clone();
+            let cleared = tokio::task::spawn_blocking(move || clear_sign_in_flag(&rt, &id)).await;
+            if let Ok(Err(e)) = cleared {
+                log::warn!("sign-in flag not cleared: {e}");
+            }
+        }
         for d in due {
             let rt = self.rt.clone();
             let id = d.chat_id.clone();
@@ -1125,6 +1354,11 @@ mod tests {
                 Some(Cause::TokenRefresh),
             ),
             ("failed to refresh oauth token", Some(Cause::TokenRefresh)),
+            // The chat's error after a failed refresh: the words first, the raw line kept.
+            (
+                "Claude's sign-in was busy (another Claude Code process was refreshing it). Helm tries again by itself.\n\nFailed to refresh OAuth token: another Claude Code process is refreshing it",
+                Some(Cause::TokenRefresh),
+            ),
             // Not outages.
             (
                 "Plan limit reached, resets at 01:13\n\nFailed to refresh OAuth token: another Claude Code process is refreshing it",
@@ -1142,6 +1376,16 @@ mod tests {
         ] {
             assert_eq!(classify(text), want, "{text}");
         }
+        // That headline form is what a failed refresh becomes, once, and nothing else is.
+        let raw = "Failed to refresh OAuth token: another Claude Code process is refreshing it";
+        let worded = sign_in_busy_error(raw).expect("worded");
+        assert_eq!(worded, format!("{SIGN_IN_BUSY_HEAD}\n\n{raw}"));
+        assert_eq!(sign_in_busy_error(&worded), None, "never worded twice");
+        assert_eq!(sign_in_busy_error("fetch failed"), None);
+        assert_eq!(
+            sign_in_busy_error("Plan limit reached\n\nfailed to refresh oauth token"),
+            None
+        );
     }
 
     #[test]
@@ -1377,6 +1621,54 @@ mod tests {
             })
             .collect();
         assert_eq!(sizes, [REFRESH_RETRIES_PER_LOOK, 2, 1, 0]);
+        // Once the sign-in works again (the gate opened), every chat still waiting to retry a
+        // refresh goes at that look, in order, without its wait or the per-look limit; the
+        // service stop keeps its own wait.
+        let mut herd = Outages::default();
+        let look = |o: &mut Outages| {
+            o.begin_look();
+            for i in 0..5 {
+                o.note_stopped(0, &format!("c{i}"), 1, Cause::TokenRefresh);
+            }
+            o.note_stopped(0, "net", 1, Cause::Service);
+        };
+        look(&mut herd);
+        assert!(herd.due(5_000).is_empty(), "still inside the first wait");
+        look(&mut herd);
+        herd.sign_in_open();
+        let resumed: Vec<String> = herd.due(5_000).into_iter().map(|d| d.chat_id).collect();
+        assert_eq!(resumed, ["c0", "c1", "c2", "c3", "c4"]);
+        // A chat Helm gave up on stays given up on while the gate is open, and is tried once
+        // more when a sign-in finishes; one the person asks for goes at the next look too.
+        let mut o = Outages::default();
+        o.begin_look();
+        o.note_stopped(0, "gone", 1, Cause::TokenRefresh);
+        for _ in 0..max_attempts(Cause::TokenRefresh) {
+            assert!(o.retry_now("gone"));
+            assert_eq!(o.due(1_000).len(), 1);
+            o.begin_look();
+            o.note_stopped(
+                0,
+                "gone",
+                1 + o.attempts("gone") as i64,
+                Cause::TokenRefresh,
+            );
+        }
+        assert_eq!(o.give_up(0), [("gone".to_owned(), Cause::TokenRefresh)]);
+        o.begin_look();
+        o.note_stopped(0, "gone", 7, Cause::TokenRefresh);
+        o.sign_in_open();
+        assert!(
+            o.due(60 * MIN).is_empty(),
+            "given up on: the open gate alone does not retry it"
+        );
+        assert_eq!(o.signed_in(), ["gone"]);
+        let again = o.due(0);
+        assert_eq!(
+            (again.len(), again[0].attempt),
+            (1, max_attempts(Cause::TokenRefresh))
+        );
+        assert!(!o.retry_now("never-seen"), "nothing to bring forward");
         let mut o = Outages::default();
         o.probe(0, false, &[]);
         o.probe(1, false, &[]);
