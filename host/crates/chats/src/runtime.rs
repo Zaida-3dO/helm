@@ -588,7 +588,7 @@ impl ProcessSpawner {
         }
         let gate = helm_core::signin_gate::global();
         let ticket = if name == "autocomplete" {
-            gate.admit(helm_core::now_ms(), None)
+            gate.admit_background(helm_core::now_ms())
                 .ok_or("Claude's sign-in is being checked; no suggestion for now.")?
         } else {
             let stop = || cancel.is_some_and(|c| c.load(Ordering::SeqCst));

@@ -14,7 +14,10 @@
 //! means the sign-in works and the token is fresh, and then go together.
 //!
 //! The gate fails open: a probe that has no answer after [`PROBE_LIMIT_MS`] opens it for everyone,
-//! and no single start waits longer than [`MAX_WAIT_MS`] whatever the gate says.
+//! and no single start waits longer than [`MAX_WAIT_MS`] whatever the gate says. A background
+//! start (the usage meter, a title or other helper) may probe too, since it is a cheap way to find
+//! out, but nobody waits on it for long: after [`BACKGROUND_PROBE_LIMIT_MS`] without an answer it
+//! stops being the probe and the next start finds out instead, while the background job carries on.
 //!
 //! [`Gate`] is the plain state machine (every method takes the time); [`SignInGate`] is the shared
 //! handle chats, helpers and the sign-in terminal use, with a wake-up for async waiters and a
@@ -27,6 +30,8 @@ use std::time::{Duration, Instant};
 
 /// A probe with no answer for this long opens the gate for everyone.
 pub const PROBE_LIMIT_MS: i64 = 90_000;
+/// A background probe with no answer for this long stops being the probe: the next start probes.
+pub const BACKGROUND_PROBE_LIMIT_MS: i64 = 15_000;
 /// The last answer is trusted for this long; after it the next start probes again.
 pub const FRESH_MS: i64 = 30 * 60_000;
 /// After a refresh failure, everyone waits this long before the next probe.
@@ -39,8 +44,13 @@ pub const MAX_WAIT_MS: i64 = 90_000;
 pub enum State {
     /// Nothing is known: the next start goes as the probe.
     Unknown,
-    /// One start (`probe`) is finding out; the rest wait.
-    Probing { since: i64, probe: u64 },
+    /// One start (`probe`) is finding out; the rest wait. A `background` probe is a job nobody
+    /// is looking at, so it holds the others for a shorter time.
+    Probing {
+        since: i64,
+        probe: u64,
+        background: bool,
+    },
     /// Claude answered at `last_answer`: everything goes.
     Open { last_answer: i64 },
     /// A refresh just failed: everything waits until `until`, then the next start probes.
@@ -78,10 +88,16 @@ impl Gate {
         }
     }
 
-    /// The state with the time rules applied: a probe past its limit opens the gate, and a
+    /// The state with the time rules applied: a background probe past its limit knows nothing
+    /// again (the next start probes), any other probe past its limit opens the gate, and a
     /// cooling past its end knows nothing again.
     pub fn current(&self, now: i64) -> State {
         match self.state {
+            State::Probing {
+                since,
+                background: true,
+                ..
+            } if now - since >= BACKGROUND_PROBE_LIMIT_MS => State::Unknown,
             State::Probing { since, .. } if now - since >= PROBE_LIMIT_MS => {
                 State::Open { last_answer: now }
             }
@@ -109,8 +125,9 @@ impl Gate {
         }
     }
 
-    /// A start asks to go. One that finds nothing known becomes the probe.
-    pub fn acquire(&mut self, now: i64, waiting_since: Option<i64>) -> Admit {
+    /// A start asks to go. One that finds nothing known becomes the probe; `background` says the
+    /// start is a job nobody is waiting on (see [`BACKGROUND_PROBE_LIMIT_MS`]).
+    pub fn acquire(&mut self, now: i64, waiting_since: Option<i64>, background: bool) -> Admit {
         self.tick(now);
         match self.state {
             State::Open { last_answer } if now - last_answer < FRESH_MS => {
@@ -121,6 +138,7 @@ impl Gate {
                 self.state = State::Probing {
                     since: now,
                     probe: self.probes,
+                    background,
                 };
                 Admit::Go {
                     probe: Some(self.probes),
@@ -241,7 +259,21 @@ impl SignInGate {
 
     /// Ask to start now: a ticket to go, or `None` to wait. Report through the ticket.
     pub fn admit(self: &Arc<Self>, now: i64, waiting_since: Option<i64>) -> Option<Ticket> {
-        match self.apply(|g| g.acquire(now, waiting_since)) {
+        self.admit_as(now, waiting_since, false)
+    }
+
+    /// [`Self::admit`] for a background job, whose probe holds the others only briefly.
+    pub fn admit_background(self: &Arc<Self>, now: i64) -> Option<Ticket> {
+        self.admit_as(now, None, true)
+    }
+
+    fn admit_as(
+        self: &Arc<Self>,
+        now: i64,
+        waiting_since: Option<i64>,
+        background: bool,
+    ) -> Option<Ticket> {
+        match self.apply(|g| g.acquire(now, waiting_since, background)) {
             Admit::Go { probe } => Some(Ticket {
                 gate: self.clone(),
                 probe,
@@ -250,9 +282,10 @@ impl SignInGate {
         }
     }
 
-    /// Wait here (blocking) until the gate lets this start go, at most `cap` (and never past
-    /// [`MAX_WAIT_MS`]), or until `stop` answers true. Always answers a ticket: past the cap the
-    /// start goes anyway.
+    /// Wait here (blocking) until the gate lets this background job go, at most `cap` (and never
+    /// past [`MAX_WAIT_MS`]), or until `stop` answers true. Always answers a ticket: past the cap
+    /// the job goes anyway. A job that goes as the probe holds the others only for
+    /// [`BACKGROUND_PROBE_LIMIT_MS`].
     pub fn admit_blocking(self: &Arc<Self>, cap: Duration, stop: &dyn Fn() -> bool) -> Ticket {
         let began = Instant::now();
         let since = crate::now_ms();
@@ -260,7 +293,7 @@ impl SignInGate {
         loop {
             let now = crate::now_ms();
             let before = g.state;
-            let admit = g.acquire(now, Some(since));
+            let admit = g.acquire(now, Some(since), true);
             if g.state != before {
                 self.wake();
             }
@@ -392,13 +425,23 @@ mod tests {
         #[derive(Clone, Copy, Debug)]
         enum Do {
             Acquire(i64, Option<i64>),
+            AcquireBackground(i64),
             Answered(i64),
             Failed(i64),
             Released(u64),
             Tick(i64),
             Reset,
         }
-        let probing = |since| State::Probing { since, probe: 1 };
+        let probing = |since| State::Probing {
+            since,
+            probe: 1,
+            background: false,
+        };
+        let background = |since| State::Probing {
+            since,
+            probe: 1,
+            background: true,
+        };
         let open = |last_answer| State::Open { last_answer };
         let go = |p: Option<u64>| Some(Admit::Go { probe: p });
         let rows: Vec<(&str, State, Do, Option<Admit>, State)> = vec![
@@ -520,6 +563,43 @@ mod tests {
                 go(None),
                 open(95 * S),
             ),
+            // A background job may probe, but after 15 s with no answer the next start probes
+            // instead; an answer it brings later still opens the gate.
+            (
+                "background: probe",
+                State::Unknown,
+                Do::AcquireBackground(0),
+                go(Some(1)),
+                background(0),
+            ),
+            (
+                "background probe: wait",
+                background(0),
+                Do::Acquire(14 * S, None),
+                Some(Admit::Wait),
+                background(0),
+            ),
+            (
+                "background probe overdue: next start probes",
+                background(0),
+                Do::Acquire(15 * S, None),
+                go(Some(1)),
+                probing(15 * S),
+            ),
+            (
+                "overdue background probe answers late",
+                background(0),
+                Do::Answered(40 * S),
+                None,
+                open(40 * S),
+            ),
+            (
+                "background behind a probe: wait",
+                probing(0),
+                Do::AcquireBackground(20 * S),
+                Some(Admit::Wait),
+                probing(0),
+            ),
             // No single start waits past 90 s, whatever the gate says.
             (
                 "waited too long",
@@ -544,7 +624,8 @@ mod tests {
                 probes: 0,
             };
             let got = match act {
-                Do::Acquire(now, since) => Some(g.acquire(now, since)),
+                Do::Acquire(now, since) => Some(g.acquire(now, since, false)),
+                Do::AcquireBackground(now) => Some(g.acquire(now, None, true)),
                 Do::Answered(now) => {
                     g.answered(now);
                     None
@@ -585,6 +666,15 @@ mod tests {
         assert!(
             g.must_wait(FRESH_MS, None, 1),
             "stale: the first in line probes"
+        );
+        let g = Gate {
+            state: background(0),
+            probes: 0,
+        };
+        assert!(g.must_wait(14 * S, None, 0), "a background probe holds");
+        assert!(
+            !g.must_wait(BACKGROUND_PROBE_LIMIT_MS, None, 0),
+            "but not past its limit"
         );
     }
 
