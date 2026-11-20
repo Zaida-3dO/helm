@@ -1,6 +1,7 @@
 // Typed wrappers over the chat ops. Every call still goes through api(op, args).
 
 import type { Api } from './client.ts';
+import { buildActionSend } from '../actions/send.ts';
 import type { ChatFindResult } from './generated/index.ts';
 import type {
   AttentionSummary,
@@ -162,14 +163,7 @@ export function chatOps(api: Api) {
     triageRetry: (chatId: string) => api<{ queued: boolean }>('triage_retry', { chatId }),
     /** Resume a stalled chat: a short message from the user's own button asking it to carry on. */
     resume: (chatId: string, text: string) =>
-      api<{ submission: Submission; chat: ChatRecord }>('chat_send', {
-        chatId,
-        submissionId: globalThis.crypto.randomUUID(),
-        text,
-        action: 'default',
-        origin: 'action',
-        draftRevision: -1,
-      }),
+      api<{ submission: Submission; chat: ChatRecord }>('chat_send', buildActionSend(chatId, text)),
     /** Try this chat's waiting sign-in retry at the next look instead of after its backoff.
      *  The host refuses plainly when nothing is pending. */
     retryNow: (chatId: string) => api<{ scheduled: boolean }>('chat_retry_now', { chatId }),
