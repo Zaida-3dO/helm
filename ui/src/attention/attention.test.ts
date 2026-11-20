@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { AttentionRow, AttentionSummary } from '../api/types.ts';
-import { countText, failedChecks, flagFor, inboxCount, inboxRows, mutedKindLabel, mutedRows, nextAttention, parseDelayMinutes, priorityFor, snoozeChoices, whenText } from './model.ts';
+import { countText, failedChecks, flagFor, inboxCount, inboxRows, mutedKindLabel, mutedRows, nextAttention, parseDelayMinutes, priorityFor, snoozeChoices, triageKindFor, whenText } from './model.ts';
 
 const row = (chatId: string, kind: AttentionRow['kind'] = 'question'): AttentionRow => ({ chatId, title: chatId, project: 'p', kind, reason: 'r' });
 const summary = (over: Partial<AttentionSummary> = {}): AttentionSummary => ({
@@ -107,9 +107,10 @@ test('muted chats are kept in their own group, out of the rows and the count; th
       { chatId: 'm2', title: 'Reviewer', project: 'p', kind: 'approval', reason: 'Waiting for your approval' },
     ],
     triage: [
-      { chatId: 'f', title: 'f', project: 'p', priority: 'high', failed: false },
-      { chatId: 'n', title: 'n', project: 'p', priority: null, failed: false },
-      { chatId: 'x', title: 'x', project: 'p', priority: null, failed: true },
+      { chatId: 'f', title: 'f', project: 'p', priority: 'high', failed: false, kind: 'decision' },
+      { chatId: 'n', title: 'n', project: 'p', priority: null, failed: false, kind: null },
+      { chatId: 's', title: 's', project: 'p', priority: 'normal', failed: false, kind: 'stalled' },
+      { chatId: 'x', title: 'x', project: 'p', priority: null, failed: true, kind: null },
     ],
   });
   assert.deepEqual(
@@ -126,6 +127,8 @@ test('muted chats are kept in their own group, out of the rows and the count; th
   assert.equal(priorityFor(s, 'f'), 'high');
   assert.equal(priorityFor(s, 'n'), null, 'a verdict without a priority shows no chip');
   assert.equal(priorityFor(s, 'x'), null, 'a failed check has no priority');
+  assert.deepEqual(['f', 'n', 's', 'x'].map((c) => triageKindFor(s, c)), ['decision', 'decision', 'stalled', 'decision'], 'only a stall offers Resume; no kind reads as a decision');
+  assert.equal(triageKindFor(null, 'f'), 'decision');
   assert.deepEqual(failedChecks(s).map((r) => r.chatId), ['x']);
   assert.deepEqual(failedChecks(s, false), [], 'with the idle check off, Retry rows go at once');
   assert.deepEqual(failedChecks(null), []);
