@@ -1297,6 +1297,11 @@ mod tests {
                 Some(Cause::TokenRefresh),
             ),
             ("failed to refresh oauth token", Some(Cause::TokenRefresh)),
+            // The chat's error after a failed refresh: the words first, the raw line kept.
+            (
+                "Claude's sign-in was busy (another Claude Code process was refreshing it). Helm tries again by itself.\n\nFailed to refresh OAuth token: another Claude Code process is refreshing it",
+                Some(Cause::TokenRefresh),
+            ),
             // Not outages.
             (
                 "Plan limit reached, resets at 01:13\n\nFailed to refresh OAuth token: another Claude Code process is refreshing it",
@@ -1314,6 +1319,16 @@ mod tests {
         ] {
             assert_eq!(classify(text), want, "{text}");
         }
+        // That headline form is what a failed refresh becomes, once, and nothing else is.
+        let raw = "Failed to refresh OAuth token: another Claude Code process is refreshing it";
+        let worded = sign_in_busy_error(raw).expect("worded");
+        assert_eq!(worded, format!("{SIGN_IN_BUSY_HEAD}\n\n{raw}"));
+        assert_eq!(sign_in_busy_error(&worded), None, "never worded twice");
+        assert_eq!(sign_in_busy_error("fetch failed"), None);
+        assert_eq!(
+            sign_in_busy_error("Plan limit reached\n\nfailed to refresh oauth token"),
+            None
+        );
     }
 
     #[test]
@@ -1549,6 +1564,54 @@ mod tests {
             })
             .collect();
         assert_eq!(sizes, [REFRESH_RETRIES_PER_LOOK, 2, 1, 0]);
+        // Once the sign-in works again (the gate opened), every chat still waiting to retry a
+        // refresh goes at that look, in order, without its wait or the per-look limit; the
+        // service stop keeps its own wait.
+        let mut herd = Outages::default();
+        let look = |o: &mut Outages| {
+            o.begin_look();
+            for i in 0..5 {
+                o.note_stopped(0, &format!("c{i}"), 1, Cause::TokenRefresh);
+            }
+            o.note_stopped(0, "net", 1, Cause::Service);
+        };
+        look(&mut herd);
+        assert!(herd.due(5_000).is_empty(), "still inside the first wait");
+        look(&mut herd);
+        herd.sign_in_open();
+        let resumed: Vec<String> = herd.due(5_000).into_iter().map(|d| d.chat_id).collect();
+        assert_eq!(resumed, ["c0", "c1", "c2", "c3", "c4"]);
+        // A chat Helm gave up on stays given up on while the gate is open, and is tried once
+        // more when a sign-in finishes; one the person asks for goes at the next look too.
+        let mut o = Outages::default();
+        o.begin_look();
+        o.note_stopped(0, "gone", 1, Cause::TokenRefresh);
+        for _ in 0..max_attempts(Cause::TokenRefresh) {
+            assert!(o.retry_now("gone"));
+            assert_eq!(o.due(1_000).len(), 1);
+            o.begin_look();
+            o.note_stopped(
+                0,
+                "gone",
+                1 + o.attempts("gone") as i64,
+                Cause::TokenRefresh,
+            );
+        }
+        assert_eq!(o.give_up(0), [("gone".to_owned(), Cause::TokenRefresh)]);
+        o.begin_look();
+        o.note_stopped(0, "gone", 7, Cause::TokenRefresh);
+        o.sign_in_open();
+        assert!(
+            o.due(60 * MIN).is_empty(),
+            "given up on: the open gate alone does not retry it"
+        );
+        assert_eq!(o.signed_in(), ["gone"]);
+        let again = o.due(0);
+        assert_eq!(
+            (again.len(), again[0].attempt),
+            (1, max_attempts(Cause::TokenRefresh))
+        );
+        assert!(!o.retry_now("never-seen"), "nothing to bring forward");
         let mut o = Outages::default();
         o.probe(0, false, &[]);
         o.probe(1, false, &[]);
