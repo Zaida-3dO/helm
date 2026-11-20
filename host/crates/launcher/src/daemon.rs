@@ -186,6 +186,8 @@ impl Daemon {
                 continue;
             };
             let Some(handle) = sys::process_handle(pid) else {
+                // It ended between the two looks: look again in a moment.
+                tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             };
             // Helm is up. After a crash loop, a Helm that runs again was started some other way:

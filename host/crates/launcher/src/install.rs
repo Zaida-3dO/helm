@@ -204,7 +204,14 @@ pub fn apply(s: &Setup) -> LauncherView {
                     &[OsStr::new("--profile"), OsStr::new(&dir_arg)],
                     &[],
                 ) {
-                    Ok(pid) => log::info!("launcher: started (pid {pid})"),
+                    Ok(pid) => {
+                        log::info!("launcher: started (pid {pid})");
+                        // Let it take its instance mutex, so the view below says it runs.
+                        let end = Instant::now() + Duration::from_secs(2);
+                        while !running(s.profile_hash) && Instant::now() < end {
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                    }
                     Err(e) => log::warn!("launcher: it could not be started: {e}"),
                 }
             }
