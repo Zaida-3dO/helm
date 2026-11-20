@@ -847,7 +847,9 @@ fn clear_sign_in_flag(rt: &ChatRuntime, chat_id: &str) -> rusqlite::Result<()> {
 /// a chat Helm would carry on by itself has a retry to bring forward; anything else is refused in
 /// plain words.
 pub fn retry_now(rt: &ChatRuntime, chat_id: &str) -> Result<bool, ApiError> {
-    let row: Option<(String, Option<String>, Option<String>, Option<String>, bool)> = rt
+    // status, error, provider, draft, archived
+    type ChatRow = (String, Option<String>, Option<String>, Option<String>, bool);
+    let row: Option<ChatRow> = rt
         .db()
         .snapshot(|tx| {
             tx.query_row(

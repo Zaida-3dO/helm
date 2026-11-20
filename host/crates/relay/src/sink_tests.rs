@@ -219,7 +219,8 @@ fn a_stopped_turn_says_so_in_words_and_waits_for_helms_own_retry() {
         headline: SIGN_IN_BUSY_HEAD.into(),
     };
     // (status, error, local, typing, gave up) -> the stop.
-    let rows: Vec<(&str, Option<&str>, bool, bool, bool, Option<Stop>)> = vec![
+    type Row<'a> = (&'a str, Option<&'a str>, bool, bool, bool, Option<Stop>);
+    let rows: Vec<Row> = vec![
         (
             "interrupted",
             Some(&worded),
