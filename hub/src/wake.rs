@@ -138,6 +138,16 @@ impl Wake {
         self.mode != Mode::Off
     }
 
+    /// Whether [`Self::send`] has what it needs to wake this PC, so a Wake button is only offered
+    /// where it can work.
+    pub fn can_wake(&self, info: &WakeInfo) -> bool {
+        match self.mode {
+            Mode::Off => false,
+            Mode::Udp => self.broadcast.or(info.broadcast).is_some(),
+            Mode::Ha => self.ha_url.is_some() && self.ha_token.is_some(),
+        }
+    }
+
     /// A short line for the start-up log.
     pub fn describe(&self) -> &'static str {
         match self.mode {
@@ -357,5 +367,15 @@ mod tests {
             !format!("{ha:?}").contains("secret-value"),
             "the token must not show in a debug print"
         );
+        // A Wake button only where sending can work: UDP needs a broadcast address from the
+        // settings or the PC.
+        let bare = WakeInfo::parse("aa:bb:cc:dd:ee:ff", None).unwrap();
+        let lan = WakeInfo::parse("aa:bb:cc:dd:ee:ff", Some("192.168.0.255")).unwrap();
+        let udp = from(&[("HUB_WAKE", "udp")]).unwrap();
+        assert!(!udp.can_wake(&bare) && udp.can_wake(&lan));
+        let set = from(&[("HUB_WAKE", "udp"), ("HUB_WAKE_BROADCAST", "10.0.0.255")]).unwrap();
+        assert!(set.can_wake(&bare));
+        assert!(ha.can_wake(&bare));
+        assert!(!from(&[]).unwrap().can_wake(&lan));
     }
 }

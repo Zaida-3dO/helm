@@ -213,6 +213,11 @@ impl Launchers {
         self.wake_mode().enabled()
     }
 
+    /// Whether the hub can wake a PC with what its launcher reported.
+    pub fn can_wake(&self, info: &crate::wake::WakeInfo) -> bool {
+        self.wake_mode().can_wake(info)
+    }
+
     /// A launcher connected: it replaces an older slot of the same client, and is sent `welcome`.
     /// Returns the connection's generation.
     pub fn attach(&self, client: &Client, tx: mpsc::UnboundedSender<String>) -> u64 {

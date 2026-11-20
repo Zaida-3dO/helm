@@ -690,7 +690,7 @@ impl Lines {
             return Vec::new();
         };
         let pinned = reg.pinned_client(person_id, channel.label()).ok().flatten();
-        let mut rows: Vec<(u8, String, i64, String, bool)> = reg
+        let mut rows: Vec<(u8, String, i64, String, Option<crate::wake::WakeInfo>)> = reg
             .relay_machines()
             .unwrap_or_default()
             .into_iter()
@@ -698,7 +698,7 @@ impl Lines {
             .filter(|c| c.person_id == person_id || reg.may_act_for(c.id, person_id))
             .map(|c| {
                 let rank = if c.person_id == person_id { 2 } else { 3 };
-                let wake = reg.wake_of(c.id).is_some();
+                let wake = reg.wake_of(c.id);
                 (
                     rank,
                     c.last_seen_at.unwrap_or_default(),
@@ -729,7 +729,11 @@ impl Lines {
                 .then_with(|| a.2.cmp(&b.2))
         });
         rows.into_iter()
-            .map(|(_, _, id, name, wake)| self.launchers.machine(id, &name, wake))
+            .map(|(_, _, id, name, wake)| {
+                // Only a PC the hub has what it needs to wake counts as one it can wake.
+                let ready = wake.is_some_and(|i| self.launchers.can_wake(&i));
+                self.launchers.machine(id, &name, ready)
+            })
             .collect()
     }
 
