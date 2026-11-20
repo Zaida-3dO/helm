@@ -237,6 +237,15 @@ fn a_stopped_turn_says_so_in_words_and_waits_for_helms_own_retry() {
             true,
             Some(Stop::SignInNeeded),
         ),
+        // Helm stopped retrying a connection or service failure: the error is the last word.
+        (
+            "interrupted",
+            Some("fetch failed"),
+            false,
+            false,
+            true,
+            Some(Stop::Error("fetch failed".into())),
+        ),
         (
             "interrupted",
             Some("fetch failed"),

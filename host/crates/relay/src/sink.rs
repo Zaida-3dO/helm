@@ -130,8 +130,9 @@ pub enum Stop {
 
 impl Stop {
     /// Read from the chat's row: its status and error, whether it runs on a local model, whether
-    /// the user is writing in it, and whether Helm gave up on its sign-in since it was last
-    /// carried on. `None` unless it stopped on an error.
+    /// the user is writing in it, and whether Helm stopped retrying it (on its sign-in, the
+    /// connection or the service) since it was last carried on. `None` unless it stopped on an
+    /// error.
     pub fn of(
         status: &str,
         error: Option<&str>,
@@ -153,6 +154,8 @@ impl Stop {
         let cause = if local { None } else { classify(error) };
         Some(match cause {
             Some(Cause::TokenRefresh) if gave_up => Stop::SignInNeeded,
+            // Helm stopped retrying: the error is the exchange's last word.
+            Some(_) if gave_up => Stop::Error(headline),
             // A chat the user is writing in is theirs to carry on: Helm does not.
             Some(c) if !typing => Stop::Retrying {
                 sign_in: c == Cause::TokenRefresh,
@@ -931,21 +934,26 @@ pub fn snapshot(
     let row = db
         .snapshot(|tx| {
             // The chat's status, and what the mirror needs to word a stop: its error, whether it
-            // runs on a local model, whether the user is writing in it, and whether Helm gave up
-            // on its sign-in since it was last carried on (the give-up line after the last
-            // continuation, in this exchange).
+            // runs on a local model, whether the user is writing in it, and whether Helm stopped
+            // retrying it since it was last carried on (a give-up line, on the sign-in or on any
+            // other outage, after the last continuation, in this exchange).
             type ChatRow = (String, Option<String>, Option<String>, Option<String>, bool);
             let chat_row: Option<ChatRow> = tx
                 .query_row(
                     "SELECT c.status, c.error, c.provider, c.draft,
                             EXISTS(SELECT 1 FROM messages g
                                    WHERE g.chat_id = c.id AND g.id > ?2 AND g.role = 'context'
-                                     AND g.text = ?3
+                                     AND g.text IN (?3, ?4)
                                      AND g.id > COALESCE((SELECT MAX(o.id) FROM messages o
                                                           WHERE o.chat_id = c.id
                                                             AND o.source_key LIKE 'c:outage:%'), 0))
                      FROM chats c WHERE c.id = ?1",
-                    rusqlite::params![chat, baseline, helm_chats::outage::SIGN_IN_AGAIN_TEXT],
+                    rusqlite::params![
+                        chat,
+                        baseline,
+                        helm_chats::outage::SIGN_IN_AGAIN_TEXT,
+                        helm_chats::outage::GAVE_UP_TEXT
+                    ],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                 )
                 .optional()?;
