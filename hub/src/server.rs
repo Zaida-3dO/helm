@@ -1,5 +1,6 @@
 //! HTTP routes: `/health` (open), `/mcp` (bearer token), `/relay` (a machine's line, a token with
-//! the `relay` scope), `/pair` (a one-time code) and `/telegram/update` (Telegram updates posted
+//! the `relay` scope), `/launcher` (the line of the program that starts Helm on that machine,
+//! the same scope; see `launcher.rs`), `/pair` (a one-time code) and `/telegram/update` (Telegram updates posted
 //! by another service that already runs the bot, a `telegram`-scope token). The household
 //! questions travel over the relay lines (`peer.rs`), not over HTTP. The phone's `/voice/*`
 //! routes (a `voice`-scope token) are in `voice_http.rs`, and the Remote page and its one call
@@ -132,6 +133,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/health", get(health))
         .route("/mcp", get(no_stream).post(post_mcp).delete(no_stream))
         .route("/relay", get(relay))
+        .route("/launcher", get(crate::launcher::connect))
         .route("/pair", post(pair))
         .route("/telegram/update", post(telegram_update))
         .route("/remote", get(remote::page))

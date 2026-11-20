@@ -12,6 +12,7 @@ use helm_hub::telegram::{
     now_ms, Bridge, HttpApi, HttpFiles, HttpVoice, Receive, Telegram, TelegramApi, TelegramConfig,
 };
 use helm_hub::voice::{VoiceBridge, VoiceConfig};
+use helm_hub::wake::Wake;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -76,7 +77,16 @@ ENVIRONMENT:
   HUB_VOICE_QUEUE_MINUTES     how long a spoken or typed turn waits for Helm (1-1440,
                               default 30)
   HUB_VOICE_QUEUE_MAX         how many turns wait for Helm (1-200, default 20)
-  HUB_VOICE_OUTBOX_MINUTES    how long a reply waits for the phone (1-10080, default 120)",
+  HUB_VOICE_OUTBOX_MINUTES    how long a reply waits for the phone (1-10080, default 120)
+  HUB_WAKE                    off (default), udp or ha: how the hub wakes a PC that is off or
+                              asleep (only when a person taps Wake or sends /wake). udp sends
+                              a magic packet by broadcast; ha asks Home Assistant to
+  HUB_WAKE_BROADCAST          the LAN broadcast address for udp (default: the one the PC's
+                              launcher reports)
+  HUB_WAKE_HA_URL             Home Assistant's address, for ha (http:// or https://)
+  HUB_WAKE_HA_TOKEN           a Home Assistant long-lived access token, for ha (a secret)
+  HUB_WATCHDOG_SECS           the hub exits, for its container to restart it, when it has not
+                              answered for this long (default 180; 0 turns it off)",
         admin::USAGE
     )
 }
@@ -439,6 +449,15 @@ fn serve() -> ExitCode {
     let registry = Arc::new(Mutex::new(registry));
     let (lines, upstream) = Lines::new(registry.clone());
     let lines = Arc::new(lines);
+    let wake = match Wake::from_env() {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("{e}; refusing to start");
+            return ExitCode::FAILURE;
+        }
+    };
+    eprintln!("wake: {}", wake.describe());
+    lines.launchers().set_wake(wake);
     let telegram = match telegram_cfg.disabled_reason() {
         Some(why) => {
             eprintln!("telegram: off ({why})");
@@ -551,6 +570,7 @@ fn serve() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
+        helm_hub::watchdog::start(watchdog_limit());
         if let Some(bot) = telegram {
             eprintln!(
                 "telegram: on, {} allowed user(s), {}; transcription {}",
@@ -596,6 +616,20 @@ fn serve() -> ExitCode {
             }
         }
     })
+}
+
+/// How long the hub may go without answering before it exits, from `HUB_WATCHDOG_SECS`: 180 s
+/// by default, and zero turns the watchdog off. A value that is not a number is said and ignored.
+fn watchdog_limit() -> std::time::Duration {
+    const DEFAULT_SECS: u64 = 180;
+    let secs = match std::env::var("HUB_WATCHDOG_SECS") {
+        Ok(v) if !v.trim().is_empty() => v.trim().parse::<u64>().unwrap_or_else(|_| {
+            eprintln!("HUB_WATCHDOG_SECS is not a number of seconds; using {DEFAULT_SECS}");
+            DEFAULT_SECS
+        }),
+        _ => DEFAULT_SECS,
+    };
+    std::time::Duration::from_secs(secs)
 }
 
 async fn shutdown_signal() {

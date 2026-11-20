@@ -20,6 +20,7 @@
 use crate::auth::{Client, Scope};
 use crate::devices;
 use crate::knowledge;
+use crate::launcher::{self, Launchers, Machine, Plan, Reason};
 use crate::peer::{self, Asker};
 use crate::registry::Registry;
 use crate::relay::{Channel, Line, Route, Upstream};
@@ -60,9 +61,16 @@ pub struct Lines {
     /// The Telegram bot, while it runs, so a profile's `tg_link` / `tg_unlink` / `tg_status` can
     /// be answered on the line that asked (see `telegram.rs`).
     telegram: Mutex<Option<Weak<crate::telegram::Telegram>>>,
+    /// Each machine's launcher line, and what the hub has done to start or wake it.
+    launchers: Arc<Launchers>,
 }
 
 impl Lines {
+    /// The launcher lines (`launcher.rs`), which start Helm on a PC that is not running it.
+    pub fn launchers(&self) -> &Arc<Launchers> {
+        &self.launchers
+    }
+
     /// Let the lines reach the Telegram bot, for the link questions a profile asks. Called by
     /// [`crate::telegram::Telegram::attach`].
     pub fn bind_telegram(&self, bot: &Arc<crate::telegram::Telegram>) {
@@ -86,6 +94,7 @@ impl Lines {
             Lines {
                 slots: Mutex::new(HashMap::new()),
                 upstream,
+                launchers: Arc::new(Launchers::new(registry.clone())),
                 registry,
                 voice: Mutex::new(None),
                 telegram: Mutex::new(None),
@@ -166,7 +175,13 @@ impl Lines {
         let line = Arc::new(line);
         let weak = Arc::downgrade(self);
         let client_id = client.id;
-        line.on_change(move |_up| devices::on_line_change(&weak, client_id));
+        line.on_change(move |up| {
+            // A machine whose relay line is up has started: the wait for a launch is over.
+            if let Some(lines) = weak.upgrade() {
+                lines.launchers.relay_changed(client_id, up);
+            }
+            devices::on_line_change(&weak, client_id);
+        });
         let (tx, person_id) = (self.upstream.clone(), client.person_id);
         let machine = client.machine.clone();
         let asker = Asker {
@@ -655,6 +670,87 @@ impl Lines {
     ) -> Option<Arc<Line>> {
         self.find_by_name(person_id, channel, machine)
             .map(|(_, _, line)| line)
+    }
+}
+
+impl Lines {
+    /// The machines a person's `channel` messages could be given to while Helm is offline, best
+    /// first: the one they pinned, the one that took their last message, their own machines (the
+    /// one seen most recently first), then machines that act for them. Only machines that may
+    /// hold a relay line count, and not those whose line is up now: Helm is running there, so
+    /// there is nothing to start or wake.
+    pub fn pc_machines(&self, person_id: i64, channel: Channel) -> Vec<Machine> {
+        let up: Vec<i64> = self
+            .lock()
+            .iter()
+            .filter(|(_, s)| s.line.is_up())
+            .map(|(id, _)| *id)
+            .collect();
+        let Ok(reg) = self.registry.lock() else {
+            return Vec::new();
+        };
+        let pinned = reg.pinned_client(person_id, channel.label()).ok().flatten();
+        let mut rows: Vec<(u8, String, i64, String, bool)> = reg
+            .relay_machines()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|c| !up.contains(&c.id))
+            .filter(|c| c.person_id == person_id || reg.may_act_for(c.id, person_id))
+            .map(|c| {
+                let rank = if c.person_id == person_id { 2 } else { 3 };
+                let wake = reg.wake_of(c.id).is_some();
+                (
+                    rank,
+                    c.last_seen_at.unwrap_or_default(),
+                    c.id,
+                    c.machine,
+                    wake,
+                )
+            })
+            .collect();
+        drop(reg);
+        let sticky = self
+            .sticky
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&(person_id, channel))
+            .copied();
+        for row in rows.iter_mut() {
+            if Some(row.2) == pinned {
+                row.0 = 0;
+            } else if Some(row.2) == sticky {
+                row.0 = 1;
+            }
+        }
+        // Best rank first; within a rank the machine seen most recently, then the oldest client.
+        rows.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| b.1.cmp(&a.1))
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        rows.into_iter()
+            .map(|(_, _, id, name, wake)| self.launchers.machine(id, &name, wake))
+            .collect()
+    }
+
+    /// What a message for `person` on `channel` gets while their Helm is offline.
+    pub fn pc_plan(&self, person_id: i64, channel: Channel, now: i64) -> Plan {
+        launcher::offline_plan(&self.pc_machines(person_id, channel), now)
+    }
+
+    /// The `pc` field for the phone while Helm is offline. With `queued` (a turn waits for Helm),
+    /// a launcher that is up is asked to start Helm first, so the answer already says so.
+    pub fn voice_pc(&self, person_id: i64, now: i64, queued: bool) -> serde_json::Value {
+        let mut plan = self.pc_plan(person_id, Channel::Voice, now);
+        if let (true, Plan::Launch { client_id, .. }) = (queued, &plan) {
+            let sent = self
+                .launchers
+                .try_launch(*client_id, Reason::Voice, None, now, false);
+            if sent == launcher::LaunchOutcome::Sent {
+                plan = self.pc_plan(person_id, Channel::Voice, now);
+            }
+        }
+        plan.pc_json()
     }
 }
 
