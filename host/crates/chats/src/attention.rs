@@ -803,6 +803,36 @@ mod tests {
             "UPDATE chats SET status = 'running', created_by_chat = ?1 WHERE id = ?2",
             &[&helped, &waiting],
         );
+        // A nested chat that is working clears its parent too; an archived or an idle helper chat
+        // does not.
+        let (parented, archived_kid, idle_kid) = (
+            chat(&db, "parented"),
+            chat(&db, "archived kid"),
+            chat(&db, "idle kid"),
+        );
+        let (kid, archived_child, idle_child) = (
+            chat(&db, "kid"),
+            chat(&db, "archived child"),
+            chat(&db, "idle child"),
+        );
+        for c in [&parented, &archived_kid, &idle_kid] {
+            tri(c, 1, "Approve the release.", Some("decision"));
+        }
+        exec(
+            &db,
+            "UPDATE chats SET status = 'running', parent_chat_id = ?1 WHERE id = ?2",
+            &[&parented, &kid],
+        );
+        exec(
+            &db,
+            "UPDATE chats SET status = 'running', archived = 1, created_by_chat = ?1 WHERE id = ?2",
+            &[&archived_kid, &archived_child],
+        );
+        exec(
+            &db,
+            "UPDATE chats SET status = 'idle', parent_chat_id = ?1, created_by_chat = ?1 WHERE id = ?2",
+            &[&idle_kid, &idle_child],
+        );
         exec(
             &db,
             "CREATE TABLE agent_waits(chat_id TEXT NOT NULL, state TEXT NOT NULL)",
@@ -823,16 +853,21 @@ mod tests {
         assert_eq!(
             (flagged, stuck, badge),
             (
-                vec!["decision".to_owned(), "old".to_owned()],
+                vec![
+                    "archived kid".to_owned(),
+                    "decision".to_owned(),
+                    "idle kid".to_owned(),
+                    "old".to_owned()
+                ],
                 vec!["stalled".to_owned()],
-                3
+                5
             ),
-            "a working helper chat or an open wait clears the flag; a settled wait does not"
+            "a working helper chat or an open wait clears the flag; a settled wait, an archived or an idle helper does not"
         );
         assert!(s
             .triage
             .iter()
-            .all(|r| r.title != "helped" && r.title != "waited"));
+            .all(|r| !["helped", "waited", "parented"].contains(&r.title.as_str())));
     }
 
     #[test]
