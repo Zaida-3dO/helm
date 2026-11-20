@@ -844,23 +844,42 @@ fn clear_sign_in_flag(rt: &ChatRuntime, chat_id: &str) -> rusqlite::Result<()> {
 
 /// `chat_retry_now`: the person asks for a chat's pending retry now (the "Try now" button on a
 /// failed turn). The outage watch takes it at its next look, which the ask brings forward. Only
-/// a chat Helm would carry on by itself has a retry to bring forward; anything else is refused in
-/// plain words.
+/// a chat Helm would carry on by itself has a retry to bring forward (the watch looks back
+/// [`RECENT_MS`]); anything else is refused in plain words.
 pub fn retry_now(rt: &ChatRuntime, chat_id: &str) -> Result<bool, ApiError> {
-    // status, error, provider, draft, archived
-    type ChatRow = (String, Option<String>, Option<String>, Option<String>, bool);
+    // status, error, provider, draft, archived, when it stopped
+    type ChatRow = (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        bool,
+        i64,
+    );
     let row: Option<ChatRow> = rt
         .db()
         .snapshot(|tx| {
             tx.query_row(
-                "SELECT status, error, provider, draft, archived FROM chats WHERE id = ?1",
+                "SELECT c.status, c.error, c.provider, c.draft, c.archived,
+                        COALESCE((SELECT MAX(r.ended_at) FROM runs r WHERE r.chat_id = c.id),
+                                 c.updated_at)
+                 FROM chats c WHERE c.id = ?1",
                 [chat_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
             )
             .optional()
         })
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    let Some((status, error, provider, draft, archived)) = row else {
+    let Some((status, error, provider, draft, archived, stopped_at)) = row else {
         return Err(ApiError::new("not_found", "That chat does not exist."));
     };
     let nothing = || {
@@ -870,7 +889,8 @@ pub fn retry_now(rt: &ChatRuntime, chat_id: &str) -> Result<bool, ApiError> {
              message to carry on.",
         )
     };
-    if archived || status != "interrupted" {
+    // The watch only carries on chats that stopped within the time it looks back.
+    if archived || status != "interrupted" || stopped_at < helm_core::now_ms() - RECENT_MS {
         return Err(nothing());
     }
     if draft.is_some_and(|d| !d.trim().is_empty()) {
