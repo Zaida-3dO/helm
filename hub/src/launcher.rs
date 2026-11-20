@@ -31,7 +31,8 @@
 //! - **Launch** (launcher up, Helm not running): the hub sends `launch` by itself, at most one a
 //!   machine every 120 s, and tells the person Helm is starting. A launch that has not led to a
 //!   relay line within 120 s is reported once, with a button to try again; the hub does not launch
-//!   by itself again for that machine until a person asks or its relay line has come up.
+//!   by itself again for that machine until a person asks, its relay line or launcher line comes
+//!   up again, it is woken, or 10 minutes have passed.
 //! - **Asleep** (no launcher, wake known and switched on): the person is offered a Wake button.
 //!   Waking is always a person's tap or command, never automatic, and at most one a machine a
 //!   minute.
@@ -66,6 +67,9 @@ pub const LAUNCH_WINDOW_MS: i64 = 120_000;
 
 /// The shortest time between two wakes of one machine.
 pub const WAKE_WINDOW_MS: i64 = 60_000;
+
+/// A launch that never led to a relay line holds back automatic launches for this long at most.
+pub const GAVE_UP_FOR_MS: i64 = 10 * 60_000;
 
 /// Why the hub asked for Helm to start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +123,16 @@ struct Acts {
     /// What the launcher said when it could not start Helm.
     error: Option<String>,
     last_wake: Option<i64>,
+}
+
+impl Acts {
+    /// Stop waiting for the last launch: something has changed since it went.
+    fn forget_launch(&mut self) {
+        self.awaiting = None;
+        self.notify = None;
+        self.notified = false;
+        self.error = None;
+    }
 }
 
 /// What came of asking for a launch.
@@ -212,7 +226,13 @@ impl Launchers {
             })
             .to_string(),
         );
-        self.acts().entry(client.id).or_default().machine = client.machine.clone();
+        // A launcher that connects anew is a fresh chance: a launch that went to its old
+        // connection and was lost no longer holds back the next one.
+        let mut acts = self.acts();
+        let a = acts.entry(client.id).or_default();
+        a.machine = client.machine.clone();
+        a.forget_launch();
+        drop(acts);
         // The older slot's sender is dropped here, which ends its socket loop.
         self.slots().insert(
             client.id,
@@ -392,7 +412,7 @@ impl Launchers {
         if rate_limited(a.last_launch, now, LAUNCH_WINDOW_MS) {
             return LaunchOutcome::RateLimited;
         }
-        if !manual && a.awaiting.is_some() {
+        if !manual && a.awaiting.is_some_and(|t| now - t < GAVE_UP_FOR_MS) {
             return LaunchOutcome::GaveUp;
         }
         let frame = json!({
@@ -430,7 +450,14 @@ impl Launchers {
             a.last_wake = Some(now);
         }
         match wake.send(&info).await {
-            Ok(()) => WakeOutcome::Sent,
+            Ok(()) => {
+                // A woken PC starts afresh: the launch it missed while asleep is not held
+                // against it.
+                if let Some(a) = self.acts().get_mut(&client_id) {
+                    a.forget_launch();
+                }
+                WakeOutcome::Sent
+            }
             Err(why) => {
                 eprintln!("launcher: waking a machine failed: {why}");
                 WakeOutcome::Failed(why)
@@ -442,10 +469,7 @@ impl Launchers {
     pub fn relay_changed(&self, client_id: i64, up: bool) {
         if up {
             if let Some(a) = self.acts().get_mut(&client_id) {
-                a.awaiting = None;
-                a.notify = None;
-                a.notified = false;
-                a.error = None;
+                a.forget_launch();
             }
         }
     }
@@ -970,6 +994,41 @@ mod tests {
         assert!(launchers.state(client_id).is_some());
         launchers.detach(client_id, gen);
         assert!(launchers.state(client_id).is_none());
+
+        // A launch lost with a dead line (the PC slept) does not hold back the next automatic
+        // one once the launcher connects again, and holds it back for 10 minutes at most.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let gen = launchers.attach(&client, tx);
+        let idle = json!({"type": "hello", "version": 1, "helmRunning": false, "wake": null});
+        assert!(launchers.receive(client_id, gen, &idle.to_string(), T0));
+        let t = T0 + 1_000_000;
+        assert_eq!(
+            launchers.try_launch(client_id, Reason::Telegram, Some(7), t, false),
+            LaunchOutcome::Sent
+        );
+        assert_eq!(
+            launchers.try_launch(client_id, Reason::Telegram, Some(7), t + 200_000, false),
+            LaunchOutcome::GaveUp
+        );
+        assert_eq!(
+            launchers.try_launch(
+                client_id,
+                Reason::Telegram,
+                Some(7),
+                t + GAVE_UP_FOR_MS,
+                false
+            ),
+            LaunchOutcome::Sent
+        );
+        let (tx, _rx2) = mpsc::unbounded_channel();
+        let gen = launchers.attach(&client, tx);
+        assert_eq!(launchers.machine(client_id, "desk", true).awaiting, None);
+        assert!(launchers.receive(client_id, gen, &idle.to_string(), T0));
+        assert_eq!(
+            launchers.try_launch(client_id, Reason::Voice, None, t + 800_000, false),
+            LaunchOutcome::Sent
+        );
+        drain(&mut rx);
         // The hardware address outlives the line.
         assert!(registry.lock().unwrap().wake_of(client_id).is_some());
     }
