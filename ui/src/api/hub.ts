@@ -20,6 +20,16 @@ export interface HubConnection {
   lineRefusal?: string;
 }
 
+/** What `launcher_get` and `launcher_set` answer about the small always-on launcher: the switch,
+ * whether its process runs, whether it registers at logon, and whether the hub could wake this
+ * PC through it. */
+export interface LauncherState {
+  enabled: boolean;
+  running: boolean;
+  registered: boolean;
+  wakeReady: boolean;
+}
+
 /** What pairing with a code answered: who this PC now is on the hub. */
 export interface HubPairResult {
   connection: HubConnection;
@@ -140,6 +150,12 @@ export function hubOps(api: Api) {
     /** Trade a one-time code for this PC's token; sets up the line and the memory server. */
     pair: (a: { address: string; fallback?: string; code: string }) => api<HubPairResult>('hub_pair', a),
     saveConnection: (a: HubConnectionSave) => api<HubConnection>('relay_connection_save', a),
+    /** Restart the hub line now: reconnect at once instead of waiting out the retry pause. */
+    reconnect: () => api<HubConnection>('relay_reconnect', {}),
+    /** The always-on launcher that lets the hub start this PC's Helm when a message arrives. */
+    launcher: () => api<LauncherState>('launcher_get', {}),
+    /** Switch the launcher; the answer is the same state as `launcher_get`. */
+    saveLauncher: (enabled: boolean) => api<LauncherState>('launcher_set', { enabled }),
     telegram: (s: ChannelScope = {}) => api<TelegramSettings>('relay_telegram_get', scope(s)),
     saveTelegram: (
       s: Pick<TelegramSettings, 'maxAgeHours' | 'maxTokens' | 'awayAlerts' | 'approvals' | 'remoteAnswers' | 'model' | 'effort' | 'takeTelegram'> & ChannelScope,

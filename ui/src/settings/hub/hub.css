@@ -42,6 +42,11 @@
   width: 64px;
 }
 
+.hub-launcher-state {
+  margin: -4px 0 8px;
+  font-size: 12px;
+}
+
 .hub-offer {
   margin: 4px 0 8px;
   font-size: 12px;

@@ -160,6 +160,9 @@ export function chatOps(api: Api) {
     snooze: (chatId: string, until: number | null) => api<null>('attention_snooze', { chatId, until }),
     /** User-only: check a chat again whose idle check gave up. */
     triageRetry: (chatId: string) => api<{ queued: boolean }>('triage_retry', { chatId }),
+    /** Try this chat's waiting sign-in retry at the next look instead of after its backoff.
+     *  The host refuses plainly when nothing is pending. */
+    retryNow: (chatId: string) => api<{ scheduled: boolean }>('chat_retry_now', { chatId }),
     /** Whether the idle check is on (it is until switched off). */
     triageEnabled: async () => (await api<{ enabled?: boolean } | null>('preference_get', { key: 'taskTriage' }))?.enabled !== false,
     /** The idle check's switch, alert delay (minutes) and custom prompt ('' for the built-in one). */

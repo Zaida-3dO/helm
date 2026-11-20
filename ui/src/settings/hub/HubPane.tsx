@@ -14,6 +14,7 @@ import { EFFORT_OPTIONS } from '../runtime/model.ts';
 import { compactCount } from '../../transcript/rowMeta.ts';
 import { defaultProfileId, linkLine, linkable, profileChoices } from './channelScope.ts';
 import { HubPairing } from './HubPairing.tsx';
+import { LauncherBlock } from './LauncherBlock.tsx';
 import { PromptsBlock } from './PromptsBlock.tsx';
 import { VoiceBlock } from './VoiceBlock.tsx';
 import './hub.css';
@@ -286,6 +287,7 @@ export function HubPane() {
       </div>
 
       <HubPairing />
+      <LauncherBlock paired={!!conn?.personName} />
 
       {people && people.length > 1 && (
         <SettingRow

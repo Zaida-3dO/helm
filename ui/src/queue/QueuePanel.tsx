@@ -59,7 +59,7 @@ export function QueuePanel({ store, onOpen, onClose }: { store: QueueStore; onOp
               <span className="queue-line">{signInLine(c)}</span>
             </div>
           ))}
-          {needsSignIn(summary) && <SignInAgain message="Claude Code could not refresh its sign-in. Sign in again, then message the chats above." />}
+          {needsSignIn(summary) && <SignInAgain message="Claude Code could not refresh its sign-in for about half an hour. Sign in again; Helm carries on by itself once it works." />}
         </div>
       )}
       {summary != null && (summary.servers.length > 0 || summary.claudeQueued > 0 || summary.claudeFull) && (

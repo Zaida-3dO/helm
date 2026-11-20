@@ -29,6 +29,10 @@ import { ConfirmDialog, useLayer, type ConfirmSpec } from './ui/index.ts';
 import { rollOverChat, rollOverConfirm } from './sidebar/actions.ts';
 import { ContextBar } from './transcript/ContextBar.tsx';
 import { isTooLargeRefusal, type ChatContextReading } from './transcript/rowMeta.ts';
+import { isSignInError } from './transcript/signin.ts';
+import { SignInAgain } from './transcript/SignInAgain.tsx';
+import { requestPane } from './settings/registry.ts';
+import { SETTINGS_DIALOG } from './settings/SettingsDialog.tsx';
 import { IconFork } from './ui/icons.tsx';
 import { accessoriesAt, composerApi, onComposerSent } from './composer/slots.ts';
 import { recallPrompts } from './composer/recall.ts';
@@ -46,6 +50,12 @@ import { sideChatAnchor } from './sidechat/anchor.ts';
 // Settings → Chat registers itself.
 import './settings/chat/index.tsx';
 import { parseChatElements, type ChatElements } from './settings/chat/elements.ts';
+
+/** A turn that died because Claude Code itself could not be found: the worker's line reads
+ * "Claude Code executable not found: …", so the way out is Settings → Runtime. */
+function isExecutableNotFound(error: string | null | undefined): boolean {
+  return !!error && error.toLowerCase().includes('executable not found');
+}
 
 export interface ChatViewProps {
   chatId: string;
@@ -382,6 +392,22 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
               onClick={() => setRollConfirm(rollOverConfirm(chat.title, () => rollOverChat(ops, chatId, (m) => setNotice(m))))}
             >
               Roll over
+            </button>
+          )}
+          {isSignInError(chat.error) && <SignInAgain />}
+          {isExecutableNotFound(chat.error) && (
+            // The worker could not find Claude Code itself: the way out is the path in
+            // Settings → Runtime, not another send.
+            <button
+              type="button"
+              className="small"
+              data-testid="interrupted-runtime-settings"
+              onClick={() => {
+                requestPane('runtime');
+                shell.openDialog(SETTINGS_DIALOG);
+              }}
+            >
+              Open Runtime settings
             </button>
           )}
           {lastUser && (

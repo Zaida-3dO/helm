@@ -15,6 +15,8 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
   const set = { lanUrl: pairedAtStart(), fallbackUrl: false, token: pairedAtStart() };
   let who: { personName: string; machineName: string } | null = pairedAtStart() ? { personName: 'Alex', machineName: 'Desk PC' } : null;
   let since = 0;
+  // The launcher: on by default once paired, like the host; its process and logon entry follow.
+  let launcherEnabled = pairedAtStart();
   // Per-profile policy and link state, keyed as the host keys it (absent profile: "home").
   const scope = (a: Record<string, unknown>) => (typeof a.profileId === 'string' && a.profileId ? a.profileId : 'home');
   interface ProfileState {
@@ -51,6 +53,20 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
     switch (op) {
       case 'relay_connection_get':
         return view();
+      case 'relay_reconnect':
+        // Line up again right away: "connecting" for three seconds, then connected.
+        if (!(set.lanUrl || set.fallbackUrl) || !set.token) throw new ApiError('refused', 'The hub line is not set up yet.');
+        since = Date.now();
+        return view();
+      case 'launcher_get':
+      case 'launcher_set': {
+        if (op === 'launcher_set') {
+          if (typeof a.enabled !== 'boolean') throw new ApiError('bad_args', 'Expected enabled to be true or false.');
+          launcherEnabled = a.enabled;
+        }
+        const paired = !!who && (set.lanUrl || set.fallbackUrl) && set.token;
+        return { enabled: launcherEnabled, running: launcherEnabled && paired, registered: launcherEnabled && paired, wakeReady: launcherEnabled && paired };
+      }
       case 'relay_connection_save':
         for (const k of ['lanUrl', 'fallbackUrl', 'token'] as const) {
           const v = a[k];
@@ -173,5 +189,5 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         throw new ApiError('unknown_op', op);
     }
   };
-  return { prefixes: ['relay_', 'hub_pair'], handler };
+  return { prefixes: ['relay_', 'launcher_', 'hub_pair'], handler };
 }

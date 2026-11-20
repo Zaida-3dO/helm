@@ -1036,6 +1036,11 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       emitAttention();
       return { queued };
     },
+    chat_retry_now: (a) => {
+      find(a.chatId);
+      // The fake chats keep no outage retries pending; always answer that the next look tries.
+      return { scheduled: true };
+    },
     autocomplete_suggest: (a) => {
       const words = ['component', 'composer', 'completion', 'transcript', 'thinking'];
       const last = String(a.draft ?? '').split(/\s/).pop() ?? '';
