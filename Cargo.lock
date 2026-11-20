@@ -1805,6 +1805,7 @@ dependencies = [
  "helm-hosttools",
  "helm-ipc",
  "helm-itemlinks",
+ "helm-launcher",
  "helm-localmodels",
  "helm-mcp",
  "helm-memindex",

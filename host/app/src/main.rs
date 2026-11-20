@@ -3,7 +3,8 @@
 //! Startup: resolve the profile, take `app.lock` (or signal the running instance and exit), open the
 //! database and run recovery, then build the Tauri app with one command (`api`), one event channel
 //! and one main window built in code. Closing the main window hides it; quitting goes through the
-//! confirmation and the quit sequence in `helm_core::lifecycle`.
+//! confirmation and the quit sequence in `helm_core::lifecycle`. Started with `--background` (as
+//! the always-on launcher does), the window stays in the tray until a person opens it.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -378,7 +379,9 @@ fn run_app(
         .invoke_handler(tauri::generate_handler![api])
         .setup(move |app| {
             let handle = app.handle().clone();
-            let shell = Arc::new(shell::TauriShell::new(handle.clone()));
+            // Started by the launcher (`--background`): the window stays in the tray.
+            let background = shell::background_start(std::env::args().skip(1));
+            let shell = Arc::new(shell::TauriShell::new(handle.clone(), background));
             // Events pass the shell service on their way out.
             let tapped = Arc::new(tray::TappedEvents::new(Arc::new(shell::TauriEvents::new(
                 handle.clone(),
@@ -524,14 +527,16 @@ fn run_app(
             }
             // Chats that were working when Helm last closed get their one continuation.
             runtime.start_continuations();
+            // The always-on launcher: its files, its copy, its logon entry, started or stopped
+            // to match the switch in Settings -> Hub.
+            helm_launcher::start_at_launch(profile.clone(), platform.keychain.clone());
 
-            // The first instance listens for "focus" from later launches.
+            // The first instance listens for "focus" from later launches: a person asking.
             let endpoint = profile.endpoint();
             let focus = shell.clone();
             tauri::async_runtime::spawn(async move {
-                use helm_core::lifecycle::AppControl;
                 if let Err(e) =
-                    helm_platform::instance::serve(endpoint, move || focus.show_main()).await
+                    helm_platform::instance::serve(endpoint, move || focus.show_for_person()).await
                 {
                     log::error!("single-instance listener stopped: {e}");
                 }

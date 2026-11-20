@@ -40,33 +40,90 @@ impl EventSink for TauriEvents {
     }
 }
 
+/// The command-line flag that starts Helm hidden in the tray. The launcher passes it when it
+/// starts Helm for a message from the hub or after a crash, so nothing pops up unasked.
+pub const BACKGROUND_FLAG: &str = "--background";
+
+/// Whether this run was started with [`BACKGROUND_FLAG`].
+pub fn background_start<I: IntoIterator<Item = S>, S: AsRef<str>>(args: I) -> bool {
+    args.into_iter().any(|a| a.as_ref() == BACKGROUND_FLAG)
+}
+
+/// A background start keeps the main window in the tray: the UI's "first frame drawn" show is
+/// passed over once, and the start-up fallback never shows it. A person's own request (a second
+/// launch, the tray) shows it as ever.
+pub struct HiddenStart {
+    background: bool,
+    pass_over_next: std::sync::atomic::AtomicBool,
+}
+
+impl HiddenStart {
+    pub fn new(background: bool) -> Self {
+        Self {
+            background,
+            pass_over_next: std::sync::atomic::AtomicBool::new(background),
+        }
+    }
+
+    /// A show request arrived: `false` when it is the one a background start passes over.
+    fn may_show(&self) -> bool {
+        !self
+            .pass_over_next
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The start-up fallback (show a window the UI never asked for) applies.
+    fn fallback_applies(&self) -> bool {
+        !self.background
+    }
+
+    /// A person asked for the window: nothing more is passed over.
+    fn person_asked(&self) {
+        self.pass_over_next
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 pub struct TauriShell {
     app: AppHandle,
     shown: std::sync::atomic::AtomicBool,
+    hidden: HiddenStart,
 }
 
 impl TauriShell {
-    pub fn new(app: AppHandle) -> Self {
+    pub fn new(app: AppHandle, background: bool) -> Self {
         Self {
             app,
             shown: std::sync::atomic::AtomicBool::new(false),
+            hidden: HiddenStart::new(background),
         }
     }
 }
 
 impl TauriShell {
     /// Show the main window only if it has never been shown (the start-up fallback), so a
-    /// window the user already closed to the tray stays hidden.
+    /// window the user already closed to the tray stays hidden. A background start never uses it.
     pub fn show_if_hidden(&self) {
-        if self.shown.load(std::sync::atomic::Ordering::SeqCst) {
+        if self.shown.load(std::sync::atomic::Ordering::SeqCst) || !self.hidden.fallback_applies() {
             return;
         }
+        self.show_main();
+    }
+
+    /// Show the main window because a person asked (a second launch of Helm), even right after a
+    /// background start.
+    pub fn show_for_person(&self) {
+        self.hidden.person_asked();
         self.show_main();
     }
 }
 
 impl AppControl for TauriShell {
     fn show_main(&self) {
+        if !self.hidden.may_show() {
+            log::info!("started in the background: the window stays in the tray");
+            return;
+        }
         self.shown.store(true, std::sync::atomic::Ordering::SeqCst);
         // A background test window is already on screen (off-screen): showing it again would
         // activate it, take focus and un-minimise it, which is what that mode exists to avoid.
@@ -423,6 +480,28 @@ pub fn file_drop_event(d: &tauri::DragDropEvent) -> AppEvent {
 #[cfg(test)]
 mod drop_tests {
     use super::*;
+
+    #[test]
+    fn a_background_start_stays_in_the_tray_until_a_person_asks() {
+        assert!(background_start(["--background"]));
+        assert!(background_start(["--other", "--background"]));
+        assert!(!background_start(["--backgrounds"]));
+        assert!(!background_start(Vec::<String>::new()));
+        // Started by the launcher: the UI's first-frame show is passed over, and the start-up
+        // fallback does not apply; a later request shows the window.
+        let h = HiddenStart::new(true);
+        assert!(!h.fallback_applies());
+        assert!(!h.may_show(), "the first-frame show is passed over");
+        assert!(h.may_show(), "a later show goes through");
+        // A person asking before the UI is ready is never passed over.
+        let h = HiddenStart::new(true);
+        h.person_asked();
+        assert!(h.may_show());
+        // A normal start shows as ever.
+        let h = HiddenStart::new(false);
+        assert!(h.fallback_applies());
+        assert!(h.may_show() && h.may_show());
+    }
 
     #[test]
     fn the_background_test_window_is_a_debug_build_switch() {
