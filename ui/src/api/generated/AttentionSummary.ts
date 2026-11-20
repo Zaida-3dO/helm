@@ -21,11 +21,14 @@ unread: Array<AttentionRow>,
  */
 finished: Array<AttentionRow>, 
 /**
- * Running chats with no output for the stall limit; they count in the badge.
+ * Running chats with no output for the stall limit, and quiet chats the idle check judged
+ * stalled (the reason is the check's own, and the inbox offers Resume); they count in the
+ * badge.
  */
 stalled: Array<AttentionRow>, 
 /**
- * Quiet chats the idle check thinks still need you; the reason is the check's own.
+ * Quiet chats the idle check thinks need a decision from you; the reason is the check's own
+ * and leads with the decision.
  */
 flagged: Array<AttentionRow>, 
 /**

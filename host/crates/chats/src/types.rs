@@ -346,6 +346,9 @@ pub struct TriageRow {
     pub priority: Option<String>,
     /// All its tries ended without a verdict: the inbox offers Retry.
     pub failed: bool,
+    /// `decision` or `stalled` when the check judged the chat needs you (a stall offers Resume);
+    /// `null` for a verdict from before kinds, which reads as a decision.
+    pub kind: Option<String>,
 }
 
 /// The one attention summary: the badge count (each chat once), the
@@ -366,9 +369,12 @@ pub struct AttentionSummary {
     /// still name the finish.
     #[serde(default)]
     pub finished: Vec<AttentionRow>,
-    /// Running chats with no output for the stall limit; they count in the badge.
+    /// Running chats with no output for the stall limit, and quiet chats the idle check judged
+    /// stalled (the reason is the check's own, and the inbox offers Resume); they count in the
+    /// badge.
     pub stalled: Vec<AttentionRow>,
-    /// Quiet chats the idle check thinks still need you; the reason is the check's own.
+    /// Quiet chats the idle check thinks need a decision from you; the reason is the check's own
+    /// and leads with the decision.
     pub flagged: Vec<AttentionRow>,
     /// Muted chats with a flag, question, approval or plan waiting. Kept so the user can find
     /// them; they raise nothing and are not in the badge.

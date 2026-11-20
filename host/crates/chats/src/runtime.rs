@@ -529,6 +529,10 @@ impl Spawner for ProcessSpawner {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned(),
+                kind: out
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .and_then(crate::triage::Kind::parse),
             }),
             (_, _, Some(e)) => Err(e.to_owned()),
             _ => Err("the helper gave no verdict".into()),
