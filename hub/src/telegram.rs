@@ -1470,12 +1470,11 @@ impl Bridge {
             return;
         }
         if candidates.is_empty() {
+            // `/starthelm` only where a launcher is connected to take it.
             let hint = match lines.pc_plan(person, Channel::Telegram, now_ms()) {
-                Plan::Launch { machine, .. } | Plan::Starting { machine, .. } => {
-                    format!(" /starthelm starts Helm on {machine}.")
-                }
+                Plan::Launch { machine, .. } => format!(" /starthelm starts Helm on {machine}."),
                 Plan::Asleep { machine, .. } => format!(" /wake wakes {machine}."),
-                Plan::Connecting { .. } | Plan::Unknown => String::new(),
+                Plan::Starting { .. } | Plan::Connecting { .. } | Plan::Unknown => String::new(),
             };
             self.reply(chat, &format!("{PC_NONE}{hint}")).await;
             return;
@@ -1616,7 +1615,14 @@ impl Bridge {
         let Some((person, lines)) = self.household() else {
             return;
         };
+        // A launch that never came up is not worth a word while another of the person's PCs
+        // takes their messages.
+        let served =
+            self.line.is_up() || !lines.candidate_lines(person, Channel::Telegram).is_empty();
         for late in lines.launchers().timeouts(person, now) {
+            if served {
+                continue;
+            }
             let machines = lines.pc_machines(person, Channel::Telegram);
             let here = machines.iter().find(|m| m.client_id == late.client_id);
             let mut buttons = vec![(
