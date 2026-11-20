@@ -43,6 +43,15 @@ fn set(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         .map_err(|_| ApiError::bad_args("Expected {enabled: true|false}."))?;
     let profile = ctx.services.need::<Profile>()?;
     let platform = ctx.services.need::<Platform>()?;
+    if !install::may_change(
+        install::may_start_in_this_build(),
+        is_default_profile(&profile),
+    ) {
+        return Err(ApiError::conflict(
+            "This test build leaves the installed Helm's launcher alone. Run it with its own \
+             profile to try the switch.",
+        ));
+    }
     install::save_choice(&profile.dir, a.enabled)
         .map_err(|_| ApiError::internal("The launcher switch could not be saved."))?;
     to_value(&with_setup(
@@ -75,15 +84,18 @@ fn with_setup<T>(
     let paired = hubline::effective(&creds).usable();
     let helm_exe = std::env::current_exe().unwrap_or_default();
     let run_key = runkey::for_this_build();
+    let is_default = is_default_profile(profile);
+    let may_start = install::may_start_in_this_build();
     let setup = Setup {
         profile_dir: &profile.dir,
         profile_hash: &profile.hash,
-        is_default_profile: is_default_profile(profile),
+        is_default_profile: is_default,
         paired,
         bundled: install::bundled_beside(&helm_exe),
         helm_exe,
         run_key: run_key.as_ref(),
-        may_start: install::may_start_in_this_build(),
+        may_start,
+        may_change: install::may_change(may_start, is_default),
     };
     f(&setup)
 }

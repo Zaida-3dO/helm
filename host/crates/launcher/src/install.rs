@@ -8,11 +8,14 @@
 //! | `launcher.json` | Helm, at every start and every switch | `{helmExe, version, enabled}`: what to start, and whether the launcher should run at all |
 //! | `choice.json` | Helm, when the person flips the switch | `{enabled}`; absent means the default (on while the PC is paired with a hub) |
 //! | `status.json` | the launcher | `{hub, wake, at}`: whether its hub line is up and the hub has its wake details |
+//! | `launcher.pid` | the launcher | its process id, in decimal, while it runs: the installer ends exactly that process |
 //! | `helm-launcher.exe` | Helm | its own copy of the program shipped beside `helm.exe`, so an update never finds it locked |
 //!
 //! Helm stops a running launcher (a named event) before it replaces that copy, and when the
 //! switch goes off. Debug builds start the launcher only with `HELM_TEST_LAUNCHER=1`, and write
-//! the real `Run` key only with `HELM_TEST_LAUNCHER_REGISTER=1` (see [`crate::runkey`]).
+//! the real `Run` key only with `HELM_TEST_LAUNCHER_REGISTER=1` (see [`crate::runkey`]). A debug
+//! build that may not start it never changes the default profile's launcher at all: that one
+//! belongs to the installed Helm.
 
 use crate::runkey::{self, RunKey};
 use crate::sys;
@@ -84,6 +87,21 @@ pub struct Status {
     pub at: i64,
 }
 
+/// Where the running launcher keeps its process id.
+pub fn pid_file(profile_dir: &Path) -> PathBuf {
+    dir(profile_dir).join("launcher.pid")
+}
+
+/// The launcher notes its process id, so the installer can end this launcher and no other.
+pub fn write_pid(profile_dir: &Path, pid: u32) -> std::io::Result<()> {
+    helm_core::privfs::create_private_dir_all(&dir(profile_dir))?;
+    helm_core::privfs::write_atomic(&pid_file(profile_dir), pid.to_string().as_bytes())
+}
+
+pub fn remove_pid(profile_dir: &Path) {
+    let _ = std::fs::remove_file(pid_file(profile_dir));
+}
+
 pub fn read_status(profile_dir: &Path) -> Option<Status> {
     read_json(&dir(profile_dir).join("status.json"))
 }
@@ -135,6 +153,9 @@ pub struct Setup<'a> {
     pub run_key: &'a dyn RunKey,
     /// Start the launcher when it is on and not running.
     pub may_start: bool,
+    /// Change anything at all: hand over files, replace the copy, write the `Run` value, stop the
+    /// launcher. See [`may_change`].
+    pub may_change: bool,
 }
 
 impl Setup<'_> {
@@ -155,6 +176,13 @@ pub fn may_start_in_this_build() -> bool {
     !cfg!(debug_assertions) || std::env::var(TEST_START_ENV).ok().as_deref() == Some("1")
 }
 
+/// Whether this build may change a profile's launcher: one that may start launchers may, and
+/// any build may change a profile chosen with `HELM_PROFILE_DIR`. A debug build run against the
+/// default profile only looks, so it never points the installed Helm's launcher at itself.
+pub fn may_change(may_start: bool, is_default_profile: bool) -> bool {
+    may_start || !is_default_profile
+}
+
 /// The launcher program beside the running Helm.
 pub fn bundled_beside(helm_exe: &Path) -> Option<PathBuf> {
     helm_exe
@@ -170,9 +198,13 @@ fn apply_lock() -> &'static Mutex<()> {
 }
 
 /// Bring the launcher in line with the switch: hand over the files, keep the profile's copy of the
-/// program current, write or remove the `Run` value, and start or stop the launcher.
+/// program current, write or remove the `Run` value, and start or stop the launcher. A setup that
+/// may not change anything only looks.
 pub fn apply(s: &Setup) -> LauncherView {
     let _one = apply_lock().lock().unwrap_or_else(|p| p.into_inner());
+    if !s.may_change {
+        return view_unlocked(s);
+    }
     let enabled = effective_enabled(choice(s.profile_dir), s.paired);
     let handoff = Handoff {
         helm_exe: runkey::plain_path(&s.helm_exe),
@@ -295,6 +327,7 @@ mod tests {
             bundled,
             run_key: key,
             may_start: false,
+            may_change: true,
         }
     }
 
@@ -307,6 +340,17 @@ mod tests {
         let shipped = root.path().join(EXE_NAME);
         std::fs::write(&shipped, b"launcher v1").unwrap();
         let key = MemoryRunKey::default();
+
+        // A debug build on the default profile only looks: nothing handed over, copied or
+        // registered, even while paired.
+        assert!(!may_change(false, true) && may_change(false, false) && may_change(true, true));
+        let mut looks = setup(&profile, &key, Some(shipped.clone()), true, true);
+        looks.may_change = false;
+        let v = apply(&looks);
+        assert!(v.enabled && !v.registered, "{v:?}");
+        assert!(read_handoff(&profile).is_none());
+        assert!(key.values.lock().unwrap().is_empty());
+        assert!(!dir(&profile).join(EXE_NAME).exists());
 
         // Unpaired with no choice: off, nothing registered, nothing copied.
         let v = apply(&setup(&profile, &key, Some(shipped.clone()), false, true));

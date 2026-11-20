@@ -89,6 +89,7 @@ impl Daemon {
             Some(h) if h.enabled => h,
             _ => {
                 log::info!("launcher: switched off in Helm; exiting");
+                install::remove_pid(&self.profile_dir);
                 std::process::exit(0);
             }
         }
@@ -504,9 +505,14 @@ pub fn main() -> ExitCode {
         log::error!("launcher: its stop signal could not be created; exiting");
         return ExitCode::FAILURE;
     };
+    if let Err(e) = install::write_pid(&profile.dir, std::process::id()) {
+        log::warn!("launcher: its process id was not noted: {e}");
+    }
+    let pid_dir = profile.dir.clone();
     std::thread::spawn(move || {
         stop.wait();
         log::info!("launcher: asked to stop by Helm");
+        install::remove_pid(&pid_dir);
         std::process::exit(0);
     });
     log::info!("launcher: started, version {}", env!("CARGO_PKG_VERSION"));
@@ -527,5 +533,6 @@ pub fn main() -> ExitCode {
     rt.block_on(async {
         tokio::join!(daemon.clone().watch_helm(), daemon.hub_line());
     });
+    install::remove_pid(&profile.dir);
     ExitCode::SUCCESS
 }
