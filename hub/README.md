@@ -294,10 +294,14 @@ about 67 MB as base64) and ignores the `files` list, so files would be lost or s
   attached, or handled a Telegram frame, last). A message that line has not acknowledged stays with
   it, and is sent again only there, while that line is up, so two machines never both answer it;
   it moves on only when that line drops. Each person has their own queue, status message and asks.
-- While Helm is offline a message is queued in order and the sender is told at once. On reconnect
-  the queue is delivered, each message carrying its age so Helm marks it "sent N min ago". An
-  expired message is dropped and the user is told how many. `/cancel` drops the queue; `/stop`
-  stops Helm's running turn. The queue is in memory: a container restart drops it.
+- While Helm is offline a message is queued in order and the sender is told at once, with what the
+  hub can do about the PC (see "Starting and waking the PC"): that Helm is being started, that the
+  PC looks off or asleep (with a Wake button), or, when the hub can do nothing, the one setting that
+  would let it. On reconnect the queue is delivered, each message carrying its age so Helm marks it
+  "sent N min ago". An expired message is dropped and the user is told how many, and to send it
+  again if it still matters. `/cancel` drops the queue; `/stop` stops Helm's running turn;
+  `/starthelm` and `/wake` start Helm on, or wake, the person's PC while Helm is offline. The queue
+  is in memory: a container restart drops it.
 - Each message is held until Helm acknowledges it. A line that drops before the acknowledgement
   resends it on the next line, and a message the current line has not acknowledged within 45 s
   is sent again on that line, every 45 s (Helm gives up on a busy chat sooner than that, without
@@ -406,6 +410,66 @@ Update or an array of them: 400. The endpoint exists in both modes.
   itself a command such as `/helm /stop`, so a forwarder can route Helm's messages by that one
   command. `/helm` alone answers the hello text.
 
+## Starting and waking the PC
+
+Nothing on the PC listens for the hub, so the hub cannot start Helm by itself. Instead each PC can
+run a small launcher that keeps one outbound WebSocket to `GET /launcher` (the same `relay`-scope
+token as `/relay`; the frames are in the table at the top of `src/launcher.rs`) and starts Helm when
+the hub asks. The launcher is on in Helm's Settings → Hub ("Start Helm when a message arrives"). A
+reverse proxy in front of the hub must route `/launcher` as it does `/relay`; the home network
+address needs nothing.
+
+When Helm is offline and a Telegram message or a voice turn waits, the hub picks the person's PC (the
+one they pinned, the one that took their last message, their own PCs, then PCs that act for them;
+one whose launcher is up first, else one it knows how to wake) and does one of:
+
+| What the hub sees | What happens |
+|---|---|
+| Launcher up, Helm not running | Asks the launcher to start Helm by itself, at most once every 2 minutes for a PC, and says "Helm is starting on <PC>". Helm starts hidden, in the tray |
+| A launch is under way | Says so; sends nothing again |
+| Launcher up, Helm running, not connected yet | Says Helm is running and reconnects by itself |
+| No launcher, and the hub knows how to wake the PC | Says the PC looks off or asleep, with a **Wake** button. Waking is always a person's tap or command, never automatic, and at most once a minute for a PC |
+| Anything else | Tells the sender the one step that would let the hub start Helm |
+
+A launch that has not brought Helm's relay line up after 2 minutes is reported once, on Telegram,
+with a **Try again** button (and **Wake** when the launcher line has gone too); the hub does not
+launch by itself again for that PC until a person asks or its relay line has come up. Telegram's
+`/starthelm` and `/wake` do the same as the buttons; they, and the buttons, only act on one of the
+person's own PCs, or one that acts for them.
+
+The phone is told too: while Helm is offline `GET /voice/status`, the `202` of `POST /voice/turn`,
+the `409` of `POST /voice/fresh`, the `429` of a turn when the queue is full, the live socket's
+`welcome` and its `helm` frame carry `"pc": {"state": "starting"|"connecting"|"asleep"|"closed"|"unknown",
+"machine": <name or null>, "canStart": bool, "canWake": bool}` (`closed`: the launcher is up and
+nothing is under way). `POST /voice/pc` with `{"action": "start"|"wake"}` answers `202 {"ok", "pc"}`,
+`409 {"error"}` when it cannot be done, or `429` when the PC was asked a moment ago. The hub picks
+the PC. A phone that does not know the field ignores it.
+
+| Variable | |
+|---|---|
+| `HUB_WAKE` | `off` (the default), `udp` or `ha`. Off: no Wake button is ever shown. Anything else: the hub refuses to start |
+| `HUB_WAKE_BROADCAST` | For `udp`: the LAN's broadcast address (`192.168.1.255`); without it the hub uses the address the PC's launcher reported. Also sent to Home Assistant for `ha` when set |
+| `HUB_WAKE_HA_URL`, `HUB_WAKE_HA_TOKEN` | For `ha`: Home Assistant's address (`http://...` or `https://...`) and a long-lived access token. The hub calls `wake_on_lan.send_magic_packet`. The token is a secret: it belongs in the env file, never in a command line, and the hub never logs it |
+
+A hub in a container on Docker's default bridge network often cannot send a broadcast out to the
+LAN. Home Assistant, which normally runs on the host network, can: prefer `ha` there. The PC's
+hardware address always comes from its own launcher (it is kept with the machine and survives a
+dropped line); the hub only keeps a hardware address of six hex pairs and a broadcast address in a
+private IPv4 range, so a PC cannot aim the hub at an outside address.
+
+**On the PC, for a wake to work:** enable Wake on LAN in the BIOS, and on the wired network adapter in
+Windows Device Manager turn on Power Management → "Allow this device to wake the computer" (and,
+if you like, "Only allow a magic packet") and Advanced → "Wake on Magic Packet". Wi-Fi usually
+cannot wake a PC. After a wake the PC has to reach Helm's launcher (it starts at logon), and the hub
+then starts Helm for what waits.
+
+**The hub restarts itself when it hangs.** The image's health check only marks a hung container
+"unhealthy"; Docker does not restart it for that. A watchdog inside the hub exits the process when its
+async runtime has not answered for `HUB_WATCHDOG_SECS` (default 180; `0` turns it off), and Docker
+brings it back. This needs `restart: unless-stopped` on the container, as in `compose.snippet.yml`;
+check that the compose file the home server really runs has it. The queues are in memory, so a
+restart drops what waited.
+
 ## The voice line
 
 A phone (the phone app) talks to its owner's Helm: it uploads a recording or typed text, the hub
@@ -444,10 +508,11 @@ token: 401 with `WWW-Authenticate: Bearer`. A token of another scope: 403. Error
 
 | Route | |
 |---|---|
-| `POST /voice/turn?turn=<id>&mode=conversation\|chat[&continues=<id>]` | A new turn. The body is `audio/ogg` (Opus), `audio/wav` (16 kHz mono) or `application/json` `{"text": "..."}` (1-8000 characters, no speech-to-text). The `turn` id is the phone's own (8-64 of `A-Za-z0-9_-`), so a retry is safe. `202 {"ok", "turn", "already": false, "helm": "online"\|"offline", "queued": true}`; the same id again `200 {"ok", "turn", "already": true, "state"}` (a turn that ended `failed` or `expired` is accepted again). 400 for a bad id, mode, empty or too-long text or an unknown `continues`; 413 for a body over 8 MiB or a recording over 130 s; 415 for another type; 429 when the queue is full ("Helm is offline and the queue is full, so this wasn't kept." while Helm is offline, "Too many turns are waiting; try again in a moment." while it is online but has not taken them yet) or the hub holds too many recordings; 503 for audio with no speech-to-text. Only this route lifts the 4 MiB request limit, to 8 MiB; a larger upload is read to its end and thrown away so the phone gets its 413 |
+| `POST /voice/turn?turn=<id>&mode=conversation\|chat[&continues=<id>]` | A new turn. The body is `audio/ogg` (Opus), `audio/wav` (16 kHz mono) or `application/json` `{"text": "..."}` (1-8000 characters, no speech-to-text). The `turn` id is the phone's own (8-64 of `A-Za-z0-9_-`), so a retry is safe. `202 {"ok", "turn", "already": false, "helm": "online"\|"offline", "queued": true}` (and `"pc"` while Helm is offline, see "Starting and waking the PC"); the same id again `200 {"ok", "turn", "already": true, "state"}` (a turn that ended `failed` or `expired` is accepted again). 400 for a bad id, mode, empty or too-long text or an unknown `continues`; 413 for a body over 8 MiB or a recording over 130 s; 415 for another type; 429 when the queue is full ("Helm is offline and the queue is full, so this wasn't kept." while Helm is offline, "Too many turns are waiting; try again in a moment." while it is online but has not taken them yet) or the hub holds too many recordings; 503 for audio with no speech-to-text. Only this route lifts the 4 MiB request limit, to 8 MiB; a larger upload is read to its end and thrown away so the phone gets its 413 |
 | `POST /voice/heard` | `{"reports": [{"reply", "state": "all"\|"partial"\|"none", "sentence"?, "charOffset"?, "replay"?, "at"?}]}`, 1-50 reports, at most 64 KiB (413 over). The latest report per reply is kept (at most 200 are held) and forwarded to Helm as `voice_heard` when a line is up. `200 {"ok", "forwarded": n}` |
-| `GET /voice/status` | `200 {"ok", "helm": "online"\|"offline", "version": 1, "stt": true\|false}`. Proves the address and token work; never touches speech-to-text |
-| `POST /voice/fresh` | Tell Helm to start a new voice conversation: `202 {"ok": true}`, or `409` when Helm is offline (it is not queued) |
+| `GET /voice/status` | `200 {"ok", "helm": "online"\|"offline", "version": 1, "stt": true\|false}`, and `"pc"` while Helm is offline. Proves the address and token work; never touches speech-to-text |
+| `POST /voice/fresh` | Tell Helm to start a new voice conversation: `202 {"ok": true}`, or `409 {"error", "pc"}` when Helm is offline (it is not queued) |
+| `POST /voice/pc` | `{"action": "start"\|"wake"}`: ask the hub to start Helm on the PC, or wake the PC. `202 {"ok", "pc"}`, `409` when it cannot be done, `429` when it was asked a moment ago (see "Starting and waking the PC") |
 | `GET /voice/live` | The WebSocket (below) |
 
 **The live socket.** One per voice token: a newer socket of the same token replaces the older, which
@@ -533,7 +598,7 @@ What is being typed in an answer survives every refresh.
 ## Commands
 
 ```
-helm-hub serve                       # HUB_DB, HUB_BIND, HUB_TOKENS, HUB_LEGACY_PERSON, HUB_ALLOW_MUTATE, HUB_TELEGRAM_*, HUB_VOICE*
+helm-hub serve                       # HUB_DB, HUB_BIND, HUB_TOKENS, HUB_LEGACY_PERSON, HUB_ALLOW_MUTATE, HUB_TELEGRAM_*, HUB_VOICE*, HUB_WAKE*, HUB_WATCHDOG_SECS
 helm-hub import <dir> --source S [--prune] [--retag]   # S: the source tag the imported memories carry (required)
 helm-hub share-existing [--dry-run] [--keep ID,ID] [--list FILE] [--revert]   # the one-off private -> shared move (below)
 helm-hub person|client|pair ...      # people, machines and pairing codes (see above)

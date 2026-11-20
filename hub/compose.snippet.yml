@@ -17,7 +17,7 @@ services:
     build: ./helm-hub
     image: helm-hub:latest
     container_name: helm-hub
-    restart: unless-stopped
+    restart: unless-stopped # needed: the hub's watchdog exits a hung hub and Docker brings it back
     user: "1000:100" # ./helm-hub/data must be writable by this user and group (chown -R 1000:100)
     env_file: ./helm-hub/.env # HUB_TOKENS, HUB_LEGACY_PERSON, HUB_TELEGRAM_BOT_TOKEN, HUB_TELEGRAM_ALLOWED_USERS
     environment:
@@ -28,6 +28,13 @@ services:
       # - HUB_TELEGRAM_STT_LANGUAGE=en
       # - HUB_EMBED_URL=http://<embed-host>:<port> # an embeddings server for search queries; unset: only a PC embeds them
       # - HUB_EMBED_MODEL=nomic-embed-text
+      # Waking a PC that is off or asleep (off unless set; README, "Starting and waking the PC").
+      # Home Assistant is the reliable path from a bridge-network container. Its access token is
+      # a secret: put HUB_WAKE_HA_TOKEN in the env file, never here.
+      # - HUB_WAKE=ha # off (default), udp or ha
+      # - HUB_WAKE_HA_URL=http://<home-assistant-host>:8123
+      # - HUB_WAKE_BROADCAST=<lan-broadcast-address> # for udp; e.g. the LAN's .255 address
+      # - HUB_WATCHDOG_SECS=180 # exit (and so restart) when hung this long; 0 turns it off
     volumes:
       - ./helm-hub/data:/data # hub.db (SQLite, WAL)
       - /path/to/memory-folder:/mnt/memory:ro # source for `helm-hub import`
