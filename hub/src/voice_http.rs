@@ -1,13 +1,15 @@
 //! The phone's side of the voice line: the HTTP routes and the live socket.
 //!
-//! `POST /voice/turn`, `POST /voice/heard`, `GET /voice/status`, `POST /voice/fresh` and the
-//! WebSocket `GET /voice/live`. All of them need a token with the `voice` scope and speak for that
+//! `POST /voice/turn`, `POST /voice/heard`, `GET /voice/status`, `POST /voice/fresh`,
+//! `POST /voice/pc` and the WebSocket `GET /voice/live`. All of them need a token with the `voice` scope and speak for that
 //! token's person. The state and the rules live in `voice.rs` ([`VoiceBridge`]); this file reads
 //! requests, answers with the statuses the protocol names, and runs the socket loop (the hello,
 //! the pings and the silence timeout). The protocol is described in `hub/README.md` (The voice
 //! line) and the frame table in `relay.rs`.
 
 use crate::auth::{Client, Scope};
+use crate::launcher::{LaunchOutcome, Reason, WakeOutcome};
+use crate::relay::Channel;
 use crate::server::{client_of, refused, unauthorized, AppState, REVALIDATE_EVERY};
 use crate::telegram::now_ms;
 use crate::voice::{
@@ -30,6 +32,8 @@ pub const MAX_TURN_BODY: usize = 8 * 1024 * 1024;
 pub const MAX_TYPED_BODY: usize = 64 * 1024;
 /// A batch of heard reports.
 pub const MAX_HEARD_BODY: usize = 64 * 1024;
+/// A `POST /voice/pc` body is one small object.
+pub const MAX_PC_BODY: usize = 1024;
 /// A body over its limit is still read this far past it and thrown away, so the client finishes
 /// sending and gets its answer instead of a reset connection.
 const DRAIN_EXTRA: usize = 16 * 1024 * 1024;
@@ -52,6 +56,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/voice/heard", post(post_heard))
         .route("/voice/status", get(get_status))
         .route("/voice/fresh", post(post_fresh))
+        .route("/voice/pc", post(post_pc))
         .route("/voice/live", get(live))
 }
 
@@ -259,17 +264,18 @@ async fn post_turn(State(state): State<Arc<AppState>>, req: Request) -> Response
                 },
                 mode.as_str()
             );
-            (
-                StatusCode::ACCEPTED,
-                Json(json!({
-                    "ok": true,
-                    "turn": turn,
-                    "already": false,
-                    "helm": if helm_online { "online" } else { "offline" },
-                    "queued": true,
-                })),
-            )
-                .into_response()
+            let mut body = json!({
+                "ok": true,
+                "turn": turn,
+                "already": false,
+                "helm": if helm_online { "online" } else { "offline" },
+                "queued": true,
+            });
+            // While Helm is offline: what the PC is doing about it.
+            if let Some(pc) = bridge.pc(client.person_id, now_ms()) {
+                body["pc"] = pc;
+            }
+            (StatusCode::ACCEPTED, Json(body)).into_response()
         }
         Begin::Already(now_state) => Json(json!({
             "ok": true,
@@ -284,14 +290,19 @@ async fn post_turn(State(state): State<Arc<AppState>>, req: Request) -> Response
         Begin::Rejected(Reject::UnknownContinues) => {
             bad_request("The turn this one carries on isn't known.")
         }
-        Begin::Rejected(Reject::QueueFull { helm_online }) => refused(
-            StatusCode::TOO_MANY_REQUESTS,
-            if helm_online {
-                voice::QUEUE_FULL
-            } else {
-                voice::QUEUE_FULL_OFFLINE
-            },
-        ),
+        Begin::Rejected(Reject::QueueFull { helm_online }) => {
+            let mut body = json!({
+                "error": if helm_online {
+                    voice::QUEUE_FULL
+                } else {
+                    voice::QUEUE_FULL_OFFLINE
+                },
+            });
+            if let Some(pc) = bridge.pc(client.person_id, now_ms()) {
+                body["pc"] = pc;
+            }
+            (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response()
+        }
     }
 }
 
@@ -327,13 +338,16 @@ async fn get_status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
         Err(refusal) => return *refusal,
     };
     let status = bridge.status(client.person_id);
-    Json(json!({
+    let mut body = json!({
         "ok": true,
         "helm": if status.helm_online { "online" } else { "offline" },
         "version": voice::VERSION,
         "stt": status.stt,
-    }))
-    .into_response()
+    });
+    if let Some(pc) = bridge.pc(client.person_id, now_ms()) {
+        body["pc"] = pc;
+    }
+    Json(body).into_response()
 }
 
 /// `POST /voice/fresh`: start a new conversation in Helm's voice chat. Not queued: with no line
@@ -346,7 +360,124 @@ async fn post_fresh(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
     if bridge.fresh(client.person_id) {
         (StatusCode::ACCEPTED, Json(json!({ "ok": true }))).into_response()
     } else {
-        refused(StatusCode::CONFLICT, "Helm is offline.")
+        // The phone can offer to start or wake the PC from what the answer says about it.
+        let mut body = json!({ "error": "Helm is offline." });
+        if let Some(pc) = bridge.pc(client.person_id, now_ms()) {
+            body["pc"] = pc;
+        }
+        (StatusCode::CONFLICT, Json(body)).into_response()
+    }
+}
+
+/// The error answer of `POST /voice/pc`, with what the PC is doing.
+fn pc_refusal(code: StatusCode, why: &str, pc: Option<Value>) -> Response {
+    let mut body = json!({ "error": why });
+    if let Some(pc) = pc {
+        body["pc"] = pc;
+    }
+    (code, Json(body)).into_response()
+}
+
+/// `POST /voice/pc {"action": "start" | "wake"}`: the phone's Start Helm and Wake PC buttons.
+/// 202 `{ok, pc}` once it is done, 409 `{error}` when it cannot be, 429 when the PC was asked a
+/// moment ago. The hub picks the machine: the one the plan would, never one the phone names.
+async fn post_pc(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    let (parts, body) = req.into_parts();
+    let (client, bridge) = match gate(&state, &parts.headers) {
+        Ok(x) => x,
+        Err(refusal) => return *refusal,
+    };
+    let bytes = match read_capped(body, MAX_PC_BODY).await {
+        Ok(b) => b,
+        Err(ReadError::TooBig) => return bad_request("That request is too long."),
+        Err(ReadError::Broken) => return bad_request("The upload was cut off."),
+    };
+    let action = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|v| v.get("action").and_then(Value::as_str).map(str::to_owned));
+    let Some(action) = action.filter(|a| a == "start" || a == "wake") else {
+        return bad_request("Send {\"action\": \"start\"} or {\"action\": \"wake\"}.");
+    };
+    let (person, now) = (client.person_id, now_ms());
+    let lines = &state.lines;
+    // Helm is up: nothing to start or wake.
+    if lines.route_for(person, Channel::Voice).is_some() {
+        return refused(StatusCode::CONFLICT, "Helm is already connected.");
+    }
+    let machines = lines.pc_machines(person, Channel::Voice);
+    let pc = || bridge.pc(person, now_ms());
+    if action == "start" {
+        let pick = machines
+            .iter()
+            .find(|m| m.launcher.is_some_and(|l| !l.helm_running))
+            .or_else(|| machines.iter().find(|m| m.launcher.is_some()));
+        let Some(m) = pick else {
+            return pc_refusal(
+                StatusCode::CONFLICT,
+                "The hub can't start Helm: no launcher is connected.",
+                pc(),
+            );
+        };
+        return match lines
+            .launchers()
+            .try_launch(m.client_id, Reason::Button, None, now, true)
+        {
+            LaunchOutcome::Sent => {
+                eprintln!("voice: {} asked the hub to start Helm", client.name);
+                (
+                    StatusCode::ACCEPTED,
+                    Json(json!({ "ok": true, "pc": pc() })),
+                )
+                    .into_response()
+            }
+            LaunchOutcome::RateLimited => pc_refusal(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Helm was asked to start a moment ago. Give it a minute.",
+                pc(),
+            ),
+            LaunchOutcome::Already => pc_refusal(
+                StatusCode::CONFLICT,
+                "Helm is running on the PC and connects by itself.",
+                pc(),
+            ),
+            LaunchOutcome::NoLauncher | LaunchOutcome::GaveUp => pc_refusal(
+                StatusCode::CONFLICT,
+                "The hub can't start Helm: no launcher is connected.",
+                pc(),
+            ),
+        };
+    }
+    let pick = machines
+        .iter()
+        .find(|m| m.wake_ready && m.launcher.is_none())
+        .or_else(|| machines.iter().find(|m| m.wake_ready));
+    let Some(m) = pick else {
+        return pc_refusal(
+            StatusCode::CONFLICT,
+            "The hub doesn't know how to wake the PC.",
+            pc(),
+        );
+    };
+    match lines.launchers().wake(m.client_id, now).await {
+        WakeOutcome::Sent => {
+            eprintln!("voice: {} asked the hub to wake the PC", client.name);
+            (
+                StatusCode::ACCEPTED,
+                Json(json!({ "ok": true, "pc": pc() })),
+            )
+                .into_response()
+        }
+        WakeOutcome::RateLimited => pc_refusal(
+            StatusCode::TOO_MANY_REQUESTS,
+            "The PC was woken a moment ago. Give it a minute.",
+            pc(),
+        ),
+        WakeOutcome::Off | WakeOutcome::NoInfo => pc_refusal(
+            StatusCode::CONFLICT,
+            "The hub doesn't know how to wake the PC.",
+            pc(),
+        ),
+        WakeOutcome::Failed(why) => pc_refusal(StatusCode::CONFLICT, &format!("{why}."), pc()),
     }
 }
 
