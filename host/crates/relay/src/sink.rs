@@ -34,6 +34,11 @@
 //! send it again. A question goes up as a new message with numbered options; an approval, plan or
 //! trust prompt goes up once as a note that it waits in Helm's window. The mirror is
 //! harness-level: the agent never has to remember to reply.
+//!
+//! A failed request is never the answer: error rows are left out, and a turn that stopped on an
+//! error gets a plain sentence instead ([`Stop`]). When Helm carries that turn on by itself (a
+//! busy sign-in, a lost connection), the exchange stays open with a line saying so, and the
+//! continued turn's answer is the one that goes up.
 
 use crate::client::{BoxFut, LineHandle, TelegramMessage, TelegramSink};
 use crate::exec::AppExecutor;
@@ -107,6 +112,100 @@ pub struct Snap {
     pub turn_done: Option<(i64, String)>,
     /// The highest transcript row id now.
     pub max_id: i64,
+    /// The chat stopped on an error: what the mirror says instead of an answer.
+    pub stopped: Option<Stop>,
+}
+
+/// How a chat's turn stopped, when it stopped on an error.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Stop {
+    /// Helm carries the turn on by itself: Claude's sign-in was busy (`sign_in`), or the
+    /// connection or the service failed. `headline` is the error's first line.
+    Retrying { sign_in: bool, headline: String },
+    /// Helm stopped retrying because the sign-in keeps failing: the person has to sign in.
+    SignInNeeded,
+    /// Any other error, by its first line.
+    Error(String),
+}
+
+impl Stop {
+    /// Read from the chat's row: its status and error, whether it runs on a local model, whether
+    /// the user is writing in it, and whether Helm gave up on its sign-in since it was last
+    /// carried on. `None` unless it stopped on an error.
+    pub fn of(
+        status: &str,
+        error: Option<&str>,
+        local: bool,
+        typing: bool,
+        gave_up: bool,
+    ) -> Option<Stop> {
+        use helm_chats::outage::{classify, Cause};
+        if status != "interrupted" {
+            return None;
+        }
+        let error = error.map(str::trim).filter(|e| !e.is_empty())?;
+        let headline = error
+            .split("\n\n")
+            .next()
+            .unwrap_or(error)
+            .trim()
+            .to_owned();
+        let cause = if local { None } else { classify(error) };
+        Some(match cause {
+            Some(Cause::TokenRefresh) if gave_up => Stop::SignInNeeded,
+            // A chat the user is writing in is theirs to carry on: Helm does not.
+            Some(c) if !typing => Stop::Retrying {
+                sign_in: c == Cause::TokenRefresh,
+                headline,
+            },
+            _ => Stop::Error(headline),
+        })
+    }
+
+    /// The working line while Helm retries, if it does.
+    pub fn status(&self) -> Option<&'static str> {
+        match self {
+            Stop::Retrying { sign_in: true, .. } => Some(telegram::SIGN_IN_RETRYING),
+            Stop::Retrying { .. } => Some(telegram::OUTAGE_RETRYING),
+            _ => None,
+        }
+    }
+
+    /// The exchange's last word: what to do about a sign-in, or the error's headline.
+    pub fn last_word(&self) -> String {
+        match self {
+            Stop::Retrying { sign_in: true, .. } | Stop::SignInNeeded => {
+                telegram::SIGN_IN_NEEDED.to_owned()
+            }
+            Stop::Retrying { headline, .. } | Stop::Error(headline) => {
+                telegram::render_stopped(headline)
+            }
+        }
+    }
+}
+
+/// How long an exchange has waited on Helm's own retry of its stopped turn. Both mirrors keep
+/// one, so neither waits past [`telegram::RETRY_HOLD_MS`].
+#[derive(Debug, Default)]
+pub struct RetryHold {
+    since: Option<i64>,
+}
+
+impl RetryHold {
+    /// Whether the exchange (`begun`: its message is in the transcript) still waits on Helm's
+    /// own retry of its stopped turn at `now`.
+    pub fn holds(&mut self, s: &Snap, begun: bool, now: i64) -> bool {
+        if !begun || !matches!(s.stopped, Some(Stop::Retrying { .. })) {
+            return false;
+        }
+        let since = *self.since.get_or_insert(now);
+        now - since < telegram::RETRY_HOLD_MS
+    }
+
+    /// The chat is working again: a later stop is timed afresh.
+    pub fn reset(&mut self) {
+        self.since = None;
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -135,6 +234,8 @@ pub struct Mirror {
     answered: bool,
     /// The pending answer is the exchange's close: once it is sent, the mirror is done.
     closing: bool,
+    /// How long the exchange has waited on Helm's own retry of its stopped turn.
+    retry: RetryHold,
     pub done: bool,
 }
 
@@ -152,6 +253,7 @@ impl Mirror {
             pending: None,
             answered: false,
             closing: false,
+            retry: RetryHold::default(),
             done: false,
         }
     }
@@ -187,9 +289,12 @@ impl Mirror {
             out.push(Up::Final(p.1));
             return out;
         }
+        // The exchange's message is in the transcript: a stop seen now is this exchange's.
+        let begun = self.started || s.max_id > self.baseline;
         if s.busy {
             self.started = true;
             self.idle_seen = 0;
+            self.retry.reset();
             if let Some((id, text)) = &s.turn_done {
                 if *id > self.sent_through {
                     // The turn's answer exists. Hand it up now instead of waiting for an idle
@@ -218,20 +323,43 @@ impl Mirror {
                 self.last_status = Some(st);
                 self.last_at = Some(now);
             }
-        } else if self.started || s.final_text.is_some() {
+        } else if self.retry.holds(s, begun, now) {
+            // Helm carries the stopped turn on by itself: the exchange stays open for the
+            // continued turn's answer, with a line saying so instead of the error.
+            self.started = true;
+            self.idle_seen = 0;
+            let st = s
+                .stopped
+                .as_ref()
+                .and_then(Stop::status)
+                .unwrap_or_default();
+            let due = self.last_at.is_none_or(|t| now - t >= STATUS_GAP_MS);
+            if self.last_status.as_deref() != Some(st) && due {
+                out.push(Up::Status(st.to_owned()));
+                self.last_status = Some(st.to_owned());
+                self.last_at = Some(now);
+            }
+        } else if self.started || s.final_text.is_some() || (begun && s.stopped.is_some()) {
             // Settled: seen idle twice in a row, so the last streamed row is flushed.
             self.idle_seen += 1;
             if self.idle_seen >= 2 {
                 // Nothing is ever held behind the turn: an idle chat with two settled
                 // samples has no more of this exchange to show.
-                let due = match (&s.turn_done, &s.final_text) {
+                let unsent = s
+                    .turn_done
+                    .as_ref()
+                    .is_some_and(|(id, _)| *id > self.sent_through);
+                let due = match (&s.stopped, &s.turn_done, &s.final_text) {
+                    // A turn that stopped on an error says so in words, never with the error
+                    // row or a reply the error cut short.
+                    (Some(stop), _, _) if !unsent => Some(stop.last_word()),
                     // Its answer went up while the chat was still busy: the exchange just
                     // closes, and says nothing a second time.
-                    (Some((id, _)), _) if *id <= self.sent_through => None,
-                    (Some((_, text)), _) => Some(telegram::render_final(Some(text.as_str()))),
-                    (None, Some(text)) => Some(telegram::render_final(Some(text.as_str()))),
-                    (None, None) if self.answered => None,
-                    (None, None) => Some(telegram::render_final(None)),
+                    (_, Some((id, _)), _) if *id <= self.sent_through => None,
+                    (_, Some((_, text)), _) => Some(telegram::render_final(Some(text.as_str()))),
+                    (_, None, Some(text)) => Some(telegram::render_final(Some(text.as_str()))),
+                    (_, None, None) if self.answered => None,
+                    (_, None, None) => Some(telegram::render_final(None)),
                 };
                 match due {
                     Some(t) => {
@@ -802,11 +930,35 @@ pub fn snapshot(
 ) -> Snap {
     let row = db
         .snapshot(|tx| {
-            let status: Option<String> = tx
-                .query_row("SELECT status FROM chats WHERE id = ?1", [chat], |r| {
-                    r.get(0)
-                })
+            // The chat's status, and what the mirror needs to word a stop: its error, whether it
+            // runs on a local model, whether the user is writing in it, and whether Helm gave up
+            // on its sign-in since it was last carried on (the give-up line after the last
+            // continuation, in this exchange).
+            type ChatRow = (String, Option<String>, Option<String>, Option<String>, bool);
+            let chat_row: Option<ChatRow> = tx
+                .query_row(
+                    "SELECT c.status, c.error, c.provider, c.draft,
+                            EXISTS(SELECT 1 FROM messages g
+                                   WHERE g.chat_id = c.id AND g.id > ?2 AND g.role = 'context'
+                                     AND g.text = ?3
+                                     AND g.id > COALESCE((SELECT MAX(o.id) FROM messages o
+                                                          WHERE o.chat_id = c.id
+                                                            AND o.source_key LIKE 'c:outage:%'), 0))
+                     FROM chats c WHERE c.id = ?1",
+                    rusqlite::params![chat, baseline, helm_chats::outage::SIGN_IN_AGAIN_TEXT],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
                 .optional()?;
+            let stopped = chat_row.as_ref().and_then(|(status, error, provider, draft, gave_up)| {
+                Stop::of(
+                    status,
+                    error.as_deref(),
+                    provider.as_deref().is_some_and(|p| !p.is_empty()),
+                    draft.as_deref().is_some_and(|d| !d.trim().is_empty()),
+                    *gave_up,
+                )
+            });
+            let status = chat_row.map(|r| r.0);
             // The few words stored with the call when it has them, otherwise the bare name.
             let mut st = tx.prepare(
                 "SELECT CASE WHEN json_valid(details) THEN \
@@ -819,10 +971,11 @@ pub fn snapshot(
                 .query_map(rusqlite::params![chat, baseline], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
             recent.reverse();
+            // A failed request is never the answer: error rows are left out.
             let final_text: Option<String> = tx
                 .query_row(
                     "SELECT text FROM messages WHERE chat_id = ?1 AND id > ?2 AND role = 'assistant'
-                     AND active = 1 AND text != '' ORDER BY id DESC LIMIT 1",
+                     AND active = 1 AND text != '' AND status != 'error' ORDER BY id DESC LIMIT 1",
                     rusqlite::params![chat, baseline],
                     |r| r.get(0),
                 )
@@ -833,7 +986,7 @@ pub fn snapshot(
             let turn_done: Option<(i64, String)> = tx
                 .query_row(
                     "SELECT id, text FROM messages WHERE chat_id = ?1 AND id > ?2 AND role = 'assistant'
-                     AND active = 1 AND text != '' AND json_valid(details)
+                     AND active = 1 AND text != '' AND status != 'error' AND json_valid(details)
                      AND json_extract(details, '$.stopReason') = 'end_turn' ORDER BY id DESC LIMIT 1",
                     rusqlite::params![chat, baseline],
                     |r| Ok((r.get(0)?, r.get(1)?)),
@@ -844,10 +997,10 @@ pub fn snapshot(
                 [chat],
                 |r| r.get(0),
             )?;
-            Ok::<_, rusqlite::Error>((status, recent, final_text, turn_done, max_id))
+            Ok::<_, rusqlite::Error>((status, recent, final_text, turn_done, max_id, stopped))
         })
         .unwrap_or_default();
-    let (status, recent, final_text, turn_done, max_id) = row;
+    let (status, recent, final_text, turn_done, max_id, stopped) = row;
     let busy = status
         .map(|s| {
             matches!(
@@ -898,6 +1051,7 @@ pub fn snapshot(
         final_text,
         turn_done,
         max_id,
+        stopped,
     }
 }
 
