@@ -5,6 +5,7 @@
 use axum::body::{Body, Bytes};
 use axum::http::{header, HeaderMap, Request, StatusCode};
 use helm_hub::auth::{Client, Scopes};
+use helm_hub::launcher::Launchers;
 use helm_hub::lines::Lines;
 use helm_hub::mcp::Options;
 use helm_hub::registry::Registry;
@@ -18,6 +19,7 @@ use helm_hub::telegram::{
     POLL_SECONDS, QUEUED, STILL_TRANSCRIBING, STT_DOWN, STT_DOWN_AFTER, TAP_OFFLINE, TAP_SENT,
     TAP_STALE, TEXT_ONLY, VOICE_OFF,
 };
+use helm_hub::wake::Wake;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -676,7 +678,7 @@ async fn expired_messages_are_dropped_and_the_user_is_told() {
     assert_eq!(frames(&mut rx)[0]["text"], "new");
     assert_eq!(
         e.api.sent_texts(),
-        vec!["1 queued message expired before Helm reconnected and was dropped."]
+        vec!["1 queued message expired before Helm reconnected and was dropped. Send it again if it still matters."]
     );
 }
 
@@ -2422,6 +2424,198 @@ async fn a_person_links_their_own_telegram_and_their_bridge_takes_their_messages
         "an unlinked account was still written to: {:?}",
         api.calls()
     );
+}
+
+/// Poll for up to five seconds for something the hub's own tick does (it runs twice a second).
+async fn wait_for(mut cond: impl FnMut() -> bool) {
+    for _ in 0..500 {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("the condition never became true");
+}
+
+/// The frames of `type` a launcher's line has been sent so far.
+fn launcher_frames(rx: &mut mpsc::UnboundedReceiver<String>, what: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    while let Ok(f) = rx.try_recv() {
+        let v: Value = serde_json::from_str(&f).unwrap();
+        if v["type"] == what {
+            out.push(v);
+        }
+    }
+    out
+}
+
+/// What a message left waiting for Helm is told, by what the person's PC allows: nothing the hub can
+/// do gives the steps; a PC it can wake gives a Wake button (a tap, never by itself); a launcher
+/// that comes up starts Helm for the message that waits, once, and the person is told; and
+/// `/starthelm`, `/wake` and the buttons work only for the person's own machine.
+#[tokio::test]
+async fn offline_messages_start_wake_or_explain_by_what_the_pc_allows() {
+    let api = Arc::new(FakeApi::default());
+    let scopes = Scopes::parse_list("relay").unwrap();
+    let mut reg = Registry::open_in_memory().unwrap();
+    let owner = reg.ensure_person("Owner").unwrap().id;
+    let desk = reg.add_client("Owner", "desk", &scopes).unwrap().client.id;
+    let registry = Arc::new(Mutex::new(reg));
+    let (lines, up) = Lines::new(registry.clone());
+    let lines = Arc::new(lines);
+    let c = TelegramConfig {
+        people: vec![(OWNER, "Owner".to_owned())],
+        ..cfg()
+    };
+    let mut resolve = |name: &str| -> Result<i64, String> {
+        let mut r = registry.lock().unwrap();
+        r.ensure_person(name)
+            .map(|p| p.id)
+            .map_err(|e| e.to_string())
+    };
+    let tel =
+        Arc::new(Telegram::build(api.clone(), &lines, &c, owner, &mut resolve, &|b| b).unwrap());
+    // The bot's own ticks are what notice a launcher that comes up later.
+    tokio::spawn(tel.clone().run(up));
+    let client = Client {
+        id: desk,
+        name: "desk".into(),
+        person_id: owner,
+        person: "Owner".into(),
+        machine: "desk".into(),
+        scopes: scopes.clone(),
+    };
+    let launchers: &Launchers = lines.launchers();
+    let say = |text: &str| {
+        let tel = tel.clone();
+        let text = text.to_owned();
+        async move {
+            let now = now_ms();
+            tel.on_update(&update(OWNER, &text, now / 1000), now).await
+        }
+    };
+    let last = || api.sent_texts().last().cloned().unwrap_or_default();
+    let buttons = || -> Value {
+        api.calls()
+            .into_iter()
+            .rfind(|(m, _)| m == "sendMessage")
+            .map(|(_, b)| b["reply_markup"]["inline_keyboard"].clone())
+            .unwrap_or(Value::Null)
+    };
+    let tap = |data: String| {
+        let tel = tel.clone();
+        async move {
+            let now = now_ms();
+            let q = json!({ "update_id": NEXT_UPDATE.fetch_add(1, Ordering::Relaxed),
+                "callback_query": {
+                    "id": "q", "chat_instance": "c", "data": data,
+                    "from": { "id": OWNER, "is_bot": false, "first_name": "x" },
+                    "message": { "message_id": 1, "date": 0,
+                                 "chat": { "id": OWNER, "type": "private" } } } });
+            tel.on_update(&q, now).await
+        }
+    };
+    let answered = || {
+        api.calls()
+            .into_iter()
+            .rfind(|(m, _)| m == "answerCallbackQuery")
+            .and_then(|(_, b)| b["text"].as_str().map(str::to_owned))
+            .unwrap_or_default()
+    };
+
+    // The hub can do nothing about it: the steps, and no buttons. The commands say why.
+    assert_eq!(say("one").await, Handled::Queued);
+    assert_eq!(last(), QUEUED);
+    assert_eq!(buttons(), Value::Null);
+    say("/starthelm").await;
+    assert!(last().starts_with("The hub can't start Helm"), "{}", last());
+    say("/wake").await;
+    assert_eq!(last(), helm_hub::telegram::WAKE_OFF);
+
+    // A launcher that has been connected once told the hub how to wake the PC, which is kept
+    // when the line drops. With waking set up, the person is offered a Wake button, and it is
+    // their tap that wakes it.
+    let (tx, launcher) = mpsc::unbounded_channel();
+    let gen = launchers.attach(&client, tx);
+    let hello = json!({"type": "hello", "version": 1, "helmRunning": false,
+                       "wake": {"mac": "AA:BB:CC:DD:EE:FF", "broadcast": "192.168.1.255"}});
+    assert!(launchers.receive(desk, gen, &hello.to_string(), now_ms()));
+    launchers.detach(desk, gen);
+    let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    launchers.set_wake(Wake::udp(
+        Some("127.0.0.1".parse().unwrap()),
+        target.local_addr().unwrap().port(),
+    ));
+    api.clear();
+    assert_eq!(say("two").await, Handled::Queued);
+    assert_eq!(
+        last(),
+        "desk looks off or asleep. Your message is queued. /cancel drops the queue."
+    );
+    assert_eq!(
+        buttons(),
+        json!([[{ "text": "Wake desk", "callback_data": format!("pc:wake:{desk}") }]])
+    );
+    assert_eq!(tap(format!("pc:wake:{desk}")).await, Handled::Button);
+    let mut packet = [0u8; 200];
+    let (n, _) = tokio::time::timeout(Duration::from_secs(5), target.recv_from(&mut packet))
+        .await
+        .expect("the magic packet")
+        .unwrap();
+    assert_eq!(n, 102);
+    assert!(
+        answered().starts_with("Sent a wake signal to desk"),
+        "{}",
+        answered()
+    );
+    // A second tap right after is held back; a button for a machine that is not theirs is stale.
+    tap(format!("pc:wake:{desk}")).await;
+    assert!(answered().contains("Give it a minute"), "{}", answered());
+    tap("pc:wake:999".to_owned()).await;
+    assert_eq!(answered(), TAP_STALE);
+
+    // The PC wakes, its launcher connects and says Helm is not running: Helm is started for the
+    // messages that wait, once, and the person is told so.
+    api.clear();
+    let (tx, mut launcher_rx) = mpsc::unbounded_channel();
+    drop(launcher);
+    let gen = launchers.attach(&client, tx);
+    let hello = json!({"type": "hello", "version": 1, "helmRunning": false, "wake": null});
+    assert!(launchers.receive(desk, gen, &hello.to_string(), now_ms()));
+    wait_for(|| {
+        api.sent_texts()
+            .iter()
+            .any(|t| t.starts_with("Helm is starting on desk."))
+    })
+    .await;
+    let launches = launcher_frames(&mut launcher_rx, "launch");
+    assert_eq!(launches.len(), 1, "{launches:?}");
+    assert_eq!(launches[0]["reason"], "telegram");
+    // Another message while it starts says so and does not launch again.
+    say("three").await;
+    assert!(
+        last().starts_with("Helm is starting on desk."),
+        "{}",
+        last()
+    );
+    assert!(launcher_frames(&mut launcher_rx, "launch").is_empty());
+
+    // Helm connects: everything that waited goes down its line, in order.
+    let line = lines.line_for(&client);
+    let (ltx, mut lrx) = mpsc::unbounded_channel();
+    line.attach(ltx);
+    let mut sent: Vec<String> = Vec::new();
+    wait_for(|| {
+        while let Ok(f) = lrx.try_recv() {
+            let v: Value = serde_json::from_str(&f).unwrap();
+            if v["type"] == "telegram" {
+                sent.push(v["text"].as_str().unwrap().to_owned());
+            }
+        }
+        sent.len() == 3
+    })
+    .await;
+    assert_eq!(sent, ["one", "two", "three"]);
 }
 
 /// A hub that has no Telegram bot at all still answers a link question: the same result type the

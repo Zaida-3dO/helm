@@ -8,6 +8,7 @@ use helm_hub::registry::Registry;
 use helm_hub::relay::{Line, Upstream, MAX_FRAME, OFFLINE};
 use helm_hub::server::{router, AppState};
 use helm_hub::store::Store;
+use helm_hub::telegram::{ApiFuture, Bridge, Handled, Receive, TelegramApi, TelegramConfig};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -63,7 +64,11 @@ type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn connect(hub: &Hub, token: &str) -> Result<Ws, u16> {
-    let mut req = format!("ws://{}/relay", hub.addr)
+    connect_at(hub, "/relay", token).await
+}
+
+async fn connect_at(hub: &Hub, path: &str, token: &str) -> Result<Ws, u16> {
+    let mut req = format!("ws://{}{path}", hub.addr)
         .into_client_request()
         .unwrap();
     req.headers_mut()
@@ -155,6 +160,20 @@ async fn only_a_relay_token_opens_the_line() {
     );
     let mut ws = connect(&hub, LINE).await.expect("the relay token opens it");
     assert_eq!(next_json(&mut ws).await["type"], "welcome");
+    // The launcher line takes the same token and nobody else's.
+    assert_eq!(
+        connect_at(&hub, "/launcher", "not-a-token-at-all-0123456789")
+            .await
+            .err(),
+        Some(401)
+    );
+    for token in [REMOTE, MEMORY_ONLY, FORWARDER, PHONE, PAGE] {
+        assert_eq!(connect_at(&hub, "/launcher", token).await.err(), Some(403));
+    }
+    let mut launcher = connect_at(&hub, "/launcher", LINE)
+        .await
+        .expect("the relay token opens the launcher line");
+    assert_eq!(next_json(&mut launcher).await["type"], "welcome");
     // ...and neither the relay token, a telegram token, a voice token nor a Remote-page token
     // reaches the MCP surface.
     for token in [LINE, FORWARDER, PHONE, PAGE] {
@@ -207,6 +226,127 @@ async fn app_tools_are_listed_only_for_app_clients() {
     assert_eq!(v["result"]["isError"], true);
     let text = v["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("unknown tool"), "{text}");
+}
+
+/// A Bot API that only records what was sent.
+#[derive(Default)]
+struct RecordingApi(Mutex<Vec<String>>);
+
+impl TelegramApi for RecordingApi {
+    fn call<'a>(&'a self, method: &'a str, body: Value) -> ApiFuture<'a> {
+        if method == "sendMessage" {
+            self.0
+                .lock()
+                .unwrap()
+                .push(body["text"].as_str().unwrap_or_default().to_owned());
+        }
+        Box::pin(async { Ok(json!({ "message_id": 1 })) })
+    }
+}
+
+/// A Telegram message with Helm closed: the PC's launcher is asked to start it (once), and when
+/// Helm's relay line comes up the queued messages are delivered down it.
+#[tokio::test]
+async fn a_message_for_a_closed_helm_starts_it_through_the_launcher_and_goes_when_it_is_up() {
+    const PERSON: i64 = 1001;
+    let hub = start().await;
+    let desk = hub
+        .lines
+        .registry()
+        .lock()
+        .unwrap()
+        .find_client("helm-line", None)
+        .unwrap()
+        .id;
+    let mut launcher = connect_at(&hub, "/launcher", LINE).await.unwrap();
+    let welcome = next_json(&mut launcher).await;
+    assert_eq!(
+        (welcome["type"].clone(), welcome["machine"].clone()),
+        (json!("welcome"), json!("helm-line"))
+    );
+    launcher
+        .send(Message::Text(
+            json!({"type": "hello", "version": 1, "helmRunning": false, "wake": null})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        if hub.lines.launchers().state(desk).is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(hub.lines.launchers().state(desk).is_some());
+
+    let api = Arc::new(RecordingApi::default());
+    let config = TelegramConfig {
+        token: Some("t".into()),
+        allowed: vec![PERSON],
+        people: vec![],
+        api_base: "http://fake".into(),
+        queue_lifetime: Duration::from_secs(30 * 60),
+        queue_max: 5,
+        receive: Receive::Poll,
+        stt: None,
+    };
+    let route = Arc::new(helm_hub::lines::PersonRoute::new(hub.lines.clone(), OWNER));
+    let bridge = Arc::new(
+        Bridge::with_route(api.clone(), route, &config).with_person(OWNER, hub.lines.clone()),
+    );
+    let now = helm_hub::telegram::now_ms();
+    let message = |text: &str| {
+        json!({ "update_id": 1, "message": { "message_id": 9, "date": now / 1000, "text": text,
+            "from": { "id": PERSON, "is_bot": false, "first_name": "x" },
+            "chat": { "id": PERSON, "type": "private" } } })
+    };
+    assert_eq!(
+        bridge.on_update(&message("first"), now).await,
+        Handled::Queued
+    );
+    let launch = next_json(&mut launcher).await;
+    assert_eq!(
+        (launch["type"].clone(), launch["reason"].clone()),
+        (json!("launch"), json!("telegram"))
+    );
+    let id = launch["id"].as_str().unwrap();
+    assert!((16..=32).contains(&id.len()));
+    launcher
+        .send(Message::Text(
+            json!({"type": "launched", "id": id, "ok": true, "already": false})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    // A second message while Helm starts is told so and does not launch again.
+    let mut second = message("second");
+    second["update_id"] = json!(2);
+    bridge.on_update(&second, now).await;
+    let said = api.0.lock().unwrap().clone();
+    assert_eq!(said.len(), 2);
+    assert!(
+        said.iter()
+            .all(|t| t.starts_with("Helm is starting on helm-line.")),
+        "{said:?}"
+    );
+    let quiet = tokio::time::timeout(Duration::from_millis(300), launcher.next()).await;
+    assert!(quiet.is_err(), "launched twice: {quiet:?}");
+
+    // Helm starts and its relay line comes up: what waited goes down it, in order.
+    let mut line = connect(&hub, LINE).await.unwrap();
+    assert_eq!(next_json(&mut line).await["type"], "welcome");
+    wait_up(&hub, true).await;
+    assert_eq!(bridge.flush(now).await, 2);
+    let mut texts = Vec::new();
+    while texts.len() < 2 {
+        let f = next_json(&mut line).await;
+        if f["type"] == "telegram" {
+            texts.push(f["text"].as_str().unwrap().to_owned());
+        }
+    }
+    assert_eq!(texts, ["first", "second"]);
 }
 
 #[tokio::test]
