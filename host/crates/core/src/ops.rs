@@ -86,7 +86,7 @@ fn window_hide(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
 }
 
 fn window_ready(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
-    ctx.services.need::<Shell>()?.0.show_main();
+    ctx.services.need::<Shell>()?.0.ui_ready();
     Ok(Value::Null)
 }
 

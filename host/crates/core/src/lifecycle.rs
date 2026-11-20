@@ -45,6 +45,11 @@ impl WorkerDrain for NoWorkers {
 /// What the host can ask of the app shell. Implemented by the Tauri app.
 pub trait AppControl: Send + Sync {
     fn show_main(&self);
+    /// The UI drew its first frame (at start, or after its page was reloaded): show the window
+    /// created hidden, unless the app should stay in the tray.
+    fn ui_ready(&self) {
+        self.show_main();
+    }
     fn hide_main(&self);
     fn exit(&self, code: i32);
 }

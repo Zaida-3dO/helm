@@ -50,26 +50,25 @@ pub fn background_start<I: IntoIterator<Item = S>, S: AsRef<str>>(args: I) -> bo
 }
 
 /// A background start keeps the main window in the tray: the UI's "first frame drawn" show is
-/// passed over once, and the start-up fallback never shows it. A person's own request (a second
-/// launch, the tray) shows it as ever.
+/// passed over (every time, since a reloaded page draws its first frame again) until a person
+/// asks for the window, and the start-up fallback never shows it. A person's own request (a
+/// second launch, the tray, the pet) shows it as ever.
 pub struct HiddenStart {
     background: bool,
-    pass_over_next: std::sync::atomic::AtomicBool,
+    pass_over: std::sync::atomic::AtomicBool,
 }
 
 impl HiddenStart {
     pub fn new(background: bool) -> Self {
         Self {
             background,
-            pass_over_next: std::sync::atomic::AtomicBool::new(background),
+            pass_over: std::sync::atomic::AtomicBool::new(background),
         }
     }
 
-    /// A show request arrived: `false` when it is the one a background start passes over.
-    fn may_show(&self) -> bool {
-        !self
-            .pass_over_next
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    /// The UI is ready: `false` while a background start keeps the window in the tray.
+    fn ui_may_show(&self) -> bool {
+        !self.pass_over.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// The start-up fallback (show a window the UI never asked for) applies.
@@ -79,7 +78,7 @@ impl HiddenStart {
 
     /// A person asked for the window: nothing more is passed over.
     fn person_asked(&self) {
-        self.pass_over_next
+        self.pass_over
             .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
@@ -119,11 +118,17 @@ impl TauriShell {
 }
 
 impl AppControl for TauriShell {
-    fn show_main(&self) {
-        if !self.hidden.may_show() {
+    fn ui_ready(&self) {
+        if !self.hidden.ui_may_show() {
             log::info!("started in the background: the window stays in the tray");
             return;
         }
+        self.show_main();
+    }
+
+    /// Every caller but [`Self::ui_ready`] is a person asking for the window.
+    fn show_main(&self) {
+        self.hidden.person_asked();
         self.shown.store(true, std::sync::atomic::Ordering::SeqCst);
         // A background test window is already on screen (off-screen): showing it again would
         // activate it, take focus and un-minimise it, which is what that mode exists to avoid.
@@ -487,20 +492,21 @@ mod drop_tests {
         assert!(background_start(["--other", "--background"]));
         assert!(!background_start(["--backgrounds"]));
         assert!(!background_start(Vec::<String>::new()));
-        // Started by the launcher: the UI's first-frame show is passed over, and the start-up
-        // fallback does not apply; a later request shows the window.
+        // Started by the launcher: the UI's first-frame show is passed over, again after a page
+        // reload, and the start-up fallback does not apply; once a person asks, it shows.
         let h = HiddenStart::new(true);
         assert!(!h.fallback_applies());
-        assert!(!h.may_show(), "the first-frame show is passed over");
-        assert!(h.may_show(), "a later show goes through");
-        // A person asking before the UI is ready is never passed over.
-        let h = HiddenStart::new(true);
+        assert!(!h.ui_may_show(), "the first-frame show is passed over");
+        assert!(!h.ui_may_show(), "and so is a reloaded page's");
         h.person_asked();
-        assert!(h.may_show());
+        assert!(
+            h.ui_may_show(),
+            "a person asked: the window shows from then on"
+        );
         // A normal start shows as ever.
         let h = HiddenStart::new(false);
         assert!(h.fallback_applies());
-        assert!(h.may_show() && h.may_show());
+        assert!(h.ui_may_show() && h.ui_may_show());
     }
 
     #[test]
