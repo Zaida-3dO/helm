@@ -612,6 +612,19 @@ impl Client {
         self.handle.clone()
     }
 
+    /// Try the hub again now instead of after the line's own backoff: wakes a line that waits to
+    /// retry, or waits for a saved connection, with its backoff back at the start. A line that is
+    /// up, or in the middle of connecting, is left alone. `true` when a waiting line was woken.
+    pub fn reconnect_now(&self) -> bool {
+        match self.handle.state() {
+            LineState::Online | LineState::Connecting => false,
+            LineState::Off | LineState::Offline => {
+                self.reconfigured.notify_waiters();
+                true
+            }
+        }
+    }
+
     /// The hub person this machine was paired as, if it was paired with a code.
     pub fn paired_person(&self) -> Option<String> {
         let person = (self.config)().person_id;
@@ -2124,15 +2137,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_a_configuration_the_line_stays_off() {
+    async fn without_a_configuration_the_line_stays_off_until_asked_to_try_again() {
+        let cfg = Arc::new(std::sync::Mutex::new(RelayConfig::default()));
+        let read = cfg.clone();
         let c = Client::new(
-            Arc::new(RelayConfig::default),
+            Arc::new(move || read.lock().unwrap().clone()),
             Arc::new(Exec::default()),
             Arc::new(Sink::default()),
         );
         let task = tokio::spawn(c.clone().run());
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(c.handle().state(), LineState::Off);
+        // A hub becomes reachable while the line waits: trying again now connects at once,
+        // without waiting out the line's own retry.
+        let (url, hub) = fake_hub().await;
+        *cfg.lock().unwrap() = RelayConfig {
+            lan_url: url,
+            token: TOKEN.to_owned(),
+            ..Default::default()
+        };
+        assert!(c.reconnect_now(), "a waiting line is woken");
+        let (_, _ws) = tokio::time::timeout(Duration::from_secs(5), hub)
+            .await
+            .expect("the line connected without waiting for its retry")
+            .unwrap();
+        for _ in 0..100 {
+            if c.handle().state() == LineState::Online {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(c.handle().state(), LineState::Online);
+        assert!(!c.reconnect_now(), "a line that is up is left alone");
         task.abort();
     }
 }
