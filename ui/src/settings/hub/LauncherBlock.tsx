@@ -1,6 +1,7 @@
 // Settings → Hub: the small always-on launcher. While it runs on this PC the hub can start Helm
-// here when a message arrives, and bring it back after a crash. No hub paired, nothing to show:
-// without a hub nobody can ask, and the host registers nothing.
+// here when a message arrives, and bring it back after a crash. No hub paired, nothing to show
+// (without a hub nobody can ask, and the host registers nothing), unless the person switched it
+// on before unpairing: then it stays, so it can be switched off.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { hubOps, type LauncherState } from '../../api/hub.ts';
@@ -26,7 +27,6 @@ export function LauncherBlock({ paired }: { paired: boolean }) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!paired) return;
     let live = true;
     void ops
       .launcher()
@@ -52,7 +52,7 @@ export function LauncherBlock({ paired }: { paired: boolean }) {
     [ops],
   );
 
-  if (!paired) return null;
+  if (!paired && !(st?.enabled || st?.registered)) return null;
   return (
     <>
       <SettingRow
