@@ -9,11 +9,15 @@
 // - R4b a photo with a caption reaches the Telegram chat as an image the chat can see; an album
 //       of other files (a PDF and a GIF) arrives as one message with both saved where the agent
 //       can read them; a file over the Bot API's 20 MB download limit is refused in plain words;
-// - R5  with Helm gone, a call answers "Helm offline, nothing sent or changed".
+// - R5  with Helm gone, a call answers "Helm offline, nothing sent or changed", and with no
+//       launcher a Telegram message is queued with the steps to let the hub start Helm next time;
+// - R6  (Windows) the always-on launcher, started against the test hub with the same scratch
+//       profile, makes the hub start Helm for the queued message, which then arrives; Helm killed
+//       outright comes back by itself and its line returns.
 //
-// Run: `npm run build:debug` at the root and `cargo build` in hub/, then
-// `node --test e2e/w7-relay.e2e.ts` in checks/ (or `npm run e2e -w checks`).
-// HELM_E2E_HUB_EXE overrides the hub binary.
+// Run: `npm run build:debug` and `cargo build -p helm-launcher` at the root and `cargo build` in
+// hub/, then `node --test e2e/w7-relay.e2e.ts` in checks/ (or `npm run e2e -w checks`).
+// HELM_E2E_HUB_EXE overrides the hub binary, HELM_E2E_LAUNCHER_EXE the launcher.
 
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -22,10 +26,11 @@ import path from "node:path";
 import fs from "node:fs";
 import { after, before, describe, test } from "node:test";
 import { startFakeTelegram, type FakeTelegram } from "../../fakes/telegram/server.ts";
-import { api, dispose, launchApp, newChat, openChat, REPO, scratchDir, tid, waitText, type App } from "./harness.ts";
+import { api, APP_BROWSER_ARGS, dispose, E2E_FIXTURE, FAKE_CLAUDE, launchApp, newChat, openChat, REPO, scratchDir, tid, waitText, type App } from "./harness.ts";
 
 const HUB_EXE =
   process.env.HELM_E2E_HUB_EXE ?? path.join(REPO, "hub", "target", "debug", process.platform === "win32" ? "helm-hub.exe" : "helm-hub");
+const LAUNCHER_EXE = process.env.HELM_E2E_LAUNCHER_EXE ?? path.join(REPO, "target", "debug", "helm-launcher.exe");
 // Made-up test tokens, used only between this test's own processes.
 const LINE = "e2e-line-token-0123456789abcdefgh";
 const ASSISTANT = "e2e-assistant-token-0123456789abcdefg";
@@ -39,7 +44,33 @@ let hub: ChildProcess | undefined;
 let hubLog = "";
 let tg: FakeTelegram | undefined;
 let hubUrl = "";
+let hubPort = 0;
+let launcher: ChildProcess | undefined;
 type Json = Record<string, any>;
+
+/** The process the profile's run record names, and whether it ended in an orderly way. */
+function runRecord(): { pid?: number; exited: boolean } {
+  try {
+    const r = JSON.parse(fs.readFileSync(path.join(profile, "diagnostics", "run.json"), "utf8")) as Json;
+    return { pid: typeof r.pid === "number" ? r.pid : undefined, exited: r.exit != null };
+  } catch {
+    return { exited: false };
+  }
+}
+
+function alive(pid: number | undefined): boolean {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** How many times the hub has logged a PC line coming up (counted as it streams: the kept log is trimmed). */
+let lineUpCount = 0;
+const lineUps = () => lineUpCount;
 
 async function freePort(): Promise<number> {
   return new Promise((resolve) => {
@@ -78,6 +109,7 @@ describe("the hub line, forwarding and the Telegram bot", { timeout: 10 * 60_000
   before(async () => {
     tg = await startFakeTelegram();
     const port = await freePort();
+    hubPort = port;
     hubUrl = `http://127.0.0.1:${port}`;
     hub = spawn(HUB_EXE, ["serve"], {
       env: {
@@ -91,7 +123,10 @@ describe("the hub line, forwarding and the Telegram bot", { timeout: 10 * 60_000
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
-    hub.stderr?.on("data", (d: Buffer) => (hubLog = (hubLog + d.toString()).slice(-20_000)));
+    hub.stderr?.on("data", (d: Buffer) => {
+      lineUpCount += d.toString().split("relay: line up").length - 1;
+      hubLog = (hubLog + d.toString()).slice(-20_000);
+    });
     await until("the hub to listen", async () => (await fetch(`${hubUrl}/health`).then((r) => r.ok).catch(() => false)) || undefined);
     app = await launchApp(profile, {
       env: { HELM_TEST_RELAY_URL: `ws://127.0.0.1:${port}/relay`, HELM_TEST_RELAY_TOKEN: LINE },
@@ -99,6 +134,11 @@ describe("the hub line, forwarding and the Telegram bot", { timeout: 10 * 60_000
   });
   after(async () => {
     await dispose(app);
+    // The launcher is our own child; a Helm it started is ended by the process id its record
+    // names, never by name.
+    launcher?.kill();
+    const rec = runRecord();
+    if (!rec.exited && alive(rec.pid)) process.kill(rec.pid!);
     hub?.kill();
     await tg?.close();
   });
@@ -215,5 +255,62 @@ describe("the hub line, forwarding and the Telegram bot", { timeout: 10 * 60_000
     const r = await mcp("app_send_message", { chatId: chat, message: "should not arrive", mode: "steer" });
     assert.equal(r.isError, true);
     assert.equal(text(r), "Helm offline, nothing sent or changed.");
+    // No launcher on this PC: the message is queued, and the reply says how to let the hub start
+    // Helm next time.
+    const before = tg!.chat(ALLOWED_USER).length;
+    tg!.message(ALLOWED_USER, "are you there after the restart");
+    const queued = await until("the queued reply", () => tg!.chat(ALLOWED_USER).slice(before).find((m) => m.text.includes("queued")));
+    assert.match(queued.text, /Helm is offline and the hub can.t start it/);
+    assert.match(queued.text, /Start Helm when a message arrives/);
+    assert.match(queued.text, /\/cancel/);
+  });
+
+  test("R6: the launcher has the hub start Helm for a queued message, and brings a killed Helm back", { skip: process.platform !== "win32" }, async () => {
+    if (!fs.existsSync(LAUNCHER_EXE)) throw new Error(`${LAUNCHER_EXE} not found: run \`cargo build -p helm-launcher\` first`);
+    // Helm wrote the launcher's handoff at its start: on, because the test hub counts as paired.
+    const handoff = JSON.parse(fs.readFileSync(path.join(profile, "launcher", "launcher.json"), "utf8")) as Json;
+    assert.equal(handoff.enabled, true, JSON.stringify(handoff));
+    assert.match(String(handoff.helmExe), /helm\.exe$/i);
+    // The environment launchApp gives Helm, so the Helm the launcher starts runs the same way
+    // (off-screen, the fake claude, the test hub). The launcher passes its own environment on.
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) if (v !== undefined && k.toUpperCase() !== "CLAUDECODE") env[k] = v;
+    Object.assign(env, {
+      HELM_PROFILE_DIR: profile,
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: APP_BROWSER_ARGS,
+      HELM_TEST_CONFIRM: "ok",
+      HELM_TEST_WINDOW: "background",
+      HELM_TEST_LOCAL_SERVERS: "off",
+      HELM_TEST_CLAUDE: JSON.stringify({ command: process.execPath, args: [FAKE_CLAUDE, E2E_FIXTURE] }),
+      FAKE_CLAUDE_LOG: path.join(profile, "fake-claude.log"),
+      HELM_TEST_RELAY_URL: `ws://127.0.0.1:${hubPort}/relay`,
+      HELM_TEST_RELAY_TOKEN: LINE,
+    });
+    const ups = lineUps();
+    launcher = spawn(LAUNCHER_EXE, ["--profile", profile], { env, stdio: "ignore" });
+    // The launcher's hello says Helm is not running while a Telegram message waits: the hub asks
+    // it to start Helm, Helm's line comes up, and the queued message is delivered.
+    await until("Helm started by the launcher to reconnect", () => (lineUps() > ups ? true : undefined), 120_000);
+    const claudeLog = path.join(profile, "fake-claude.log");
+    await until(
+      "the queued message to reach a chat",
+      () => (fs.existsSync(claudeLog) && fs.readFileSync(claudeLog, "utf8").includes("are you there after the restart") ? true : undefined),
+      120_000,
+    );
+    const started = runRecord();
+    assert.ok(alive(started.pid) && !started.exited, `a running Helm: ${JSON.stringify(started)}`);
+    // Killed outright (a crash): the launcher waits a little and starts it again.
+    const ups2 = lineUps();
+    process.kill(started.pid!);
+    await until(
+      "a new Helm after the crash",
+      () => {
+        const now = runRecord();
+        return now.pid !== started.pid && alive(now.pid) ? true : undefined;
+      },
+      90_000,
+    );
+    await until("its line to come back", () => (lineUps() > ups2 ? true : undefined), 120_000);
+    assert.equal(launcher.exitCode, null, "the launcher keeps running");
   });
 });

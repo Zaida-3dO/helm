@@ -1805,6 +1805,7 @@ dependencies = [
  "helm-hosttools",
  "helm-ipc",
  "helm-itemlinks",
+ "helm-launcher",
  "helm-localmodels",
  "helm-mcp",
  "helm-memindex",
@@ -2089,6 +2090,24 @@ dependencies = [
  "serde_json",
  "tempfile",
  "ts-rs",
+]
+
+[[package]]
+name = "helm-launcher"
+version = "2.3.2"
+dependencies = [
+ "futures-util",
+ "helm-core",
+ "helm-ipc",
+ "helm-platform",
+ "helm-relay",
+ "log",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

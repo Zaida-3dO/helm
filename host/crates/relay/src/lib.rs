@@ -35,7 +35,10 @@
 //!
 //! Ops: `relay_connection_get` → [`config::RelayConnectionView`] (booleans and the line state,
 //! never a value) and `relay_connection_save` ([`config::RelaySaveArgs`]: absent keeps, empty
-//! clears). For Settings → Hub's Telegram section: `relay_telegram_get` →
+//! clears). `relay_reconnect` (Settings → Hub's Try now) answers the same view as
+//! `relay_connection_get` after waking a line that waits to retry, so it tries the hub at once
+//! with its backoff back at the start; a line that is up or connecting is left alone. For
+//! Settings → Hub's Telegram section: `relay_telegram_get` →
 //! [`sink::TelegramView`], `relay_telegram_save` ([`telegram::PolicyFile`]: the limits, the
 //! away-alerts switch, approving from Telegram, answering from the Remote page, and the model and
 //! effort a new Telegram chat opens with) and
@@ -268,6 +271,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
             OpClass::Maintenance,
             connection_save,
         )
+        .blocking("relay_reconnect", OpClass::Blocking, reconnect)
         .blocking("relay_telegram_get", OpClass::Blocking, telegram_get)
         .blocking("relay_telegram_save", OpClass::Blocking, telegram_save)
         .blocking("relay_telegram_reset", OpClass::Blocking, telegram_reset)
@@ -299,6 +303,15 @@ fn connection_get(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
         v.line_refusal = h.last_refusal();
     }
     to_value(&v)
+}
+
+/// `relay_reconnect`: try the hub now rather than after the line's backoff, then the same view
+/// as `relay_connection_get` (the line shows `connecting` once it has picked the request up).
+fn reconnect(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
+    if let Some(c) = ctx.services.get::<client::Client>() {
+        c.reconnect_now();
+    }
+    connection_get(ctx, Value::Null)
 }
 
 fn connection_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {

@@ -55,6 +55,7 @@ helm-backup = { path = "../crates/backup" }
 helm-pages = { path = "../crates/pages" }
 helm-dictation = { path = "../crates/dictation" }
 helm-memindex = { path = "../crates/memindex" }
+helm-launcher = { path = "../crates/launcher" }
 serde_json.workspace = true
 rusqlite.workspace = true
 tokio.workspace = true

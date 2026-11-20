@@ -1,0 +1,41 @@
+[package]
+name = "helm-launcher"
+description = "The small always-on launcher: starts Helm when the hub asks, restarts it after a crash, and tells the hub how to wake the PC. Also the app side that installs, registers and switches it."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "helm-launcher"
+path = "src/main.rs"
+
+[dependencies]
+helm-core.workspace = true
+helm-ipc.workspace = true
+helm-platform.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+# One current-thread runtime: the launcher is meant to stay small.
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "sync", "time", "net"] }
+# Plain ws on the LAN or Tailscale only (no TLS stack), like the relay line.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Threading",
+  "Win32_System_Registry",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_NetworkManagement_Ndis",
+  "Win32_Networking_WinSock",
+] }
+
+[dev-dependencies]
+# Only to prove the launcher reads the connection the relay saves.
+helm-relay = { path = "../relay" }
+tempfile.workspace = true

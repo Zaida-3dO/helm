@@ -43,6 +43,8 @@ pub fn ops(reg: &mut OpRegistry) {
     crate::petworld::register_ops(reg);
     helm_dictation::register_ops(reg);
     helm_memindex::register_ops(reg);
+    // Settings -> Hub's launcher switch: window-only, no agent tool reaches it.
+    helm_launcher::register_ops(reg);
 }
 
 pub fn migrations(reg: &mut MigrationRegistry) {
