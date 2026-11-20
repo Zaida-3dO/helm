@@ -1888,7 +1888,8 @@ async fn a_line_from_another_crate_becomes_a_context_row() {
 /// Three Claude chats start together while nothing is known of the sign-in: one opens and checks
 /// it, the other two wait at their start with the reason `sign_in` (no worker starts for them),
 /// and the first one's answer lets both go. A failed request on the way is no answer: it is
-/// stored as an error row whose text is empty, with the error in its details.
+/// stored as an error row whose text is empty, with the error in its details. The answer is the
+/// reply's first streamed words, not the end of the message.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn one_start_checks_the_sign_in_and_its_answer_lets_the_waiting_ones_go() {
     let mut h = harness();
@@ -1926,7 +1927,9 @@ async fn one_start_checks_the_sign_in_and_its_answer_lets_the_waiting_ones_go() 
         h.workers.try_recv().is_err(),
         "no worker for a waiting start"
     );
-    w.emit(json!({"type": "message_end", "message": {"id": "m1", "role": "assistant", "content": [{"type": "text", "text": "Hello."}], "status": "complete"}}))
+    w.emit(json!({"type": "message_start", "message": {"id": "m1", "role": "assistant", "content": []}}))
+        .await;
+    w.emit(json!({"type": "message_update", "messageId": "m1", "index": 0, "delta": {"type": "text_delta", "text": "Hel"}}))
         .await;
     let mut opened = Vec::new();
     for _ in 0..2 {

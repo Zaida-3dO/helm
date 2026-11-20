@@ -4072,9 +4072,20 @@ impl Actor {
             "message_update" => {
                 let key = self.msg_key(&str_of(&v, "messageId").unwrap_or_default());
                 let delta = v.get("delta").cloned().unwrap_or_default();
+                let text = str_of(&delta, "text").unwrap_or_default();
+                let words = matches!(
+                    str_of(&delta, "type").as_deref(),
+                    Some("text_delta" | "thinking_delta")
+                ) && !text.is_empty();
+                if words {
+                    // Claude is streaming a reply, so the sign-in works: whoever waited for
+                    // this start's check can go now, not when a long first message ends.
+                    if let Some(t) = self.sign_in.take() {
+                        t.answered(now());
+                    }
+                }
                 if let Some(m) = self.stream.get_mut(&key) {
                     let was_empty = m.text.is_empty() && m.thinking.is_empty();
-                    let text = str_of(&delta, "text").unwrap_or_default();
                     match str_of(&delta, "type").as_deref() {
                         Some("text_delta") => m.text.push_str(&text),
                         Some("thinking_delta") => m.thinking.push_str(&text),
@@ -4778,7 +4789,8 @@ impl Actor {
             }
         }
         if status == MessageStatus::Complete {
-            // Claude answered: the sign-in works, and whoever waited for that can go.
+            // Claude answered: the sign-in works, and whoever waited for that can go. A
+            // streamed reply has usually said so already; a message sent whole says it here.
             if let Some(t) = self.sign_in.take() {
                 t.answered(now());
             }
