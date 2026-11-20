@@ -15,6 +15,7 @@
 //! | `actor` | one task per chat: worker, streaming, tools, interactions, Stop, timers |
 //! | [`submit`] | sends, in-flight actions, model changes, restart continuation |
 //! | [`outage`] | sleep and outage lines in the transcript, and the continuation after an outage or a worker crash |
+//! | [`oauth_lock`] | clearing a Claude Code sign-in lock its holder left behind, before a refresh retry |
 //! | [`exits`] | worker exits: the line the chat shows, the exit log, incidents and crashes |
 //! | [`titles`] | automatic titles through `helpers/titles`, renames, suggestions |
 //! | [`toolsummary`] | the few plain words a running tool call shows in the progress lines |
@@ -71,6 +72,7 @@ pub mod local;
 pub mod manage;
 pub mod message_images;
 pub mod mute;
+pub mod oauth_lock;
 pub mod ops;
 pub mod outage;
 pub mod output_save;

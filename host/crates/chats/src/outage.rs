@@ -898,21 +898,39 @@ pub struct OutageWatch {
     rt: ChatRuntime,
     probe: Arc<dyn Probe>,
     state: Mutex<Outages>,
+    /// Claude Code's config folder, where an abandoned sign-in lock is cleared before a
+    /// token-refresh retry ([`crate::oauth_lock`]); `None` leaves every lock alone.
+    lock_dir: Option<std::path::PathBuf>,
     /// The sign-ins the sign-in gate had counted at the last look.
     sign_ins_seen: std::sync::atomic::AtomicU64,
 }
 
 impl OutageWatch {
     pub fn new(rt: ChatRuntime) -> Arc<Self> {
-        Self::with_probe(rt, Arc::new(TcpProbe(PROBE_TARGET.to_owned())))
+        Self::with_parts(
+            rt,
+            Arc::new(TcpProbe(PROBE_TARGET.to_owned())),
+            crate::oauth_lock::claude_dir(),
+        )
     }
 
+    /// A watch with its own probe, that never touches a sign-in lock.
     pub fn with_probe(rt: ChatRuntime, probe: Arc<dyn Probe>) -> Arc<Self> {
+        Self::with_parts(rt, probe, None)
+    }
+
+    /// A watch with its own probe and config folder for the sign-in lock.
+    pub fn with_parts(
+        rt: ChatRuntime,
+        probe: Arc<dyn Probe>,
+        lock_dir: Option<std::path::PathBuf>,
+    ) -> Arc<Self> {
         let seen = rt.sh.spawner.sign_in_gate().map_or(0, |g| g.sign_ins());
         Arc::new(Self {
             rt,
             probe,
             state: Mutex::new(Outages::default()),
+            lock_dir,
             sign_ins_seen: std::sync::atomic::AtomicU64::new(seen),
         })
     }
@@ -967,6 +985,42 @@ impl OutageWatch {
         }
         let marker = self.state.lock().unwrap().resume(helm_core::now_ms());
         self.write_marker(marker);
+    }
+
+    /// Before token-refresh retries go out: clear a sign-in lock its holder left behind, and say
+    /// so in the chats being retried. Nothing happens unless one of them is a refresh retry.
+    async fn heal_lock(&self, due: &[Due]) {
+        let refreshing: Vec<&str> = due
+            .iter()
+            .filter(|d| d.cause == Cause::TokenRefresh)
+            .map(|d| d.chat_id.as_str())
+            .collect();
+        let Some(dir) = self.lock_dir.clone().filter(|_| !refreshing.is_empty()) else {
+            return;
+        };
+        let healed = tokio::task::spawn_blocking(move || {
+            crate::oauth_lock::heal(
+                &dir,
+                std::time::SystemTime::now(),
+                &helm_workers::job::process_alive,
+            )
+        })
+        .await;
+        match healed {
+            Ok(Ok(true)) => {
+                log::info!("{}", crate::oauth_lock::CLEARED_LOG);
+                // An interruption line, not a sign-in card: nobody has to sign in.
+                for id in refreshing {
+                    self.rt.add_context_row(
+                        id,
+                        ContextKind::Interruption,
+                        crate::oauth_lock::CLEARED_TEXT,
+                    );
+                }
+            }
+            Ok(Ok(false)) | Err(_) => {}
+            Ok(Err(e)) => log::warn!("the Claude Code sign-in lock could not be cleared: {e}"),
+        }
     }
 
     fn write_marker(&self, marker: Option<Marker>) {
@@ -1075,6 +1129,7 @@ impl OutageWatch {
             (marker, t.due(now), t.give_up(now), rearmed)
         };
         self.write_marker(marker);
+        self.heal_lock(&due).await;
         for id in rearmed {
             let rt = self.rt.clone();
             let cleared = tokio::task::spawn_blocking(move || clear_sign_in_flag(&rt, &id)).await;
