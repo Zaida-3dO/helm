@@ -31,6 +31,7 @@ test('reasons read in plain words, unknown ones show as stored', () => {
   assert.equal(reasonLabel('claude_capacity'), 'Claude allowance used up');
   assert.equal(reasonLabel('at_limit'), 'Too many chats running');
   assert.equal(reasonLabel('manual'), 'Parked by you');
+  assert.equal(reasonLabel('sign_in'), "Waiting while Claude's sign-in is checked");
   assert.equal(reasonLabel('something_new'), 'something_new');
 });
 
@@ -42,6 +43,8 @@ test('the wait line names the reason, the reset time, or the place ahead', () =>
     [e({ reason: 'claude_capacity' }), 1, null, 'Claude allowance used up · 1 waiting ahead'],
     [e({ reason: 'manual' }), 3, null, 'Parked by you'],
     [e({ reason: 'at_limit' }), 0, null, 'Too many chats running'],
+    [e({ reason: 'sign_in', serverId: null }), 0, null, "Waiting while Claude's sign-in is checked"],
+    [e({ reason: 'sign_in', serverId: null }), 1, null, "Waiting while Claude's sign-in is checked · 1 waiting ahead"],
   ] as const) {
     assert.equal(waitLine(entry, ahead, until), want);
   }

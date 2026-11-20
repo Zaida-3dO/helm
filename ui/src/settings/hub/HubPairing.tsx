@@ -9,7 +9,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { hubOps, type HubConnection } from '../../api/hub.ts';
 import { useShell } from '../../shell/context.ts';
 import { Button, SettingRow, TextInput } from '../../ui/index.ts';
-import { pairedLine } from './pairedLine.ts';
+import { canRetryLine, HUB_OFFLINE_STEPS, pairedLine } from './pairedLine.ts';
 import '../../profiles/profiles.css';
 
 const POLL_MS = 4000;
@@ -28,6 +28,7 @@ export function HubPairing() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -78,7 +79,30 @@ export function HubPairing() {
           testId="hub-paired"
           title={done ?? paired}
           description={done ? 'Shared memory and the hub line are set up.' : (pairedDetail ?? 'Shared memory and the hub line are set up.')}
-        />
+        >
+          {canRetryLine(conn) && (
+            <>
+              <Button
+                variant="secondary"
+                busy={retrying}
+                data-testid="hub-try-now"
+                onClick={() => {
+                  setRetrying(true);
+                  void ops
+                    .reconnect()
+                    .then(setConn)
+                    .catch((e: unknown) => setError(errorText(e)))
+                    .finally(() => setRetrying(false));
+                }}
+              >
+                Try now
+              </Button>
+              <span className="muted" data-testid="hub-offline-steps">
+                {HUB_OFFLINE_STEPS}
+              </span>
+            </>
+          )}
+        </SettingRow>
       )}
       <SettingRow
         title="Hub address"

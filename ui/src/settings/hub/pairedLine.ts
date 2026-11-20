@@ -18,3 +18,13 @@ export function pairedLine(conn: HubConnection | null): string | null {
       return `Paired as ${who}, but the hub is offline`;
   }
 }
+
+/** Whether the pairing exists but its line is dead: the row can offer to retry it now. */
+export function canRetryLine(conn: HubConnection | null): boolean {
+  return !!conn && conn.state === 'offline' && !!conn.personName;
+}
+
+/** What to say when a hub line stays offline: the hub restarts itself, so the person's own
+ * step is only the last one, and only if that fails too. */
+export const HUB_OFFLINE_STEPS =
+  'If Tailscale is on and this keeps failing, the hub itself may be down. It restarts by itself within a few minutes; if it does not, restart the helm-hub container on the home server.';

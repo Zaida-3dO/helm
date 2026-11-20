@@ -10,6 +10,7 @@ export const REASON_LABEL: Record<string, string> = {
   claude_capacity: 'Claude allowance used up',
   at_limit: 'Too many chats running',
   manual: 'Parked by you',
+  sign_in: "Waiting while Claude's sign-in is checked",
 };
 
 /** What kind of start it is, in a couple of words for the row's tag. */
@@ -101,7 +102,7 @@ export function untilText(until: number, now: number): string {
 /** One chat stopped by a failed Claude token refresh: still being tried again, or waiting for you. */
 export function signInLine(c: QueueSignIn): string {
   return c.gaveUp
-    ? 'Claude could not refresh its sign-in for about half an hour. Sign in again, then message the chat.'
+    ? "Claude Code could not refresh its sign-in for about half an hour. Sign in again; Helm carries on by itself once it works."
     : 'Claude could not refresh its sign-in; Helm is trying again.';
 }
 
