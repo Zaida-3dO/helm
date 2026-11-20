@@ -9,6 +9,7 @@
 //! environment stays the only place they are added or removed.
 
 use crate::auth::{bearer, ct_eq, digest, Client, Scopes, Tokens};
+use crate::wake::WakeInfo;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::path::Path;
@@ -203,6 +204,17 @@ impl Registry {
                 "ALTER TABLE clients ADD COLUMN device_uid TEXT;
                  ALTER TABLE clients ADD COLUMN device_name TEXT;
                  ALTER TABLE clients ADD COLUMN run INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+        // A registry made before a PC's launcher could report how to wake it gains those columns.
+        let has_wake = conn
+            .prepare("SELECT 1 FROM pragma_table_info('clients') WHERE name = 'wake_mac'")?
+            .exists([])?;
+        if !has_wake {
+            conn.execute_batch(
+                "ALTER TABLE clients ADD COLUMN wake_mac TEXT;
+                 ALTER TABLE clients ADD COLUMN wake_broadcast TEXT;
+                 ALTER TABLE clients ADD COLUMN wake_seen_at TEXT;",
             )?;
         }
         // A registry made before acting for others existed gains the pairing's list of people.
@@ -495,6 +507,44 @@ impl Registry {
         )?;
         self.client_by_id(client_id)?
             .ok_or_else(|| RegistryError::NotFound("the client vanished".into()))
+    }
+
+    /// Keep how to wake a machine, as its launcher reported it. The hardware address must be six
+    /// hex pairs, and the broadcast address a private IPv4 address; a bad broadcast address is
+    /// dropped, and a bad hardware address keeps nothing (what was stored stays). Returns whether
+    /// anything was stored. It is kept when the machine's line drops: that is when it is needed.
+    pub fn store_wake(&self, client_id: i64, mac: &str, broadcast: Option<&str>) -> Result<bool> {
+        let Some(info) = WakeInfo::parse(mac, broadcast) else {
+            return Ok(false);
+        };
+        let changed = self.conn.execute(
+            &format!(
+                "UPDATE clients SET wake_mac = ?2, wake_broadcast = ?3, wake_seen_at = {NOW}
+                 WHERE id = ?1 AND revoked_at IS NULL"
+            ),
+            params![
+                client_id,
+                info.mac_text(),
+                info.broadcast.map(|b| b.to_string())
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// How to wake a machine, if its launcher ever said. Read back through the same checks.
+    pub fn wake_of(&self, client_id: i64) -> Option<WakeInfo> {
+        let (mac, broadcast): (Option<String>, Option<String>) = self
+            .conn
+            .query_row(
+                "SELECT wake_mac, wake_broadcast FROM clients
+                 WHERE id = ?1 AND revoked_at IS NULL",
+                [client_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .ok()
+            .flatten()?;
+        WakeInfo::parse(&mac?, broadcast.as_deref())
     }
 
     /// The active machines that announced a device, oldest first.

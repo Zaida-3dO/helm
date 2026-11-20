@@ -27,6 +27,9 @@
 //!   [`HELD_MS`] for it.
 //! - **Heard reports.** The latest report per reply is kept (a later `all` replaces an earlier
 //!   `partial`) and forwarded to Helm as `voice_heard` whenever a line is up.
+//! - **The PC.** While Helm is offline the phone is told what the PC is doing about it (`pc`, see
+//!   `launcher.rs`) on `welcome`, on `helm` frames and in the answers of the HTTP routes, and a turn
+//!   that waits for Helm asks a launcher that is up to start it.
 //! - **Presence.** The phones' screen state is forwarded as `voice_presence` (live when any phone
 //!   is in front, with the mode of the one that changed last) and repeated to every new relay
 //!   connection.
@@ -740,6 +743,11 @@ struct Person {
     phones: HashMap<i64, Phone>,
     screen_clock: u64,
     helm_up: Option<bool>,
+    /// What the phone is told about the PC while Helm is offline (see `launcher.rs`); `None`
+    /// while Helm is online. Set by the bridge before each call.
+    pc: Option<Value>,
+    /// The `pc` the phone last saw, so a change while Helm stays offline is sent too.
+    pc_sent: Option<Value>,
     last_status: i64,
     /// What the hub-wide caps leave this person, set by the bridge before each call.
     room: Room,
@@ -1011,9 +1019,19 @@ impl Person {
         }
 
         let up = line.is_some();
-        if self.helm_up.is_some_and(|prev| prev != up) {
+        // The phone hears of Helm going up or down, and, while it stays down, of the PC's state
+        // changing (a launch under way, then Helm connecting).
+        let moved = self.helm_up.is_some_and(|prev| prev != up);
+        let pc_moved =
+            !up && self.helm_up == Some(false) && self.pc_sent.is_some() && self.pc != self.pc_sent;
+        if moved || pc_moved {
             let state = if up { "online" } else { "offline" };
-            self.send_live(&json!({ "type": "helm", "state": state }));
+            let mut frame = json!({ "type": "helm", "state": state });
+            if let Some(pc) = &self.pc {
+                frame["pc"] = pc.clone();
+            }
+            self.send_live(&frame);
+            self.pc_sent = self.pc.clone();
         }
         self.helm_up = Some(up);
 
@@ -1296,7 +1314,16 @@ impl VoiceBridge {
             .into_iter()
             .map(|(_, _, l)| l)
             .collect();
+        // While Helm is offline the phone is told what the PC is doing about it, and a turn that
+        // waits for Helm starts it where a launcher is up.
+        let offline = line.is_none();
+        let waiting = |p: &Person| p.turns.values().any(|t| t.state == TurnState::Queued);
+        let was_waiting = waiting(p);
+        p.pc = offline.then(|| self.lines.voice_pc(person, now, was_waiting));
         let r = f(p, &line);
+        if offline && !was_waiting && waiting(p) {
+            p.pc = Some(self.lines.voice_pc(person, now, true));
+        }
         let forwarded = p.sync(&line, &self.cfg, now);
         (r, forwarded)
     }
@@ -1309,6 +1336,11 @@ impl VoiceBridge {
             helm_online: self.lines.route_for(person, Channel::Voice).is_some(),
             stt: self.stt.is_some(),
         }
+    }
+
+    /// What the phone is told about the PC: `None` while Helm is online.
+    pub fn pc(&self, person: i64, now: i64) -> Option<Value> {
+        self.with(person, now, |p, _| p.pc.clone()).0
     }
 
     /// A new turn from `POST /voice/turn`. A typed turn is ready at once; a spoken one waits for
@@ -1501,12 +1533,17 @@ impl VoiceBridge {
                 let _ = old.tx.send(Out::Close(4000, "replaced"));
             }
             p.helm_up = Some(line.is_some());
-            send(&json!({
+            let mut welcome = json!({
                 "type": "welcome",
                 "version": VERSION,
                 "helm": if line.is_some() { "online" } else { "offline" },
                 "seq": p.next_seq,
-            }));
+            });
+            if let Some(pc) = &p.pc {
+                welcome["pc"] = pc.clone();
+            }
+            p.pc_sent = p.pc.clone();
+            send(&welcome);
             // A phone that remembers a seq the hub never issued met a hub that restarted: it
             // gets everything the hub holds.
             let after = if hello.last_seq > p.next_seq {

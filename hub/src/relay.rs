@@ -5,6 +5,9 @@
 //! for travels down that line: forwarded tool calls from MCP callers, household calls from other
 //! people's Helms and messages from the Telegram bot. The PC needs no inbound port.
 //!
+//! A machine may also keep a second, separate socket to `/launcher`, held by the small program on the
+//! PC that starts Helm when the hub asks (see `launcher.rs`): it never touches this line.
+//!
 //! The hub keeps one [`Line`] per client (see `lines.rs`): a newer connection from the *same*
 //! client replaces the older one, and different clients' lines coexist.
 //!

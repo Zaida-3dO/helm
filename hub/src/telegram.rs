@@ -48,6 +48,10 @@
 //!   chat sooner than that), until it is acknowledged or outlives the queue
 //!   lifetime. `/cancel` drops the queue; `/stop` asks Helm to stop the
 //!   running turn.
+//! - **Helm offline.** What a queued message is told depends on what the hub can do about the PC
+//!   (see `launcher.rs`): a PC whose launcher is up is asked to start Helm by itself, a PC the hub
+//!   can wake gets a Wake button (a tap, never automatic), and otherwise the sender is given the one
+//!   setting that would let the hub start Helm. `/starthelm` and `/wake` do the same on request.
 //! - **Helm can speak first.** `telegram_notify` (an alert: a chat finished, or something needs
 //!   the user while they are away) arrives as a new message and leaves the live status alone.
 //! - **Never silent while working.** Helm sends the live status as
@@ -93,6 +97,7 @@
 
 use crate::auth::digest;
 use crate::images;
+use crate::launcher::{LaunchOutcome, Plan, Reason, WakeOutcome};
 use crate::lines::{Lines, PersonRoute, PersonUpstream};
 use crate::registry::{new_code, normalize_code};
 use crate::relay::{valid_ask_id, Channel, Line, Route, Upstream, OFFLINE};
@@ -172,13 +177,17 @@ pub const MAX_ASK_TEXT: usize = MAX_TEXT - 100;
 /// forgotten one is not a standing invitation.
 pub const LINK_CODE_MINUTES: i64 = 15;
 
-pub const QUEUED: &str =
-    "Helm is offline. Queued; it will be delivered when Helm reconnects. /cancel drops the queue.";
+/// A message queued while Helm is offline and the hub cannot start it, so its sender is given
+/// the one step that changes that.
+pub const QUEUED: &str = "Helm is offline and the hub can't start it. Your message is queued and \
+     goes when Helm is open. To let the hub start Helm for you next time, turn on \"Start Helm \
+     when a message arrives\" in Helm's Settings → Hub. /cancel drops the queue.";
 pub const TEXT_ONLY: &str =
     "Helm takes text, files, pictures, videos and recordings; this kind of message was not sent.";
 pub const HELLO: &str =
     "Helm is listening. Messages here go to the active Telegram chat in Helm. /stop stops the \
-     running turn; /cancel drops messages queued while Helm is offline.";
+     running turn; /cancel drops messages queued while Helm is offline. When Helm is offline \
+     /starthelm starts it on your PC and /wake wakes the PC, where the hub can.";
 pub const VOICE_OFF: &str = "Voice notes are not transcribed on this hub, so the recording went \
                              to Helm without its text.";
 pub const FILES_OFF: &str = "Files are off on this hub.";
@@ -196,6 +205,16 @@ pub const TAP_STALE: &str = "This request is no longer waiting.";
 /// The `/pc` answers.
 pub const PC_NONE: &str = "No PC can take your Telegram right now. Open Helm on the PC you want \
                            and turn on \"Take my Telegram on this PC\" in its settings.";
+/// What `/starthelm` answers when no launcher is up on any of the person's PCs.
+pub const START_NONE: &str = "The hub can't start Helm: no PC of yours has its launcher \
+     connected. Open Helm on the PC once and turn on \"Start Helm when a message arrives\" in \
+     Settings → Hub.";
+/// What `/wake` answers when waking is not set up on the hub.
+pub const WAKE_OFF: &str = "Waking a PC isn't set up on this hub.";
+/// What `/wake` answers when waking is on but no PC has said how it is woken.
+pub const WAKE_NONE: &str = "The hub doesn't know how to wake any of your PCs yet. It learns \
+     that from a PC whose \"Start Helm when a message arrives\" is on, once that PC has been \
+     connected.";
 pub const PC_CURRENT: &str = "Your Telegram goes to: ";
 pub const PC_PINNED: &str = " (pinned by you)";
 pub const PC_AUTO: &str = "Other PCs that could take it: ";
@@ -961,6 +980,92 @@ fn parse_button(data: &str) -> Option<(&str, usize)> {
     valid_ask_id(id).then_some((id, index))
 }
 
+/// A PC button's callback data: `pc:start:<client id>` or `pc:wake:<client id>`.
+fn parse_pc_button(data: &str) -> Option<(PcAction, i64)> {
+    let (action, client) = data.strip_prefix("pc:")?.split_once(':')?;
+    let action = match action {
+        "start" => PcAction::Start,
+        "wake" => PcAction::Wake,
+        _ => return None,
+    };
+    Some((action, client.parse::<i64>().ok().filter(|c| *c > 0)?))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PcAction {
+    Start,
+    Wake,
+}
+
+/// What a person is told about their PC when a message cannot go because Helm is offline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Told {
+    /// Helm is being started on this machine.
+    Starting(String),
+    /// Helm is running on this machine but has not connected to the hub yet.
+    Connecting(String),
+    /// This machine looks off or asleep.
+    Asleep(String),
+    /// A launch for this machine never led to a connection.
+    DidntStart(String),
+    /// The hub can do nothing about it.
+    Unknown,
+}
+
+/// The sentence about the PC that goes in front of what the person is told about their message.
+fn pc_note(told: &Told) -> Option<String> {
+    match told {
+        Told::Starting(m) => Some(format!("Helm is starting on {m}.")),
+        Told::Connecting(m) => Some(format!(
+            "Helm is running on {m} but isn't connected to the hub yet; it reconnects by itself."
+        )),
+        Told::Asleep(m) => Some(format!("{m} looks off or asleep.")),
+        Told::DidntStart(m) => Some(format!("Helm didn't start on {m}.")),
+        Told::Unknown => None,
+    }
+}
+
+/// The reply to a message that waits for Helm.
+fn queued_text(told: &Told) -> String {
+    let note = pc_note(told).unwrap_or_default();
+    match told {
+        Told::Starting(_) => {
+            format!("{note} Your message is queued and goes as soon as it's up. /cancel drops the queue.")
+        }
+        Told::Connecting(_) | Told::Asleep(_) | Told::DidntStart(_) => {
+            format!("{note} Your message is queued. /cancel drops the queue.")
+        }
+        Told::Unknown => QUEUED.to_owned(),
+    }
+}
+
+/// The reply to a message that could not even be queued.
+fn full_text(told: &Told) -> String {
+    let note = pc_note(told).map(|n| format!(" {n}")).unwrap_or_default();
+    format!(
+        "Helm is offline and the queue is full, so this message was not kept.{note} Send it \
+         again once Helm is back."
+    )
+}
+
+/// What the person is told, and the buttons under it as `(label, callback data)`.
+struct Offline {
+    told: Told,
+    buttons: Vec<(String, String)>,
+}
+
+/// `text` with the reason a launch failed, when the launcher gave one.
+fn with_reason(text: &str, error: Option<&str>) -> String {
+    match error {
+        Some(e) => format!(
+            "{}: {}.",
+            text.trim_end_matches('.'),
+            e.trim().trim_end_matches('.')
+        ),
+        None => text.to_owned(),
+    }
+}
+
 /// Split a long answer into Telegram-sized pieces, on character boundaries.
 pub fn split_text(s: &str, max: usize) -> Vec<String> {
     let chars: Vec<char> = s.chars().collect();
@@ -1222,6 +1327,14 @@ impl Bridge {
                 self.reply(chat, &text).await;
                 return Handled::Command;
             }
+            Some("/starthelm") => {
+                self.on_start_helm(chat, now).await;
+                return Handled::Command;
+            }
+            Some("/wake") => {
+                self.on_wake(chat, now).await;
+                return Handled::Command;
+            }
             Some("/pc") => {
                 let rest = text
                     .split_once(char::is_whitespace)
@@ -1324,11 +1437,9 @@ impl Bridge {
     }
 
     async fn reply_full(&self, chat: i64) {
-        self.reply(
-            chat,
-            "Helm is offline and the queue is full, so this message was not kept.",
-        )
-        .await;
+        let offline = self.offline_status(now_ms());
+        self.reply_buttons(chat, &full_text(&offline.told), &offline.buttons)
+            .await;
     }
 
     /// `/pc`: the PCs that can take this person's Telegram and the one that does. `/pc <name>`
@@ -1359,7 +1470,14 @@ impl Bridge {
             return;
         }
         if candidates.is_empty() {
-            self.reply(chat, PC_NONE).await;
+            let hint = match lines.pc_plan(person, Channel::Telegram, now_ms()) {
+                Plan::Launch { machine, .. } | Plan::Starting { machine, .. } => {
+                    format!(" /starthelm starts Helm on {machine}.")
+                }
+                Plan::Asleep { machine, .. } => format!(" /wake wakes {machine}."),
+                Plan::Connecting { .. } | Plan::Unknown => String::new(),
+            };
+            self.reply(chat, &format!("{PC_NONE}{hint}")).await;
             return;
         }
         let current = lines.route_for(person, Channel::Telegram);
@@ -1386,6 +1504,302 @@ impl Bridge {
         self.reply(chat, &text).await;
     }
 
+    // ----- Helm offline: what the hub can do about the PC -----
+
+    /// This person's machines and the household's lines, when the bridge knows them.
+    fn household(&self) -> Option<(i64, &Arc<Lines>)> {
+        Some((self.person?, self.household_lines.as_ref()?))
+    }
+
+    /// Where a message for an offline Helm stands, doing what the hub may do by itself: a PC
+    /// whose launcher is up is asked to start Helm (at most one launch a machine every two
+    /// minutes). Waking is never done here: it is a person's button.
+    fn offline_status(&self, now: i64) -> Offline {
+        let unknown = Offline {
+            told: Told::Unknown,
+            buttons: Vec::new(),
+        };
+        let Some((person, lines)) = self.household() else {
+            return unknown;
+        };
+        match lines.pc_plan(person, Channel::Telegram, now) {
+            Plan::Unknown => unknown,
+            Plan::Starting { machine, .. } => Offline {
+                told: Told::Starting(machine),
+                buttons: Vec::new(),
+            },
+            Plan::Connecting { machine, .. } => Offline {
+                told: Told::Connecting(machine),
+                buttons: Vec::new(),
+            },
+            Plan::Asleep { client_id, machine } => Offline {
+                buttons: vec![(format!("Wake {machine}"), format!("pc:wake:{client_id}"))],
+                told: Told::Asleep(machine),
+            },
+            Plan::Launch { client_id, machine } => {
+                let launched = lines.launchers().try_launch(
+                    client_id,
+                    Reason::Telegram,
+                    Some(person),
+                    now,
+                    false,
+                );
+                match launched {
+                    // A launch a moment ago is still the answer.
+                    LaunchOutcome::Sent | LaunchOutcome::RateLimited => Offline {
+                        told: Told::Starting(machine),
+                        buttons: Vec::new(),
+                    },
+                    LaunchOutcome::Already => Offline {
+                        told: Told::Connecting(machine),
+                        buttons: Vec::new(),
+                    },
+                    LaunchOutcome::GaveUp => Offline {
+                        buttons: vec![("Try again".to_owned(), format!("pc:start:{client_id}"))],
+                        told: Told::DidntStart(machine),
+                    },
+                    LaunchOutcome::NoLauncher => unknown,
+                }
+            }
+        }
+    }
+
+    /// Answer a message that waits for Helm, in the way the PC allows.
+    async fn tell_offline(&self, chat: i64, now: i64) {
+        let offline = self.offline_status(now);
+        self.reply_buttons(chat, &queued_text(&offline.told), &offline.buttons)
+            .await;
+    }
+
+    /// The toast for a tap on an ask while Helm is offline.
+    fn tap_offline_text(&self, now: i64) -> String {
+        match self.offline_status(now).told {
+            Told::Starting(m) => {
+                format!("{TAP_OFFLINE} Helm is starting on {m}; tap again in a minute.")
+            }
+            Told::Connecting(m) => {
+                format!("{TAP_OFFLINE} Helm is running on {m} but isn't connected yet; tap again in a minute.")
+            }
+            Told::Asleep(m) => format!("{TAP_OFFLINE} {m} looks off or asleep."),
+            Told::DidntStart(m) => format!("{TAP_OFFLINE} Helm didn't start on {m}."),
+            Told::Unknown => TAP_OFFLINE.to_owned(),
+        }
+    }
+
+    /// A message with buttons under it: one button a row.
+    async fn reply_buttons(&self, chat: i64, text: &str, buttons: &[(String, String)]) {
+        if buttons.is_empty() {
+            self.reply(chat, text).await;
+            return;
+        }
+        let rows: Vec<Value> = buttons
+            .iter()
+            .map(|(label, data)| json!([{ "text": cut(label, MAX_OPTION), "callback_data": data }]))
+            .collect();
+        let _g = self.ops.lock().await;
+        let sent = self
+            .api
+            .call(
+                "sendMessage",
+                json!({ "chat_id": chat, "text": text, "disable_notification": false,
+                        "reply_markup": { "inline_keyboard": rows } }),
+            )
+            .await;
+        if let Err(e) = sent {
+            eprintln!("telegram: reply failed: {}", e.description);
+        }
+    }
+
+    /// Once a tick: tell the person about a launch that never came up, and start Helm for
+    /// messages that waited for a launcher to connect.
+    async fn tick_pc(&self, now: i64) {
+        let Some((person, lines)) = self.household() else {
+            return;
+        };
+        for late in lines.launchers().timeouts(person, now) {
+            let machines = lines.pc_machines(person, Channel::Telegram);
+            let here = machines.iter().find(|m| m.client_id == late.client_id);
+            let mut buttons = vec![(
+                "Try again".to_owned(),
+                format!("pc:start:{}", late.client_id),
+            )];
+            if here.is_some_and(|m| m.launcher.is_none() && m.wake_ready) {
+                buttons.push((
+                    format!("Wake {}", late.machine),
+                    format!("pc:wake:{}", late.client_id),
+                ));
+            }
+            let text = with_reason(
+                &format!("Helm didn't start on {}.", late.machine),
+                late.error.as_deref(),
+            );
+            if let Some(chat) = self.reply_chat() {
+                self.reply_buttons(chat, &text, &buttons).await;
+            }
+        }
+        // A launcher that came up after a message was queued starts Helm for it.
+        if self.line.is_up()
+            || !self
+                .st()
+                .queue
+                .iter()
+                .any(|q| q.sent_on.is_none() && q.text.is_some())
+        {
+            return;
+        }
+        if let Plan::Launch { client_id, machine } = lines.pc_plan(person, Channel::Telegram, now) {
+            let launched =
+                lines
+                    .launchers()
+                    .try_launch(client_id, Reason::Telegram, Some(person), now, false);
+            if launched == LaunchOutcome::Sent {
+                if let Some(chat) = self.reply_chat() {
+                    self.reply(chat, &queued_text(&Told::Starting(machine)))
+                        .await;
+                }
+            }
+        }
+    }
+
+    /// Ask the PC's launcher to start Helm because the person asked. Returns what to tell them
+    /// and whether a launch went.
+    fn start_sentence(
+        &self,
+        lines: &Lines,
+        person: i64,
+        client_id: i64,
+        machine: &str,
+        now: i64,
+    ) -> (String, bool) {
+        match lines
+            .launchers()
+            .try_launch(client_id, Reason::Button, Some(person), now, true)
+        {
+            LaunchOutcome::Sent => (
+                format!(
+                    "Helm is starting on {machine}. Your messages are queued and go as soon as \
+                     it's up."
+                ),
+                true,
+            ),
+            LaunchOutcome::Already => (
+                format!("Helm is already running on {machine}; it reconnects by itself."),
+                false,
+            ),
+            LaunchOutcome::RateLimited => (
+                format!("Helm was asked to start on {machine} a moment ago. Give it a minute."),
+                false,
+            ),
+            LaunchOutcome::NoLauncher | LaunchOutcome::GaveUp => (
+                format!("{machine}'s launcher isn't connected, so the hub can't start Helm there."),
+                false,
+            ),
+        }
+    }
+
+    /// Wake the person's PC because they asked. Returns what to tell them and whether it went.
+    async fn wake_sentence(
+        &self,
+        lines: &Lines,
+        client_id: i64,
+        machine: &str,
+        now: i64,
+    ) -> (String, bool) {
+        match lines.launchers().wake(client_id, now).await {
+            WakeOutcome::Sent => (
+                format!(
+                    "Sent a wake signal to {machine}. Your messages stay queued and go once \
+                     Helm is up."
+                ),
+                true,
+            ),
+            WakeOutcome::Off => (WAKE_OFF.to_owned(), false),
+            WakeOutcome::NoInfo => (
+                format!("The hub doesn't know how to wake {machine} yet."),
+                false,
+            ),
+            WakeOutcome::RateLimited => (
+                format!("A wake signal went to {machine} a moment ago. Give it a minute."),
+                false,
+            ),
+            WakeOutcome::Failed(why) => (format!("Waking {machine} failed: {why}."), false),
+        }
+    }
+
+    /// `/starthelm`: start Helm on the person's PC whose launcher is up.
+    async fn on_start_helm(&self, chat: i64, now: i64) {
+        let Some((person, lines)) = self.household() else {
+            self.reply(chat, PC_ROUTING_OFF).await;
+            return;
+        };
+        if self.line.is_up() {
+            self.reply(chat, "Helm is already connected.").await;
+            return;
+        }
+        let machines = lines.pc_machines(person, Channel::Telegram);
+        let pick = machines
+            .iter()
+            .find(|m| m.launcher.is_some_and(|l| !l.helm_running))
+            .or_else(|| machines.iter().find(|m| m.launcher.is_some()));
+        let Some(m) = pick else {
+            self.reply(chat, START_NONE).await;
+            return;
+        };
+        let (said, _) = self.start_sentence(lines, person, m.client_id, &m.name, now);
+        self.reply(chat, &said).await;
+    }
+
+    /// `/wake`: wake the person's PC that has no launcher up and that the hub knows how to wake.
+    async fn on_wake(&self, chat: i64, now: i64) {
+        let Some((person, lines)) = self.household() else {
+            self.reply(chat, PC_ROUTING_OFF).await;
+            return;
+        };
+        if self.line.is_up() {
+            self.reply(chat, "Helm is already connected.").await;
+            return;
+        }
+        if !lines.launchers().wake_enabled() {
+            self.reply(chat, WAKE_OFF).await;
+            return;
+        }
+        let machines = lines.pc_machines(person, Channel::Telegram);
+        let pick = machines
+            .iter()
+            .find(|m| m.wake_ready && m.launcher.is_none())
+            .or_else(|| machines.iter().find(|m| m.wake_ready));
+        let Some(m) = pick else {
+            self.reply(chat, WAKE_NONE).await;
+            return;
+        };
+        let (said, _) = self.wake_sentence(lines, m.client_id, &m.name, now).await;
+        self.reply(chat, &said).await;
+    }
+
+    /// A tap on a Start or Wake button. Only a machine of this person's counts.
+    async fn on_pc_button(&self, action: PcAction, client_id: i64, query: &str) {
+        let now = now_ms();
+        let Some((person, lines)) = self.household() else {
+            self.answer_query(query, Some(PC_ROUTING_OFF)).await;
+            return;
+        };
+        let machines = lines.pc_machines(person, Channel::Telegram);
+        let Some(m) = machines.iter().find(|m| m.client_id == client_id) else {
+            self.answer_query(query, Some(TAP_STALE)).await;
+            return;
+        };
+        let (said, went) = match action {
+            PcAction::Start => self.start_sentence(lines, person, client_id, &m.name, now),
+            PcAction::Wake => self.wake_sentence(lines, client_id, &m.name, now).await,
+        };
+        self.answer_query(query, Some(&cut(&said, 200))).await;
+        if went {
+            if let Some(chat) = self.reply_chat() {
+                self.reply(chat, &said).await;
+            }
+        }
+    }
+
     /// Send what may go, and say whether message `id` went with it. A message that stays behind
     /// while the line is up waits for a voice note before it, so only a line that is down earns
     /// the "offline" reply.
@@ -1394,7 +1808,7 @@ impl Bridge {
             return Handled::Forwarded;
         }
         if !self.line.is_up() {
-            self.reply(chat, QUEUED).await;
+            self.tell_offline(chat, now).await;
         }
         Handled::Queued
     }
@@ -1864,16 +2278,19 @@ impl Bridge {
                 self.reply(chat, &notes.join("\n")).await;
             }
             if kept && !sent.contains(&id) && !self.line.is_up() {
-                self.reply(chat, QUEUED).await;
+                self.tell_offline(chat, now).await;
             }
         }
         let mut notices: Vec<String> = Vec::new();
         if expired > 0 {
             notices.push(if expired == 1 {
-                "1 queued message expired before Helm reconnected and was dropped.".to_owned()
+                "1 queued message expired before Helm reconnected and was dropped. Send it again \
+                 if it still matters."
+                    .to_owned()
             } else {
                 format!(
-                    "{expired} queued messages expired before Helm reconnected and were dropped."
+                    "{expired} queued messages expired before Helm reconnected and were dropped. \
+                     Send them again if they still matter."
                 )
             });
         }
@@ -2118,6 +2535,14 @@ impl Bridge {
         if q.pointer("/message/chat/type").and_then(Value::as_str) != Some("private") {
             return Handled::Ignored;
         }
+        if let Some((action, client)) = q
+            .get("data")
+            .and_then(Value::as_str)
+            .and_then(parse_pc_button)
+        {
+            self.on_pc_button(action, client, query).await;
+            return Handled::Button;
+        }
         let _g = self.ops.lock().await;
         let Some((id, index)) = q.get("data").and_then(Value::as_str).and_then(parse_button) else {
             self.answer_query(query, None).await;
@@ -2154,8 +2579,10 @@ impl Bridge {
             None => self.line.send(&frame),
         };
         if !sent {
-            // Nothing reached Helm, so the buttons stay for another try.
-            self.answer_query(query, Some(TAP_OFFLINE)).await;
+            // Nothing reached Helm, so the buttons stay for another try. A launcher that is up
+            // is asked to start Helm, and the person is told to tap again shortly.
+            let said = self.tap_offline_text(now_ms());
+            self.answer_query(query, Some(&said)).await;
             return Handled::Button;
         }
         self.st().asks.retain(|a| a.id != id);
@@ -2206,6 +2633,7 @@ impl Bridge {
                 let now = now_ms();
                 ticker.flush(now).await;
                 ticker.flush_status(now).await;
+                ticker.tick_pc(now).await;
             }
         });
     }

@@ -16,6 +16,7 @@ use helm_hub::store::Store;
 use helm_hub::stt::{Stt, SttConfig};
 use helm_hub::telegram::now_ms;
 use helm_hub::voice::{VoiceBridge, VoiceConfig, AUDIO_BUDGET, BUSY, EXPIRED, STT_FAILED};
+use helm_hub::wake::Wake;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -106,6 +107,7 @@ impl FakeStt {
 
 struct Hub {
     addr: String,
+    lines: Arc<Lines>,
     bridge: Option<Arc<VoiceBridge>>,
     stt: FakeStt,
 }
@@ -169,7 +171,12 @@ async fn start(o: Opts) -> Hub {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    Hub { addr, bridge, stt }
+    Hub {
+        addr,
+        lines,
+        bridge,
+        stt,
+    }
 }
 
 // ----- HTTP -----
@@ -226,6 +233,11 @@ async fn uploads_reach(hub: &Hub, n: usize) {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("the speech-to-text server was not sent {n} recording(s)");
+}
+
+/// What the phone is told about the PC while Helm is offline and nothing can start or wake it.
+fn pc_unknown() -> Value {
+    json!({"state": "unknown", "machine": null, "canStart": false, "canWake": false})
 }
 
 fn typed(text: &str) -> Vec<u8> {
@@ -488,7 +500,7 @@ async fn a_turn_is_accepted_or_refused_with_the_statuses_of_the_protocol() {
     let long_text = "x".repeat(8001);
     let too_big = vec![0u8; 8 * 1024 * 1024 + 1024];
     let status_ok = json!({"ok": true, "turn": "turn-0101", "already": false,
-                           "helm": "offline", "queued": true});
+                           "helm": "offline", "queued": true, "pc": pc_unknown()});
     // (name, target, content type, body, status, a piece of the answer or the whole answer)
     #[allow(clippy::type_complexity)]
     let rows: Vec<(&str, String, &str, Vec<u8>, u16, Value)> = vec![
@@ -603,7 +615,7 @@ async fn a_turn_is_accepted_or_refused_with_the_statuses_of_the_protocol() {
             ogg(119),
             202,
             json!({"ok": true, "turn": "turn-0102", "already": false,
-                   "helm": "offline", "queued": true}),
+                   "helm": "offline", "queued": true, "pc": pc_unknown()}),
         ),
         (
             "a third turn with the queue full",
@@ -1033,8 +1045,111 @@ async fn turns_wait_while_helm_is_offline_and_a_turn_helm_never_takes_expires() 
     let status = http(&hub, "GET", "/voice/status", Some(PHONE), "", &[]).await;
     assert_eq!(
         status.body,
-        json!({"ok": true, "helm": "offline", "version": 1, "stt": true})
+        json!({"ok": true, "helm": "offline", "version": 1, "stt": true, "pc": pc_unknown()})
     );
+}
+
+/// While Helm is offline the phone is told what the PC is doing about it, and can ask the hub to
+/// start Helm (a launcher is up) or wake the PC (the hub knows how and is set up to). The hub
+/// picks the machine itself.
+#[tokio::test]
+async fn the_phone_is_told_about_the_pc_and_can_start_or_wake_it() {
+    let hub = start(Opts::default()).await;
+    let (mut me, welcome) = phone(&hub, PHONE, 0, true).await;
+    assert_eq!(welcome["pc"], pc_unknown());
+    let ask = |action: &'static str| {
+        let body = json!({ "action": action }).to_string().into_bytes();
+        let hub = &hub;
+        async move {
+            http(
+                hub,
+                "POST",
+                "/voice/pc",
+                Some(PHONE),
+                "application/json",
+                &body,
+            )
+            .await
+        }
+    };
+    // Nothing to start or wake yet, and a request that is not one.
+    for (action, status) in [("start", 409), ("wake", 409), ("dance", 400)] {
+        assert_eq!(ask(action).await.status, status, "{action}");
+    }
+    let no_token = http(&hub, "POST", "/voice/pc", None, "application/json", b"{}").await;
+    assert_eq!(no_token.status, 401);
+
+    // A launcher comes up on the PC and says how to wake it; the phone is told it is closed.
+    let mut launcher = connect(&hub, "/launcher", Some(LINE))
+        .await
+        .expect("the launcher line");
+    let welcome = next_where(&mut launcher, "welcome", is("welcome")).await;
+    assert_eq!(welcome["machine"], "helm-line");
+    send(
+        &mut launcher,
+        json!({"type": "hello", "version": 1, "helmRunning": false,
+               "wake": {"mac": "aa:bb:cc:dd:ee:ff", "broadcast": "192.168.1.255"}}),
+    )
+    .await;
+    let closed = next_where(&mut me, "the PC is closed", |f| {
+        f["type"] == "helm" && f["pc"]["state"] == "closed"
+    })
+    .await;
+    assert_eq!(
+        closed["pc"],
+        json!({"state": "closed", "machine": "helm-line", "canStart": true, "canWake": false})
+    );
+    let status = http(&hub, "GET", "/voice/status", Some(PHONE), "", &[]).await;
+    assert_eq!(status.body["pc"], closed["pc"]);
+
+    // Start: the launcher is asked once, the answer says it is starting, and a second try
+    // within two minutes is held back.
+    let started = ask("start").await;
+    assert_eq!(started.status, 202, "{}", started.body);
+    assert_eq!(started.body["pc"]["state"], "starting");
+    let launch = next_where(&mut launcher, "launch", is("launch")).await;
+    assert_eq!(launch["reason"], "button");
+    assert_eq!(ask("start").await.status, 429);
+    next_where(&mut me, "the PC is starting", |f| {
+        f["type"] == "helm" && f["pc"]["state"] == "starting"
+    })
+    .await;
+
+    // The launcher goes. The hub can wake the PC only once it is set up to, and only on a tap.
+    drop(launcher);
+    let machine = hub
+        .lines
+        .registry()
+        .lock()
+        .unwrap()
+        .find_client("helm-line", None)
+        .unwrap()
+        .id;
+    for _ in 0..100 {
+        if hub.lines.launchers().state(machine).is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(ask("wake").await.status, 409, "waking is off");
+    let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = target.local_addr().unwrap().port();
+    hub.lines
+        .launchers()
+        .set_wake(Wake::udp(Some("127.0.0.1".parse().unwrap()), port));
+    let woke = ask("wake").await;
+    assert_eq!(woke.status, 202, "{}", woke.body);
+    let mut packet = [0u8; 200];
+    let (n, _) = tokio::time::timeout(Duration::from_secs(5), target.recv_from(&mut packet))
+        .await
+        .expect("the magic packet")
+        .unwrap();
+    assert_eq!(n, 102);
+    assert!(packet[..6].iter().all(|b| *b == 0xff));
+    assert!(packet[6..n]
+        .chunks(6)
+        .all(|c| c == [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]));
+    assert_eq!(ask("wake").await.status, 429);
 }
 
 #[tokio::test]
@@ -1200,12 +1315,16 @@ async fn status_fresh_and_heard_reports() {
     let get = |target: &'static str| http(&hub, "GET", target, Some(PHONE), "", &[]);
     assert_eq!(
         get("/voice/status").await.body,
-        json!({"ok": true, "helm": "offline", "version": 1, "stt": true})
+        json!({"ok": true, "helm": "offline", "version": 1, "stt": true, "pc": pc_unknown()})
     );
     let fresh = http(&hub, "POST", "/voice/fresh", Some(PHONE), "", &[]).await;
     assert_eq!(
-        (fresh.status, fresh.body["error"].clone()),
-        (409, json!("Helm is offline."))
+        (
+            fresh.status,
+            fresh.body["error"].clone(),
+            fresh.body["pc"].clone()
+        ),
+        (409, json!("Helm is offline."), pc_unknown())
     );
 
     // Reports are checked, and with Helm offline kept: the latest per reply wins (a later "all"
