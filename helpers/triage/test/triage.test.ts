@@ -57,6 +57,7 @@ test("the prompt carries the chat as data and the retry asks for bare JSON", () 
   assert.match(p, /Quiet for: 20 minutes/);
   assert.ok(p.includes("END") && p.length < 5500, "a long turn is cut in the middle");
   assert.match(buildPrompt(j, true), /Reply with only a JSON object/);
+  assert.match(buildPrompt(j, true), /"waiting" \(needs false\) is for a chat that only waits on work it started itself/);
   // The waiting rule and the calibration examples apply with or without the person's own guidance.
   for (const text of [p, buildPrompt(job("x", { customPrompt: "Only tell me about failing tests." }), false)]) {
     assert.match(text, /waiting on work it started itself/);
@@ -64,6 +65,8 @@ test("the prompt carries the chat as data and the retry asks for bare JSON", () 
     assert.match(text, /paused pending the backend crew report[^"]*" is waiting/);
     assert.match(text, /never started and asking nothing, is stalled/);
     assert.match(text, /Awaiting your decision[^"]*" is a decision/);
+    assert.match(text, /release decision and the pull request approval are waiting on you[^"]*" is a decision/);
+    assert.match(text, /Pending: your choice of display approach[^"]*" is a decision/);
   }
   const own = buildPrompt(job("x", { customPrompt: "Only tell me about failing tests." }), false);
   assert.match(own, /Only tell me about failing tests\./);
