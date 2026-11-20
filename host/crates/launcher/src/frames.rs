@@ -51,7 +51,8 @@ pub fn launched(id: &str, ok: bool, already: bool, error: Option<&str>) -> Value
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FromHub {
     Welcome {
-        machine_id: String,
+        /// The hub's number for this PC; 0 when the frame has none.
+        machine_id: i64,
         machine: String,
     },
     Launch {
@@ -69,7 +70,7 @@ pub fn parse(text: &str) -> FromHub {
     let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
     match v.get("type").and_then(Value::as_str) {
         Some("welcome") => FromHub::Welcome {
-            machine_id: s("machineId"),
+            machine_id: v.get("machineId").and_then(Value::as_i64).unwrap_or(0),
             machine: s("machine"),
         },
         Some("launch") => {
@@ -133,10 +134,10 @@ mod tests {
         let id = "0123456789abcdef0123456789ABCDEF";
         let rows: Vec<(String, FromHub)> = vec![
             (
-                json!({"type": "welcome", "version": 1, "machineId": "pc-1", "machine": "Desk"})
+                json!({"type": "welcome", "version": 1, "machineId": 7, "machine": "Desk"})
                     .to_string(),
                 FromHub::Welcome {
-                    machine_id: "pc-1".into(),
+                    machine_id: 7,
                     machine: "Desk".into(),
                 },
             ),
