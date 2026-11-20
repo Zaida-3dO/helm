@@ -133,10 +133,10 @@ mod tests {
         let id = "0123456789abcdef0123456789ABCDEF";
         let rows: Vec<(String, FromHub)> = vec![
             (
-                json!({"type": "welcome", "version": 1, "machineId": "m1", "machine": "Desk"})
+                json!({"type": "welcome", "version": 1, "machineId": "pc-1", "machine": "Desk"})
                     .to_string(),
                 FromHub::Welcome {
-                    machine_id: "m1".into(),
+                    machine_id: "pc-1".into(),
                     machine: "Desk".into(),
                 },
             ),
