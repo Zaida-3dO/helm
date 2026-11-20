@@ -8,12 +8,14 @@
 //! process logs one line and exits, and the container's restart policy brings it
 //! back a moment later.
 //!
-//! The limit comes from `HUB_WATCHDOG_SECS` (default 180, `0` turns the watchdog
-//! off). The decision itself is [`overdue`], a pure function of the last beat,
+//! The limit comes from `HUB_WATCHDOG_SECS` (default 180, at least 30, `0` turns the
+//! watchdog off). Time is measured on the monotonic clock, so a step in the wall clock
+//! never trips it. The decision itself is [`overdue`], a pure function of the last beat,
 //! now and the limit, so it can be tested without wedging anything.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 /// How often the async task stamps the beat counter.
 const BEAT_EVERY: Duration = Duration::from_secs(10);
@@ -24,7 +26,10 @@ const CHECK_EVERY: Duration = Duration::from_secs(5);
 /// The limit used when `HUB_WATCHDOG_SECS` is unset or unusable.
 const DEFAULT_LIMIT_SECS: u64 = 180;
 
-/// The last beat: Unix milliseconds of the most recent stamp, 0 before the first.
+/// The shortest limit: one much nearer the beat would restart a healthy hub over and over.
+const MIN_LIMIT_SECS: u64 = 30;
+
+/// The last beat: milliseconds on the watchdog's own clock of the most recent stamp.
 static LAST_BEAT_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Start the watchdog: the beating task and the checking thread. A `limit` of
@@ -69,20 +74,20 @@ fn overdue(last_beat_ms: u64, now_ms: u64, limit_ms: u64) -> bool {
     limit_ms > 0 && now_ms.saturating_sub(last_beat_ms) >= limit_ms
 }
 
-/// The watchdog limit from the raw `HUB_WATCHDOG_SECS` value: seconds as given,
-/// the default when unset or not a number, and off for `0`.
+/// The watchdog limit from the raw `HUB_WATCHDOG_SECS` value: seconds as given (at
+/// least [`MIN_LIMIT_SECS`]), the default when unset or not a number, and off for `0`.
 pub fn limit_from_env(value: Option<&str>) -> Duration {
     match value.and_then(|v| v.trim().parse::<u64>().ok()) {
-        Some(secs) => Duration::from_secs(secs),
+        Some(0) => Duration::ZERO,
+        Some(secs) => Duration::from_secs(secs.max(MIN_LIMIT_SECS)),
         None => Duration::from_secs(DEFAULT_LIMIT_SECS),
     }
 }
 
+/// Milliseconds since the watchdog's clock started, on the monotonic clock.
 fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    ORIGIN.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
 #[cfg(test)]
@@ -123,6 +128,8 @@ mod tests {
             (Some("0"), 0),
             (Some("60"), 60),
             (Some(" 45 "), 45),
+            // too short to be safe: raised to the floor
+            (Some("5"), 30),
             (Some(""), 180),
             (Some("five"), 180),
             (Some("-1"), 180),
