@@ -1,7 +1,7 @@
 ---
 summary: How a pinned page is built, what it can do and how to change it.
 ---
-A pinned page is one local .html file that runs its own scripts in a sealed frame in the side panel (inline CSS and JS; images, styles and scripts beside it are served from its folder). It is offline and has no cookies or localStorage.
+A pinned page is one local .html file that runs its own scripts in a sealed frame in the side panel (inline CSS and JS; images, styles and scripts beside it are served from its folder). It has no cookies or localStorage, and it reaches the network only when it is pinned for the profile that opens it: an unpinned page is offline.
 
 It gets a `helm` object:
 - `await helm.ready`

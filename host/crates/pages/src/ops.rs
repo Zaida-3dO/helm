@@ -397,7 +397,7 @@ fn favicon_of(server: &PageServer, path: &str) -> Result<Option<String>, ApiErro
     }
     candidates.extend(FALLBACK_ICONS.map(str::to_owned));
     for rel in candidates {
-        let bytes = match server.bundle_read(path, Some(&rel)) {
+        let bytes = match server.bundle_read_up_to(path, Some(&rel), MAX_ICON_BYTES as u64) {
             Ok(b) => b,
             Err(_) => continue,
         };

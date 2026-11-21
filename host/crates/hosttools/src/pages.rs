@@ -3,8 +3,9 @@
 //! Both are thin wrappers over the pages crate's own ops, so an agent's pin passes exactly the
 //! checks the app's own Pin button does (an `.html` or `.htm` file, a regular file under 10 MiB,
 //! outside Helm's own folders). A page runs in the side panel inside a sandbox: it has no access
-//! to Helm, the user's files or the network unless the user switches the network on for that
-//! open. An agent updates a page by rewriting its file; the open tab reloads by itself.
+//! to Helm or the user's files. Its network access follows the pin: a page pinned for the
+//! profile that opens it may reach the network, and any other page stays offline. An agent
+//! updates a page by rewriting its file; the open tab reloads by itself.
 
 use crate::registry::{screen_label, HostToolRegistry, ToolCtx, ToolResult};
 use crate::spec::ToolSpec;
@@ -13,7 +14,7 @@ use serde_json::{json, Map, Value};
 const EXPLICIT: &str =
     " Act only when the user asked for a page or to pin one; report what you pinned.";
 
-const API: &str = "A pinned page is one local .html file that runs its own scripts in a sealed frame in the side panel (inline CSS and JS; images, styles and scripts beside it are served from its folder). It is offline and has no cookies or localStorage. It gets a `helm` object: `await helm.ready`; `helm.state` and `await helm.setState(json)` (up to 256 KiB, kept across restarts: use it instead of localStorage); `helm.theme`, `helm.on('themechange', fn)` and the CSS variables --helm-bg, --helm-text, --helm-surface, --helm-muted, --helm-accent, --helm-border; `await helm.sendMessage({text, data?, title?})`, which asks the user to confirm and then posts the text into this chat as a message from the page, never as the user's own words; `helm.openLink(url)`. To change a page, rewrite its file: the open tab reloads and keeps its saved state. A page cannot start work by itself.";
+const API: &str = "A pinned page is one local .html file that runs its own scripts in a sealed frame in the side panel (inline CSS and JS; images, styles and scripts beside it are served from its folder). It has no cookies or localStorage, and it reaches the network only when it is pinned for the profile that opens it: an unpinned page is offline. It gets a `helm` object: `await helm.ready`; `helm.state` and `await helm.setState(json)` (up to 256 KiB, kept across restarts: use it instead of localStorage); `helm.theme`, `helm.on('themechange', fn)` and the CSS variables --helm-bg, --helm-text, --helm-surface, --helm-muted, --helm-accent, --helm-border; `await helm.sendMessage({text, data?, title?})`, which asks the user to confirm and then posts the text into this chat as a message from the page, never as the user's own words; `helm.openLink(url)`. To change a page, rewrite its file: the open tab reloads and keeps its saved state. A page cannot start work by itself.";
 
 fn chat_arg(ctx: &ToolCtx, mut args: Map<String, Value>) -> Value {
     args.insert("chatId".into(), json!(ctx.caller_chat_id));

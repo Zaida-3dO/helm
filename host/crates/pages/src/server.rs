@@ -808,18 +808,31 @@ impl PageServer {
     /// One file beside a page: its type and (when `read`) its bytes, or `None` for anything the
     /// page may not have.
     fn read_asset(&self, dir: &Path, rel: &str, read: bool) -> Option<(&'static str, Vec<u8>)> {
+        self.read_asset_up_to(dir, rel, read, MAX_ASSET_BYTES)
+    }
+
+    /// [`PageServer::read_asset`] for a file of at most `max` bytes: a larger one is `None`
+    /// without being read.
+    fn read_asset_up_to(
+        &self,
+        dir: &Path,
+        rel: &str,
+        read: bool,
+        max: u64,
+    ) -> Option<(&'static str, Vec<u8>)> {
         let path = asset_path(dir, rel)?;
         let mime = asset_mime(&extension(&path))?;
         // The same gate as the page itself: no links along the way, no private folder.
         let path = viewer::admit(&path.to_string_lossy(), &self.roots).ok()?;
         let file = helm_platform::fs::open_regular_no_follow(&path).ok()?;
         let meta = file.metadata().ok()?;
-        if meta.len() > MAX_ASSET_BYTES {
+        let max = max.min(MAX_ASSET_BYTES);
+        if meta.len() > max {
             return None;
         }
         let mut body = Vec::new();
         if read {
-            (&file).take(MAX_ASSET_BYTES).read_to_end(&mut body).ok()?;
+            (&file).take(max).read_to_end(&mut body).ok()?;
         }
         Some((mime, body))
     }
@@ -922,6 +935,17 @@ impl PageServer {
 
     /// The bytes of the page's document (`None`) or of one file beside it, for another PC.
     pub fn bundle_read(&self, raw: &str, rel: Option<&str>) -> Result<Vec<u8>, PageError> {
+        self.bundle_read_up_to(raw, rel, MAX_ASSET_BYTES)
+    }
+
+    /// [`PageServer::bundle_read`] for a file of at most `max` bytes: a larger one is not part
+    /// of the answer, and is never read whole.
+    pub fn bundle_read_up_to(
+        &self,
+        raw: &str,
+        rel: Option<&str>,
+        max: u64,
+    ) -> Result<Vec<u8>, PageError> {
         let loaded = self.load(raw)?;
         let Some(rel) = rel else {
             return Ok(loaded.html.into_bytes());
@@ -930,7 +954,7 @@ impl PageServer {
             .path
             .parent()
             .ok_or_else(|| PageError::Refused("The page has no folder.".into()))?;
-        self.read_asset(dir, rel, true)
+        self.read_asset_up_to(dir, rel, true, max)
             .map(|(_, bytes)| bytes)
             .ok_or_else(|| PageError::NotFound("That file is not part of the page.".into()))
     }
