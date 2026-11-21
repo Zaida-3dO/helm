@@ -16,6 +16,22 @@ export const AGENTS_INLINE_MIN = "1.0.60";
  */
 export const AGENTS_FILE_MIN = "2.1.0";
 
+/**
+ * First version we rely on to take a file path on `--append-system-prompt-file`. The installed
+ * 2.1.289 documents it in its help ("--append-system-prompt-file <file>"); the release it landed
+ * in is not recorded anywhere, so like AGENTS_FILE_MIN this is a cautious floor: an older CLI is
+ * handed the text inline instead.
+ */
+export const APPEND_FILE_MIN = "2.1.0";
+
+export type AppendMode = "file" | "inline";
+
+/** How to carry a chat's appended prompt for a CLI of this version. An unknown version is trusted with the file. */
+export function appendMode(version: string | undefined): AppendMode {
+  if (!version) return "file";
+  return compareVersions(version, APPEND_FILE_MIN) < 0 ? "inline" : "file";
+}
+
 export type AgentsMode = "file" | "inline" | "unsupported";
 
 /** The first `major.minor.patch` in a `claude --version` line ("2.1.289 (Claude Code)"), or undefined. */

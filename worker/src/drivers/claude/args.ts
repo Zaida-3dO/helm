@@ -68,10 +68,24 @@ export function disallowedTools(c: ClaudeLaunch, env: Record<string, string | un
 export interface ArgOptions {
   /** The long-command rule, appended to the main chat's instructions when the rule is on. */
   promptRule?: string;
+  /**
+   * A file holding the appended prompt (what `appendText` joins), passed to
+   * `--append-system-prompt-file` in place of the text itself. The rules addendum runs to
+   * 32 KiB, and a command line that long does not spawn on Windows at all.
+   */
+  appendFile?: string;
   /** Register Helm's in-process `helm` MCP server (`--mcp-config` with the SDK entry). */
   mcpConfig?: string;
   /** What to pass to `--agents` in place of the launch's file path (the file's JSON, for an older CLI). */
   agentsArg?: string;
+}
+
+/**
+ * The text appended to the chat's instructions: the launch's addendum (its rules and guidance),
+ * then the worker's own prompt rule. Both may be absent.
+ */
+export function appendText(c: ClaudeLaunch, promptRule?: string): string {
+  return [c.appendSystemPrompt, promptRule].filter((x): x is string => typeof x === "string" && x.length > 0).join("\n\n");
 }
 
 /** Pre-approves every tool of Helm's own server. */
@@ -109,8 +123,11 @@ export function buildClaudeArgs(c: ClaudeLaunch, opts: ArgOptions = {}): string[
   for (const dir of c.pluginDirs ?? []) args.push("--plugin-dir", dir);
   // Helm-managed agent definitions, by plain name: one file of them.
   if (c.agentsFile) args.push("--agents", opts.agentsArg ?? c.agentsFile);
-  const append = [c.appendSystemPrompt, opts.promptRule].filter((x): x is string => typeof x === "string" && x.length > 0).join("\n\n");
-  if (append) args.push("--append-system-prompt", append);
+  if (opts.appendFile) args.push("--append-system-prompt-file", opts.appendFile);
+  else {
+    const append = appendText(c, opts.promptRule);
+    if (append) args.push("--append-system-prompt", append);
+  }
   // fastMode is always explicit: the launch's own field is its only owner.
   const { fastMode: _dropped, ...custom } = c.settings ?? {};
   void _dropped;

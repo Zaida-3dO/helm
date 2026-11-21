@@ -73,7 +73,10 @@ steering and tool control" for why it is delivery and not the acknowledgement.
   `--replay-user-messages`, `--permission-prompt-tool stdio`, `--setting-sources user,project,local`
   (`claude.settingSources` overrides it: a chat for someone other than the PC's own person gets
   `project,local`), `--model`, `--effort` (omitted for haiku models), and when asked
-  `--permission-mode bypassPermissions`, `--resume`, `--append-system-prompt`, `--settings`,
+  `--permission-mode bypassPermissions`, `--resume`, `--append-system-prompt-file` (the whole
+  appended prompt goes into `system-append.md` beside launch.json on any CLI that takes the flag —
+  2.1.0 or newer, or a version that cannot be read; older CLIs get `--append-system-prompt` with
+  the text inline, up to 24,000 characters), `--settings`,
   `--plugin-dir` (once per entry of `claude.pluginDirs`) and `--agents` (`claude.agentsFile`).
 - **Submission ack:** the CLI echoes each user message (with our uuid) because of
   `--replay-user-messages`; that echo is the acknowledgement. No echo within 30 s: the prompt is
@@ -287,8 +290,8 @@ public Agent SDK type definitions; no SDK code is used or copied.
   `<profile>/launch-plugins/<hash>/<plugin>/`, named by a hash of the skills' contents and reused
   while it holds. The same folder carries `agents.json`, the Everyone and the profile agents
   merged (the profile wins a name clash), passed with `--agents`; agents keep their plain names.
-  Rules are not a CLI feature here: they reach the chat inside `--append-system-prompt`, in a
-  `rules` section. A chat whose profile is not the PC's home profile is launched with
+  Rules are not a CLI feature here: they reach the chat in a `rules` section of the appended
+  prompt, carried by `--append-system-prompt-file` (the text itself only on older CLIs). A chat whose profile is not the PC's home profile is launched with
   `--setting-sources project,local`, so the owner's `~/.claude` rules, skills and settings are not
   read for it; its project's own `CLAUDE.md` and `.claude/skills` load as usual.
 

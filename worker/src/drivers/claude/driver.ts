@@ -3,20 +3,22 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import os from "node:os";
+import path from "node:path";
 import type { HostChannel, ResponseBody } from "../../protocol/channel.ts";
 import { describeFault, LineReader, MAX_RECORD_BYTES } from "../../protocol/lines.ts";
 import type { Driver } from "../../protocol/server.ts";
 import { markLaunch, markPrompt } from "../../protocol/timing.ts";
 import { DEFAULT_EFFORT, isEffort, type Json, type Launch, type UiResponse } from "../../protocol/types.ts";
 import { isAlive, treeKill } from "../../process/kill.ts";
-import { buildClaudeArgs, modelTakesEffort } from "./args.ts";
+import { appendText, buildClaudeArgs, modelTakesEffort } from "./args.ts";
 import { buildClaudeEnv, contextRefusalNote, localThinkingTokens } from "./env.ts";
 import { Interactions } from "./interactions.ts";
 import { BUDGET_HOOK_ID, SubagentBudget, subagentRule } from "./limits.ts";
 import { isLongCommandLevel, LongCommandPolicy, PROMPT_RULE, SHELL_TOOLS_MATCHER } from "./longcmd.ts";
 import { LANDING_GUARD_HOOK_ID, LANDING_GUARD_MATCHER, LandingGuard } from "./guard.ts";
-import { agentsArg, cliVersion } from "./cliversion.ts";
+import { agentsArg, appendMode, cliVersion } from "./cliversion.ts";
 import { assertNotShim, resolveClaude, type Resolved } from "./resolve.ts";
 import { NATIVE_SCHEDULE_MATCHER, SCHEDULE_REDIRECT_HOOK_ID, scheduleRedirect } from "./schedulecalls.ts";
 import { SUBAGENT_MODEL_HOOK_ID, SUBAGENT_MODEL_MATCHER, SubagentModelGuard } from "./subagentmodel.ts";
@@ -109,12 +111,52 @@ interface PendingControl {
   timer: NodeJS.Timeout;
 }
 
+/** The file in the worker's folder that carries the chat's appended prompt, beside its launch.json. */
+export const APPEND_FILE_NAME = "system-append.md";
+/** The appended prompt text an older CLI (without the file flag) still takes on the command line.
+ * Past this the start says so plainly instead of failing in the spawn with an over-long line. */
+export const INLINE_APPEND_MAX = 24_000;
+/** A Windows command line tops out at 32,767 characters; stay well clear of it and say which
+ * argument grew too long, rather than letting an unexplained ENAMETOOLONG surface. */
+const SPAWN_ARG_LIMIT = 30_000;
+
+/**
+ * Carry a chat's appended prompt: write it into the worker folder and return the path when the CLI
+ * understands `--append-system-prompt-file` (an unknown version is trusted with the file), else
+ * return undefined and the text goes inline. Rewritten at every start, so a resumed chat never
+ * runs stale rules, and marked owner-only: the file holds this chat's rules.
+ */
+export function appendFileFor(text: string, version: string | undefined, cliPath: string, folder: string | undefined): string | undefined {
+  if (!text) return undefined;
+  if (appendMode(version) === "file" && folder) {
+    const file = path.join(folder, APPEND_FILE_NAME);
+    fs.writeFileSync(file, text, { mode: 0o600 });
+    return file;
+  }
+  if (text.length > INLINE_APPEND_MAX) {
+    throw new Error(`the rules are too long for claude ${version ?? "unknown version"} at ${cliPath}: update claude`);
+  }
+  return undefined;
+}
+
+/** Refuse a spawn whose arguments outgrow a command line, naming the argument that is too long. */
+function checkSpawnArgs(args: string[], cliPath: string): void {
+  const total = args.reduce((n, a) => n + a.length, 0) + Math.max(args.length - 1, 0);
+  if (total <= SPAWN_ARG_LIMIT) return;
+  let worst = 0;
+  for (let i = 1; i < args.length; i++) if (args[i].length > args[worst].length) worst = i;
+  const flag = worst > 0 && args[worst - 1].startsWith("-") ? args[worst - 1] : `argument ${worst}`;
+  throw new Error(`the arguments for claude at ${cliPath} come to ${total} characters, past the ${SPAWN_ARG_LIMIT} limit: ${flag} carries ${args[worst].length} of them`);
+}
+
 export interface DriverDeps {
   env: Record<string, string | undefined>;
   /** The local model server's key, taken from the worker's environment at start-up (never logged). */
   localKey?: string;
   /** The saved Claude token, taken from the worker's environment at start-up (never logged). */
   claudeToken?: string;
+  /** The worker's own folder — the one holding its launch.json. The appended prompt file lives beside it. */
+  workerFolder?: string;
   diag: (msg: string) => void;
   /** Called after a fatal error has been reported; the worker should exit with this code. */
   onFatal: (code: number) => void;
@@ -270,12 +312,18 @@ export class ClaudeDriver implements Driver {
       this.resolved = resolveClaude({ env: this.deps.env });
       command = this.resolved.path;
     }
-    // An older CLI gets the agents inline, or the spawn fails here naming its version and path.
-    const agents = c.agentsFile ? agentsArg(c.agentsFile, cliVersion(command), command) : undefined;
+    // The CLI's version decides both file-carrying flags: an older CLI gets the agents inline (or
+    // the spawn fails here naming its version and path), and the appended prompt rides a file on
+    // any CLI new enough to take one.
+    const version = cliVersion(command);
+    const agents = c.agentsFile ? agentsArg(c.agentsFile, version, command) : undefined;
+    const promptRule = this.promptRule();
+    const appendFile = appendFileFor(appendText(c, promptRule), version, command, this.deps.workerFolder);
     const args = [
       ...(c.commandArgs ?? []),
-      ...buildClaudeArgs(c, { promptRule: this.promptRule(), mcpConfig: this.hostTools ? sdkMcpConfig() : undefined, agentsArg: agents }),
+      ...buildClaudeArgs(c, { promptRule, appendFile, mcpConfig: this.hostTools ? sdkMcpConfig() : undefined, agentsArg: agents }),
     ];
+    checkSpawnArgs(args, command);
     const env = buildClaudeEnv(this.deps.env, { apiKeyMode: c.apiKeyMode === true, chatId: this.launch.chatId, local: c.local, localKey: this.deps.localKey, claudeToken: this.deps.claudeToken, effort: this.effort });
     const child = spawn(command, args, {
       cwd: this.launch.cwd ?? process.cwd(),

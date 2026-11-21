@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { test } from "node:test";
-import { buildClaudeArgs, disallowedTools } from "../src/drivers/claude/args.ts";
-import { agentsArg, agentsMode, cliVersion, parseCliVersion } from "../src/drivers/claude/cliversion.ts";
+import { appendText, buildClaudeArgs, disallowedTools } from "../src/drivers/claude/args.ts";
+import { agentsArg, agentsMode, appendMode, cliVersion, parseCliVersion } from "../src/drivers/claude/cliversion.ts";
+import { appendFileFor } from "../src/drivers/claude/driver.ts";
 import { decideGate, decideStop, gateHook, startupWanted, stopHook } from "../src/drivers/claude/gates.ts";
 import { cronTiming, NATIVE_SCHEDULE_TOOLS, scheduleRedirect } from "../src/drivers/claude/schedulecalls.ts";
 import { assertLoopbackHttp, buildClaudeEnv, contextRefusalNote, STRIPPED_UNLESS_API_KEY_MODE, takeClaudeToken, takeLocalKey } from "../src/drivers/claude/env.ts";
@@ -332,6 +336,45 @@ test("a chat the workflow gates may act in loses the workflow runner and the REP
   assert.deepEqual(await decideStop(byOperation({ app_startup_turn_end: true }), { stop_hook_active: true }, both), {}, "a continuation is never blocked again");
   // The startup switch alone leaves the workflow's tool restrictions and edit gate off.
   assert.ok(!disallowedTools({}, { HELM_STARTUP_GATE: "1" }).includes("REPL"));
+});
+
+test("the appended prompt rides a file, not the command line; an older CLI stays inline up to a cap", () => {
+  // The join itself, as it is carried either way.
+  assert.equal(appendText({ appendSystemPrompt: "rules" }, "the rule"), "rules\n\nthe rule");
+  assert.equal(appendText({ appendSystemPrompt: "rules" }, undefined), "rules");
+  assert.equal(appendText({}, undefined), "");
+  for (const [v, mode] of [["2.1.289", "file"], ["2.1.0", "file"], ["2.0.5", "inline"], [undefined, "file"]] as const) {
+    assert.equal(appendMode(v), mode, String(v));
+  }
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "helm-append-"));
+  try {
+    // 60,000 characters of rules on a new CLI: a file, and a command line that stays short.
+    const long = "R".repeat(60_000);
+    const file = appendFileFor(long, "2.1.289", "claude.exe", dir);
+    assert.ok(file);
+    const a = buildClaudeArgs({ appendSystemPrompt: long }, { promptRule: "the rule", appendFile: file });
+    assert.equal(flag(a, "--append-system-prompt-file"), file);
+    assert.equal(a.includes("--append-system-prompt"), false, "not the text flag");
+    assert.ok(!a.some((x) => x.includes("R".repeat(200))), "no argument carries the text");
+    assert.ok(a.join(" ").length < 8_000, "the whole command line stays under 8,000 characters");
+    assert.equal(fs.readFileSync(file, "utf8"), long, "the file holds the exact text");
+    // Rewritten whole at every start, so a resumed chat never runs an older copy.
+    assert.equal(fs.readFileSync(appendFileFor("newer text", "2.1.289", "claude.exe", dir) ?? "", "utf8"), "newer text");
+    // An unknown CLI is trusted with the file too.
+    assert.ok(appendFileFor(long, undefined, "claude.exe", dir));
+
+    // An older CLI: a short text stays inline, a long one fails here, not in the spawn.
+    assert.equal(appendFileFor("short rule", "2.0.5", "C:/bin/claude.exe", dir), undefined);
+    const inline = buildClaudeArgs({ appendSystemPrompt: "short rule" }, { promptRule: "also short" });
+    assert.equal(flag(inline, "--append-system-prompt"), "short rule\n\nalso short");
+    assert.equal(inline.includes("--append-system-prompt-file"), false);
+    assert.throws(() => appendFileFor("L".repeat(24_001), "2.0.5", "C:/bin/claude.exe", dir), /C:\/bin\/claude\.exe.*too long.*update claude/);
+    // No folder to write into (nothing starts the worker through a launch.json): the same cap applies.
+    assert.throws(() => appendFileFor("L".repeat(24_001), undefined, "C:/bin/claude.exe", undefined), /too long/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("--agents follows the CLI's version: a file, the inline JSON, or a clear refusal", () => {

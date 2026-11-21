@@ -6,7 +6,7 @@
 //! |---|---|---|
 //! | `helm_skills_list` / `_add` / `_remove` / `_reveal` | blocking / maintenance | as before, each with an optional `layer` (default `everyone`) |
 //! | `helm_agents_list` / `_add` / `_remove` / `_reveal` | blocking / maintenance | as before, with the same optional `layer` |
-//! | `knowledge_get` | blocking | `{layer}` → `{layer, folder, rules, skills, agents, clashes}` |
+//! | `knowledge_get` | blocking | `{layer}` → `{layer, folder, rules, skills, agents, clashes, budget}` |
 //! | `knowledge_rule_read` | blocking | `{layer, path}` → `{rule, text}` (the text without its title line) |
 //! | `knowledge_rule_write` | maintenance | `{layer, path?, title, text, revision?}` → `{rule}`; a stale `revision` is a conflict |
 //! | `knowledge_delete` | maintenance | `{layer, kind: rule\|skill\|agent, name}` → the layer as `knowledge_get` |
@@ -23,6 +23,7 @@
 //! (and the older `skills-changed` or `agents-changed` for the older ops).
 
 use crate::layers::{Kind, Layer};
+use crate::launch::{self, ChatKnowledge, ProfileRef};
 use crate::memories::{self, HubMemory, MemError};
 use crate::sources::{self, SkillSource};
 use crate::undo::item_path;
@@ -316,6 +317,25 @@ fn agents_reveal(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     Ok(json!({"revealed": true}))
 }
 
+/// What a chat reading this layer spends of the whole-rule budget. A person's layer comes with
+/// Everyone's rules as a chat gets them; the Everyone layer reads alone. The name and home flag
+/// never change the figure, so they are left blank.
+fn budget_view(data: &Path, layer: &Layer) -> Value {
+    let who = match layer {
+        Layer::Everyone => ChatKnowledge::default(),
+        Layer::Profile(id) => ChatKnowledge {
+            profile: Some(ProfileRef {
+                id: id.clone(),
+                name: String::new(),
+                is_home: false,
+            }),
+            project_id: None,
+        },
+    };
+    let (used, cap) = launch::rules_budget(data, &who);
+    json!({ "usedBytes": used, "capBytes": cap })
+}
+
 /// One layer as the knowledge screens draw it.
 fn view(data: &Path, layer: &Layer) -> Value {
     let root = layer.root(data);
@@ -327,6 +347,7 @@ fn view(data: &Path, layer: &Layer) -> Value {
         "skills": skills,
         "agents": agents::list(&root),
         "clashes": clashes,
+        "budget": budget_view(data, layer),
     })
 }
 

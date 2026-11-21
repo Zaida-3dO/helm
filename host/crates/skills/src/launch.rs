@@ -288,33 +288,83 @@ pub fn rule_groups(profile_dir: &Path, who: &ChatKnowledge) -> Vec<(String, Vec<
     groups
 }
 
+/// What the prompt does with one rule: carry it whole, list it on one line, or (once the cap is
+/// reached) leave it out of the text and name its file at the end.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fit {
+    Whole,
+    Line,
+    Over,
+}
+
+/// A whole rule as the prompt carries it.
+fn whole_rule(r: &Loaded) -> String {
+    format!("### {}\n{}", r.entry.title, r.body)
+}
+
+/// The one walk the prompt text and the budget share: for each group, in rule order, how the
+/// prompt treats each rule. A short rule (or one marked `always`) goes whole until `cap` bytes of
+/// whole-rule text are used; longer ones are one line each; whole rules past the cap fall to the
+/// file list.
+fn rule_fits(groups: &[(String, Vec<Loaded>)], cap: usize) -> Vec<Vec<Fit>> {
+    let mut used = 0usize;
+    let mut out = Vec::with_capacity(groups.len());
+    for (_, rules) in groups {
+        let mut fits = Vec::with_capacity(rules.len());
+        for r in rules {
+            if !r.inline() {
+                fits.push(Fit::Line);
+                continue;
+            }
+            let len = whole_rule(r).len();
+            if used + len <= cap {
+                used += len;
+                fits.push(Fit::Whole);
+            } else {
+                fits.push(Fit::Over);
+            }
+        }
+        out.push(fits);
+    }
+    out
+}
+
+/// How much of the whole-rule cap one chat's rules use: (bytes used, cap). Settings reads this so
+/// the figure it warns about is exactly what a chat's prompt goes through.
+pub fn rules_budget(profile_dir: &Path, who: &ChatKnowledge) -> (usize, usize) {
+    let groups = rule_groups(profile_dir, who);
+    let mut used = 0usize;
+    for ((_, rules), fits) in groups.iter().zip(rule_fits(&groups, RULES_PROMPT_CAP)) {
+        for (r, fit) in rules.iter().zip(fits) {
+            if fit == Fit::Whole {
+                used += whole_rule(r).len();
+            }
+        }
+    }
+    (used, RULES_PROMPT_CAP)
+}
+
 /// The `rules` section's text: the Everyone rules, then the person's, then the guidance. A short
 /// rule (or one marked `always`) goes in whole until `cap` bytes of rule text are used; the others
 /// are one line each, with the topic that has the rest.
 pub fn rules_text(profile_dir: &Path, who: &ChatKnowledge, cap: usize) -> String {
     let groups = rule_groups(profile_dir, who);
-    let mut used = 0usize;
+    let fits = rule_fits(&groups, cap);
     let mut parts: Vec<String> = Vec::new();
     let mut overflow: Vec<String> = Vec::new();
-    for (heading, rules) in groups {
+    for ((heading, rules), fits) in groups.iter().zip(&fits) {
         let mut block = String::new();
         let mut listed = String::new();
-        for r in rules {
-            if !r.inline() {
-                listed.push_str(&format!(
+        for (r, fit) in rules.iter().zip(fits) {
+            match fit {
+                Fit::Line => listed.push_str(&format!(
                     "\n- {}: {} (app_help rule/{})",
                     r.entry.title,
                     r.summary(),
                     r.topic
-                ));
-                continue;
-            }
-            let text = format!("### {}\n{}", r.entry.title, r.body);
-            if used + text.len() <= cap {
-                used += text.len();
-                block.push_str(&format!("\n\n{text}"));
-            } else {
-                overflow.push(r.file.to_string_lossy().into_owned());
+                )),
+                Fit::Whole => block.push_str(&format!("\n\n{}", whole_rule(r))),
+                Fit::Over => overflow.push(r.file.to_string_lossy().into_owned()),
             }
         }
         if !listed.is_empty() {
@@ -575,5 +625,18 @@ mod tests {
         assert!(tight.contains("Read these when they apply") && tight.contains("a-habits.md"));
         let bare = rules_text(&tmp.path().join("empty"), &ChatKnowledge::default(), 100);
         assert_eq!(bare, GUIDANCE);
+        // The budget goes through the same walk: everything that fits whole at the real cap is
+        // counted, and a layer with nothing in it says zero.
+        let whole_sum = rule_groups(&data, &home)
+            .iter()
+            .flat_map(|(_, rs)| rs.iter().map(whole_rule))
+            .map(|t| t.len())
+            .sum::<usize>();
+        assert!(whole_sum > 0 && whole_sum <= RULES_PROMPT_CAP);
+        assert_eq!(rules_budget(&data, &home), (whole_sum, RULES_PROMPT_CAP));
+        assert_eq!(
+            rules_budget(&tmp.path().join("empty"), &ChatKnowledge::default()),
+            (0, RULES_PROMPT_CAP)
+        );
     }
 }

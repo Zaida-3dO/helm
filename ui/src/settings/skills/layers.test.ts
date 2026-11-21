@@ -8,6 +8,7 @@ import {
   layerOptions,
   moveTargets,
   projectsLabel,
+  rulesBudgetNote,
   skillsFromSource,
   sourceLabel,
   toggleProject,
@@ -63,4 +64,24 @@ test('layers: where a skill came from, which projects a folder reaches, how many
   assert.deepEqual(toggleProject(['a'], 'b'), ['a', 'b']);
   assert.deepEqual(toggleProject(['a', 'b'], 'a'), ['b']);
   assert.equal(skillsFromSource([{ source: 'folder' }, { source: 'linked:s1' }, { source: 'linked:s1' }], 's1'), 2);
+});
+
+test('layers: the rules budget note appears at 80% of the cap and names both figures', () => {
+  assert.equal(rulesBudgetNote(undefined), null, 'an older host says nothing');
+  assert.equal(rulesBudgetNote({ usedBytes: 4096, capBytes: 0 }), null, 'a cap of nothing warns about nothing');
+  // 80% of 32 KiB is 26,214.4 bytes: just under stays quiet, just over reads in KB.
+  assert.equal(rulesBudgetNote({ usedBytes: 26_213, capBytes: 32_768 }), null);
+  assert.equal(
+    rulesBudgetNote({ usedBytes: 26_214, capBytes: 32_768 }),
+    'Rules kept whole use 26 KB of the 32 KB chats get; past that the rest are only listed by name.',
+  );
+  assert.equal(
+    rulesBudgetNote({ usedBytes: 27_648, capBytes: 32_768 }),
+    'Rules kept whole use 27 KB of the 32 KB chats get; past that the rest are only listed by name.',
+  );
+  assert.equal(
+    rulesBudgetNote({ usedBytes: 40_000, capBytes: 32_768 }),
+    'Rules kept whole use 39 KB of the 32 KB chats get; past that the rest are only listed by name.',
+    'past the cap it still says the whole-rule figure',
+  );
 });

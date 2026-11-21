@@ -2,9 +2,22 @@
 // item can move to, and how a linked folder's reach reads. A layer is `everyone` or
 // `profile:<profileId>` (the host's keys).
 
-import type { SkillSource, SourceProjects } from './api.ts';
+import type { RulesBudget, SkillSource, SourceProjects } from './api.ts';
 
 export const EVERYONE = 'everyone';
+
+/** The share of the whole-rule cap past which the Rules section warns about it. */
+export const RULES_BUDGET_WARN_AT = 0.8;
+
+/**
+ * The sentence the Rules section shows when whole rules have used at least 80% of what every chat
+ * gets, or null while there is room (or when the host reported no budget).
+ */
+export function rulesBudgetNote(budget: RulesBudget | null | undefined): string | null {
+  if (!budget || budget.capBytes <= 0 || budget.usedBytes < budget.capBytes * RULES_BUDGET_WARN_AT) return null;
+  const kb = (bytes: number) => Math.round(bytes / 1024);
+  return `Rules kept whole use ${kb(budget.usedBytes)} KB of the ${kb(budget.capBytes)} KB chats get; past that the rest are only listed by name.`;
+}
 
 export interface LayerOption {
   /** The host's key: `everyone` or `profile:<id>`. */

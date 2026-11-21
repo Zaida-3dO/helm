@@ -2,6 +2,7 @@
 // stdin: host commands. stdout: events and responses. stderr: diagnostics only.
 
 import fs from "node:fs";
+import path from "node:path";
 import { HostChannel } from "./protocol/channel.ts";
 import { MAX_RECORD_BYTES } from "./protocol/lines.ts";
 import { serve } from "./protocol/server.ts";
@@ -61,9 +62,10 @@ function main(): void {
   // servers, their hooks) should write into Helm's folder.
   delete process.env.NODE_COMPILE_CACHE;
   let launch: Launch;
+  const launchFile = process.argv[2];
   const early = new HostChannel(process.stdout, diag);
   try {
-    launch = readLaunch(process.argv[2]);
+    launch = readLaunch(launchFile);
   } catch (e) {
     // Fail closed on unreadable configuration.
     early.emit({ type: "worker_error", error: `cannot read launch description: ${(e as Error).message}` });
@@ -83,7 +85,9 @@ function main(): void {
   const localKey = takeLocalKey(process.env);
   // Same for the saved Claude token: only the claude child ever gets it, as its own sign-in.
   const claudeToken = takeClaudeToken(process.env);
-  const driver = new ClaudeDriver(launch, channel, { env: process.env, localKey, claudeToken, diag, onFatal: exit });
+  // The driver writes the chat's appended prompt beside launch.json, in this folder.
+  const workerFolder = launchFile ? path.dirname(path.resolve(launchFile)) : undefined;
+  const driver = new ClaudeDriver(launch, channel, { env: process.env, localKey, claudeToken, workerFolder, diag, onFatal: exit });
   serve({ input: process.stdin, channel, driver, diag, exit, maxRecordBytes: limit });
 }
 

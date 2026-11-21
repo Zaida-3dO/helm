@@ -93,6 +93,14 @@ export interface Clash {
   dropped: string;
 }
 
+/** How much of the prompt's whole-rule budget a chat reading one layer spends. */
+export interface RulesBudget {
+  /** Bytes of rule text that go into every chat's prompt whole. */
+  usedBytes: number;
+  /** Past this the rest are only listed by name. */
+  capBytes: number;
+}
+
 /** One layer as the knowledge screen draws it. */
 export interface KnowledgeLayer {
   layer: string;
@@ -101,6 +109,8 @@ export interface KnowledgeLayer {
   skills: LayerSkill[];
   agents: AgentRow[];
   clashes: Clash[];
+  /** Missing from an older host; the Rules section then says nothing about the budget. */
+  budget?: RulesBudget;
 }
 
 export type KnowledgeKind = 'rule' | 'skill' | 'agent';

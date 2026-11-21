@@ -4,10 +4,10 @@
 
 import { useEffect, useState } from 'react';
 import { Button, Checkbox, TextArea, TextInput, type ConfirmSpec } from '../../ui/index.ts';
-import type { KnowledgeOps, RuleRow } from './api.ts';
+import type { KnowledgeOps, RulesBudget, RuleRow } from './api.ts';
 import { errorCode, errorText, sizeLabel } from './common.ts';
 import { MoveTo } from './LayerPicker.tsx';
-import type { LayerOption } from './layers.ts';
+import { rulesBudgetNote, type LayerOption } from './layers.ts';
 
 export type RunAction = (action: () => Promise<string | void>) => Promise<void>;
 
@@ -155,12 +155,13 @@ function RuleEditor({ ops, layer, options, busy, run, confirm, rule, onClose }: 
   );
 }
 
-export function RulesSection(props: Shared & { rules: RuleRow[] }) {
-  const { ops, layer, busy, run, rules } = props;
+export function RulesSection(props: Shared & { rules: RuleRow[]; budget?: RulesBudget }) {
+  const { ops, layer, busy, run, rules, budget } = props;
   // `null`: nothing open; `'new'`: a blank editor; otherwise the path of the rule being edited.
   const [open, setOpen] = useState<string | null>(null);
   useEffect(() => setOpen(null), [layer]);
   const editing = open && open !== 'new' ? (rules.find((r) => r.path === open) ?? null) : null;
+  const budgetNote = rulesBudgetNote(budget);
 
   return (
     <section className="kn-section" data-testid="knowledge-rules">
@@ -178,6 +179,11 @@ export function RulesSection(props: Shared & { rules: RuleRow[] }) {
       <div className="setting-desc">
         Plain instructions added to every chat's starting prompt. The agent can also add one when you tell it to always or never do something.
       </div>
+      {budgetNote && (
+        <div className="setting-desc" data-testid="knowledge-rules-budget">
+          {budgetNote}
+        </div>
+      )}
       {rules.length === 0 && open !== 'new' && (
         <div className="setting-desc" data-testid="knowledge-rules-empty">
           No rules in this list yet.

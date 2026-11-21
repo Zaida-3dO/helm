@@ -142,7 +142,7 @@ export function KnowledgePane() {
       )}
       {data && (
         <>
-          <RulesSection {...shared} rules={data.rules} />
+          <RulesSection {...shared} rules={data.rules} budget={data.budget} />
           <SkillsSection
             {...shared}
             skills={data.skills}

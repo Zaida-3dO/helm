@@ -9,7 +9,7 @@
 //   ?memories=none      the host has no memories op: the section is left out
 
 import { ApiError } from '../api/client.ts';
-import type { AgentRow, KnowledgeLayer, LayerSkill, RuleRow, SkillSource, SourceProjects } from '../settings/skills/api.ts';
+import type { AgentRow, KnowledgeLayer, LayerSkill, RulesBudget, RuleRow, SkillSource, SourceProjects } from '../settings/skills/api.ts';
 import type { FakeOpHandler } from './fakeHost.ts';
 
 function param(name: string): string | null {
@@ -91,6 +91,11 @@ export function knowledgeFakeOps(): { prefixes: string[]; handler: FakeOpHandler
       const first = skills.slice(0, i).find((e) => e.name === later.name);
       return first ? [{ plugin: '', name: later.name, kept: first.source, dropped: later.source }] : [];
     });
+    // As the host reports it: whole rules (short ones, and any marked `always`) against the 32 KiB cap.
+    const budget: RulesBudget = {
+      usedBytes: l.rules.filter((r) => r.always === true || r.text.length <= 800).reduce((n, r) => n + r.title.length + r.text.length + 8, 0),
+      capBytes: 32 * 1024,
+    };
     return {
       layer: key,
       folder: `C:/Helm/knowledge/${key}`,
@@ -98,6 +103,7 @@ export function knowledgeFakeOps(): { prefixes: string[]; handler: FakeOpHandler
       skills,
       agents: l.agents.map((a) => agentRow(key, a)),
       clashes,
+      budget,
     };
   };
 
