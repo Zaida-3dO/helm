@@ -7,7 +7,7 @@ use helm_hub::mcp::Options;
 use helm_hub::registry::Registry;
 use helm_hub::server::{router, AppState};
 use helm_hub::store::Store;
-use helm_hub::stt::Stt;
+use helm_hub::stt::{self, Stt, SttHealth};
 use helm_hub::telegram::{
     now_ms, Bridge, HttpApi, HttpFiles, HttpVoice, Receive, Telegram, TelegramApi, TelegramConfig,
 };
@@ -449,6 +449,12 @@ fn serve() -> ExitCode {
     let registry = Arc::new(Mutex::new(registry));
     let (lines, upstream) = Lines::new(registry.clone());
     let lines = Arc::new(lines);
+    // The speech server's health: the bridges hold it now, the probe task fills it once the
+    // runtime is up.
+    let stt_health = telegram_cfg
+        .stt
+        .as_ref()
+        .map(|_| Arc::new(SttHealth::default()));
     let wake = match Wake::from_env() {
         Ok(w) => w,
         Err(e) => {
@@ -475,6 +481,9 @@ fn serve() -> ExitCode {
                         &token,
                         stt,
                     )));
+                    if let Some(h) = &stt_health {
+                        bridge = bridge.with_stt_health(h.clone());
+                    }
                 }
                 bridge
             };
@@ -520,6 +529,9 @@ fn serve() -> ExitCode {
         let mut bridge = VoiceBridge::new(lines.clone(), cfg);
         if let Some(stt) = &telegram_cfg.stt {
             bridge = bridge.with_stt(Arc::new(Stt::new(stt)));
+            if let Some(h) = &stt_health {
+                bridge = bridge.with_stt_health(h.clone());
+            }
         }
         Arc::new(bridge)
     });
@@ -571,6 +583,10 @@ fn serve() -> ExitCode {
             }
         };
         helm_hub::watchdog::start(watchdog_limit());
+        // The speech server's /health, so a voice failure can say since when it has been down.
+        if let (Some(stt), Some(h)) = (&telegram_cfg.stt, stt_health.clone()) {
+            stt::spawn_health(&stt.url, h);
+        }
         if let Some(bot) = telegram {
             eprintln!(
                 "telegram: on, {} allowed user(s), {}; transcription {}",

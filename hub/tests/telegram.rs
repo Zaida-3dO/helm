@@ -12,6 +12,7 @@ use helm_hub::registry::Registry;
 use helm_hub::relay::{Channel, Line, Upstream, OFFLINE};
 use helm_hub::server::{router, AppState};
 use helm_hub::store::Store;
+use helm_hub::stt::{SttError, SttFailure, SttFuture, SttHealth};
 use helm_hub::telegram::{
     now_ms, parse_allowed, parse_receive, size_text, ApiError, ApiFuture, Bridge, Files, Handled,
     HttpFiles, HttpVoice, Receive, SttConfig, Telegram, TelegramApi, TelegramConfig, Voice,
@@ -110,7 +111,7 @@ impl TelegramApi for FakeApi {
 
 /// Downloads a few bytes and answers `heard`, once the gate lets it (open unless `held`).
 struct FakeVoice {
-    heard: Result<String, String>,
+    heard: Result<String, SttError>,
     gate: tokio::sync::Semaphore,
     seen: Mutex<Vec<String>>,
 }
@@ -124,8 +125,19 @@ impl FakeVoice {
     }
     fn gated(heard: Result<&str, &str>, permits: usize) -> Arc<Self> {
         Arc::new(FakeVoice {
-            heard: heard.map(str::to_owned).map_err(str::to_owned),
+            heard: heard.map(str::to_owned).map_err(SttError::plain),
             gate: tokio::sync::Semaphore::new(permits),
+            seen: Mutex::new(vec![]),
+        })
+    }
+    /// A failure of a given kind, for the retry rules.
+    fn failing(heard: Result<&str, SttFailure>) -> Arc<Self> {
+        Arc::new(FakeVoice {
+            heard: heard.map(str::to_owned).map_err(|kind| SttError {
+                kind,
+                why: "the speech-to-text server could not be reached".into(),
+            }),
+            gate: tokio::sync::Semaphore::new(100),
             seen: Mutex::new(vec![]),
         })
     }
@@ -144,7 +156,7 @@ impl Voice for FakeVoice {
         audio: Vec<u8>,
         name: &'a str,
         mime: &'a str,
-    ) -> VoiceFuture<'a, String> {
+    ) -> SttFuture<'a, String> {
         let seen = format!("transcribe {name} {mime} {}", audio.len());
         self.seen.lock().unwrap().push(seen);
         Box::pin(async move {
@@ -1310,6 +1322,58 @@ async fn recordings_go_with_their_transcript_and_the_recording_attached() {
 }
 
 #[tokio::test]
+async fn passing_stt_trouble_is_retried_once_and_a_standing_outage_names_its_start() {
+    let note = json!({ "file_id": "f1", "mime_type": "audio/ogg", "file_size": 1234 });
+    let down_reply = |why: &str| format!("{STT_DOWN}{why}{STT_DOWN_AFTER}");
+    // (the kind of failure, the tries it costs, and whether the health probe has seen the
+    // server down for five minutes)
+    for (kind, tries, down_for) in [
+        (SttFailure::Refused, 2, false),
+        (SttFailure::Status(502), 2, false),
+        (SttFailure::Status(500), 1, false),
+        (SttFailure::ReadTimeout, 1, false),
+        (SttFailure::Status(503), 2, true),
+    ] {
+        let voice = FakeVoice::failing(Err(kind));
+        let api = Arc::new(FakeApi::default());
+        let (line, _up) = Line::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        line.attach(tx);
+        let mut bridge = Bridge::new(api.clone(), Arc::new(line), &cfg())
+            .with_voice(voice.clone())
+            .with_stt_retry(Duration::from_millis(5));
+        if down_for {
+            let h = SttHealth::default();
+            h.note_ok(now_ms() - 5 * 60_000);
+            bridge = bridge.with_stt_health(Arc::new(h));
+        }
+        let bridge = Arc::new(bridge);
+        bridge
+            .on_update(&owner_message(json!({ "voice": note })), now_ms())
+            .await;
+        settle().await;
+        let seen = voice.seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.iter().filter(|s| s.starts_with("transcribe")).count(),
+            tries,
+            "{kind:?}: {seen:?}"
+        );
+        let sent = api.sent_texts();
+        assert_eq!(sent.len(), 1, "{kind:?}: {sent:?}");
+        let why = "the speech-to-text server could not be reached";
+        if down_for {
+            assert!(
+                sent[0].contains(why) && sent[0].contains("unreachable since "),
+                "{}",
+                sent[0]
+            );
+        } else {
+            assert_eq!(sent, [down_reply(why)], "{kind:?}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn pictures_reach_helm_as_images_and_the_ones_it_cannot_show_as_plain_files() {
     let photo = |id: &str, w: u32, h: u32| json!({ "file_id": id, "width": w, "height": h });
     let sizes = json!([
@@ -1999,7 +2063,9 @@ async fn http_voice_downloads_the_file_and_posts_a_multipart_form() {
             .await;
         match (got, want) {
             (Ok(t), Ok(w)) => assert_eq!(t, w),
-            (Err(e), Err(w)) => assert!(e.starts_with(w) && e.chars().count() < 400, "{e}"),
+            (Err(e), Err(w)) => {
+                assert!(e.why.starts_with(w) && e.why.chars().count() < 400, "{e}")
+            }
             (got, want) => panic!("{status} {body:?}: {got:?}, wanted {want:?}"),
         }
     }
@@ -2032,7 +2098,10 @@ async fn http_voice_downloads_the_file_and_posts_a_multipart_form() {
         .await;
     assert_eq!(
         late,
-        Err("the speech-to-text server did not finish within 1 minute".into())
+        Err(SttError {
+            kind: SttFailure::ReadTimeout,
+            why: "the speech-to-text server did not finish within 1 minute".into(),
+        })
     );
 
     let files = HttpFiles::new(&base, TOKEN);
@@ -2059,9 +2128,13 @@ async fn http_voice_downloads_the_file_and_posts_a_multipart_form() {
     );
     let heard = heard.unwrap_err();
     assert!(
-        heard.starts_with("the speech-to-text server could not be reached"),
+        heard
+            .why
+            .starts_with("the speech-to-text server could not be reached"),
         "{heard}"
     );
+    // A refused address is the kind the bridges try once more on.
+    assert_eq!(heard.kind, SttFailure::Refused);
 }
 
 /// The next frame of `type` down a line, waiting for the hub's forwarding task to make it.

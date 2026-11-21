@@ -13,7 +13,7 @@ use helm_hub::mcp::Options;
 use helm_hub::registry::Registry;
 use helm_hub::server::{router, AppState};
 use helm_hub::store::Store;
-use helm_hub::stt::{Stt, SttConfig};
+use helm_hub::stt::{Stt, SttConfig, SttHealth, STT_RETRY_AFTER};
 use helm_hub::telegram::now_ms;
 use helm_hub::voice::{VoiceBridge, VoiceConfig, AUDIO_BUDGET, BUSY, EXPIRED, STT_FAILED};
 use helm_hub::wake::Wake;
@@ -40,6 +40,10 @@ struct Opts {
     seq_base: u64,
     /// Bytes of recordings the hub holds until they are transcribed.
     audio_budget: usize,
+    /// How long before a failing transcription is retried (normally [`STT_RETRY_AFTER`]).
+    stt_retry: Duration,
+    /// When the speech server was last seen healthy (`None`: never probed).
+    stt_seen_ok: Option<i64>,
 }
 
 impl Default for Opts {
@@ -51,6 +55,8 @@ impl Default for Opts {
             queue_lifetime: Duration::from_secs(30 * 60),
             seq_base: 0,
             audio_budget: AUDIO_BUDGET,
+            stt_retry: STT_RETRY_AFTER,
+            stt_seen_ok: None,
         }
     }
 }
@@ -96,6 +102,11 @@ impl FakeStt {
 
     fn says(&self, status: u16, text: &str) {
         *self.answer.lock().unwrap() = (status, text.to_owned());
+    }
+
+    /// How many uploads have arrived.
+    fn count(&self) -> usize {
+        self.uploads.lock().unwrap().len()
     }
 
     /// The multipart form of the n-th upload as text (the recording's bytes are in it too).
@@ -155,12 +166,19 @@ async fn start(o: Opts) -> Hub {
         .with_seq_base(o.seq_base)
         .with_audio_budget(o.audio_budget);
         if o.stt {
-            b = b.with_stt(Arc::new(Stt::new(&SttConfig {
-                url: stt.url.clone(),
-                model: "fake-model".into(),
-                language: "en".into(),
-                timeout: Duration::from_secs(30),
-            })));
+            b = b
+                .with_stt(Arc::new(Stt::new(&SttConfig {
+                    url: stt.url.clone(),
+                    model: "fake-model".into(),
+                    language: "en".into(),
+                    timeout: Duration::from_secs(30),
+                })))
+                .with_stt_retry(o.stt_retry);
+            if let Some(at) = o.stt_seen_ok {
+                let h = SttHealth::default();
+                h.note_ok(at);
+                b = b.with_stt_health(Arc::new(h));
+            }
         }
         let b = Arc::new(b);
         tokio::spawn(b.clone().run(lines.voice_receiver()));
@@ -707,7 +725,11 @@ async fn a_turn_is_accepted_or_refused_with_the_statuses_of_the_protocol() {
 
 #[tokio::test]
 async fn a_spoken_turn_goes_to_helm_and_the_answer_comes_back() {
-    let hub = start(Opts::default()).await;
+    let hub = start(Opts {
+        stt_retry: Duration::from_millis(5),
+        ..Opts::default()
+    })
+    .await;
     let mut helm = pc(&hub).await;
     let (mut me, welcome) = phone(&hub, PHONE, 0, true).await;
     assert_eq!(
@@ -921,12 +943,16 @@ async fn a_spoken_turn_goes_to_helm_and_the_answer_comes_back() {
     );
 
     // What the speech-to-text server answers decides the turn's state, and its own words never
-    // reach the phone. A failed turn can be sent again; one with nothing heard cannot.
-    for (n, status, text, state, message) in [
-        (10, 200u16, "Synthetic words.", "heard", None),
-        (11, 500, "model not loaded", "failed", Some(STT_FAILED)),
-        (12, 200, "{\"text\": \"  \"}", "empty", None),
+    // reach the phone. A failed turn can be sent again; one with nothing heard cannot. Trouble
+    // that looks passing (502, 503) costs one retry; a model that cannot load does not.
+    for (n, status, text, state, message, tries) in [
+        (10, 200u16, "Synthetic words.", "heard", None, 1),
+        (11, 500, "model not loaded", "failed", Some(STT_FAILED), 1),
+        (12, 200, "{\"text\": \"  \"}", "empty", None, 1),
+        (13, 502, "busy, try again", "failed", Some(STT_FAILED), 2),
+        (14, 503, "not ready", "failed", Some(STT_FAILED), 2),
     ] {
+        let before = hub.stt.count();
         hub.stt.says(status, text);
         let turn = id("turn", n);
         let r = post_turn(&hub, &turn, "", "audio/ogg", &ogg(1)).await;
@@ -936,6 +962,7 @@ async fn a_spoken_turn_goes_to_helm_and_the_answer_comes_back() {
         })
         .await;
         assert_eq!(f["message"].as_str(), message, "{state}");
+        assert_eq!(hub.stt.count(), before + tries, "{n} ({status}) uploads");
     }
     hub.stt.says(200, "Synthetic words.");
     let retry = post_turn(&hub, &id("turn", 11), "", "audio/ogg", &ogg(1)).await;
@@ -948,6 +975,27 @@ async fn a_spoken_turn_goes_to_helm_and_the_answer_comes_back() {
         (again.status, again.body["state"].clone()),
         (200, json!("empty"))
     );
+}
+
+#[tokio::test]
+async fn a_standing_speech_outage_tells_the_phone_since_when() {
+    let hub = start(Opts {
+        stt_retry: Duration::from_millis(5),
+        stt_seen_ok: Some(now_ms() - 5 * 60_000),
+        ..Opts::default()
+    })
+    .await;
+    let (mut me, _welcome) = phone(&hub, PHONE, 0, true).await;
+    hub.stt.says(503, "not ready");
+    let t = id("turn", 1);
+    post_turn(&hub, &t, "", "audio/ogg", &ogg(1)).await;
+    let f = next_where(&mut me, "failed", turn_is(t.clone(), "failed")).await;
+    let msg = f["message"].as_str().unwrap();
+    assert!(
+        msg.starts_with(STT_FAILED) && msg.contains("unreachable since "),
+        "{msg}"
+    );
+    assert_eq!(hub.stt.count(), 2, "the 503 was tried twice");
 }
 
 #[tokio::test]

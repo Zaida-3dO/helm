@@ -40,7 +40,7 @@
 
 use crate::lines::{Lines, PersonUpstream};
 use crate::relay::{Channel, Line, Upstream};
-use crate::stt::Transcribe;
+use crate::stt::{retry_transcribing, SttHealth, Transcribe, STT_RETRY_AFTER};
 use crate::telegram::now_ms;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -1213,6 +1213,10 @@ pub struct VoiceBridge {
     lines: Arc<Lines>,
     cfg: VoiceConfig,
     stt: Option<Arc<dyn Transcribe>>,
+    /// The speech server's health, so a failure can say since when it has been down.
+    stt_health: Option<Arc<SttHealth>>,
+    /// A failing transcription is tried once more after this (normally [`STT_RETRY_AFTER`]).
+    stt_retry_after: Duration,
     /// One recording is transcribed at a time, so the container holds one clip at once and a long
     /// recording never blocks Telegram's own transcriptions.
     stt_gate: tokio::sync::Semaphore,
@@ -1232,6 +1236,8 @@ impl VoiceBridge {
             lines,
             cfg,
             stt: None,
+            stt_health: None,
+            stt_retry_after: STT_RETRY_AFTER,
             stt_gate: tokio::sync::Semaphore::new(1),
             people: Mutex::new(HashMap::new()),
             live_gen: AtomicU64::new(0),
@@ -1267,6 +1273,18 @@ impl VoiceBridge {
     /// Spoken turns are transcribed by `stt`.
     pub fn with_stt(mut self, stt: Arc<dyn Transcribe>) -> Self {
         self.stt = Some(stt);
+        self
+    }
+
+    /// Keep the speech server's health, so a failure tells the phone since when it has been down.
+    pub fn with_stt_health(mut self, health: Arc<SttHealth>) -> Self {
+        self.stt_health = Some(health);
+        self
+    }
+
+    /// Retry a failing transcription after `wait` (instead of [`STT_RETRY_AFTER`]).
+    pub fn with_stt_retry(mut self, wait: Duration) -> Self {
+        self.stt_retry_after = wait;
         self
     }
 
@@ -1472,14 +1490,31 @@ impl VoiceBridge {
         } else {
             "turn.ogg"
         };
-        let result = match stt.transcribe(audio, name, mime).await {
+        let result = match retry_transcribing(stt.endpoint(), self.stt_retry_after, || {
+            stt.transcribe(audio.clone(), name, mime)
+        })
+        .await
+        {
             Ok(text) => Transcript::Text(text),
             Err(why) => {
                 eprintln!("voice: transcription failed: {why}");
-                Transcript::Failed(STT_FAILED.into())
+                Transcript::Failed(self.stt_failed_text())
             }
         };
         self.heard(person, turn, result, now_ms());
+    }
+
+    /// What the phone is told when a transcription fails: the stock line, and when the health
+    /// probe shows the server has been down for a while, since when.
+    fn stt_failed_text(&self) -> String {
+        match self
+            .stt_health
+            .as_ref()
+            .and_then(|h| h.since_text(now_ms()))
+        {
+            Some(since) => format!("{STT_FAILED} It has been {since}."),
+            None => STT_FAILED.into(),
+        }
     }
 
     /// The phone cancels a turn (the rejoin). True when the hub knew the turn.
@@ -1657,7 +1692,8 @@ mod tests {
     use super::*;
     use crate::auth::{Client, Scopes};
     use crate::registry::Registry;
-    use crate::stt::VoiceFuture;
+    use crate::stt::{SttError, SttFailure, SttFuture, SttHealth};
+    use std::sync::atomic::AtomicUsize;
     use tokio::sync::mpsc;
 
     const T0: i64 = 1_800_000_000_000;
@@ -2345,7 +2381,10 @@ mod tests {
         assert_eq!(retry, Begin::New { helm_online: true });
     }
 
-    struct FakeStt(Result<String, String>);
+    struct FakeStt {
+        result: Result<String, SttError>,
+        calls: AtomicUsize,
+    }
 
     impl Transcribe for FakeStt {
         fn transcribe<'a>(
@@ -2353,12 +2392,23 @@ mod tests {
             audio: Vec<u8>,
             name: &'a str,
             mime: &'a str,
-        ) -> VoiceFuture<'a, String> {
+        ) -> SttFuture<'a, String> {
             assert_eq!(
                 (audio.as_slice(), name, mime),
                 (&b"clip"[..], "turn.ogg", "audio/ogg")
             );
-            Box::pin(async move { self.0.clone() })
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let result = self.result.clone();
+            Box::pin(async move { result })
+        }
+    }
+
+    impl FakeStt {
+        fn new(result: Result<String, SttError>) -> Arc<Self> {
+            Arc::new(FakeStt {
+                result,
+                calls: AtomicUsize::new(0),
+            })
         }
     }
 
@@ -2367,7 +2417,9 @@ mod tests {
         for (stt, want, plain) in [
             (Some(Ok("Synthetic words.".to_owned())), "turn:heard", None),
             (
-                Some(Err("the speech-to-text server answered HTTP 500".to_owned())),
+                Some(Err(SttError::plain(
+                    "the speech-to-text server answered HTTP 500",
+                ))),
                 "turn:failed",
                 Some(STT_FAILED),
             ),
@@ -2375,7 +2427,7 @@ mod tests {
         ] {
             let mut r = rig(VoiceConfig::default());
             if let Some(result) = stt {
-                r.bridge = r.bridge.with_stt(Arc::new(FakeStt(result)));
+                r.bridge = r.bridge.with_stt(FakeStt::new(result));
             }
             let (_g, mut live) = phone(&r, 0, true, T0);
             frames(&mut live);
@@ -2391,6 +2443,62 @@ mod tests {
             );
             // The server's own words stay in the log.
             assert_eq!(got[1]["message"].as_str(), plain);
+        }
+    }
+
+    #[tokio::test]
+    async fn passing_stt_trouble_is_retried_once_and_a_standing_outage_says_since_when() {
+        // (the kind of failure, tries the phone should see, and whether the health probe has
+        // seen the server down for five minutes)
+        for (kind, tries, down_for) in [
+            (SttFailure::ConnectTimeout, 2, false),
+            (SttFailure::Refused, 2, false),
+            (SttFailure::Status(502), 2, false),
+            (SttFailure::Status(503), 2, false),
+            (SttFailure::Status(500), 1, false),
+            (SttFailure::ReadTimeout, 1, false),
+            (SttFailure::Refused, 2, true),
+        ] {
+            let stt = FakeStt::new(Err(SttError {
+                kind,
+                why: "synthetic: down".into(),
+            }));
+            let mut r = rig(VoiceConfig::default());
+            let mut b = r
+                .bridge
+                .with_stt(stt.clone())
+                .with_stt_retry(Duration::from_millis(1));
+            if down_for {
+                let h = SttHealth::default();
+                h.note_ok(now_ms() - 5 * 60_000);
+                b = b.with_stt_health(Arc::new(h));
+            }
+            r.bridge = b;
+            let (_g, mut live) = phone(&r, 0, true, T0);
+            frames(&mut live);
+            r.bridge.begin_turn(PERSON, spoken(1), now_ms());
+            r.bridge
+                .transcribe_turn(PERSON, &id(1), b"clip".to_vec(), "audio/ogg")
+                .await;
+            let got = frames(&mut live);
+            assert_eq!(
+                types(&got)[..2],
+                ["turn:transcribing".to_owned(), "turn:failed".to_owned()]
+            );
+            let msg = got[1]["message"].as_str().unwrap();
+            assert_eq!(
+                stt.calls.load(Ordering::SeqCst),
+                tries,
+                "{kind:?} tried wrong"
+            );
+            if down_for {
+                assert!(
+                    msg.starts_with(STT_FAILED) && msg.contains("unreachable since "),
+                    "{msg}"
+                );
+            } else {
+                assert_eq!(msg, STT_FAILED);
+            }
         }
     }
 

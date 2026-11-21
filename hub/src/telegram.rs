@@ -101,7 +101,9 @@ use crate::launcher::{LaunchOutcome, Plan, Reason, WakeOutcome};
 use crate::lines::{Lines, PersonRoute, PersonUpstream};
 use crate::registry::{new_code, normalize_code};
 use crate::relay::{valid_ask_id, Channel, Line, Route, Upstream, OFFLINE};
-use crate::stt::{agent_with, blocking, Stt, Transcribe};
+use crate::stt::{
+    agent_with, blocking, retry_transcribing, Stt, SttHealth, Transcribe, STT_RETRY_AFTER,
+};
 use base64::Engine as _;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -110,7 +112,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-pub use crate::stt::{SttConfig, VoiceFuture, STT_CONNECT, STT_TIMEOUT};
+pub use crate::stt::{SttConfig, SttError, SttFuture, VoiceFuture, STT_CONNECT, STT_TIMEOUT};
 
 /// The fewest milliseconds between two edits of the status message. Telegram allows about one
 /// message per second in a chat; a slower pace leaves room for the final answer.
@@ -258,7 +260,11 @@ pub trait Voice: Send + Sync {
         audio: Vec<u8>,
         name: &'a str,
         mime: &'a str,
-    ) -> VoiceFuture<'a, String>;
+    ) -> SttFuture<'a, String>;
+    /// Where the transcription calls go, for the log line. `""` when there is no real server.
+    fn endpoint(&self) -> &str {
+        ""
+    }
 }
 
 /// Fetching a file Telegram holds. The real one is [`HttpFiles`]; tests use a fake. No error may
@@ -716,6 +722,10 @@ pub struct Bridge {
     receive: Receive,
     /// `None`: recordings go without a transcript.
     voice: Option<Arc<dyn Voice>>,
+    /// The speech server's health, so a failure can say since when it has been down.
+    stt_health: Option<Arc<SttHealth>>,
+    /// A failing transcription is tried once more after this (normally [`STT_RETRY_AFTER`]).
+    stt_retry_after: Duration,
     /// `None`: files are fetched through `voice` alone, and with neither they are off.
     files: Option<Arc<dyn Files>>,
     state: Mutex<State>,
@@ -1096,6 +1106,8 @@ impl Bridge {
             queue_max: cfg.queue_max,
             receive: cfg.receive,
             voice: None,
+            stt_health: None,
+            stt_retry_after: STT_RETRY_AFTER,
             files: None,
             state: Mutex::new(State::default()),
             ops: tokio::sync::Mutex::new(()),
@@ -1201,6 +1213,18 @@ impl Bridge {
     /// Turn voice notes on, transcribed by `voice`.
     pub fn with_voice(mut self, voice: Arc<dyn Voice>) -> Self {
         self.voice = Some(voice);
+        self
+    }
+
+    /// Keep the speech server's health, so a failure can say since when it has been down.
+    pub fn with_stt_health(mut self, health: Arc<SttHealth>) -> Self {
+        self.stt_health = Some(health);
+        self
+    }
+
+    /// Retry a failing transcription after `wait` (instead of [`STT_RETRY_AFTER`]).
+    pub fn with_stt_retry(mut self, wait: Duration) -> Self {
+        self.stt_retry_after = wait;
         self
     }
 
@@ -1935,8 +1959,10 @@ impl Bridge {
         }
     }
 
-    /// Transcribe a recording. When it takes longer than [`SLOW_AFTER`], the chat is told once that
-    /// it is still going, and that message is removed when the transcription ends, either way.
+    /// Transcribe a recording, trying once more when the first failure looks passing. When it
+    /// takes longer than [`SLOW_AFTER`] in total, the chat is told once that it is still going,
+    /// and that message is removed when the transcription ends, either way. A failure names its
+    /// reason, and when the health probe has seen the server down, since when.
     async fn transcribe(
         &self,
         voice: &Arc<dyn Voice>,
@@ -1945,9 +1971,16 @@ impl Bridge {
         name: &str,
         mime: &str,
     ) -> Result<String, String> {
-        let mut work = voice.transcribe(audio, name, mime);
+        let mut work = Box::pin(retry_transcribing(
+            voice.endpoint(),
+            self.stt_retry_after,
+            move || {
+                let audio = audio.clone();
+                voice.transcribe(audio, name, mime)
+            },
+        ));
         if let Ok(done) = tokio::time::timeout(self.slow_after, &mut work).await {
-            return done;
+            return self.stt_failure_text(done);
         }
         let notice = {
             let _g = self.ops.lock().await;
@@ -1979,7 +2012,22 @@ impl Bridge {
                 );
             }
         }
-        done
+        self.stt_failure_text(done)
+    }
+
+    /// Turn a transcription failure into the plain words the chat is given: the reason, and
+    /// when the health probe has seen the server down a while, since when.
+    fn stt_failure_text(&self, done: Result<String, SttError>) -> Result<String, String> {
+        done.map_err(|e| {
+            match self
+                .stt_health
+                .as_ref()
+                .and_then(|h| h.since_text(now_ms()))
+            {
+                Some(since) => format!("{}; {since}", e.why),
+                None => e.why,
+            }
+        })
     }
 
     /// `getFile`, the download, then a look at the bytes (is it a picture Helm shows?) and, for a
@@ -3375,7 +3423,11 @@ impl Voice for HttpVoice {
         audio: Vec<u8>,
         name: &'a str,
         mime: &'a str,
-    ) -> VoiceFuture<'a, String> {
+    ) -> SttFuture<'a, String> {
         self.stt.transcribe(audio, name, mime)
+    }
+
+    fn endpoint(&self) -> &str {
+        self.stt.url()
     }
 }
