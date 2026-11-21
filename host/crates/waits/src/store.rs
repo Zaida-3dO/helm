@@ -206,6 +206,7 @@ fn code_name(code: &str) -> &'static str {
     [
         "timeout",
         "finished",
+        "idle",
         "stopped",
         "errored",
         "gone",

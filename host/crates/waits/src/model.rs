@@ -14,8 +14,9 @@ pub const MAX_PER_CHAT: usize = 8;
 /// many children still has its ordinary waits.
 pub const MAX_WATCHES_PER_CHAT: usize = 32;
 pub const MAX_IN_APP: usize = 64;
-/// A chat that was already idle when the wait was declared is given this long to show it began a
-/// turn (a message just sent may not have started yet) before the wait counts it as finished.
+/// A chat that was already idle when the wait was declared and has never closed a turn is
+/// given this long to show it began one (a message just sent may not have started yet) before
+/// the wait counts it as finished. A chat that has closed turns is answered at once instead.
 pub const IDLE_GRACE_MS: i64 = 5_000;
 /// Longest note an agent may leave on a wait.
 pub const MAX_NOTE: usize = 500;
@@ -91,6 +92,16 @@ pub struct ChatObs {
     /// chat carries on. None when no roll over archived it, or when this session is the
     /// newest of its stack.
     pub rolls_to: Option<String>,
+    /// One of the chat's own helpers is working: a chat it started is running, or a wait it
+    /// declared is still open. Such a chat has not come to an end even while it is itself
+    /// idle — the helpers are still carrying its turn.
+    pub helpers: bool,
+    /// At least one of the chat's turns has closed. A brand-new chat has closed none, and a
+    /// wait on it keeps the idle grace in case its first message has only not started yet.
+    pub finished_turn: bool,
+    /// Its last turn ended unfinished without anyone being told — the same question the
+    /// silent-child note asks. A chat with no live parent is never unreported.
+    pub unreported: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -230,19 +241,46 @@ fn judge_chat(w: &mut Wait, c: Option<&ChatObs>, now: i64) -> Option<Outcome> {
     if c.stopped {
         return named_follow(w, out("stopped", "The chat was stopped."));
     }
+    if c.helpers {
+        // Idle itself, but a chat it started or a wait it declared is still working: the
+        // turn has not come to an end. Count it as still busy; once its helpers are done,
+        // the idle rules below answer.
+        w.state["seenBusy"] = json!(true);
+        return None;
+    }
     let seen_busy = w.state["seenBusy"].as_bool().unwrap_or(false);
     if seen_busy {
         return named_follow(
             w,
             match &c.error {
                 Some(e) => out("errored", format!("Its turn ended in an error: {e}")),
-                None => out("finished", "Its turn ended."),
+                None => out("finished", format!("Its turn ended.{}", unreported_note(c))),
             },
         );
     }
-    // Idle and never seen working: give a just-sent message time to start a turn. A wait
-    // that followed a roll over starts the grace again: the newer session has only just
-    // taken the chat over.
+    if c.finished_turn {
+        // It has closed turns before and is idle now with nothing of its own running:
+        // answer at once with the state it is in, rather than waiting out the grace that
+        // only makes sense while a first message may not have started yet.
+        return named_follow(
+            w,
+            Some(Outcome {
+                code: "idle",
+                detail: format!(
+                    "The chat was already idle: {}.{}",
+                    match &c.error {
+                        Some(e) => format!("its last turn ended in an error: {e}"),
+                        None =>
+                            "its last turn is closed and nothing of its own is working".to_owned(),
+                    },
+                    unreported_note(c)
+                ),
+            }),
+        );
+    }
+    // A chat that has never closed a turn: give a just-sent message time to start one. A
+    // wait that followed a roll over starts the grace again: the newer session has only
+    // just taken the chat over.
     let since = w
         .state
         .get("followedAt")
@@ -256,6 +294,19 @@ fn judge_chat(w: &mut Wait, c: Option<&ChatObs>, now: i64) -> Option<Outcome> {
             detail: "The chat was idle and did not start a turn.".into(),
         }),
     )
+}
+
+/// When the watched chat ended its last turn unfinished and without reporting, the result
+/// says so and points the watcher at steering it, instead of letting it assume the work is
+/// done. No steer happens on its own: the watcher reads this and acts.
+fn unreported_note(c: &ChatObs) -> String {
+    if c.unreported {
+        " idleWithoutWait: true - it ended that turn without reporting and with no wait of \
+         its own open; if you expected more from it, steer it to report to you or to set a wait."
+            .to_owned()
+    } else {
+        String::new()
+    }
 }
 
 /// A roll over archived the session this chat_idle wait watched: move the wait to the
@@ -426,6 +477,9 @@ mod tests {
             stopped: false,
             error: None,
             rolls_to: None,
+            helpers: false,
+            finished_turn: false,
+            unreported: false,
         }))
     }
 
@@ -437,7 +491,40 @@ mod tests {
             stopped: false,
             error: None,
             rolls_to: to.map(str::to_owned),
+            helpers: false,
+            finished_turn: false,
+            unreported: false,
         }))
+    }
+
+    /// Idle with a helper of its own (a child or an open wait) still working.
+    fn with_helpers() -> Observation {
+        Observation::Chat(Some(ChatObs {
+            helpers: true,
+            finished_turn: true,
+            ..chat_obs()
+        }))
+    }
+
+    /// Idle with at least one turn closed: the immediate answer, not the grace.
+    fn closed_turn() -> Observation {
+        Observation::Chat(Some(ChatObs {
+            finished_turn: true,
+            ..chat_obs()
+        }))
+    }
+
+    fn chat_obs() -> ChatObs {
+        ChatObs {
+            archived: false,
+            busy: false,
+            stopped: false,
+            error: None,
+            rolls_to: None,
+            helpers: false,
+            finished_turn: false,
+            unreported: false,
+        }
     }
 
     fn file(exists: bool, len: u64) -> Observation {
@@ -475,11 +562,8 @@ mod tests {
         };
         let ended = |err: Option<&str>| {
             Observation::Chat(Some(ChatObs {
-                archived: false,
-                busy: false,
-                stopped: false,
                 error: err.map(str::to_owned),
-                rolls_to: None,
+                ..chat_obs()
             }))
         };
         let url = || "https://github.com/o/r/pull/1".to_owned();
@@ -509,7 +593,8 @@ mod tests {
                 vec![(2_000, chat(true)), (4_000, chat(true))],
                 None,
             ),
-            // Idle at once: not done until the grace has passed, in case a message is starting.
+            // A chat that has never closed a turn, idle at once: not done until the grace
+            // has passed, in case its first message is starting.
             (
                 "idle inside the grace",
                 chat_id(),
@@ -528,14 +613,32 @@ mod tests {
                 vec![(
                     2_000,
                     Observation::Chat(Some(ChatObs {
-                        archived: false,
-                        busy: false,
                         stopped: true,
-                        error: None,
-                        rolls_to: None,
+                        ..chat_obs()
                     })),
                 )],
                 Some("stopped"),
+            ),
+            // A chat idle behind its own helpers has not finished; once they are gone the
+            // finish comes, and a chat already idle with a closed turn is answered at once
+            // instead of waiting out the grace.
+            (
+                "its own helpers keep it waiting",
+                chat_id(),
+                vec![(2_000, with_helpers()), (4_000, with_helpers())],
+                None,
+            ),
+            (
+                "its helpers end: idle without them is finished",
+                chat_id(),
+                vec![(2_000, with_helpers()), (4_000, ended(None))],
+                Some("finished"),
+            ),
+            (
+                "already idle with a closed turn answers at once",
+                chat_id(),
+                vec![(2_000, closed_turn())],
+                Some("idle"),
             ),
             (
                 "chat deleted",
@@ -786,6 +889,33 @@ mod tests {
         );
         assert!(text.contains("chat s3"), "{text}");
         assert!(text.contains("from s1 to s3"), "{text}");
+    }
+
+    /// A turn that ended unfinished and unreported is flagged in the result, so the watcher
+    /// knows to steer the chat instead of assuming the work is done. A chat already idle that
+    /// way, which the wait never saw working, is answered at once with that same state.
+    #[test]
+    fn an_unreported_ending_is_flagged_so_the_watcher_can_steer() {
+        let un = Observation::Chat(Some(ChatObs {
+            finished_turn: true,
+            unreported: true,
+            ..chat_obs()
+        }));
+        let mut w = wait(Target::ChatIdle {
+            chat_id: "other".into(),
+        });
+        assert_eq!(judge(&mut w, &chat(true), 2_000), None);
+        let o = judge(&mut w, &un, 4_000).unwrap();
+        assert_eq!(o.code, "finished");
+        assert!(o.detail.contains("idleWithoutWait: true"), "{o:?}");
+        assert!(o.detail.contains("steer"), "{o:?}");
+        let mut w2 = wait(Target::ChatIdle {
+            chat_id: "other".into(),
+        });
+        let o2 = judge(&mut w2, &un, 2_000).unwrap();
+        assert_eq!(o2.code, "idle");
+        assert!(o2.detail.contains("already idle"), "{o2:?}");
+        assert!(o2.detail.contains("idleWithoutWait: true"), "{o2:?}");
     }
 
     #[test]

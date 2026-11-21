@@ -278,7 +278,12 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                  outcome within your own permissions. Stopping or archiving this chat cancels its \
                  waits; a fired or cancelled wait never fires again. A chat_idle wait on a chat \
                  that rolls over follows to the session the chat carries on in and keeps waiting; \
-                 its result names both sessions."
+                 its result names both sessions. A chat idle while children or waits of its own \
+                 are working is treated as still working and keeps the wait waiting. A chat \
+                 already idle with a closed turn is answered at once with outcome idle; a brand-\
+                 new chat keeps the short grace first. The result says idleWithoutWait when the \
+                 chat ended its last turn without reporting: steer it to report or to set a \
+                 wait."
             ),
             json!({
                 "type": "object",
@@ -357,9 +362,12 @@ mod tests {
         // An archived session of a roll over: a wait may be declared on it; the watcher
         // follows it to the session that carries on.
         let older = "44444444-4444-4444-4444-444444444444";
+        // A chat idle behind its own helpers: declaring on it is fine; the watcher waits
+        // for the helpers rather than for the turn that has already ended.
+        let helpers = "55555555-5555-5555-5555-555555555555";
         db.write(|tx| {
             tx.execute("INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 1)", [])?;
-            for id in [me, other, older] {
+            for id in [me, other, older, helpers] {
                 tx.execute(
                     "INSERT INTO chats(id, project_id, created_at, updated_at) VALUES (?1, 'p', 1, 1)",
                     [id],
@@ -377,6 +385,9 @@ mod tests {
                 stopped: false,
                 error: None,
                 rolls_to: None,
+                helpers: false,
+                finished_turn: false,
+                unreported: false,
             },
         );
         probes.chats.lock().unwrap().insert(
@@ -387,6 +398,22 @@ mod tests {
                 stopped: false,
                 error: None,
                 rolls_to: Some(other.into()),
+                helpers: false,
+                finished_turn: false,
+                unreported: false,
+            },
+        );
+        probes.chats.lock().unwrap().insert(
+            helpers.into(),
+            ChatObs {
+                archived: false,
+                busy: false,
+                stopped: false,
+                error: None,
+                rolls_to: None,
+                helpers: true,
+                finished_turn: true,
+                unreported: false,
             },
         );
         let svc = Arc::new(WaitsService::new(
@@ -524,6 +551,9 @@ mod tests {
             // Declaring on a session archived by a roll over is allowed: the watcher follows
             // it to the session that carries on.
             wait(json!({"kind": "chat_idle", "chatId": older, "note": "an archived session"})),
+            // As is declaring on a chat idle behind its own helpers: the wait waits for the
+            // helpers rather than for the turn that already ended.
+            wait(json!({"kind": "chat_idle", "chatId": helpers, "note": "behind helpers"})),
             wait(json!({"kind": "file", "path": "C:/work/a..b.txt"})),
             wait(json!({"kind": "pr_checks", "repo": "o/r", "number": 3})),
             wait(json!({"kind": "file", "path": "\\\\host\\share\\x.txt"})),
@@ -535,16 +565,26 @@ mod tests {
         }
         let r = call("app_wait_for", json!({"action": "list"})).await;
         let listed = r["result"]["waits"].as_array().unwrap();
-        assert_eq!(listed.len(), 5);
+        assert_eq!(listed.len(), 6);
         assert_eq!(listed[0]["note"], "the reviewer");
         assert_eq!(listed[1]["target"], format!("chat {older}"));
+        assert_eq!(listed[2]["target"], format!("chat {helpers}"));
+        assert_eq!(listed[3]["target"], "file C:/work/a..b.txt");
         assert_eq!(
-            listed[3]["target"],
+            listed[4]["target"],
             "the checks on https://github.com/o/r/pull/3"
         );
-        assert_eq!(listed[4]["target"], "file \\\\host\\share\\x.txt");
-        // The chat that was busy when declared is remembered as seen working.
+        assert_eq!(listed[5]["target"], "file \\\\host\\share\\x.txt");
+        // The chat that was busy when declared is remembered as seen working; a chat idle
+        // behind its helpers is not — the watcher learns that from the next sweep.
         assert_eq!(svc.list(None).unwrap()[0].state["seenBusy"], true);
+        let behind = svc
+            .list(None)
+            .unwrap()
+            .into_iter()
+            .find(|w| w.note.as_deref() == Some("behind helpers"))
+            .unwrap();
+        assert_eq!(behind.state["seenBusy"], false);
 
         // Cancel: once, and only your own.
         let r = call(
@@ -559,7 +599,7 @@ mod tests {
         )
         .await;
         assert_eq!(r["result"]["cancelled"], false);
-        assert_eq!(svc.list(None).unwrap().len(), 4);
+        assert_eq!(svc.list(None).unwrap().len(), 5);
 
         // Background results come from the chat's worker; a call that reaches the host has none.
         let r = call("app_background_result", json!({"callId": "tu_1"})).await;

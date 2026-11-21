@@ -55,6 +55,9 @@ impl Probes for RealProbes {
                                 stopped: status == "stopped",
                                 error: r.get(2)?,
                                 rolls_to: None,
+                                helpers: false,
+                                finished_turn: false,
+                                unreported: false,
                             })
                         },
                     )
@@ -92,6 +95,28 @@ impl Probes for RealProbes {
                             .flatten()
                             .filter(|l| l != chat_id);
                     }
+                    // A chat whose own children or declared waits are still working has not
+                    // finished, even while it is itself idle. The same rule the attention
+                    // lists apply, read for one chat.
+                    o.helpers = helm_chats::triage::helpers_working(tx, chat_id).unwrap_or(false);
+                    // Has one of its turns closed? A chat that never ran a turn keeps the
+                    // idle grace in the rules; a closed turn makes an idle chat answerable
+                    // at once.
+                    o.finished_turn = tx
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM runs
+                             WHERE chat_id = ?1 AND ended_at IS NOT NULL)",
+                            [chat_id],
+                            |r| r.get::<_, bool>(0),
+                        )
+                        .unwrap_or(false);
+                    // Its last turn ended unfinished and nobody was told: the very question
+                    // the parent's silent-child note asks. A chat with no live parent has
+                    // nobody to have told.
+                    o.unreported = helm_chats::childnote::unreported_turn(tx, chat_id)
+                        .ok()
+                        .flatten()
+                        .is_some();
                     o
                 }))
             })

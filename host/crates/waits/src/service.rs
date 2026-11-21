@@ -168,14 +168,15 @@ impl WaitsService {
         }
     }
 
-    /// A watch declared for a created chat that fires because the child's turn ended, when the
-    /// parent already has a message about that turn (the child reported, or it ended unfinished
-    /// and the parent was told so): firing too would wake the parent twice.
+    /// A watch declared for a created chat that fires because the child's turn ended (or was
+    /// found already idle), when the parent already has a message about that turn (the child
+    /// reported, or it ended unfinished and the parent was told so): firing too would wake the
+    /// parent twice.
     fn child_watch_is_redundant(&self, w: &Wait, o: &Outcome) -> bool {
         let Target::ChatIdle { chat_id: child } = &w.target else {
             return false;
         };
-        if o.code != "finished" || !store::is_watch(&w.state) {
+        if !matches!(o.code, "finished" | "idle") || !store::is_watch(&w.state) {
             return false;
         }
         self.db
@@ -441,6 +442,9 @@ mod tests {
             stopped: false,
             error: None,
             rolls_to: None,
+            helpers: false,
+            finished_turn: false,
+            unreported: false,
         }
     }
 
@@ -941,5 +945,152 @@ mod tests {
         )));
         assert!(!hold(None));
         assert!(real.chat("nope").unwrap().is_none());
+
+        // The same read answers the questions the idle rules ask: nothing of its own is
+        // working yet and no turn has closed, so c7 starts plain.
+        let plain = real.chat("c7").unwrap().unwrap();
+        assert!(!plain.helpers && !plain.finished_turn && !plain.unreported);
+        // A child that started working gives it helpers; a closed turn makes its idle
+        // answer immediate.
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO chats(id, project_id, status, parent_chat_id, created_at, updated_at)
+                 VALUES ('c7kid', 'p', 'running', 'c7', 1, 1)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO runs(id, chat_id, status, started_at, ended_at)
+                 VALUES ('r7', 'c7', 'complete', 1, 2)",
+                [],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+        let helped = real.chat("c7").unwrap().unwrap();
+        assert!(helped.helpers, "a working child counts");
+        assert!(helped.finished_turn, "a closed turn counts");
+        // With the child quiet, an open wait the chat declared itself counts as a helper.
+        db.write(|tx| {
+            tx.execute("UPDATE chats SET status = 'idle' WHERE id = 'c7kid'", [])?;
+            tx.execute(
+                "INSERT INTO agent_waits(id, chat_id, kind, target, state, created_at, expires_at)
+                 VALUES ('aw1', 'c7', 'process', '{}', 'open', 1, 2)",
+                [],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+        assert!(real.chat("c7").unwrap().unwrap().helpers);
+        // The child's own turn never closed and reported: it reads as unreported (its
+        // parent is live), which is what the finish message flags.
+        assert!(real.chat("c7kid").unwrap().unwrap().unreported);
+        db.write(|tx| {
+            tx.execute(
+                "UPDATE agent_waits SET state = 'fired' WHERE id = 'aw1'",
+                [],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+        assert!(
+            !real.chat("c7").unwrap().unwrap().helpers,
+            "a settled wait is not a helper"
+        );
+    }
+
+    /// A chat idle while its own helpers work is not finished: the wait waits for them, and
+    /// when they leave the finish says the ending was unreported. A chat already idle with a
+    /// closed turn is answered at once, with `idle` and its state.
+    #[test]
+    fn waits_wait_for_a_chats_own_helpers_and_answer_at_once_when_it_is_already_idle() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = MigrationRegistry::new();
+        crate::register_migrations(&mut reg);
+        helm_chats::register_migrations(&mut reg);
+        let db = Arc::new(Database::open(&dir.path().join("t.sqlite3"), &reg).unwrap());
+        db.write(|tx| {
+            tx.execute("INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 1)", [])?;
+            for id in ["watcher", "crew", "quiet"] {
+                tx.execute(
+                    "INSERT INTO chats(id, project_id, created_at, updated_at) VALUES (?1, 'p', 1, 1)",
+                    [id],
+                )?;
+            }
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+        let probes = Arc::new(Fake::default());
+        probes.chats.lock().unwrap().insert(
+            "watcher".into(),
+            ChatObs {
+                helpers: true, // watcher itself is busy behind its helpers
+                ..idle()
+            },
+        );
+        probes.chats.lock().unwrap().insert(
+            "crew".into(),
+            ChatObs {
+                helpers: true,
+                finished_turn: true,
+                unreported: true,
+                ..idle()
+            },
+        );
+        probes.chats.lock().unwrap().insert(
+            "quiet".into(),
+            ChatObs {
+                finished_turn: true,
+                ..idle()
+            },
+        );
+        let sink = Arc::new(Sink::default());
+        let svc = WaitsService::new(db, probes.clone());
+        svc.set_sink(sink.clone());
+        let t0 = 1_000_000;
+        for (id, target) in [("h1", "crew"), ("h2", "quiet")] {
+            svc.declare(&wait(
+                id,
+                "watcher",
+                Target::ChatIdle {
+                    chat_id: target.into(),
+                },
+                t0,
+                600,
+            ))
+            .unwrap()
+            .unwrap();
+        }
+        // First sweep: the crew is behind its helpers, so it waits; the already-idle chat
+        // answers at once.
+        svc.sweep_local(t0 + 2_000);
+        assert!(svc
+            .list(Some("watcher"))
+            .unwrap()
+            .iter()
+            .any(|w| w.id == "h1"));
+        let sent = sink.sent.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1, "only the already-idle chat answered");
+        assert_eq!(sent[0].1, delivery_id("h2"));
+        assert!(sent[0].2.contains("chat quiet: idle"), "{}", sent[0].2);
+        assert!(
+            sent[0].2.contains("its last turn is closed"),
+            "{}",
+            sent[0].2
+        );
+        // The crew's helpers finish: now its idle counts, with the unreported flag.
+        probes
+            .chats
+            .lock()
+            .unwrap()
+            .get_mut("crew")
+            .unwrap()
+            .helpers = false;
+        svc.sweep_local(t0 + 4_000);
+        let sent = sink.sent.lock().unwrap().clone();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[1].1, delivery_id("h1"));
+        assert!(sent[1].2.contains("finished"), "{}", sent[1].2);
+        assert!(sent[1].2.contains("idleWithoutWait: true"), "{}", sent[1].2);
+        assert!(sent[1].2.contains("steer"), "{}", sent[1].2);
     }
 }
