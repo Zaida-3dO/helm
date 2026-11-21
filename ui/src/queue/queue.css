@@ -66,6 +66,61 @@
   flex-wrap: wrap;
 }
 
+/* The panel's two tabs: the chat queue and the build queue. */
+.queue-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.queue-tab {
+  border: 1px solid var(--helm-border);
+  border-radius: 8px;
+  background: none;
+  color: var(--helm-muted);
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+
+.queue-tab.on {
+  color: var(--helm-text);
+  background: var(--hover);
+}
+
+/* The Build queue's add form: a title and model on the first line, the brief below,
+   and the board item id on the last. */
+.build-queue-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.build-queue-form-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.build-queue-form-row .ui-input:first-child {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.build-queue-model {
+  max-width: 220px;
+}
+
+/* A build row's title when there is no chat to open yet. */
+.queue-title-plain {
+  grid-area: open;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* A row under drag: lifted off the list, following the pointer, text not selectable. */
 .queue-row.drag-live {
   position: relative;

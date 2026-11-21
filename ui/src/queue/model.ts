@@ -1,8 +1,8 @@
 // The queue's row model: plain-English strings for why a chat waits and how long it has
-// waited, which actions the queue will take for a row, and the chip's count. Pure, so the
-// table test covers it without a host.
+// waited, which actions the queue will take for a row, and the chip's count. The build
+// queue's parts live here too, same reason. Pure, so the table test covers it without a host.
 
-import type { QueueEntry, QueueSignIn, QueueSummary } from '../api/generated/index.ts';
+import type { BuildQueueEntry, QueueEntry, QueueSignIn, QueueSummary } from '../api/generated/index.ts';
 
 /** Why a start waits, in one short line. Unknown reasons show as themselves. */
 export const REASON_LABEL: Record<string, string> = {
@@ -112,4 +112,45 @@ export function signInLine(c: QueueSignIn): string {
 /** Whether any chat needs the person to sign in (Helm has used its tries). */
 export function needsSignIn(summary: QueueSummary | null): boolean {
   return summary != null && summary.signIn.some((c) => c.gaveUp);
+}
+
+// ————— The build queue: features to run one after another. —————
+
+/** What a build entry's state means in one word. Unknown states show as stored. */
+export const BUILD_STATE_LABEL: Record<string, string> = {
+  waiting: 'Waiting',
+  running: 'Running',
+  paused: 'Paused',
+  done: 'Done',
+};
+
+export function buildStateLabel(state: string): string {
+  return BUILD_STATE_LABEL[state] ?? state;
+}
+
+/** One line under an entry's title: what to work on — the brief, shortened to fit, or the
+ * board item when there is no brief — and which model it runs on. */
+export function buildLine(entry: BuildQueueEntry): string {
+  const brief = entry.brief?.trim();
+  const work = brief ? clip(brief, 120) : `Board item ${entry.itemId ?? ''}`.trim();
+  return `${work} · ${entry.model ? `on ${entry.model}` : 'default model'}`;
+}
+
+function clip(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+/** The actions a row offers; mirrors the host's refusals so a dead click never shows.
+ *  Only entries still in line (waiting, paused) can be picked up or moved — a running one
+ *  is mid-build and a done one is history. A done row's chat stays openable; Remove takes
+ *  any row out of the list. */
+export function buildActionsFor(entry: BuildQueueEntry): { open: boolean; pause: boolean; resume: boolean; reorder: boolean; remove: boolean } {
+  return {
+    open: entry.chatId != null,
+    pause: entry.state === 'waiting' || entry.state === 'running',
+    resume: entry.state === 'paused',
+    reorder: entry.state === 'waiting' || entry.state === 'paused',
+    // every listed entry can be taken out of the list: that is how done rows leave it
+    remove: entry.state !== 'removed',
+  };
 }

@@ -1,10 +1,11 @@
 // The queue row model: one table per string family. No host here — the words and the
-// button gate are what the panel shows, so they are tested at their source.
+// button gate are what the panel shows, so they are tested at their source. The build
+// queue's families are tested the same way.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { aheadOf, actionsFor, claudeLine, needsSignIn, queueCount, reasonLabel, sameLine, serverLine, signInLine, waitLine } from './model.ts';
-import type { QueueEntry, QueueSignIn, QueueSummary } from '../api/generated/index.ts';
+import { aheadOf, actionsFor, buildActionsFor, buildLine, buildStateLabel, claudeLine, needsSignIn, queueCount, reasonLabel, sameLine, serverLine, signInLine, waitLine } from './model.ts';
+import type { BuildQueueEntry, QueueEntry, QueueSignIn, QueueSummary } from '../api/generated/index.ts';
 
 const e = (over: Partial<QueueEntry>): QueueEntry => ({
   chatId: 'c',
@@ -98,4 +99,45 @@ test('a failed token refresh reads as retrying until Helm gives up, then asks fo
   assert.equal(needsSignIn(s({})), false);
   assert.equal(needsSignIn(s({ signIn: [c(false)] })), false, 'still being tried: nothing for the person to do');
   assert.equal(needsSignIn(s({ signIn: [c(false), c(true)] })), true);
+});
+
+const b = (over: Partial<BuildQueueEntry>): BuildQueueEntry => ({
+  id: 'b1',
+  profileId: 'p',
+  title: 'T',
+  position: 0,
+  state: 'waiting',
+  ...over,
+});
+
+test('build states read in plain words, unknown ones show as stored', () => {
+  assert.equal(buildStateLabel('waiting'), 'Waiting');
+  assert.equal(buildStateLabel('running'), 'Running');
+  assert.equal(buildStateLabel('paused'), 'Paused');
+  assert.equal(buildStateLabel('done'), 'Done');
+  assert.equal(buildStateLabel('something_new'), 'something_new');
+});
+
+test('the build line names the work and the model, clipping a long brief', () => {
+  for (const [entry, want] of [
+    [b({ brief: 'Read the folder and import each file.' }), 'Read the folder and import each file. · default model'],
+    [b({ itemId: 'item-42' }), 'Board item item-42 · default model'],
+    [b({ brief: 'Trim first', itemId: 'item-42', model: 'claude-sonnet-5' }), 'Trim first · on claude-sonnet-5'],
+    [b({}), 'Board item · default model'],
+  ] as const) {
+    assert.equal(buildLine(entry), want, entry.state);
+  }
+  assert.equal(buildLine(b({ brief: 'x'.repeat(200) })), `${'x'.repeat(119)}… · default model`, 'a long brief is shortened to fit the row');
+});
+
+test('a build row offers only what the host would take for its state', () => {
+  for (const [entry, want] of [
+    [b({ state: 'waiting' }), { open: false, pause: true, resume: false, reorder: true, remove: true }],
+    [b({ state: 'running', chatId: 'c1' }), { open: true, pause: true, resume: false, reorder: false, remove: true }],
+    [b({ state: 'paused' }), { open: false, pause: false, resume: true, reorder: true, remove: true }],
+    [b({ state: 'paused', chatId: 'c1' }), { open: true, pause: false, resume: true, reorder: true, remove: true }],
+    [b({ state: 'done', chatId: 'c1' }), { open: true, pause: false, resume: false, reorder: false, remove: true }],
+  ] as const) {
+    assert.deepEqual(buildActionsFor(entry), want, entry.state);
+  }
 });

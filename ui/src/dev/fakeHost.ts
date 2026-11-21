@@ -157,6 +157,55 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     }
     return fakeQueueList();
   };
+  // A small build queue for the dev host: one feature mid-build, one waiting, one paused
+  // and one finished, so the Build queue tab has every state to show.
+  type FakeBuildEntry = { id: string; profileId: string; title: string; brief?: string; itemId?: string; projectId?: string | null; model?: string | null; position: number; state: string; chatId?: string | null; startedAt?: number | null; finishedAt?: number | null };
+  let fakeBuilds: FakeBuildEntry[] = [
+    { id: 'dev-build-1', profileId: '', title: 'Wire the importer', brief: 'Read the folder and import each file, reporting what arrives.', model: 'claude-sonnet-5', position: 0, state: 'running', chatId: 'dev-queue-chat', startedAt: Date.now() - 900_000 },
+    { id: 'dev-build-2', profileId: '', title: 'Fix the report footer', itemId: 'item-42', position: 1, state: 'waiting' },
+    { id: 'dev-build-3', profileId: '', title: 'Retire the old banner', brief: 'Remove the banner and the styles it needed.', position: 2, state: 'paused' },
+    { id: 'dev-build-4', profileId: '', title: 'Rename the sidebar tile', brief: 'Say "Seat" where it said "Host".', position: 3, state: 'done', chatId: 'dev-queue-chat-2', startedAt: Date.now() - 4_000_000, finishedAt: Date.now() - 3_000_000 },
+  ];
+  const fakeBuildList = () =>
+    fakeBuilds
+      .filter((b) => b.state !== 'removed')
+      .sort((a, b) => a.position - b.position)
+      .map((b, i) => ({ ...b, position: i }));
+  const fakeBuildAct = (kind: 'add' | 'move' | 'pause' | 'resume' | 'remove', a: Record<string, unknown>) => {
+    if (kind === 'add') {
+      fakeBuilds.push({
+        id: `dev-build-${fakeBuilds.length + 1}-${Math.floor(Math.random() * 1e6)}`,
+        profileId: '',
+        title: String(a.title ?? ''),
+        ...(typeof a.brief === 'string' ? { brief: a.brief } : {}),
+        ...(typeof a.itemId === 'string' ? { itemId: a.itemId } : {}),
+        ...(typeof a.model === 'string' ? { model: a.model } : {}),
+        position: fakeBuilds.length,
+        state: 'waiting',
+      });
+    } else if (kind === 'move') {
+      const id = String(a.id);
+      const at = fakeBuilds.findIndex((b) => b.id === id);
+      if (at >= 0) {
+        const moved = fakeBuilds.splice(at, 1)[0]!;
+        const anchor = typeof a.beforeId === 'string' ? fakeBuilds.findIndex((b) => b.id === a.beforeId) : -1;
+        fakeBuilds.splice(anchor >= 0 ? anchor : fakeBuilds.length, 0, moved);
+      }
+    } else {
+      const b = fakeBuilds.find((x) => x.id === String(a.id));
+      if (b) {
+        if (kind === 'pause' && (b.state === 'waiting' || b.state === 'running')) b.state = 'paused';
+        else if (kind === 'resume' && b.state === 'paused') b.state = b.chatId ? 'running' : 'waiting';
+        else if (kind === 'remove') {
+          b.state = 'removed';
+          b.finishedAt = Date.now();
+        }
+      }
+    }
+    emit({ kind: 'build_queue_changed' });
+    return fakeBuildList();
+  };
+
   const answers = new Map<string, (a: Record<string, unknown>) => void>();
   /** forkId → the chat that fork made, so a repeated request answers the same chat. */
   const forks = new Map<string, string>();
@@ -1300,6 +1349,12 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     preference_get: (a) => (a.key === 'sendBehavior' ? sendBehavior : (prefs.get(String(a.key)) ?? null)),
     queue_list: () => fakeQueueList(),
     queue_action: (a) => fakeQueueAct(String(a.chatId), String(a.action), typeof a.beforeChatId === 'string' ? a.beforeChatId : undefined),
+    build_queue_list: () => fakeBuildList(),
+    build_queue_add: (a) => fakeBuildAct('add', a),
+    build_queue_move: (a) => fakeBuildAct('move', a),
+    build_queue_pause: (a) => fakeBuildAct('pause', a),
+    build_queue_resume: (a) => fakeBuildAct('resume', a),
+    build_queue_remove: (a) => fakeBuildAct('remove', a),
     preference: (a) => {
       if (a.key === 'sendBehavior') sendBehavior = { ...HOME_SEND_BEHAVIOR, ...(a.value as object) };
       else prefs.set(String(a.key), a.value);
