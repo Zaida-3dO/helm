@@ -26,7 +26,7 @@ import { bytesFromBase64 } from '../transcript/messageImages.ts';
 import { Recall } from './recall.ts';
 import { ImageViewer } from '../transcript/ImageViewer.tsx';
 import { commandWithArgs, helmCommand, matchesHidden, moveActive, SCOPE_LABEL, skillMenu, skillQuery, withHelmCommands, type Skill } from './skills.ts';
-import { SendHold } from './hold.ts';
+import { SendHold, holdStep } from './hold.ts';
 import { rollOverChat } from '../sidebar/actions.ts';
 import { ContextMenu, toast } from '../ui/index.ts';
 import { panelOps, type QuickItem } from '../api/panel.ts';
@@ -465,7 +465,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
       if (away && remote) {
         // The device is only away: the message waits here (its draft is already saved) and goes
         // once, under this id, when the device is back. Pressing Send again replaces the wait.
-        hold.hold({ submissionId: uid(), action, text });
+        hold.hold({ submissionId: uid(), action, text, deviceUid: remote.deviceUid });
         setWaiting(remote.deviceName);
         return;
       }
@@ -477,15 +477,23 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
 
   // The device is live again: the waiting message goes, exactly once — however many live updates
   // follow. A refusal or an unconfirmed answer leaves it at that one; it is never resent by itself.
+  // It only goes to the device it waited for: another device, or none, takes it back. While another
+  // send is still starting it keeps waiting, and goes when that one has finished.
   useEffect(() => {
-    if (!remote || remote.blocked !== null) {
-      if (!remote) setWaiting(null);
+    const step = holdStep(hold.peek(), remote, sendingRef.current);
+    if (step === 'keep') {
+      if (!hold.peek()) setWaiting(null);
+      return;
+    }
+    if (step === 'cancel') {
+      hold.cancel();
+      setWaiting(null);
       return;
     }
     const held = hold.release();
     setWaiting(null);
     if (held) void deliver(held.text, held.action, held.submissionId);
-  }, [remote, deliver, hold]);
+  }, [remote, deliver, hold, sending]);
 
   const stop = useCallback(
     async () => {

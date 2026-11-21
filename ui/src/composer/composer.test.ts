@@ -6,7 +6,7 @@ import { inFlightView, waitReason } from './inFlight.ts';
 import { row, submission } from '../dev/fixtures.ts';
 import { liveRuns, wrapMarker } from './markup.ts';
 import { permissionLabel } from './permission.ts';
-import { SendHold } from './hold.ts';
+import { SendHold, holdStep } from './hold.ts';
 
 const key = (k: string, m: Partial<KeyShape> = {}): KeyShape => ({ key: k, ctrl: false, shift: false, alt: false, meta: false, ...m });
 const asap: KeyContext = { sendShortcut: 'mod-enter', mode: 'asap', showChoices: true };
@@ -164,18 +164,34 @@ test('wait reason: the running tool of this turn, else the next step', () => {
 test('a send to a device that is away waits and is handed over exactly once, keeping its submission id', () => {
   const h = new SendHold();
   assert.equal(h.release(), null, 'nothing waits yet');
-  h.hold({ submissionId: 'sub-1', action: 'default', text: 'hello' });
+  h.hold({ submissionId: 'sub-1', action: 'default', text: 'hello', deviceUid: 'desk' });
   const held = h.release();
-  assert.deepEqual(held, { submissionId: 'sub-1', action: 'default', text: 'hello' }, 'once the device is live the held send comes to light, under the id made when Send was pressed');
+  assert.deepEqual(held, { submissionId: 'sub-1', action: 'default', text: 'hello', deviceUid: 'desk' }, 'once the device is live the held send comes to light, under the id made when Send was pressed');
   assert.equal(h.release(), null, 'more live updates never send it a second time, whatever the answer was');
   const c = new SendHold();
-  c.hold({ submissionId: 'sub-3', action: 'steer', text: 'wait for me' });
+  c.hold({ submissionId: 'sub-3', action: 'steer', text: 'wait for me', deviceUid: 'desk' });
   assert.deepEqual(c.cancel()?.submissionId, 'sub-3', 'Cancel takes the message back');
   assert.equal(c.release(), null, 'and nothing goes on its own afterwards');
   const r = new SendHold();
-  r.hold({ submissionId: 'sub-4', action: 'default', text: 'first' });
-  r.hold({ submissionId: 'sub-5', action: 'default', text: 'second' });
+  r.hold({ submissionId: 'sub-4', action: 'default', text: 'first', deviceUid: 'desk' });
+  r.hold({ submissionId: 'sub-5', action: 'default', text: 'second', deviceUid: 'desk' });
   assert.equal(r.release()?.submissionId, 'sub-5', 'pressing Send again replaces what waited');
+});
+
+test('a held send only goes to the device it waited for, once that device is live and nothing else is starting', () => {
+  const held = { deviceUid: 'desk' };
+  const live = (deviceUid: string) => ({ deviceUid, blocked: null });
+  const away = (deviceUid: string) => ({ deviceUid, blocked: 'Desk is offline' });
+  for (const [h, remote, sending, want, why] of [
+    [held, live('desk'), false, 'release', 'its device is back and nothing else is starting'],
+    [held, away('desk'), false, 'keep', 'its device is still away'],
+    [held, live('desk'), true, 'keep', 'another send is still starting: it waits for that one, it is not dropped'],
+    [held, live('laptop'), false, 'cancel', 'another device was picked: it never goes there'],
+    [held, away('laptop'), false, 'cancel', 'another device was picked, even one that is away'],
+    [held, null, false, 'cancel', 'the chat is on this PC now: it is taken back'],
+    [null, live('desk'), false, 'keep', 'nothing waits'],
+    [null, null, false, 'keep', 'nothing waits, nothing to take back'],
+  ] as const) assert.equal(holdStep(h, remote, sending), want, why);
 });
 
 test('formatting keys wrap, unwrap, and leave the caret between empty markers', () => {

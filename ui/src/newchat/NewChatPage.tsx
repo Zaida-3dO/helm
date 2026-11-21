@@ -330,7 +330,7 @@ function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShort
           flushers={flushers}
           sendShortcut={sendShortcut}
           registerSetText={() => undefined}
-          remote={device && hostState ? { ...composerFor(device.uid, hostState), blocked: newChatBlocked(hostState) } : null}
+          remote={device && hostState ? { ...composerFor(device.uid, hostState), blocked: newChatBlocked(hostState), holds: false } : null}
         />
       </div>
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menuItems()} onClose={() => setMenu(null)} label="Folder" testId="newchat-folder-menu" />}
