@@ -3226,6 +3226,10 @@ async fn a_household_member_reads_the_whole_list_and_is_refused_nothing() {
         Some(Att::Question),
         Some(&["A", "B"]),
     ));
+    let resend = |chat: &str, text: &str| {
+        json!({"chatId": chat, "messageId": 1, "revision": 1,
+               "submissionId": "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b99", "text": text})
+    };
     let send = |chat: &str, n: u8| {
         json!({"chatId": chat, "clientId": format!("7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b{n:02x}"),
                "text": "hi", "mode": "steer"})
@@ -3297,6 +3301,16 @@ async fn a_household_member_reads_the_whole_list_and_is_refused_nothing() {
             json!({"chatId": "hers", "action": "delete"}),
             Some(code::BAD_ARGS),
         ),
+        // Rewriting a sent message rewinds the chat, so it is for the chat's owner and those it
+        // is shared with; opening one for edit is the same door.
+        ("resend", resend("hers", "edit hers"), None),
+        ("resend", resend("shared", "edit shared"), None),
+        ("resend", resend("mine", "edit mine"), Some(code::REFUSED)),
+        (
+            "edit_open",
+            json!({"chatId": "mine", "messageId": 1}),
+            Some(code::REFUSED),
+        ),
     ];
     for (op, args, want) in cases {
         let got = sam.rpc.call("dev-a", op, args.clone()).await;
@@ -3321,6 +3335,16 @@ async fn a_household_member_reads_the_whole_list_and_is_refused_nothing() {
         );
         // A chat she starts is hers, whoever she names.
         assert_eq!(st.created[0].person_id, "person-b");
+        // What she resends: plain on her own chat, marked as hers on one shared with her, and
+        // never on a chat that is neither.
+        assert_eq!(st.resends.len(), 2);
+        assert_eq!(st.resends[0].text, "edit hers");
+        assert!(
+            st.resends[1].text.starts_with("[Message from Sam (household)")
+                && st.resends[1].text.ends_with("edit shared"),
+            "{}",
+            st.resends[1].text
+        );
         // Her project ops are served like anyone's.
         assert_eq!(st.projects_created.len(), 1);
         assert_eq!(st.projects_set.len(), 1);
