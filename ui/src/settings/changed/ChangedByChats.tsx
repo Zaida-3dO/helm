@@ -1,18 +1,16 @@
-// Settings → General → Changed by chats: the settings a chat has changed (the host keeps the last
-// 100), each with Undo. Undo is refused by the host when the setting has changed since.
+// Settings → General: the settings a chat has changed (the host keeps the last 100) live behind
+// one button — "Changes made by chats (N)" — that opens them in their own dialog, each row with
+// Undo. Undo is refused by the host when the setting has changed since.
 
 import { useCallback, useEffect, useState } from 'react';
 import { useShell } from '../../shell/context.ts';
-import { Button, SettingRow, toast } from '../../ui/index.ts';
+import { Button, Dialog, SettingRow, toast } from '../../ui/index.ts';
 import { changedBy, changeText, keyTitle, parseChanges, type SettingChange } from './model.ts';
-
-const SHOWN = 8;
 
 export function ChangedByChats() {
   const shell = useShell();
   const [changes, setChanges] = useState<SettingChange[]>([]);
-  const [all, setAll] = useState(false);
-  const [busy, setBusy] = useState<number | null>(null);
+  const [open, setOpen] = useState(false);
   const reload = useCallback(
     () =>
       shell
@@ -26,6 +24,25 @@ export function ChangedByChats() {
     const offs = [shell.bus.on('external_settings', () => void reload()), shell.bus.on('preferences', () => void reload())];
     return () => offs.forEach((o) => o());
   }, [shell, reload]);
+  // Nothing to look at until a chat has changed something; the button appears with the first change.
+  if (changes.length === 0) return null;
+  return (
+    <div className="settings-action-row">
+      <Button onClick={() => setOpen(true)} data-testid="changed-by-chats-open">
+        Changes made by chats ({changes.length})
+      </Button>
+      {open && (
+        <Dialog title="Changes made by chats" onClose={() => setOpen(false)} testId="changed-by-chats" padded>
+          <ChangedList changes={changes} onReload={reload} />
+        </Dialog>
+      )}
+    </div>
+  );
+}
+
+function ChangedList({ changes, onReload }: { changes: SettingChange[]; onReload: () => void }) {
+  const shell = useShell();
+  const [busy, setBusy] = useState<number | null>(null);
 
   const undo = async (c: SettingChange) => {
     setBusy(c.changeId);
@@ -35,16 +52,13 @@ export function ChangedByChats() {
       toast.show({ kind: 'error', text: String((e as Error).message ?? e) });
     } finally {
       setBusy(null);
-      void reload();
+      onReload();
     }
   };
 
-  const shown = all ? changes : changes.slice(0, SHOWN);
   return (
-    <div data-testid="changed-by-chats">
-      <h3 className="settings-section">Changed by chats</h3>
-      {changes.length === 0 && <p>No chat has changed a setting yet.</p>}
-      {shown.map((c) => {
+    <div data-testid="changed-by-chats-list">
+      {changes.map((c) => {
         const by = changedBy(c.chatId, shell.store.chatList());
         return (
           <SettingRow
@@ -68,11 +82,6 @@ export function ChangedByChats() {
           </SettingRow>
         );
       })}
-      {changes.length > SHOWN && (
-        <Button variant="text" onClick={() => setAll((v) => !v)}>
-          {all ? 'Show fewer' : `Show all ${changes.length}`}
-        </Button>
-      )}
     </div>
   );
 }
