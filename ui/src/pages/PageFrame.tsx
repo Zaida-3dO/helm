@@ -3,16 +3,16 @@
 //
 // The frame is `<iframe sandbox="allow-scripts">` with no `allow-same-origin`, so
 // the page has an opaque origin and no way to reach this page, Helm's IPC, cookies or storage. It
-// loads from the `helmpage` scheme under a random per-open address. It is offline until the network
-// is allowed (the page's own notice offers it when the page tried, and the bar's menu has it); that
-// switch belongs to this open only (it is not saved) and changing it ends the session and starts
-// another, so the page reloads from its saved state. Where the web view cannot keep an offline
-// page's scripts off the network (the host tells, per open), an offline page is shown without
-// scripts and says so, with allowing the network as the way to run them.
+// loads from the `helmpage` scheme under a random per-open address. The network follows the pin:
+// a page pinned for the acting profile runs online and everything else stays offline; the host
+// decides that when it opens the session, not this frame. Pinning or unpinning here ends the
+// session and starts another so the rule takes effect at once. Where the web view cannot keep an
+// offline page's scripts off the network (the host tells, per open), an offline page is shown
+// without scripts and says so, with pinning the page as the way to run them.
 //
 // The bar keeps one button, Reload, which is what a page needs day to day. The rest are rare and
-// sit in its "…" menu: the network switch, adding to or removing from the Pages list, sending the
-// page's messages to the chat in view, and resetting its storage.
+// sit in its "…" menu: adding to or removing from the Pages list, sending the page's messages to
+// the chat in view, showing the file in File Explorer, and resetting its storage.
 //
 // The frame is read and polled only while the tab is shown. A rewrite of the file by an agent
 // shows up as a new revision at the next poll and the frame reloads in place, with its saved
@@ -67,7 +67,6 @@ function words(e: unknown): string {
 export function PageFrame({ api, path, remote, chatId, visible, onTitle }: PageFrameProps) {
   const ops = useMemo(() => pageOps(api), [api]);
   const [shown, setShown] = useState(visible);
-  const [network, setNetwork] = useState(false);
   const [nonce, setNonce] = useState(0);
   const [session, setSession] = useState<PageSession | null>(null);
   const [frameRev, setFrameRev] = useState(0);
@@ -101,14 +100,14 @@ export function PageFrame({ api, path, remote, chatId, visible, onTitle }: PageF
     if (visible) setShown(true);
   }, [visible]);
 
-  // Open a session once the tab is first shown, and again when the network switch or Reload ends one.
+  // Open a session once the tab is first shown, and again when Reload or a pin change ends one.
   useEffect(() => {
     if (!shown) return;
     let cancelled = false;
     let opened: PageSession | null = null;
     setOpenError(null);
     setSession(null);
-    (remote ? ops.openRemote(remote.deviceUid, remote.pageId, network) : ops.open(path, chatRef.current, network))
+    (remote ? ops.openRemote(remote.deviceUid, remote.pageId) : ops.open(path, chatRef.current))
       .then((s) => {
         if (cancelled) {
           void ops.close(s.session).catch(() => undefined);
@@ -132,7 +131,7 @@ export function PageFrame({ api, path, remote, chatId, visible, onTitle }: PageF
     };
     // onTitle is the tab's setter and changes every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ops, path, remote?.deviceUid, remote?.pageId, network, nonce, shown]);
+  }, [ops, path, remote?.deviceUid, remote?.pageId, nonce, shown]);
 
   // The file watch.
   useEffect(() => {
@@ -316,7 +315,19 @@ export function PageFrame({ api, path, remote, chatId, visible, onTitle }: PageF
     const action = pin
       ? ops.unpin(pin.id).then(() => setPin(null))
       : ops.pin(session.path, { chatId }).then((r) => setPin(r.page));
-    action.catch((e: unknown) => toast.show({ kind: 'error', text: words(e) }));
+    // The network follows the pin, and the host fixes it when the session opens: end this open
+    // so the new rule takes effect at once.
+    action
+      .then(() => setNonce((n) => n + 1))
+      .catch((e: unknown) => toast.show({ kind: 'error', text: words(e) }));
+  };
+
+  // Show the page's file in File Explorer; the panel's own reveal op, same gate as the page.
+  const revealHere = () => {
+    if (!session) return;
+    api('file_reveal', { path: session.path }).catch((e: unknown) =>
+      toast.show({ kind: 'error', text: words(e) }),
+    );
   };
 
   const linkHere = () => {
@@ -367,14 +378,14 @@ export function PageFrame({ api, path, remote, chatId, visible, onTitle }: PageF
 
   const canLinkHere = Boolean(!remote && pin && chatId && pin.chatId !== chatId);
   const menuItems: MenuItem[] = [
-    { id: 'network', label: 'Allow network for this open', checked: network, onSelect: () => setNetwork((n) => !n) },
     // Pinning belongs to the PC that holds the page.
     ...(remote ? [] : [{ id: 'pin', label: pin ? 'Remove from Pages' : 'Add to Pages', onSelect: togglePin }]),
     ...(canLinkHere ? [{ id: 'link-chat', label: 'Send its messages to this chat', onSelect: linkHere }] : []),
+    ...(remote ? [] : [{ id: 'reveal', label: 'Show in File Explorer', onSelect: revealHere }]),
     { id: 'reset', label: 'Reset page storage…', danger: true, separator: true, onSelect: resetStorage },
   ];
   return (
-    <div className="pg-root" data-testid="page-frame-root" data-network={network ? 'on' : 'off'} data-scripts={session.scripts ? 'on' : 'off'}>
+    <div className="pg-root" data-testid="page-frame-root" data-network={session.network ? 'on' : 'off'} data-scripts={session.scripts ? 'on' : 'off'}>
       <div className="pg-toolbar" role="toolbar" aria-label="Page controls">
         <span className="pg-name" title={session.path}>
           {session.title}
@@ -398,28 +409,16 @@ export function PageFrame({ api, path, remote, chatId, visible, onTitle }: PageF
         </Button>
       </div>
       {menuAt && <ContextMenu x={menuAt.x} y={menuAt.y} label="Page actions" testId="page-menu" items={menuItems} onClose={() => setMenuAt(null)} />}
-      {network && (
-        <div className="pg-notice" data-testid="page-network-notice">
-          HTTPS network enabled for this open. The page can send and receive data over the internet.{' '}
-          <button type="button" className="pg-link" onClick={() => setNetwork(false)} data-testid="page-network-off">
-            Turn off
-          </button>
-        </div>
-      )}
       {!session.scripts && (
         <div className="pg-notice" data-testid="page-scripts-off">
-          Scripts are off while this page is offline: this version of the web view cannot keep them from reaching the network.{' '}
-          <button type="button" className="pg-link" onClick={() => setNetwork(true)} data-testid="page-scripts-network">
-            Allow network and run scripts
-          </button>
+          Scripts are off while this page is offline: this version of the web view cannot keep them
+          from reaching the network. Add it to Pages to let it use the network and run its scripts.
         </div>
       )}
-      {!network && blocked && (
+      {blocked && (
         <div className="pg-notice" data-testid="page-network-hint">
-          The page tried to use the network.{' '}
-          <button type="button" className="pg-link" onClick={() => setNetwork(true)} data-testid="page-network-allow">
-            Allow it for this open
-          </button>
+          The page tried to use the network, which offline pages are kept from. Add it to Pages to
+          let it.
         </div>
       )}
       {gone && <div className="pg-notice">The page file is gone. This is the last copy that was read.</div>}

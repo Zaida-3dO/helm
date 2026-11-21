@@ -216,7 +216,10 @@ describe("panel: Changes, the gate, vault notes, the viewer and quick-open", { t
       } else {
         await page().waitForSelector(`${tid("page-scripts-off")}:visible`, { timeout: 10_000 });
         assert.equal(await other.locator("#out").textContent(), "other");
-        await page().locator(`${tid("page-scripts-network")}:visible`).click();
+        // The network follows the pin, decided by the host: pinning the page reopens the session
+        // online and the scripts run.
+        await page().locator(`${tid("page-more")}:visible`).click();
+        await page().locator(`${tid("page-menu")} [data-item="pin"]`).click();
         await page().waitForSelector(`${tid("page-frame-root")}[data-network="on"][data-scripts="on"]:visible`, { timeout: 20_000 });
       }
       assert.deepEqual(JSON.parse(await finished(other)), { secret: "OTHER-SECRET" });

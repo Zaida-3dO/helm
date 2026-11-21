@@ -7,6 +7,12 @@
 import type { PinnedPage, RemotePages } from './api.ts';
 import type { DevicesList } from '../devices/api.ts';
 
+/** The letter tile for a page with no icon of its own: the title's first character, upper case. */
+export function tileLetter(title: string): string {
+  const first = Array.from(title.trim())[0];
+  return first ? first.toUpperCase() : '';
+}
+
 export interface PageRow {
   page: PinnedPage;
   /** The PC that holds the pin; null for this PC's own. */

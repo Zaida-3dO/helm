@@ -1,7 +1,9 @@
 // The sidebar's Pages view, as the tile row and its More menu share it (the shape of
 // `useTasksEntry`): the count of pages pinned by the active profile for the tile's badge, and the
 // dialog that lists them. The list is one: this PC's pins, then the paired PCs', de-duplicated,
-// with the PC as a small detail on the row and never a group of its own. Clicking one opens it as
+// with the PC as a small detail on the row and never a group of its own, and a PC that could not
+// be read left quiet. Each row leads with the bundle's own favicon (asked once per path) or a
+// letter tile. Clicking one opens it as
 // a tab in the side panel; Unpin removes it from the list (its saved state stays, so pinning it
 // again finds it as it was). The mounting sidebar passes the active profile's id, or nothing for
 // every page.
@@ -13,7 +15,7 @@ import { Button, Dialog, toast } from '../ui/index.ts';
 import { IconUnpin } from '../ui/icons.tsx';
 import { pageOps } from './api.ts';
 import type { PinnedPage, RemotePages } from './api.ts';
-import { mergePages } from './list.ts';
+import { mergePages, tileLetter } from './list.ts';
 import { openPageTab, openRemotePageTab } from './open.ts';
 import { displayPath, shortPath } from '../panel/viewer/paths.ts';
 import { devicesStoreFor } from '../devices/store.ts';
@@ -35,6 +37,9 @@ export function usePagesEntry(api: Api, bus: EventBus, profileId?: string | null
   const [pages, setPages] = useState<PinnedPage[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [remote, setRemote] = useState<RemotePages[] | null>(null);
+  // Each page's bundle favicon, asked once per path while the list is open. Remote pages keep
+  // their icon on their own PC, so they show the letter tile.
+  const [icons, setIcons] = useState<Record<string, string | null>>({});
 
   const refresh = useCallback(() => {
     ops
@@ -71,6 +76,28 @@ export function usePagesEntry(api: Api, bus: EventBus, profileId?: string | null
     return mergePages(pages ?? [], remote ?? [], devicesStoreFor(api, bus).snapshot.list, personId);
   }, [api, bus, pages, remote, profileId]);
 
+  // Fetch a favicon for each local page not asked for yet; a page without one gets null and the
+  // letter tile, and a failed ask is remembered so it is not retried on every render.
+  useEffect(() => {
+    if (!open) return;
+    const missing = [...new Set(merged.rows.filter((r) => !r.device).map((r) => r.page.path))].filter((p) => !(p in icons));
+    if (missing.length === 0) return;
+    let cancelled = false;
+    void Promise.all(
+      missing.map((p) => ops.icon(p).then((r) => [p, r.icon] as const).catch(() => [p, null] as const)),
+    ).then((got) => {
+      if (cancelled) return;
+      setIcons((cur) => {
+        const next = { ...cur };
+        for (const [p, icon] of got) next[p] = icon;
+        return next;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [ops, open, merged, icons]);
+
   const show = (p: PinnedPage) => {
     if (!openPageTab(p.path)) {
       toast.show({ kind: 'error', text: 'The side panel has no room for another tab.' });
@@ -96,7 +123,9 @@ export function usePagesEntry(api: Api, bus: EventBus, profileId?: string | null
         </p>
       )}
       <ul className="pg-list">
-        {merged.rows.map(({ page: p, device }) => (
+        {merged.rows.map(({ page: p, device }) => {
+          const icon = device ? null : icons[p.path];
+          return (
           <li key={device ? `${device.uid}:${p.id}` : p.id} className="pg-list-row">
             <button
               type="button"
@@ -105,10 +134,15 @@ export function usePagesEntry(api: Api, bus: EventBus, profileId?: string | null
               title={device ? `${p.title}\nOn ${device.name}\n${displayPath(p.path)}` : `${p.title}\n${displayPath(p.path)}`}
               data-testid={device ? 'pages-remote-row' : 'pages-row'}
             >
-              <span className="pg-list-title">{p.title}</span>
-              <span className="pg-list-path">
-                {shortPath(p.path)}
-                {device && <span className="pg-list-on" data-testid="pages-row-on"> · on {device.name}</span>}
+              <span className="pg-list-icon" data-testid="pages-row-icon" aria-hidden="true">
+                {icon ? <img src={icon} alt="" /> : <span className="pg-list-letter">{tileLetter(p.title)}</span>}
+              </span>
+              <span className="pg-list-text">
+                <span className="pg-list-title">{p.title}</span>
+                <span className="pg-list-path">
+                  {shortPath(p.path)}
+                  {device && <span className="pg-list-on" data-testid="pages-row-on"> · on {device.name}</span>}
+                </span>
               </span>
             </button>
             {!device && (
@@ -126,13 +160,9 @@ export function usePagesEntry(api: Api, bus: EventBus, profileId?: string | null
               </Button>
             )}
           </li>
-        ))}
+          );
+        })}
       </ul>
-      {merged.problems.map((pr) => (
-        <p key={pr.uid} className="pg-handoff-note" data-testid="pages-device-problem">
-          {pr.name}: {pr.message}
-        </p>
-      ))}
     </Dialog>
   ) : null;
 

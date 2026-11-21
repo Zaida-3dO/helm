@@ -51,9 +51,12 @@ export interface PageStatus {
 
 export function pageOps(api: Api) {
   return {
-    /** Reads the file and starts a session. `network` is fixed for the session's life. */
-    open: (path: string, chatId: string | null, network: boolean) =>
-      api<PageSession>('page_open', { path, ...(chatId ? { chatId } : {}), network }),
+    /**
+     * Reads the file and starts a session. The host decides the network: it is on when the page
+     * is pinned for the acting profile, off otherwise, and fixed for the session's life.
+     */
+    open: (path: string, chatId: string | null) =>
+      api<PageSession>('page_open', { path, ...(chatId ? { chatId } : {}) }),
     reload: (session: string) => api<Omit<PageSession, 'state' | 'stateRevision' | 'pins'>>('page_reload', { session }),
     close: (session: string) => api<{ closed: boolean }>('page_close', { session }),
     /** The file watch: has the file changed since the session last read it? */
@@ -73,8 +76,10 @@ export function pageOps(api: Api) {
     /** The pages pinned on the household's other PCs that the active profile's person may open. */
     devicePages: () => api<{ devices: RemotePages[] }>('devices_pages', {}),
     /** A page from another PC, brought across and opened here; answers as `open` does. */
-    openRemote: (deviceUid: string, pageId: string, network: boolean) => api<PageSession>('devices_page_open', { deviceUid, pageId, network }),
+    openRemote: (deviceUid: string, pageId: string) => api<PageSession>('devices_page_open', { deviceUid, pageId }),
     list: (profileId?: string | null) => api<{ pages: PinnedPage[] }>('page_list', profileId ? { profileId } : {}),
+    /** The bundle's own favicon as a data URL, or null; for the Pages list row icon. */
+    icon: (path: string) => api<{ icon: string | null }>('page_icon', { path }),
   };
 }
 

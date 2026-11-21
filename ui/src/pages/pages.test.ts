@@ -15,7 +15,7 @@ import {
 } from './protocol.ts';
 import { buildTheme, plainValue, THEME_VARIABLES } from './theme.ts';
 import { remoteTabKey, validPagePath, validRemote } from './open.ts';
-import { mergePages } from './list.ts';
+import { mergePages, tileLetter } from './list.ts';
 import type { PinnedPage, RemotePages } from './api.ts';
 import type { DeviceInfo, DevicesList } from '../devices/api.ts';
 
@@ -278,6 +278,19 @@ test('one Pages list: this PC first, other PCs as plain rows with a detail, dedu
   // Devices are ordered by name, regardless of the order they were answered in.
   const m5 = mergePages([], [rem('z', 'attic', [pin('a1', '', 'H:/a.html')]), rem('a', 'Desk PC', [pin('b1', '', 'H:/b.html')]), rem('m', 'Laptop', [pin('c1', '', 'H:/c.html')])], null, null);
   assert.deepEqual(shape(m5.rows), ['a1@attic', 'b1@Desk PC', 'c1@Laptop'], 'names order regardless of case, like the device menu');
+});
+
+test('the letter tile stands in when a page has no icon of its own', () => {
+  const rows: Array<[string, string]> = [
+    ['Plan', 'P'],
+    ['  planting calendar', 'P'],
+    ['Budget 2026', 'B'],
+    ['', ''],
+    ['   ', ''],
+    ['éclair', 'É'],
+    ['\u{1f680} launch', '\u{1f680}'],
+  ];
+  for (const [title, want] of rows) assert.equal(tileLetter(title), want, JSON.stringify(title));
 });
 
 test('a page from another PC keeps its own tab key and survives a restore only whole', () => {

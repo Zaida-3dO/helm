@@ -238,9 +238,10 @@ export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
       case 'page_list':
         return { pages: pinned };
       // A page opens onto a blank frame, so its tab, its bar and its menu can be looked at here.
+      // As on the real host, the network follows the pin: a pinned page opens online.
       case 'page_open': {
         const path = String(args.path ?? '');
-        const network = args.network === true;
+        const network = pinned.some((x) => x.path === path);
         pageSeq += 1;
         const name = path.split('\\').pop() ?? 'page.html';
         return { session: `s${pageSeq}`, channel: `c${pageSeq}`, url: 'about:blank', path, key: path.toLowerCase(), title: name, network, scripts: true, revision: 1, size: 0, state: null, stateRevision: 0, pins: pinned.filter((x) => x.path === path) };
@@ -259,6 +260,11 @@ export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         pinned = [...pinned, page];
         return { page, created: true };
       }
+      case 'page_icon':
+        // The fake Budget page carries an icon; the rest show the letter tile.
+        return String(args.path ?? '').includes('budget')
+          ? { icon: 'data:image/svg+xml;base64,' + btoa('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" rx="3" fill="#4b7bec"/></svg>') }
+          : { icon: null };
       case 'page_link_chat':
         return { linked: true };
       case 'page_unpin':

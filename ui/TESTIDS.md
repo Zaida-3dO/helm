@@ -224,12 +224,12 @@ Send now `Ctrl+Alt+Enter`, Stop and send waiting messages `Esc`.
 | `forwards-empty` / `forward-row-<id>` / `forward-open-<id>` / `forward-stop-<id>` | Settings → Devices' forwarded ports: the empty note, one forward's row (id = the forward id) and its Open and Stop | |
 | `file-save-here` | The file viewer's Save here button on a file of another PC (saves a copy on this PC) | |
 | `nav-archived` / `nav-settings` | The sidebar footer's Archived chats and Settings entries | `nav-archived`: `aria-pressed` while the archived list shows |
-| `pages-list` / `pages-row` / `pages-empty` | The Pages dialog, one pinned page in it (click opens it as a tab), and the empty note | |
-| `pages-remote-row` / `pages-row-on` / `pages-device-problem` | One page pinned on another PC in the Pages dialog (click brings it across and opens it as a tab), its small "on <PC>" detail, and the line saying a PC could not be read | |
-| `page-frame-root` / `page-frame` / `page-error` | A page tab's body (`data-network` and `data-scripts` are `on` or `off`), its sandboxed frame, and the error shown when the page could not open | |
-| `page-reload` / `page-more` / `page-menu` | The page bar's Reload button, its "…" button, and the menu it opens (Allow network for this open, ticked while on; Add to / Remove from Pages; Send its messages to this chat, only when the page is linked elsewhere; Reset page storage) | |
-| `page-network-notice` / `page-network-hint` / `page-runtime-error` | The notice while the network is on (its `page-network-off` link turns it off), the hint after an offline page tried the network (its `page-network-allow` link allows it), and the dismissible script-error strip | |
-| `page-scripts-off` / `page-scripts-network` | The notice on an offline page shown without scripts (a web view that cannot keep them off the network) and its "Allow network and run scripts" button | |
+| `pages-list` / `pages-row` / `pages-row-icon` / `pages-empty` | The Pages dialog, one pinned page in it (click opens it as a tab), the row's icon (the bundle's favicon or a letter tile), and the empty note | |
+| `pages-remote-row` / `pages-row-on` | One page pinned on another PC in the Pages dialog (click brings it across and opens it as a tab) and its small "on <PC>" detail | |
+| `page-frame-root` / `page-frame` / `page-error` | A page tab's body (`data-network` and `data-scripts` are `on` or `off`, from the host's per-open rule: a pinned page runs online), its sandboxed frame, and the error shown when the page could not open | |
+| `page-reload` / `page-more` / `page-menu` | The page bar's Reload button, its "…" button, and the menu it opens (Add to / Remove from Pages; Send its messages to this chat, only when the page is linked elsewhere; Show in File Explorer, for a page on this PC; Reset page storage) | |
+| `page-network-hint` / `page-runtime-error` | The quiet hint after an offline page tried the network (pinning it is what lets it), and the dismissible script-error strip | |
+| `page-scripts-off` | The notice on an offline page shown without scripts (a web view that cannot keep them off the network); adding the page to Pages is what lets it run them | |
 | `page-handoff` / `page-handoff-text` / `page-handoff-send` / `page-handoff-add` / `page-handoff-cancel` / `page-handoff-open` / `page-handoff-url` | Helm's confirmation for a page's message or link: the dialog, the editable text, Send to agent, Add to message, Cancel, Open link and the address | |
 | `run-page` | The file tab's "Run page" button, shown for an HTML file | |
 
