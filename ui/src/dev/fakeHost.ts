@@ -12,6 +12,7 @@ import type {
   MessageDetails,
   MessageRow,
   SendBehavior,
+  SessionMark,
   Submission,
   ThreadState,
   TranscriptPage,
@@ -724,23 +725,62 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     if (refusal) throw refusal;
   }
 
+  /** The chat's roll-over sessions, oldest first: the chain it sits in, or just it. */
+  function sessionsOf(c: FakeChat): FakeChat[] {
+    if (!c.chat.stackId) return [c];
+    const chain = [c];
+    let cur = c;
+    while (cur.chat.prevSessionId) {
+      const p = chats.get(cur.chat.prevSessionId);
+      if (!p) break;
+      chain.unshift(p);
+      cur = p;
+    }
+    let nxt = c;
+    while (nxt.chat.nextSessionId) {
+      const n = chats.get(nxt.chat.nextSessionId);
+      if (!n) break;
+      chain.push(n);
+      nxt = n;
+    }
+    return chain;
+  }
+
   function page(c: FakeChat, a: Record<string, unknown>): TranscriptPage {
-    let end = c.rows.length;
-    if (typeof a.before === 'string') end = Math.max(0, c.rows.findIndex((r) => String(r.id) === a.before));
+    // With `stack` the page covers the chat's whole roll-over stack as one transcript, ids
+    // ascending across sessions, with a mark wherever two sessions meet inside the page.
+    const all = a.stack === true ? sessionsOf(c).flatMap((s) => s.rows) : c.rows;
+    let end = all.length;
+    if (typeof a.before === 'string') end = Math.max(0, all.findIndex((r) => String(r.id) === a.before));
     if (typeof a.around === 'number') {
-      const at = c.rows.findIndex((r) => r.id === a.around);
-      if (at >= 0) end = Math.min(c.rows.length, at + 1 + Math.floor(PAGE / 2));
+      const at = all.findIndex((r) => r.id === a.around);
+      if (at >= 0) end = Math.min(all.length, at + 1 + Math.floor(PAGE / 2));
     }
     const start = Math.max(0, end - PAGE);
+    const messages = all.slice(start, end);
+    const sessionMarks: SessionMark[] = [];
+    for (let j = 1; j < messages.length; j++) {
+      const above = messages[j - 1]!;
+      const below = messages[j]!;
+      if (above.chatId === below.chatId) continue;
+      sessionMarks.push({
+        aboveMessageId: above.id,
+        belowMessageId: below.id,
+        sessionId: above.chatId,
+        title: chats.get(above.chatId)?.chat.title ?? above.chatId,
+        rolledOverAt: chats.get(below.chatId)?.chat.createdAt ?? 0,
+      });
+    }
     return {
       chatId: c.chat.id,
-      messages: c.rows.slice(start, end),
+      messages,
       hasOlder: start > 0,
-      hasNewer: end < c.rows.length,
-      olderCursor: start > 0 ? String(c.rows[start]!.id) : null,
+      hasNewer: end < all.length,
+      olderCursor: start > 0 ? String(all[start]!.id) : null,
       newerCursor: null,
       runs: [],
       pending: c.pending,
+      sessionMarks,
       revision,
     };
   }
@@ -824,6 +864,30 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
           })
         : [];
       return { rows, nextCursor: null };
+    },
+    chat_stack: (a) => {
+      const sessions = sessionsOf(find(a.chatId));
+      return {
+        stackId: sessions[0]!.chat.stackId,
+        latestId: sessions[sessions.length - 1]!.chat.id,
+        sessions: sessions.map((s) => ({ id: s.chat.id, title: s.chat.title, archived: s.chat.archived, createdAt: s.chat.createdAt })),
+      };
+    },
+    stack_find: (a) => {
+      const sessions = sessionsOf(find(a.chatId));
+      const q = String(a.query ?? '').toLowerCase();
+      const rows: { sessionId: string; id: number; count: number }[] = [];
+      if (q.trim()) {
+        for (const s of [...sessions].reverse()) {
+          for (const r of [...s.rows].reverse()) {
+            const text = (r.role === 'user' || r.role === 'assistant' || a.includeActivity ? r.text : '').toLowerCase();
+            let count = 0;
+            for (let i = text.indexOf(q); i >= 0; i = text.indexOf(q, i + q.length)) count++;
+            if (count) rows.push({ sessionId: s.chat.id, id: r.id, count });
+          }
+        }
+      }
+      return { rows: rows.slice(0, 50), truncated: rows.length > 50 };
     },
     chat_send: (a) => {
       const c = find(a.chatId);
@@ -1195,7 +1259,25 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     },
     chat_compact: () => null,
     chat_warm: () => null,
-    chat_roll_over: () => ({ started: true }),
+    chat_roll_over: (a) => {
+      const c = find(a.chatId);
+      remoteGuard(c);
+      if (c.chat.nextSessionId) return { started: true }; // already rolled over
+      // The fake's roll over, shaped like the host's: a successor with the same title in the same
+      // stack, linked both ways, the old session archived, the hand-off message opening it, and
+      // the same open-chat event the real host sends while the reader is still on the old window.
+      const s = newChat(c.chat.cwd, c.chat.model ?? undefined, c.chat.effort ?? undefined);
+      const stackId = c.chat.stackId ?? c.chat.id;
+      c.chat = { ...c.chat, archived: true, nextSessionId: s.chat.id, stackId, status: 'idle' };
+      s.chat = { ...s.chat, title: c.chat.title, titleState: 'generated', projectId: c.chat.projectId, stackId, prevSessionId: c.chat.id, started: true };
+      addRow(s, { role: 'user', text: 'Carry on where the earlier session left off: scroll up to read it.' });
+      emitChat(c);
+      emitThread(s);
+      emitChat(s);
+      emit({ kind: 'sidebar', chatIds: [c.chat.id, s.chat.id] });
+      emit({ kind: 'shell_open_chat', chatId: s.chat.id, ifViewing: c.chat.id, title: s.chat.title });
+      return { started: true };
+    },
     // The desktop pet's page (open the dev server with ?window=pet) and the first-run intro.
     pet_ready: () => null,
     pet_moved: (a) => {
