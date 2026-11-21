@@ -26,6 +26,7 @@
 //! | chats columns `stack_id`, `prev_session_id`, `next_session_id` | the roll-over stack: every session of a rolled-over chat shares a stack id (the oldest session's) and links to the sessions before and after it ([`crate::rollover`]) |
 //! | `chat_turn_usage` | per turn: the tokens and cost it used, projected from the session log's `usage` entries ([`crate::turn_usage`]) |
 //! | `chat_dispatch_holds` | the turn starts waiting for capacity, with their class, line and reason ([`crate::queue`]) |
+//! | `build_queue` | the features to run one after another: their order, state, and the chat that runs each one ([`crate::buildqueue`]) |
 //! | view `chat_search_source` | the searchable message text the search crate indexes ([`crate::search_source`]) |
 //!
 //! Recovery, inside the one startup transaction:
@@ -56,6 +57,7 @@ pub fn register(reg: &mut MigrationRegistry) {
         .initializer("chats-activity-state", activity_state)
         .initializer("chats-dispatch-holds", dispatch_holds)
         .initializer("chats-rollover-stack", rollover_stack)
+        .initializer("chats-build-queue", build_queue)
         .one_time("chats-origin-user-is-typed", origin_user_is_typed)
         .recovery_capture("chats-restart-capture", capture_continuations)
         .recovery_step("chats-retry-leftovers", cancel_retry_leftovers)
@@ -399,6 +401,31 @@ pub(crate) fn link_old_rolls(tx: &Transaction<'_>) -> rusqlite::Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// The build queue: the features to run one after another, with their hand-set order (`position`),
+/// their state (`waiting`, `running`, `paused`, `done` or `removed`), and the chat each running
+/// entry is being carried out in ([`crate::buildqueue`]). `started_at` and `finished_at` mark the
+/// entry's run; `profile_id` says who added it.
+fn build_queue(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS build_queue (
+             id           TEXT PRIMARY KEY,
+             profile_id   TEXT NOT NULL DEFAULT '',
+             title        TEXT NOT NULL,
+             brief        TEXT,
+             item_id      TEXT,
+             project_id   TEXT,
+             model        TEXT,
+             position     INTEGER NOT NULL,
+             state        TEXT NOT NULL
+                 CHECK (state IN ('waiting', 'running', 'paused', 'done', 'removed')),
+             chat_id      TEXT REFERENCES chats(id) ON DELETE SET NULL,
+             started_at   INTEGER,
+             finished_at  INTEGER
+         );
+         CREATE INDEX IF NOT EXISTS build_queue_order ON build_queue(state, position);",
+    )
 }
 
 /// `chat_activity` gained the live-state column (what a busy chat is doing right now, as the

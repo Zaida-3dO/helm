@@ -274,6 +274,85 @@ pub struct QueueActionArgs {
     pub before_chat_id: Option<String>,
 }
 
+/// One entry of the build queue: a feature to run, in the order the queue keeps them
+/// ([`crate::buildqueue`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildQueueEntry {
+    pub id: String,
+    /// Who added it (the empty string when nobody was named).
+    pub profile_id: String,
+    pub title: String,
+    /// The brief the started chat opens with; `None` means the board item line instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub brief: Option<String>,
+    /// The board item to work on, named in the first message when there is no brief.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub item_id: Option<String>,
+    /// The project the chat runs in (a folder project, or a board with a folder).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub project_id: Option<String>,
+    /// The model to run it on; `None` is the new-chat default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+    /// Its place in the line, smallest first.
+    #[ts(type = "number")]
+    pub position: i64,
+    /// `waiting`, `running`, `paused`, `done` or `removed`.
+    pub state: String,
+    /// The chat carrying it out, while one runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub chat_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub started_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub finished_at: Option<i64>,
+}
+
+/// `build_queue_add`: join the back of the line. It needs a title and either a brief or a board
+/// item to work on; the project and model are optional.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BuildQueueAddArgs {
+    pub title: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub brief: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub item_id: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub model: Option<String>,
+}
+
+/// `build_queue_move`: stand this entry just before another (`None` is the back of the line).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BuildQueueMoveArgs {
+    pub id: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub before_id: Option<String>,
+}
+
+/// `build_queue_pause`, `build_queue_resume` and `build_queue_remove`: one entry, by id.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BuildQueueIdArgs {
+    pub id: String,
+}
+
 /// Where the chat's title came from. A manual rename always wins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]

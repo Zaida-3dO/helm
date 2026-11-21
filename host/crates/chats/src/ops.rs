@@ -22,6 +22,7 @@
 //! | `chat_roll_over` | async | [`ChatIdArgs`] → `{started}` (see [`crate::rollover`]) |
 //! | `chat_stack` | blocking | [`ChatIdArgs`] → [`ChatStack`] (the roll-over stack: every session and the newest) |
 //! | `attention_get` | blocking | `{}` → [`AttentionSummary`] |
+//! | `build_queue_list` | blocking | `{}` → `BuildQueueEntry[]` (features to run one after another; `build_queue_add`/`_move`/`_pause`/`_resume`/`_remove` change it — see [`crate::buildqueue`]) |
 //!
 //! Argument parsing is strict (an unknown field is `bad_args`). Ops that touch a running chat go
 //! through the [`ChatRuntime`] service. A call that names a chat running on another device never
@@ -72,6 +73,20 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("chat_stack", OpClass::Blocking, chat_stack)
         .blocking("queue_list", OpClass::Blocking, queue_list)
         .blocking("queue_action", OpClass::Maintenance, queue_action)
+        .blocking("build_queue_list", OpClass::Blocking, build_queue_list)
+        .blocking("build_queue_add", OpClass::Maintenance, build_queue_add)
+        .blocking("build_queue_move", OpClass::Maintenance, build_queue_move)
+        .blocking("build_queue_pause", OpClass::Maintenance, build_queue_pause)
+        .blocking(
+            "build_queue_resume",
+            OpClass::Maintenance,
+            build_queue_resume,
+        )
+        .blocking(
+            "build_queue_remove",
+            OpClass::Maintenance,
+            build_queue_remove,
+        )
         .blocking("chat_retry_now", OpClass::Maintenance, chat_retry_now)
         .blocking("chat_rename", OpClass::Maintenance, chat_rename)
         .async_op("title_suggest", title_suggest)
@@ -155,6 +170,118 @@ fn queue_action(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         &a.action,
         a.before_chat_id.as_deref(),
     )?)
+}
+
+/// `build_queue_list`: the features queued to run one after another, front of the line first
+/// (removed entries are gone). See [`crate::buildqueue`].
+fn build_queue_list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    parse_args::<EmptyArgs>(args)?;
+    let rt = runtime(ctx)?;
+    to_value(&crate::buildqueue::list(rt.db()))
+}
+
+/// `build_queue_add`: join the back of the line. A title and either a brief or a board item to
+/// work on are needed; the project (a folder project, or a board with a folder) and model are
+/// optional. Answers with the fresh list.
+fn build_queue_add(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: BuildQueueAddArgs = parse_args(args)?;
+    let rt = runtime(ctx)?;
+    let clean = |v: Option<String>| -> Option<String> {
+        v.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
+    };
+    let title = a.title.trim().to_owned();
+    if title.is_empty() {
+        return Err(ApiError::bad_args("The entry needs a title."));
+    }
+    if title.len() > 512 {
+        return Err(ApiError::bad_args("title is at most 512 bytes."));
+    }
+    let brief = clean(a.brief);
+    let item = clean(a.item_id);
+    if brief.is_none() && item.is_none() {
+        return Err(ApiError::bad_args(
+            "Give the entry a brief or a board item to work on.",
+        ));
+    }
+    let profile = crate::buildqueue::active_profile(rt.db());
+    crate::buildqueue::add(
+        rt.db(),
+        &profile,
+        &title,
+        brief.as_deref(),
+        item.as_deref(),
+        clean(a.project_id).as_deref(),
+        clean(a.model).as_deref(),
+    )
+    .map_err(sql)?;
+    crate::buildqueue::publish(&rt);
+    to_value(&crate::buildqueue::list(rt.db()))
+}
+
+/// `build_queue_move`: stand an entry just before another (`beforeId` none is the back of the
+/// line). Answers with the fresh list.
+fn build_queue_move(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: BuildQueueMoveArgs = parse_args(args)?;
+    let rt = runtime(ctx)?;
+    if !crate::buildqueue::move_entry(rt.db(), &a.id, a.before_id.as_deref()).map_err(sql)? {
+        return Err(ApiError::new(
+            "refused",
+            "That entry, or the one it was dropped beside, is no longer in the queue.",
+        ));
+    }
+    crate::buildqueue::publish(&rt);
+    to_value(&crate::buildqueue::list(rt.db()))
+}
+
+/// `build_queue_pause`: stop tracking an entry for a while. Its place and its started chat are
+/// kept; the queue neither settles it nor resumes it by itself.
+fn build_queue_pause(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: BuildQueueIdArgs = parse_args(args)?;
+    let rt = runtime(ctx)?;
+    match crate::buildqueue::pause(&rt, &a.id).map_err(sql)? {
+        None => return Err(ApiError::new("refused", "No such entry in the queue.")),
+        Some(ref state) if state == crate::buildqueue::PAUSED => {}
+        Some(ref other) => {
+            return Err(ApiError::new(
+                "refused",
+                format!("That entry is {other}; it cannot be paused."),
+            ))
+        }
+    }
+    crate::buildqueue::publish(&rt);
+    to_value(&crate::buildqueue::list(rt.db()))
+}
+
+/// `build_queue_resume`: take a paused entry back. One that had started a chat is tracked again;
+/// one that never started waits in line again.
+fn build_queue_resume(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: BuildQueueIdArgs = parse_args(args)?;
+    let rt = runtime(ctx)?;
+    match crate::buildqueue::resume(&rt, &a.id).map_err(sql)? {
+        Some(ref state)
+            if state == crate::buildqueue::RUNNING || state == crate::buildqueue::WAITING => {}
+        Some(ref other) => {
+            return Err(ApiError::new(
+                "refused",
+                format!("That entry is {other}; it is not paused."),
+            ))
+        }
+        None => return Err(ApiError::new("refused", "No such entry in the queue.")),
+    }
+    crate::buildqueue::publish(&rt);
+    to_value(&crate::buildqueue::list(rt.db()))
+}
+
+/// `build_queue_remove`: stop tracking an entry for good. A chat it already started keeps
+/// running; stopping that is done from the chat itself.
+fn build_queue_remove(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: BuildQueueIdArgs = parse_args(args)?;
+    let rt = runtime(ctx)?;
+    if !crate::buildqueue::remove(&rt, &a.id, helm_core::now_ms()).map_err(sql)? {
+        return Err(ApiError::new("refused", "No such entry in the queue."));
+    }
+    crate::buildqueue::publish(&rt);
+    to_value(&crate::buildqueue::list(rt.db()))
 }
 
 /// `chat_retry_now {chatId}` → `{scheduled}`: try this chat's pending outage retry at once
@@ -815,6 +942,13 @@ pub(crate) mod tests {
             // The capacity queue: who waits, and moving one start.
             ("queue_list", OpClass::Blocking),
             ("queue_action", OpClass::Maintenance),
+            // The build queue: features to run one after another.
+            ("build_queue_list", OpClass::Blocking),
+            ("build_queue_add", OpClass::Maintenance),
+            ("build_queue_move", OpClass::Maintenance),
+            ("build_queue_pause", OpClass::Maintenance),
+            ("build_queue_resume", OpClass::Maintenance),
+            ("build_queue_remove", OpClass::Maintenance),
             // A failed turn's retry, now.
             ("chat_retry_now", OpClass::Maintenance),
         ];

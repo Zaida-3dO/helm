@@ -898,6 +898,9 @@ impl Actor {
         }
         self.emit_chat();
         crate::attention::publish(&self.sh);
+        // A status change is exactly what the build queue wants to hear about: a finished
+        // tree should settle its entry at once, not on the next minute.
+        self.sh.build_queue_poke.notify_one();
     }
 
     fn status(&self) -> ChatStatus {

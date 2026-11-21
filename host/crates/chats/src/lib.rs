@@ -37,6 +37,7 @@
 //! | [`search_source`] | the searchable message text the search crate indexes |
 //! | `timeline` | one log line per turn-opening send, from saved to first output |
 //! | [`runtime_settings`] | Settings → Runtime: Node/Claude status, launch options, new-chat defaults |
+//! | [`buildqueue`] | the build queue: features to run one after another, started by the host |
 
 /// SQL for "this chat was addressed or snoozed, with no activity since" (`?1` is now; `c` is the
 /// chat). Shared by the attention summary and the idle check, so they agree on what is set aside.
@@ -56,6 +57,7 @@ pub mod attention;
 pub mod autocomplete;
 mod background;
 pub mod bindings;
+pub mod buildqueue;
 pub mod catalogue;
 pub mod checkpoint;
 pub mod childnote;

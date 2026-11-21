@@ -828,6 +828,12 @@ pub(crate) struct Shared {
     pub retry_now: Mutex<std::collections::HashSet<String>>,
     /// Brings the outage watch's next look forward.
     pub outage_poke: tokio::sync::Notify,
+    /// Brings the build queue's next look forward: a chat's status just changed, which is what
+    /// settles a finished entry ([`crate::buildqueue`]).
+    pub build_queue_poke: tokio::sync::Notify,
+    /// Per running build-queue entry: since when its whole chat tree has stood quiet. Empty
+    /// after a restart, so a running entry's quiet window must be lived again.
+    pub build_queue_quiet: Mutex<HashMap<String, i64>>,
 }
 
 /// The runtime service.
@@ -874,9 +880,12 @@ impl ChatRuntime {
                 launched_keys: Mutex::new(HashMap::new()),
                 retry_now: Mutex::new(Default::default()),
                 outage_poke: tokio::sync::Notify::new(),
+                build_queue_poke: tokio::sync::Notify::new(),
+                build_queue_quiet: Mutex::new(HashMap::new()),
             }),
         };
         rt.start_tick();
+        rt.start_build_queue_watch();
         rt
     }
 
@@ -932,6 +941,32 @@ impl ChatRuntime {
                 crate::attention::publish(&sh);
                 crate::triage::pass(&sh);
                 ChatRuntime { sh: sh.clone() }.apply_send_behavior();
+            }
+        });
+    }
+
+    /// The build queue's look ([`crate::buildqueue`]): every minute, and at once when a chat's
+    /// status changes, settle a running entry whose whole chat tree has been quiet for two
+    /// minutes, then start the next waiting one if nothing holds the slot. It stops when the app
+    /// is quitting.
+    fn start_build_queue_watch(&self) {
+        let me = self.clone();
+        self.sh.handle.spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
+                    _ = me.sh.build_queue_poke.notified() => {}
+                }
+                if me.sh.shutting_down.load(Ordering::SeqCst) {
+                    break;
+                }
+                let rt = me.clone();
+                let starter = crate::buildqueue::ChatStarter { rt: me.clone() };
+                // Starting a chat is chat_create's heavier work: keep it off the shared task.
+                let _ = tokio::task::spawn_blocking(move || {
+                    crate::buildqueue::tick(&rt, helm_core::now_ms(), &starter)
+                })
+                .await;
             }
         });
     }

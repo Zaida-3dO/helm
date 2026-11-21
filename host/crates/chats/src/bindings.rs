@@ -86,6 +86,10 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         QueueSummary,
         QueueActionArgs,
         ChatStack,
+        BuildQueueEntry,
+        BuildQueueAddArgs,
+        BuildQueueMoveArgs,
+        BuildQueueIdArgs,
     );
     let mut files: Vec<String> = std::fs::read_dir(dir)
         .map_err(|e| e.to_string())?
