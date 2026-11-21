@@ -336,8 +336,7 @@ pub fn write(
     }
     // A rewritten rule keeps its header (its summary, whether it is always carried); `always`
     // sets or clears the flag without disturbing the rest of the header.
-    let mut header = String::new();
-    let file = match path {
+    let (header, file) = match path {
         Some(p) => {
             let file = file_name_of(p)?;
             let (now, old) = read(root, &file).map_err(|e| match e.kind() {
@@ -352,13 +351,9 @@ pub fn write(
                     "the rule changed since it was read",
                 ));
             }
-            header = set_always(&old[..front_len(&old)], always);
-            file
+            (set_always(&old[..front_len(&old)], always), file)
         }
-        None => {
-            header = set_always("", always);
-            new_file_name(root, title)?
-        }
+        None => (set_always("", always), new_file_name(root, title)?),
     };
     let body = format!("{header}{body}");
     if body.len() as u64 > MAX_RULE_FILE {
