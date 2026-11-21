@@ -93,11 +93,15 @@ pub struct TerminalAttachResult {
     pub seq: u64,
 }
 
-/// Called with a Claude token the sign-in session printed. It must never log it.
-pub type TokenSink = Arc<dyn Fn(&str) + Send + Sync>;
+/// Called with a Claude token the sign-in session printed; answers whether it was saved. It must
+/// never log it.
+pub type TokenSink = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
-/// What replaces a captured token in the session's replay.
+/// What replaces a captured token in the session's replay, once it is saved.
 const TOKEN_REPLACED: &str = "[Claude token saved by Helm]";
+/// What replaces it when it could not be saved: the token is still blanked, never left in the
+/// replay, and the words say it was not kept.
+const TOKEN_NOT_SAVED: &str = "[Claude token not saved: Helm could not store it]";
 /// How much of the newest output is searched for a token.
 const CAPTURE_WINDOW: usize = 16 * 1024;
 
@@ -536,7 +540,9 @@ fn spawn_reader(
     std::thread::spawn(move || {
         let mut buf = vec![0u8; CHUNK_MAX];
         let mut carry = Utf8Carry::default();
-        let mut catch_token = catch_token;
+        // The token the sign-in printed, once it has been taken: every later copy of it is
+        // blanked too, for as long as the session runs.
+        let mut taken: Option<String> = None;
         loop {
             let n = match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
@@ -560,35 +566,75 @@ fn spawn_reader(
                         .with("data", piece),
                 );
             }
-            // A token sign-in: once the token has been printed whole, hand it over, blank it in
-            // the replay and look no further.
+            // A token sign-in: once the token has been printed whole, hand it over and blank
+            // every copy of it in the replay; copies printed later are blanked as they come.
             if let Some(save) = catch_token.as_ref() {
-                if let Some(token) = take_token(&s.replay, s.cols.load(Ordering::SeqCst) as usize) {
-                    save(&token);
-                    catch_token = None;
+                let cols = s.cols.load(Ordering::SeqCst) as usize;
+                if let Some(token) = take_token(&s.replay, cols, false, taken.as_deref(), &**save) {
+                    taken = Some(token);
                 }
             }
             s.flow.wait_for_room(Duration::from_millis(250));
         }
+        // The output is over: a token that ended the output with no line break after it is
+        // complete now.
+        if let Some(save) = catch_token.as_ref() {
+            let cols = s.cols.load(Ordering::SeqCst) as usize;
+            take_token(&s.replay, cols, true, taken.as_deref(), &**save);
+        }
     });
 }
 
-/// The complete token in the session's newest output, if there is one; the replay then shows
-/// [`TOKEN_REPLACED`] in its place.
-fn take_token(replay: &Mutex<Replay>, cols: usize) -> Option<String> {
+/// The complete tokens in the session's newest output, blanked in the replay (every copy, wrapped
+/// or not, and any other copy of the token already `taken`). A token not seen before is handed to
+/// `save` once, and is the answer; the replay then says whether it was saved. `at_end` says the
+/// output is over, so a token with no line break after it is complete.
+fn take_token(
+    replay: &Mutex<Replay>,
+    cols: usize,
+    at_end: bool,
+    taken: Option<&str>,
+    save: &dyn Fn(&str) -> bool,
+) -> Option<String> {
     let mut replay = replay.lock().unwrap();
     let text = replay.text();
     let mut from = text.len().saturating_sub(CAPTURE_WINDOW);
     while !text.is_char_boundary(from) {
         from += 1;
     }
-    let found = capture::find(&text[from..], cols)?;
-    let mut scrubbed = String::with_capacity(text.len());
-    scrubbed.push_str(&text[..from + found.span.start]);
-    scrubbed.push_str(TOKEN_REPLACED);
-    scrubbed.push_str(&text[from + found.span.end..]);
+    let window = &text[from..];
+    let mut found = if at_end {
+        // The text's end counts as a line break; the spans stay inside the real text.
+        capture::find_all(&format!("{window}\r\n"), cols)
+    } else {
+        capture::find_all(window, cols)
+    };
+    // Once a token is taken, only copies of that one are blanked: another token is not ours.
+    found.retain(|f| f.span.end <= window.len() && taken.is_none_or(|t| f.token == t));
+    let fresh = match taken {
+        Some(_) => None,
+        None => found.first().map(|f| f.token.clone()),
+    };
+    let known = taken.map(str::to_owned).or_else(|| fresh.clone());
+    if found.is_empty() && !known.as_deref().is_some_and(|t| text.contains(t)) {
+        return None;
+    }
+    let note = match &fresh {
+        Some(token) if !save(token) => TOKEN_NOT_SAVED,
+        _ => TOKEN_REPLACED,
+    };
+    // Blank the spans from the back so the earlier ones keep their places.
+    let mut scrubbed = text.clone();
+    for f in found.iter().rev() {
+        scrubbed.replace_range(from + f.span.start..from + f.span.end, note);
+    }
+    // Any copy beyond the search window, or printed in one piece the search did not read as a
+    // token, goes too.
+    if let Some(t) = known.as_deref() {
+        scrubbed = scrubbed.replace(t, note);
+    }
     replay.replace_all(scrubbed);
-    Some(found.token)
+    fresh
 }
 
 fn spawn_waiter(
@@ -748,9 +794,13 @@ fn op_claude_sign_in(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         let save: TokenSink = Arc::new(move |raw| {
             match helm_core::chat_token::save(&creds, raw, helm_core::now_ms() as u64) {
                 Ok(status) => {
-                    events.emit(AppEvent::new("claude_token").with("status", json!(status)))
+                    events.emit(AppEvent::new("claude_token").with("status", json!(status)));
+                    true
                 }
-                Err(e) => log::warn!("the token from the sign-in was not saved: {e}"),
+                Err(e) => {
+                    log::warn!("the token from the sign-in was not saved: {e}");
+                    false
+                }
             }
         });
         m.open_setup_token(claude, pairs, cols, rows, save)
@@ -870,7 +920,7 @@ mod tests {
         );
         // The token sign-in is the same session with its own fixed arguments and a place to put
         // the token.
-        let t = setup_token_launch(PathBuf::from("claude.exe"), Vec::new(), Arc::new(|_| {}));
+        let t = setup_token_launch(PathBuf::from("claude.exe"), Vec::new(), Arc::new(|_| true));
         assert_eq!(t.args, ["setup-token"]);
         assert_eq!(t.title, "Claude sign-in");
         assert!(t.catch_token.is_some() && l.catch_token.is_none());
@@ -890,12 +940,19 @@ mod tests {
         );
         let replay = Mutex::new(Replay::default());
         let mut taken = Vec::new();
+        let save = |_: &str| true;
         // Cut in the middle of the token: nothing is taken until the token is whole.
         let cut = out.find("GHI456").unwrap();
         let end = out.find("Store").unwrap();
         for piece in [&out[..cut], &out[cut..end], &out[end..]] {
             replay.lock().unwrap().push(piece);
-            taken.extend(take_token(&replay, 120));
+            taken.extend(take_token(
+                &replay,
+                120,
+                false,
+                taken.first().map(String::as_str),
+                &save,
+            ));
         }
         assert_eq!(taken, [token]);
         let shown = replay.lock().unwrap().text();
@@ -906,7 +963,59 @@ mod tests {
         assert!(shown.contains(TOKEN_REPLACED) && shown.contains("Your token:"));
         assert!(shown.ends_with("Store it safely.\r\n"));
         // Nothing left to take on the next read.
-        assert!(take_token(&replay, 120).is_none());
+        assert!(take_token(&replay, 120, false, Some(token), &save).is_none());
+    }
+
+    /// Every copy of the token is blanked, the ones that come later too; a token that ends the
+    /// output with no line break is taken when the output is over; a save that fails is not
+    /// reported as saved; and another token is never blanked under the first one's name.
+    #[test]
+    fn every_copy_goes_a_late_token_is_flushed_and_a_failed_save_says_so() {
+        let token = "sk-ant-oat01-AbC123_def-GHI456jklMNO789pqrSTUvwx-YZ0123456789abcdefghij";
+        let other = "sk-ant-oat01-ZyX987_wvu-TSR654qpoNML321kjiHGFedc-BA9876543210zyxwvutsrq";
+        let replay = Mutex::new(Replay::default());
+        let save = |_: &str| true;
+        replay
+            .lock()
+            .unwrap()
+            .push(&format!("A\r\n{token}\r\nexport X={token}\r\n"));
+        assert_eq!(
+            take_token(&replay, 120, false, None, &save).as_deref(),
+            Some(token)
+        );
+        // A copy printed afterwards, and a different token, which is left alone.
+        replay
+            .lock()
+            .unwrap()
+            .push(&format!("again {token}\r\nand {other}\r\n"));
+        assert!(take_token(&replay, 120, false, Some(token), &save).is_none());
+        let shown = replay.lock().unwrap().text();
+        assert!(!shown.contains(token), "{shown:?}");
+        assert_eq!(shown.matches(TOKEN_REPLACED).count(), 3);
+        assert!(shown.contains(other));
+
+        // Nothing follows the token: it is whole only once the output is over.
+        let late = Mutex::new(Replay::default());
+        late.lock()
+            .unwrap()
+            .push(&format!("Your token:\r\n{token}"));
+        assert!(take_token(&late, 120, false, None, &save).is_none());
+        assert_eq!(
+            take_token(&late, 120, true, None, &save).as_deref(),
+            Some(token)
+        );
+        assert!(!late.lock().unwrap().text().contains("sk-ant-"));
+
+        // The save failed: the token is still blanked, and the words do not claim it was kept.
+        let failed = Mutex::new(Replay::default());
+        failed.lock().unwrap().push(&format!("{token}\r\n\r\n"));
+        let no = |_: &str| false;
+        assert!(take_token(&failed, 120, false, None, &no).is_some());
+        let shown = failed.lock().unwrap().text();
+        assert!(
+            shown.contains(TOKEN_NOT_SAVED) && !shown.contains("sk-ant-"),
+            "{shown:?}"
+        );
     }
 
     #[test]

@@ -6,7 +6,8 @@
 //! escape sequences, treats a cursor move to another row as a line break, and joins a token row to
 //! the next one only when the row is as wide as the terminal (a wrapped row), never across a
 //! blank or short row. It answers only once the token is known to be complete, so a token that is
-//! still arriving is never saved in part.
+//! still arriving is never saved in part: a wrapped row followed by a row that has not been
+//! written yet is a token that may go on, not one that ended there.
 
 use helm_core::chat_token;
 use std::ops::Range;
@@ -121,6 +122,13 @@ fn trimmed(row: &[Cell]) -> &[Cell] {
 /// The first complete Claude token in `text`, for a terminal `cols` wide. `None` when there is
 /// none yet, or the last one found may still be growing.
 pub fn find(text: &str, cols: usize) -> Option<Found> {
+    find_all(text, cols).into_iter().next()
+}
+
+/// Every complete Claude token in `text` (a token printed twice is two), in order. A token that
+/// may still be growing, and anything after it, is left out.
+pub fn find_all(text: &str, cols: usize) -> Vec<Found> {
+    let mut hits = Vec::new();
     let prefix: Vec<char> = "sk-ant-".chars().collect();
     let (rows, ended) = rows(text);
     for (r, row) in rows.iter().enumerate() {
@@ -156,11 +164,11 @@ pub fn find(text: &str, cols: usize) -> Option<Found> {
                         closed = true;
                         continue;
                     }
-                    return None;
+                    return hits;
                 }
                 let next = at_row + 1;
                 if !ended.get(at_row).copied().unwrap_or(false) || next >= rows.len() {
-                    return None;
+                    return hits;
                 }
                 let nrow = trimmed(&rows[next]);
                 let mut n = 0;
@@ -170,7 +178,12 @@ pub fn find(text: &str, cols: usize) -> Option<Found> {
                     n += 1;
                 }
                 if n == 0 {
-                    // Nothing continues it: the wide row was the whole token.
+                    // The row after a full-width one has not been written yet: the token may go
+                    // on there, so wait. Once that row is over and holds nothing of a token, the
+                    // wide row was the whole token.
+                    if !ended.get(next).copied().unwrap_or(false) {
+                        return hits;
+                    }
                     closed = true;
                     continue;
                 }
@@ -186,14 +199,14 @@ pub fn find(text: &str, cols: usize) -> Option<Found> {
             }
             if chat_token::valid_token(&token) {
                 first = first.min(last);
-                return Some(Found {
+                hits.push(Found {
                     token,
                     span: first..last,
                 });
             }
         }
     }
-    None
+    hits
 }
 
 #[cfg(test)]
@@ -251,5 +264,11 @@ mod tests {
         assert_eq!(find(&painted, 60).unwrap().token, TOKEN);
         // The wrapped second row is not known to be over yet: wait.
         assert!(find(&format!("{a}\r\n{b}"), 60).is_none());
+        // A full-width row whose next row has not been written yet may go on there: wait. Once
+        // that row is over and holds nothing of a token, the wide row was the whole token.
+        let wide = &TOKEN[..60];
+        assert!(find(&format!("{wide}\r\n"), 60).is_none());
+        let whole = format!("Your token:\r\n{wide}\r\n\r\nStore it.\r\n");
+        assert_eq!(find(&whole, 60).map(|f| f.token).as_deref(), Some(wide));
     }
 }
