@@ -1,7 +1,8 @@
 //! Telegram into chats, and the mirror back out.
 //!
 //! **In.** [`ChatSink`] takes each message the hub forwards and puts it into the active Telegram
-//! chat ([`crate::telegram::active_chat`]), starting `Telegram <bot> <date>` when there is none:
+//! chat ([`crate::telegram::active_chat`]), starting `Telegram <name> <date>` (the profile's
+//! display name) when there is none:
 //!
 //! - It is stored through the chats crate's host send with origin `telegram`, so it never counts
 //!   as consent and never trips the user's wait limit (that limit turns a waiting steer into an
@@ -687,6 +688,22 @@ pub(crate) fn max_row(db: &Database, chat: &str) -> i64 {
     .unwrap_or(0)
 }
 
+/// The profile's display name, so a chat started from the phone carries the person it belongs
+/// to in its title. `None` when the row or table is not there: the chat is then named without
+/// a name, which is no reason to lose the message.
+pub(crate) fn profile_name(db: &Database, profile_id: &str) -> Option<String> {
+    db.snapshot(|tx| {
+        tx.query_row(
+            "SELECT name FROM profiles WHERE id = ?1",
+            [profile_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+    })
+    .ok()
+    .flatten()
+}
+
 /// Everything a delivery needs, cloned into the blocking pool. All of it is for one profile:
 /// its channel files, its folder, and the hub person its frames carry (`""` when the profile
 /// has no person yet).
@@ -770,8 +787,9 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
         ignored: Mutex::new(None),
         profile_id: Some(c.profile_id.clone()),
     };
+    let who = profile_name(&c.db, &c.profile_id);
     let (chat, _created) =
-        telegram::active_chat(&c.tag_path, &port, &c.policy, msg.bot.as_deref(), now)?;
+        telegram::active_chat(&c.tag_path, &port, &c.policy, who.as_deref(), now)?;
     let ignored = port
         .ignored
         .lock()

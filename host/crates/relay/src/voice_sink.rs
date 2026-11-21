@@ -1,7 +1,8 @@
 //! The voice chat: the phone's turns into it, and its answers back out.
 //!
 //! **In.** [`ChatVoice`] takes each turn the hub forwards and puts it into the voice chat
-//! ([`crate::voice::active_chat`]), starting `Voice <date>` when there is none. It is stored
+//! ([`crate::voice::active_chat`]), starting `Voice <name> <date>` (the profile's display name)
+//! when there is none. It is stored
 //! through the chats crate's host send with origin `voice`, so it never counts as consent and an
 //! approval, plan or trust prompt is never answered by it. On a busy chat it is a steer, read at
 //! the next tool boundary. Its submission id is fixed per turn id, so a turn delivered twice is
@@ -36,7 +37,8 @@ use crate::client::{BoxFut, LineHandle, VoiceSink, VoiceTurn};
 use crate::exec::AppExecutor;
 use crate::notify::title_of;
 use crate::sink::{
-    chat_facts, max_row, plain_path, snapshot, RealPort, RetryHold, Snap, Stop, STATUS_GAP_MS,
+    chat_facts, max_row, plain_path, profile_name, snapshot, RealPort, RetryHold, Snap, Stop,
+    STATUS_GAP_MS,
 };
 use crate::telegram::{cut_chars, ChatPort};
 use crate::voice::{self, Mode, Reply, TagPolicy, WatchLevel, VOICE_ORIGIN};
@@ -910,7 +912,8 @@ pub fn place(c: &Ctx, turn: &VoiceTurn, notes: &[String], now: i64) -> Result<Pl
         ignored: std::sync::Mutex::new(None),
         profile_id: Some(c.profile_id.clone()),
     };
-    let (tag, _created) = voice::active_chat(&c.tag_path, &port, &c.policy, now)?;
+    let who = profile_name(&c.db, &c.profile_id);
+    let (tag, _created) = voice::active_chat(&c.tag_path, &port, &c.policy, who.as_deref(), now)?;
     let ignored = port
         .ignored
         .lock()

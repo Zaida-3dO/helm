@@ -5,7 +5,7 @@
 //!   Telegram message never counts as consent, whatever it says (trust-boundary item e).
 //! - **The active Telegram chat.** One chat carries the tag. An inbound message attaches to it;
 //!   with no tag, or once the tag has expired (age or token threshold, or the chat was archived
-//!   or deleted), Helm starts a new chat named `Telegram <bot name> <date>`. The tag is a small
+//!   or deleted), Helm starts a new chat named `Telegram <profile name> <date>`. The tag is a small
 //!   file in the profile, `relay/telegram-chat.json`.
 //! - **Queued messages** arrive marked with how long ago they were sent.
 //! - **The limits** (age and tokens), the away-alerts switch ([`crate::notify`]) and the model
@@ -331,12 +331,13 @@ pub fn expired(
 }
 
 /// The chat an inbound message goes to: the tagged one while it holds, else a new one that takes
-/// the tag. Returns the chat id and whether it was just created.
+/// the tag. `profile` is the display name of the profile that owns the channel; a new chat carries
+/// it in its title. Returns the chat id and whether it was just created.
 pub fn active_chat(
     path: &Path,
     port: &dyn ChatPort,
     policy: &TagPolicy,
-    bot: Option<&str>,
+    profile: Option<&str>,
     now: i64,
 ) -> Result<(String, bool), String> {
     if let Some(tag) = load_tag(path) {
@@ -344,7 +345,7 @@ pub fn active_chat(
             return Ok((tag.chat_id, false));
         }
     }
-    let id = port.create(&chat_title(bot, now))?;
+    let id = port.create(&chat_title(profile, now))?;
     let tokens_at_start = port.facts(&id).map(|f| f.tokens).unwrap_or(0);
     let tag = ActiveTag {
         chat_id: id.clone(),
@@ -356,16 +357,22 @@ pub fn active_chat(
     Ok((id, true))
 }
 
-/// `Telegram <bot name> <YYYY-MM-DD>` (UTC date).
-pub fn chat_title(bot: Option<&str>, now: i64) -> String {
-    let bot: String = bot
-        .unwrap_or("bot")
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(64)
-        .collect();
+/// `Telegram <profile name> <YYYY-MM-DD>` (UTC date); no name part when the name is unknown.
+pub fn chat_title(profile: Option<&str>, now: i64) -> String {
+    let name = clean_title_name(profile);
     let (y, m, d) = civil_date(now.div_euclid(86_400_000));
-    format!("Telegram {bot} {y:04}-{m:02}-{d:02}")
+    match name.as_deref() {
+        Some(n) => format!("Telegram {n} {y:04}-{m:02}-{d:02}"),
+        None => format!("Telegram {y:04}-{m:02}-{d:02}"),
+    }
+}
+
+/// A person's or profile's name made safe for a chat title: no control characters, at most 64
+/// characters; `None` when nothing is left. Shared by the Telegram and voice title builders.
+pub(crate) fn clean_title_name(raw: Option<&str>) -> Option<String> {
+    let cleaned: String = raw?.chars().filter(|c| !c.is_control()).take(64).collect();
+    let cleaned = cleaned.trim();
+    (!cleaned.is_empty()).then(|| cleaned.to_owned())
 }
 
 /// Days since 1970-01-01 to a calendar date (proleptic Gregorian).
@@ -590,14 +597,31 @@ mod tests {
         let port = Port::default();
         let p = TagPolicy::default();
         assert_eq!(
-            active_chat(&path, &port, &p, Some("helm_bot"), T0).unwrap(),
+            active_chat(&path, &port, &p, Some("Alex"), T0).unwrap(),
             ("chat-1".into(), true)
         );
-        assert_eq!(port.created.borrow()[0], "Telegram helm_bot 2027-01-15");
+        assert_eq!(port.created.borrow()[0], "Telegram Alex 2027-01-15");
         assert_eq!(
-            active_chat(&path, &port, &p, Some("helm_bot"), T0 + 1000).unwrap(),
+            active_chat(&path, &port, &p, Some("Alex"), T0 + 1000).unwrap(),
             ("chat-1".into(), false)
         );
+    }
+
+    #[test]
+    fn the_title_names_the_person_and_cleans_the_name() {
+        let long = "x".repeat(80);
+        let long_want = format!("Telegram {} 2027-01-15", "x".repeat(64));
+        // (name, expected title)
+        let rows = [
+            (Some("Alex"), "Telegram Alex 2027-01-15"),
+            (None, "Telegram 2027-01-15"),
+            (Some("  "), "Telegram 2027-01-15"),
+            (Some("A\u{7}B"), "Telegram AB 2027-01-15"),
+            (Some(long.as_str()), long_want.as_str()),
+        ];
+        for (name, want) in rows {
+            assert_eq!(chat_title(name, T0), want, "name {name:?}");
+        }
     }
 
     #[test]
@@ -635,7 +659,7 @@ mod tests {
             active_chat(&path, &port, &p, None, T0 + 60_004).unwrap().0,
             "chat-5"
         );
-        assert_eq!(port.created.borrow()[4], "Telegram bot 2027-01-15");
+        assert_eq!(port.created.borrow()[4], "Telegram 2027-01-15");
     }
 
     #[test]

@@ -705,7 +705,14 @@ async fn a_message_starts_the_telegram_chat_with_origin_telegram_and_is_stored_o
             })
         })
         .unwrap();
-    assert!(title.starts_with("Telegram helm_bot "), "{title}");
+    // The chat is named for the profile that owns the channel, never for the bot handle.
+    let who =
+        e.db.snapshot(|tx| helm_profiles::store::home(tx))
+            .unwrap()
+            .unwrap()
+            .name;
+    assert!(title.starts_with(&format!("Telegram {who} ")), "{title}");
+    assert!(!title.contains("helm_bot"), "{title}");
     let calls = e.ops.calls.lock().unwrap().clone();
     assert_eq!(calls[0].0, "chat_create");
     assert!(
@@ -2080,7 +2087,7 @@ async fn voice_turns_enter_one_chat_with_origin_voice_its_mode_note_and_a_new_ch
     let c = vctx(&e, voice::PolicyFile::default());
     let t0 = helm_core::now_ms();
 
-    // The first turn starts "Voice <date>" on the saved model and effort.
+    // The first turn starts "Voice <profile name> <date>" on the saved model and effort.
     let p = vplace(
         &c,
         vturn("t1", "Synthetic question one.", "conversation"),
@@ -2104,7 +2111,12 @@ async fn voice_turns_enter_one_chat_with_origin_voice_its_mode_note_and_a_new_ch
             })
         })
         .unwrap();
-    assert!(title.starts_with("Voice "), "{title}");
+    let who =
+        e.db.snapshot(|tx| helm_profiles::store::home(tx))
+            .unwrap()
+            .unwrap()
+            .name;
+    assert!(title.starts_with(&format!("Voice {who} ")), "{title}");
     let s = subs(&e.db, &chat);
     assert_eq!(s.len(), 1);
     assert_eq!(s[0].0, voice::submission_id("t1"));

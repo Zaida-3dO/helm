@@ -14,7 +14,9 @@
 //! - **The reply** ([`Reply`]) is what goes up the line, once per answer, with a fixed id so a
 //!   resend is recognised.
 
-use crate::telegram::{civil_date, cut_chars, write_private, ChatFacts, ChatPort};
+use crate::telegram::{
+    civil_date, clean_title_name, cut_chars, write_private, ChatFacts, ChatPort,
+};
 use helm_chats::types::SubmissionOrigin;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -292,18 +294,20 @@ pub fn current(path: &Path, port: &dyn ChatPort, policy: &TagPolicy, now: i64) -
 }
 
 /// The chat a message from the phone goes to: the tagged one while it holds, else a new one
-/// that takes the tag. Returns the tag as it now stands and whether the chat was just created.
-/// The tag's last-message time moves to `now`.
+/// that takes the tag. `profile` is the display name of the profile that owns the channel; a
+/// new chat carries it in its title. Returns the tag as it now stands and whether the chat was
+/// just created. The tag's last-message time moves to `now`.
 pub fn active_chat(
     path: &Path,
     port: &dyn ChatPort,
     policy: &TagPolicy,
+    profile: Option<&str>,
     now: i64,
 ) -> Result<(VoiceTag, bool), String> {
     let (mut tag, created) = match current(path, port, policy, now) {
         Some(tag) => (tag, false),
         None => {
-            let id = port.create(&chat_title(now))?;
+            let id = port.create(&chat_title(profile, now))?;
             let tokens_at_start = port.facts(&id).map(|f| f.tokens).unwrap_or(0);
             let tag = VoiceTag {
                 chat_id: id,
@@ -321,10 +325,14 @@ pub fn active_chat(
     Ok((tag, created))
 }
 
-/// `Voice <YYYY-MM-DD>` (UTC date).
-pub fn chat_title(now: i64) -> String {
+/// `Voice <profile name> <YYYY-MM-DD>` (UTC date); no name part when the name is unknown.
+pub fn chat_title(profile: Option<&str>, now: i64) -> String {
+    let name = clean_title_name(profile);
     let (y, m, d) = civil_date(now.div_euclid(86_400_000));
-    format!("Voice {y:04}-{m:02}-{d:02}")
+    match name.as_deref() {
+        Some(n) => format!("Voice {n} {y:04}-{m:02}-{d:02}"),
+        None => format!("Voice {y:04}-{m:02}-{d:02}"),
+    }
 }
 
 /// A random 16-hex conversation id.
@@ -526,9 +534,9 @@ mod tests {
         let policy = PolicyFile::default().check().unwrap();
         let port = Port::default();
 
-        let (tag, created) = active_chat(&path, &port, &policy, T0).unwrap();
+        let (tag, created) = active_chat(&path, &port, &policy, Some("Alex"), T0).unwrap();
         assert!(created && !tag.primed && tag.conversation.len() == 16);
-        assert_eq!(port.created.borrow()[0], "Voice 2027-01-15");
+        assert_eq!(port.created.borrow()[0], "Voice Alex 2027-01-15");
 
         // (minutes since the last message, tokens now, archived, expected new chat)
         let rows = [
@@ -545,7 +553,7 @@ mod tests {
             port.chats
                 .borrow_mut()
                 .insert(before.chat_id.clone(), ChatFacts { archived, tokens });
-            let (tag, created) = active_chat(&path, &port, &policy, now).unwrap();
+            let (tag, created) = active_chat(&path, &port, &policy, None, now).unwrap();
             assert_eq!(
                 created, fresh,
                 "gap {gap}, tokens {tokens}, archived {archived}"
@@ -555,6 +563,8 @@ mod tests {
             assert_eq!(tag.conversation != before.conversation, fresh);
         }
 
+        // A chat started without a name carries none: chat 2 came from the idle row, passed None.
+        assert_eq!(port.created.borrow()[1], "Voice 2027-01-15");
         // Age: a chat in steady use still ends at the age limit.
         let policy = PolicyFile {
             max_age_hours: 1,
@@ -563,12 +573,26 @@ mod tests {
         .check()
         .unwrap();
         let start = load_tag(&path).unwrap();
-        let (tag, created) = active_chat(&path, &port, &policy, now + 61 * MIN).unwrap();
+        let (tag, created) =
+            active_chat(&path, &port, &policy, Some("Alex"), now + 61 * MIN).unwrap();
         assert!(created && tag.chat_id != start.chat_id);
         // Dropping the tag by hand starts a new chat too; `current` reads without starting one.
         assert!(current(&path, &port, &policy, now + 62 * MIN).is_some());
         save_tag(&path, None).unwrap();
         assert!(current(&path, &port, &policy, now + 62 * MIN).is_none());
+    }
+
+    #[test]
+    fn the_title_names_the_person() {
+        // (name, expected title)
+        let rows = [
+            (Some("Alex"), "Voice Alex 2027-01-15"),
+            (None, "Voice 2027-01-15"),
+            (Some("   "), "Voice 2027-01-15"),
+        ];
+        for (name, want) in rows {
+            assert_eq!(chat_title(name, T0), want, "name {name:?}");
+        }
     }
 
     #[test]
