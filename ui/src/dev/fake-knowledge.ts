@@ -21,6 +21,7 @@ interface Rule {
   title: string;
   text: string;
   revision: number;
+  always?: boolean;
 }
 
 interface Layer {
@@ -45,7 +46,7 @@ export function knowledgeFakeOps(): { prefixes: string[]; handler: FakeOpHandler
       'everyone',
       {
         rules: [
-          { path: 'rules/commits.md', title: 'Commit messages', text: 'Write commit messages in plain words, one change per commit.', revision: 1 },
+          { path: 'rules/commits.md', title: 'Commit messages', text: 'Write commit messages in plain words, one change per commit.', revision: 1, always: true },
           { path: 'rules/careful-deletes.md', title: 'Careful deletes', text: 'Look at what a delete removes before running it.', revision: 1 },
         ],
         skills: [
@@ -77,7 +78,7 @@ export function knowledgeFakeOps(): { prefixes: string[]; handler: FakeOpHandler
     if (!l) throw new ApiError('bad_args', 'The layer is `everyone` or `profile:<id>`.');
     return l;
   };
-  const ruleRow = (r: Rule): RuleRow => ({ path: r.path, title: r.title, size: r.text.length + r.title.length + 4, revision: String(r.revision), tooLarge: false });
+  const ruleRow = (r: Rule): RuleRow => ({ path: r.path, title: r.title, size: r.text.length + r.title.length + 4, revision: String(r.revision), tooLarge: false, always: r.always === true });
   const agentRow = (key: string, a: { name: string; description: string }): AgentRow => ({ ...a, path: `C:/Helm/knowledge/${key}/agents/${a.name}.md` });
 
   const view = (key: string): KnowledgeLayer => {
@@ -128,12 +129,13 @@ export function knowledgeFakeOps(): { prefixes: string[]; handler: FakeOpHandler
         if (existing) {
           if (a.revision !== undefined && String(a.revision) !== String(existing.revision)) throw new ApiError('conflict', 'That rule changed since it was read.');
           Object.assign(existing, { title, text, revision: existing.revision + 1 });
+          if (a.always !== undefined) existing.always = Boolean(a.always);
           changed(key);
           return { rule: ruleRow(existing) };
         }
         let path = `rules/${slug(title)}.md`;
         for (let n = 2; l.rules.some((x) => x.path === path); n++) path = `rules/${slug(title)}-${n}.md`;
-        const made: Rule = { path, title, text, revision: 1 };
+        const made: Rule = { path, title, text, revision: 1, always: Boolean(a.always) };
         l.rules.push(made);
         changed(key);
         return { rule: ruleRow(made) };

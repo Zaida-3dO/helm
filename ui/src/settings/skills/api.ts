@@ -69,6 +69,8 @@ export interface RuleRow {
   revision: string;
   /** Over the size limit: listed so it can be fixed, but never loaded into a chat. */
   tooLarge: boolean;
+  /** Kept whole in every chat's prompt however long it is, instead of being listed by a line. */
+  always: boolean;
 }
 
 /** `all`, or the ids of the projects a linked folder's skills load in. */
@@ -132,8 +134,11 @@ export function knowledgeOps(api: Api) {
     get: (layer: string) => api<KnowledgeLayer>('knowledge_get', { layer }),
     ruleRead: (layer: string, path: string) =>
       api<{ rule: RuleRow; text: string }>('knowledge_rule_read', { layer, path }),
-    /** A new rule has no `path`; a changed one sends the `revision` it was read at (a stale one is a conflict). */
-    ruleWrite: (a: { layer: string; path?: string; title: string; text: string; revision?: string }) =>
+    /**
+     * A new rule has no `path`; a changed one sends the `revision` it was read at (a stale one is a
+     * conflict). `always` sets or clears the "include in full" flag; left out it keeps the setting.
+     */
+    ruleWrite: (a: { layer: string; path?: string; title: string; text: string; revision?: string; always?: boolean }) =>
       api<{ rule: RuleRow }>('knowledge_rule_write', a),
     remove: (layer: string, kind: KnowledgeKind, name: string) =>
       api<KnowledgeLayer>('knowledge_delete', { layer, kind, name }),

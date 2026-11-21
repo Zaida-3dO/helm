@@ -3,7 +3,7 @@
 // (an agent saved to it, or another device), the host refuses and the editor offers to reload.
 
 import { useEffect, useState } from 'react';
-import { Button, TextArea, TextInput, type ConfirmSpec } from '../../ui/index.ts';
+import { Button, Checkbox, TextArea, TextInput, type ConfirmSpec } from '../../ui/index.ts';
 import type { KnowledgeOps, RuleRow } from './api.ts';
 import { errorCode, errorText, sizeLabel } from './common.ts';
 import { MoveTo } from './LayerPicker.tsx';
@@ -24,6 +24,7 @@ function RuleEditor({ ops, layer, options, busy, run, confirm, rule, onClose }: 
   const [title, setTitle] = useState(rule?.title ?? '');
   const [text, setText] = useState('');
   const [revision, setRevision] = useState<string | undefined>(rule?.revision);
+  const [always, setAlways] = useState(rule?.always ?? false);
   const [loaded, setLoaded] = useState(rule === null);
   const [error, setError] = useState<string | null>(null);
   const [stale, setStale] = useState(false);
@@ -37,6 +38,7 @@ function RuleEditor({ ops, layer, options, busy, run, confirm, rule, onClose }: 
         setTitle(r.rule.title);
         setText(r.text);
         setRevision(r.rule.revision);
+        setAlways(r.rule.always);
         setStale(false);
         setError(null);
         setLoaded(true);
@@ -49,7 +51,7 @@ function RuleEditor({ ops, layer, options, busy, run, confirm, rule, onClose }: 
   const save = () =>
     run(async () => {
       try {
-        await ops.ruleWrite({ layer, ...(rule ? { path: rule.path } : {}), title: title.trim(), text, ...(revision ? { revision } : {}) });
+        await ops.ruleWrite({ layer, ...(rule ? { path: rule.path } : {}), title: title.trim(), text, ...(revision ? { revision } : {}), always });
       } catch (e) {
         if (errorCode(e) === 'conflict') {
           setStale(true);
@@ -110,6 +112,16 @@ function RuleEditor({ ops, layer, options, busy, run, confirm, rule, onClose }: 
         onChange={(e) => setText(e.target.value)}
         data-testid="knowledge-rule-text"
       />
+      <div className="kn-field">
+        <Checkbox
+          label="Always include in full"
+          checked={always}
+          disabled={!loaded}
+          onChange={setAlways}
+          data-testid="knowledge-rule-always"
+        />
+        <span className="setting-desc">Keeps the rule whole in every chat's prompt, even when it is long; use for short, essential rules.</span>
+      </div>
       <div className="kn-actions">
         <Button variant="primary" disabled={busy || !loaded || !title.trim() || !text.trim()} data-testid="knowledge-rule-save" onClick={() => void save()}>
           Save
