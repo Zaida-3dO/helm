@@ -14,11 +14,15 @@
 // Chats of another device (`rc-*`, `rs-*`, and the ones made with `devices_create_chat`) are made
 // by the fake host on first use from `remoteFakeChat`; changes to a device that cannot take them
 // are refused with the words the real host uses (`remoteFakeRefusal`).
+//
+// Port forwards are kept in memory (no socket is opened): "Forward a port…" on a remote chat's
+// bar, an agent's offer, and Settings → Devices all read and stop the same list. Port 3389 and
+// ports under 1024 are refused, as the real host does. "Save to this PC" answers a made-up path.
 
 import { ApiError } from '../api/client.ts';
 import type { DeviceState } from '../api/devices.ts';
 import type { ModelCatalogue } from '../api/types.ts';
-import type { DeviceChats, DeviceInfo, RemoteChatRecord, RemoteProject } from '../devices/api.ts';
+import type { DeviceChats, DeviceInfo, Forward, RemoteChatRecord, RemoteProject } from '../devices/api.ts';
 import { remoteChatState } from '../devices/state.ts';
 import { chat } from './fixtures.ts';
 import type { FakeOpHandler } from './fakeHost.ts';
@@ -36,6 +40,9 @@ function param(name: string): string | null {
 const forced = new Map<string, DeviceState>();
 /** Chats made on another device while the page is open. */
 const created: RemoteChatRecord[] = [];
+/** Ports forwarded to this PC while the page is open. */
+const forwards: Forward[] = [];
+let forwardSeq = 0;
 let tell: (() => void) | null = null;
 const started = Date.now();
 
@@ -168,6 +175,39 @@ export function devicesFakeOps(): { prefixes: string[]; handler: FakeOpHandler }
       }
       case 'devices_open_chat':
         return {};
+      case 'devices_forwards':
+        return { forwards };
+      case 'devices_forward_open': {
+        const chatId = String(a.chatId ?? '');
+        const device = remoteFakeChat(chatId)?.hostDeviceId;
+        if (!device) throw new ApiError('not_found', 'That chat does not run on another PC.');
+        const refusal = remoteFakeRefusal(device);
+        if (refusal) throw new ApiError(refusal.code, refusal.message);
+        const port = Number(a.port);
+        if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new ApiError('refused', 'Only ports 1024 to 65535 can be forwarded.');
+        if (port === 3389) throw new ApiError('refused', 'Remote desktop ports are never forwarded.');
+        const same = forwards.find((f) => f.chatId === chatId && f.port === port);
+        if (same) return same;
+        const at = Date.now();
+        const taken = forwards.some((f) => f.localPort === port);
+        const localPort = taken ? 50_000 + ++forwardSeq : port;
+        const title = typeof a.title === 'string' ? a.title.slice(0, 200) : '';
+        const name = devices().find((d) => d.uid === device)?.name ?? 'Another device';
+        const made: Forward = { forwardId: `fw-${++forwardSeq}`, chatId, deviceUid: device, deviceName: name, port, localPort, url: `http://127.0.0.1:${localPort}/`, title, streams: 0, openedAt: at, lastUsedAt: at };
+        forwards.push(made);
+        ctx.emit({ kind: 'devices_forwards_changed' });
+        return made;
+      }
+      case 'devices_forward_close': {
+        const i = forwards.findIndex((f) => f.forwardId === a.forwardId);
+        if (i >= 0) forwards.splice(i, 1);
+        ctx.emit({ kind: 'devices_forwards_changed' });
+        return {};
+      }
+      case 'devices_file_save': {
+        const name = String(a.path ?? '').split(/[\\/]/).pop() || 'file';
+        return { path: `C:/Users/me/Downloads/${name}` };
+      }
       case 'devices_create_chat': {
         const device = String(a.deviceUid);
         const refusal = remoteFakeRefusal(device);
