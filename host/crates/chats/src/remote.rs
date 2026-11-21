@@ -69,6 +69,18 @@ pub trait RemoteChats: Send + Sync {
     fn chat_op(&self, op: &str, args: Value) -> Fut<Res>;
     /// The model catalogue another device last reported.
     fn catalogue(&self, device_uid: String) -> Fut<Res>;
+    /// Start a chat on the named device, for the named hub person. `{chatId}` answers it, and the
+    /// device's news of the chat is held in this PC's copy before the answer comes back, so the
+    /// chat can be read and sent to at once. Refused where the link cannot start chats.
+    fn create_chat(&self, a: RemoteCreateChat) -> Fut<Res> {
+        let _ = a;
+        Box::pin(async {
+            Err(ApiError::new(
+                "refused",
+                "Chats cannot be started on another PC over this link.",
+            ))
+        })
+    }
     /// Something big of the chat, brought across whole in chunks. `r` names it as the device's
     /// `blob_read` does: `{output}` (a tool's whole output) or `{file}` (a path inside the
     /// chat's project folder there).
@@ -81,6 +93,20 @@ pub trait RemoteChats: Send + Sync {
             ))
         })
     }
+}
+
+/// What [`RemoteChats::create_chat`] asks of the link: start a chat on `device_uid` for the hub
+/// person `person_id`, showing it on that PC's project `project_id`, with the model and effort
+/// that PC understands. `title` names it before its first message; `muted` keeps it quiet from
+/// its first turn.
+pub struct RemoteCreateChat {
+    pub device_uid: String,
+    pub person_id: String,
+    pub project_id: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub title: Option<String>,
+    pub muted: bool,
 }
 
 /// Something big of a chat that runs on another device, brought across whole.

@@ -1450,27 +1450,7 @@ async fn send_to_mirror_chat(
     );
     // The words go as the person whose profile the sending chat is in, not whoever the sidebar
     // shows. A chat whose profile is not on the hub yet cannot send.
-    let from = ctx.caller_chat_id.clone();
-    let store = db(ctx)?;
-    let acting: Option<String> = tokio::task::spawn_blocking(move || {
-        store.snapshot(|tx| {
-            Ok::<_, rusqlite::Error>(
-                tx.query_row(
-                    "SELECT hub_person_id FROM profiles WHERE id =
-                         COALESCE((SELECT NULLIF(profile_id, '') FROM chats WHERE id = ?1),
-                                  (SELECT id FROM profiles WHERE is_home = 1))",
-                    [&from],
-                    |r| r.get::<_, Option<String>>(0),
-                )
-                .ok()
-                .flatten(),
-            )
-        })
-    })
-    .await
-    .ok()
-    .and_then(Result::ok)
-    .flatten();
+    let acting = caller_hub_person(ctx).await?;
     if acting.is_none() {
         return Err(refuse("This chat's profile isn't on the hub yet."));
     }
@@ -1730,6 +1710,151 @@ fn place(
 const NO_BOARD: &str =
     "This chat is not on a board, so pass projectId: a board's id from app_list_projects.";
 
+/// What a `device` argument names, settled against this install's device rows.
+enum Pc {
+    /// The name is this PC's own; the chat starts here as if `device` were left out.
+    This,
+    /// One paired PC, as `(uid, name)`.
+    Found { uid: String, name: String },
+    /// No paired PC matches; the names carried are the ones that do exist.
+    Unknown(Vec<String>),
+}
+
+/// Resolve `want` — a device id or name, case-insensitive — like `app_list_chats` matches them.
+fn pick_pc(tx: &Transaction<'_>, want: &str) -> rusqlite::Result<Pc> {
+    if let Some((uid, name)) = this_device(tx) {
+        if uid.eq_ignore_ascii_case(want) || name.eq_ignore_ascii_case(want) {
+            return Ok(Pc::This);
+        }
+    }
+    // An install without a household link has no device rows at all: answer Unknown, no names.
+    let want_l = want.to_lowercase();
+    let found = tx
+        .query_row(
+            "SELECT uid, name FROM devices WHERE lower(uid) = ?1 OR lower(name) = ?1 LIMIT 1",
+            [&want_l],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    if let Some((uid, name)) = found {
+        return Ok(Pc::Found { uid, name });
+    }
+    let names = tx
+        .prepare("SELECT name FROM devices")
+        .and_then(|mut q| {
+            q.query_map([], |r| r.get::<_, String>(0))
+                .and_then(|rows| rows.collect::<rusqlite::Result<_>>())
+        })
+        .unwrap_or_default();
+    Ok(Pc::Unknown(names))
+}
+
+/// The hub person of the calling chat's profile — the person a cross-PC act is done for, and
+/// the words of a cross-PC send arrive as. `None` when the profile is not on the hub yet.
+async fn caller_hub_person(ctx: &ToolCtx) -> Result<Option<String>, ToolError> {
+    let store = db(ctx)?;
+    let from = ctx.caller_chat_id.clone();
+    Ok(tokio::task::spawn_blocking(move || {
+        store.snapshot(move |tx| {
+            Ok::<_, rusqlite::Error>(
+                tx.query_row(
+                    "SELECT hub_person_id FROM profiles WHERE id =
+                         COALESCE((SELECT NULLIF(profile_id, '') FROM chats WHERE id = ?1),
+                                  (SELECT id FROM profiles WHERE is_home = 1))",
+                    [&from],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .ok()
+                .flatten(),
+            )
+        })
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .flatten())
+}
+
+/// `app_create_chat` with `device` naming another paired PC: the chat is started there over the
+/// household link, for the calling chat's own person, and its first message crosses the same way.
+/// The new chat is held in this PC's copy by the link itself, so reads and sends follow at once.
+async fn create_chat_on_device(
+    ctx: ToolCtx,
+    a: &Value,
+    body: String,
+    title: Option<&str>,
+    muted: bool,
+    watch: bool,
+    uid: String,
+    name: String,
+    limits: &SendLimits,
+) -> ToolResult {
+    let Some(remote) = ctx
+        .services
+        .get::<crate::remote::RemoteSlot>()
+        .and_then(|s| s.get())
+    else {
+        return Err(refuse(
+            "This PC is not on a household link, so it cannot start a chat on another PC.",
+        ));
+    };
+    // The other PC acts for the hub person this chat's profile is linked to; without one there
+    // is no one the chat could belong to.
+    let person = caller_hub_person(&ctx).await?.ok_or_else(|| {
+        refuse("This chat's profile isn't on the hub yet, so it cannot start a chat on another PC.")
+    })?;
+    // This PC's boards are not there: the project must be one that PC knows, named outright.
+    let project = str_arg(a, "projectId").ok_or_else(|| {
+        refuse(format!(
+            "A chat started on {name} needs projectId: a board of that PC. Its ids are its own, not this PC's — list its boards with the new-chat page for {name}, or pass the id of a board the two PCs share."
+        ))
+    })?;
+    limits.admit(&ctx.caller_chat_id, None, Instant::now())?;
+    let made = remote
+        .create_chat(crate::remote::RemoteCreateChat {
+            device_uid: uid.clone(),
+            person_id: person.clone(),
+            project_id: project.to_owned(),
+            model: str_arg(a, "model").map(str::to_owned),
+            effort: str_arg(a, "effort").map(str::to_owned),
+            title: title.map(str::to_owned),
+            muted,
+        })
+        .await
+        .map_err(|e| ToolError::refused(e.message))?;
+    let id = made["chatId"]
+        .as_str()
+        .ok_or_else(|| {
+            ToolError::maybe(format!(
+                "{name} started the chat but its answer carried no chat id."
+            ))
+        })?
+        .to_owned();
+    // The first message crosses as a send to the mirrored chat; the link is already holding its
+    // copy, so nothing waits for the other PC's list news.
+    let mut out = send_to_mirror_chat(&ctx, remote, &id, &body, limits, a)
+        .await
+        .map_err(|e| {
+            ToolError::maybe(format!(
+                "The chat was started on {name} (id {id}), but its first message did not arrive: {} Send it the words yourself, or start the chat there.",
+                e.public
+            ))
+        })?;
+    if let Some(o) = out.as_object_mut() {
+        o.remove("mode");
+        o.insert("deviceId".into(), json!(uid));
+        o.insert("deviceName".into(), json!(name.clone()));
+    }
+    if watch {
+        // A wait follows chats on this PC; this one runs over the link, where waits do not reach.
+        out["watch"] = json!({
+            "declared": false,
+            "reason": format!("That chat runs on {name}: waits follow chats on this PC. Ask it to report back with app_send_message, and read it with app_read_chat."),
+        });
+    }
+    Ok(out)
+}
+
 async fn create_chat(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolResult {
     let body = message_arg(&a)?;
     let title = str_arg(&a, "title")
@@ -1737,6 +1862,25 @@ async fn create_chat(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRes
         .filter(|t| !t.is_empty());
     if title.is_some_and(|t| t.len() > 512) {
         return Err(refuse("title is at most 512 bytes."));
+    }
+    // `device` names a paired PC to start the chat on; unset or naming this PC means here.
+    let device = match a.get("device") {
+        None | Some(Value::Null) => None,
+        Some(d) => Some(
+            d.as_str()
+                .map(str::trim)
+                .filter(|d| !d.is_empty())
+                .ok_or_else(|| refuse("device must name one paired PC by its name or id."))?
+                .to_owned(),
+        ),
+    };
+    // A chat that will run on another PC cannot hang under a chat or run in a folder of this one.
+    if device.is_some()
+        && (a.get("folder").is_some_and(|f| !f.is_null()) || a.get("parentChatId").is_some())
+    {
+        return Err(refuse(
+            "folder and parentChatId name things on this PC, and this chat would run on another one. Pass projectId for a board or project of that PC instead.",
+        ));
     }
     let folder = match a.get("folder") {
         None | Some(Value::Null) => None,
@@ -1778,6 +1922,34 @@ async fn create_chat(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRes
             .as_bool()
             .ok_or_else(|| refuse("watch must be true or false."))?,
     };
+    if let Some(device) = device {
+        let store = db(&ctx)?;
+        let want = device.clone();
+        let picked =
+            tokio::task::spawn_blocking(move || store.snapshot(move |tx| pick_pc(tx, &want)))
+                .await
+                .map_err(|e| ToolError::maybe(e.to_string()))?
+                .map_err(|e| ToolError::maybe(e.to_string()))?;
+        match picked {
+            // The name is this PC's own: start the chat the usual way.
+            Pc::This => {}
+            Pc::Found { uid, name } => {
+                return create_chat_on_device(
+                    ctx, &a, body, title, muted, watch, uid, name, &limits,
+                )
+                .await
+            }
+            Pc::Unknown(names) => {
+                let known = match names.len() {
+                    0 => "none: this PC has no paired PCs.".to_owned(),
+                    _ => format!("{}.", names.join(", ")),
+                };
+                return Err(refuse(format!(
+                    "I don't know a paired PC called \"{device}\". The PCs this one is paired with: {known}"
+                )));
+            }
+        }
+    }
     let boards = Boards::of(&ctx.services);
     let db = db(&ctx)?;
     if str_arg(&a, "projectId").is_none()
@@ -2280,7 +2452,7 @@ A rolled-over chat is a stack of sessions: its chat fields name the stack (stack
     r.async_tool(
         ToolSpec::write(
             "app_create_chat",
-            format!("Start a new chat on a board with a first message. projectId is a board's id (default: this chat's board; required from Telegram, voice or the default board); folder an absolute path to run elsewhere; model, effort, parentChatId, muted (default true) and watch (default true: you are woken when its turn ends) are optional. Ask it to report to your chatId (app_this_chat) with app_send_message, then end your turn. More: app_help tool/app_create_chat.{LINKS}{EXPLICIT}"),
+            format!("Start a new chat on a board with a first message. projectId is a board's id (default: this chat's board; required from Telegram, voice or the default board); folder an absolute path to run elsewhere; model, effort, parentChatId, muted (default true), watch (default true: you are woken when its turn ends) and device (another paired PC to run it on; there folder and parentChatId are refused) are optional. Ask it to report to your chatId (app_this_chat) with app_send_message, then end your turn. More: app_help tool/app_create_chat.{LINKS}{EXPLICIT}"),
             obj(
                 json!({
                     "projectId": {"type": "string", "description": "The board to show the chat on; defaults to this chat's board."},
@@ -2291,7 +2463,8 @@ A rolled-over chat is a stack of sessions: its chat fields name the stack (stack
                     "model": {"type": "string", "description": "A Claude model id (sonnet, opus, ...) or a local model id (local/<server>/<model>)."},
                     "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]},
                     "muted": {"type": "boolean", "description": MUTED_ARG},
-                    "watch": {"type": "boolean", "description": "Default true: Helm declares an app_wait_for chat_idle on the new chat for you (a day at most), so you hear when its turn ends even if it never reports. Pass false when you wait on it yourself."}
+                    "watch": {"type": "boolean", "description": "Default true: Helm declares an app_wait_for chat_idle on the new chat for you (a day at most), so you hear when its turn ends even if it never reports. Pass false when you wait on it yourself."},
+                    "device": {"type": "string", "description": "A paired PC to run the chat on, by its name or id; unset means this PC. There projectId must be that PC's own board; folder and parentChatId are refused, and watch never declares."}
                 }),
                 &["message"],
             ),
@@ -2301,6 +2474,9 @@ A rolled-over chat is a stack of sessions: its chat fields name the stack (stack
 It starts muted unless you pass muted false; app_chat update changes that later. Your own chat id, for the new chat to report back to, is the chatId app_this_chat returns.
 The chat runs in the board's folder, or in folder when you name another. It nests under this chat by default; parentChatId nests it elsewhere on the same board, or null for top level. Chats nest at most three deep.
 watch defaults to true: Helm declares an app_wait_for chat_idle on the new chat for you (up to a day), so you are woken when its turn ends even if it never reports, and the answer's watch field says whether that wait was declared. Pass watch false when you declare your own wait or do not need one.
+
+## on-another-pc
+Pass device (a paired PC's name or id, as app_list_chats names them) to run the chat on that PC: it belongs to you there, is started muted as here, and your first message crosses the link to it. projectId is then required and must name a board that exists on that PC — a board the two PCs share carries the same id; a folder-only project of this PC does not exist there. folder and parentChatId are refused: they name things on this PC. Waits do not reach across the link, so watch never declares: make the chat report back with app_send_message, and read it with app_read_chat. The other PC must have “Let other devices use chats on this PC” turned on; the refusal says so when it is off.
 Omitted model and effort use the new-chat defaults. model can name a Claude model (sonnet, opus...) or a local model (local/<server>/<model>), whichever provider this chat itself runs on.
 
 ## report-back
@@ -3470,6 +3646,261 @@ mod tests {
         .await;
         assert_eq!(r["ok"], true, "{r}");
         assert_eq!(r["result"]["title"], "Sam on the laptop");
+    }
+
+    /// A paired stand-in that can also start a chat: it records the ask and every send that
+    /// crosses. `mirror_row` stands for the copy the real link holds of a chat it just made.
+    #[derive(Default)]
+    struct RemoteMaker {
+        asks: Mutex<Vec<crate::remote::RemoteCreateChat>>,
+        sends: Mutex<Vec<crate::types::ChatSendArgs>>,
+    }
+
+    const MADE_CHAT: &str = "0f0f0f0f-1111-2222-3333-888888888888";
+
+    impl crate::remote::RemoteChats for RemoteMaker {
+        fn owns(&self, _chat_id: &str) -> Option<String> {
+            None
+        }
+        fn this_device(&self) -> String {
+            "dev-1".to_owned()
+        }
+        fn device_name(&self, device_uid: &str) -> String {
+            if device_uid == "dev-2" {
+                "Laptop"
+            } else {
+                device_uid
+            }
+            .to_owned()
+        }
+        fn create_chat(
+            &self,
+            a: crate::remote::RemoteCreateChat,
+        ) -> crate::remote::Fut<crate::remote::Res> {
+            self.asks.lock().unwrap().push(a);
+            Box::pin(async move { Ok(json!({ "chatId": MADE_CHAT })) })
+        }
+        fn get(&self, _chat_id: String) -> crate::remote::Fut<crate::remote::Res> {
+            Box::pin(async { panic!("not used") })
+        }
+        fn page(
+            &self,
+            _a: crate::types::TranscriptPageArgs,
+        ) -> crate::remote::Fut<crate::remote::Res> {
+            Box::pin(async { panic!("not used") })
+        }
+        fn send(&self, a: crate::types::ChatSendArgs) -> crate::remote::Fut<crate::remote::Res> {
+            self.sends.lock().unwrap().push(a);
+            Box::pin(async move { Ok(json!({"submission": {"state": "accepted"}, "chat": {}})) })
+        }
+        fn chat_op(
+            &self,
+            _op: &str,
+            _args: serde_json::Value,
+        ) -> crate::remote::Fut<crate::remote::Res> {
+            Box::pin(async { panic!("not used") })
+        }
+        fn stop(&self, _chat_id: String) -> crate::remote::Fut<crate::remote::Res> {
+            Box::pin(async { panic!("not used") })
+        }
+        fn answer(
+            &self,
+            _a: crate::types::InteractionAnswerArgs,
+        ) -> crate::remote::Fut<crate::remote::Res> {
+            Box::pin(async { panic!("not used") })
+        }
+        fn set_model(
+            &self,
+            _a: crate::types::ChatSetModelArgs,
+        ) -> crate::remote::Fut<crate::remote::Res> {
+            Box::pin(async { panic!("not used") })
+        }
+        fn rename(
+            &self,
+            _chat_id: String,
+            _title: String,
+        ) -> crate::remote::Fut<crate::remote::Res> {
+            Box::pin(async { panic!("not used") })
+        }
+        fn archive(
+            &self,
+            _chat_id: String,
+            _archived: bool,
+        ) -> crate::remote::Fut<crate::remote::Res> {
+            Box::pin(async { panic!("not used") })
+        }
+        fn draft_save(
+            &self,
+            _a: crate::types::DraftSaveArgs,
+        ) -> crate::remote::Fut<crate::remote::Res> {
+            Box::pin(async { panic!("not used") })
+        }
+        fn catalogue(&self, _device_uid: String) -> crate::remote::Fut<crate::remote::Res> {
+            Box::pin(async { panic!("not used") })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_chat_can_start_a_chat_on_a_paired_pc() {
+        let far = Arc::new(RemoteMaker::default());
+        let boards = Arc::new(FakeBoards::default());
+        let h = crate::runtime_tests::harness_with_services(crate::runtime_tests::limits(), {
+            let (far, boards) = (far.clone(), boards.clone());
+            move |s: &mut helm_ipc::Services| {
+                s.insert(Arc::new(crate::seams::ProjectGates(boards.clone())));
+                s.insert(Arc::new(crate::seams::ChildWatcher(boards)));
+                let slot = crate::remote::RemoteSlot::default();
+                slot.attach(far);
+                s.insert(Arc::new(slot));
+            }
+        });
+        let t = tools(&h);
+        let a = h.create().await;
+        let folder = h
+            .col(&format!("SELECT project_id FROM chats WHERE id = '{a}'"))
+            .pop()
+            .unwrap();
+        let work = h.work.to_string_lossy().into_owned();
+        boards.boards.lock().unwrap().push(board(
+            "b-home",
+            "Home",
+            None,
+            Some((folder.as_str(), work.as_str())),
+        ));
+        boards
+            .groups
+            .lock()
+            .unwrap()
+            .insert(a.clone(), "b-home".into());
+        h.db
+            .write(|tx| {
+                tx.execute_batch(
+                    "CREATE TABLE profiles (id TEXT PRIMARY KEY, name TEXT, is_home INTEGER, hub_person_id TEXT);
+                     CREATE TABLE device_self (uid TEXT PRIMARY KEY, name TEXT, created_at INTEGER);
+                     CREATE TABLE devices (uid TEXT PRIMARY KEY, name TEXT);
+                     CREATE TABLE mirror_chats (chat_id TEXT PRIMARY KEY, device_uid TEXT, person_id TEXT, shared_with TEXT, record TEXT);
+                     INSERT INTO profiles VALUES ('p-home', 'Pat', 1, 'person-p');
+                     INSERT INTO device_self VALUES ('dev-1', 'Desk', 0);
+                     INSERT INTO devices VALUES ('dev-2', 'Laptop');
+                     INSERT INTO mirror_chats (chat_id, device_uid, person_id, shared_with, record) VALUES
+                       ('0f0f0f0f-1111-2222-3333-888888888888', 'dev-2', 'person-p', '[]',
+                        '{\"title\":\"Far chat\",\"archived\":false,\"status\":\"idle\",\"updatedAt\":100,\"createdAt\":99,\"harness\":\"claude\",\"pinned\":false,\"muted\":true}');",
+                )
+            })
+            .unwrap();
+        // `device` names the other PC by name, case-insensitively: the chat is started there
+        // for this chat's own person, with this PC's own title, model and effort handed over,
+        // muted as a made chat is here, and its first message crosses the same way. The copy
+        // above stands for what the link holds the moment the create answer comes back.
+        let r = call(
+            &h,
+            &t,
+            &a,
+            "app_create_chat",
+            json!({
+                "message": "Go on there.",
+                "device": "laptop",
+                "projectId": "brd-far",
+                "title": "Far chat",
+                "model": "sonnet",
+                "effort": "high",
+            }),
+        )
+        .await;
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["result"]["chatId"], MADE_CHAT);
+        assert_eq!(r["result"]["deviceId"], "dev-2");
+        assert_eq!(r["result"]["deviceName"], "Laptop");
+        assert_eq!(r["result"]["delivered"], true);
+        assert_eq!(r["result"]["watch"]["declared"], false, "{r}");
+        {
+            let asks = far.asks.lock().unwrap();
+            assert_eq!(asks.len(), 1);
+            let q = &asks[0];
+            assert_eq!(q.device_uid, "dev-2");
+            assert_eq!(q.person_id, "person-p");
+            assert_eq!(q.project_id, "brd-far");
+            assert_eq!(q.model.as_deref(), Some("sonnet"));
+            assert_eq!(q.effort.as_deref(), Some("high"));
+            assert_eq!(q.title.as_deref(), Some("Far chat"));
+            assert_eq!(q.muted, true);
+        }
+        {
+            let mut s = far.sends.lock().unwrap();
+            assert_eq!(s.len(), 1);
+            let sent = s.pop().unwrap();
+            assert_eq!(sent.chat_id, MADE_CHAT);
+            assert_eq!(sent.action, crate::types::SendAction::Steer);
+            let text = sent.text;
+            assert!(text.starts_with("[Message from another chat:"), "{text}");
+            assert!(text.contains(&a) && text.ends_with("\n\nGo on there."));
+        }
+        // Things that name this PC are refused before anything moves.
+        let r = call(
+            &h,
+            &t,
+            &a,
+            "app_create_chat",
+            json!({"message": "x", "device": "Laptop", "projectId": "brd-far", "folder": work}),
+        )
+        .await;
+        assert!(
+            r["error"]
+                .as_str()
+                .unwrap()
+                .contains("name things on this PC"),
+            "{r}"
+        );
+        let r = call(
+            &h,
+            &t,
+            &a,
+            "app_create_chat",
+            json!({"message": "x", "device": "Laptop", "parentChatId": a}),
+        )
+        .await;
+        assert!(
+            r["error"]
+                .as_str()
+                .unwrap()
+                .contains("name things on this PC"),
+            "{r}"
+        );
+        // Without a projectId of that PC there is nothing to start it on; an unknown name
+        // refuses with the names that do exist.
+        let r = call(
+            &h,
+            &t,
+            &a,
+            "app_create_chat",
+            json!({"message": "x", "device": "Laptop"}),
+        )
+        .await;
+        assert!(r["error"].as_str().unwrap().contains("projectId"), "{r}");
+        let r = call(
+            &h,
+            &t,
+            &a,
+            "app_create_chat",
+            json!({"message": "x", "device": "Tablet", "projectId": "brd-far"}),
+        )
+        .await;
+        let e = r["error"].as_str().unwrap();
+        assert!(e.contains("Tablet") && e.contains("Laptop"), "{r}");
+        // A device name that is this PC's own starts the chat the usual way, here.
+        let r = create(&h, &t, &a, json!({"device": "DESK"})).await;
+        assert_eq!(r["ok"], true, "{r}");
+        assert!(!far.asks.lock().unwrap().is_empty());
+        let made = r["result"]["chatId"].as_str().unwrap().to_owned();
+        assert_ne!(made, MADE_CHAT);
+        assert!(
+            far.sends.lock().unwrap().is_empty(),
+            "a chat started here sends nothing over the link"
+        );
+        let here = h
+            .col(&format!("SELECT id FROM chats WHERE id = '{made}'"))
+            .len();
+        assert_eq!(here, 1);
     }
 
     /// Boards for the tool tests, kept in memory: the sidebar tables live in the projects crate.
