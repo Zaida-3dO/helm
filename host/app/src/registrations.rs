@@ -468,6 +468,7 @@ pub fn allow_kinds() -> helm_consent::AllowKinds {
     helm_relay::register_allow_kinds(&mut k);
     helm_mcp::gmail::register_allow_kinds(&mut k);
     helm_mcp::owner_step::register_allow_kinds(&mut k);
+    helm_mcp::server_change::register_allow_kinds(&mut k);
     helm_memindex::register_allow_kinds(&mut k);
     helm_projects::startup::register_allow_kinds(&mut k);
     k
@@ -633,6 +634,8 @@ mod host_tool_tests {
             "app_edit_mcp_server",
             "app_update_mcp_server",
             "app_remove_mcp_server",
+            "app_set_mcp_secret",
+            "app_set_mcp_level",
             "app_link_item",
             "app_orchestrator_on",
             "app_workflow",
@@ -755,6 +758,7 @@ mod host_tool_tests {
         let kinds = super::allow_kinds();
         assert_eq!(kinds.get("test_action").is_some(), cfg!(debug_assertions));
         assert!(kinds.applies_on_allow("protected_settings"));
+        assert!(kinds.applies_on_allow("mcp_server_change"));
     }
 }
 

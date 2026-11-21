@@ -147,14 +147,15 @@ impl McpStore {
         })
     }
 
-    /// Read, check `expected` against the current revision, apply `f`, validate, seal new
-    /// literals, write, forget orphaned secrets, notify. Nothing is written if any step fails.
-    pub fn mutate(
+    /// The steps `mutate` and `preview` share, under the caller's lock: read the list, check
+    /// `expected` against its revision, apply `f`, give a new hub memory server its person
+    /// header, validate, and refuse a saved secret the server did not already have. Returns the
+    /// list before and after; nothing is sealed, written or announced.
+    fn checked(
         &self,
         expected: Option<&str>,
         f: impl FnOnce(&mut Vec<McpServer>) -> Result<(), StoreError>,
-    ) -> Result<McpEditorSnapshot, StoreError> {
-        let _g = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+    ) -> Result<(Vec<McpServer>, Vec<McpServer>), StoreError> {
         let before = self.load()?;
         if let Some(exp) = expected {
             if exp != revision_of(&before) {
@@ -188,6 +189,31 @@ impl McpStore {
                 )));
             }
         }
+        Ok((before, after))
+    }
+
+    /// What [`McpStore::mutate`] would change, without changing anything: the list before and
+    /// after `f`, checked exactly as a save checks it. Nothing is sealed, written or announced,
+    /// so a literal value in `f`'s result stays in memory only. A caller that shows the result
+    /// to someone must show names, never values.
+    pub fn preview(
+        &self,
+        expected: Option<&str>,
+        f: impl FnOnce(&mut Vec<McpServer>) -> Result<(), StoreError>,
+    ) -> Result<(Vec<McpServer>, Vec<McpServer>), StoreError> {
+        let _g = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        self.checked(expected, f)
+    }
+
+    /// Read, check `expected` against the current revision, apply `f`, validate, seal new
+    /// literals, write, forget orphaned secrets, notify. Nothing is written if any step fails.
+    pub fn mutate(
+        &self,
+        expected: Option<&str>,
+        f: impl FnOnce(&mut Vec<McpServer>) -> Result<(), StoreError>,
+    ) -> Result<McpEditorSnapshot, StoreError> {
+        let _g = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        let (before, mut after) = self.checked(expected, f)?;
         let minted = self.seal_literals(&mut after)?;
         let bytes = serde_json::to_vec_pretty(&FileShape {
             version: FILE_VERSION,

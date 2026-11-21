@@ -66,6 +66,12 @@ test('an Allow request call names its request, and the chip reads waiting, allow
   assert.equal(allowRequestId(call('{"requestId":"r4","state":"pending"}', 'app_project_startup')), 'r4', 'staged startup instructions wait on a card too');
   assert.equal(allowRequestId(call('{"projectId":"p","startupInstructions":null}', 'app_project_startup')), null, 'reading them files no request');
   assert.equal(allowRequestId(call('{"requestId":"r1"}', 'app_workflow')), null, 'only the Allow request tools');
+  for (const tool of ['app_mcp_servers', 'app_add_mcp_server', 'app_edit_mcp_server', 'app_update_mcp_server', 'app_remove_mcp_server', 'app_set_mcp_secret', 'app_set_mcp_level']) {
+    assert.equal(allowRequestId(call('{"requestId":"r5","state":"pending","note":"The user now sees an Approve card"}', tool)), 'r5', `${tool} waits on a card once its result says pending`);
+    assert.equal(allowRequestId(call('{"revision":"abc","servers":[]}', tool)), null, `${tool} without a card files no request`);
+  }
+  assert.equal(allowRequestId(call('{"requestId":"r6","state":"pending","note":"cut o', 'app_mcp_servers')), 'r6', 'a cut-off pending result still names its request');
+  assert.equal(allowRequestId(call('{"requestId":"r7","state":"denied"}', 'app_mcp_servers')), null, 'only a pending result files a card');
   assert.equal(allowRequestId(row({ role: 'toolResult', toolName: 'Bash', text: '{"requestId":"r1"}' })), null);
   const want: Record<string, string | null> = { pending: 'waiting', allowed: 'allowed', used: 'allowed', denied: 'refused', expired: 'refused', other: null };
   for (const [state, chip] of Object.entries(want)) assert.equal(allowChipState(state), chip, state);

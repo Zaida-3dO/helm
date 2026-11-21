@@ -81,6 +81,8 @@
     "app_schedule",
     "app_send_message",
     "app_set_chat_archived",
+    "app_set_mcp_level",
+    "app_set_mcp_secret",
     "app_settings",
     "app_show_images",
     "app_stage_settings",
