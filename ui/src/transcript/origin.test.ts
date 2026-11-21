@@ -52,6 +52,8 @@ test('the line naming the PC a message was typed on is hidden only for a message
     [user('[Typed on Laptop]\nhello', 'remote'), 'Laptop', 'hello'],
     [user('[Typed on Desk upstairs]\nline one\n[Typed on X]\nkept', 'remote'), 'Desk upstairs', 'line one\n[Typed on X]\nkept'],
     [user(`[Typed on ${'x'.repeat(40)}]\nok`, 'remote'), 'x'.repeat(40), 'ok'],
+    // 40 characters counted as characters, not UTF-16 units: a name of emoji is still stripped.
+    [user(`[Typed on ${String.fromCodePoint(0x1f5a5).repeat(40)}]\nok`, 'remote'), String.fromCodePoint(0x1f5a5).repeat(40), 'ok'],
     // Not that kind of message, or not exactly that line: shown as written.
     [user('[Typed on Laptop]\nhello', 'typed'), null, '[Typed on Laptop]\nhello'],
     [user('[Typed on Laptop]\nhello'), null, '[Typed on Laptop]\nhello'],

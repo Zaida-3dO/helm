@@ -47,7 +47,7 @@ export function fromVoice(row: MessageRow): boolean {
  * the name without brackets or control characters and at most 40 characters.
  */
 // eslint-disable-next-line no-control-regex
-const TYPED_ON = /^\[Typed on ([^[\]\u0000-\u001f\u007f]{1,40})\]\n/;
+const TYPED_ON = /^\[Typed on ([^[\]\u0000-\u001f\u007f]{1,40})\]\n/u;
 
 /** The PC a message from another PC was typed on, or null (typed here, or not that kind of message). */
 export function typedOn(row: MessageRow): string | null {
