@@ -43,12 +43,14 @@ use ts_rs::TS;
 pub const SESSIONS_MAX: usize = 16;
 /// Variables a Claude sign-in must not inherit, so the login writes the normal sign-in and not an
 /// override from the environment (the names a worker strips for the claude child).
-pub const SIGN_IN_STRIP_ENV: [&str; 5] = [
+pub const SIGN_IN_STRIP_ENV: [&str; 6] = [
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "CLAUDECODE",
+    // Where the host hands a worker the saved Claude token: never a terminal's business.
+    "HELM_CLAUDE_TOKEN",
 ];
 /// The tab title of the sign-in session.
 pub const SIGN_IN_TITLE: &str = "Claude sign-in";
@@ -752,6 +754,7 @@ mod tests {
             "CLAUDE_CODE_OAUTH_TOKEN",
             "CLAUDECODE",
             "HELM_LOCAL_MODEL_KEY",
+            "HELM_CLAUDE_TOKEN",
         ]
         .iter()
         .map(|k| (k.to_string(), "x".to_string()))
@@ -772,6 +775,7 @@ mod tests {
         // A shell launch brings no base and strips only the app-internal variables.
         assert!(!strips("ANTHROPIC_API_KEY", &[]));
         assert!(strips("HELM_LOCAL_MODEL_KEY", &[]));
+        assert!(strips("HELM_CLAUDE_TOKEN", &[]));
         // Only a sign-in that ended well tells the sign-in gate, which then checks afresh.
         let gate = helm_core::signin_gate::global();
         let before = gate.sign_ins();

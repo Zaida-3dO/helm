@@ -374,12 +374,14 @@ pub(crate) fn wait_for(
 }
 
 /// Never handed to a program (as for the claude child, and as the chats' own client does).
-pub(crate) const STRIPPED_ENV: [&str; 5] = [
+pub(crate) const STRIPPED_ENV: [&str; 6] = [
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "CLAUDECODE",
+    // Where the host hands a worker the saved Claude token: never a program's business.
+    "HELM_CLAUDE_TOKEN",
 ];
 
 fn is_shim(p: &Path) -> bool {

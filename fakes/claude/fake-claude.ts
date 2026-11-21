@@ -59,6 +59,7 @@
 //        callback the client registered for that matcher (with agent_id when "agent" is set).
 //        The client's control_response is saved under "as" (default "mcp").
 
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 
 type Json = Record<string, unknown>;
@@ -104,7 +105,10 @@ const ENV_ECHO = [
   "API_MAX_RETRIES",
 ];
 const env = Object.fromEntries(ENV_ECHO.filter((k) => process.env[k] !== undefined).map((k) => [k, process.env[k]]));
-log({ kind: "start", argv: flags, envKeys: Object.keys(process.env).sort(), env, pid: process.pid });
+// A sign-in token is a secret, so only its SHA-256 is logged: enough to tell which value arrived.
+const oauth = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+const oauthSha = oauth === undefined ? undefined : createHash("sha256").update(oauth).digest("hex");
+log({ kind: "start", argv: flags, envKeys: Object.keys(process.env).sort(), env, oauthSha, pid: process.pid });
 
 const replay = fixture.replay !== false && flags.includes("--replay-user-messages");
 const lifecycle = replay && fixture.lifecycle !== false;

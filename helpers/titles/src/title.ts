@@ -12,12 +12,18 @@
 // - The host may name a different model on the job (`model`), or route the job at a local model
 //   server the chat runs on (`localBaseUrl` with the same rules as a worker launch: loopback only,
 //   key from HELM_LOCAL_MODEL_KEY in the helper's environment, read once and never passed on).
+// - A Claude job may carry the person's saved Claude token in HELM_CLAUDE_TOKEN; it is set on the
+//   claude child as its own sign-in (never for a local job, never on the command line) and the
+//   hand-over name itself never reaches the child.
+// - The child is stopped gently: its input is already closed, so it is given a moment to exit on
+//   its own before it is killed. A claude killed in the middle of refreshing its sign-in can leave
+//   its lock behind.
 
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildClaudeEnv, localPinnedEnv, takeLocalKey } from "../../../worker/src/drivers/claude/env.ts";
+import { buildClaudeEnv, localPinnedEnv, takeClaudeToken, takeLocalKey } from "../../../worker/src/drivers/claude/env.ts";
 import { resolveClaude } from "../../../worker/src/drivers/claude/resolve.ts";
 import type { LocalLaunch } from "../../../worker/src/protocol/types.ts";
 
@@ -66,6 +72,8 @@ export const MIN_TITLE_WORDS = 3;
 export const MAX_TITLE_WORDS = 7;
 export const FIRST_REQUEST_CHARS = 4_000;
 export const MODEL = "haiku";
+/** How long a finished or timed-out claude may take to exit by itself before it is killed. */
+export const EXIT_GRACE_MS = 2_000;
 
 /** Keep the head and tail of a long text. */
 export function headTail(text: string, max: number): string {
@@ -230,7 +238,7 @@ export function askClaude(job: TitleJob, prompt: string): Promise<string> {
         process.env,
         launch.local
           ? { local: launch.local, localKey: takeLocalKey({ ...process.env } as Record<string, string | undefined>) }
-          : {},
+          : { claudeToken: takeClaudeToken({ ...process.env } as Record<string, string | undefined>) },
       ),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
@@ -241,13 +249,32 @@ export function askClaude(job: TitleJob, prompt: string): Promise<string> {
       if (done) return;
       done = true;
       clearTimeout(timer);
-      child.kill();
       // Best effort: the folder is empty unless claude left something; never fail the title on it.
       // Removed once the child has gone, whether that already happened or is still to come.
       const removeCwd = () => fs.rm(cwd, { recursive: true, force: true }, () => {});
-      if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) removeCwd();
-      else child.once("close", removeCwd);
-      f();
+      const gone = child.pid === undefined || child.exitCode !== null || child.signalCode !== null;
+      if (gone) {
+        removeCwd();
+        f();
+        return;
+      }
+      // The input is already closed, so claude is on its way out: wait for it, and only kill it if
+      // it is still there after the grace period.
+      let answered = false;
+      const answer = () => {
+        if (answered) return;
+        answered = true;
+        clearTimeout(killer);
+        f();
+      };
+      const killer = setTimeout(() => {
+        child.kill();
+        answer();
+      }, EXIT_GRACE_MS);
+      child.once("close", () => {
+        removeCwd();
+        answer();
+      });
     };
     const timer = setTimeout(() => finish(() => reject(new Error("timed out"))), job.timeoutMs ?? 45_000);
     child.on("error", (e) => finish(() => reject(e)));

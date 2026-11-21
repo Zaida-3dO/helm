@@ -4,6 +4,11 @@
 // One exception: a chat on a local model server (`claude.local`). It gets that server's address as
 // the base URL and the server's own key as the auth token, and never the user's sign-in or an
 // Anthropic key.
+//
+// The other exception: a long-lived Claude token the person saved in Helm. The host hands it over
+// in `HELM_CLAUDE_TOKEN`; it is read once, removed from this process, and set on the claude child
+// as `CLAUDE_CODE_OAUTH_TOKEN` only (never on a command line, never for a local chat, never for an
+// API-key launch). A child that holds it never has to refresh a sign-in of its own.
 
 import { DEFAULT_EFFORT, isEffort, LOCAL_THINKING_TOKENS, type LocalLaunch } from "../../protocol/types.ts";
 
@@ -19,9 +24,13 @@ export const STRIPPED_UNLESS_API_KEY_MODE = [
  * removes it from its own environment, and never passes it on under this name. */
 export const LOCAL_KEY_VAR = "HELM_LOCAL_MODEL_KEY";
 
+/** Where the host hands the worker or helper the saved Claude token. Read once (`takeClaudeToken`),
+ * removed from the process environment, and never passed on under this name. */
+export const CLAUDE_TOKEN_VAR = "HELM_CLAUDE_TOKEN";
+
 /** Always removed: variables that would make the child look like part of another agent's session,
- * Helm's own Node compile cache (set for the worker and helpers only), and the local key's hand-over name. */
-export const ALWAYS_STRIPPED = ["CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT", "NODE_COMPILE_CACHE", LOCAL_KEY_VAR] as const;
+ * Helm's own Node compile cache (set for the worker and helpers only), and the two hand-over names. */
+export const ALWAYS_STRIPPED = ["CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT", "NODE_COMPILE_CACHE", LOCAL_KEY_VAR, CLAUDE_TOKEN_VAR] as const;
 
 /** Removed from a local chat on top of the credential variables: another provider, or headers that
  * could carry a credential to the local server. */
@@ -53,6 +62,21 @@ export function takeLocalKey(env: Record<string, string | undefined>): string | 
 }
 
 /**
+ * Reads the saved Claude token the host passed in `env` and removes it there, so nothing the worker
+ * starts later (MCP servers, hooks) can see it under that name. Undefined when the launch brought none.
+ */
+export function takeClaudeToken(env: Record<string, string | undefined>): string | undefined {
+  let token: string | undefined;
+  // Windows env names are case-insensitive: compare upper-cased.
+  for (const k of Object.keys(env)) {
+    if (k.toUpperCase() !== CLAUDE_TOKEN_VAR) continue;
+    token = env[k];
+    delete env[k];
+  }
+  return token === undefined || token.trim() === "" ? undefined : token.trim();
+}
+
+/**
  * The base URL a local chat may use: plain http to this machine. Returns it without a trailing
  * slash. Anything else throws, so a launch can never send the local key (or a prompt) to another host.
  */
@@ -79,7 +103,7 @@ export function localThinkingTokens(local: Pick<LocalLaunch, "thinkingTokens">, 
 
 export function buildClaudeEnv(
   base: Record<string, string | undefined>,
-  opts: { apiKeyMode?: boolean; chatId?: string; local?: LocalLaunch; localKey?: string; effort?: string },
+  opts: { apiKeyMode?: boolean; chatId?: string; local?: LocalLaunch; localKey?: string; claudeToken?: string; effort?: string },
 ): Record<string, string> {
   const local = opts.local;
   const strip = new Set<string>(ALWAYS_STRIPPED.map((k) => k.toUpperCase()));
@@ -98,6 +122,9 @@ export function buildClaudeEnv(
   for (const [k, v] of Object.entries(FORCED)) out[k] = v;
   if (opts.chatId) out.HELM_CHAT_ID = opts.chatId;
   if (local) applyLocal(out, local, opts.localKey, opts.effort);
+  // The saved token is set after the stripping above, and only where it is the sign-in to use: not
+  // for a local chat, and not when API-key mode has chosen a key.
+  else if (opts.claudeToken && !opts.apiKeyMode) out.CLAUDE_CODE_OAUTH_TOKEN = opts.claudeToken;
   return out;
 }
 

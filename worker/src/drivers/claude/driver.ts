@@ -113,6 +113,8 @@ export interface DriverDeps {
   env: Record<string, string | undefined>;
   /** The local model server's key, taken from the worker's environment at start-up (never logged). */
   localKey?: string;
+  /** The saved Claude token, taken from the worker's environment at start-up (never logged). */
+  claudeToken?: string;
   diag: (msg: string) => void;
   /** Called after a fatal error has been reported; the worker should exit with this code. */
   onFatal: (code: number) => void;
@@ -274,7 +276,7 @@ export class ClaudeDriver implements Driver {
       ...(c.commandArgs ?? []),
       ...buildClaudeArgs(c, { promptRule: this.promptRule(), mcpConfig: this.hostTools ? sdkMcpConfig() : undefined, agentsArg: agents }),
     ];
-    const env = buildClaudeEnv(this.deps.env, { apiKeyMode: c.apiKeyMode === true, chatId: this.launch.chatId, local: c.local, localKey: this.deps.localKey, effort: this.effort });
+    const env = buildClaudeEnv(this.deps.env, { apiKeyMode: c.apiKeyMode === true, chatId: this.launch.chatId, local: c.local, localKey: this.deps.localKey, claudeToken: this.deps.claudeToken, effort: this.effort });
     const child = spawn(command, args, {
       cwd: this.launch.cwd ?? process.cwd(),
       env,

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { controlArgs, controlRequests, readControlUsage } from "../src/control.ts";
+import { controlArgs, controlRequests, EXIT_GRACE_MS, readControlUsage } from "../src/control.ts";
 import { normaliseControl, toMillis } from "../src/normalise.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -56,12 +56,17 @@ test("the reading comes from the get_usage answer and no user message is ever wr
 test("the child is a standalone CLI: stripped credentials, strict empty MCP, no setting sources, a neutral folder", async () => {
   process.env.ANTHROPIC_API_KEY = "test-key-not-real";
   process.env.CLAUDECODE = "1";
+  // The meter stays on the person's normal sign-in: a saved chat token is never handed to it.
+  process.env.HELM_CLAUDE_TOKEN = "test-token-not-real";
+  process.env.CLAUDE_CODE_OAUTH_TOKEN = "test-token-not-real";
   try {
     const s = scenario({ usage: BODY });
     await readControlUsage({ command: s.command, commandArgs: s.commandArgs, timeoutMs: 10_000 });
     const start = entries(s.log).find((e) => e.kind === "start")!;
     assert.ok(!start.envKeys.includes("ANTHROPIC_API_KEY"));
     assert.ok(!start.envKeys.includes("CLAUDECODE"));
+    assert.ok(!start.envKeys.includes("HELM_CLAUDE_TOKEN"));
+    assert.ok(!start.envKeys.includes("CLAUDE_CODE_OAUTH_TOKEN"));
     const argv: string[] = start.argv;
     assert.ok(argv.includes("--strict-mcp-config"));
     assert.equal(argv[argv.indexOf("--mcp-config") + 1], '{"mcpServers":{}}');
@@ -72,8 +77,56 @@ test("the child is a standalone CLI: stripped credentials, strict empty MCP, no 
   } finally {
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.CLAUDECODE;
+    delete process.env.HELM_CLAUDE_TOKEN;
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
   }
   assert.ok(controlArgs().includes("-p"));
+});
+
+test("the binary is ended gently: it gets its input closed and time to leave on its own, and is killed only if it stays", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "helm-usage-test-"));
+  const marker = path.join(dir, "left-by-itself");
+  // Answers the usage request (or not), then leaves a while after its input closes, writing a marker
+  // that a kill would have prevented.
+  const script = path.join(dir, "linger.mjs");
+  fs.writeFileSync(
+    script,
+    `import fs from "node:fs";
+const answer = process.argv[2] === "answer";
+let buf = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (d) => {
+  buf += d;
+  let nl;
+  while ((nl = buf.indexOf("\\n")) !== -1) {
+    const rec = JSON.parse(buf.slice(0, nl));
+    buf = buf.slice(nl + 1);
+    if (answer && rec.request?.subtype === "get_usage") {
+      process.stdout.write(JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: rec.request_id, response: ${JSON.stringify(BODY)} } }) + "\\n");
+    }
+  }
+});
+process.stdin.on("end", () => setTimeout(() => { fs.writeFileSync(${JSON.stringify(marker)}, "x"); process.exit(0); }, 600));
+`,
+  );
+  const answered = await readControlUsage({ command: process.execPath, commandArgs: [script, "answer"], timeoutMs: 10_000 });
+  assert.ok(answered.ok);
+  assert.ok(fs.existsSync(marker), "after an answer the binary was left to exit by itself");
+  fs.rmSync(marker);
+  const timedOut = await readControlUsage({ command: process.execPath, commandArgs: [script, "silent"], timeoutMs: 300 });
+  assert.ok(!timedOut.ok && timedOut.reason === "timeout");
+  assert.ok(fs.existsSync(marker), "after a timeout too");
+  // One that never leaves is killed once the grace period is over, and the answer does not wait for ever.
+  const stuckScript = path.join(dir, "stuck.mjs");
+  fs.writeFileSync(stuckScript, `process.stdin.resume();
+process.stdin.on("end", () => {});
+setInterval(() => {}, 1000);
+`);
+  const t0 = Date.now();
+  const r = await readControlUsage({ command: process.execPath, commandArgs: [stuckScript], timeoutMs: 200 });
+  const took = Date.now() - t0;
+  assert.ok(!r.ok && r.reason === "timeout");
+  assert.ok(took >= EXIT_GRACE_MS - 100 && took < EXIT_GRACE_MS + 2_500, `waited about the grace period, took ${took} ms`);
 });
 
 test("a binary that refuses, exits or says nothing is reported, never thrown", async () => {

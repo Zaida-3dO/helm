@@ -292,12 +292,13 @@ test("a reference the host could not resolve fails the server without connecting
 });
 
 test("stdio servers never inherit the Anthropic credentials", async () => {
-  const h = harness({ env: { ...process.env, ANTHROPIC_API_KEY: "should-not-pass", HELM_FAKE_VISIBLE: "yes" } });
+  const h = harness({ env: { ...process.env, ANTHROPIC_API_KEY: "should-not-pass", HELM_CLAUDE_TOKEN: "should-not-pass", HELM_FAKE_VISIBLE: "yes" } });
   open.push(h.bridge);
   h.bridge.configure({ revision: "r1", servers: [stdioServer("env", {}, { env: { FROM_CONFIG: "cfg" } })] });
   await h.bridge.tools({ server: "env", query: "env" });
   const name = generatedName("env", "env");
   assert.equal(text(await h.bridge.call(name, { name: "ANTHROPIC_API_KEY" })), "unset");
+  assert.equal(text(await h.bridge.call(name, { name: "HELM_CLAUDE_TOKEN" })), "unset", "the saved Claude token's hand-over name stays out too");
   assert.equal(text(await h.bridge.call(name, { name: "HELM_FAKE_VISIBLE" })), "set:yes");
   assert.equal(text(await h.bridge.call(name, { name: "FROM_CONFIG" })), "set:cfg");
 });

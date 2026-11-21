@@ -7,6 +7,10 @@
 // network call, never reads a token store and never calls any `/api/oauth/*` endpoint (CLAUDE.md
 // hard rule 2). The control request is experimental upstream, so an old or different binary that
 // does not answer is a reported state ("unsupported"), not a crash.
+//
+// The binary is ended gently: its input is closed and it is given a moment to exit on its own
+// before it is killed, because a claude killed while it is renewing its sign-in can leave its
+// renewal lock behind.
 
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -30,6 +34,8 @@ export type ControlResult =
 
 export const EMPTY_MCP = '{"mcpServers":{}}';
 export const DEFAULT_TIMEOUT_MS = 60_000;
+/** How long the binary may take to exit on its own once its input is closed, before it is killed. */
+export const EXIT_GRACE_MS = 2_000;
 
 export function controlArgs(extra: string[] = []): string[] {
   return [
@@ -113,9 +119,18 @@ export function readControlUsage(job: ControlJob = {}): Promise<ControlResult> {
         }
         resolve(r);
       };
-      child.once("close", cleanup);
-      child.kill();
-      setTimeout(cleanup, 2_000).unref();
+      if (child.exitCode !== null || child.signalCode !== null) {
+        cleanup();
+        return;
+      }
+      const killer = setTimeout(() => child.kill(), EXIT_GRACE_MS);
+      killer.unref();
+      child.once("close", () => {
+        clearTimeout(killer);
+        cleanup();
+      });
+      // The answer never waits much longer than the grace period, even for a binary that will not die.
+      setTimeout(cleanup, EXIT_GRACE_MS + 1_000).unref();
     };
     const timer = setTimeout(
       () => finish({ ok: false, reason: "timeout", message: "The claude binary did not answer the usage request in time.", version }),

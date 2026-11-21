@@ -4,7 +4,7 @@ import { buildClaudeArgs, disallowedTools } from "../src/drivers/claude/args.ts"
 import { agentsArg, agentsMode, cliVersion, parseCliVersion } from "../src/drivers/claude/cliversion.ts";
 import { decideGate, decideStop, gateHook, startupWanted, stopHook } from "../src/drivers/claude/gates.ts";
 import { cronTiming, NATIVE_SCHEDULE_TOOLS, scheduleRedirect } from "../src/drivers/claude/schedulecalls.ts";
-import { assertLoopbackHttp, buildClaudeEnv, contextRefusalNote, STRIPPED_UNLESS_API_KEY_MODE, takeLocalKey } from "../src/drivers/claude/env.ts";
+import { assertLoopbackHttp, buildClaudeEnv, contextRefusalNote, STRIPPED_UNLESS_API_KEY_MODE, takeClaudeToken, takeLocalKey } from "../src/drivers/claude/env.ts";
 
 const base = {
   PATH: "/bin",
@@ -33,6 +33,28 @@ test("stripping is case-insensitive (Windows env names)", () => {
 test("API-key mode keeps them", () => {
   const env = buildClaudeEnv(base, { apiKeyMode: true });
   for (const k of STRIPPED_UNLESS_API_KEY_MODE) assert.equal(env[k], base[k], k);
+});
+
+test("a saved Claude token: taken out of the environment, set on the child as its sign-in, never for a local chat or an API key", () => {
+  // Taken out of the environment it came in, whatever the case of its name; blank counts as none.
+  const handed: Record<string, string | undefined> = { Helm_Claude_Token: " tok-1 ", KEEP: "x" };
+  assert.equal(takeClaudeToken(handed), "tok-1");
+  assert.deepEqual(handed, { KEEP: "x" });
+  assert.equal(takeClaudeToken({ HELM_CLAUDE_TOKEN: "  " }), undefined);
+  assert.equal(takeClaudeToken({}), undefined);
+
+  // With a token, the child's sign-in is that token: not the inherited one, and the hand-over name is gone.
+  const withToken = buildClaudeEnv({ ...base, HELM_CLAUDE_TOKEN: "tok-1" }, { claudeToken: "tok-1" });
+  assert.equal(withToken.CLAUDE_CODE_OAUTH_TOKEN, "tok-1");
+  for (const k of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDECODE", "HELM_CLAUDE_TOKEN"]) assert.equal(k in withToken, false, k);
+  // Without one, nothing is set and an inherited value is still stripped, hand-over name included.
+  const none = buildClaudeEnv({ ...base, HELM_CLAUDE_TOKEN: "tok-1" }, {});
+  assert.deepEqual(["CLAUDE_CODE_OAUTH_TOKEN", "HELM_CLAUDE_TOKEN"].filter((k) => k in none), []);
+  // A local chat never gets it, and neither does a launch that chose API-key mode.
+  const local = { baseUrl: "http://127.0.0.1:40731", model: "qwen:8b" };
+  assert.equal("CLAUDE_CODE_OAUTH_TOKEN" in buildClaudeEnv({}, { local, localKey: "k", claudeToken: "tok-1" }), false);
+  assert.equal(buildClaudeEnv({ ANTHROPIC_API_KEY: "k" }, { apiKeyMode: true, claudeToken: "tok-1" }).CLAUDE_CODE_OAUTH_TOKEN, undefined);
+  assert.equal(buildClaudeEnv({ ANTHROPIC_API_KEY: "k" }, { apiKeyMode: true, claudeToken: "tok-1" }).ANTHROPIC_API_KEY, "k");
 });
 
 test("non-essential traffic and auto-update are off", () => {

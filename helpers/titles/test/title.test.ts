@@ -5,7 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { buildPrompt, buildSuggestPrompt, cleanSuggestions, cleanTitle, headTail, makeSuggestions, makeTitle } from "../src/title.ts";
+import { createHash } from "node:crypto";
+import { buildPrompt, buildSuggestPrompt, cleanSuggestions, cleanTitle, EXIT_GRACE_MS, headTail, makeSuggestions, makeTitle } from "../src/title.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -218,4 +219,85 @@ test("the empty folder is removed when claude exits without a title too", async 
     for (let n = 0; n < 50 && fs.existsSync(c); n++) await new Promise((res) => setTimeout(res, 20));
     assert.equal(fs.existsSync(c), false, `${c} is removed`);
   }
+});
+
+test("a saved Claude token is the child's sign-in for a Claude job only, and never on the command line", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "helm-titles-"));
+  const record = path.join(dir, "seen.json");
+  const script = path.join(dir, "fake.mjs");
+  // The fake logs only a hash of the sign-in it was given, so the test never prints a token.
+  fs.writeFileSync(
+    script,
+    `import { createHash } from "node:crypto";
+import fs from "node:fs";
+const t = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+fs.writeFileSync(${JSON.stringify(record)}, JSON.stringify({ argv: process.argv.slice(2), sha: t === undefined ? null : createHash("sha256").update(t).digest("hex"), handOver: process.env.HELM_CLAUDE_TOKEN ?? null }));
+process.stdin.resume();
+process.stdin.on("end", () => {
+  process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "Plan the release" }) + "\\n");
+});
+`,
+  );
+  const TOKEN = "sk-ant-oat01-fake-title-token";
+  const sha = createHash("sha256").update(TOKEN).digest("hex");
+  const read = () => JSON.parse(fs.readFileSync(record, "utf8")) as { argv: string[]; sha: string | null; handOver: string | null };
+  const run = (extra: Record<string, unknown> = {}) => makeTitle({ firstRequest: "plan it", command: process.execPath, commandArgs: [script], ...extra });
+  process.env.HELM_CLAUDE_TOKEN = TOKEN;
+  process.env.CLAUDE_CODE_OAUTH_TOKEN = "inherited";
+  process.env.HELM_LOCAL_MODEL_KEY = "sk-fake-bg-key";
+  try {
+    assert.deepEqual(await run(), { title: "Plan the release" });
+    let seen = read();
+    assert.equal(seen.sha, sha, "the handed-over token replaces any inherited sign-in");
+    assert.equal(seen.handOver, null, "the hand-over name never reaches the child");
+    assert.equal(JSON.stringify(seen.argv).includes(TOKEN), false);
+    // A job on a local model server never carries it.
+    assert.deepEqual(await run({ model: "small-4k", localBaseUrl: "http://127.0.0.1:19999" }), { title: "Plan the release" });
+    seen = read();
+    assert.equal(seen.sha, null);
+    assert.equal(seen.handOver, null);
+  } finally {
+    delete process.env.HELM_CLAUDE_TOKEN;
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    delete process.env.HELM_LOCAL_MODEL_KEY;
+  }
+  // Without a hand-over nothing is set, and an inherited sign-in is still stripped.
+  process.env.CLAUDE_CODE_OAUTH_TOKEN = "inherited";
+  try {
+    assert.deepEqual(await run(), { title: "Plan the release" });
+    assert.equal(read().sha, null);
+  } finally {
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  }
+});
+
+test("claude is ended gently: it is given time to leave on its own after an answer or a timeout, and killed only if it stays", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "helm-titles-"));
+  const marker = path.join(dir, "left-by-itself");
+  // Answers (or not), then leaves a while after its input closes, writing a marker a kill would prevent.
+  const script = path.join(dir, "linger.mjs");
+  fs.writeFileSync(
+    script,
+    `import fs from "node:fs";
+const answer = process.argv[2] === "answer";
+const stay = process.argv[2] === "stay";
+process.stdin.resume();
+process.stdin.on("end", () => {
+  if (answer) process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "Plan the release" }) + "\\n");
+  if (stay) return setInterval(() => {}, 1000);
+  setTimeout(() => { fs.writeFileSync(${JSON.stringify(marker)}, "x"); process.exit(0); }, 600);
+});
+`,
+  );
+  const run = (mode: string, timeoutMs?: number) => makeTitle({ firstRequest: "plan it", command: process.execPath, commandArgs: [script, mode], timeoutMs });
+  assert.deepEqual(await run("answer"), { title: "Plan the release" });
+  assert.ok(fs.existsSync(marker), "after an answer claude was left to exit by itself");
+  fs.rmSync(marker);
+  assert.deepEqual(await run("silent", 300), { error: "timed out" });
+  assert.ok(fs.existsSync(marker), "after a timeout too");
+  // One that never leaves is killed once the grace period is over (two attempts, so two waits).
+  const t0 = Date.now();
+  assert.deepEqual(await run("stay", 200), { error: "timed out" });
+  const took = Date.now() - t0;
+  assert.ok(took >= 2 * EXIT_GRACE_MS - 200 && took < 2 * EXIT_GRACE_MS + 3_000, `waited about the grace period for each attempt, took ${took} ms`);
 });

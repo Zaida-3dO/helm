@@ -65,6 +65,45 @@ describe("launch and handshake", () => {
     }
   });
 
+  test("a saved Claude token reaches claude as its sign-in only, never in the arguments, never for a local chat", async () => {
+    const TOKEN = "sk-ant-oat01-fake-chat-token";
+    const sha = createHash("sha256").update(TOKEN).digest("hex");
+    const s = startWithFixture("streaming", { env: { HELM_CLAUDE_TOKEN: TOKEN, CLAUDE_CODE_OAUTH_TOKEN: "inherited" } });
+    try {
+      await s.host.ready();
+      const start = s.fakeStart();
+      assert.equal(start?.oauthSha, sha, "the handed-over token is the child's sign-in, not the inherited one");
+      const keys = (start?.envKeys as string[]).map((k) => k.toUpperCase());
+      assert.equal(keys.includes("HELM_CLAUDE_TOKEN"), false, "the hand-over name never reaches claude");
+      assert.equal(JSON.stringify(start?.argv).includes(TOKEN), false, "never on the command line");
+    } finally {
+      await s.done();
+    }
+    // No hand-over: nothing is set, and the inherited sign-in is still stripped.
+    const bare = startWithFixture("streaming", { env: { CLAUDE_CODE_OAUTH_TOKEN: "inherited" } });
+    try {
+      await bare.host.ready();
+      assert.equal(bare.fakeStart()?.oauthSha, undefined);
+    } finally {
+      await bare.done();
+    }
+    // A local-model chat never carries it.
+    const fake = await startFakeLocalModel({ key: "fake-local-key", reply: "x" });
+    const local = startWithFixture("local-model", {
+      claude: { model: "fake-flash", local: { baseUrl: fake.url, model: "fake-flash" } },
+      env: { HELM_LOCAL_MODEL_KEY: "fake-local-key", HELM_CLAUDE_TOKEN: TOKEN },
+    });
+    try {
+      await local.host.ready();
+      const start = local.fakeStart();
+      assert.equal(start?.oauthSha, undefined);
+      assert.equal((start?.envKeys as string[]).map((k) => k.toUpperCase()).includes("HELM_CLAUDE_TOKEN"), false);
+    } finally {
+      await local.done();
+      await fake.close();
+    }
+  });
+
   test("API-key mode passes the credential variables through", async () => {
     const s = startWithFixture("streaming", { claude: { apiKeyMode: true }, env: { ANTHROPIC_API_KEY: "sk-test", CLAUDECODE: "1" } });
     try {
