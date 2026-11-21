@@ -7,6 +7,7 @@
 //! | `chat_get` | blocking | [`ChatIdArgs`] → [`ChatGetResult`] |
 //! | `transcript_page` | heavy | [`TranscriptPageArgs`] → [`TranscriptPage`] |
 //! | `chat_find` | heavy | [`ChatFindArgs`] → [`ChatFindResult`] (find in chat over the whole history, one step) |
+//! | `stack_find` | heavy | [`StackFindArgs`] → [`StackFindResult`] (find across a chat's whole roll-over stack, newest session first) |
 //! | `chat_send` | maintenance | [`ChatSendArgs`] → [`ChatSendResult`] |
 //! | `chat_stop` | async | [`ChatStopArgs`] → [`ChatStopResult`] |
 //! | `chat_stop_no_resend` | async | [`ChatStopArgs`] → [`ChatStopResult`] |
@@ -44,6 +45,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("chat_get", OpClass::Blocking, chat_get)
         .blocking("transcript_page", OpClass::Heavy, transcript_page)
         .blocking("chat_find", OpClass::Heavy, chat_find)
+        .blocking("stack_find", OpClass::Heavy, stack_find)
         .blocking("chat_send", OpClass::Maintenance, chat_send)
         .async_op("chat_stop", chat_stop)
         .async_op("chat_stop_no_resend", chat_stop_no_resend)
@@ -606,6 +608,16 @@ fn chat_find(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     to_value(&out)
 }
 
+fn stack_find(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: StackFindArgs = parse_args(args)?;
+    let db = ctx.services.need::<Database>()?;
+    let out = db
+        .snapshot(|tx| store::stack_find(tx, &a))
+        .map_err(sql)?
+        .ok_or_else(not_found)?;
+    to_value(&out)
+}
+
 fn draft_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: DraftSaveArgs = parse_args(args)?;
     if a.text.len() > store::MAX_SUBMISSION_BYTES {
@@ -736,6 +748,7 @@ pub(crate) mod tests {
             ("chat_get", OpClass::Blocking),
             ("transcript_page", OpClass::Heavy),
             ("chat_find", OpClass::Heavy),
+            ("stack_find", OpClass::Heavy),
             ("chat_send", OpClass::Maintenance),
             ("chat_stop", OpClass::Async),
             ("chat_stop_no_resend", OpClass::Async),

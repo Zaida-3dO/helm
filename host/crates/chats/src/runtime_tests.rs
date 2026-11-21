@@ -6694,6 +6694,98 @@ async fn roll_over_hands_the_work_to_a_successor_and_archives_the_old_chat() {
         .map(|s| s["id"].as_str().unwrap())
         .collect();
     assert_eq!(listed, [chat.as_str(), new.as_str()]);
+    // The successor's window still shows only the successor's rows...
+    let own = h
+        .call("transcript_page", json!({"chatId": new}))
+        .await
+        .unwrap();
+    let texts = |page: &Value| -> Vec<String> {
+        page["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["text"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    };
+    assert!(
+        !texts(&own).iter().any(|t| t.contains("Built part one")),
+        "the newest session's page stays inside the session"
+    );
+    // ...and one stack page from it reads the whole chat: it runs on into the archived
+    // session in one order and marks where they meet. (The successor's first turn is still
+    // running, so its session has only the hand-off message; the page reaches the archived
+    // session's words in the same call.)
+    let p1 = h
+        .call("transcript_page", json!({"chatId": new, "stack": true}))
+        .await
+        .unwrap();
+    let p1_texts = texts(&p1);
+    assert!(
+        p1_texts.iter().any(|t| t.contains("Built part one")),
+        "the archived session's words keep their text: {p1_texts:?}"
+    );
+    assert!(
+        p1_texts.first().unwrap().contains("build the thing"),
+        "the page starts at the stack's first message"
+    );
+    assert_eq!(
+        p1["hasNewer"],
+        json!(false),
+        "the window's newest row ends the page"
+    );
+    let ids: Vec<i64> = p1["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_i64().unwrap())
+        .collect();
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted.len(), ids.len(), "no row comes back twice");
+    let marks = p1["sessionMarks"].as_array().unwrap();
+    assert_eq!(marks.len(), 1, "one boundary between the two sessions");
+    assert_eq!(marks[0]["sessionId"].as_str(), Some(chat.as_str()));
+    assert_eq!(marks[0]["title"].as_str(), Some(old_title.as_str()));
+    // The whole stack fit in one page, so there is no older page to ask for.
+    assert!(
+        p1["olderCursor"].is_null(),
+        "the walk reached the stack's start: {}",
+        p1["olderCursor"]
+    );
+    // Find reaches a word only the archived session has, from the newest window.
+    let found = h
+        .call("stack_find", json!({"chatId": new, "query": "part one"}))
+        .await
+        .unwrap();
+    let hits = found["rows"].as_array().unwrap();
+    assert!(!hits.is_empty(), "the oldest session answers");
+    assert!(
+        hits.iter()
+            .all(|r| r["sessionId"].as_str() == Some(chat.as_str())),
+        "the word sits in the archived session: {hits:?}"
+    );
+    // A jump into the archived session centres there and runs on to the newer session: the
+    // one window reaches through the stack from any entry point.
+    let first_old = h.col(&format!(
+        "SELECT id FROM messages WHERE chat_id = '{chat}' AND text LIKE 'build the thing%'"
+    ))[0]
+        .parse::<i64>()
+        .unwrap();
+    let jumped = h
+        .call(
+            "transcript_page",
+            json!({"chatId": new, "stack": true, "around": first_old}),
+        )
+        .await
+        .unwrap();
+    let jumped_texts = texts(&jumped);
+    assert!(jumped_texts.first().unwrap().contains("build the thing"));
+    assert!(
+        jumped_texts.iter().any(|t| t.contains("part two")),
+        "the jump's page runs past the successor boundary"
+    );
+    assert!(!jumped["sessionMarks"].as_array().unwrap().is_empty());
 }
 
 /// Attach a host seam carrying the harness's own services, so a flow started from inside the

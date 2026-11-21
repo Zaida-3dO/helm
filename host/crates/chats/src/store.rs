@@ -585,6 +585,9 @@ pub const FIND_STEP: i64 = 2000;
 /// The longest query searched, as in the find bar.
 pub const FIND_MAX_QUERY: usize = 256;
 const FIND_MAX_PER_ROW: i64 = 10_000;
+/// Default and ceiling for a `stack_find` row list.
+pub const STACK_FIND_DEFAULT: i64 = 50;
+const STACK_FIND_MAX: i64 = 200;
 
 fn count_in(hay: &str, needle: &str) -> i64 {
     let mut n = 0;
@@ -696,7 +699,9 @@ pub fn find_step(
 }
 
 /// One transcript page: the latest 100 by default, or 100 before/after a
-/// cursor, or 100 around a message id.
+/// cursor, or 100 around a message id. With `stack` the page covers the whole roll-over
+/// stack: the walk runs on into the neighbouring session when one runs out, and the page
+/// carries `sessionMarks` where the sessions meet.
 pub fn transcript_page(
     tx: &Transaction<'_>,
     args: &TranscriptPageArgs,
@@ -710,6 +715,9 @@ pub fn transcript_page(
     )?;
     if !exists {
         return Ok(None);
+    }
+    if args.stack == Some(true) {
+        return stack_page(tx, args, revision);
     }
     let inclusive = args.inclusive.unwrap_or(false);
     let messages = if let Some(target) = args.around {
@@ -755,6 +763,7 @@ pub fn transcript_page(
         messages,
         runs: runs(tx, chat)?,
         pending: pending(tx, chat)?,
+        session_marks: Vec::new(),
         revision,
     }))
 }
@@ -769,8 +778,391 @@ fn empty_page(tx: &Transaction<'_>, chat: &str, revision: i64) -> rusqlite::Resu
         newer_cursor: None,
         runs: runs(tx, chat)?,
         pending: pending(tx, chat)?,
+        session_marks: Vec::new(),
         revision,
     })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Stack paging: the whole roll-over stack read as one transcript
+// ---------------------------------------------------------------------------------------------
+
+/// How far a stack walk follows the session links before it stops. The links are built by
+/// roll over and its backfill, both of which chain at most this deep; the guard only keeps a
+/// hand-edited database from spinning here.
+const STACK_HOPS: usize = 50;
+
+/// A stack cursor or jump resolves to its own session anywhere in the stack: message ids are
+/// one table, so the row says where it came from.
+fn stack_row(tx: &Transaction<'_>, id: i64) -> rusqlite::Result<Option<(String, (i64, i64))>> {
+    tx.query_row(
+        "SELECT chat_id, timestamp, id FROM messages WHERE id = ?1",
+        [id],
+        |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))),
+    )
+    .optional()
+}
+
+/// Whether two sessions belong to the same roll-over stack (or are the same chat).
+fn same_stack(tx: &Transaction<'_>, asked: &str, session: &str) -> rusqlite::Result<bool> {
+    if asked == session {
+        return Ok(true);
+    }
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM chats a JOIN chats b \
+            ON a.stack_id IS NOT NULL AND a.stack_id = b.stack_id \
+            WHERE a.id = ?1 AND b.id = ?2)",
+        [asked, session],
+        |r| r.get(0),
+    )
+}
+
+/// The neighbouring session of the stack: the one before, or the one after.
+fn stack_neighbour(
+    tx: &Transaction<'_>,
+    session: &str,
+    newer: bool,
+) -> rusqlite::Result<Option<String>> {
+    let col = if newer {
+        "next_session_id"
+    } else {
+        "prev_session_id"
+    };
+    tx.query_row(
+        &format!("SELECT {col} FROM chats WHERE id = ?1"),
+        [session],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(|row| row.flatten())
+}
+
+/// The stack's newest session: walk forward from any session until the chain ends.
+fn stack_latest(tx: &Transaction<'_>, session: &str) -> rusqlite::Result<String> {
+    let mut cur = session.to_owned();
+    for _ in 0..STACK_HOPS {
+        match stack_neighbour(tx, &cur, true)? {
+            Some(n) => cur = n,
+            None => break,
+        }
+    }
+    Ok(cur)
+}
+
+fn session_has_rows(tx: &Transaction<'_>, session: &str) -> rusqlite::Result<bool> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE chat_id = ?1 AND active = 1)",
+        [session],
+        |r| r.get(0),
+    )
+}
+
+/// The divider's words come from the older session's own row, and its roll date from the
+/// session that followed it.
+fn session_label(tx: &Transaction<'_>, session: &str) -> rusqlite::Result<(String, i64)> {
+    tx.query_row(
+        "SELECT title, created_at FROM chats WHERE id = ?1",
+        [session],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+    .map(|row| row.unwrap_or_else(|| (session.to_owned(), 0)))
+}
+
+/// More rows before the page's oldest row: in its own session, or in an earlier session of
+/// the stack.
+fn stack_has_older(tx: &Transaction<'_>, first: Option<&MessageRow>) -> rusqlite::Result<bool> {
+    let Some(m) = first else { return Ok(false) };
+    if exists_beyond(tx, &m.chat_id, Some(m), false)? {
+        return Ok(true);
+    }
+    let mut cur = m.chat_id.clone();
+    for _ in 0..STACK_HOPS {
+        match stack_neighbour(tx, &cur, false)? {
+            Some(p) => {
+                if session_has_rows(tx, &p)? {
+                    return Ok(true);
+                }
+                cur = p;
+            }
+            None => break,
+        }
+    }
+    Ok(false)
+}
+
+/// The same beyond the page's newest row.
+fn stack_has_newer(tx: &Transaction<'_>, last: Option<&MessageRow>) -> rusqlite::Result<bool> {
+    let Some(m) = last else { return Ok(false) };
+    if exists_beyond(tx, &m.chat_id, Some(m), true)? {
+        return Ok(true);
+    }
+    let mut cur = m.chat_id.clone();
+    for _ in 0..STACK_HOPS {
+        match stack_neighbour(tx, &cur, true)? {
+            Some(n) => {
+                if session_has_rows(tx, &n)? {
+                    return Ok(true);
+                }
+                cur = n;
+            }
+            None => break,
+        }
+    }
+    Ok(false)
+}
+
+/// One direction of the walk: `limit` rows from `start_session`, running on into the
+/// neighbouring sessions of the stack when one runs out. Each session's block is oldest
+/// first; the blocks are returned newest session first for an older walk (the caller
+/// reverses them) and oldest first for a newer walk.
+fn stack_walk(
+    tx: &Transaction<'_>,
+    start_session: &str,
+    start_key: Option<(i64, i64)>,
+    inclusive: bool,
+    newer: bool,
+    limit: i64,
+) -> rusqlite::Result<Vec<MessageRow>> {
+    let mut blocks: Vec<Vec<MessageRow>> = Vec::new();
+    let mut need = limit;
+    let mut session = start_session.to_owned();
+    let mut key = start_key;
+    let mut first_step = true;
+    for _ in 0..=STACK_HOPS {
+        let rows = select_page(tx, &session, newer, key, first_step && inclusive, need)?;
+        if !rows.is_empty() {
+            need -= rows.len() as i64;
+            blocks.push(rows);
+        }
+        first_step = false;
+        key = None;
+        if need <= 0 {
+            break;
+        }
+        match stack_neighbour(tx, &session, newer)? {
+            Some(n) => session = n,
+            None => break,
+        }
+    }
+    if newer {
+        Ok(blocks.into_iter().flatten().collect())
+    } else {
+        Ok(blocks.into_iter().rev().flatten().collect())
+    }
+}
+
+/// A stack page: the same three shapes as a single chat's, but every walk runs on across
+/// session boundaries and the page says where they sit. A stack always starts at its newest
+/// session: that is where the chat lives now, whoever asks.
+fn stack_page(
+    tx: &Transaction<'_>,
+    args: &TranscriptPageArgs,
+    revision: i64,
+) -> rusqlite::Result<Option<TranscriptPage>> {
+    let chat = &args.chat_id;
+    let inclusive = args.inclusive.unwrap_or(false);
+    // Which session the walk starts in: a cursor or a jump may name a row of any session in
+    // this stack. A cursor outside it is not this chat's history: an empty page, as an
+    // unknown cursor is today.
+    let start_session = stack_latest(tx, chat)?;
+    let mut cursor_session: Option<String> = None;
+    let mut messages: Vec<MessageRow> = Vec::new();
+    let mut walked_newer = false;
+    let mut built = false;
+    if args.before.is_some() || args.after.is_some() {
+        let newer = args.after.is_some();
+        walked_newer = newer;
+        let c = if newer {
+            args.after.as_deref()
+        } else {
+            args.before.as_deref()
+        }
+        .unwrap_or_default();
+        let Ok(id) = c.trim().parse::<i64>() else {
+            return Ok(Some(empty_page(tx, chat, revision)?));
+        };
+        let Some((session, key)) = stack_row(tx, id)? else {
+            return Ok(Some(empty_page(tx, chat, revision)?));
+        };
+        if !same_stack(tx, chat, &session)? {
+            return Ok(Some(empty_page(tx, chat, revision)?));
+        }
+        cursor_session = Some(session.clone());
+        messages = stack_walk(tx, &session, Some(key), inclusive, newer, PAGE_SIZE)?;
+        built = true;
+    } else if let Some(target) = args.around {
+        if let Some((session, key)) = stack_row(tx, target)? {
+            if same_stack(tx, chat, &session)? {
+                // Half below the target, half from it down: the same shape as one chat's,
+                // each half free to run on across a boundary.
+                let older = stack_walk(tx, &session, Some(key), false, false, PAGE_SIZE / 2)?;
+                let newer = stack_walk(tx, &session, Some(key), true, true, PAGE_SIZE / 2)?;
+                messages = older;
+                messages.extend(newer);
+                built = true;
+            }
+        }
+    }
+    if !built {
+        messages = stack_walk(tx, &start_session, None, false, false, PAGE_SIZE)?;
+    }
+    let has_older = stack_has_older(tx, messages.first())?;
+    let has_newer = stack_has_newer(tx, messages.last())?;
+    let session_marks = stack_marks(tx, &messages, cursor_session.as_deref(), walked_newer)?;
+    Ok(Some(TranscriptPage {
+        chat_id: chat.clone(),
+        older_cursor: messages.first().filter(|_| has_older).map(cursor_of),
+        newer_cursor: messages.last().filter(|_| has_newer).map(cursor_of),
+        has_older,
+        has_newer,
+        messages,
+        runs: runs(tx, chat)?,
+        pending: pending(tx, chat)?,
+        session_marks,
+        revision,
+    }))
+}
+
+/// Where the page's rows change session: a mark per meeting point, oldest first. A mark
+/// missing one anchor means the other side of that boundary sits in the neighbouring page —
+/// the page before this one for an older walk, the one after for a newer walk.
+fn stack_marks(
+    tx: &Transaction<'_>,
+    messages: &[MessageRow],
+    cursor_session: Option<&str>,
+    walked_newer: bool,
+) -> rusqlite::Result<Vec<SessionMark>> {
+    let mut marks: Vec<SessionMark> = Vec::new();
+    if let (Some(cs), Some(first)) = (cursor_session, messages.first()) {
+        if walked_newer && first.chat_id != cs {
+            let (title, _) = session_label(tx, cs)?;
+            let rolled_over_at = match stack_neighbour(tx, cs, true)? {
+                Some(n) => session_label(tx, &n)?.1,
+                None => 0,
+            };
+            marks.push(SessionMark {
+                above_message_id: None,
+                below_message_id: Some(first.id),
+                session_id: cs.to_owned(),
+                title,
+                rolled_over_at,
+            });
+        }
+    }
+    for w in messages.windows(2) {
+        let (above, below) = (&w[0], &w[1]);
+        if above.chat_id == below.chat_id {
+            continue;
+        }
+        let (title, _) = session_label(tx, &above.chat_id)?;
+        marks.push(SessionMark {
+            above_message_id: Some(above.id),
+            below_message_id: Some(below.id),
+            session_id: above.chat_id.clone(),
+            title,
+            rolled_over_at: session_label(tx, &below.chat_id)?.1,
+        });
+    }
+    if let (Some(cs), Some(last)) = (cursor_session, messages.last()) {
+        if !walked_newer && last.chat_id != cs {
+            let (title, _) = session_label(tx, &last.chat_id)?;
+            let rolled_over_at = match stack_neighbour(tx, &last.chat_id, true)? {
+                Some(n) => session_label(tx, &n)?.1,
+                None => 0,
+            };
+            marks.push(SessionMark {
+                above_message_id: Some(last.id),
+                below_message_id: None,
+                session_id: last.chat_id.clone(),
+                title,
+                rolled_over_at,
+            });
+        }
+    }
+    Ok(marks)
+}
+
+/// Find in the whole roll-over stack: every session searched with the same rule as the find
+/// bar, newest session first, newest row first, stopped at `limit`.
+pub fn stack_find(
+    tx: &Transaction<'_>,
+    args: &StackFindArgs,
+) -> rusqlite::Result<Option<StackFindResult>> {
+    let Some(stack) = crate::rollover::stack_of(tx, &args.chat_id)? else {
+        return Ok(None);
+    };
+    let q: String = args
+        .query
+        .chars()
+        .take(FIND_MAX_QUERY)
+        .collect::<String>()
+        .to_lowercase();
+    if q.trim().is_empty() {
+        return Ok(Some(StackFindResult {
+            rows: Vec::new(),
+            truncated: false,
+        }));
+    }
+    let activity = args.include_activity.unwrap_or(false);
+    let limit = args
+        .limit
+        .unwrap_or(STACK_FIND_DEFAULT)
+        .clamp(1, STACK_FIND_MAX);
+    let mut rows: Vec<StackFound> = Vec::new();
+    let mut truncated = false;
+    'sessions: for session in stack.sessions.iter().rev() {
+        let mut st = tx.prepare(
+            "SELECT id, role, text, thinking, tool_name,
+                    CASE WHEN json_valid(details) AND json_type(details, '$.toolArgs') = 'text'
+                         THEN json_extract(details, '$.toolArgs') END
+             FROM messages WHERE chat_id = ?1 AND active = 1
+             ORDER BY timestamp DESC, id DESC",
+        )?;
+        let mut found = st.query([&session.id])?;
+        while let Some(r) = found.next()? {
+            let id: i64 = r.get(0)?;
+            let role: String = r.get(1)?;
+            let text: String = r.get(2)?;
+            let thinking: String = r.get(3)?;
+            let hay = match role.as_str() {
+                "user" => text,
+                "assistant" if activity && !thinking.is_empty() => format!(
+                    "{thinking}
+{text}"
+                ),
+                "assistant" => text,
+                _ if !activity => continue,
+                "toolResult" => {
+                    let name: Option<String> = r.get(4)?;
+                    let tool_args: Option<String> = r.get(5)?;
+                    [
+                        name.unwrap_or_default(),
+                        tool_args.unwrap_or_default(),
+                        text,
+                    ]
+                    .join(
+                        "
+",
+                    )
+                }
+                _ => text,
+            };
+            let count = count_in(&hay.to_lowercase(), &q);
+            if count > 0 {
+                if rows.len() as i64 >= limit {
+                    truncated = true;
+                    break 'sessions;
+                }
+                rows.push(StackFound {
+                    session_id: session.id.clone(),
+                    id,
+                    count,
+                });
+            }
+        }
+    }
+    Ok(Some(StackFindResult { rows, truncated }))
 }
 
 fn runs(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<Vec<RunSummary>> {
@@ -1078,6 +1470,7 @@ mod tests {
             after: None,
             around: None,
             inclusive: None,
+            stack: None,
         }
     }
 
@@ -1139,5 +1532,307 @@ mod tests {
             },
         );
         assert_eq!(by_id.messages.last().unwrap().id, older.messages[9].id);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Stack paging: the roll-over stack read as one transcript
+    // -----------------------------------------------------------------------------------------
+
+    /// Three sessions joined as one stack, oldest first, with distinct titles and dates.
+    fn stack3(db: &Database) -> [String; 3] {
+        let s = [chat(db), chat(db), chat(db)];
+        db.write(|tx| {
+            for (i, id) in s.iter().enumerate() {
+                let n = i + 1;
+                tx.execute(
+                    "UPDATE chats SET title = ?2, created_at = ?3, stack_id = ?4,
+                        prev_session_id = ?5, next_session_id = ?6 WHERE id = ?1",
+                    rusqlite::params![
+                        id,
+                        format!("session {n}"),
+                        100 * n as i64,
+                        s[0],
+                        if n > 1 { Some(s[i - 1].as_str()) } else { None },
+                        if n < 3 { Some(s[i + 1].as_str()) } else { None }
+                    ],
+                )?;
+            }
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+        s
+    }
+
+    fn add_tagged(db: &Database, chat: &str, tag: &str, n: i64, ts0: i64) {
+        db.write(|tx| {
+            for i in 0..n {
+                tx.execute(
+                    "INSERT INTO messages(chat_id, source_key, role, text, status, timestamp) VALUES (?1, ?2, 'user', ?3, 'complete', ?4)",
+                    rusqlite::params![chat, format!("{tag}k{i}"), format!("{tag}{i}"), ts0 + i],
+                )?;
+            }
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+    }
+
+    fn row_id(db: &Database, text: &str) -> i64 {
+        db.snapshot(|tx| {
+            tx.query_row("SELECT id FROM messages WHERE text = ?1", [text], |r| {
+                r.get(0)
+            })
+        })
+        .unwrap()
+    }
+
+    /// Paging up from the newest session runs on into the older ones: one order across all
+    /// three, every row exactly once, and a mark where the sessions meet.
+    #[test]
+    fn stack_pages_run_across_sessions_in_one_order() {
+        let (_d, db) = temp_db();
+        let s = stack3(&db);
+        add_tagged(&db, &s[0], "a", 30, 1000);
+        add_tagged(&db, &s[1], "b", 90, 2000);
+        add_tagged(&db, &s[2], "c", 120, 3000);
+        let mut pages: Vec<TranscriptPage> = Vec::new();
+        let mut cursor = None;
+        for _ in 0..10 {
+            let p = page(
+                &db,
+                TranscriptPageArgs {
+                    before: cursor.clone(),
+                    stack: Some(true),
+                    ..args(&s[2])
+                },
+            );
+            cursor = p.older_cursor.clone();
+            let last = pages.len();
+            pages.push(p);
+            if !pages[last].has_older {
+                break;
+            }
+        }
+        let mut all: Vec<String> = Vec::new();
+        for p in pages.iter().rev() {
+            all.extend(p.messages.iter().map(|m| m.text.clone()));
+        }
+        let mut want: Vec<String> = Vec::new();
+        for (tag, n) in [("a", 30), ("b", 90), ("c", 120)] {
+            want.extend((0..n).map(|i| format!("{tag}{i}")));
+        }
+        assert_eq!(all, want, "one order, no row twice, none missing");
+        assert_eq!(pages.len(), 3, "100 + 100 + the rest");
+        let marks: Vec<&SessionMark> = pages.iter().flat_map(|p| &p.session_marks).collect();
+        assert_eq!(marks.len(), 2, "one mark per session boundary");
+        // Where session 2 meets session 3: the divider sits over the last session-2 row of
+        // that page and under the first session-3 row, naming session 2 and its roll date.
+        let bc = marks.iter().find(|m| m.session_id == s[1]).unwrap();
+        assert_eq!(bc.title, "session 2");
+        assert_eq!(bc.above_message_id, Some(row_id(&db, "b89")));
+        assert_eq!(bc.below_message_id, Some(row_id(&db, "c0")));
+        assert_eq!(
+            bc.rolled_over_at, 300,
+            "session 3 opened when session 2 rolled over"
+        );
+        let ab = marks.iter().find(|m| m.session_id == s[0]).unwrap();
+        assert_eq!(ab.above_message_id, Some(row_id(&db, "a29")));
+        assert_eq!(ab.below_message_id, Some(row_id(&db, "b0")));
+        assert_eq!(ab.rolled_over_at, 200);
+    }
+
+    /// A jump into an older session centres there, runs on to the newer sessions below it,
+    /// and the following `after` page continues where it left off.
+    #[test]
+    fn stack_jumps_and_forward_pages_cross_sessions_too() {
+        let (_d, db) = temp_db();
+        let s = stack3(&db);
+        add_tagged(&db, &s[0], "a", 30, 1000);
+        add_tagged(&db, &s[1], "b", 90, 2000);
+        add_tagged(&db, &s[2], "c", 120, 3000);
+        let target = row_id(&db, "a15");
+        let p = page(
+            &db,
+            TranscriptPageArgs {
+                around: Some(target),
+                stack: Some(true),
+                ..args(&s[2])
+            },
+        );
+        let texts: Vec<String> = p.messages.iter().map(|m| m.text.clone()).collect();
+        assert_eq!(
+            texts.first().unwrap(),
+            "a0",
+            "older half runs to the session's start"
+        );
+        assert!(
+            texts.contains(&"b10".to_owned()),
+            "the newer half runs on into session 2"
+        );
+        assert_eq!(
+            texts
+                .windows(2)
+                .filter(|w| w[0] == "a29" && w[1] == "b0")
+                .count(),
+            1,
+            "the two runs meet once, in order"
+        );
+        assert_eq!(p.session_marks.len(), 1);
+        assert_eq!(p.session_marks[0].session_id, s[0]);
+        assert!(p.has_newer);
+        let next = page(
+            &db,
+            TranscriptPageArgs {
+                after: p.newer_cursor.clone(),
+                stack: Some(true),
+                ..args(&s[2])
+            },
+        );
+        let first = next.messages.first().unwrap();
+        assert_eq!(
+            first.text, "b35",
+            "the page after continues right where the jump left off"
+        );
+        // The forward page crosses into session 3, and says where the sessions meet.
+        assert!(
+            next.messages.iter().any(|m| m.text == "c0"),
+            "the forward page reaches session 3"
+        );
+        let bc = next
+            .session_marks
+            .iter()
+            .find(|m| m.session_id == s[1])
+            .unwrap();
+        assert_eq!(bc.above_message_id, Some(row_id(&db, "b89")));
+        assert_eq!(bc.below_message_id, Some(row_id(&db, "c0")));
+    }
+
+    /// `stack_find` searches every session and answers newest session first, newest row
+    /// first; the limit truncates; tool and thinking rows answer only with activity on.
+    #[test]
+    fn stack_find_searches_every_session_newest_first() {
+        let (_d, db) = temp_db();
+        let s = stack3(&db);
+        add_tagged(&db, &s[0], "a", 5, 1000);
+        add_tagged(&db, &s[1], "b", 5, 2000);
+        add_tagged(&db, &s[2], "c", 5, 3000);
+        db.write(|tx| {
+            tx.execute("UPDATE messages SET text = text || ' and a zebra' WHERE text = 'a2'", [])?;
+            tx.execute("UPDATE messages SET text = 'zebra crossing' WHERE text = 'b4'", [])?;
+            tx.execute("UPDATE messages SET text = 'the second zebra' WHERE text = 'c1'", [])?;
+            tx.execute("UPDATE messages SET text = 'zebra at the top' WHERE text = 'c4'", [])?;
+            tx.execute(
+                "INSERT INTO messages(chat_id, source_key, role, text, status, timestamp) VALUES (?1, 'xk', 'toolResult', 'zebra in a tool', 'complete', 3100)",
+                [&s[2]],
+            )
+        })
+        .unwrap();
+        let find = |q: &str, activity: bool, limit: Option<i64>| -> StackFindResult {
+            db.snapshot(|tx| {
+                stack_find(
+                    tx,
+                    &StackFindArgs {
+                        chat_id: s[2].clone(),
+                        query: q.into(),
+                        include_activity: activity.then_some(true),
+                        limit,
+                    },
+                )
+            })
+            .unwrap()
+            .unwrap()
+        };
+        let hits = find("ZEBRA", false, None);
+        let got: Vec<String> = hits
+            .rows
+            .iter()
+            .map(|h| {
+                let text: String = db
+                    .snapshot(|tx| {
+                        tx.query_row("SELECT text FROM messages WHERE id = ?1", [h.id], |r| {
+                            r.get(0)
+                        })
+                    })
+                    .unwrap();
+                let session = if h.session_id == s[0] {
+                    "a"
+                } else if h.session_id == s[1] {
+                    "b"
+                } else {
+                    "c"
+                };
+                format!("{session}:{text}")
+            })
+            .collect();
+        // Asking from the newest session still finds the word only an older session has,
+        // newest session first, newest row first inside each.
+        assert_eq!(
+            got,
+            [
+                "c:zebra at the top",
+                "c:the second zebra",
+                "b:zebra crossing",
+                "a:a2 and a zebra",
+            ],
+            "case-insensitive, every session, one order"
+        );
+        assert!(!hits.truncated);
+        let capped = find("zebra", false, Some(2));
+        assert_eq!(capped.rows.len(), 2);
+        assert!(capped.truncated, "the limit cut the list short");
+        let with_tools = find("zebra", true, None);
+        assert_eq!(
+            with_tools.rows.len(),
+            5,
+            "the tool row answers only with activity on"
+        );
+        // A lone chat finds its own rows; a chat that does not exist is not found.
+        let (_d2, db2) = temp_db();
+        let lone = chat(&db2);
+        add_tagged(&db2, &lone, "z", 3, 1000);
+        let one = db2
+            .snapshot(|tx| {
+                stack_find(
+                    tx,
+                    &StackFindArgs {
+                        chat_id: lone,
+                        query: "z0".into(),
+                        include_activity: None,
+                        limit: None,
+                    },
+                )
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(one.rows.len(), 1);
+        assert!(db2
+            .snapshot(|tx| stack_find(
+                tx,
+                &StackFindArgs {
+                    chat_id: "nope".into(),
+                    query: "z".into(),
+                    include_activity: None,
+                    limit: None
+                },
+            ))
+            .unwrap()
+            .is_none());
+    }
+
+    /// A chat no roll over touched answers a stack page exactly as a plain page.
+    #[test]
+    fn a_lone_chat_pages_the_same_with_the_stack_flag() {
+        let (_d, db) = temp_db();
+        let c = chat(&db);
+        add_messages(&db, &c, 150);
+        let plain = page(&db, args(&c));
+        let stacked = page(
+            &db,
+            TranscriptPageArgs {
+                stack: Some(true),
+                ..args(&c)
+            },
+        );
+        assert_eq!(stacked, plain);
+        assert!(stacked.session_marks.is_empty());
     }
 }

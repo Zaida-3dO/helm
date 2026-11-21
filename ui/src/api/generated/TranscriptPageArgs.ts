@@ -16,4 +16,10 @@ around?: number,
 /**
  * Include the cursor's own row (for jumps).
  */
-inclusive?: boolean, };
+inclusive?: boolean, 
+/**
+ * Page the whole roll-over stack as one window: when a walk runs past the end of one
+ * session it continues in the session before or after it, and the page says where the
+ * sessions meet with `sessionMarks`. Without it a chat answers from its own rows alone.
+ */
+stack?: boolean, };

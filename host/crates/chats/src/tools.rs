@@ -834,6 +834,7 @@ async fn read_mirror_chat(
                     _ => None,
                 },
                 inclusive: None,
+                stack: None,
             })
             .await
             .map_err(|e| ToolError::maybe(e.message))?;
@@ -874,6 +875,7 @@ async fn read_mirror_chat(
                 after: None,
                 around: None,
                 inclusive: None,
+                stack: None,
             })
             .await
             .map_err(|e| ToolError::maybe(e.message))?;

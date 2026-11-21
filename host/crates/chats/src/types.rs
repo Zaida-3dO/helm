@@ -1116,6 +1116,10 @@ pub struct TranscriptPage {
     pub runs: Vec<RunSummary>,
     /// At most 100 messages sent but not yet read or settled, oldest first.
     pub pending: Vec<Submission>,
+    /// Where the roll-over sessions meet inside `messages` (only ever filled when the page
+    /// asked for the stack). Oldest first, like the rows.
+    #[serde(default)]
+    pub session_marks: Vec<SessionMark>,
     #[ts(type = "number")]
     pub revision: i64,
 }
@@ -1253,6 +1257,77 @@ pub struct TranscriptPageArgs {
     #[serde(default)]
     #[ts(optional)]
     pub inclusive: Option<bool>,
+    /// Page the whole roll-over stack as one window: when a walk runs past the end of one
+    /// session it continues in the session before or after it, and the page says where the
+    /// sessions meet with `sessionMarks`. Without it a chat answers from its own rows alone.
+    #[serde(default)]
+    #[ts(optional)]
+    pub stack: Option<bool>,
+}
+
+/// Where two roll-over sessions meet in a stack page. The divider it names sits between the
+/// two rows it anchors (a missing side means the other side of the boundary is in the page
+/// before or after this one); it names the older session, the one the reader meets going up.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionMark {
+    /// The row shown above the divider, when this page carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number")]
+    #[ts(optional)]
+    pub above_message_id: Option<i64>,
+    /// The row shown below the divider, when this page carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number")]
+    #[ts(optional)]
+    pub below_message_id: Option<i64>,
+    /// The older session the divider names.
+    pub session_id: String,
+    /// Its title, for the divider's words.
+    pub title: String,
+    /// When that session rolled over into the next one.
+    #[ts(type = "number")]
+    pub rolled_over_at: i64,
+}
+
+/// Find across a chat's whole roll-over stack (`stack_find`): every session's message text,
+/// with the same case-insensitive rule as the find bar.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StackFindArgs {
+    pub chat_id: String,
+    pub query: String,
+    /// Also search tool calls, thinking and context rows.
+    #[serde(default)]
+    #[ts(optional)]
+    pub include_activity: Option<bool>,
+    /// At most this many rows (default 50, capped at 200).
+    #[serde(default)]
+    #[ts(type = "number")]
+    #[ts(optional)]
+    pub limit: Option<i64>,
+}
+
+/// One matching message of a stack session.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct StackFound {
+    /// The session whose history holds the row.
+    pub session_id: String,
+    #[ts(type = "number")]
+    pub id: i64,
+    /// How many times the query appears in the row (counted per row, capped).
+    #[ts(type = "number")]
+    pub count: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct StackFindResult {
+    /// Matching rows: newest session first, newest row first within a session.
+    pub rows: Vec<StackFound>,
+    /// True when the limit cut the list short.
+    pub truncated: bool,
 }
 
 /// Find in chat over the whole stored history (`chat_find`): one scan step of the active branch.
