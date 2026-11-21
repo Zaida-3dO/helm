@@ -50,7 +50,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `transcript` | The transcript scroller | |
 | `transcript-row` | One message row | `data-status` (`saved` `streaming` `complete` `error` `interrupted`), `data-role` (`user` `assistant` `toolResult` `context`), `data-row-id` |
 | `peer-card` | A user row that another chat sent (origin `other_chat`): the "From <chat>" card with the sender's link, the body and a note that the user did not write it | `data-from` (the sending chat's id) |
-| `row-origin` | Above a user bubble that did not come from the composer: "Telegram" for a message from the hub's bot (the bubble hides the note for the agent) | `data-origin` (`telegram`) |
+| `row-origin` | Above a user bubble that did not come from the composer: "Telegram" for a message from the hub's bot (the bubble hides the note for the agent), or "Typed on <PC>" for a message typed on another PC | `data-origin` (`telegram` `remote`) |
 | `message-images` / `message-image` | The thumbnails in a user bubble, and one of them (`message-image-viewer` is the image viewer opened from it, `message-image-full` the image in it: `data-state` `loading` `ready` `failed`) | `message-image`: `data-state` (`loading` `ready` `failed`); a `ready` one is a button |
 | `image-viewer-count` / `image-viewer-prev` / `image-viewer-next` / `image-viewer-facts` | In the image viewer (attached or sent images): "2 of 3" and the Previous and Next buttons (shown only for several images; the arrow keys step too), and the size and pixel dimensions line | |
 | `work-fold` | "Worked for …" row of a settled turn; click to unfold | |
@@ -214,10 +214,16 @@ Send now `Ctrl+Alt+Enter`, Stop and send waiting messages `Esc`.
 
 | Hook | Element | Attributes |
 |---|---|---|
-| `nav-pages` / `nav-pages-count` | The sidebar's Pages entry (under the top buttons) and its pinned-page count | |
+| `nav-pages` / `nav-pages-count` | The sidebar's Pages tile (one of the top-row tiles, so it moves into More when the sidebar is narrow) and its pinned-page count | |
+| `composer-hold` / `composer-hold-cancel` | The note above the composer while a send is held for a chat's PC that is away (it goes when the PC is back), and its Cancel | |
+| `tool-open-panel` / `tool-forward-port` | The buttons on a tool card: Open (shows the file or page the agent pointed at in the side panel) and Forward (opens another PC's port on this PC) | |
+| `remote-forward` / `remote-forward-open` / `remote-forward-stop` | One forwarded port in the strip of a chat that runs on another PC, and its Open and Stop buttons | `remote-forward`: `data-port` |
+| `remote-forward-add` / `remote-forward-port` / `remote-forward-go` | The strip's Forward a port button, its port field and its Forward button | |
+| `forwards-empty` / `forward-row-<id>` / `forward-open-<id>` / `forward-stop-<id>` | Settings → Devices' forwarded ports: the empty note, one forward's row (id = the forward id) and its Open and Stop | |
+| `file-save-here` | The file viewer's Save here button on a file of another PC (saves a copy on this PC) | |
 | `nav-archived` / `nav-settings` | The sidebar footer's Archived chats and Settings entries | `nav-archived`: `aria-pressed` while the archived list shows |
 | `pages-list` / `pages-row` / `pages-empty` | The Pages dialog, one pinned page in it (click opens it as a tab), and the empty note | |
-| `pages-device` / `pages-remote-row` | A PC of the household in the Pages dialog, and one page pinned on it (click brings it across and opens it as a tab) | |
+| `pages-remote-row` / `pages-row-on` / `pages-device-problem` | One page pinned on another PC in the Pages dialog (click brings it across and opens it as a tab), its small "on <PC>" detail, and the line saying a PC could not be read | |
 | `page-frame-root` / `page-frame` / `page-error` | A page tab's body (`data-network` and `data-scripts` are `on` or `off`), its sandboxed frame, and the error shown when the page could not open | |
 | `page-reload` / `page-more` / `page-menu` | The page bar's Reload button, its "…" button, and the menu it opens (Allow network for this open, ticked while on; Add to / Remove from Pages; Send its messages to this chat, only when the page is linked elsewhere; Reset page storage) | |
 | `page-network-notice` / `page-network-hint` / `page-runtime-error` | The notice while the network is on (its `page-network-off` link turns it off), the hint after an offline page tried the network (its `page-network-allow` link allows it), and the dismissible script-error strip | |
