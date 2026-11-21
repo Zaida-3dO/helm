@@ -467,6 +467,24 @@ test('a local picture is marked with its path and drawn later; other image targe
   const html = renderToHtml('![the shot](C:/Users/me/shot.png)');
   assert.match(html, /<img class="md-image md-image-local" data-md-local-src="C:\/Users\/me\/shot\.png" alt="the shot">/);
   assert.ok(!html.includes(' src='), 'no src until the host answers');
+
+  // Two PCs can have a picture at the same path: a kept one is only reused for the same PC.
+  const { loadLocalImage, setLocalImageLoader } = await import('./localImages.ts');
+  const asked: string[] = [];
+  const from = (pc: string) => async (path: string) => {
+    asked.push(`${pc}:${path}`);
+    return { mime: 'image/png', bytes: btoa(pc) };
+  };
+  const shot = 'C:/dev/app/shot.png';
+  let undo = setLocalImageLoader(from('desk'), 'desk');
+  const desk = await loadLocalImage(shot);
+  assert.equal(await loadLocalImage(shot), desk, 'the same PC reuses its kept picture');
+  undo();
+  undo = setLocalImageLoader(from('here'));
+  const here = await loadLocalImage(shot);
+  assert.notEqual(here, desk, "this PC's picture is never the other PC's");
+  undo();
+  assert.deepEqual(asked, [`desk:${shot}`, `here:${shot}`]);
 });
 
 test('pull request mentions become links; bare numbers need the chat\'s repository; code, links and name characters stay text', () => {

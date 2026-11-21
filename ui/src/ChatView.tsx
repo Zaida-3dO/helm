@@ -122,7 +122,12 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
   );
   // Pictures on disk named in replies and tool cards come from the host; for a chat that runs on
   // another PC, from that PC (the chat id tells this PC's host where to read).
-  useEffect(() => setLocalImageLoader((path) => shell.api<{ mime: string; bytes: string }>('local_image_get', { path, chatId })), [shell, chatId]);
+  // Kept pictures are told apart by PC, since two PCs can have a picture at the same path.
+  const pictureSource = remote?.uid ?? '';
+  useEffect(
+    () => setLocalImageLoader((path) => shell.api<{ mime: string; bytes: string }>('local_image_get', { path, chatId }), pictureSource),
+    [shell, chatId, pictureSource],
+  );
   // Transcript element toggles, read once and followed on change.
   const [elements, setElements] = useState<ChatElements>({});
   useEffect(() => {

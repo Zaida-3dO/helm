@@ -23,12 +23,21 @@ export function localImagePath(href: string): string | null {
 export type LocalImageLoader = (path: string) => Promise<{ mime: string; bytes: string }>;
 
 let loader: LocalImageLoader | null = null;
+let source = '';
 
-/** Set by the chat view; returns the way to undo it. */
-export function setLocalImageLoader(l: LocalImageLoader): () => void {
+/**
+ * Set by the chat view; returns the way to undo it. `key` names the computer the loader reads
+ * from (the chat's host device, or '' for this PC): two PCs can have a picture at the same path,
+ * so a kept picture is only reused for the same computer.
+ */
+export function setLocalImageLoader(l: LocalImageLoader, key = ''): () => void {
   loader = l;
+  source = key;
   return () => {
-    if (loader === l) loader = null;
+    if (loader === l) {
+      loader = null;
+      source = '';
+    }
   };
 }
 
@@ -37,7 +46,8 @@ const KEPT = 40;
 
 /** A blob URL for the picture, or a rejection when the host cannot show it. Recent ones are kept. */
 export async function loadLocalImage(path: string): Promise<string> {
-  const kept = urls.get(path);
+  const at = `${source}\n${path}`;
+  const kept = urls.get(at);
   if (kept) return kept;
   if (!loader) throw new Error('Pictures from disk are not available here.');
   const r = await loader(path);
@@ -45,7 +55,7 @@ export async function loadLocalImage(path: string): Promise<string> {
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   const url = URL.createObjectURL(new Blob([bytes], { type: r.mime }));
-  urls.set(path, url);
+  urls.set(at, url);
   if (urls.size > KEPT) {
     const oldest = urls.keys().next().value;
     if (oldest !== undefined) {
