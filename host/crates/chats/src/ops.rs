@@ -142,13 +142,19 @@ fn queue_list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     to_value(&crate::queue::summary(rt.db(), &rt))
 }
 
-/// `queue_action`: one move on one waiting start — `top`, `up`, `down`, `hold`, `release` or
-/// `cancel` — answering with the fresh summary. `cancel` gives a waiting send back to its
-/// owner (typed text to the draft, as a refusal would); nothing is ever deleted.
+/// `queue_action`: one move on one waiting start — `top`, `up`, `down`, `move`, `hold`,
+/// `release` or `cancel` — answering with the fresh summary. `move` takes a `beforeChatId`
+/// (or none, for the end of the line). `cancel` gives a waiting send back to its owner
+/// (typed text to the draft, as a refusal would); nothing is ever deleted.
 fn queue_action(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: QueueActionArgs = parse_args(args)?;
     let rt = runtime(ctx)?;
-    to_value(&crate::queue::action(&rt, &a.chat_id, &a.action)?)
+    to_value(&crate::queue::action(
+        &rt,
+        &a.chat_id,
+        &a.action,
+        a.before_chat_id.as_deref(),
+    )?)
 }
 
 /// `chat_retry_now {chatId}` → `{scheduled}`: try this chat's pending outage retry at once

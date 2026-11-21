@@ -5,6 +5,10 @@
  */
 export type QueueActionArgs = { chatId: string, 
 /**
- * `top`, `up`, `down`, `hold`, `release` or `cancel`.
+ * `top`, `up`, `down`, `move`, `hold`, `release` or `cancel`.
  */
-action: string, };
+action: string, 
+/**
+ * For `move`: stand just before this waiting chat (at the end when given as none).
+ */
+beforeChatId?: string, };

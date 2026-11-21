@@ -266,8 +266,12 @@ pub struct QueueSummary {
 #[serde(rename_all = "camelCase")]
 pub struct QueueActionArgs {
     pub chat_id: String,
-    /// `top`, `up`, `down`, `hold`, `release` or `cancel`.
+    /// `top`, `up`, `down`, `move`, `hold`, `release` or `cancel`.
     pub action: String,
+    /// For `move`: stand just before this waiting chat (at the end when given as none).
+    #[serde(default)]
+    #[ts(optional)]
+    pub before_chat_id: Option<String>,
 }
 
 /// Where the chat's title came from. A manual rename always wins.

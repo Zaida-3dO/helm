@@ -83,7 +83,8 @@ fn act(ctx: &ToolCtx, a: Value) -> ToolResult {
             "ask the user: a chat parked by hand stays parked until they release it in the queue panel.",
         ));
     }
-    let summary = queue::action(&rt, chat_id, action)
+    // The drag form of `move` belongs to the panel; agents push, nudge and send back.
+    let summary = queue::action(&rt, chat_id, action, None)
         .map_err(|e| ToolError::refused(format!("{}: {}", e.code, e.message)))?;
     serde_json::to_value(summary)
         .map_err(|e| ToolError::maybe(format!("The queue could not be read: {e}")))

@@ -424,6 +424,61 @@ pub fn swap_seq(db: &Database, a: &str, b: &str) {
     });
 }
 
+/// Drag one held start to stand just before another (or at the end with `before_chat_id`
+/// `None`), taking that anchor's place in the pushed-to-front group so the drop is seen even
+/// beside a pushed chat. The places in line are then renumbered, smallest at the front, so
+/// the order the panel shows is exactly the order that now stands. Answers every place that
+/// changed (`chat_id`, new `seq`) and the moved chat's new front flag — the callers keep the
+/// actors in step with them. `None` when the chat is not waiting or the named anchor no
+/// longer is.
+pub fn move_hold(
+    db: &Database,
+    chat_id: &str,
+    before_chat_id: Option<&str>,
+) -> Option<(Vec<(String, i64)>, bool)> {
+    let mut order = holds(db);
+    let at = order.iter().position(|h| h.chat_id == chat_id)?;
+    let mut mine = order.remove(at);
+    if before_chat_id == Some(chat_id) {
+        return Some((Vec::new(), mine.top));
+    }
+    let top = match before_chat_id {
+        None => false,
+        Some(b) => order.iter().find(|h| h.chat_id == b)?.top,
+    };
+    let to = match before_chat_id {
+        None => order.len(),
+        Some(b) => order.iter().position(|h| h.chat_id == b)?,
+    };
+    mine.top = top;
+    order.insert(to, mine.clone());
+    let mut seqs: Vec<i64> = order.iter().map(|h| h.seq).collect();
+    seqs.sort_unstable();
+    let mut changed: Vec<(String, i64)> = Vec::new();
+    let wrote = db.write(|tx| {
+        for (h, s) in order.iter().zip(seqs) {
+            if h.chat_id == chat_id {
+                tx.execute(
+                    "UPDATE chat_dispatch_holds SET seq = ?2, top = ?3 WHERE chat_id = ?1",
+                    rusqlite::params![chat_id, s, top as i64],
+                )?;
+                if h.seq != s {
+                    changed.push((chat_id.to_owned(), s));
+                }
+            } else if h.seq != s {
+                tx.execute(
+                    "UPDATE chat_dispatch_holds SET seq = ?2 WHERE chat_id = ?1",
+                    rusqlite::params![h.chat_id, s],
+                )?;
+                changed.push((h.chat_id.clone(), s));
+            }
+        }
+        Ok::<_, rusqlite::Error>(())
+    });
+    wrote.ok()?;
+    Some((changed, top))
+}
+
 // ------------------------------------------------------------------ the queue as one read
 
 use crate::types::{QueueEntry, QueueServer, QueueSignIn, QueueSummary};
@@ -563,11 +618,13 @@ pub fn move_touches(db: &Database, chat_id: &str, action: &str) -> Vec<String> {
     }
 }
 
-/// One action from the queue panel or a queue tool, then the fresh summary.
+/// One action from the queue panel or a queue tool, then the fresh summary. `before_chat_id`
+/// belongs to `move` and names the waiting chat to stand in front of.
 pub fn action(
     rt: &crate::runtime::ChatRuntime,
     chat_id: &str,
     action: &str,
+    before_chat_id: Option<&str>,
 ) -> Result<QueueSummary, helm_ipc::ApiError> {
     use helm_ipc::ApiError;
     let db = rt.db();
@@ -634,6 +691,31 @@ pub fn action(
                 let _ = rt.command(&other.chat_id, crate::actor::Cmd::QueueSeq(sa as u64));
             }
         }
+        "move" => {
+            let Some(row) = row else {
+                return Err(ApiError::new(
+                    "refused",
+                    "That chat is not waiting in the queue.",
+                ));
+            };
+            if row.reason == MANUAL {
+                return Err(ApiError::new(
+                    "refused",
+                    "A hand-held chat has no line to move along.",
+                ));
+            }
+            let Some((changed, top)) = move_hold(db, chat_id, before_chat_id) else {
+                return Err(ApiError::new(
+                    "refused",
+                    "The chat it was dropped beside is no longer waiting.",
+                ));
+            };
+            // Keep the actors' own places in step with the renumbered rows.
+            for (id, seq) in changed {
+                let _ = rt.command(&id, crate::actor::Cmd::QueueSeq(seq as u64));
+            }
+            rt.set_hold_top(chat_id, top);
+        }
         "cancel" => {
             if row.is_none() {
                 return Err(ApiError::new(
@@ -660,7 +742,7 @@ pub fn action(
             return Err(ApiError::new(
                 "bad_args",
                 format!(
-                    "The queue knows no action \"{other}\" (top, up, down, hold, release, cancel)."
+                    "The queue knows no action \"{other}\" (top, up, down, move, hold, release, cancel)."
                 ),
             ))
         }
@@ -1045,6 +1127,15 @@ mod tests {
             11,
         );
         manual_hold(&db, "c", QueueClass::Normal.key(), 12);
+        // A hand park takes its place from the process counter, which starts at 1; give this
+        // row a known one so the swap and move checks do not depend on which tests ran first.
+        db.write(|tx| {
+            tx.execute(
+                "UPDATE chat_dispatch_holds SET seq = 3 WHERE chat_id = 'c'",
+                [],
+            )
+        })
+        .unwrap();
         set_top(&db, "b", true);
         assert!(is_manual(&db, "c"));
         assert!(!is_manual(&db, "a"));
@@ -1069,5 +1160,27 @@ mod tests {
         clear_hold(&db, "c");
         write_hold(&db, "c", MANUAL, QueueClass::Normal, None, 9, 31);
         assert!(!is_manual(&db, "c"), "a release stays released");
+
+        // A drag-move renumbers the places so the order the panel shows is the order that
+        // stands, and joining or leaving the pushed-to-front group follows where it lands.
+        // (Only b still waits at this point: the test ended the others' holds along the way.)
+        write_hold(&db, "a", LOCAL_CAP, QueueClass::Normal, Some("srv"), 12, 40);
+        let (changed, top) = move_hold(&db, "a", Some("b")).unwrap();
+        assert!(top, "in front of the pushed b means joining the front");
+        assert!(!changed.is_empty());
+        let order: Vec<String> = holds(&db).into_iter().map(|h| h.chat_id).collect();
+        assert_eq!(order, ["a", "b"], "a leads the line now");
+        write_hold(&db, "c", LOCAL_CAP, QueueClass::Normal, Some("srv"), 20, 50);
+        let (_, top) = move_hold(&db, "b", Some("c")).unwrap();
+        assert!(!top, "dropped behind the normal rows, b leaves the front");
+        let order: Vec<String> = holds(&db).into_iter().map(|h| h.chat_id).collect();
+        assert_eq!(
+            order,
+            ["a", "b", "c"],
+            "b stays ahead of c, just no longer pushed"
+        );
+        // Unknown chats answer nothing, so the caller can refuse in words.
+        assert!(move_hold(&db, "gone", Some("a")).is_none());
+        assert!(move_hold(&db, "a", Some("gone")).is_none());
     }
 }

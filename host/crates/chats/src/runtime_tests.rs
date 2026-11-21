@@ -2223,7 +2223,7 @@ async fn the_queue_line_can_be_reordered_parked_and_sent_back() {
     })
     .await;
     // C goes to the front of the line.
-    crate::queue::action(&h.rt, &c, "top").unwrap();
+    crate::queue::action(&h.rt, &c, "top", None).unwrap();
     assert_eq!(
         h.col(&format!(
             "SELECT top FROM chat_dispatch_holds WHERE chat_id = '{c}'"
@@ -2246,7 +2246,7 @@ async fn the_queue_line_can_be_reordered_parked_and_sent_back() {
     ack(&wc, &pc).await;
     wc.emit(json!({"type": "agent_start"})).await;
     // Park B by hand: a freed place does not take it until it is released.
-    crate::queue::action(&h.rt, &b, "hold").unwrap();
+    crate::queue::action(&h.rt, &b, "hold", None).unwrap();
     wc.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-q-c"}))
         .await;
     h.until("C's turn ends", |h| h.status(&c) == "idle").await;
@@ -2258,7 +2258,7 @@ async fn the_queue_line_can_be_reordered_parked_and_sent_back() {
         )),
         ["manual"]
     );
-    crate::queue::action(&h.rt, &b, "release").unwrap();
+    crate::queue::action(&h.rt, &b, "release", None).unwrap();
     h.until("the released chat takes the free place", |_h| asked(&b))
         .await;
     let mut wb = h.worker().await;
@@ -2269,8 +2269,8 @@ async fn the_queue_line_can_be_reordered_parked_and_sent_back() {
     wb.emit(json!({"type": "agent_start"})).await;
     // A running chat parked by hand has no wait to cancel: the cancel is refused and its turn
     // goes on; releasing the park is the way out.
-    crate::queue::action(&h.rt, &b, "hold").unwrap();
-    assert!(crate::queue::action(&h.rt, &b, "cancel").is_err());
+    crate::queue::action(&h.rt, &b, "hold", None).unwrap();
+    assert!(crate::queue::action(&h.rt, &b, "cancel", None).is_err());
     assert_ne!(
         h.status(&b),
         "idle",
@@ -2282,7 +2282,7 @@ async fn the_queue_line_can_be_reordered_parked_and_sent_back() {
         )),
         ["1"]
     );
-    crate::queue::action(&h.rt, &b, "release").unwrap();
+    crate::queue::action(&h.rt, &b, "release", None).unwrap();
     // Cancel: a waiting send goes back to its sender.
     let d = new_id(
         h.call(
@@ -2301,7 +2301,7 @@ async fn the_queue_line_can_be_reordered_parked_and_sent_back() {
             )) == ["1"]
     })
     .await;
-    crate::queue::action(&h.rt, &d, "cancel").unwrap();
+    crate::queue::action(&h.rt, &d, "cancel", None).unwrap();
     h.until("the cancelled send is given back", |h| {
         h.state(&sidd) == "rejected"
             && h.status(&d) == "idle"
