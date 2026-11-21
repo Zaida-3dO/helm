@@ -5,12 +5,13 @@
 // restored tab. Network shares and device paths are refused from the string alone (opening one on
 // Windows offers the user's NTLM credentials to that server); so is the drive-relative "C:x" form
 // that "C:javascript:..." hides behind. Only http, https and mailto ever leave the app, and only
-// through the host's `open_external` op.
+// through the host's `open_external` op. Helm's own `helm://` links (chats, files, pages, panel
+// views) are read again here by the same strict parser, and never leave the app.
 
 import type { LinkTarget } from '../markdown/links.ts';
 import { driveForm, isRemoteOrDevicePath } from '../markdown/paths.ts';
 import { splitPathSuffix } from '../markdown/pathrefs.ts';
-import { parseChatLink } from '../markdown/links.ts';
+import { parseChatLink, parseHelmLink, type PanelView } from '../markdown/links.ts';
 
 export const MAX_LINK_BYTES = 8 * 1024;
 
@@ -26,6 +27,10 @@ export type GateResult =
   | { action: 'anchor'; heading?: string; block?: string }
   /** A chat link from a reply or a tool result: opens that chat. */
   | { action: 'chat'; chatId: string; messageId?: number }
+  /** A pinned page, by its pin id: opens on this PC, or on the PC the chat runs on. */
+  | { action: 'page'; pageId: string }
+  /** A view of the side panel for the chat. */
+  | { action: 'panel'; view: PanelView }
   | { action: 'refuse'; reason: string };
 
 export const REFUSED = {
@@ -133,6 +138,32 @@ export function gateTarget(target: unknown): GateResult {
     return chat ? { action: 'chat', ...chat } : refuse(REFUSED.malformed);
   }
 
+  if (t.kind === 'helm') {
+    const href = typeof t.href === 'string' ? t.href.trim() : '';
+    if (!href) return refuse(REFUSED.empty);
+    if (CONTROL.test(href) || new TextEncoder().encode(href).length > MAX_LINK_BYTES) return refuse(REFUSED.malformed);
+    const link = parseHelmLink(href);
+    if (!link) return refuse(REFUSED.malformed);
+    switch (link.form) {
+      case 'chat':
+        return link.messageId === undefined ? { action: 'chat', chatId: link.chatId } : { action: 'chat', chatId: link.chatId, messageId: link.messageId };
+      case 'page':
+        return { action: 'page', pageId: link.pageId };
+      case 'panel':
+        return { action: 'panel', view: link.view };
+      case 'file': {
+        // Checked once more here, on the decoded path, before the host is asked to resolve it.
+        if (CONTROL.test(link.path) || isRemoteOrDevicePath(link.path)) return refuse(REFUSED.share);
+        if (driveForm(link.path) === 'relative') return refuse(REFUSED.driveRelative);
+        const out: { path: string; line?: number; column?: number } = { path: link.path };
+        if (link.line !== undefined) out.line = link.line;
+        if (link.column !== undefined) out.column = link.column;
+        // Always the host's resolve, which reads the chat's own PC for a chat that runs elsewhere.
+        return { action: 'path', ...out };
+      }
+    }
+  }
+
   if (t.kind === 'path') {
     const raw = typeof t.href === 'string' ? t.href.trim() : '';
     if (!raw) return refuse(REFUSED.empty);
@@ -175,6 +206,8 @@ export function gateTarget(target: unknown): GateResult {
 }
 
 type ChatRoute = (req: Extract<GateResult, { action: 'chat' }>, ctx: LinkContext) => Promise<boolean | string> | boolean | string;
+type PageRoute = (req: Extract<GateResult, { action: 'page' }>, ctx: LinkContext) => Promise<boolean | string> | boolean | string;
+type PanelRoute = (req: Extract<GateResult, { action: 'panel' }>, ctx: LinkContext) => Promise<boolean | string> | boolean | string;
 
 export type LinkOutcome = { ok: true; action: GateResult['action'] } | { ok: false; reason: string };
 
@@ -201,7 +234,7 @@ interface LinkDeps {
   notify: (message: string) => void;
 }
 
-const routes: { file?: FileRoute; vault?: VaultRoute; path?: PathRoute; chat?: ChatRoute } = {};
+const routes: { file?: FileRoute; vault?: VaultRoute; path?: PathRoute; chat?: ChatRoute; page?: PageRoute; panel?: PanelRoute } = {};
 let deps: LinkDeps = {
   openExternal: () => Promise.reject(new Error('The link handler is not connected yet.')),
   notify: (m) => console.warn(m),
@@ -217,7 +250,12 @@ export function registerLinkRoute(kind: 'file', route: FileRoute): () => void;
 export function registerLinkRoute(kind: 'vault', route: VaultRoute): () => void;
 export function registerLinkRoute(kind: 'path', route: PathRoute): () => void;
 export function registerLinkRoute(kind: 'chat', route: ChatRoute): () => void;
-export function registerLinkRoute(kind: 'file' | 'vault' | 'path' | 'chat', route: FileRoute | VaultRoute | PathRoute | ChatRoute): () => void {
+export function registerLinkRoute(kind: 'page', route: PageRoute): () => void;
+export function registerLinkRoute(kind: 'panel', route: PanelRoute): () => void;
+export function registerLinkRoute(
+  kind: 'file' | 'vault' | 'path' | 'chat' | 'page' | 'panel',
+  route: FileRoute | VaultRoute | PathRoute | ChatRoute | PageRoute | PanelRoute,
+): () => void {
   (routes as Record<string, unknown>)[kind] = route;
   return () => {
     if ((routes as Record<string, unknown>)[kind] === route) delete (routes as Record<string, unknown>)[kind];
@@ -313,6 +351,14 @@ export async function handleLink(target: LinkTarget, ctx: LinkContext, opts: { s
         const r = await route(gate, ctx);
         if (r === true) return { ok: true, action: 'chat' };
         return fail(typeof r === 'string' ? r : 'The chat could not be opened.');
+      }
+      case 'page':
+      case 'panel': {
+        const route = gate.action === 'page' ? routes.page : routes.panel;
+        if (!route) return fail(NOT_AVAILABLE);
+        const r = await (route as (req: GateResult, ctx: LinkContext) => Promise<boolean | string> | boolean | string)(gate, ctx);
+        if (r === true) return { ok: true, action: gate.action };
+        return fail(typeof r === 'string' ? r : gate.action === 'page' ? 'The page could not be opened.' : 'That view could not be shown.');
       }
       case 'vault':
       case 'anchor': {

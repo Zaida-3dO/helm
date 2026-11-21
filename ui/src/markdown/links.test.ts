@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { classifyHref, isImageName, parseChatLink, parseWikilink, targetAttrs, targetFromAttrs } from './links.ts';
+import { classifyHref, helmFileHref, isImageName, parseChatLink, parseHelmLink, parseWikilink, targetAttrs, targetFromAttrs } from './links.ts';
 
 test('parseWikilink splits note, heading, block and alias', () => {
   assert.deepEqual(parseWikilink('Note'), { kind: 'vault', note: 'Note' });
@@ -57,6 +57,78 @@ test('chat links are accepted only in their strict forms', () => {
     assert.equal(parseChatLink(bad), null, bad);
     assert.equal(classifyHref(bad), null, bad);
   }
+});
+
+test('file, page and panel links are read in their strict forms; anything else under helm: stays text', () => {
+  const ok: [string, unknown][] = [
+    ['helm://files/C%3A%2Fsrc%2Fa.ts', { form: 'file', path: 'C:/src/a.ts' }],
+    ['helm://files/C:/src/a.ts:12', { form: 'file', path: 'C:/src/a.ts', line: 12 }],
+    ['helm://files/C%3A%5Csrc%5Ca%20b.ts:12:4', { form: 'file', path: String.raw`C:\src\a b.ts`, line: 12, column: 4 }],
+    ['helm://files/src%2Fa.ts', { form: 'file', path: 'src/a.ts' }],
+    ['helm://files/~/notes/x.md', { form: 'file', path: '~/notes/x.md' }],
+    // An encoded colon stays part of the name.
+    ['helm://files/C%3A%2Fa%3A5', { form: 'file', path: 'C:/a:5' }],
+    ['helm://pages/3f2a9c0d4b5e6f708192a3b4c5d6e7f8', { form: 'page', pageId: '3f2a9c0d4b5e6f708192a3b4c5d6e7f8' }],
+    ['helm://panel/changes', { form: 'panel', view: 'changes' }],
+    ['helm://panel/files', { form: 'panel', view: 'files' }],
+    ['helm://panel/tasks', { form: 'panel', view: 'tasks' }],
+  ];
+  for (const [href, want] of ok) {
+    assert.deepEqual(parseHelmLink(href), want, href);
+    assert.deepEqual(classifyHref(href), { kind: 'helm', href }, href);
+  }
+  for (const bad of [
+    // Control characters, encoded (a raw one never survives classifyHref's strip).
+    'helm://files/C%3A%2Fa%0A.ts',
+    'helm://files/C%3A%2Fa%00.ts',
+    'helm://files/C%3A%2Fa%C2%85.ts',
+    // Shares and device paths, in every spelling, double-encoded too.
+    'helm://files/%5C%5Chost%5Cshare%5Cx.ts',
+    'helm://files/%2F%2Fhost%2Fshare',
+    'helm://files///host/share',
+    'helm://files/%255C%255Chost%255Cshare',
+    'helm://files/%5C%5C%3F%5CC%3A%5Cx',
+    'helm://files/file%3A%2F%2Fhost%2Fshare',
+    // Drive-relative, a scheme inside, broken escapes, and the shape rules.
+    'helm://files/C%3Ax.ts',
+    'helm://files/C:5',
+    'helm://files/javascript%3Aalert(1)',
+    'helm://files/https%3A%2F%2Fevil.example',
+    'helm://files/%E0%A4%A',
+    'helm://files/',
+    'helm://files/%20',
+    'helm://files/a.ts:0',
+    'helm://files/a.ts?x=1',
+    'helm://files/a.ts#L3',
+    String.raw`helm://files/C:\x.ts`,
+    'helm://files/a b.ts',
+    // Pages: an id of letters, digits and dashes, at most 64.
+    'helm://pages/',
+    'helm://pages/a_b',
+    'helm://pages/../x',
+    'helm://pages/' + 'a'.repeat(65),
+    'helm://pages/abc/',
+    'helm://pages/abc?x',
+    // Panel views: the three named, nothing else.
+    'helm://panel/other',
+    'helm://panel/',
+    'helm://panel/Changes',
+    'helm://panel/files/x',
+    'helm://u@pages/abc',
+    'helm://files:80/a.ts',
+    'helm://settings/x',
+    'HELM://pages/abc',
+  ]) {
+    assert.equal(parseHelmLink(bad), null, bad);
+    assert.equal(classifyHref(bad), null, bad);
+  }
+  // What Helm writes reads back the same, whatever the path holds.
+  for (const [path, line] of [[String.raw`C:\a b\(x)!.ts`, 3], ['C:/a:5', undefined], ['src/#hash.ts', 9]] as const) {
+    const back = parseHelmLink(helmFileHref(path, line));
+    assert.deepEqual(back, line === undefined ? { form: 'file', path } : { form: 'file', path, line }, path);
+  }
+  const attrs = new Map(targetAttrs({ kind: 'helm', href: 'helm://panel/files' }));
+  assert.deepEqual(targetFromAttrs((n) => attrs.get(n) ?? null), { kind: 'helm', href: 'helm://panel/files' });
 });
 
 test('classifyHref treats a Windows drive path as a path, not a scheme', () => {

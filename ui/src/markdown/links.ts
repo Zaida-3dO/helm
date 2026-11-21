@@ -7,9 +7,10 @@ import { driveForm, isRemoteOrDevicePath } from './paths.ts';
 import { hasExtension } from './pathrefs.ts';
 
 export interface LinkTarget {
-  /** `path`: a file path written in inline code or plain text, resolved by the host on click. */
-  kind: 'url' | 'vault' | 'path' | 'chat';
-  /** `url`: the href as written (http, https, mailto, file, or a plain path). `path`: the path as written, with any line suffix. `chat`: the chat link as written. */
+  /** `path`: a file path written in inline code or plain text, resolved by the host on click.
+   *  `helm`: one of Helm's own file, page or panel links (see {@link parseHelmLink}). */
+  kind: 'url' | 'vault' | 'path' | 'chat' | 'helm';
+  /** `url`: the href as written (http, https, mailto, file, or a plain path). `path`: the path as written, with any line suffix. `chat` and `helm`: the link as written. */
   href?: string;
   /** `vault` only: the note name or path, without `.md`. Empty means the current note. */
   note?: string;
@@ -36,6 +37,99 @@ export function parseChatLink(href: string): { chatId: string; messageId?: numbe
   const m = CHAT_LINK.exec(href);
   if (!m) return null;
   return m[2] === undefined ? { chatId: m[1] as string } : { chatId: m[1] as string, messageId: Number(m[2]) };
+}
+
+/** The panel views a `helm://panel/<view>` link may show. */
+export const PANEL_VIEWS = ['changes', 'files', 'tasks'] as const;
+export type PanelView = (typeof PANEL_VIEWS)[number];
+
+/** One of Helm's own links, read and checked. */
+export type HelmLink =
+  | { form: 'chat'; chatId: string; messageId?: number }
+  /** A file the host resolves against the chat (so it works for a chat that runs on another PC). */
+  | { form: 'file'; path: string; line?: number; column?: number }
+  /** A pinned page, by its pin id. */
+  | { form: 'page'; pageId: string }
+  | { form: 'panel'; view: PanelView };
+
+/** The longest decoded path a file link may carry. */
+const MAX_LINK_PATH = 4096;
+/** The highest line or column a file link may name. */
+const MAX_LINE = 10_000_000;
+
+// The encoded path: URL path characters and percent escapes only. No query, fragment, whitespace or
+// raw backslash (a backslash is written %5C). A raw "/" and ":" are allowed, so "C:/src/a.ts" reads.
+const FILE_LINK = /^helm:\/\/files\/([A-Za-z0-9\-._~%!$&'()*+,;=@:/]+)$/;
+const PAGE_LINK = /^helm:\/\/pages\/([A-Za-z0-9-]{1,64})$/;
+const PANEL_LINK = /^helm:\/\/panel\/([a-z]+)$/;
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
+
+/**
+ * The decoded path of a file link, with its line and column, or null when it must not open. The
+ * line suffix is read before decoding, so an encoded colon stays part of the name; the decoded path
+ * is then refused when it holds a control character, names a network share or a device path (in
+ * any spelling, double-encoded included), is drive-relative ("C:x") or starts with a scheme.
+ */
+function fileLinkPath(encoded: string): { path: string; line?: number; column?: number } | null {
+  let raw = encoded;
+  let line: number | undefined;
+  let column: number | undefined;
+  const m = /:(\d{1,8})(?::(\d{1,8}))?$/.exec(raw);
+  // "C:5" alone is a drive-relative path, not a path with a line.
+  if (m && m.index > 1) {
+    line = Number(m[1]);
+    column = m[2] === undefined ? undefined : Number(m[2]);
+    if (!(line >= 1 && line <= MAX_LINE) || (column !== undefined && !(column >= 1 && column <= MAX_LINE))) return null;
+    raw = raw.slice(0, m.index);
+  }
+  let path: string;
+  try {
+    path = decodeURIComponent(raw);
+  } catch {
+    return null;
+  }
+  if (!path.trim() || path.length > MAX_LINK_PATH || CONTROL_CHARS.test(path)) return null;
+  if (isRemoteOrDevicePath(path)) return null;
+  const drive = driveForm(path);
+  if (drive === 'relative') return null;
+  // A path is a path: "https:", "file:" or "javascript:" inside a file link is never followed.
+  if (!drive && /^[a-z][a-z0-9+.-]+:/i.test(path)) return null;
+  const out: { path: string; line?: number; column?: number } = { path };
+  if (line !== undefined) out.line = line;
+  if (column !== undefined) out.column = column;
+  return out;
+}
+
+/**
+ * Helm's own links, each in one strict form (no user info, port, query, fragment or trailing
+ * slash), or null for anything else:
+ *
+ *   helm://chats/<id>[/messages/<n>]           a chat
+ *   helm://files/<percent-encoded path>[:line[:col]]   a file, resolved against the chat
+ *   helm://pages/<pin id>                     a pinned page
+ *   helm://panel/changes | files | tasks      a view of the side panel
+ */
+export function parseHelmLink(href: string): HelmLink | null {
+  if (typeof href !== 'string' || href.length > 8 * 1024) return null;
+  const chat = parseChatLink(href);
+  if (chat) return { form: 'chat', ...chat };
+  let m = FILE_LINK.exec(href);
+  if (m) {
+    const file = fileLinkPath(m[1] as string);
+    return file ? { form: 'file', ...file } : null;
+  }
+  m = PAGE_LINK.exec(href);
+  if (m) return { form: 'page', pageId: m[1] as string };
+  m = PANEL_LINK.exec(href);
+  if (m && (PANEL_VIEWS as readonly string[]).includes(m[1] as string)) return { form: 'panel', view: m[1] as PanelView };
+  return null;
+}
+
+/** The file link for a path (and line), in the form {@link parseHelmLink} reads back. */
+export function helmFileHref(path: string, line?: number): string {
+  const enc = encodeURIComponent(path).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `helm://files/${enc}${line !== undefined && line >= 1 ? `:${Math.floor(line)}` : ''}`;
 }
 
 type Parts = Pick<LinkTarget, 'note' | 'heading' | 'block'>;
@@ -111,7 +205,10 @@ export function classifyHref(rawHref: string): LinkTarget | null {
       return { kind: 'url', href };
     }
     if (name === 'obsidian') return classifyObsidianUri(href);
-    if (name === 'helm') return parseChatLink(href) ? { kind: 'chat', href } : null;
+    if (name === 'helm') {
+      const link = parseHelmLink(href);
+      return !link ? null : link.form === 'chat' ? { kind: 'chat', href } : { kind: 'helm', href };
+    }
     return null;
   }
 
@@ -161,7 +258,7 @@ export function targetAttrs(target: LinkTarget): Array<[string, string]> {
 /** Reads a target back from the attributes written by {@link targetAttrs}. */
 export function targetFromAttrs(get: (name: string) => string | null): LinkTarget | null {
   const kind = get('data-md-kind');
-  if (kind !== 'url' && kind !== 'vault' && kind !== 'path' && kind !== 'chat') return null;
+  if (kind !== 'url' && kind !== 'vault' && kind !== 'path' && kind !== 'chat' && kind !== 'helm') return null;
   const target: LinkTarget = { kind };
   const href = get('data-md-href');
   const note = get('data-md-note');

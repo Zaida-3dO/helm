@@ -99,6 +99,61 @@ test('a chat link opens its chat through the chat route and nothing else', async
   assert.equal(notices.at(-1), 'That chat no longer exists.');
 });
 
+test('file, page and panel links pass the gate only in their strict forms, and open through their own routes', async () => {
+  const helm = (href: string) => ({ kind: 'helm' as const, href });
+  // A file link always goes to the host's resolve, which reads the chat's own PC.
+  assert.deepEqual(gateTarget(helm('helm://files/C%3A%2Fsrc%2Fa.ts:12')), { action: 'path', path: 'C:/src/a.ts', line: 12 });
+  assert.deepEqual(gateTarget(helm('helm://files/src%2Fa.ts:3:4')), { action: 'path', path: 'src/a.ts', line: 3, column: 4 });
+  assert.deepEqual(gateTarget(helm('helm://pages/abc-123')), { action: 'page', pageId: 'abc-123' });
+  assert.deepEqual(gateTarget(helm('helm://panel/tasks')), { action: 'panel', view: 'tasks' });
+  const id = '0b8f6a52-1c3d-4e5f-8a9b-0c1d2e3f4a5b';
+  assert.deepEqual(gateTarget(helm(`helm://chats/${id}`)), { action: 'chat', chatId: id });
+  // Decoded before it is checked: encoded control characters, shares and device paths never reach a route.
+  for (const bad of [
+    'helm://files/C%3A%2Fa%0Db.ts',
+    'helm://files/%5C%5Chost%5Cshare%5Cx',
+    'helm://files/%255C%255Chost%255Cshare',
+    'helm://files/%2F%2F%3F%2FC%3A%2Fx',
+    'helm://files/C%3Ax',
+    'helm://files/mailto%3Aa%40b.co',
+    'helm://panel/other',
+    'helm://panel/changes/',
+    'helm://pages/a.b',
+    'helm://pages/' + 'x'.repeat(65),
+    'helm://pages/abc' + String.fromCharCode(7),
+    'helm://elsewhere/x',
+    'https://example.com',
+    '',
+  ]) {
+    assert.equal(gateTarget(helm(bad)).action, 'refuse', bad);
+  }
+  // A Helm link written as a web address is not one: it never reaches open_external.
+  assert.deepEqual(gateTarget(url('helm://pages/abc')), { action: 'refuse', reason: REFUSED.scheme });
+  assert.deepEqual(gateTarget(url('helm://files/a.ts')), { action: 'refuse', reason: REFUSED.scheme });
+
+  const outside: string[] = [];
+  const notices: string[] = [];
+  configureLinks({ openExternal: async (u) => void outside.push(u), notify: (m) => void notices.push(m) });
+  assert.equal((await handleLink(helm('helm://pages/abc'), { chatId: 'c1' })).ok, false, 'no page route yet');
+  const seen: string[] = [];
+  const offs = [
+    registerLinkRoute('page', (req, ctx) => (seen.push(`page ${req.pageId} ${ctx.chatId}`), req.pageId === 'abc' ? true : 'That page is no longer pinned.')),
+    registerLinkRoute('panel', (req) => (seen.push(`panel ${req.view}`), true)),
+    registerLinkRoute('path', (req, ctx) => (seen.push(`path ${req.path}:${req.line} ${ctx.chatId}`), true)),
+  ];
+  try {
+    assert.deepEqual(await handleLink(helm('helm://pages/abc'), { chatId: 'c1' }), { ok: true, action: 'page' });
+    assert.deepEqual(await handleLink(helm('helm://pages/gone'), { chatId: 'c1' }), { ok: false, reason: 'That page is no longer pinned.' });
+    assert.deepEqual(await handleLink(helm('helm://panel/changes'), { chatId: 'c1' }), { ok: true, action: 'panel' });
+    assert.deepEqual(await handleLink(helm('helm://files/src%2Fa.ts:7'), { chatId: 'c2' }), { ok: true, action: 'path' });
+    assert.equal((await handleLink(helm('helm://files/%5C%5Chost%5Cx'), { chatId: 'c2' })).ok, false);
+  } finally {
+    offs.forEach((off) => off());
+  }
+  assert.deepEqual(seen, ['page abc c1', 'page gone c1', 'panel changes', 'path src/a.ts:7 c2']);
+  assert.deepEqual(outside, [], 'no Helm link ever leaves the app');
+});
+
 test('anything that is not a known target is refused', () => {
   for (const t of [null, undefined, 1, 'x', {}, { kind: 'script', href: 'x' }, { kind: 'url' }]) {
     assert.equal(gateTarget(t).action, 'refuse', JSON.stringify(t));
