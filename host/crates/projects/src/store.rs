@@ -5,7 +5,7 @@
 use crate::schema::{ARCHIVED_REFUSAL, CLOSED_REFUSAL};
 use crate::types::*;
 use helm_chats::types::ChatStatus;
-use rusqlite::{params, OptionalExtension, Row, Transaction};
+use rusqlite::{named_params, params, OptionalExtension, Row, Transaction};
 use std::collections::{HashMap, HashSet};
 
 /// Rows per sidebar page.
@@ -273,8 +273,21 @@ pub fn validate_icon_image(png_base64: &str) -> Res<Vec<u8>> {
 
 // ---- projects -------------------------------------------------------------------------------
 
-const PROJECT_SELECT: &str = "SELECT p.id, p.kind, p.name, p.path, p.color, p.created_at,
-        COALESCE(l.pinned, 0), l.position, COALESCE(l.collapsed, 0), l.icon, COALESCE(l.archived, 0),
+/// Whether a project reads as pinned (`l` is its `project_local` row): pinned by the profile the
+/// sidebar shows, or by none recorded. With every profile shown (`:pin_profile` is empty, see
+/// [`pin_scope`]) any pin counts. Each profile keeps its own pins, so a board one person pinned
+/// never sits empty in another's sidebar.
+macro_rules! pinned_sql {
+    () => {
+        "(COALESCE(l.pinned, 0) = 1 AND (:pin_profile = ''
+              OR COALESCE(l.pinned_profile_id, '') IN ('', :pin_profile)))"
+    };
+}
+
+const PROJECT_SELECT: &str = concat!(
+    "SELECT p.id, p.kind, p.name, p.path, p.color, p.created_at, ",
+    pinned_sql!(),
+    ", l.position, COALESCE(l.collapsed, 0), l.icon, COALESCE(l.archived, 0),
         l.title_override, l.primary_folder_project_id, COALESCE(l.revision, 0),
         pp.parent_id, pp.source,
         b.board_url, b.board_project_id, b.title, b.headline, b.area, b.repo, b.priority,
@@ -284,12 +297,35 @@ const PROJECT_SELECT: &str = "SELECT p.id, p.kind, p.name, p.path, p.color, p.cr
      FROM projects p
      LEFT JOIN project_local l ON l.project_id = p.id
      LEFT JOIN project_parents pp ON pp.project_id = p.id
-     LEFT JOIN board_projects b ON b.project_id = p.id";
+     LEFT JOIN board_projects b ON b.project_id = p.id"
+);
 
 /// Sidebar order of projects: pinned first, then position (unset sorts after set), newest
 /// creation first, then id.
-const PROJECT_ORDER: &str =
-    "ORDER BY COALESCE(l.pinned, 0) DESC, l.position IS NULL, l.position, p.created_at DESC, p.id";
+const PROJECT_ORDER: &str = concat!(
+    "ORDER BY ",
+    pinned_sql!(),
+    " DESC, l.position IS NULL, l.position, p.created_at DESC, p.id"
+);
+
+/// The profile whose pins the sidebar shows, as `:pin_profile`: the active one, or empty when it
+/// shows every profile (or the store has no profiles yet).
+fn pin_scope(tx: &Transaction<'_>) -> String {
+    active_scope(tx).map(|(id, _)| id).unwrap_or_default()
+}
+
+/// The profile a new pin is recorded for: the active one, else the home profile (the one every
+/// unowned thing belongs to), else none.
+fn pin_owner(tx: &Transaction<'_>) -> String {
+    match active_scope(tx) {
+        Some((id, _)) => id,
+        None => helm_profiles::store::home(tx)
+            .ok()
+            .flatten()
+            .map(|p| p.id)
+            .unwrap_or_default(),
+    }
+}
 
 /// A list stored as JSON text; anything unreadable is an empty list.
 pub(crate) fn json_list(raw: Option<String>) -> Vec<String> {
@@ -414,15 +450,19 @@ pub fn list_projects(
         format!("WHERE {}", conds.join(" AND "))
     };
     let mut st = tx.prepare(&format!("{PROJECT_SELECT} {filter} {PROJECT_ORDER}"))?;
-    let rows = st.query_map([], |r| project_from_row(r, &counts))?;
+    let rows = st.query_map(named_params! {":pin_profile": pin_scope(tx)}, |r| {
+        project_from_row(r, &counts)
+    })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 pub fn get_project(tx: &Transaction<'_>, id: &str) -> Res<ProjectNode> {
     let counts = chat_counts(tx)?;
-    tx.query_row(&format!("{PROJECT_SELECT} WHERE p.id = ?1"), [id], |r| {
-        project_from_row(r, &counts)
-    })
+    tx.query_row(
+        &format!("{PROJECT_SELECT} WHERE p.id = :id"),
+        named_params! {":id": id, ":pin_profile": pin_scope(tx)},
+        |r| project_from_row(r, &counts),
+    )
     .optional()?
     .ok_or_else(|| Refusal::NotFound("That project does not exist.".into()))
 }
@@ -530,10 +570,14 @@ pub fn create_project(tx: &Transaction<'_>, a: &ProjectCreateArgs, now: i64) -> 
     }
     let parent = parent_of(tx, &id)?;
     let top: Option<i64> = tx.query_row(
-        "SELECT min(l.position) FROM project_local l
-         LEFT JOIN project_parents pp ON pp.project_id = l.project_id
-         WHERE l.pinned = 0 AND l.project_id != ?1 AND pp.parent_id IS ?2",
-        params![id, parent],
+        concat!(
+            "SELECT min(l.position) FROM project_local l
+             LEFT JOIN project_parents pp ON pp.project_id = l.project_id
+             WHERE NOT ",
+            pinned_sql!(),
+            " AND l.project_id != :id AND pp.parent_id IS :parent"
+        ),
+        named_params! {":id": id, ":parent": parent, ":pin_profile": pin_scope(tx)},
         |r| r.get(0),
     )?;
     tx.execute(
@@ -635,10 +679,15 @@ pub fn set_parent(tx: &Transaction<'_>, id: &str, parent: Option<&str>) -> Res<(
 /// The ids of `id`'s siblings in its pin group, in sidebar order (including `id`).
 fn project_siblings(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<Vec<String>> {
     let parent = parent_of(tx, id)?;
+    let scope = pin_scope(tx);
     let pinned = tx
         .query_row(
-            "SELECT pinned FROM project_local WHERE project_id = ?1",
-            [id],
+            concat!(
+                "SELECT ",
+                pinned_sql!(),
+                " FROM project_local l WHERE l.project_id = :id"
+            ),
+            named_params! {":id": id, ":pin_profile": scope},
             |r| r.get::<_, i64>(0),
         )
         .optional()?
@@ -647,10 +696,14 @@ fn project_siblings(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<Vec<Stri
         "SELECT p.id FROM projects p
          LEFT JOIN project_local l ON l.project_id = p.id
          LEFT JOIN project_parents pp ON pp.project_id = p.id
-         WHERE pp.parent_id IS ?1 AND COALESCE(l.pinned, 0) = ?2 AND COALESCE(l.archived, 0) = 0
-         {PROJECT_ORDER}"
+         WHERE pp.parent_id IS :parent AND {} = :pinned AND COALESCE(l.archived, 0) = 0
+         {PROJECT_ORDER}",
+        pinned_sql!()
     ))?;
-    let rows = st.query_map(params![parent, pinned], |r| r.get(0))?;
+    let rows = st.query_map(
+        named_params! {":parent": parent, ":pinned": pinned, ":pin_profile": scope},
+        |r| r.get(0),
+    )?;
     rows.collect()
 }
 
@@ -820,10 +873,13 @@ pub fn update_project(tx: &Transaction<'_>, a: &ProjectUpdateArgs) -> Res<i64> {
     }
     if let Some(p) = a.pinned {
         if p != node.pinned {
-            // Pinning moves the project to the end of its new pin group.
+            // Pinning moves the project to the end of its new pin group. A pin belongs to the
+            // profile that made it; unpinning clears it for everyone.
+            let owner = if p { pin_owner(tx) } else { String::new() };
             tx.execute(
-                "UPDATE project_local SET pinned = ?2, position = NULL WHERE project_id = ?1",
-                params![id, p as i64],
+                "UPDATE project_local SET pinned = ?2, pinned_profile_id = ?3, position = NULL
+                 WHERE project_id = ?1",
+                params![id, p as i64, owner],
             )?;
         }
     }

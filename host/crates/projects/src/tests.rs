@@ -967,7 +967,7 @@ fn dragging_a_chat_onto_a_group_writes_chat_groups_and_never_moves_where_it_runs
 }
 
 #[test]
-fn group_counts_follow_the_profile_the_sidebar_shows() {
+fn group_counts_and_pins_follow_the_profile_the_sidebar_shows() {
     let (_d, db) = temp_db();
     let board = board_project(&db, "b-1", "Board one");
     // A store with no profiles yet counts every chat (nothing to filter by).
@@ -1057,6 +1057,74 @@ fn group_counts_follow_the_profile_the_sidebar_shows() {
     .unwrap();
     active(Some(&pat));
     assert_eq!(node(&db, &board).chat_count, 1);
+
+    // Pins belong to the profile that made them: Pat's pin is not home's, and the order each
+    // sidebar uses follows its own pins.
+    let other = board_project(&db, "b-2", "Board two");
+    let pin = |id: &str, on: bool| {
+        let mut a = upd(id, &db);
+        a.pinned = Some(on);
+        update(&db, a).unwrap();
+    };
+    let first = |db: &Database| {
+        db.snapshot(|tx| store::list_projects(tx, false, false))
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+            .id
+    };
+    active(Some(&pat));
+    pin(&other, true);
+    assert!(node(&db, &other).pinned);
+    assert_eq!(first(&db), other, "Pat's pin leads Pat's sidebar");
+    active(Some(&home));
+    assert!(!node(&db, &other).pinned, "home never pinned it");
+    pin(&board, true);
+    assert_eq!(first(&db), board);
+    active(None);
+    assert!(node(&db, &other).pinned && node(&db, &board).pinned);
+    // Unpinning, from home's sidebar, is home's own pin only.
+    active(Some(&home));
+    pin(&board, false);
+    active(Some(&pat));
+    assert!(node(&db, &other).pinned && !node(&db, &board).pinned);
+
+    // A pin made before pins were per profile goes to the home profile when the store opens.
+    db.write(|tx| {
+        tx.execute_batch(&format!(
+            "ALTER TABLE project_local DROP COLUMN pinned_profile_id;
+             UPDATE project_local SET pinned = 1 WHERE project_id = '{board}';
+             DELETE FROM counters WHERE key = 'migration:projects-pins-per-profile';"
+        ))
+    })
+    .unwrap();
+    let path = _d.path().join("t.sqlite3");
+    drop(db);
+    let mut reg = helm_core::db::MigrationRegistry::new();
+    helm_chats::register_migrations(&mut reg);
+    crate::register_migrations(&mut reg);
+    let db = Database::open(&path, &reg).unwrap();
+    let owner = |id: &str| -> String {
+        db.snapshot(|tx| {
+            tx.query_row(
+                "SELECT pinned_profile_id FROM project_local WHERE project_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+        })
+        .unwrap()
+    };
+    assert_eq!(owner(&board), home, "the old pin is home's");
+    assert_eq!(
+        owner(&other),
+        home,
+        "Pat's pin, made before the column was back, too"
+    );
+    assert!(
+        !node(&db, &board).pinned,
+        "Pat's sidebar, still the one shown, does not have home's old pin"
+    );
 }
 
 #[test]

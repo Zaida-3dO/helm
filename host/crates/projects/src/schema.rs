@@ -4,7 +4,7 @@
 //!
 //! | Table | Holds |
 //! |---|---|
-//! | `project_local` | per project, local-only state: pin, position, collapse, icon (and the uploaded picture), description, startup instructions, archive, closed, a board project's local rename and whether the board has it yet, primary folder, CAS revision |
+//! | `project_local` | per project, local-only state: pin (and the profile it belongs to), position, collapse, icon (and the uploaded picture), description, startup instructions, archive, closed, a board project's local rename and whether the board has it yet, primary folder, CAS revision |
 //! | `project_parents` | local nesting: one parent per project, `source` board or local |
 //! | `chat_groups` | the group a chat is shown under when it is not its folder project |
 //! | `project_archive_members` | exactly which chats a project archive archived, so restore brings back only those |
@@ -33,6 +33,7 @@ pub fn register(reg: &mut MigrationRegistry) {
         .one_time("projects-icon-and-description", add_icon_and_description)
         .one_time("projects-startup-instructions", add_startup_instructions)
         .one_time("projects-startup-set", add_startup_set)
+        .one_time("projects-pins-per-profile", pins_per_profile)
         .initializer("projects-startup", crate::startup::init)
         .initializer("projects-repositories", crate::repos::init);
 }
@@ -55,7 +56,8 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              startup_files              TEXT,
              startup_servers            TEXT,
              icon_image                 BLOB,
-             title_pending              INTEGER NOT NULL DEFAULT 0
+             title_pending              INTEGER NOT NULL DEFAULT 0,
+             pinned_profile_id          TEXT NOT NULL DEFAULT ''
          );
          CREATE TABLE IF NOT EXISTS project_parents (
              project_id  TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
@@ -215,6 +217,37 @@ fn add_startup_set(tx: &Transaction<'_>) -> rusqlite::Result<()> {
                 "ALTER TABLE project_local ADD COLUMN {column} TEXT"
             ))?;
         }
+    }
+    Ok(())
+}
+
+/// Pins became per profile after the table existed: a profile made before gets the column here,
+/// and every pin it already has goes to the home profile, whose sidebar it was made in. With no
+/// home profile yet, a pin keeps no owner and shows for every profile.
+fn pins_per_profile(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    let present: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('project_local') WHERE name = 'pinned_profile_id')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !present {
+        tx.execute_batch(
+            "ALTER TABLE project_local ADD COLUMN pinned_profile_id TEXT NOT NULL DEFAULT ''",
+        )?;
+    }
+    let profiles: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'profiles')",
+        [],
+        |r| r.get(0),
+    )?;
+    if profiles {
+        tx.execute(
+            "UPDATE project_local
+             SET pinned_profile_id = (SELECT id FROM profiles WHERE is_home = 1)
+             WHERE pinned = 1 AND pinned_profile_id = ''
+               AND EXISTS (SELECT 1 FROM profiles WHERE is_home = 1)",
+            [],
+        )?;
     }
     Ok(())
 }
