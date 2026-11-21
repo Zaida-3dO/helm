@@ -629,8 +629,12 @@ async fn carry_on(
                 .db()
                 .snapshot(|tx| crate::store::get_chat(tx, &chat.id, rev))
             {
-                ctx.events
-                    .emit(ChatEvent::Chat { chat: rec }.to_app_event());
+                ctx.events.emit(
+                    ChatEvent::Chat {
+                        chat: Box::new(rec),
+                    }
+                    .to_app_event(),
+                );
             }
         }
         rt.publish_attention();

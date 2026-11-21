@@ -647,8 +647,12 @@ pub(crate) fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         .snapshot(|tx| store::get_chat(tx, &id, rev))
         .map_err(sql)?
         .ok_or_else(not_found)?;
-    ctx.events
-        .emit(ChatEvent::Chat { chat: chat.clone() }.to_app_event());
+    ctx.events.emit(
+        ChatEvent::Chat {
+            chat: Box::new(chat.clone()),
+        }
+        .to_app_event(),
+    );
     to_value(&chat)
 }
 
@@ -775,7 +779,12 @@ fn draft_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                 .snapshot(|tx| store::get_chat(tx, &a.chat_id, rev))
                 .map_err(sql)?
             {
-                ctx.events.emit(ChatEvent::Chat { chat }.to_app_event());
+                ctx.events.emit(
+                    ChatEvent::Chat {
+                        chat: Box::new(chat),
+                    }
+                    .to_app_event(),
+                );
             }
             to_value(&DraftSaveResult { revision })
         }

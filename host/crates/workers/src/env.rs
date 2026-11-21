@@ -34,9 +34,18 @@ pub fn compile_cache_dir(data_root: &str) -> String {
 
 /// Variables are compared case-insensitively on Windows, so keys are kept upper-cased for lookup
 /// alongside their original spelling.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct EnvMap {
     vars: BTreeMap<String, (String, String)>,
+}
+
+/// Names only: the map can hold tokens and keys, and a stray `{:?}` must never print a value.
+impl std::fmt::Debug for EnvMap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_set()
+            .entries(self.vars.values().map(|(name, _)| name))
+            .finish()
+    }
 }
 
 impl EnvMap {
@@ -264,6 +273,14 @@ mod tests {
     fn unknown_references_stay_as_written() {
         let env = EnvMap::default();
         assert_eq!(env.expand("a%NOPE%b%"), "a%NOPE%b%");
+    }
+
+    #[test]
+    fn debug_prints_names_and_never_values() {
+        let mut env = EnvMap::default();
+        env.set("HELM_CLAUDE_TOKEN", "sk-ant-secret-value");
+        let shown = format!("{env:?}");
+        assert!(shown.contains("HELM_CLAUDE_TOKEN") && !shown.contains("sk-ant"));
     }
 
     #[test]

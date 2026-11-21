@@ -167,7 +167,12 @@ pub(crate) fn fork_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         .get::<helm_chats::clock::Clock>()
         .map_or(0, |c| c.next());
     if let Ok(Some(chat)) = db.snapshot(|tx| helm_chats::store::get_chat(tx, &out.chat_id, rev)) {
-        ctx.events.emit(ChatEvent::Chat { chat }.to_app_event());
+        ctx.events.emit(
+            ChatEvent::Chat {
+                chat: Box::new(chat),
+            }
+            .to_app_event(),
+        );
     }
     to_json(&out)
 }

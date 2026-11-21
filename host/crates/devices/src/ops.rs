@@ -2,6 +2,7 @@
 
 use crate::identity::{self, DeviceError};
 use crate::mirror::{self, Mirror, MirrorSlot};
+use crate::route::NewChat;
 use base64::Engine as _;
 use helm_chats::clock::Clock;
 use helm_core::db::Database;
@@ -281,12 +282,14 @@ async fn devices_create_chat(ctx: OpCtx, args: Value) -> Result<Value, ApiError>
     let id = mirror
         .create_chat(
             &a.device_uid,
-            &person,
-            &a.project_id,
-            a.model,
-            a.effort,
-            None,
-            None,
+            NewChat {
+                person_id: &person,
+                project_id: &a.project_id,
+                model: a.model,
+                effort: a.effort,
+                title: None,
+                muted: None,
+            },
         )
         .await?;
     Ok(json!({ "chatId": id }))

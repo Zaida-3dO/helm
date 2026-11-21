@@ -178,7 +178,12 @@ fn start_chat(svc: &SchedulesService, project_id: Option<&str>) -> Result<String
         .db
         .snapshot(|tx| helm_chats::store::get_chat(tx, &id, rev))
     {
-        svc.events.emit(ChatEvent::Chat { chat }.to_app_event());
+        svc.events.emit(
+            ChatEvent::Chat {
+                chat: Box::new(chat),
+            }
+            .to_app_event(),
+        );
     }
     Ok(id)
 }

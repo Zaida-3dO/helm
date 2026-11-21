@@ -39,6 +39,16 @@ fn too_big_page() -> ApiError {
     )
 }
 
+/// What a chat started on another PC is made from.
+pub struct NewChat<'a> {
+    pub person_id: &'a str,
+    pub project_id: &'a str,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub title: Option<String>,
+    pub muted: Option<bool>,
+}
+
 /// A page held on another PC, brought across to run here.
 pub struct PageBundle {
     /// The pin there: id, title, path, linked chat.
@@ -140,16 +150,15 @@ impl Mirror {
 
     /// Start a chat on `device` for the person, then open it here. `title` and `muted` are
     /// asked of the device outright, so the chat arrives already named and quiet.
-    pub async fn create_chat(
-        &self,
-        device: &str,
-        person_id: &str,
-        project_id: &str,
-        model: Option<String>,
-        effort: Option<String>,
-        title: Option<String>,
-        muted: Option<bool>,
-    ) -> Result<String, ApiError> {
+    pub async fn create_chat(&self, device: &str, new: NewChat<'_>) -> Result<String, ApiError> {
+        let NewChat {
+            person_id,
+            project_id,
+            model,
+            effort,
+            title,
+            muted,
+        } = new;
         self.check_live(device)?;
         let mut args = json!({ "personId": person_id, "projectId": project_id });
         if let Some(m) = model {
@@ -1624,12 +1633,14 @@ impl RemoteChats for Mirror {
             let id = m
                 .create_chat(
                     &a.device_uid,
-                    &a.person_id,
-                    &a.project_id,
-                    a.model,
-                    a.effort,
-                    a.title,
-                    Some(a.muted),
+                    NewChat {
+                        person_id: &a.person_id,
+                        project_id: &a.project_id,
+                        model: a.model,
+                        effort: a.effort,
+                        title: a.title,
+                        muted: Some(a.muted),
+                    },
                 )
                 .await?;
             Ok(json!({ "chatId": id }))

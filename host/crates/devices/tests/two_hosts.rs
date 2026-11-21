@@ -217,7 +217,7 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
     for (title, rev) in [("Renamed", 11), ("Renamed again", 12)] {
         host.observe(
             &ChatEvent::Chat {
-                chat: fake_record("c1", title, rev),
+                chat: Box::new(fake_record("c1", title, rev)),
             }
             .to_app_event(),
         );
@@ -3188,13 +3188,13 @@ async fn a_household_member_reads_the_whole_list_and_is_refused_nothing() {
     // A change to any chat reaches her as it reaches the owner's device.
     host.observe(
         &ChatEvent::Chat {
-            chat: fake_record("mine", "Renamed", 13),
+            chat: Box::new(fake_record("mine", "Renamed", 13)),
         }
         .to_app_event(),
     );
     host.observe(
         &ChatEvent::Chat {
-            chat: fake_record("shared", "Renamed too", 14),
+            chat: Box::new(fake_record("shared", "Renamed too", 14)),
         }
         .to_app_event(),
     );

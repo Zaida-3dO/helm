@@ -728,7 +728,9 @@ impl Actor {
             .snapshot(|t| store::get_chat(t, &self.chat_id, rev))
         {
             self.live.lock().unwrap().thread.status = chat.status;
-            self.emit(ChatEvent::Chat { chat });
+            self.emit(ChatEvent::Chat {
+                chat: Box::new(chat),
+            });
         }
     }
 

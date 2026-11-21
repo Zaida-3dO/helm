@@ -250,7 +250,7 @@ impl ChatPort for ChannelPort {
     fn consent_states(&self, chat_id: String) -> BoxFut<'_, PortResult<Vec<Value>>> {
         self.port.consent_states(chat_id)
     }
-    fn create(&self, a: CreateArgs) -> BoxFut<'_, PortResult<String>> {
+    fn create(&self, a: CreateArgs) -> BoxFut<'_, PortResult<Value>> {
         self.port.create(a)
     }
     fn set_model(&self, a: SetModelArgs) -> BoxFut<'_, PortResult<()>> {

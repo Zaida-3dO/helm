@@ -300,7 +300,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
         ToolSpec::write(
             "app_save_rule",
             format!(
-                "Save a rule: an instruction about how to work that this chat's person (or everyone) wants every later chat to follow. Use it when the user asks you to always or never do something. A fact or lesson belongs in memory_write instead. {SCOPE_NOTE} `replace` is the path of an existing rule to rewrite (from app_list_knowledge). `always: true` keeps the rule whole in every chat's prompt however long it is, instead of listing it by one line: use for short, essential rules; a rewrite without it keeps the rule's current setting.{EXPLICIT}"
+                "Save a rule: an instruction about how to work that this chat's person (or everyone) wants every later chat to follow. Use it when the user asks you to always or never do something. A fact or lesson belongs in memory_write instead. {SCOPE_NOTE} `replace` is the path of an existing rule to rewrite (from app_list_knowledge). `always` keeps a rule whole in every chat's prompt.{EXPLICIT}"
             ),
             json!({
                 "type": "object",

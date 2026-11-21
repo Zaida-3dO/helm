@@ -399,49 +399,6 @@ impl Daemon {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::opens_helm_at_logon;
-
-    #[test]
-    fn helm_opens_only_for_a_sign_in_start_with_the_switch_on_and_nothing_running() {
-        // (why, Windows started it at sign-in, the switch, Helm running, opens Helm?)
-        let rows: &[(&str, bool, bool, bool, bool)] = &[
-            (
-                "sign-in start, switch on, nothing running",
-                true,
-                true,
-                false,
-                true,
-            ),
-            ("Helm is already up at sign-in", true, true, true, false),
-            ("the person turned sign-in off", true, false, false, false),
-            (
-                "sign-in start, off switch, Helm up",
-                true,
-                false,
-                true,
-                false,
-            ),
-            (
-                "Helm itself started the launcher",
-                false,
-                true,
-                false,
-                false,
-            ),
-            ("the hub asked for this launcher", false, true, true, false),
-        ];
-        for (why, at_logon, switch, running, want) in rows {
-            assert_eq!(
-                opens_helm_at_logon(*at_logon, *switch, *running),
-                *want,
-                "{why}"
-            );
-        }
-    }
-}
-
 /// The hub's reason, for the log: one of the known words, never the hub's raw text.
 fn reason_text(reason: &str) -> &'static str {
     match reason {
@@ -608,4 +565,47 @@ pub fn main() -> ExitCode {
     });
     install::remove_pid(&profile.dir);
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::opens_helm_at_logon;
+
+    #[test]
+    fn helm_opens_only_for_a_sign_in_start_with_the_switch_on_and_nothing_running() {
+        // (why, Windows started it at sign-in, the switch, Helm running, opens Helm?)
+        let rows: &[(&str, bool, bool, bool, bool)] = &[
+            (
+                "sign-in start, switch on, nothing running",
+                true,
+                true,
+                false,
+                true,
+            ),
+            ("Helm is already up at sign-in", true, true, true, false),
+            ("the person turned sign-in off", true, false, false, false),
+            (
+                "sign-in start, off switch, Helm up",
+                true,
+                false,
+                true,
+                false,
+            ),
+            (
+                "Helm itself started the launcher",
+                false,
+                true,
+                false,
+                false,
+            ),
+            ("the hub asked for this launcher", false, true, true, false),
+        ];
+        for (why, at_logon, switch, running, want) in rows {
+            assert_eq!(
+                opens_helm_at_logon(*at_logon, *switch, *running),
+                *want,
+                "{why}"
+            );
+        }
+    }
 }

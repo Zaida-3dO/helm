@@ -1781,7 +1781,7 @@ pub struct CompletionAckArgs {
 )]
 pub enum ChatEvent {
     /// Any change to the chat row. The revision is `chat.revision`.
-    Chat { chat: ChatRecord },
+    Chat { chat: Box<ChatRecord> },
     /// The thread state changed. The revision is `thread.revision`.
     Thread {
         chat_id: String,

@@ -98,8 +98,12 @@ fn changed(ctx: &OpCtx, chat_id: &str) -> Result<ChatRecord, ApiError> {
         .snapshot(|tx| store::get_chat(tx, chat_id, rev))
         .map_err(sql)?
         .ok_or_else(not_found)?;
-    ctx.events
-        .emit(ChatEvent::Chat { chat: chat.clone() }.to_app_event());
+    ctx.events.emit(
+        ChatEvent::Chat {
+            chat: Box::new(chat.clone()),
+        }
+        .to_app_event(),
+    );
     if let Some(rt) = ctx.services.get::<ChatRuntime>() {
         rt.publish_attention();
     }

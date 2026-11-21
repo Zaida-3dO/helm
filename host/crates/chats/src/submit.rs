@@ -126,9 +126,12 @@ pub(crate) fn emit_chat(rt: &ChatRuntime, chat_id: &str) -> Option<ChatRecord> {
         .snapshot(|t| store::get_chat(t, chat_id, rev))
         .ok()
         .flatten()?;
-    rt.sh
-        .events
-        .emit(ChatEvent::Chat { chat: chat.clone() }.to_app_event());
+    rt.sh.events.emit(
+        ChatEvent::Chat {
+            chat: Box::new(chat.clone()),
+        }
+        .to_app_event(),
+    );
     Some(chat)
 }
 

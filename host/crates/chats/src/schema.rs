@@ -759,7 +759,7 @@ pub(crate) mod tests {
             "the walk never un-archives or archives"
         );
         let before = linked();
-        db.write(|tx| rollover_stack(tx)).unwrap();
+        db.write(rollover_stack).unwrap();
         assert_eq!(linked(), before, "a re-run is a no-op");
     }
 }

@@ -1775,20 +1775,32 @@ async fn caller_hub_person(ctx: &ToolCtx) -> Result<Option<String>, ToolError> {
     .flatten())
 }
 
+/// What a chat started on another PC is made from: the first message, its title, whether it is
+/// muted and whether the caller asked to watch it.
+struct FarChat<'a> {
+    body: String,
+    title: Option<&'a str>,
+    muted: bool,
+    watch: bool,
+}
+
 /// `app_create_chat` with `device` naming another paired PC: the chat is started there over the
 /// household link, for the calling chat's own person, and its first message crosses the same way.
 /// The new chat is held in this PC's copy by the link itself, so reads and sends follow at once.
 async fn create_chat_on_device(
     ctx: ToolCtx,
     a: &Value,
-    body: String,
-    title: Option<&str>,
-    muted: bool,
-    watch: bool,
+    chat: FarChat<'_>,
     uid: String,
     name: String,
     limits: &SendLimits,
 ) -> ToolResult {
+    let FarChat {
+        body,
+        title,
+        muted,
+        watch,
+    } = chat;
     let Some(remote) = ctx
         .services
         .get::<crate::remote::RemoteSlot>()
@@ -1934,10 +1946,13 @@ async fn create_chat(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRes
             // The name is this PC's own: start the chat the usual way.
             Pc::This => {}
             Pc::Found { uid, name } => {
-                return create_chat_on_device(
-                    ctx, &a, body, title, muted, watch, uid, name, &limits,
-                )
-                .await
+                let chat = FarChat {
+                    body,
+                    title,
+                    muted,
+                    watch,
+                };
+                return create_chat_on_device(ctx, &a, chat, uid, name, &limits).await;
             }
             Pc::Unknown(names) => {
                 let known = match names.len() {
@@ -2363,7 +2378,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::read(
             "app_this_chat",
-            format!("This chat's own details: chatId (give it to a chat you start so it can report back with app_send_message), title, board, folder, parent chat, model, effort, muted, profile and device. A chat that has rolled over also names its stack (stackId, latestSessionId, previousSessionId, nextSessionId). If a tool you expect is missing, call this and tell the person what it says: when toolServers is present, those tool servers are not connected on this PC, each with the reason.{LINKS}"),
+            format!("This chat's own details: chatId (give it to a chat you start so it can report back with app_send_message), title, board, folder, parent chat, model, effort, muted, profile and device. A rolled-over chat also names its stack (stackId and the session ids). If a tool you expect is missing, call this and tell the person what it says: when toolServers is present, those tool servers are not connected on this PC, each with the reason.{LINKS}"),
             obj(json!({}), &[]),
         ),
         this_chat,
@@ -2376,14 +2391,14 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                 json!({
                     "query": {"type": "string", "maxLength": 512},
                     "projectId": {"type": "string"},
-                    "person": {"type": "string", "description": "One person (their profile's name or id, or their hub person id), or \"any\" for every profile. \"profile\" is the retired spelling and means the same."},
-                    "profile": {"type": "string", "description": "Retired spelling of person; still accepted."},
-                    "device": {"type": "string", "description": "One device (its name or id), or \"any\" for every paired PC; unset means this PC."},
+                    "person": {"type": "string", "description": "One person (profile name or id, or hub person id), or \"any\" for every profile. \"profile\" is the retired spelling."},
+                    "profile": {"type": "string", "description": "Retired spelling of person."},
+                    "device": {"type": "string", "description": "One device (name or id), or \"any\" for every paired PC; unset: this PC."},
                     "archived": {"type": "boolean"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 50},
                     "offset": {"type": "integer", "minimum": 0, "maximum": 100000},
                     "includeCurrent": {"type": "boolean"},
-                    "includeEarlierSessions": {"type": "boolean", "description": "Also list the earlier sessions of rolled-over chats, not just the session each chat runs in now."}
+                    "includeEarlierSessions": {"type": "boolean", "description": "Also list earlier sessions of rolled-over chats."}
                 }),
                 &[],
             ),
@@ -2464,7 +2479,7 @@ A rolled-over chat is a stack of sessions: its chat fields name the stack (stack
                     "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]},
                     "muted": {"type": "boolean", "description": MUTED_ARG},
                     "watch": {"type": "boolean", "description": "Default true: Helm declares an app_wait_for chat_idle on the new chat for you (a day at most), so you hear when its turn ends even if it never reports. Pass false when you wait on it yourself."},
-                    "device": {"type": "string", "description": "A paired PC to run the chat on, by its name or id; unset means this PC. There projectId must be that PC's own board; folder and parentChatId are refused, and watch never declares."}
+                    "device": {"type": "string", "description": "A paired PC (name or id) to run the chat on; unset: this PC. There projectId must be its own board; folder and parentChatId are refused, watch never declares."}
                 }),
                 &["message"],
             ),
@@ -3823,7 +3838,7 @@ mod tests {
             assert_eq!(q.model.as_deref(), Some("sonnet"));
             assert_eq!(q.effort.as_deref(), Some("high"));
             assert_eq!(q.title.as_deref(), Some("Far chat"));
-            assert_eq!(q.muted, true);
+            assert!(q.muted);
         }
         {
             let mut s = far.sends.lock().unwrap();
