@@ -123,6 +123,28 @@
   width: 100%;
 }
 
+.mcp-ref-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+
+/* A secret's own values for single profiles, indented under the secret. */
+.mcp-profile-values {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-left: 16px;
+}
+
+.mcp-profile-value {
+  display: grid;
+  grid-template-columns: 140px 1fr auto;
+  gap: 6px;
+  align-items: center;
+}
+
 .mcp-actions {
   display: flex;
   flex-wrap: wrap;

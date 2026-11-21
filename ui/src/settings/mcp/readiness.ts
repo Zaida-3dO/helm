@@ -153,6 +153,29 @@ export function blankServer(taken: string[]): McpServer {
 
 type Refs = { [key in string]?: ValueRef };
 
+/** A secret's values for single profiles as a save wants them: a typed value replaces, a kept
+ * one rides back as its id, an empty entry is dropped. */
+function cleanProfileSecrets(m: ValueRef['profiles']): ValueRef['profiles'] {
+  if (!m) return undefined;
+  const out: NonNullable<ValueRef['profiles']> = {};
+  for (const [id, p] of Object.entries(m)) {
+    if (!p) continue;
+    if (p.value) out[id] = { value: p.value };
+    else if (p.secretId) out[id] = { secretId: p.secretId };
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** A secret's own value for one profile: typed (`value` a string; an empty one keeps what is
+ * saved) or taken away (`null`). The shared value is never touched. */
+export function withProfileValue(r: ValueRef, profileId: string, value: string | null): ValueRef {
+  const profiles = { ...(r.profiles ?? {}) };
+  if (value === null) delete profiles[profileId];
+  else profiles[profileId] = { ...(profiles[profileId] ?? {}), value };
+  const { profiles: _drop, ...rest } = r;
+  return Object.keys(profiles).length ? { ...rest, profiles } : rest;
+}
+
 function cleanRefs(m: Refs | undefined): Refs | undefined {
   if (!m) return undefined;
   const out: Refs = {};
@@ -160,8 +183,14 @@ function cleanRefs(m: Refs | undefined): Refs | undefined {
     const name = k.trim();
     if (!name || !r) continue;
     if (r.kind === 'literal') {
-      if (r.value) out[name] = { kind: 'literal', value: r.value, ...(r.prefix ? { prefix: r.prefix } : {}) };
-      else if (r.secretId) out[name] = { kind: 'literal', secretId: r.secretId, ...(r.prefix ? { prefix: r.prefix } : {}) };
+      const profiles = cleanProfileSecrets(r.profiles);
+      const own = profiles ? { profiles } : {};
+      const prefix = r.prefix ? { prefix: r.prefix } : {};
+      if (r.value) out[name] = { kind: 'literal', value: r.value, ...prefix, ...own };
+      else if (r.secretId) out[name] = { kind: 'literal', secretId: r.secretId, ...prefix, ...own };
+      // A secret with only profile values has no shared one: a chat of any other profile finds
+      // it empty and the row says it needs its token.
+      else if (profiles) out[name] = { kind: 'literal', ...prefix, ...own };
       // An empty new literal is left out rather than saved empty.
     } else if (r.kind === 'chatPerson') {
       // Filled by the host per chat, so it never has a value of its own.

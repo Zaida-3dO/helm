@@ -709,6 +709,7 @@ mod tests {
             refs.insert(
                 "Authorization".to_owned(),
                 ValueRef {
+                    profiles: Default::default(),
                     kind: RefKind::Literal,
                     value: Some(t.to_owned()),
                     secret_id: None,

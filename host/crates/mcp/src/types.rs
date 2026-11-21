@@ -18,6 +18,8 @@ pub const MAX_ARGS: usize = 64;
 pub const MAX_ARG_CHARS: usize = 4096;
 pub const MAX_ENV: usize = 32;
 pub const MAX_HEADERS: usize = 32;
+/// Profiles one secret may have its own value for.
+pub const MAX_PROFILE_SECRETS: usize = 16;
 pub const MAX_HEADER_NAME: usize = 128;
 pub const MAX_URL_CHARS: usize = 4096;
 pub const MAX_LITERAL_BYTES: usize = 16 * 1024;
@@ -79,6 +81,25 @@ pub struct ValueRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub prefix: Option<String>,
+    /// A literal secret may have a value of its own for a profile, keyed by the profile's id: a
+    /// chat of that profile reads its own value, every other chat the one above. Empty for
+    /// anything but a literal.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(as = "Option<BTreeMap<String, ProfileSecret>>", optional)]
+    pub profiles: BTreeMap<String, ProfileSecret>,
+}
+
+/// One profile's own value for a literal secret: the same pair a literal carries (a new value
+/// on input only, or the saved secret's id).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProfileSecret {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub secret_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]

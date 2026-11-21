@@ -11,6 +11,7 @@ import { Button, Checkbox, Dialog, Segmented, TextArea, TextInput, toast } from 
 import { IconCheck, IconWarning } from '../../ui/icons.tsx';
 import { WheelMark } from '../../ui/status/index.ts';
 import { GoogleAccountsDialog } from './GoogleAccounts.tsx';
+import { ProfileValues } from './ProfileValues.tsx';
 import { GOOGLE_PRESET, googleOps, isGoogleServer } from './google.ts';
 import { WAITING_NOTE, canDisconnect, connectLabel, isOAuthServer, oauthOps, type OAuthStatus } from './oauth.ts';
 import { BROKER_PRESET, blankServer, copyImportable, draftFromPreset, isBrokerServer, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable } from './readiness.ts';
@@ -44,7 +45,8 @@ function RefRows({ refs, onChange, kindLabel, headers = false }: { refs: Refs; o
     <div className="mcp-refs">
       {rows.map(([k, r], i) =>
         r ? (
-          <div className="mcp-ref" key={i} data-testid={`mcp-ref-${k}`}>
+          <div className="mcp-ref-block" key={i}>
+          <div className="mcp-ref" data-testid={`mcp-ref-${k}`}>
             <TextInput aria-label={`${kindLabel} name`} value={k} spellCheck={false} onChange={(e) => set(k, e.target.value, r)} />
             <Segmented<RefKind>
               label="Value kind"
@@ -74,6 +76,8 @@ function RefRows({ refs, onChange, kindLabel, headers = false }: { refs: Refs; o
             <Button variant="text" danger onClick={() => drop(k)}>
               Remove
             </Button>
+          </div>
+          {r.kind === 'literal' && k.trim() ? <ProfileValues name={k} value={r} onChange={(next) => set(k, k, next)} /> : null}
           </div>
         ) : null,
       )}

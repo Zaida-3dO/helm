@@ -47,8 +47,13 @@ pub fn revision_of(servers: &[McpServer]) -> String {
     helm_core::sha256_hex(helm_core::revisions::canonical_json(&v).as_bytes())
 }
 
-pub(crate) fn identity(server_id: &str, secret_id: &str) -> String {
-    format!("mcp-literal:{server_id}:{secret_id}")
+/// What a stored literal is bound to in the credential store. A profile's own value is bound to
+/// that profile as well, so it cannot be read back as another profile's or as the shared one.
+pub(crate) fn identity(server_id: &str, secret_id: &str, profile: Option<&str>) -> String {
+    match profile {
+        Some(p) => format!("mcp-literal:{server_id}:{secret_id}:{p}"),
+        None => format!("mcp-literal:{server_id}:{secret_id}"),
+    }
 }
 
 type Listener = Box<dyn Fn(&str) + Send + Sync>;
@@ -122,11 +127,13 @@ impl McpStore {
         if f.version != FILE_VERSION || validate_list(&f.servers).is_err() {
             return Err(self.invalid_file());
         }
-        // A stored file never holds a literal value.
-        if f.servers
-            .iter()
-            .any(|s| refs(s).any(|r| r.value.is_some() && r.kind == RefKind::Literal))
-        {
+        // A stored file never holds a literal value, shared or a profile's own.
+        if f.servers.iter().any(|s| {
+            refs(s).any(|r| {
+                (r.value.is_some() && r.kind == RefKind::Literal)
+                    || r.profiles.values().any(|p| p.value.is_some())
+            })
+        }) {
             return Err(self.invalid_file());
         }
         Ok(f.servers)
@@ -163,21 +170,22 @@ impl McpStore {
             }
         }
         validate_list(&after)?;
-        // A kept secret id must be one this same server already had.
-        let owned: BTreeMap<&str, BTreeSet<String>> = before
+        // A kept secret id must be one this same server already had, and a profile's own value
+        // must be one that same profile already had: an id never moves to another profile.
+        let owned: BTreeMap<&str, BTreeSet<(Option<String>, String)>> = before
             .iter()
-            .map(|s| (s.id.as_str(), secret_ids(s)))
+            .map(|s| (s.id.as_str(), secret_slots(s)))
             .collect();
         for s in &after {
-            for r in refs(s) {
-                if let (RefKind::Literal, Some(id)) = (r.kind, &r.secret_id) {
-                    if !owned.get(s.id.as_str()).is_some_and(|ids| ids.contains(id)) {
-                        return Err(StoreError::Invalid(format!(
-                            "{}: a saved secret was referenced that this server does not have. Enter the value again.",
-                            s.name
-                        )));
-                    }
-                }
+            let had = owned.get(s.id.as_str());
+            let foreign = secret_slots(s)
+                .iter()
+                .any(|slot| !had.is_some_and(|h| h.contains(slot)));
+            if foreign {
+                return Err(StoreError::Invalid(format!(
+                    "{}: a saved secret was referenced that this server does not have. Enter the value again.",
+                    s.name
+                )));
             }
         }
         let minted = self.seal_literals(&mut after)?;
@@ -253,19 +261,39 @@ impl McpStore {
                     continue;
                 }
                 if let Some(v) = r.value.take() {
-                    let id = format!("lit_{}", uuid::Uuid::new_v4().simple());
-                    if let Err(e) = self.creds.write(&id, &identity(&sid, &id), v.as_bytes()) {
-                        self.forget_all(&minted);
-                        return Err(StoreError::Unavailable(format!(
-                            "Could not store the secret in Helm's credential store: {e}"
-                        )));
+                    r.secret_id = Some(self.seal_one(&sid, None, &v, &mut minted)?);
+                }
+                for (profile, p) in r.profiles.iter_mut() {
+                    if let Some(v) = p.value.take() {
+                        p.secret_id = Some(self.seal_one(&sid, Some(profile), &v, &mut minted)?);
                     }
-                    minted.push(id.clone());
-                    r.secret_id = Some(id);
                 }
             }
         }
         Ok(minted)
+    }
+
+    /// Store one literal (shared, or a profile's own) and return its new id; `minted` collects
+    /// every id stored so far, so a failure forgets them all.
+    fn seal_one(
+        &self,
+        server_id: &str,
+        profile: Option<&str>,
+        value: &str,
+        minted: &mut Vec<String>,
+    ) -> Result<String, StoreError> {
+        let id = format!("lit_{}", uuid::Uuid::new_v4().simple());
+        if let Err(e) = self
+            .creds
+            .write(&id, &identity(server_id, &id, profile), value.as_bytes())
+        {
+            self.forget_all(minted);
+            return Err(StoreError::Unavailable(format!(
+                "Could not store the secret in Helm's credential store: {e}"
+            )));
+        }
+        minted.push(id.clone());
+        Ok(id)
     }
 
     fn forget_all(&self, ids: &[String]) {
@@ -315,6 +343,19 @@ impl McpStore {
         without_chat_person: bool,
         not_home: bool,
     ) -> Result<(String, Vec<ResolvedServer>), StoreError> {
+        self.resolve_enabled_in(env, person, without_chat_person, not_home, None)
+    }
+
+    /// As [`McpStore::resolve_enabled_scoped`] for a chat of `profile`: a secret that has a value
+    /// of its own for that profile is read as that value, every other secret as its shared one.
+    pub fn resolve_enabled_in(
+        &self,
+        env: &dyn Fn(&str) -> Option<String>,
+        person: Option<&str>,
+        without_chat_person: bool,
+        not_home: bool,
+        profile: Option<&str>,
+    ) -> Result<(String, Vec<ResolvedServer>), StoreError> {
         let servers = self.load()?;
         let revision = revision_of(&servers);
         let resolved = servers
@@ -324,17 +365,22 @@ impl McpStore {
                     && !(without_chat_person && sends_chat_person(s))
                     && !(not_home && is_home_only(s))
             })
-            .map(|s| self.resolve_one(s, env, person))
+            .map(|s| self.resolve_one(s, env, person, profile))
             .collect();
         Ok((revision, resolved))
     }
 
-    /// Whether any enabled server sends the chat's person, so its config differs per chat.
+    /// Whether any enabled server sends the chat's person or has a secret of a profile's own, so
+    /// its config differs per chat.
     pub fn uses_chat_person(&self) -> bool {
         self.load()
             .map(|l| {
-                l.iter()
-                    .any(|s| s.enabled && (sends_chat_person(s) || is_home_only(s)))
+                l.iter().any(|s| {
+                    s.enabled
+                        && (sends_chat_person(s)
+                            || is_home_only(s)
+                            || refs(s).any(|r| !r.profiles.is_empty()))
+                })
             })
             .unwrap_or(false)
     }
@@ -349,7 +395,7 @@ impl McpStore {
             .load()?
             .iter()
             .find(|s| s.enabled && s.id == id)
-            .map(|s| self.resolve_one(s, &|k| std::env::var(k).ok(), person)))
+            .map(|s| self.resolve_one(s, &|k| std::env::var(k).ok(), person, None)))
     }
 
     /// One draft server with its references resolved, for a connection test. A literal secret
@@ -357,7 +403,7 @@ impl McpStore {
     /// store as usual. A browser sign-in is attached only when the draft is at the address the
     /// sign-in was made for.
     pub fn resolve_draft(&self, s: &McpServer) -> ResolvedServer {
-        self.resolve_one(s, &|k| std::env::var(k).ok(), None)
+        self.resolve_one(s, &|k| std::env::var(k).ok(), None, None)
     }
 
     /// The server list as another PC of the same person may see it: every secret value, saved
@@ -380,7 +426,9 @@ impl McpStore {
     ) -> Result<McpEditorSnapshot, StoreError> {
         for s in servers {
             let dirty = refs(s).any(|r| {
-                r.secret_id.is_some() || (r.kind != RefKind::Environment && r.value.is_some())
+                r.secret_id.is_some()
+                    || !r.profiles.is_empty()
+                    || (r.kind != RefKind::Environment && r.value.is_some())
             });
             if dirty {
                 return Err(StoreError::Invalid(format!(
@@ -422,6 +470,7 @@ impl McpStore {
         s: &McpServer,
         env: &dyn Fn(&str) -> Option<String>,
         person: Option<&str>,
+        profile: Option<&str>,
     ) -> ResolvedServer {
         let t = &s.transport;
         let mut out = ResolvedServer {
@@ -458,8 +507,15 @@ impl McpStore {
             let mut e = BTreeMap::new();
             for (k, r) in &t.env {
                 let mut kept = Vec::new();
-                let value =
-                    self.resolve_ref(&s.id, r, false, &format!("Environment {k}"), env, &mut kept)?;
+                let value = self.resolve_ref(
+                    &s.id,
+                    r,
+                    profile,
+                    false,
+                    &format!("Environment {k}"),
+                    env,
+                    &mut kept,
+                )?;
                 if !plain_env.contains(k) {
                     secrets.extend(kept);
                 }
@@ -479,7 +535,15 @@ impl McpStore {
                 }
                 h.insert(
                     k.clone(),
-                    self.resolve_ref(&s.id, r, true, &format!("Header {k}"), env, &mut secrets)?,
+                    self.resolve_ref(
+                        &s.id,
+                        r,
+                        profile,
+                        true,
+                        &format!("Header {k}"),
+                        env,
+                        &mut secrets,
+                    )?,
                 );
             }
             Ok((e, h))
@@ -531,12 +595,34 @@ impl McpStore {
         &self,
         server_id: &str,
         r: &ValueRef,
+        profile: Option<&str>,
         header: bool,
         label: &str,
         env: &dyn Fn(&str) -> Option<String>,
         secrets: &mut Vec<String>,
     ) -> Result<String, String> {
+        // The chat's profile has its own value for this secret: read that one, bound to the
+        // profile, and never the shared one or another profile's.
+        let own = profile
+            .filter(|_| r.kind == RefKind::Literal)
+            .and_then(|p| r.profiles.get(p).map(|v| (p, v)));
         let raw = match r.kind {
+            RefKind::Literal if own.is_some() => {
+                let (p, v) = own.expect("checked");
+                match (&v.secret_id, &v.value) {
+                    (Some(id), _) => {
+                        let bytes = self
+                            .creds
+                            .read(id, &identity(server_id, id, Some(p)))
+                            .map_err(|_| format!("{label}: the saved secret could not be read. Enter it again in Settings → MCP."))?;
+                        String::from_utf8(bytes)
+                            .map_err(|_| format!("{label}: the saved secret is not text."))?
+                    }
+                    // Typed in the editor and not saved yet (only a connection test sees this).
+                    (None, Some(typed)) => typed.clone(),
+                    (None, None) => String::new(),
+                }
+            }
             RefKind::Environment => {
                 let name = r.value.as_deref().unwrap_or("");
                 env(name).ok_or_else(|| format!("{label}: the variable {name} is not set."))?
@@ -559,7 +645,7 @@ impl McpStore {
                 let id = r.secret_id.as_deref().unwrap_or("");
                 let bytes = self
                     .creds
-                    .read(id, &identity(server_id, id))
+                    .read(id, &identity(server_id, id, None))
                     .map_err(|_| format!("{label}: the saved secret could not be read. Enter it again in Settings → MCP."))?;
                 String::from_utf8(bytes)
                     .map_err(|_| format!("{label}: the saved secret is not text."))?
@@ -607,6 +693,8 @@ fn copy_shape(s: &McpServer) -> McpServer {
             r.value = None;
             r.secret_id = None;
         }
+        // A profile's own value belongs to a profile of this PC: none of it crosses.
+        r.profiles.clear();
     }
     c
 }
@@ -664,6 +752,7 @@ fn add_person_header(s: &mut McpServer) -> bool {
     s.transport.headers.insert(
         PERSON_HEADER.to_owned(),
         ValueRef {
+            profiles: Default::default(),
             kind: RefKind::ChatPerson,
             value: None,
             secret_id: None,
@@ -673,10 +762,23 @@ fn add_person_header(s: &mut McpServer) -> bool {
     true
 }
 
+/// Every saved secret id of a server, shared and per profile.
 fn secret_ids(s: &McpServer) -> BTreeSet<String> {
+    secret_slots(s).into_iter().map(|(_, id)| id).collect()
+}
+
+/// Each saved secret id with the profile it belongs to (`None` for the shared value).
+fn secret_slots(s: &McpServer) -> BTreeSet<(Option<String>, String)> {
     refs(s)
         .filter(|r| r.kind == RefKind::Literal)
-        .filter_map(|r| r.secret_id.clone())
+        .flat_map(|r| {
+            let shared = r.secret_id.clone().map(|id| (None, id));
+            let own = r
+                .profiles
+                .iter()
+                .filter_map(|(p, v)| v.secret_id.clone().map(|id| (Some(p.clone()), id)));
+            shared.into_iter().chain(own)
+        })
         .collect()
 }
 
@@ -700,6 +802,7 @@ pub(crate) mod tests {
         headers.insert(
             "Authorization".to_string(),
             ValueRef {
+                profiles: Default::default(),
                 kind: RefKind::Literal,
                 value: Some(token.into()),
                 secret_id: None,
@@ -761,6 +864,7 @@ pub(crate) mod tests {
                 b.transport.env.insert(
                     k.into(),
                     ValueRef {
+                        profiles: Default::default(),
                         kind: RefKind::Literal,
                         value: Some(v.into()),
                         secret_id: None,
@@ -820,6 +924,162 @@ pub(crate) mod tests {
         );
         assert_eq!(resolved[0].secrets, vec!["s3cret-token-value".to_string()]);
         assert!(resolved[0].error.is_none());
+    }
+
+    /// A secret can have a value of its own per profile: the chat's profile reads its own value,
+    /// a profile with none reads the shared one, no value shows up in the file, the redaction set
+    /// or another profile's config, and an id cannot be moved to another profile or the shared slot.
+    #[test]
+    fn a_profile_can_have_its_own_value_for_a_secret() {
+        let d = tempfile::tempdir().unwrap();
+        let st = store(d.path());
+        let plain = st
+            .mutate(None, |l| {
+                l.push(hub("shared-tok"));
+                Ok(())
+            })
+            .unwrap();
+        let own = |v: &str| ProfileSecret {
+            value: Some(v.into()),
+            secret_id: None,
+        };
+        let snap = st
+            .mutate(Some(&plain.revision), |l| {
+                let r = l[0].transport.headers.get_mut("Authorization").unwrap();
+                r.profiles.insert("pa".into(), own("pa-tok"));
+                r.profiles.insert("pb".into(), own("pb-tok"));
+                Ok(())
+            })
+            .unwrap();
+        assert_ne!(
+            snap.revision, plain.revision,
+            "a profile's value changes the revision"
+        );
+        let text = std::fs::read_to_string(d.path().join(FILE_NAME)).unwrap();
+        assert!(!text.contains("pa-tok") && !text.contains("pb-tok"));
+        assert!(st.uses_chat_person(), "the config now differs per chat");
+
+        let for_profile = |p: Option<&str>| {
+            let (_, r) = st
+                .resolve_enabled_in(&no_env, None, false, false, p)
+                .unwrap();
+            (r[0].headers["Authorization"].clone(), r[0].secrets.clone())
+        };
+        assert_eq!(
+            for_profile(Some("pa")),
+            ("Bearer pa-tok".into(), vec!["pa-tok".into()])
+        );
+        assert_eq!(
+            for_profile(Some("pb")),
+            ("Bearer pb-tok".into(), vec!["pb-tok".into()])
+        );
+        let shared = (
+            "Bearer shared-tok".to_string(),
+            vec!["shared-tok".to_string()],
+        );
+        assert_eq!(
+            for_profile(Some("pc")),
+            shared,
+            "a profile with none falls back"
+        );
+        assert_eq!(for_profile(None), shared);
+
+        // Saving the list back unchanged keeps every value (the ids go round, the values do not).
+        let again = st.mutate(Some(&snap.revision), |_| Ok(())).unwrap();
+        assert_eq!(again.revision, snap.revision);
+        assert_eq!(for_profile(Some("pa")).0, "Bearer pa-tok");
+
+        // An id never moves to another profile or to the shared slot.
+        let ids = |l: &[McpServer]| {
+            let r = &l[0].transport.headers["Authorization"];
+            (
+                r.secret_id.clone().unwrap(),
+                r.profiles["pa"].secret_id.clone().unwrap(),
+            )
+        };
+        let (shared_id, pa_id) = ids(&again.servers);
+        let moved = |f: fn(&mut ValueRef, &str, &str)| {
+            st.mutate(None, |l| {
+                f(
+                    l[0].transport.headers.get_mut("Authorization").unwrap(),
+                    &shared_id,
+                    &pa_id,
+                );
+                Ok(())
+            })
+        };
+        assert!(
+            moved(|r, _, pa| r.profiles.get_mut("pb").unwrap().secret_id = Some(pa.into()))
+                .is_err()
+        );
+        assert!(moved(
+            |r, shared, _| r.profiles.get_mut("pb").unwrap().secret_id = Some(shared.into())
+        )
+        .is_err());
+        assert!(moved(|r, _, pa| r.secret_id = Some(pa.into())).is_err());
+        assert_eq!(
+            for_profile(Some("pb")).0,
+            "Bearer pb-tok",
+            "refused saves change nothing"
+        );
+
+        // The shared value, a plain profile id and one value per profile are all that is accepted.
+        assert!(moved(|r, _, _| {
+            r.profiles.insert(
+                "bad id".into(),
+                ProfileSecret {
+                    value: Some("x".into()),
+                    secret_id: None,
+                },
+            );
+        })
+        .is_err());
+        assert!(moved(|r, _, _| {
+            r.profiles.insert("pc".into(), ProfileSecret::default());
+        })
+        .is_err());
+
+        // Another PC's copy carries none of it.
+        let copy = st.export_copy().unwrap();
+        assert!(copy[0].transport.headers["Authorization"]
+            .profiles
+            .is_empty());
+        let mut dirty = copy[0].clone();
+        dirty.id = "other".into();
+        dirty
+            .transport
+            .headers
+            .get_mut("Authorization")
+            .unwrap()
+            .profiles
+            .insert(
+                "pa".into(),
+                ProfileSecret {
+                    value: None,
+                    secret_id: Some(pa_id.clone()),
+                },
+            );
+        assert!(st.import_copy(&[dirty], None).is_err());
+
+        // Dropping a profile's value forgets its secret; the others stay.
+        let after = st
+            .mutate(None, |l| {
+                l[0].transport
+                    .headers
+                    .get_mut("Authorization")
+                    .unwrap()
+                    .profiles
+                    .remove("pa");
+                Ok(())
+            })
+            .unwrap();
+        assert!(st
+            .creds()
+            .read(&pa_id, &identity("hub", &pa_id, Some("pa")))
+            .is_err());
+        assert_eq!(for_profile(Some("pa")), shared);
+        assert_eq!(for_profile(Some("pb")).0, "Bearer pb-tok");
+        assert_ne!(after.revision, snap.revision);
     }
 
     #[test]
@@ -937,6 +1197,7 @@ pub(crate) mod tests {
         s.transport.headers.insert(
             "X-Env".into(),
             ValueRef {
+                profiles: Default::default(),
                 kind: RefKind::Environment,
                 value: Some("HUB_TOKEN".into()),
                 secret_id: None,
@@ -946,6 +1207,7 @@ pub(crate) mod tests {
         s.transport.headers.insert(
             "X-File".into(),
             ValueRef {
+                profiles: Default::default(),
                 kind: RefKind::File,
                 value: Some(tokfile.to_string_lossy().into_owned()),
                 secret_id: None,
@@ -1030,6 +1292,7 @@ pub(crate) mod tests {
         s.transport.headers.insert(
             "X-Env".into(),
             ValueRef {
+                profiles: Default::default(),
                 kind: RefKind::Environment,
                 value: Some("MIX_TOKEN".into()),
                 secret_id: None,
@@ -1046,6 +1309,7 @@ pub(crate) mod tests {
         g.transport.oauth = Some(OAuthConfig {
             client_id: Some("client-id-1".into()),
             client_secret: Some(ValueRef {
+                profiles: Default::default(),
                 kind: RefKind::Literal,
                 value: Some("s3cret-client-secret".into()),
                 secret_id: None,
@@ -1060,6 +1324,7 @@ pub(crate) mod tests {
             p.transport.env.insert(
                 "MIX_FILE".into(),
                 ValueRef {
+                    profiles: Default::default(),
                     kind: RefKind::File,
                     value: Some(tokfile.to_string_lossy().into_owned()),
                     secret_id: None,
@@ -1069,6 +1334,7 @@ pub(crate) mod tests {
             p.transport.env.insert(
                 "MIX_LIT".into(),
                 ValueRef {
+                    profiles: Default::default(),
                     kind: RefKind::Literal,
                     value: Some("s3cret-env-secret".into()),
                     secret_id: None,
@@ -1078,6 +1344,7 @@ pub(crate) mod tests {
             p.transport.env.insert(
                 "MIX_KEEP".into(),
                 ValueRef {
+                    profiles: Default::default(),
                     kind: RefKind::Environment,
                     value: Some("KEEP_ME".into()),
                     secret_id: None,
@@ -1136,6 +1403,7 @@ pub(crate) mod tests {
         assert_eq!(
             mix.transport.headers["Authorization"],
             ValueRef {
+                profiles: Default::default(),
                 kind: RefKind::Literal,
                 value: None,
                 secret_id: None,
@@ -1147,6 +1415,7 @@ pub(crate) mod tests {
         assert_eq!(
             signed.transport.oauth.as_ref().unwrap().client_secret,
             Some(ValueRef {
+                profiles: Default::default(),
                 kind: RefKind::Literal,
                 value: None,
                 secret_id: None,

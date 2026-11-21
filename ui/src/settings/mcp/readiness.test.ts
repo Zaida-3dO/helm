@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import type { ChatMcpProblem, McpPreset, McpServer } from '../../api/mcp.ts';
 import { CONSOLE_STEPS, GOOGLE_PRESET, SIGN_IN_WINDOW_MS, blockState, clientLooksSet, watchState, type GoogleAccountList } from './google.ts';
 import { canDisconnect, connectLabel } from './oauth.ts';
-import { BROKER_PRESET, blankServer, chatMcpNoticeText, copyImportable, draftFromPreset, isBrokerServer, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable } from './readiness.ts';
+import { BROKER_PRESET, blankServer, chatMcpNoticeText, copyImportable, draftFromPreset, isBrokerServer, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable, withProfileValue } from './readiness.ts';
 
 const hub: McpPreset = {
   id: 'helm_hub',
@@ -316,4 +316,22 @@ test('a copied server keeps its shape but not its secret, and an id already kept
   assert.deepEqual(out[0]!.transport.headers?.['X-Person'], { kind: 'chatPerson' }, 'the chat-person header carries as it stands');
   assert.deepEqual(out[1]!.transport.env?.KEEP, { kind: 'environment', value: 'KEEP' }, 'the variable name carries');
   assert.deepEqual(out[1]!.transport.env?.TOKPATH, { kind: 'literal' }, 'a credential file on that PC crosses as an empty secret slot');
+});
+
+test('a secret can have its own value per profile: typed, kept by id, saved, never blank, never copied', () => {
+  const id = `lit_${'b'.repeat(32)}`;
+  const shared: McpServer['transport']['headers'] = { Authorization: { kind: 'literal', secretId: `lit_${'a'.repeat(32)}`, prefix: 'Bearer ' } };
+  let ref = withProfileValue(shared!.Authorization!, 'pa', 'typed');
+  ref = withProfileValue({ ...ref, profiles: { ...ref.profiles, pb: { secretId: id } } }, 'pc', '');
+  const draft = { ...blankServer([]), transport: { type: 'http' as const, url: 'https://x.example/mcp', headers: { Authorization: ref } } };
+  assert.deepEqual(
+    toSaveable(draft).transport.headers?.Authorization?.profiles,
+    { pa: { value: 'typed' }, pb: { secretId: id } },
+    'a typed value is sent, a saved one rides back as its id, an empty entry is dropped',
+  );
+  const only = { ...draft, transport: { ...draft.transport, headers: { Authorization: { kind: 'literal' as const, profiles: { pa: { value: 'x' } } } } } };
+  assert.deepEqual(toSaveable(only).transport.headers?.Authorization, { kind: 'literal', profiles: { pa: { value: 'x' } } }, 'profile values alone keep the secret');
+  assert.deepEqual(withProfileValue(ref, 'pa', null).profiles?.pa, undefined, 'removing one leaves the rest');
+  assert.equal(withProfileValue(withProfileValue({ kind: 'literal' }, 'pa', 'x'), 'pa', null).profiles, undefined, 'removing the last drops the map');
+  assert.deepEqual(copyImportable([{ ...draft, id: 'other' }], [])[0]!.transport.headers?.Authorization, { kind: 'literal', prefix: 'Bearer ' }, 'a copy to another PC carries none of it');
 });

@@ -195,6 +195,7 @@ pub fn memory_server(line_url: &str, token: &str) -> Option<helm_mcp::McpServer>
     headers.insert(
         "Authorization".to_owned(),
         ValueRef {
+            profiles: Default::default(),
             kind: RefKind::Literal,
             value: Some(token.to_owned()),
             secret_id: None,

@@ -167,7 +167,7 @@ fn client_secret(store: &McpStore, server: &McpServer) -> Result<Option<String>,
         (Some(id), _) if !id.is_empty() => {
             let bytes = store
                 .creds()
-                .read(id, &crate::config::identity(&server.id, id))
+                .read(id, &crate::config::identity(&server.id, id, None))
                 .map_err(|_| {
                     "The saved client secret could not be read. Enter it again in Settings → MCP."
                         .to_owned()
@@ -923,6 +923,7 @@ mod tests {
         s.transport.oauth = Some(OAuthConfig {
             client_id: Some("pre-id".into()),
             client_secret: Some(crate::types::ValueRef {
+                profiles: Default::default(),
                 kind: crate::types::RefKind::Literal,
                 value: Some("pre-secret".into()),
                 secret_id: None,

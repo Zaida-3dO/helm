@@ -1720,6 +1720,7 @@ mod tests {
         legacy.transport.env.insert(
             CLIENT_ID_ENV.into(),
             crate::types::ValueRef {
+                profiles: Default::default(),
                 kind: crate::types::RefKind::Environment,
                 value: Some("MY_ID".into()),
                 secret_id: None,
@@ -1729,6 +1730,7 @@ mod tests {
         legacy.transport.env.insert(
             CLIENT_SECRET_ENV.into(),
             crate::types::ValueRef {
+                profiles: Default::default(),
                 kind: crate::types::RefKind::Environment,
                 value: Some("MY_SECRET".into()),
                 secret_id: None,
@@ -2014,6 +2016,7 @@ mod tests {
         s.transport.env.insert(
             CLIENT_ID_ENV.into(),
             crate::types::ValueRef {
+                profiles: Default::default(),
                 kind: crate::types::RefKind::Literal,
                 value: Some("g-client".into()),
                 secret_id: None,
@@ -2023,6 +2026,7 @@ mod tests {
         s.transport.env.insert(
             CLIENT_SECRET_ENV.into(),
             crate::types::ValueRef {
+                profiles: Default::default(),
                 kind: crate::types::RefKind::Literal,
                 value: Some("g-secret".into()),
                 secret_id: None,

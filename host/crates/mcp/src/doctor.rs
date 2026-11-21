@@ -444,6 +444,7 @@ mod tests {
             s.transport.env.insert(
                 "BROKER_ATTACHED_TOKEN".into(),
                 crate::types::ValueRef {
+                    profiles: Default::default(),
                     kind: crate::types::RefKind::Literal,
                     value: Some("tok_secret".into()),
                     secret_id: None,

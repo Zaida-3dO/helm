@@ -65,6 +65,7 @@ pub enum RefPlace {
 }
 
 pub fn validate_ref(r: &ValueRef, place: RefPlace, label: &str) -> Result<(), Invalid> {
+    validate_profile_secrets(r, place, label)?;
     if let Some(p) = &r.prefix {
         if p.len() > MAX_PREFIX_BYTES || has_control(p) {
             return Err(bad(format!(
@@ -131,6 +132,56 @@ pub fn validate_ref(r: &ValueRef, place: RefPlace, label: &str) -> Result<(), In
             Ok(())
         }
     }
+}
+
+/// A profile's own values for a literal secret: only a literal has them, there are few, each is
+/// named by a plain profile id and carries a real value or the saved secret's id (never both,
+/// never neither: a profile with nothing to say has no entry).
+fn validate_profile_secrets(r: &ValueRef, place: RefPlace, label: &str) -> Result<(), Invalid> {
+    if r.profiles.is_empty() {
+        return Ok(());
+    }
+    if r.kind != RefKind::Literal {
+        return Err(bad(format!(
+            "{label}: only a literal secret can have a value for a profile."
+        )));
+    }
+    if r.profiles.len() > MAX_PROFILE_SECRETS {
+        return Err(bad(format!(
+            "{label}: a secret has its own value for at most {MAX_PROFILE_SECRETS} profiles."
+        )));
+    }
+    for (profile, p) in &r.profiles {
+        let plain = !profile.is_empty()
+            && profile.len() <= 64
+            && profile
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_');
+        if !plain {
+            return Err(bad(format!("{label}: a profile id is not valid.")));
+        }
+        match (&p.value, &p.secret_id) {
+            (Some(v), None) if !v.is_empty() => {
+                if v.len() > MAX_LITERAL_BYTES || v.contains('\0') {
+                    return Err(bad(format!(
+                        "{label}: a literal value is at most 16 KiB with no NUL."
+                    )));
+                }
+                if place == RefPlace::Header && v.chars().any(|c| c.is_control() && c != '\t') {
+                    return Err(bad(format!(
+                        "{label}: a header value may not contain control characters."
+                    )));
+                }
+            }
+            (None, Some(id)) if is_secret_id(id) => {}
+            _ => {
+                return Err(bad(format!(
+                    "{label}: a profile's value is either a new value or the saved secret's id."
+                )))
+            }
+        }
+    }
+    Ok(())
 }
 
 /// An absolute path on a local drive. Network shares (`\\host\share`, `//host/share`) and device
@@ -373,6 +424,11 @@ pub fn validate_server(s: &McpServer) -> Result<(), Invalid> {
                             "The OAuth client secret is entered as a literal value.",
                         ));
                     }
+                    if !secret.profiles.is_empty() {
+                        return Err(bad(
+                            "The OAuth client secret is the same for every profile.",
+                        ));
+                    }
                     validate_ref(secret, RefPlace::Header, "OAuth client secret")?;
                 }
                 for f in [&o.client_id, &o.scope].into_iter().flatten() {
@@ -464,6 +520,7 @@ mod tests {
 
     fn lit(v: &str) -> ValueRef {
         ValueRef {
+            profiles: Default::default(),
             kind: RefKind::Literal,
             value: Some(v.into()),
             secret_id: None,
@@ -584,6 +641,7 @@ mod tests {
     #[test]
     fn references() {
         let env = |v: &str| ValueRef {
+            profiles: Default::default(),
             kind: RefKind::Environment,
             value: Some(v.into()),
             secret_id: None,
@@ -592,6 +650,7 @@ mod tests {
         assert!(validate_ref(&env("HUB_TOKEN"), RefPlace::Env, "x").is_ok());
         assert!(validate_ref(&env("HUB-TOKEN"), RefPlace::Env, "x").is_err());
         let file = ValueRef {
+            profiles: Default::default(),
             kind: RefKind::File,
             value: Some("relative.txt".into()),
             secret_id: None,
@@ -604,6 +663,7 @@ mod tests {
         assert!(validate_ref(&lit(&"v".repeat(16 * 1024)), RefPlace::Env, "x").is_ok());
         assert!(validate_ref(&lit(&"v".repeat(16 * 1024 + 1)), RefPlace::Env, "x").is_err());
         let both = ValueRef {
+            profiles: Default::default(),
             kind: RefKind::Literal,
             value: Some("v".into()),
             secret_id: Some(format!("lit_{}", "a".repeat(32))),
@@ -611,6 +671,7 @@ mod tests {
         };
         assert!(validate_ref(&both, RefPlace::Env, "x").is_err());
         let kept = ValueRef {
+            profiles: Default::default(),
             kind: RefKind::Literal,
             value: None,
             secret_id: Some(format!("lit_{}", "a".repeat(32))),
@@ -619,6 +680,7 @@ mod tests {
         assert!(validate_ref(&kept, RefPlace::Env, "x").is_ok());
         // A blank slot (a copy whose secret was blanked on the way across) saves and waits.
         let blank = ValueRef {
+            profiles: Default::default(),
             kind: RefKind::Literal,
             value: None,
             secret_id: None,
@@ -630,6 +692,7 @@ mod tests {
         );
         // The chat's person: a header with no value.
         let person = |value: Option<&str>| ValueRef {
+            profiles: Default::default(),
             kind: RefKind::ChatPerson,
             value: value.map(Into::into),
             secret_id: None,
@@ -643,6 +706,7 @@ mod tests {
     #[test]
     fn file_references_stay_on_local_drives() {
         let file = |v: &str| ValueRef {
+            profiles: Default::default(),
             kind: RefKind::File,
             value: Some(v.into()),
             secret_id: None,

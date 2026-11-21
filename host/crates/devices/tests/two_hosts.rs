@@ -3773,6 +3773,7 @@ async fn mcp_servers_copy_across_without_their_secrets() {
     headers.insert(
         "Authorization".to_string(),
         mt::ValueRef {
+            profiles: Default::default(),
             kind: mt::RefKind::Literal,
             value: Some("topsecret-token".into()),
             secret_id: None,
@@ -3783,6 +3784,7 @@ async fn mcp_servers_copy_across_without_their_secrets() {
     env.insert(
         "SECRET_LIT".to_string(),
         mt::ValueRef {
+            profiles: Default::default(),
             kind: mt::RefKind::Literal,
             value: Some("envsecret".into()),
             secret_id: None,
@@ -3792,6 +3794,7 @@ async fn mcp_servers_copy_across_without_their_secrets() {
     env.insert(
         "VAR_NAME".to_string(),
         mt::ValueRef {
+            profiles: Default::default(),
             kind: mt::RefKind::Environment,
             value: Some("KEEP_ME".into()),
             secret_id: None,
@@ -3801,6 +3804,7 @@ async fn mcp_servers_copy_across_without_their_secrets() {
     env.insert(
         "TOKFILE".to_string(),
         mt::ValueRef {
+            profiles: Default::default(),
             kind: mt::RefKind::File,
             value: Some(tokfile.to_string_lossy().into_owned()),
             secret_id: None,

@@ -26,6 +26,9 @@ pub struct ChatPerson {
     /// The chat belongs to a profile other than the home one. The servers that reach the home
     /// person's own browser are left out of its config.
     pub not_home: bool,
+    /// The chat's profile (the home one when the chat has none of its own): a secret that has a
+    /// value for it is read as that value.
+    pub profile: Option<String>,
 }
 
 /// The `mcp_config` line for one chat. With the MCP master switch off it lists no servers.
@@ -38,11 +41,12 @@ pub fn config_line_for(services: &Services, store: &McpStore, who: &ChatPerson) 
         return Some(json!({ "type": "mcp_config", "revision": revision, "servers": [] }));
     }
     let (revision, servers) = store
-        .resolve_enabled_scoped(
+        .resolve_enabled_in(
             &|k| std::env::var(k).ok(),
             who.person.as_deref(),
             who.unlinked,
             who.not_home,
+            who.profile.as_deref(),
         )
         .ok()?;
     Some(json!({ "type": "mcp_config", "revision": revision, "servers": servers }))
@@ -83,35 +87,45 @@ pub fn chat_person(services: &Services, chat_id: &str) -> ChatPerson {
     db.snapshot(|tx| {
         let own = tx
             .query_row(
-                "SELECT hub_person_id, COALESCE(is_home, 0) FROM profiles
+                "SELECT hub_person_id, COALESCE(is_home, 0), id FROM profiles
                  WHERE id = (SELECT NULLIF(profile_id, '') FROM chats WHERE id = ?1)",
                 [chat_id],
-                |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)? != 0)),
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, i64>(1)? != 0,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
             )
             .optional()?;
-        let (person, unlinked, not_home) = match own {
-            Some((person, home)) => {
+        let (person, unlinked, not_home, profile) = match own {
+            Some((person, home, id)) => {
                 let person = person.filter(|p| !p.is_empty());
                 let unlinked = person.is_none() && !home;
-                (person, unlinked, !home)
+                (person, unlinked, !home, Some(id))
             }
-            None => (
-                tx.query_row(
-                    "SELECT hub_person_id FROM profiles WHERE is_home = 1",
-                    [],
-                    |r| r.get::<_, Option<String>>(0),
-                )
-                .optional()
-                .map(Option::flatten)?
-                .filter(|p| !p.is_empty()),
-                false,
-                false,
-            ),
+            None => {
+                let home = tx
+                    .query_row(
+                        "SELECT hub_person_id, id FROM profiles WHERE is_home = 1",
+                        [],
+                        |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?)),
+                    )
+                    .optional()?;
+                match home {
+                    Some((person, id)) => {
+                        (person.filter(|p| !p.is_empty()), false, false, Some(id))
+                    }
+                    None => (None, false, false, None),
+                }
+            }
         };
         Ok::<_, rusqlite::Error>(ChatPerson {
             person,
             unlinked,
             not_home,
+            profile,
         })
     })
     .unwrap_or_default()

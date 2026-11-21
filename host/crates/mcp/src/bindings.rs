@@ -41,6 +41,7 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         Transport::ident(),
         TransportKind::ident(),
         ValueRef::ident(),
+        ProfileSecret::ident(),
         RefKind::ident(),
         OAuthConfig::ident(),
         AgentSnapshot::ident(),
