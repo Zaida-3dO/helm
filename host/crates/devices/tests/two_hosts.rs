@@ -3340,7 +3340,9 @@ async fn a_household_member_reads_the_whole_list_and_is_refused_nothing() {
         assert_eq!(st.resends.len(), 2);
         assert_eq!(st.resends[0].text, "edit hers");
         assert!(
-            st.resends[1].text.starts_with("[Message from Sam (household)")
+            st.resends[1]
+                .text
+                .starts_with("[Message from Sam (household)")
                 && st.resends[1].text.ends_with("edit shared"),
             "{}",
             st.resends[1].text
