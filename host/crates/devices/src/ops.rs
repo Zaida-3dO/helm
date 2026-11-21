@@ -39,7 +39,9 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .async_op("devices_composer_defaults", devices_composer_defaults)
         .async_op("devices_board_connection", devices_board_connection)
         .async_op("devices_board_read", devices_board_read)
-        .async_op("devices_board_cancel", devices_board_cancel);
+        .async_op("devices_board_cancel", devices_board_cancel)
+        .blocking("devices_typed_on", OpClass::Blocking, devices_typed_on)
+        .async_op("devices_file_save", devices_file_save);
 }
 
 fn fail(e: DeviceError) -> ApiError {
@@ -938,4 +940,68 @@ async fn devices_board_cancel(ctx: OpCtx, args: Value) -> Result<Value, ApiError
     };
     let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
     mirror.board_cancel(&chat_id, &request_id).await
+}
+
+// ---------------------------------------------------------------------------------------------
+// Where the person is, and files of a chat that runs on another device
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TypedOnArgs {
+    chat_id: String,
+}
+
+/// `devices_typed_on`: the PC the last message of a chat that runs here was typed on, when that
+/// was another device: `{deviceUid, name, at}`, or `null` when it was typed on this PC or nothing
+/// is known since Helm started.
+fn devices_typed_on(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: TypedOnArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    let typed = ctx
+        .services
+        .get::<crate::EventTap>()
+        .and_then(|t| t.service())
+        .and_then(|s| s.typed_on(&a.chat_id));
+    Ok(serde_json::to_value(typed).unwrap_or(Value::Null))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FileSaveArgs {
+    chat_id: String,
+    /// The file on the PC that runs the chat, inside the chat's project folder there.
+    path: String,
+}
+
+/// `devices_file_save`: a copy of one file of a chat that runs on another device, saved on this
+/// PC where the person chooses: `{path}`, or `{path: null}` when the dialog is cancelled. The
+/// file comes across in chunks, at most 64 MiB, and only from inside the chat's project folder.
+async fn devices_file_save(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: FileSaveArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
+    if mirror.owner(&a.chat_id).is_none() {
+        return Err(ApiError::new(
+            "not_found",
+            "That chat does not run on another device of this household.",
+        ));
+    }
+    let saver = ctx
+        .services
+        .get::<helm_chats::output_save::FileSaver>()
+        .ok_or_else(|| ApiError::new("unavailable", "Saving is not available here."))?;
+    let blob = mirror
+        .read_blob(
+            &a.chat_id,
+            json!({ "file": a.path }),
+            crate::wire::MAX_BLOB_BYTES,
+        )
+        .await?;
+    let name = if blob.name.is_empty() {
+        "file".to_owned()
+    } else {
+        blob.name
+    };
+    helm_chats::remote::save_here(saver, name, blob.bytes).await
 }

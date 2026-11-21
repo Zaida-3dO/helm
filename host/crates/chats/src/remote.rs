@@ -9,7 +9,9 @@
 //! |---|---|
 //! | `chat_get`, `transcript_page` | the mirror (and the device that runs the chat, for older pages) |
 //! | `chat_send`, `chat_stop`, `interaction_answer`, `chat_set_model`, `chat_rename`, `chat_archive`, `chat_restore` | the device that runs the chat |
-//! | `chat_fork`, `chat_compact`, `chat_roll_over`, `usage_cost`, `chat_export_markdown`, `chat_organize`, `unread_mark`, `chat_mute`, `chat_set_permission_mode`, `chat_verbosity_get`/`set`, `chat_warm`, `tool_stop`, `checkpoint_info`, `attention_snooze`/`address`, `panel_context_get`, `quick_open`, `chat_folder`, `file_read`, `dir_list`, `file_stat`, `archive_list`, `path_resolve`, `changes`, `diff`, `changes_stage`, `changes_unstage` | the same op on the device that runs the chat (panel paths stay inside the chat's project folder there) |
+//! | `chat_fork`, `chat_compact`, `chat_roll_over`, `usage_cost`, `chat_export_markdown`, `chat_organize`, `unread_mark`, `chat_mute`, `chat_set_permission_mode`, `chat_verbosity_get`/`set`, `chat_warm`, `chat_stop_no_resend`, `tool_stop`, `checkpoint_info`, `attention_snooze`/`address`, `panel_context_get`, `quick_open`, `chat_folder`, `file_read`, `dir_list`, `file_stat`, `archive_list`, `path_resolve`, `changes`, `diff`, `changes_stage`, `changes_unstage` | the same op on the device that runs the chat (panel paths stay inside the chat's project folder there) |
+//! | `shown_gallery_get`, `shown_image_get`, `shown_image_thumb`, `option_board_state`, `option_board_answer`, `attachment_get`, `local_image_get` (with the `chatId`) | the device that runs the chat; full-size pictures and a reply's picture inside the chat's project folder come across in chunks |
+//! | `message_output_save` | the output comes across in chunks and is saved on this PC, where the person chose |
 //! | `draft_save` | the mirror alone: a draft never leaves this PC |
 //! | `title_suggest`, `autocomplete_suggest`, `skills_list` | quietly, with an empty answer |
 //! | `model_catalogue` with a `deviceUid` | the models that device last said it offers |
@@ -18,6 +20,7 @@
 //! [`Routes`] is the check the dispatcher makes before it runs an op; the devices crate supplies
 //! the [`RemoteChats`] it asks, through the [`RemoteSlot`] service.
 
+use crate::output_save::FileSaver;
 use crate::types::{
     ChatRenameArgs, ChatSendArgs, ChatSetModelArgs, DraftSaveArgs, InteractionAnswerArgs,
     TranscriptPageArgs,
@@ -66,6 +69,42 @@ pub trait RemoteChats: Send + Sync {
     fn chat_op(&self, op: &str, args: Value) -> Fut<Res>;
     /// The model catalogue another device last reported.
     fn catalogue(&self, device_uid: String) -> Fut<Res>;
+    /// Something big of the chat, brought across whole in chunks. `r` names it as the device's
+    /// `blob_read` does: `{output}` (a tool's whole output) or `{file}` (a path inside the
+    /// chat's project folder there).
+    fn blob(&self, chat_id: String, r: Value) -> Fut<Result<RemoteBlob, ApiError>> {
+        let _ = (chat_id, r);
+        Box::pin(async {
+            Err(ApiError::new(
+                "refused",
+                "That can't be brought across from the other PC.",
+            ))
+        })
+    }
+}
+
+/// Something big of a chat that runs on another device, brought across whole.
+pub struct RemoteBlob {
+    pub mime: String,
+    /// A file name to suggest when it is saved.
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Save bytes brought from another PC on this one, where the person chooses in the save dialog:
+/// `{path}`, or `{path: null}` when the dialog is cancelled.
+pub async fn save_here(saver: Arc<FileSaver>, name: String, bytes: Vec<u8>) -> Res {
+    tokio::task::spawn_blocking(move || {
+        let chosen = (saver.0)(&name).map_err(|e| ApiError::new("unavailable", e))?;
+        let Some(path) = chosen else {
+            return Ok(json!({ "path": null }));
+        };
+        helm_core::privfs::write_atomic(&path, &bytes)
+            .map_err(|e| ApiError::new("internal", format!("Could not save the file: {e}")))?;
+        Ok(json!({ "path": path.to_string_lossy() }))
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?
 }
 
 /// Where the devices crate hands the app its [`RemoteChats`] once the hub line exists.
@@ -107,12 +146,38 @@ impl OpInterceptor for Routes {
         let chat_id = args.get("chatId").and_then(Value::as_str)?;
         let device = remote.owns(chat_id)?;
         let chat_id = chat_id.to_owned();
-        let op = op.to_owned();
         let args = args.clone();
+        // A tool's output is read there and saved here, where the person chose.
+        if op == "message_output_save" {
+            let saver = ctx.services.get::<FileSaver>();
+            return Some(Box::pin(async move {
+                save_output(remote, saver, chat_id, args).await
+            }));
+        }
+        let op = op.to_owned();
         Some(Box::pin(async move {
             route(remote, device, op, chat_id, args).await
         }))
     }
+}
+
+/// `message_output_save` for a chat that runs on another device.
+async fn save_output(
+    remote: Arc<dyn RemoteChats>,
+    saver: Option<Arc<FileSaver>>,
+    chat_id: String,
+    args: Value,
+) -> Res {
+    let message_id = args
+        .get("messageId")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| ApiError::bad_args("messageId is required."))?;
+    let saver =
+        saver.ok_or_else(|| ApiError::new("unavailable", "Saving is not available here."))?;
+    let blob = remote
+        .blob(chat_id, json!({ "output": message_id }))
+        .await?;
+    save_here(saver, blob.name, blob.bytes).await
 }
 
 async fn route(
@@ -156,6 +221,14 @@ async fn route(
         | "attention_snooze"
         | "attention_address"
         | "chat_warm"
+        | "chat_stop_no_resend"
+        // What an agent showed in the chat, and the pictures a reply names: read there.
+        | "shown_gallery_get"
+        | "shown_image_get"
+        | "shown_image_thumb"
+        | "option_board_state"
+        | "option_board_answer"
+        | "local_image_get"
         // The side panel around a chat: the same ops, run on the device that runs the chat,
         // kept inside that chat's project folder there.
         | "chat_folder"

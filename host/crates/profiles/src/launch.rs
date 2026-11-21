@@ -59,6 +59,10 @@ pub fn who_text(conn: &Connection, chat_id: &str) -> rusqlite::Result<Option<Str
     Ok(Some(compose(&me, device.as_deref(), &others)))
 }
 
+/// Where the person is: a message typed on another PC of the household says so in its first
+/// line, and a server on this PC's localhost is not on theirs.
+pub const TYPED_ON: &str = "A message typed on another PC of the household starts with a [Typed on <PC>] line: a localhost address here is then not on the person's PC, so offer app_forward_port; without that line they are at this PC and localhost works as it is.";
+
 /// The text from its parts; empty parts are left out.
 pub fn compose(me: &Profile, device: Option<&str>, others: &[String]) -> String {
     let mut out = format!("You are working with {} (their Helm profile).", me.name);
@@ -69,7 +73,7 @@ pub fn compose(me: &Profile, device: Option<&str>, others: &[String]) -> String 
     }
     if let Some(d) = device {
         out.push_str(&format!(
-            " This chat runs on {d} under that computer's Claude sign-in."
+            " This chat runs on {d} under that computer's Claude sign-in. {TYPED_ON}"
         ));
     }
     if !others.is_empty() {
@@ -108,7 +112,10 @@ mod tests {
                 Some("Desk"),
                 sam.as_slice(),
                 "You are working with Alex (their Helm profile). Prefers plain words.\nCalled Al. \
-                 This chat runs on Desk under that computer's Claude sign-in. Other people in this \
+                 This chat runs on Desk under that computer's Claude sign-in. A message typed on \
+                 another PC of the household starts with a [Typed on <PC>] line: a localhost \
+                 address here is then not on the person's PC, so offer app_forward_port; without \
+                 that line they are at this PC and localhost works as it is. Other people in this \
                  household: Sam, Jo. Their chats and memories may be read when you are asked to or it helps: \"my\" and \"I\" mean Alex, a named person means that person. Credential and token stores are never read.",
             ),
             (
@@ -121,7 +128,7 @@ mod tests {
                 "  ",
                 Some("Laptop"),
                 &[][..],
-                "You are working with Alex (their Helm profile). This chat runs on Laptop under that computer's Claude sign-in.",
+                "You are working with Alex (their Helm profile). This chat runs on Laptop under that computer's Claude sign-in. A message typed on another PC of the household starts with a [Typed on <PC>] line: a localhost address here is then not on the person's PC, so offer app_forward_port; without that line they are at this PC and localhost works as it is.",
             ),
         ] {
             let mut p = alex.clone();
@@ -167,7 +174,7 @@ mod tests {
         assert_eq!(
             text(&db).unwrap(),
             format!(
-                "You are working with Alex (their Helm profile). Likes short answers. This chat runs on {device} under that computer's Claude sign-in. Other people in this household: Sam. Their chats and memories may be read when you are asked to or it helps: \"my\" and \"I\" mean Alex, a named person means that person. Credential and token stores are never read."
+                "You are working with Alex (their Helm profile). Likes short answers. This chat runs on {device} under that computer's Claude sign-in. {TYPED_ON} Other people in this household: Sam. Their chats and memories may be read when you are asked to or it helps: \"my\" and \"I\" mean Alex, a named person means that person. Credential and token stores are never read."
             )
         );
 

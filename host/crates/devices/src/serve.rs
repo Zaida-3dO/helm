@@ -18,7 +18,7 @@
 use crate::link::{BoxFut, DeviceLink};
 use crate::subs::{self, Out, Subs, CHATS_SUB, PUSH_ROW_BUDGET};
 use crate::wire::{
-    code, AnswerArgs, ArchiveArgs, AttachPutArgs, AttachmentGetArgs, AttachmentRef,
+    code, AnswerArgs, ArchiveArgs, AttachPutArgs, AttachmentGetArgs, AttachmentRef, BlobReadArgs,
     BoardCancelArgs, BoardReadArgs, Caller, ChatIdArgs, CheckpointArgs, ConsentDecideArgs,
     CreateArgs, DefaultsArgs, DeviceFrame, DeviceInfo, DevicePerson, ForkArgs, Frame, Hello,
     MoveProfileArgs, MuteArgs, Op, OrganizeArgs, PageArgs, PageIdArgs, PagesReadArgs,
@@ -84,6 +84,34 @@ pub struct ChatState {
 /// The most the consent cards of one answer or push may weigh together.
 pub const CONSENT_BUDGET: usize = 64 * 1024;
 
+/// The PC a chat's last message from another device was typed on, as the hub stamped the
+/// sender. The name is cleaned with [`pc_name`].
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypedOn {
+    pub device_uid: String,
+    pub name: String,
+    /// When the message arrived (Unix ms).
+    pub at: i64,
+}
+
+/// How many chats' typing PCs are remembered; the oldest go first.
+const TYPED_KEPT: usize = 1024;
+
+/// A device name as it may stand in a message line: no brackets or control characters, at most
+/// 40 characters, and words of its own when nothing is left.
+pub fn pc_name(name: &str) -> String {
+    let clean: String = name
+        .chars()
+        .filter(|c| !c.is_control() && !matches!(c, '[' | ']'))
+        .take(40)
+        .collect();
+    match clean.trim() {
+        "" => "another PC".to_owned(),
+        t => t.to_owned(),
+    }
+}
+
 /// Everything the service needs from this install. The production adapter reads the chats and
 /// profiles tables and runs the chat ops; tests use [`crate::testing::FakePort`].
 pub trait ChatPort: Send + Sync {
@@ -124,17 +152,20 @@ pub trait ChatPort: Send + Sync {
     fn release_send(&self, client_id: &str);
     /// Send the text to the chat as the person's own words (origin `remote`). `from` names the
     /// household member who sent it when the chat is not theirs: then it is delivered as a
-    /// message from them, never as the owner's words. `files` are the attachments carried with
-    /// it, exactly as a local send hands them over.
+    /// message from them, never as the owner's words. `device` is the PC it was typed on, as the
+    /// hub stamped the sender, its name already cleaned with [`pc_name`]; the agent is told.
+    /// `files` are the attachments carried with it, exactly as a local send hands them over.
     fn send(
         &self,
         chat_id: String,
         client_id: String,
         text: String,
         from: Option<String>,
+        device: DeviceInfo,
         files: Vec<SentFile>,
     ) -> BoxFut<'_, PortResult<()>>;
-    fn stop(&self, chat_id: String) -> BoxFut<'_, PortResult<()>>;
+    /// Stop the chat's turn; with `no_resend`, what the agent had not read is not sent again.
+    fn stop(&self, chat_id: String, no_resend: bool) -> BoxFut<'_, PortResult<()>>;
     fn answer(&self, a: AnswerArgs) -> BoxFut<'_, PortResult<()>>;
     /// The Allow cards of a chat that wait on the person, newest checks aside: the pending ones,
     /// oldest first, as the consent store lists them.
@@ -226,6 +257,14 @@ pub trait ChatPort: Send + Sync {
     /// The chat as other devices see it, for a push after a sidebar change. `Ok(None)` when
     /// the chat is not this install's.
     fn chat_brief(&self, chat_id: String) -> BoxFut<'_, PortResult<Option<RemoteChat>>>;
+    /// A gallery or option board an agent showed in a chat here: this install's own op
+    /// (`shown_gallery_get`, `shown_image_thumb`, `option_board_state` or
+    /// `option_board_answer`), answered as it answers, within one frame.
+    fn shown(&self, local_op: &'static str, args: Value) -> BoxFut<'_, PortResult<Value>>;
+    /// One chunk of something big of a chat here: `{offset, total, mime, name, data}`. A file
+    /// stays inside the chat's project folder, an output is that chat's own, and the whole is at
+    /// most [`crate::wire::MAX_BLOB_BYTES`].
+    fn blob_read(&self, a: BlobReadArgs) -> BoxFut<'_, PortResult<Value>>;
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -279,6 +318,9 @@ struct Inner {
     answered: Mutex<VecDeque<(String, String)>>,
     /// Files in transit to chats that run here, by upload id.
     uploads: Mutex<HashMap<String, Upload>>,
+    /// The PC each chat's last message from another device was typed on, until one is typed
+    /// here. Kept in memory only: after a restart nothing is known.
+    typed: Mutex<HashMap<String, TypedOn>>,
     events: mpsc::UnboundedSender<AppEvent>,
     _handle: Handle,
 }
@@ -300,6 +342,7 @@ impl Service {
             online: Mutex::new(HashMap::new()),
             answered: Mutex::new(VecDeque::new()),
             uploads: Mutex::new(HashMap::new()),
+            typed: Mutex::new(HashMap::new()),
             events,
             _handle: handle.clone(),
         });
@@ -340,6 +383,9 @@ impl Service {
     /// An event this install emitted. Chat events go to the watchers that subscribed; a changed
     /// device name, run switch or set of linked profiles is announced.
     pub fn observe(&self, ev: &AppEvent) {
+        if ev.kind == "message" {
+            self.inner.typed_here(ev);
+        }
         match ev.kind.as_str() {
             "device_changed" | "profiles_changed" => self.announce(),
             "preferences" => {
@@ -365,6 +411,12 @@ impl Service {
     /// The devices currently watching, for diagnostics and tests.
     pub fn watchers(&self) -> Vec<String> {
         lock(&self.inner.subs).watchers()
+    }
+
+    /// The PC the chat's last message was typed on when that was another device; `None` when
+    /// it was typed here, or nothing is known since Helm started.
+    pub fn typed_on(&self, chat_id: &str) -> Option<TypedOn> {
+        lock(&self.inner.typed).get(chat_id).cloned()
     }
 }
 
@@ -434,6 +486,60 @@ impl Inner {
     fn send_outs(&self, outs: Vec<Out>) {
         for o in outs {
             self.link.send(Frame::DevPush(o.push));
+        }
+    }
+
+    /// A message typed on another device has arrived for a chat here.
+    fn note_typed(&self, chat_id: &str, device: &DeviceInfo) {
+        let mut typed = lock(&self.typed);
+        if typed.len() >= TYPED_KEPT && !typed.contains_key(chat_id) {
+            let oldest = typed
+                .iter()
+                .min_by_key(|(_, t)| t.at)
+                .map(|(k, _)| k.clone());
+            if let Some(k) = oldest {
+                typed.remove(&k);
+            }
+        }
+        typed.insert(
+            chat_id.to_owned(),
+            TypedOn {
+                device_uid: device.uid.clone(),
+                name: device.name.clone(),
+                at: helm_core::now_ms(),
+            },
+        );
+    }
+
+    /// A user row typed in this install's own composer, newer than the last message from
+    /// another device, means the person is at this PC now.
+    fn typed_here(&self, ev: &AppEvent) {
+        let mut typed = lock(&self.typed);
+        let chat_id = ev
+            .fields
+            .get("chatId")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let Some(since) = typed.get(chat_id).map(|t| t.at) else {
+            return;
+        };
+        let here = ev
+            .fields
+            .get("rows")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|r| {
+                r.get("role").and_then(Value::as_str) == Some("user")
+                    && r.pointer("/details/origin")
+                        .and_then(Value::as_str)
+                        .is_none_or(|o| o == "typed")
+                    && r.get("timestamp")
+                        .and_then(Value::as_i64)
+                        .is_some_and(|t| t > since)
+            });
+        if here {
+            typed.remove(chat_id);
         }
     }
 
@@ -698,17 +804,17 @@ impl Inner {
             }
             Op::Send(a) => {
                 // A household member's words on a chat that is not theirs are marked as theirs.
-                let from = match asker {
+                let household = match asker {
                     Asker::Household { person_id, name } => {
                         let chat = self.port.chat(a.chat_id.clone()).await?.chat.to_value();
                         (!subs::owned_by(&chat, person_id)).then(|| name.clone())
                     }
                     Asker::Own => None,
                 };
-                done(self.send(uid, a, from).await?)
+                done(self.send(from, a, household).await?)
             }
             Op::Stop(a) => {
-                self.port.stop(a.chat_id).await?;
+                self.port.stop(a.chat_id, a.no_resend).await?;
                 done(json!({}))
             }
             Op::Answer(a) => {
@@ -878,6 +984,15 @@ impl Inner {
             }
             Op::ProjectCreate(a) => done(self.port.project_create(a).await?),
             Op::ProjectSet(a) => done(self.port.project_set(a).await?),
+            Op::ShownGallery(a) => done(self.port.shown("shown_gallery_get", to_value(&a)?).await?),
+            Op::ShownImage(a) => done(self.port.shown("shown_image_thumb", to_value(&a)?).await?),
+            Op::OptionBoard(a) => done(self.port.shown("option_board_state", to_value(&a)?).await?),
+            Op::OptionBoardAnswer(a) => done(
+                self.port
+                    .shown("option_board_answer", to_value(&a)?)
+                    .await?,
+            ),
+            Op::BlobRead(a) => done(self.port.blob_read(a).await?),
         }
     }
 
@@ -1055,10 +1170,11 @@ impl Inner {
 
     async fn send(
         &self,
-        owner: &str,
+        sender: &Caller,
         a: SendArgs,
         from: Option<String>,
     ) -> Result<Value, WireError> {
+        let owner = sender.uid.as_str();
         if a.text.trim().is_empty() {
             return Err(WireError::bad_args("There is nothing to send."));
         }
@@ -1082,12 +1198,25 @@ impl Inner {
         }
         // Both modes are delivered the way the PC delivers any message it did not type itself:
         // an idle chat starts a turn, a working one takes it in at its next tool boundary.
+        let device = DeviceInfo {
+            uid: sender.uid.clone(),
+            name: pc_name(&sender.name),
+        };
+        let chat_id = a.chat_id.clone();
         let sent = self
             .port
-            .send(a.chat_id, a.client_id.clone(), a.text, from, files)
+            .send(
+                a.chat_id,
+                a.client_id.clone(),
+                a.text,
+                from,
+                device.clone(),
+                files,
+            )
             .await;
         match sent {
             Ok(()) => {
+                self.note_typed(&chat_id, &device);
                 // The uploads are spent only once the send went through; a refused one can be
                 // tried again with the same ids.
                 let mut uploads = lock(&self.uploads);
@@ -1182,6 +1311,16 @@ pub fn check_answer(i: &Interaction, a: &AnswerArgs) -> Result<(), WireError> {
     // Cancelling approves nothing.
     if a.cancelled == Some(true) {
         return Ok(());
+    }
+    // Going to another step of a question approves nothing either; it must be one of its steps.
+    if let Some(step) = a.goto {
+        let question = matches!(i.method, InteractionMethod::Select)
+            && i.attention != Some(InteractionAttention::Plan);
+        return if question && i.steps.is_some_and(|n| step < n) {
+            Ok(())
+        } else {
+            Err(mismatch())
+        };
     }
     let label = a.label.trim();
     match i.method {

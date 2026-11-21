@@ -218,12 +218,14 @@ impl ChatPort for ChannelPort {
         client_id: String,
         text: String,
         from: Option<String>,
+        device: DeviceInfo,
         files: Vec<SentFile>,
     ) -> BoxFut<'_, PortResult<()>> {
-        self.port.send(chat_id, client_id, text, from, files)
+        self.port
+            .send(chat_id, client_id, text, from, device, files)
     }
-    fn stop(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
-        self.port.stop(chat_id)
+    fn stop(&self, chat_id: String, no_resend: bool) -> BoxFut<'_, PortResult<()>> {
+        self.port.stop(chat_id, no_resend)
     }
     fn answer(&self, a: AnswerArgs) -> BoxFut<'_, PortResult<()>> {
         self.port.answer(a)
@@ -394,6 +396,12 @@ impl ChatPort for ChannelPort {
     }
     fn chat_brief(&self, chat_id: String) -> BoxFut<'_, PortResult<Option<RemoteChat>>> {
         self.port.chat_brief(chat_id)
+    }
+    fn shown(&self, local_op: &'static str, args: Value) -> BoxFut<'_, PortResult<Value>> {
+        self.port.shown(local_op, args)
+    }
+    fn blob_read(&self, a: helm_devices::wire::BlobReadArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.port.blob_read(a)
     }
 }
 

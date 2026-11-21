@@ -4,12 +4,13 @@
 use crate::link::BoxFut;
 use crate::serve::{ChatPort, ChatState, PageScope, PanelRead, PortResult, SentFile};
 use crate::wire::{
-    code, AnswerArgs, ArchiveArgs, AttachmentGetArgs, BoardCancelArgs, BoardReadArgs,
-    CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo, DevicePerson,
-    ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, PageIdArgs, PagesReadArgs,
-    PanelStageArgs, PersonInfo, ProfileInfo, ProjectCreateArgs, ProjectInfo, ProjectSetArgs,
-    QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs, SetModelArgs, SetPermissionArgs,
-    ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError,
+    code, AnswerArgs, ArchiveArgs, AttachmentGetArgs, BlobReadArgs, BlobRef, BoardCancelArgs,
+    BoardReadArgs, CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo,
+    DevicePerson, ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, PageIdArgs,
+    PagesReadArgs, PanelStageArgs, PersonInfo, ProfileInfo, ProjectCreateArgs, ProjectInfo,
+    ProjectSetArgs, QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs, SetModelArgs,
+    SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs,
+    WireError,
 };
 use base64::Engine as _;
 use helm_chats::types::{
@@ -133,7 +134,17 @@ pub struct FakeState {
     pub sent_from: Vec<Option<String>>,
     /// For each send, the files it carried.
     pub sent_files: Vec<Vec<SentFile>>,
+    /// For each send, the PC it was typed on, as the port was told.
+    pub sent_on: Vec<DeviceInfo>,
     pub stopped: Vec<String>,
+    /// The chats stopped without resending what the agent had not read.
+    pub stopped_no_resend: Vec<String>,
+    /// Each gallery or board op asked of the port, with its arguments.
+    pub shown: Vec<(&'static str, Value)>,
+    /// The option board's answer once one was given.
+    pub board_answer: Option<Value>,
+    /// Each chunk read: what it named and from where.
+    pub blob_reads: Vec<(BlobRef, u64)>,
     pub answered: Vec<AnswerArgs>,
     /// The pending Allow cards of each chat, as the cards the consent store would show.
     pub consent: HashMap<String, Vec<Value>>,
@@ -447,6 +458,7 @@ impl ChatPort for FakePort {
         client_id: String,
         text: String,
         from: Option<String>,
+        device: DeviceInfo,
         files: Vec<SentFile>,
     ) -> BoxFut<'_, PortResult<()>> {
         let mut st = self.st();
@@ -454,6 +466,7 @@ impl ChatPort for FakePort {
             st.sent.push((chat_id, client_id, text));
             st.sent_from.push(from);
             st.sent_files.push(files);
+            st.sent_on.push(device);
             Ok(())
         } else {
             Err(WireError::not_found())
@@ -461,8 +474,13 @@ impl ChatPort for FakePort {
         ready(r)
     }
 
-    fn stop(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
-        self.st().stopped.push(chat_id);
+    fn stop(&self, chat_id: String, no_resend: bool) -> BoxFut<'_, PortResult<()>> {
+        let mut st = self.st();
+        if no_resend {
+            st.stopped_no_resend.push(chat_id);
+        } else {
+            st.stopped.push(chat_id);
+        }
         ready(Ok(()))
     }
 
@@ -925,4 +943,93 @@ impl ChatPort for FakePort {
         let st = self.st();
         ready(Ok(st.chats.iter().find(|c| c.id() == chat_id).cloned()))
     }
+
+    /// One gallery (`g1`, two pictures) and one board (`b1`, options A and B) on every chat.
+    fn shown(&self, local_op: &'static str, args: Value) -> BoxFut<'_, PortResult<Value>> {
+        let mut st = self.st();
+        st.shown.push((local_op, args.clone()));
+        let board = |answer: &Option<Value>| {
+            json!({
+                "boardId": "b1", "question": "Which?", "multiSelect": false, "allowOther": false,
+                "createdAt": 1, "answer": answer,
+                "options": [
+                    {"index": 0, "label": "A", "detail": "", "hasImage": true},
+                    {"index": 1, "label": "B", "detail": "", "hasImage": false},
+                ],
+            })
+        };
+        ready(match local_op {
+            "shown_gallery_get" if args["galleryId"] == "g1" => Ok(json!({
+                "galleryId": "g1", "title": "Shots", "createdAt": 1,
+                "images": [
+                    {"index": 0, "name": "a.png", "caption": "", "mime": "image/png", "width": 2, "height": 2},
+                    {"index": 1, "name": "b.png", "caption": "", "mime": "image/png", "width": 2, "height": 2},
+                ],
+            })),
+            "shown_image_thumb" => Ok(json!({ "mime": "image/png", "bytes": "AAAA" })),
+            "option_board_state" if args["boardId"] == "b1" => Ok(board(&st.board_answer)),
+            "option_board_answer" if args["boardId"] == "b1" => {
+                if st.board_answer.is_some() {
+                    Err(WireError::new(
+                        "conflict",
+                        "This board was already answered.",
+                    ))
+                } else {
+                    st.board_answer = Some(json!({
+                        "labels": args["labels"], "other": args["other"], "answeredAt": 2,
+                    }));
+                    Ok(board(&st.board_answer))
+                }
+            }
+            _ => Err(WireError::not_found()),
+        })
+    }
+
+    /// A 2 MiB picture for every picture ref, a small picture for a file in `/work`, and a
+    /// tool's output; anything else is refused as the real port refuses it.
+    fn blob_read(&self, a: BlobReadArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.st().blob_reads.push((a.blob.clone(), a.offset));
+        let r = &a.blob;
+        let (mime, name, whole): (&str, &str, Vec<u8>) =
+            if r.attachment.is_some() || r.gallery.is_some() {
+                ("image/png", "", fake_picture(FAKE_PICTURE_BYTES))
+            } else if let Some(path) = &r.file {
+                if !path.starts_with("/work/") {
+                    return ready(Err(WireError::new(
+                        code::REFUSED,
+                        "That path is outside the chat's project folder.",
+                    )));
+                }
+                ("image/png", "shot.png", fake_picture(64))
+            } else {
+                (
+                    "text/plain; charset=utf-8",
+                    "bash-output.txt",
+                    FAKE_OUTPUT.as_bytes().to_vec(),
+                )
+            };
+        let from = usize::try_from(a.offset)
+            .unwrap_or(usize::MAX)
+            .min(whole.len());
+        let to = (from + crate::wire::MAX_CHUNK_BYTES).min(whole.len());
+        ready(Ok(json!({
+            "offset": from,
+            "total": whole.len(),
+            "mime": mime,
+            "name": name,
+            "data": base64::engine::general_purpose::STANDARD.encode(&whole[from..to]),
+        })))
+    }
+}
+
+/// The size of the pictures the fake port holds: more than three chunks.
+pub const FAKE_PICTURE_BYTES: usize = 2 * 1024 * 1024;
+/// A tool's whole output, as the fake port holds it.
+pub const FAKE_OUTPUT: &str = "the whole output";
+
+/// A PNG of `len` bytes: the signature, then a pattern that shows a misplaced chunk.
+pub fn fake_picture(len: usize) -> Vec<u8> {
+    let mut b = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    b.extend((b.len()..len).map(|i| (i % 251) as u8));
+    b
 }

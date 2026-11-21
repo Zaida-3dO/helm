@@ -14,7 +14,9 @@
 //!
 //! Every frame is at most [`MAX_FRAME_BYTES`]; senders trim what they carry to stay under it.
 //! A file bigger than a frame crosses as an ordered run of `attach_put` calls (at most
-//! [`MAX_CHUNK_BYTES`] raw bytes each), and the `send` that follows names the upload ids.
+//! [`MAX_CHUNK_BYTES`] raw bytes each), and the `send` that follows names the upload ids. The
+//! other way, a big picture, a project file or a tool's whole output comes back as a run of
+//! `blob_read` calls, each from the offset the last one ended at, at most [`MAX_BLOB_BYTES`] in all.
 
 use helm_chats::types::ChatRecord;
 use serde::{Deserialize, Serialize};
@@ -392,6 +394,16 @@ pub const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 /// The most files one message sent from another device may carry.
 pub const MAX_SEND_ATTACHMENTS: usize = 20;
 
+/// Stop a chat's turn. With `noResend`, what the agent had not read yet is not sent again, as
+/// the stop button's "without resending" does.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StopArgs {
+    pub chat_id: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_resend: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AnswerArgs {
@@ -403,10 +415,108 @@ pub struct AnswerArgs {
     pub confirmed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancelled: Option<bool>,
+    /// A question of several steps: go to that step instead of answering ("Go back a step").
+    /// It approves nothing; `value` then only keeps what was typed as a draft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goto: Option<u32>,
     /// The words on the button or choice the person pressed; they must be the ones the request
     /// shows.
     pub label: String,
 }
+
+/// One gallery an agent showed in a chat.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GalleryArgs {
+    pub chat_id: String,
+    pub gallery_id: String,
+}
+
+/// The thumbnail of one picture of a gallery or of an option board (`galleryId` is then the
+/// board's id). The full picture crosses with `blob_read`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ShownImageArgs {
+    pub chat_id: String,
+    pub gallery_id: String,
+    pub index: i64,
+}
+
+/// One option board an agent offered in a chat.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OptionBoardArgs {
+    pub chat_id: String,
+    pub board_id: String,
+}
+
+/// The person's choice on an option board, checked there as a local choice is.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OptionBoardAnswerArgs {
+    pub chat_id: String,
+    pub board_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other: Option<String>,
+}
+
+/// What `blob_read` reads, exactly one of: a picture sent with a message (`attachment`), a
+/// picture of a gallery or option board (`gallery` and `index`), a file of the chat's project
+/// folder (`file`, an absolute path there), or a tool's whole output (`output`, the row id).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BlobRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gallery: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<i64>,
+}
+
+impl BlobRef {
+    /// Whether it names exactly one thing, with an index for a gallery and only for one.
+    pub fn is_valid(&self) -> bool {
+        let named = [
+            self.attachment.is_some(),
+            self.gallery.is_some(),
+            self.file.is_some(),
+            self.output.is_some(),
+        ]
+        .iter()
+        .filter(|b| **b)
+        .count();
+        named == 1 && self.gallery.is_some() == self.index.is_some()
+    }
+
+    /// A file or a tool's output is read from this PC's disk, so it needs the run switch as the
+    /// panel's reads do; the pictures are part of the chat and need only the pairing.
+    pub fn reads_disk(&self) -> bool {
+        self.file.is_some() || self.output.is_some()
+    }
+}
+
+/// One chunk of something big of a chat, from `offset`: at most [`MAX_CHUNK_BYTES`] raw bytes.
+/// Answers `{offset, total, mime, name, data}` (`data` base64); the whole is at most
+/// [`MAX_BLOB_BYTES`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BlobReadArgs {
+    pub chat_id: String,
+    #[serde(rename = "ref")]
+    pub blob: BlobRef,
+    #[serde(default)]
+    pub offset: u64,
+}
+
+/// The most one `blob_read` transfer may carry in all, on both sides.
+pub const MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -701,7 +811,7 @@ pub enum Op {
     Page(PageArgs),
     AttachPut(AttachPutArgs),
     Send(SendArgs),
-    Stop(ChatIdArgs),
+    Stop(StopArgs),
     Answer(AnswerArgs),
     ConsentDecide(ConsentDecideArgs),
     /// Where this install's Allow requests for one chat stand, read only. A tool row's chip
@@ -783,6 +893,17 @@ pub enum Op {
     ProjectCreate(ProjectCreateArgs),
     /// Pin a project here, or give a board one of this PC's folders to start its chats in.
     ProjectSet(ProjectSetArgs),
+    /// A gallery an agent showed in the chat: its title and pictures' names. A read.
+    ShownGallery(GalleryArgs),
+    /// The thumbnail of one picture of a gallery or option board. A read.
+    ShownImage(ShownImageArgs),
+    /// An option board and its answer, if any. A read.
+    OptionBoard(OptionBoardArgs),
+    /// Answer an option board; the first answer stands.
+    OptionBoardAnswer(OptionBoardAnswerArgs),
+    /// One chunk of a big picture, a project file or a tool's whole output. Pictures are reads;
+    /// a file or an output reads this PC's disk and runs with the switch.
+    BlobRead(BlobReadArgs),
 }
 
 fn args<T: for<'de> Deserialize<'de>>(v: Value) -> Result<T, WireError> {
@@ -879,6 +1000,19 @@ impl Op {
             "defaults_set" => Op::DefaultsSet(args(a)?),
             "project_create" => Op::ProjectCreate(args(a)?),
             "project_set" => Op::ProjectSet(args(a)?),
+            "shown_gallery" => Op::ShownGallery(args(a)?),
+            "shown_image" => Op::ShownImage(args(a)?),
+            "option_board" => Op::OptionBoard(args(a)?),
+            "option_board_answer" => Op::OptionBoardAnswer(args(a)?),
+            "blob_read" => {
+                let r: BlobReadArgs = args(a)?;
+                if !r.blob.is_valid() {
+                    return Err(WireError::bad_args(
+                        "A read names one attachment, gallery picture, file or output.",
+                    ));
+                }
+                Op::BlobRead(r)
+            }
             _ => return Err(WireError::elsewhere()),
         })
     }
@@ -887,6 +1021,9 @@ impl Op {
     /// (the project folder's files and changes). These need the PC's switch "Let other devices
     /// use chats on this PC"; the other reads need only the pairing.
     pub fn is_run(&self) -> bool {
+        if let Op::BlobRead(a) = self {
+            return a.blob.reads_disk();
+        }
         matches!(
             self,
             Op::AttachPut(_)
@@ -929,6 +1066,7 @@ impl Op {
                 | Op::Diff(_)
                 | Op::ArchiveList(_)
                 | Op::PathResolve(_)
+                | Op::OptionBoardAnswer(_)
         )
     }
 }
@@ -1079,4 +1217,116 @@ pub fn iso_utc(ms: i64) -> String {
         rem % 3600 / 60,
         rem % 60
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ops this build added parse with their arguments, refuse what they do not take, and
+    /// fall on the right side of the run switch.
+    #[test]
+    fn the_newer_ops_parse_and_split_into_reads_and_runs() {
+        let rows: Vec<(&str, Value, Option<bool>)> = vec![
+            ("stop", json!({"chatId": "c1"}), Some(true)),
+            (
+                "stop",
+                json!({"chatId": "c1", "noResend": true}),
+                Some(true),
+            ),
+            ("stop", json!({"chatId": "c1", "noResend": "yes"}), None),
+            (
+                "answer",
+                json!({"chatId": "c1", "requestId": "q", "goto": 0, "label": "Back"}),
+                Some(true),
+            ),
+            (
+                "shown_gallery",
+                json!({"chatId": "c1", "galleryId": "g"}),
+                Some(false),
+            ),
+            (
+                "shown_image",
+                json!({"chatId": "c1", "galleryId": "g", "index": 2}),
+                Some(false),
+            ),
+            (
+                "shown_image",
+                json!({"chatId": "c1", "galleryId": "g"}),
+                None,
+            ),
+            (
+                "option_board",
+                json!({"chatId": "c1", "boardId": "b"}),
+                Some(false),
+            ),
+            (
+                "option_board_answer",
+                json!({"chatId": "c1", "boardId": "b", "labels": ["A"]}),
+                Some(true),
+            ),
+            (
+                "option_board_answer",
+                json!({"chatId": "c1", "boardId": "b", "other": "mine", "extra": 1}),
+                None,
+            ),
+            (
+                "blob_read",
+                json!({"chatId": "c1", "ref": {"attachment": "a"}}),
+                Some(false),
+            ),
+            (
+                "blob_read",
+                json!({"chatId": "c1", "ref": {"gallery": "g", "index": 0}, "offset": 655360}),
+                Some(false),
+            ),
+            (
+                "blob_read",
+                json!({"chatId": "c1", "ref": {"file": "/work/a.txt"}}),
+                Some(true),
+            ),
+            (
+                "blob_read",
+                json!({"chatId": "c1", "ref": {"output": 12}}),
+                Some(true),
+            ),
+            ("blob_read", json!({"chatId": "c1", "ref": {}}), None),
+            (
+                "blob_read",
+                json!({"chatId": "c1", "ref": {"gallery": "g"}}),
+                None,
+            ),
+            (
+                "blob_read",
+                json!({"chatId": "c1", "ref": {"attachment": "a", "index": 1}}),
+                None,
+            ),
+            (
+                "blob_read",
+                json!({"chatId": "c1", "ref": {"file": "/a", "output": 1}}),
+                None,
+            ),
+            (
+                "blob_read",
+                json!({"chatId": "c1", "ref": {"path": "/a"}}),
+                None,
+            ),
+        ];
+        for (op, args, run) in rows {
+            let got = Op::parse(op, args.clone());
+            match run {
+                Some(run) => assert_eq!(got.unwrap().is_run(), run, "{op} {args}"),
+                None => assert_eq!(got.unwrap_err().code, code::BAD_ARGS, "{op} {args}"),
+            }
+        }
+        // A stop without the flag is the stop an older Helm sends, and carries none on the wire.
+        let plain = StopArgs {
+            chat_id: "c1".into(),
+            no_resend: false,
+        };
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap(),
+            json!({"chatId": "c1"})
+        );
+    }
 }

@@ -16,9 +16,11 @@
 
 use crate::mirror::{chat_value, local_page, staged_dir, Mirror, PAGE_ROWS, UNCONFIRMED};
 use crate::serve::confirm_options;
-use crate::wire::{code, WireError, MAX_CHUNK_BYTES, MAX_SEND_ATTACHMENTS, MAX_UPLOAD_BYTES};
+use crate::wire::{
+    code, WireError, MAX_BLOB_BYTES, MAX_CHUNK_BYTES, MAX_SEND_ATTACHMENTS, MAX_UPLOAD_BYTES,
+};
 use base64::Engine as _;
-use helm_chats::remote::{Fut, RemoteChats, Res};
+use helm_chats::remote::{Fut, RemoteBlob, RemoteChats, Res};
 use helm_chats::types::{
     ChatSendArgs, ChatSetModelArgs, DraftSaveArgs, Interaction, InteractionAnswerArgs,
     InteractionMethod, SendAction, SendOrigin, TranscriptPageArgs,
@@ -48,6 +50,25 @@ pub struct PageBundle {
 
 /// The most a draft may hold, as for a chat that runs here.
 const MAX_DRAFT_BYTES: usize = 2 * 1024 * 1024;
+
+/// The largest picture a reply shows from disk, as for a chat that runs here.
+const LOCAL_IMAGE_MAX: u64 = 12 * 1024 * 1024;
+
+/// The type of a picture from its first bytes; `None` for anything that is not PNG, JPEG, GIF
+/// or WebP.
+pub(crate) fn sniff_image(b: &[u8]) -> Option<&'static str> {
+    if b.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        Some("image/png")
+    } else if b.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if b.len() > 12 && &b[..4] == b"RIFF" && &b[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
 
 /// One file staged on this PC for a send to a chat on another device.
 struct StagedFile {
@@ -244,6 +265,9 @@ impl Mirror {
                             | "that page"
                             | "those rows"
                             | "that project"
+                            | "that picture"
+                            | "that file"
+                            | "that board"
                     ) =>
             {
                 ApiError::new(
@@ -908,6 +932,219 @@ impl Mirror {
         }
     }
 
+    /// What an agent showed in a chat that runs on another device, the pictures of its
+    /// messages, and Stop without resending. The gallery and board reads and the board's answer
+    /// go to the device as they are; a full picture, or a reply's picture inside the chat's
+    /// project folder, comes across in chunks. `None` for any other op.
+    async fn shown_op(&self, op: &str, device: &str, chat_id: &str, args: &Value) -> Option<Res> {
+        let arg = |k: &str| args.get(k).cloned().unwrap_or(Value::Null);
+        Some(match op {
+            "shown_gallery_get" => {
+                let a = json!({ "chatId": chat_id, "galleryId": arg("galleryId") });
+                self.shown_read(device, "shown_gallery", a, "that picture")
+                    .await
+            }
+            "shown_image_thumb" => {
+                let a = json!({ "chatId": chat_id, "galleryId": arg("galleryId"), "index": arg("index") });
+                self.shown_read(device, "shown_image", a, "that picture")
+                    .await
+            }
+            "option_board_state" => {
+                let a = json!({ "chatId": chat_id, "boardId": arg("boardId") });
+                self.shown_read(device, "option_board", a, "that board")
+                    .await
+            }
+            "option_board_answer" => self.board_answer(device, chat_id, args).await,
+            "shown_image_get" => {
+                let r = json!({ "gallery": arg("galleryId"), "index": arg("index") });
+                self.picture(device, chat_id, r, MAX_BLOB_BYTES, false)
+                    .await
+            }
+            "attachment_get" if args.get("thumb").and_then(Value::as_bool) != Some(true) => {
+                self.full_attachment(device, chat_id, args).await
+            }
+            "local_image_get" => match args.get("path").and_then(Value::as_str) {
+                Some(path) => {
+                    let r = json!({ "file": path });
+                    self.picture(device, chat_id, r, LOCAL_IMAGE_MAX, true)
+                        .await
+                }
+                None => Err(ApiError::bad_args("path is required.")),
+            },
+            "chat_stop_no_resend" => self.stop_no_resend(device, chat_id).await,
+            _ => return None,
+        })
+    }
+
+    /// A gallery or board read: the device needs only to be up.
+    async fn shown_read(&self, device: &str, wire: &str, args: Value, what: &str) -> Res {
+        self.check_up(device)?;
+        self.ask_as(device, wire, args, what, &[]).await
+    }
+
+    /// The person's choice on an option board, answered on the device; the first answer stands.
+    async fn board_answer(&self, device: &str, chat_id: &str, args: &Value) -> Res {
+        self.check_live(device)?;
+        let act = self.acting(chat_id)?;
+        let mut a = json!({ "chatId": chat_id, "boardId": args.get("boardId") });
+        for key in ["labels", "other"] {
+            if let Some(v) = args.get(key).filter(|v| !v.is_null()) {
+                a[key] = v.clone();
+            }
+        }
+        self.ask_as(device, "option_board_answer", a, "that board", &[act])
+            .await
+    }
+
+    async fn stop_no_resend(&self, device: &str, chat_id: &str) -> Res {
+        self.check_live(device)?;
+        let act = self.acting(chat_id)?;
+        self.ask_as(
+            device,
+            "stop",
+            json!({ "chatId": chat_id, "noResend": true }),
+            "the stop",
+            &[act],
+        )
+        .await?;
+        let chat = self.chat_json(chat_id)?;
+        Ok(json!({ "status": chat["status"] }))
+    }
+
+    /// A picture brought across whole, answered as the local picture reads answer:
+    /// `{mime, bytes}`. With `sniff`, only a PNG, JPEG, GIF or WebP by its first bytes is shown,
+    /// whatever its name.
+    async fn picture(&self, device: &str, chat_id: &str, r: Value, cap: u64, sniff: bool) -> Res {
+        let act = self.blob_gate(device, chat_id, &r)?;
+        let blob = self
+            .fetch_blob(device, chat_id, &r, cap, &act)
+            .await
+            .map_err(|e| self.failed(device, e, "that picture"))?;
+        let mime = if sniff {
+            sniff_image(&blob.bytes)
+                .ok_or_else(|| ApiError::bad_args("That file is not a picture."))?
+                .to_owned()
+        } else {
+            blob.mime
+        };
+        Ok(json!({
+            "mime": mime,
+            "bytes": base64::engine::general_purpose::STANDARD.encode(&blob.bytes),
+        }))
+    }
+
+    /// A picture sent with a message, full size. An older Helm there has no chunked read; its
+    /// own answer still brings the pictures that fit one frame.
+    async fn full_attachment(&self, device: &str, chat_id: &str, args: &Value) -> Res {
+        let r = json!({ "attachment": args.get("attachmentId") });
+        let act = self.blob_gate(device, chat_id, &r)?;
+        match self
+            .fetch_blob(device, chat_id, &r, MAX_BLOB_BYTES, &act)
+            .await
+        {
+            Ok(blob) => Ok(json!({
+                "mime": blob.mime,
+                "bytes": base64::engine::general_purpose::STANDARD.encode(&blob.bytes),
+            })),
+            Err(e) if e.code == code::REFUSED && e.message == WireError::elsewhere().message => {
+                self.ask_as(device, "attachment_get", args.clone(), "that picture", &[])
+                    .await
+            }
+            Err(e) => Err(self.failed(device, e, "that picture")),
+        }
+    }
+
+    /// Something big of a chat that runs on another device, brought across whole: a picture
+    /// needs the device up, a file or a tool's output (read from its disk) also its switch on.
+    /// At most `cap` bytes, checked against what the device says before anything is held.
+    pub async fn read_blob(
+        &self,
+        chat_id: &str,
+        r: Value,
+        cap: u64,
+    ) -> Result<RemoteBlob, ApiError> {
+        let device = self.device_of(chat_id)?;
+        let act = self.blob_gate(&device, chat_id, &r)?;
+        self.fetch_blob(&device, chat_id, &r, cap, &act)
+            .await
+            .map_err(|e| self.failed(&device, e, "that file"))
+    }
+
+    /// The device's state checked for a `blob_read`, and who it acts for.
+    fn blob_gate(&self, device: &str, chat_id: &str, r: &Value) -> Result<Vec<String>, ApiError> {
+        if r.get("file").is_some() || r.get("output").is_some() {
+            self.check_live(device)?;
+            Ok(vec![self.acting(chat_id)?])
+        } else {
+            self.check_up(device)?;
+            Ok(Vec::new())
+        }
+    }
+
+    /// The chunks of one `blob_read`, in order, joined. Each answer must carry the offset asked
+    /// for and the same total, and the whole stops at `cap`.
+    async fn fetch_blob(
+        &self,
+        device: &str,
+        chat_id: &str,
+        r: &Value,
+        cap: u64,
+        act: &[String],
+    ) -> Result<RemoteBlob, WireError> {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let damaged = || WireError::new(code::REFUSED, "That arrived damaged; try again.");
+        let mut out: Vec<u8> = Vec::new();
+        let mut first: Option<(u64, String, String)> = None;
+        loop {
+            let got = self
+                .inner
+                .rpc
+                .call_as(
+                    device,
+                    "blob_read",
+                    json!({ "chatId": chat_id, "ref": r, "offset": out.len() }),
+                    act,
+                )
+                .await?;
+            let total = got["total"].as_u64().ok_or_else(damaged)?;
+            if total > cap {
+                return Err(WireError::new(
+                    code::REFUSED,
+                    "That is too large to bring across from the other PC.",
+                ));
+            }
+            let (want, _, _) = first.get_or_insert_with(|| {
+                out.reserve(usize::try_from(total).unwrap_or(0));
+                (
+                    total,
+                    got["mime"].as_str().unwrap_or_default().to_owned(),
+                    got["name"].as_str().unwrap_or_default().to_owned(),
+                )
+            });
+            if *want != total || got["offset"].as_u64() != Some(out.len() as u64) {
+                return Err(damaged());
+            }
+            let chunk = b64
+                .decode(got["data"].as_str().unwrap_or_default())
+                .map_err(|_| damaged())?;
+            if chunk.is_empty() && (out.len() as u64) < total {
+                return Err(damaged());
+            }
+            out.extend(chunk);
+            if out.len() as u64 > total {
+                return Err(damaged());
+            }
+            if out.len() as u64 == total {
+                let (_, mime, name) = first.unwrap_or_default();
+                return Ok(RemoteBlob {
+                    mime,
+                    name,
+                    bytes: out,
+                });
+            }
+        }
+    }
+
     /// The person a change to this chat acts as, alone on the wire: the active profile's
     /// person, or with "All profiles" the chat owner's person when a profile here is linked to
     /// them, else the home profile's person. A profile with no hub person yet (before the first
@@ -1069,6 +1306,9 @@ fn read_op(op: &str) -> Option<&'static str> {
 fn answer_label(i: &Interaction, a: &InteractionAnswerArgs) -> String {
     if a.cancelled == Some(true) {
         return "Cancel".to_owned();
+    }
+    if a.goto.is_some() {
+        return "Go back a step".to_owned();
     }
     match i.method {
         InteractionMethod::Select => a.value.clone().unwrap_or_default(),
@@ -1322,12 +1562,6 @@ impl RemoteChats for Mirror {
         Box::pin(async move {
             let device = m.device_of(&a.chat_id)?;
             m.check_live(&device)?;
-            if a.goto.is_some() {
-                return Err(ApiError::new(
-                    "refused",
-                    "Going back a step can only be done on the PC this chat runs on.",
-                ));
-            }
             // The request as this PC last heard it; its words are the label the device checks.
             let stored: Option<String> = m
                 .inner
@@ -1364,6 +1598,9 @@ impl RemoteChats for Mirror {
             }
             if let Some(c) = a.cancelled {
                 args["cancelled"] = json!(c);
+            }
+            if let Some(g) = a.goto {
+                args["goto"] = json!(g);
             }
             let act = [m.acting(&a.chat_id)?];
             m.ask_as(&device, "answer", args, "that answer", &act)
@@ -1437,6 +1674,9 @@ impl RemoteChats for Mirror {
                 .unwrap_or_default()
                 .to_owned();
             let device = m.device_of(&chat_id)?;
+            if let Some(answer) = m.shown_op(&op, &device, &chat_id, &args).await {
+                return answer;
+            }
             // Reads answer while the device's run switch is off.
             if let Some(wire) = read_op(&op) {
                 m.check_up(&device)?;
@@ -1548,6 +1788,11 @@ impl RemoteChats for Mirror {
                 _ => Err(not_found()),
             }
         })
+    }
+
+    fn blob(&self, chat_id: String, r: Value) -> Fut<Result<RemoteBlob, ApiError>> {
+        let m = self.clone();
+        Box::pin(async move { m.read_blob(&chat_id, r, MAX_BLOB_BYTES).await })
     }
 
     fn catalogue(&self, device_uid: String) -> Fut<Res> {

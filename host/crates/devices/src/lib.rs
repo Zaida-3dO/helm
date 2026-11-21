@@ -34,9 +34,11 @@
 //! | `devices_create_chat` | async | `{deviceUid, projectId, model?, effort?}` → `{chatId}`: starts the chat for the active profile's person on that device, then opens it here |
 //! | `devices_open_chat` | async | `{chatId}` → `{}`: listen to a copied chat; its rows arrive as `chat`, `thread`, `pending`, `message` and `refresh` events |
 //! | `devices_attach` | async | `{chatId, kind, name, mime?, data?, path?}` → `{attachmentId}`: stage a picture (base64) or a file (path on this PC) for the next message to a chat that runs on another device; the send names the ids |
-//! | `devices_pages` | async | `{}` → `{devices: [{deviceUid, name, pages, problem?}]}`: the pages pinned on the other PCs of the household, the active profile's person's own first, each as the Pages list shows it; a PC that is offline or has its switch off carries a `problem` in words |
+//! | `devices_pages` | async | `{}` → `{devices: [{deviceUid, name, pages, problem?}]}`: the pages pinned on the other PCs of the household for the active profile's person (their own, then those pinned before profiles), each as the Pages list shows it; a PC that is offline or has its switch off carries a `problem` in words |
 //! | `devices_page_open` | async | `{deviceUid, pageId, network?}` → as `page_open`: brings the page and the files beside it that it names across and opens it here; its messages go to the chat the pin names there, and its saved state stays on this PC |
 //! | `devices_discard` | blocking | `{chatId, attachmentId}` → `{}`: take back a staged attachment |
+//! | `devices_typed_on` | blocking | `{chatId}` → `{deviceUid, name, at} \| null`: the PC the last message of a chat that runs here was typed on, when that was another device (`at` in Unix ms); `null` when it was typed here, or nothing is known since Helm started |
+//! | `devices_file_save` | async | `{chatId, path}` → `{path: string \| null}`: a copy of a file of a chat that runs on another device (inside its project folder there), brought across in chunks and saved on this PC where the person chooses; `null` when the dialog is cancelled |
 //!
 //! `model_catalogue` also takes `deviceUid` (the models that device last reported). Every other
 //! chat op that names a copied chat is answered by [`route`] (see `helm_chats::remote`).
@@ -46,15 +48,23 @@
 //! serialised types in [`wire`] are the device-to-device frames, which the UI never sees.
 //!
 //! What another device may ask of this one (`wire::Op`): reads — `hello`, `chats_sub`, `chat_sub`,
-//! `chat_unsub`, `chats_unsub`, `page`, `attachment_get` (a picture of a message), the panel reads of the chat's project folder (`file_view`,
-//! `file_stat`, `changes`, `diff`, `archive_list`, `path_resolve`, `chat_folder`, `quick_open`)
-//! and the task-board reads (`board_connection`, `board_read`, `board_cancel`) — need only the
-//! pairing; everything that changes something (`send`, `stop`, `answer`, `create`, `set_model`,
-//! `rename`, `archive`, `share`, staging, and the rest) also needs the switch "Let other devices
-//! use chats on this PC". Panel paths never leave the chat's project folder.
+//! `chat_unsub`, `chats_unsub`, `page`, `attachment_get` (a picture of a message), what an agent
+//! showed (`shown_gallery`, `shown_image`, `option_board`), the chunked `blob_read` of a picture,
+//! the panel reads of the chat's project folder (`file_view`, `file_stat`, `changes`, `diff`,
+//! `archive_list`, `path_resolve`, `chat_folder`, `quick_open`) and the task-board reads
+//! (`board_connection`, `board_read`, `board_cancel`) — need only the pairing, except that the
+//! panel reads touch this PC's disk and run with the switch; everything that changes something
+//! (`send`, `stop`, `answer`, `option_board_answer`, `create`, `set_model`, `rename`, `archive`,
+//! `share`, staging, and the rest) and `blob_read` of a project file or a tool's output also need
+//! the switch "Let other devices use chats on this PC". Panel paths and project files never
+//! leave the chat's project folder. A `send` tells the agent the PC it was typed on, in a first
+//! line `[Typed on <PC>]` (a household member's header names it too); `stop` with `noResend`
+//! leaves unread words unsent; `answer` with `goto` moves a question of several steps.
 //! Pinned pages come across the same way: a device may list the pages its person pinned on this PC
-//! and read a pinned page's document and the files beside it that the document names (`pages_list`,
-//! `pages_files`, `pages_read`, all run with the switch), never any other path.
+//! (and those pinned before profiles) and read a pinned page's document and the files beside it
+//! that the document names (`pages_list`, `pages_files`, `pages_read`, all run with the switch),
+//! never any other path. A page is opened by its pin's id whoever pinned it, so a link to it from
+//! a shared chat still opens.
 
 pub mod host;
 pub mod identity;
