@@ -71,6 +71,11 @@ export type ListItem = (
       twoLine: boolean;
       /** The task-board item this chat is linked to, shown as a small chip. */
       itemChip?: ItemRef;
+      /** Totalled over every descendant of a chat with children: how many are running and how
+       *  many may need the person. A collapsed chat rides these up next to its children count
+       *  (the wheel for running, the flag for needs-you); finished ones never ride up. */
+      childRunning?: number;
+      childFlagged?: number;
     }
   | { kind: 'itemFolder'; key: string; groupId: string; itemId: string; title: string; members: number; depth: number; height: number; collapsed: boolean }
   | { kind: 'pinBreak'; key: string; height: number }
@@ -111,8 +116,14 @@ export function isFinished(p: ProjectNode): boolean {
   return p.board?.completed === true && !p.board.stale && !p.archived;
 }
 
-/** Per-row drawn depth and the children each row holds, for one group's held rows. */
-export function nestRows(rows: SidebarRow[]): { order: { row: SidebarRow; depth: number }[]; childCount: Map<string, number> } {
+/** Per-row drawn depth and the children each row holds, for one group's held rows. With the
+ *  flagged set it also totals, under each chat, the descendants that are running or may need the
+ *  person (for a collapsed parent's marks); finished descendants never ride up. */
+export function nestRows(rows: SidebarRow[], flagged?: ReadonlySet<string>): {
+  order: { row: SidebarRow; depth: number }[];
+  childCount: Map<string, number>;
+  childMarks: Map<string, { running: number; flagged: number }>;
+} {
   const byId = new Map(rows.map((r) => [r.chatId, r]));
   const parentOf = (r: SidebarRow): string | null => {
     const p = r.parentChatId ? byId.get(r.parentChatId) : undefined;
@@ -154,7 +165,57 @@ export function nestRows(rows: SidebarRow[]): { order: { row: SidebarRow; depth:
   for (const r of roots) walk(r, 0);
   const childCount = new Map<string, number>();
   for (const [k, v] of children) childCount.set(k, v.length);
-  return { order, childCount };
+  // What rides up under each chat: every descendant (the cycle cut above keeps this a forest),
+  // counted once each for running and for the flagged set. Only set when something rides up.
+  const childMarks = new Map<string, { running: number; flagged: number }>();
+  const marksUnder = (id: string): { running: number; flagged: number } => {
+    const hit = childMarks.get(id);
+    if (hit) return hit;
+    let running = 0;
+    let needPerson = 0;
+    for (const c of children.get(id) ?? []) {
+      const sub = marksUnder(c.chatId);
+      running += sub.running + (isBusy(c.status) ? 1 : 0);
+      needPerson += sub.flagged + (flagged?.has(c.chatId) ? 1 : 0);
+    }
+    const m = { running, flagged: needPerson };
+    childMarks.set(id, m);
+    return m;
+  };
+  for (const r of rows) marksUnder(r.chatId);
+  return { order, childCount, childMarks };
+}
+
+/** The trailing marks of a chat row, in draw order. One order for every row: flag, state chip,
+ *  mute, shared-from, children (count and what is running inside when collapsed), item chip,
+ *  draft — and the age always last, hard right. The leading status indicator is not part of it.
+ *  An expanded parent names its children through the chevron instead, so no count rides. */
+export function badgeOrder(b: {
+  flag: boolean;
+  chip: boolean;
+  muted: boolean;
+  shared: boolean;
+  children: number;
+  expanded: boolean;
+  childRunning: boolean;
+  childFlagged: boolean;
+  itemChip: boolean;
+  draft: boolean;
+}): ('flag' | 'chip' | 'mute' | 'shared' | 'children' | 'child-running' | 'child-flag' | 'item' | 'draft' | 'age')[] {
+  const out: ('flag' | 'chip' | 'mute' | 'shared' | 'children' | 'child-running' | 'child-flag' | 'item' | 'draft' | 'age')[] = [];
+  if (b.flag) out.push('flag');
+  if (b.chip) out.push('chip');
+  if (b.muted) out.push('mute');
+  if (b.shared) out.push('shared');
+  if (!b.expanded && b.children > 0) {
+    out.push('children');
+    if (b.childRunning) out.push('child-running');
+    if (b.childFlagged) out.push('child-flag');
+  }
+  if (b.itemChip) out.push('item');
+  if (b.draft) out.push('draft');
+  out.push('age');
+  return out;
 }
 
 function projectChildren(projects: ProjectNode[]): { roots: ProjectNode[]; kids: Map<string, ProjectNode[]> } {
@@ -275,7 +336,7 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
     if (collapsed) return;
     const next = new Set(path).add(p.id);
     for (const k of kids.get(p.id) ?? []) emitGroup(k, depth + 1, next);
-    const { order, childCount } = nestRows(byGroup.get(p.id) ?? []);
+    const { order, childCount, childMarks } = nestRows(byGroup.get(p.id) ?? [], o.flagged);
     const hidden = new Set<string>();
     for (const e of arrange(order, o.itemLinks?.refs, o.itemLinks?.collapsed, MAX_DEPTH, o.selectedChatId)) {
       if (e.type === 'folder') {
@@ -300,6 +361,7 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
         expanded,
         twoLine: false,
         ...(e.chip ? { itemChip: e.chip } : {}),
+        ...(n > 0 ? { childRunning: childMarks.get(row.chatId)?.running ?? 0, childFlagged: childMarks.get(row.chatId)?.flagged ?? 0 } : {}),
       });
     }
   };

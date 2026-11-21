@@ -720,6 +720,18 @@
   background: var(--interrupted, #be9562);
 }
 
+/* The wheel beside a collapsed chat's children count: a status-mark slot of its own, so it keeps
+   its place in the row's mark order even when the row's own mark moves to the trailing edge. */
+.sb-child-mark {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .sb-group-marks {
   display: inline-flex;
   align-items: center;
@@ -754,19 +766,23 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* The collapse chevron always sits in the row's left gutter, between the left bar and the status
-   mark, at the same place for every row that has one. It never shifts the title: rows with and
-   without children keep their titles on the level's left edge, and each nesting level's step
-   carries the chevron in with it. */
+/* The collapse chevron sits just left of the title, at the title's indent (the title's left edge
+   is fixed: left padding + the status slot + the flex gap), and follows it when a trailing mark
+   shifts the text. It never shifts the title: rows with and without children keep their titles on
+   the level's left edge, and each nesting level's step carries the chevron in with it. */
 .sb-root .sb-children {
   position: absolute;
   z-index: 4;
-  left: 7px;
+  left: 30.5px;
   top: calc((var(--sb-chat-h) - 22px) / 2);
   width: 17px;
   height: 22px;
   border-radius: 4px;
   color: var(--sb-muted);
+}
+
+.sb-chat-wrap[data-trailing='true'] .sb-children {
+  left: 52.5px;
 }
 
 .sb-root .sb-children:hover {
@@ -1008,14 +1024,14 @@
   margin-right: 0;
 }
 
-.sb-chat-wrap[data-trailing='true'][data-flagged='true']:hover .sb-flag,
-.sb-chat-wrap[data-trailing='true'][data-flagged='true']:focus-within .sb-flag {
+.sb-chat-wrap[data-trailing='true'][data-flagged='true']:hover .sb-flag:not([data-kind='under']),
+.sb-chat-wrap[data-trailing='true'][data-flagged='true']:focus-within .sb-flag:not([data-kind='under']) {
   margin-right: 57px;
 }
 
 /* A linked row also shows the open-item button, so the reserve is wider. */
-.sb-chat-wrap[data-trailing='true'][data-flagged='true'][data-linked='true']:hover .sb-flag,
-.sb-chat-wrap[data-trailing='true'][data-flagged='true'][data-linked='true']:focus-within .sb-flag {
+.sb-chat-wrap[data-trailing='true'][data-flagged='true'][data-linked='true']:hover .sb-flag:not([data-kind='under']),
+.sb-chat-wrap[data-trailing='true'][data-flagged='true'][data-linked='true']:focus-within .sb-flag:not([data-kind='under']) {
   margin-right: 82px;
 }
 

@@ -6,7 +6,7 @@ import { SidebarData } from './data.ts';
 import { toast } from '../ui/toasts.ts';
 import { SidebarActions, type ActionDeps } from './actions.ts';
 import { UndoStack } from './undo.ts';
-import { buildList, chatAncestors, headerSubtitle, HEIGHTS, nestRows, showsCalmWheel, stepChat, visibleChatOrder, type ListItem } from './model.ts';
+import { badgeOrder, buildList, chatAncestors, headerSubtitle, HEIGHTS, nestRows, showsCalmWheel, stepChat, visibleChatOrder, type ListItem } from './model.ts';
 import { loadMore, readBudget, type PageResult } from './paging.ts';
 import { age, needsYouLabel, rowAttention, rowStateLabel, rowStatusLabel, trailingIndicator } from './status.ts';
 import { layout, visibleRange } from './virtual.ts';
@@ -114,6 +114,24 @@ test('status priority: running > unread > lingering > interrupted > pinned', () 
   assert.equal(rowStateLabel(null), null);
 });
 
+test('chat row trailing marks: one order for every row, age always last', () => {
+  const none = { flag: false, chip: false, muted: false, shared: false, children: 0, expanded: false, childRunning: false, childFlagged: false, itemChip: false, draft: false };
+  // Everything at once reads in one fixed order.
+  assert.deepEqual(
+    badgeOrder({ flag: true, chip: true, muted: true, shared: true, children: 3, expanded: false, childRunning: true, childFlagged: true, itemChip: true, draft: true }),
+    ['flag', 'chip', 'mute', 'shared', 'children', 'child-running', 'child-flag', 'item', 'draft', 'age'],
+  );
+  assert.deepEqual(badgeOrder(none), ['age'], 'a plain row is just its age');
+  // The flag takes one slot whether the chat waits on you or the idle check only thinks it might.
+  assert.deepEqual(badgeOrder({ ...none, flag: true }), ['flag', 'age']);
+  // An expanded parent reaches its children through the chevron instead: no count, no riding-up marks.
+  assert.deepEqual(badgeOrder({ ...none, children: 3, expanded: true, childRunning: true, childFlagged: true }), ['age']);
+  // A collapsed parent shows its count, plus the wheel if any runs, the flag if any may need you.
+  assert.deepEqual(badgeOrder({ ...none, children: 2, childRunning: true }), ['children', 'child-running', 'age']);
+  assert.deepEqual(badgeOrder({ ...none, children: 2, childFlagged: true }), ['children', 'child-flag', 'age']);
+  assert.deepEqual(badgeOrder({ ...none, children: 2 }), ['children', 'age'], 'idle children: just the count');
+});
+
 test('age is relative: now, minutes, hours, days', () => {
   const t = 1_000_000_000;
   assert.equal(age(t - 59_000, t), 'now');
@@ -142,6 +160,11 @@ test('a collapsed group totals the running and unread chats inside it and its ne
   assert.equal(header(buildList([project('b', { collapsed: true, chatCount: 1 })], [row('x', 'b')], opts), 'b').marks, null, 'nothing going on, no marks');
   // A waiting or flagged chat inside a collapsed group is counted on its header.
   assert.deepEqual(header(buildList(projects, rows, { ...opts, flagged: new Set(['i1', 'r2']) }), 'a').marks, { running: 2, unread: 1, flagged: 2, lingering: 0 });
+  // The same rule at every depth: a collapsed project inside an open one marks its own header too.
+  const deep = [project('outer', { chatCount: 1 }), project('mid', { parentId: 'outer', collapsed: true, chatCount: 1 }), project('inner', { parentId: 'mid', chatCount: 1 })];
+  const deepItems = buildList(deep, [row('r', 'inner', { status: 'running' })], opts);
+  assert.deepEqual(header(deepItems, 'mid').marks, { running: 1, unread: 0, flagged: 0, lingering: 0 });
+  assert.equal(header(deepItems, 'outer').marks, null, 'an open group shows its rows instead of marks');
 
   // Background work only: the header carries the calm wheel, unless a chat inside runs (running wins).
   const held = (extra: SidebarRow[]) => header(buildList([project('bg', { collapsed: true, chatCount: 3 })], [row('l1', 'bg', { attention: 'lingering' }), row('q1', 'bg'), ...extra], opts), 'bg').marks;
@@ -297,21 +320,27 @@ test('a pin break separates pinned and unpinned top-level groups', () => {
 test('chats nest under held parents in the same group, capped at depth 2, collapsed by default', () => {
   const rows = [
     row('a', 'g'),
-    row('b', 'g', { parentChatId: 'a' }),
+    row('b', 'g', { parentChatId: 'a', status: 'running', attention: 'running' }),
     row('c', 'g', { parentChatId: 'b' }),
     row('d', 'g', { parentChatId: 'c' }), // a deeper record renders at depth 2
     row('e', 'g', { parentChatId: 'nope' }), // parent not held: top level
     row('f', 'other', { parentChatId: 'a' }), // parent in another group: top level there
   ];
   const all = new Set(['a', 'b', 'c']);
-  const items = buildList([project('g'), project('other')], rows, { ...opts, expandedChats: all });
+  const items = buildList([project('g'), project('other')], rows, { ...opts, expandedChats: all, flagged: new Set(['c']) });
   assert.deepEqual(shape(items), ['H0:g', 'C0:a', 'C1:b', 'C2:c', 'C2:d', 'C0:e', 'H0:other', 'C0:f']);
   // Collapsing the parent hides every descendant.
-  const collapsed = buildList([project('g')], rows.slice(0, 3), opts);
+  const collapsed = buildList([project('g')], rows.slice(0, 3), { ...opts, flagged: new Set(['c']) });
   assert.deepEqual(shape(collapsed), ['H0:g', 'C0:a']);
   const a = collapsed[1] as Extract<ListItem, { kind: 'chat' }>;
   assert.equal(a.children, 1);
   assert.equal(a.expanded, false);
+  // Running and may-need-you ride up from any depth to the collapsed parent's marks; idle ones do not.
+  assert.deepEqual([a.childRunning, a.childFlagged], [1, 1]);
+  const chat = (items: ListItem[], id: string) => items.find((i): i is Extract<ListItem, { kind: 'chat' }> => i.kind === 'chat' && i.row.chatId === id)!;
+  assert.deepEqual([chat(items, 'b').childRunning, chat(items, 'b').childFlagged], [0, 1], 'b carries its flagged child up too');
+  assert.deepEqual([chat(items, 'c').childRunning, chat(items, 'c').childFlagged], [0, 0], 'idle children ride nothing up, even two levels');
+  assert.equal(chat(items, 'f').childRunning, undefined, 'a leaf carries nothing');
 });
 
 test('chats in a group follow the host order: pinned first, then dragged position, then newest', () => {
@@ -326,7 +355,8 @@ test('chats in a group follow the host order: pinned first, then dragged positio
 });
 
 test('a chat cycle is cut rather than looping', () => {
-  const { order } = nestRows([row('a', 'g', { parentChatId: 'b' }), row('b', 'g', { parentChatId: 'a' })]);
+  const { order, childMarks } = nestRows([row('a', 'g', { parentChatId: 'b' }), row('b', 'g', { parentChatId: 'a' })], new Set(['a', 'b']));
+  assert.deepEqual(childMarks.get('a'), { running: 0, flagged: 0 }, 'a cut cycle carries nothing under either row');
   assert.deepEqual(
     order.map((o) => [o.row.chatId, o.depth]),
     [

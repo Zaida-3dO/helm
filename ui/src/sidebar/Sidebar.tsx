@@ -3,7 +3,7 @@
 // virtualised, with the Projects / Activity / Archived views, menus, drag and drop, hover preview
 // and undo. Its test ids stay stable: `new-chat`, `chat-item`.
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import type { Api } from '../api/client.ts';
 import type { EventBus } from '../api/events.ts';
 import type { ChatOps } from '../api/ops.ts';
@@ -32,7 +32,7 @@ import { SidebarActions, compactChat, exportChatMarkdown, rollOverChat, rollOver
 import { SidebarData, errorText } from './data.ts';
 import { canSitUnder, dropAction, passedThreshold, type DragSource, type DropTarget } from './drag.ts';
 import { chatMenuItems, projectMenuItems } from './menus.ts';
-import { buildList, chatAncestors, projectsHolding, showsCalmWheel, visibleChatOrder, type ListView, type ListItem } from './model.ts';
+import { badgeOrder, buildList, chatAncestors, projectsHolding, showsCalmWheel, visibleChatOrder, type ListView, type ListItem } from './model.ts';
 import { setVisibleOrder } from './rowOrder.ts';
 import { SidebarTop } from './SidebarTop.tsx';
 import { PromptDialog, type Prompt } from './PromptDialog.tsx';
@@ -1287,6 +1287,76 @@ function ChatRow({
   const chip = rowStateLabel(r.state);
   const colour = colourCss(project?.colour);
   const trailing = trailingIndicator(r.attention);
+  const childRunning = item.childRunning ?? 0;
+  const childFlagged = item.childFlagged ?? 0;
+  // One trailing order for every row (flag, chip, mute, shared-from, children and their status,
+  // item, draft, age last) — the badges are built once and drawn in badgeOrder's order.
+  const badges: Record<string, ReactNode> = {};
+  if (needsYou)
+    badges.flag = (
+      <span className="sb-flag" role="img" aria-label={needsLabel} title={needsLabel}>
+        <IconFlag size={12} filled />
+      </span>
+    );
+  else if (flagReason !== undefined)
+    badges.flag = (
+      <span className="sb-flag" data-kind="quiet" data-testid="chat-flag" role="img" aria-label={`May still need you: ${flagReason}`} title={`May still need you: ${flagReason}`}>
+        <IconFlag size={12} filled />
+      </span>
+    );
+  if (chip)
+    badges.chip = (
+      <span className="sb-chip" data-kind={r.state?.kind} data-testid="chat-state-chip" title={chip}>
+        {chip}
+      </span>
+    );
+  if (r.muted)
+    badges.mute = (
+      <span className="sb-muted" data-testid="row-muted" role="img" aria-label="Muted: no notices or flags" title="Muted: no notices or flags">
+        <IconMute size={11} />
+      </span>
+    );
+  if (sharedBy)
+    badges.shared = (
+      <span className="sb-shared-from" data-testid="chat-shared-from" role="img" aria-label={`Shared by ${sharedBy.name}`} title={`Shared by ${sharedBy.name}`}>
+        <ProfileDisc name={sharedBy.name} colour={sharedBy.colour} size={14} />
+      </span>
+    );
+  if (!item.expanded && item.children > 0) {
+    badges.children = <span className="sb-agg" title={`${item.children} started chats under ${r.title}`}>{item.children}</span>;
+    if (childRunning > 0)
+      badges['child-running'] = (
+        <span className="sb-child-mark" data-testid="chat-agg-working" role="img" aria-label={`${childRunning} running underneath`} title={`${childRunning} running underneath`}>
+          <WheelMark size={20} state="working" className="sb-ind-wheel" />
+        </span>
+      );
+    if (childFlagged > 0)
+      badges['child-flag'] = (
+        <span className="sb-flag" data-kind="under" data-testid="chat-agg-flag" role="img" aria-label={`${childFlagged} underneath may need you`} title={`${childFlagged} underneath may need you`}>
+          <IconFlag size={12} filled />
+        </span>
+      );
+  }
+  if (item.itemChip) badges.item = <ItemChip item={item.itemChip} />;
+  if (r.hasDraft)
+    badges.draft = (
+      <span className="sb-draft" role="img" aria-label="Unsent draft" title="Unsent draft">
+        <IconEdit size={10} />
+      </span>
+    );
+  badges.age = <span className="sb-age">{age(r.updatedAt, now)}</span>;
+  const order = badgeOrder({
+    flag: needsYou || flagReason !== undefined,
+    chip: chip !== null,
+    muted: r.muted,
+    shared: sharedBy !== null,
+    children: item.children,
+    expanded: item.expanded,
+    childRunning: childRunning > 0,
+    childFlagged: childFlagged > 0,
+    itemChip: item.itemChip !== undefined,
+    draft: r.hasDraft,
+  });
   const wrap = useRef<HTMLDivElement>(null);
   return (
     <div
@@ -1345,39 +1415,9 @@ function ChatRow({
           <span className="sb-chat-title">{r.title}</span>
           {item.twoLine && <span className="sb-chat-sub">{project?.name ?? r.folderPath}</span>}
         </span>
-        {needsYou && (
-          <span className="sb-flag" role="img" aria-label={needsLabel} title={needsLabel}>
-            <IconFlag size={12} filled />
-          </span>
-        )}
-        {!needsYou && flagReason !== undefined && (
-          <span className="sb-flag" data-kind="quiet" data-testid="chat-flag" role="img" aria-label={`May still need you: ${flagReason}`} title={`May still need you: ${flagReason}`}>
-            <IconFlag size={12} filled />
-          </span>
-        )}
-        {r.muted && (
-          <span className="sb-muted" data-testid="row-muted" role="img" aria-label="Muted: no notices or flags" title="Muted: no notices or flags">
-            <IconMute size={11} />
-          </span>
-        )}
-        {sharedBy && (
-          <span className="sb-shared-from" data-testid="chat-shared-from" role="img" aria-label={`Shared by ${sharedBy.name}`} title={`Shared by ${sharedBy.name}`}>
-            <ProfileDisc name={sharedBy.name} colour={sharedBy.colour} size={14} />
-          </span>
-        )}
-        {!item.expanded && item.children > 0 && <span className="sb-agg">{item.children}</span>}
-        {item.itemChip && <ItemChip item={item.itemChip} />}
-        {chip && (
-          <span className="sb-chip" data-kind={r.state?.kind} data-testid="chat-state-chip" title={chip}>
-            {chip}
-          </span>
-        )}
-        {r.hasDraft && (
-          <span className="sb-draft" role="img" aria-label="Unsent draft" title="Unsent draft">
-            <IconEdit size={10} />
-          </span>
-        )}
-        <span className="sb-age">{age(r.updatedAt, now)}</span>
+        {order.map((k) => (
+          <Fragment key={k}>{badges[k]}</Fragment>
+        ))}
       </button>
       <span className="sb-row-actions">
         {item.itemChip && <ItemOpenButton item={item.itemChip} />}
