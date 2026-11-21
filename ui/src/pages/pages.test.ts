@@ -15,6 +15,9 @@ import {
 } from './protocol.ts';
 import { buildTheme, plainValue, THEME_VARIABLES } from './theme.ts';
 import { remoteTabKey, validPagePath, validRemote } from './open.ts';
+import { mergePages } from './list.ts';
+import type { PinnedPage, RemotePages } from './api.ts';
+import type { DeviceInfo, DevicesList } from '../devices/api.ts';
 
 const CHANNEL = 'chan1';
 const msg = (type: string, extra: Record<string, unknown> = {}) => ({ mark: MARK, channel: CHANNEL, type, ...extra });
@@ -230,6 +233,51 @@ test('page errors reach the strip at most once a second; a missing frame hears n
   gone.b.receive({ source: null, data: msg('ready') });
   gone.b.receive({ source: undefined, data: msg('ready') });
   assert.equal(gone.seen.ready, 0);
+});
+
+test('one Pages list: this PC first, other PCs as plain rows with a detail, deduped and filtered to the person', () => {
+  const pin = (id: string, profileId: string, path: string): PinnedPage => ({ id, profileId, path, title: id, chatId: null, pinnedAt: 1 });
+  const rem = (uid: string, name: string, pages: PinnedPage[], problem: { code: string; message: string } | null = null): RemotePages => ({ deviceUid: uid, name, pages, problem });
+  const dev = (uid: string, name: string, profiles?: { profileId: string; name: string; personId?: string | null }[]): DeviceInfo => ({
+    uid,
+    name,
+    person: null,
+    online: true,
+    lastSeenAt: null,
+    run: true,
+    isSelf: false,
+    ...(profiles ? { profiles } : {}),
+  });
+  const l: DevicesList = { self: 'me', devices: [dev('me', 'Desk', [{ profileId: 'pa', name: 'Me', personId: 'per-1' }]), dev('lap', 'Laptop', [{ profileId: 'qa', name: 'Me there', personId: 'per-1' }, { profileId: 'qb', name: 'Other', personId: 'per-2' }])] };
+  const shape = (rows: { page: PinnedPage; device: { uid: string; name: string } | null }[]) => rows.map((r) => `${r.page.id}${r.device ? `@${r.device.name}` : ''}`);
+
+  // A local pin, then the other PC's in one list; a second pin of the same path on that PC is
+  // dropped (the store keys pins by profile and path, and two profiles of one person can still
+  // pin the same file), and a pin of another person's profile is left out.
+  const m1 = mergePages(
+    [pin('l1', 'pa', 'C:/p/a.html')],
+    [rem('lap', 'Laptop', [pin('r1', 'qa', 'H:/p/b.html'), pin('r2', 'qa', 'H:/p/b.html'), pin('r3', 'qb', 'H:/p/c.html')]), rem('tab', 'Tablet', [pin('t1', '', 'H:/p/d.html')])],
+    l,
+    'per-1',
+  );
+  assert.deepEqual(shape(m1.rows), ['l1', 'r1@Laptop', 't1@Tablet'], 'legacy pins without a profile stay');
+  assert.deepEqual(m1.problems, []);
+
+  // A PC that could not be read is one muted line, never an empty group.
+  const m2 = mergePages([], [rem('lap', 'Laptop', [], { code: 'offline', message: 'Laptop is offline.' })], l, 'per-1');
+  assert.deepEqual(m2.rows, []);
+  assert.deepEqual(m2.problems.map((p) => `${p.name}: ${p.message}`), ['Laptop: Laptop is offline.']);
+
+  // With no person in play (every profile shown) nothing is filtered; a PC whose hello named no
+  // profiles keeps its pins all the same.
+  const m3 = mergePages([], [rem('lap', 'Laptop', [pin('r3', 'qb', 'H:/p/c.html')]), rem('old', 'Desk 2', [pin('o1', 'zz', 'H:/p/e.html')])], l, 'per-1');
+  assert.deepEqual(shape(m3.rows), ['r3@Laptop', 'o1@Desk 2'], 'an older peer that says nothing about profiles keeps its pins');
+  const m4 = mergePages([], [rem('lap', 'Laptop', [pin('r3', 'qb', 'H:/p/c.html')])], l, null);
+  assert.deepEqual(shape(m4.rows), ['r3@Laptop'], 'every profile: nothing is filtered');
+
+  // Devices are ordered by name, regardless of the order they were answered in.
+  const m5 = mergePages([], [rem('z', 'attic', [pin('a1', '', 'H:/a.html')]), rem('a', 'Desk PC', [pin('b1', '', 'H:/b.html')]), rem('m', 'Laptop', [pin('c1', '', 'H:/c.html')])], null, null);
+  assert.deepEqual(shape(m5.rows), ['a1@attic', 'b1@Desk PC', 'c1@Laptop'], 'names order regardless of case, like the device menu');
 });
 
 test('a page from another PC keeps its own tab key and survives a restore only whole', () => {

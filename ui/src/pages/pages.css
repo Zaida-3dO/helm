@@ -151,9 +151,8 @@
   white-space: nowrap;
 }
 
-.pg-list-device {
-  margin: 14px 0 6px;
-  font-size: 12px;
-  font-weight: 600;
+/* The PC a pin lives on, a detail on the row rather than a group of its own. */
+.pg-list-on {
   color: var(--text-muted);
+  font-style: italic;
 }

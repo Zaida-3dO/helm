@@ -1,8 +1,10 @@
 // The sidebar's Pages view, as the tile row and its More menu share it (the shape of
 // `useTasksEntry`): the count of pages pinned by the active profile for the tile's badge, and the
-// dialog that lists them. Clicking one opens it as a tab in the side panel; Unpin removes it from
-// the list (its saved state stays, so pinning it again finds it as it was). The mounting sidebar
-// passes the active profile's id, or nothing for every page.
+// dialog that lists them. The list is one: this PC's pins, then the paired PCs', de-duplicated,
+// with the PC as a small detail on the row and never a group of its own. Clicking one opens it as
+// a tab in the side panel; Unpin removes it from the list (its saved state stays, so pinning it
+// again finds it as it was). The mounting sidebar passes the active profile's id, or nothing for
+// every page.
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { Api } from '../api/client.ts';
@@ -11,14 +13,17 @@ import { Button, Dialog, toast } from '../ui/index.ts';
 import { IconUnpin } from '../ui/icons.tsx';
 import { pageOps } from './api.ts';
 import type { PinnedPage, RemotePages } from './api.ts';
+import { mergePages } from './list.ts';
 import { openPageTab, openRemotePageTab } from './open.ts';
 import { displayPath, shortPath } from '../panel/viewer/paths.ts';
+import { devicesStoreFor } from '../devices/store.ts';
+import { profilesStoreFor } from '../profiles/store.ts';
 
 export interface PagesEntry {
   /** Pages pinned by the active profile, for the tile's badge. */
   count: number;
   open: boolean;
-  /** Open or close the dialog (the tile's and the More menu's action). */
+  /** Open or close the list (the tile's and the More menu's action). */
   toggle: () => void;
   /** The dialog, mounted by whoever holds the entry. */
   dialog: ReactNode;
@@ -60,13 +65,11 @@ export function usePagesEntry(api: Api, bus: EventBus, profileId?: string | null
     };
   }, [ops, open]);
 
-  const showRemote = (device: RemotePages, p: PinnedPage) => {
-    if (!openRemotePageTab(device.deviceUid, p)) {
-      toast.show({ kind: 'error', text: 'The side panel has no room for another tab.' });
-      return;
-    }
-    setOpen(false);
-  };
+  // One list: this PC's pins, then the other PCs', deduped and filtered to the acting person.
+  const merged = useMemo(() => {
+    const personId = profilesStoreFor(api, bus).snapshot.view?.profiles.find((p) => p.id === profileId)?.hubPersonId ?? null;
+    return mergePages(pages ?? [], remote ?? [], devicesStoreFor(api, bus).snapshot.list, personId);
+  }, [api, bus, pages, remote, profileId]);
 
   const show = (p: PinnedPage) => {
     if (!openPageTab(p.path)) {
@@ -76,54 +79,60 @@ export function usePagesEntry(api: Api, bus: EventBus, profileId?: string | null
     setOpen(false);
   };
 
+  const showRemote = (deviceUid: string, p: PinnedPage) => {
+    if (!openRemotePageTab(deviceUid, p)) {
+      toast.show({ kind: 'error', text: 'The side panel has no room for another tab.' });
+      return;
+    }
+    setOpen(false);
+  };
+
   const dialog = open ? (
     <Dialog title="Pages" onClose={() => setOpen(false)} padded testId="pages-list">
       {error && <p className="pg-handoff-error">{error}</p>}
-      {pages && pages.length === 0 && remote && remote.every((d) => d.pages.length === 0) && (
+      {pages !== null && remote !== null && merged.rows.length === 0 && merged.problems.length === 0 && (
         <p className="pg-handoff-note" data-testid="pages-empty">
           No pages are pinned yet. Ask an agent to build you a page, or open an .html file and pin it.
         </p>
       )}
       <ul className="pg-list">
-        {(pages ?? []).map((p) => (
-          <li key={p.id} className="pg-list-row">
-            <button type="button" className="pg-list-open" onClick={() => show(p)} title={`${p.title}\n${displayPath(p.path)}`} data-testid="pages-row">
-              <span className="pg-list-title">{p.title}</span>
-              <span className="pg-list-path">{shortPath(p.path)}</span>
-            </button>
-            <Button
-              variant="icon"
-              label={`Unpin ${p.title}`}
-              onClick={() =>
-                void ops
-                  .unpin(p.id)
-                  .then(refresh)
-                  .catch((e: unknown) => toast.show({ kind: 'error', text: e instanceof Error ? e.message : String(e) }))
-              }
+        {merged.rows.map(({ page: p, device }) => (
+          <li key={device ? `${device.uid}:${p.id}` : p.id} className="pg-list-row">
+            <button
+              type="button"
+              className="pg-list-open"
+              onClick={() => (device ? showRemote(device.uid, p) : show(p))}
+              title={device ? `${p.title}\nOn ${device.name}\n${displayPath(p.path)}` : `${p.title}\n${displayPath(p.path)}`}
+              data-testid={device ? 'pages-remote-row' : 'pages-row'}
             >
-              <IconUnpin size={14} />
-            </Button>
+              <span className="pg-list-title">{p.title}</span>
+              <span className="pg-list-path">
+                {shortPath(p.path)}
+                {device && <span className="pg-list-on" data-testid="pages-row-on"> · on {device.name}</span>}
+              </span>
+            </button>
+            {!device && (
+              <Button
+                variant="icon"
+                label={`Unpin ${p.title}`}
+                onClick={() =>
+                  void ops
+                    .unpin(p.id)
+                    .then(refresh)
+                    .catch((e: unknown) => toast.show({ kind: 'error', text: e instanceof Error ? e.message : String(e) }))
+                }
+              >
+                <IconUnpin size={14} />
+              </Button>
+            )}
           </li>
         ))}
       </ul>
-      {(remote ?? [])
-        .filter((d) => d.pages.length > 0 || d.problem)
-        .map((d) => (
-          <section key={d.deviceUid} data-testid="pages-device">
-            <h3 className="pg-list-device">On {d.name}</h3>
-            {d.problem && <p className="pg-handoff-note">{d.problem.message}</p>}
-            <ul className="pg-list">
-              {d.pages.map((p) => (
-                <li key={p.id} className="pg-list-row">
-                  <button type="button" className="pg-list-open" onClick={() => showRemote(d, p)} title={`${p.title}\n${displayPath(p.path)}`} data-testid="pages-remote-row">
-                    <span className="pg-list-title">{p.title}</span>
-                    <span className="pg-list-path">{shortPath(p.path)}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </section>
-        ))}
+      {merged.problems.map((pr) => (
+        <p key={pr.uid} className="pg-handoff-note" data-testid="pages-device-problem">
+          {pr.name}: {pr.message}
+        </p>
+      ))}
     </Dialog>
   ) : null;
 
