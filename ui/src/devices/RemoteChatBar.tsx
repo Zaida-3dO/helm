@@ -27,7 +27,13 @@ export function typedPort(text: string): number | null {
   return n >= 1 && n <= 65535 ? n : null;
 }
 
-/** The ports forwarded to this PC, kept fresh from the host's event. */
+/** How often the forward lists are read again while shown, so open connections and idle time stay current. */
+const FORWARDS_REFRESH_MS = 30_000;
+
+/**
+ * The ports forwarded to this PC, kept fresh from the host's event. The event only comes when a
+ * forward starts or ends, so the list is also read again every `FORWARDS_REFRESH_MS` while shown.
+ */
 export function useForwards(): Forward[] {
   const shell = useShell();
   const ops = useMemo(() => deviceOps(shell.api), [shell.api]);
@@ -41,9 +47,11 @@ export function useForwards(): Forward[] {
       );
     void load();
     const off = shell.bus.on(FORWARDS_CHANGED, () => void load());
+    const timer = setInterval(() => void load(), FORWARDS_REFRESH_MS);
     return () => {
       live = false;
       off();
+      clearInterval(timer);
     };
   }, [ops, shell.bus]);
   return forwards;
