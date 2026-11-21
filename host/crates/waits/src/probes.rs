@@ -77,6 +77,38 @@ impl Probes for RealProbes {
                             )
                             .unwrap_or(false);
                     }
+                    // A message that was sent and has not opened its turn yet (it is saved, or
+                    // waiting for capacity), and a roll over that has started its successor but
+                    // not yet archived this session: in both the chat is about to work, so an
+                    // idle read now would answer before the work began. Each is read apart, so a
+                    // database without one of the tables still answers the rest.
+                    if !o.busy && !o.archived {
+                        let recent = helm_core::now_ms() - helm_chats::runtime::STOP_HOLD_BUSY_MS;
+                        let exists = |sql: &str, recent: Option<i64>| {
+                            match recent {
+                                Some(r) => tx.query_row(sql, rusqlite::params![chat_id, r], |r| {
+                                    r.get::<_, bool>(0)
+                                }),
+                                None => tx.query_row(sql, [chat_id], |r| r.get::<_, bool>(0)),
+                            }
+                            .unwrap_or(false)
+                        };
+                        o.busy = exists(
+                            "SELECT EXISTS(SELECT 1 FROM submissions
+                             WHERE chat_id = ?1 AND state IN ('saved', 'queued', 'dispatching')
+                               AND created_at > ?2)",
+                            Some(recent),
+                        ) || exists(
+                            "SELECT EXISTS(SELECT 1 FROM chat_dispatch_holds
+                             WHERE chat_id = ?1 AND reason <> 'manual')",
+                            None,
+                        ) || exists(
+                            "SELECT EXISTS(SELECT 1 FROM chat_succession s
+                             JOIN chats n ON n.id = s.chat_id
+                             WHERE s.predecessor_id = ?1 AND n.archived = 0)",
+                            None,
+                        );
+                    }
                     // A session a roll over archived carries on in the newest session of its
                     // stack: name it so a wait on it can follow. Read apart, so a database
                     // without the stack columns simply says the chat does not carry on.

@@ -946,6 +946,28 @@ mod tests {
         assert!(!hold(None));
         assert!(real.chat("nope").unwrap().is_none());
 
+        // A message sent to it that has not opened its turn yet reads as busy while it is
+        // recent, and not once its turn has started; so does a chat whose roll over has started
+        // a successor but not yet archived it, until the successor is gone.
+        let busy_after = |sql: String| {
+            db.write(|tx| tx.execute_batch(&sql)).unwrap();
+            real.chat("c7").unwrap().unwrap().busy
+        };
+        assert!(busy_after(format!(
+            "INSERT INTO submissions(id, chat_id, text, state, created_at)
+             VALUES ('sent', 'c7', 'hi', 'saved', {now})"
+        )));
+        assert!(!busy_after(
+            "UPDATE submissions SET state = 'complete' WHERE id = 'sent'".into()
+        ));
+        assert!(busy_after(
+            "INSERT INTO chats(id, project_id, status, created_at, updated_at)
+             VALUES ('c7next', 'p', 'idle', 1, 1);
+             INSERT INTO chat_succession(chat_id, predecessor_id) VALUES ('c7next', 'c7');"
+                .into()
+        ));
+        assert!(!busy_after("DELETE FROM chats WHERE id = 'c7next'".into()));
+
         // The same read answers the questions the idle rules ask: nothing of its own is
         // working yet and no turn has closed, so c7 starts plain.
         let plain = real.chat("c7").unwrap().unwrap();
