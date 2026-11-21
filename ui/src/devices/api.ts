@@ -80,7 +80,7 @@ export interface ThisDevice {
 }
 
 /**
- * A port of the PC a chat runs on, forwarded to this PC: `localhost:<localPort>` here reaches
+ * A port of the PC a chat runs on, forwarded to this PC: `127.0.0.1:<localPort>` here reaches
  * `localhost:<port>` there, through the hub line. It lives only while both PCs run.
  */
 export interface Forward {
@@ -109,7 +109,7 @@ export const FORWARDS_CHANGED = 'devices_forwards_changed';
  */
 export function forwardAddress(f: Pick<Forward, 'localPort'>): string | null {
   const p = f.localPort;
-  return Number.isInteger(p) && p >= 1 && p <= 65535 ? `http://localhost:${p}/` : null;
+  return Number.isInteger(p) && p >= 1 && p <= 65535 ? `http://127.0.0.1:${p}/` : null;
 }
 
 /** The preference that remembers which computer's chats the sidebar shows. */

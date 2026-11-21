@@ -57,14 +57,14 @@ test('forwards: one row per port in plain words, by PC then port, and only loopb
   assert.deepEqual(
     forwardRows(list, NOW).map((r) => [r.forward.forwardId, r.line, r.use]),
     [
-      ['c', 'Port 3000 on Attic opens here at localhost:3000', '1 connection open'],
-      ['d', 'Port 4000 on Attic opens here at localhost:4000', 'idle'],
-      ['a', 'Port 5173 on Desk opens here at localhost:5173', 'idle for 5 minutes'],
-      ['b', 'Port 8080 on Desk (API) opens here at localhost:8081 (8080 was taken here)', '2 connections open'],
+      ['c', 'Port 3000 on Attic opens here at 127.0.0.1:3000', '1 connection open'],
+      ['d', 'Port 4000 on Attic opens here at 127.0.0.1:4000', 'idle'],
+      ['a', 'Port 5173 on Desk opens here at 127.0.0.1:5173', 'idle for 5 minutes'],
+      ['b', 'Port 8080 on Desk (API) opens here at 127.0.0.1:8081 (8080 was taken here)', '2 connections open'],
     ],
   );
   assert.deepEqual(forwardRows(list, NOW, 'c1').map((r) => r.forward.forwardId), ['a', 'b']);
   assert.deepEqual(forwardRows([], NOW), []);
   // The browser gets an address built here, never the host's words as written.
-  assert.deepEqual([5173, 0, 70000, 1.5].map((localPort) => forwardAddress({ localPort })), ['http://localhost:5173/', null, null, null]);
+  assert.deepEqual([5173, 0, 70000, 1.5].map((localPort) => forwardAddress({ localPort })), ['http://127.0.0.1:5173/', null, null, null]);
 });

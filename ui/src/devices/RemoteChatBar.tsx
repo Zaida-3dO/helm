@@ -97,7 +97,7 @@ export function RemoteChatBar({ state, chatId }: { state: RemoteChatState; chatI
               :{f.port}
               {f.localPort !== f.port && ` → :${f.localPort}`}
             </span>
-            <button type="button" className="remote-fwd-btn" data-testid="remote-forward-open" title={`Open localhost:${f.localPort} in the browser`} onClick={() => openForward(f, chatId)}>
+            <button type="button" className="remote-fwd-btn" data-testid="remote-forward-open" title={`Open 127.0.0.1:${f.localPort} in the browser`} onClick={() => openForward(f, chatId)}>
               Open
             </button>
             <button type="button" className="remote-fwd-btn" data-testid="remote-forward-stop" title="Stop forwarding this port" onClick={() => stop(f)}>

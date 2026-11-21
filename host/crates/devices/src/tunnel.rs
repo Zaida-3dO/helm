@@ -282,7 +282,7 @@ impl Fwd {
             device_uid: self.peer.clone(),
             port: self.port,
             local_port: self.local_port,
-            url: format!("http://localhost:{}/", self.local_port),
+            url: format!("http://127.0.0.1:{}/", self.local_port),
             title: self.title.clone(),
             streams: self.streams.len(),
             opened_at: self.opened_at,
@@ -1250,7 +1250,7 @@ mod tests {
         let info = forward(&p).await;
         // The server's port was free here, so the link works as written.
         assert_eq!(info.local_port, info.port);
-        assert_eq!(info.url, format!("http://localhost:{}/", info.port));
+        assert_eq!(info.url, format!("http://127.0.0.1:{}/", info.port));
         assert_eq!(p.laptop.viewing("Desk", info.port), Some(info.clone()));
 
         // A megabyte out and back through the window, then the browser's end of input closes the

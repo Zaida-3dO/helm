@@ -45,9 +45,9 @@ export function otherDevices(devices: DeviceRow[]): DeviceRow[] {
     .sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
 }
 
-/** "Port 5173 on Desk opens here at localhost:5173", with the title when the agent gave one. */
+/** "Port 5173 on Desk opens here at 127.0.0.1:5173", with the title when the agent gave one. */
 export function forwardLine(f: Pick<Forward, 'port' | 'localPort' | 'deviceName' | 'title'>): string {
-  const where = f.localPort === f.port ? `localhost:${f.localPort}` : `localhost:${f.localPort} (${f.port} was taken here)`;
+  const where = f.localPort === f.port ? `127.0.0.1:${f.localPort}` : `127.0.0.1:${f.localPort} (${f.port} was taken here)`;
   const title = f.title.trim() ? ` (${f.title.trim()})` : '';
   return `Port ${f.port} on ${f.deviceName}${title} opens here at ${where}`;
 }
