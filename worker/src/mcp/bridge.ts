@@ -24,6 +24,7 @@ import {
   oneControl,
   readControl,
   stepClass,
+  urlNever,
   withoutGrant,
   type HoldEvent,
 } from "./browser.ts";
@@ -233,6 +234,12 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
   const waitingSteps = new Map<string, Waiting>();
   const neverSteps = new Set<string>();
   const stepKey = (serverId: string, leaseKey: string, ref: string) => `${serverId}\u0000${leaseKey}\u0000${ref}`;
+  /** A refused-for-good entry belongs to the reference as it was numbered on the page then:
+   * a navigation renumbers the references, and a released lease has no page at all. */
+  const clearNever = (serverId: string, leaseKey: string) => {
+    const p = `${serverId}\u0000${leaseKey}\u0000`;
+    for (const k of [...neverSteps]) if (k.startsWith(p)) neverSteps.delete(k);
+  };
   const waitingFor = (key: string) =>
     [...waitingSteps.values()].some((w) => stepKey(w.entry.server.id, w.leaseKey, w.ref) === key && now() - w.at <= capMs);
 
@@ -269,10 +276,25 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
       } catch {
         /* not a url worth naming */
       }
+      clearNever(e.server.id, lease);
+    }
+    if ((tool === "browser_read" || tool === "browser_status") && !r.isError) {
+      // The page's own answer keeps the lease's address current: a link click or a script
+      // redirect moves the tab between navigations, and a card must name the site it is on.
+      const u = acceptedValue(textOf(r))?.url;
+      if (typeof u === "string") {
+        try {
+          leaseHosts.set(key, new URL(u).host);
+          leaseUrls.set(key, u);
+        } catch {
+          /* not a url worth naming */
+        }
+      }
     }
     if (tool === "browser_release" && !r.isError) {
       leaseUrls.delete(key);
       leasePurposes.delete(key);
+      clearNever(e.server.id, lease);
     }
     if (holdFinished(tool, args, r.isError)) {
       stopHold(key);
@@ -304,26 +326,35 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
     const s = e.session;
     if (!step || !lease || !s || s.closed || !opts.hostRequest) return undefined;
     const key = holdKey(e.server.id, lease);
-    let host = "";
-    try {
-      host = new URL(leaseUrls.get(key) ?? "").hostname;
-    } catch {
-      /* the page's site is unknown: no card */
-    }
     const note = (why: string) => ({ content: [...r.content, { type: "text", text: `[Helm] ${why}` }], isError: true });
     // What the page says the control is, read the way the broker reads it.
     let control: ReturnType<typeof readControl> = null;
+    let pageUrl: string | undefined;
     try {
       const read = formatResult(await s.callTool("browser_read", { lease_key: lease, find: controlFinder(step.ref), inline: true, limit: 16_000 }), e.red, limits);
-      const inlined = acceptedValue(textOf(read))?.inlined;
+      const val = acceptedValue(textOf(read));
+      const u = val?.url;
+      if (typeof u === "string" && u) pageUrl = u;
+      const inlined = val?.inlined;
       const text = Array.isArray(inlined) ? inlined.map((x) => String((x as Json)?.text ?? "")).join("\n") : "";
       control = readControl(text, step.ref);
     } catch {
       /* unread: no card */
     }
+    // The site as the broker's own page answer last said it, falling back to where the lease
+    // last navigated: a card must not name a tab the page has already left.
+    const where = pageUrl ?? leaseUrls.get(key);
+    let host = "";
+    try {
+      host = new URL(where ?? "").hostname;
+    } catch {
+      /* the page's site is unknown: no card */
+    }
     if (!control || !host) return undefined;
-    const cls = stepClass(control.name, control.role, step.value, control.pageSecret);
-    if (cls === "never") {
+    const cls = stepClass(control.name, control.role, step.value, control.pageSecret, control.text);
+    // The page's own address judges too: a button that only says "Confirm" on a checkout page
+    // is still a checkout step.
+    if (cls === "never" || urlNever(where)) {
       neverSteps.add(stepKey(e.server.id, lease, step.ref));
       return note(NEVER_STEP);
     }

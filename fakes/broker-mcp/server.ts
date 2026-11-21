@@ -29,6 +29,9 @@ type Json = Record<string, unknown>;
 interface Control {
   role: string;
   name: string;
+  /** The text the control shows when it differs from its accessible name (an icon button with
+   * an aria-label, say). The real broker knows this and gates on it. */
+  text?: string;
   inputType?: string;
   autocomplete?: string;
 }
@@ -36,6 +39,11 @@ interface Control {
 interface Page {
   /** The host the tab arrives at, whatever was asked for. */
   host: string;
+  /** The path the tab arrives at, after redirects. */
+  path?: string;
+  /** Where the tab stands now, if the page moved on its own since the navigation. */
+  hostNow?: string;
+  pathNow?: string;
   actSites: string[];
   controls: Record<string, Control>;
   /** The page holds a password or card field (a submit over it is consequential). */
@@ -87,7 +95,8 @@ function verdict(grant: string, t: { leaseKey: string; ref: string; accessibleNa
 
 function gateAct(page: Page, args: Json): Json {
   const ref = typeof args.target === "string" ? args.target : "";
-  const grant = typeof args.owner_grant === "string" ? args.owner_grant : undefined;
+  // The real broker reads both spellings of the grant argument.
+  const grant = typeof args.owner_grant === "string" ? args.owner_grant : typeof args.ownerGrant === "string" ? args.ownerGrant : undefined;
   const c = page.controls[ref];
   const log = (outcome: string) => cfg.acts && fs.appendFileSync(cfg.acts, `${JSON.stringify({ ref, action: args.action, grant: grant !== undefined, outcome })}\n`);
   const no = (rule: string, message: string) => {
@@ -104,13 +113,13 @@ function gateAct(page: Page, args: Json): Json {
       leaseKey: String(args.lease_key ?? ""),
       ref,
       accessibleName: c.name,
-      urlHost: page.host,
+      urlHost: page.hostNow ?? page.host,
       verb: String(args.action ?? ""),
       value: typeof args.value === "string" ? args.value : undefined,
     });
     if (v !== "valid" && v !== "no_secret") return no("attached.grant_invalid", `The owner grant did not verify (${v}); the step is refused.`);
   }
-  const seen = new Set([...words(c.name), ...words(c.role)]);
+  const seen = new Set([...words(c.name), ...words(c.role), ...words(c.text)]);
   const consequential = CONSEQUENCE.some((w) => seen.has(w)) || (!!page.secretField && c.inputType === "submit");
   if (consequential && grant === undefined) return no("attached.needs_owner", "This step is consequential, so the owner does it: call browser_sign_in with what to press.");
   log("acted");
@@ -118,19 +127,23 @@ function gateAct(page: Page, args: Json): Json {
 }
 
 function gateTool(page: Page, name: string, args: Json): Json | undefined {
+  const at = `https://${page.host}${page.path ?? "/aisles"}`;
+  const atNow = `https://${page.hostNow ?? page.host}${page.pathNow ?? page.path ?? "/aisles"}`;
   switch (name) {
     case "browser_claim":
       return accepted({ key: "L1" });
     case "browser_navigate":
-      return accepted({ url: `https://${page.host}/aisles` });
+      return accepted({ url: at });
     case "browser_act":
       return gateAct(page, args);
     case "browser_read": {
       const find = typeof args.find === "string" ? args.find : "";
       const re = find.startsWith("/") && find.endsWith("/") ? new RegExp(find.slice(1, -1)) : null;
-      const lines = Object.entries(page.controls).map(([ref, c]) => `- ${c.role} ${JSON.stringify(c.name)} [ref=${ref}]`);
+      const lines = Object.entries(page.controls).map(
+        ([ref, c]) => `- ${c.role} ${JSON.stringify(c.name)}${c.text === undefined ? "" : ` [text=${JSON.stringify(c.text)}]`} [ref=${ref}]`,
+      );
       const text = lines.filter((l) => !re || re.test(l)).join("\n");
-      return accepted({ artifacts: ["snapshot"], inlined: [{ artifact: "snapshot", text }] });
+      return accepted({ url: atNow, artifacts: ["snapshot"], inlined: [{ artifact: "snapshot", text }] });
     }
     case "browser_capture": {
       if (!page.artifacts) return refused("capture.unavailable", "no capture here");

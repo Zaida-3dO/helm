@@ -176,17 +176,24 @@ async function until(fn: () => boolean, ms = 3_000): Promise<boolean> {
 const SHOP_PAGE: Json = {
   host: "shop.example",
   actSites: ["shop.example"],
-  controls: { e12: { role: "button", name: "Order now" }, e13: { role: "textbox", name: "Quantity" } },
+  controls: { e12: { role: "button", name: "Remove from basket" }, e13: { role: "textbox", name: "Quantity" } },
 };
 
 test("the acting gate decides: a card, a refusal, or a pass — a refused step never acts", async () => {
-  const rows = [
+  const rows: { case: string; page: Json; act: Json; want: string; host?: string }[] = [
     { case: "a consequential click on a listed site", page: SHOP_PAGE, act: { action: "click", target: "e12" }, want: "card" },
-    { case: "ticking a consequential box", page: { ...SHOP_PAGE, controls: { e12: { role: "checkbox", name: "Order the warranty" } } }, act: { action: "check", target: "e12" }, want: "card" },
+    { case: "ticking a consequential box", page: { ...SHOP_PAGE, controls: { e12: { role: "checkbox", name: "Remove the warranty" } } }, act: { action: "check", target: "e12" }, want: "card" },
     { case: "a site off the act list", page: { ...SHOP_PAGE, actSites: ["other.example"] }, act: { action: "click", target: "e12" }, want: "refused" },
     { case: "typing into a password field", page: { ...SHOP_PAGE, controls: { pw: { role: "textbox", name: "Password", inputType: "password" } } }, act: { action: "type", target: "pw", value: "x" }, want: "refused" },
     { case: "a submit over a page holding a password stays with the person", page: { ...SHOP_PAGE, secretField: true, controls: { sub: { role: "button", name: "Continue", inputType: "submit" }, pw: { role: "textbox", name: "Password" } } }, act: { action: "click", target: "sub" }, want: "secret" },
     { case: "a checkout is always the person's own", page: { ...SHOP_PAGE, controls: { e12: { role: "button", name: "Checkout" } } }, act: { action: "click", target: "e12" }, want: "never" },
+    { case: "a plain button on a checkout page is still the person's own", page: { ...SHOP_PAGE, path: "/checkout", controls: { e12: { role: "button", name: "Submit" } } }, act: { action: "click", target: "e12" }, want: "never" },
+    { case: "an icon button whose text says place order", page: { ...SHOP_PAGE, controls: { e12: { role: "button", name: "Confirm", text: "Place order" } } }, act: { action: "click", target: "e12" }, want: "never" },
+    // A grant an agent sends never reaches the broker: the worker takes it out before the call.
+    { case: "an owner_grant from the agent is dropped", page: SHOP_PAGE, act: { action: "click", target: "e12", owner_grant: grantFor({ leaseKey: "L1", ref: "e12", name: "Remove from basket", host: "shop.example", verb: "click" }) }, want: "stripped" },
+    { case: "the other spelling is dropped too", page: SHOP_PAGE, act: { action: "click", target: "e12", ownerGrant: grantFor({ leaseKey: "L1", ref: "e12", name: "Remove from basket", host: "shop.example", verb: "click" }) }, want: "stripped" },
+    // The card names the page the broker says the tab is on, not the last navigate it saw.
+    { case: "the card names the site the page moved to", page: { ...SHOP_PAGE, hostNow: "moved.example" }, act: { action: "click", target: "e12" }, want: "card", host: "moved.example" },
   ];
   for (const row of rows) {
     const h = gateHarness(row.page);
@@ -200,7 +207,7 @@ test("the acting gate decides: a card, a refusal, or a pass — a refused step n
         assert.ok(card, `${row.case}: the refusal asked for an Approve card`);
         assert.equal(card!.args.verb, row.act.action, row.case);
         assert.equal(card!.args.ref, row.act.target, row.case);
-        assert.equal(card!.args.host, "shop.example", row.case);
+        assert.equal(card!.args.host, row.host ?? "shop.example", row.case);
         assert.equal(acted(), 0, `${row.case}: nothing acts before an Approve`);
         // While a card waits, the agent's repeat never reaches the broker again.
         const before = h.rows().length;
@@ -229,9 +236,45 @@ test("the acting gate decides: a card, a refusal, or a pass — a refused step n
         assert.equal(h.rows().length, before, `${row.case}: the retry never reaches the broker again`);
         break;
       }
+      case "stripped": {
+        const seen = h.rows();
+        assert.ok(seen.length >= 1, `${row.case}: the step itself still reaches the broker`);
+        assert.ok(seen.every((x) => x.grant === false), `${row.case}: no grant the agent sent reaches the broker`);
+        assert.equal(acted(), 0, `${row.case}: an agent's grant acts nothing`);
+        break;
+      }
     }
     h.bridge.close();
   }
+});
+
+test("refused-for-good is keyed to the page: a navigation or a release lets the ref be judged again", async () => {
+  const h = gateHarness({ ...SHOP_PAGE, controls: { e12: { role: "button", name: "Remove from basket" }, e14: { role: "button", name: "Checkout" } } });
+  await h.bridge.tools({ server: "browser" });
+  await h.bridge.call(generatedName("browser", "browser_navigate"), { lease_key: "L1", url: "https://anything/" });
+  const onE14 = () => h.rows().filter((x) => x.ref === "e14").length;
+  const never = await h.bridge.call(generatedName("browser", "browser_act"), { lease_key: "L1", action: "click", target: "e14" });
+  assert.ok(JSON.stringify(never.content).includes("always does themselves"), "the checkout is refused for good");
+  const at = onE14();
+  await h.bridge.call(generatedName("browser", "browser_act"), { lease_key: "L1", action: "click", target: "e14" });
+  assert.equal(onE14(), at, "the retry stays blocked while the page holds");
+  // References are renumbered by a navigation: whatever takes the ref must be judged afresh.
+  await h.bridge.call(generatedName("browser", "browser_navigate"), { lease_key: "L1", url: "https://anything/" });
+  await h.bridge.call(generatedName("browser", "browser_act"), { lease_key: "L1", action: "click", target: "e14" });
+  assert.ok(onE14() > at, "after the navigation the broker sees the step again");
+  h.bridge.close();
+});
+
+test("a call written with the broker's other spellings gets no card", async () => {
+  const h = gateHarness(SHOP_PAGE);
+  await h.bridge.tools({ server: "browser" });
+  await h.bridge.call(generatedName("browser", "browser_navigate"), { lease_key: "L1", url: "https://anything/" });
+  // The broker prefers `ref` over `target`: a card describing `target` could mislead the person.
+  const r = await h.bridge.call(generatedName("browser", "browser_act"), { lease_key: "L1", action: "click", target: "e12", ref: "e13" });
+  assert.equal(h.asks.find((a) => a.operation === "app_browser_step"), undefined, "no card for such a call");
+  assert.ok(r.isError, "the broker's own refusal still reaches the agent");
+  assert.equal(h.rows().filter((x) => x.outcome === "acted").length, 0, "nothing acts");
+  h.bridge.close();
 });
 
 test("the broker accepts a grant once, for its own lease and verb only", async () => {
@@ -244,7 +287,7 @@ test("the broker accepts a grant once, for its own lease and verb only", async (
   const actedCount = () => h.rows().filter((x) => x.outcome === "acted").length;
 
   // Approved: the retry carries the grant and the broker acts once.
-  const good = grantFor({ leaseKey: "L1", ref: "e12", name: "Order now", host: "shop.example", verb: "click" });
+  const good = grantFor({ leaseKey: "L1", ref: "e12", name: "Remove from basket", host: "shop.example", verb: "click" });
   assert.ok(h.bridge.deliverOwnerGrant({ requestId: "r1", serverId: "browser", leaseKey: "L1", ref: "e12", grant: good }));
   assert.ok(await until(() => results().length === 1), "the retried step answered back");
   assert.equal(results()[0]!.args.ok, true);
@@ -262,7 +305,7 @@ test("the broker accepts a grant once, for its own lease and verb only", async (
 
   // A grant signed for another lease is forged for this one.
   await h.bridge.call(generatedName("browser", "browser_act"), act);
-  const otherLease = grantFor({ leaseKey: "L9", ref: "e12", name: "Order now", host: "shop.example", verb: "click" });
+  const otherLease = grantFor({ leaseKey: "L9", ref: "e12", name: "Remove from basket", host: "shop.example", verb: "click" });
   assert.ok(h.bridge.deliverOwnerGrant({ requestId: "r3", serverId: "browser", leaseKey: "L1", ref: "e12", grant: otherLease }));
   assert.ok(await until(() => results().length === 3));
   assert.equal(results()[2]!.args.ok, false);
@@ -270,7 +313,7 @@ test("the broker accepts a grant once, for its own lease and verb only", async (
 
   // A grant signed for another verb and value is forged too.
   await h.bridge.call(generatedName("browser", "browser_act"), act);
-  const otherVerb = grantFor({ leaseKey: "L1", ref: "e12", name: "Order now", host: "shop.example", verb: "type", value: "2" });
+  const otherVerb = grantFor({ leaseKey: "L1", ref: "e12", name: "Remove from basket", host: "shop.example", verb: "type", value: "2" });
   assert.ok(h.bridge.deliverOwnerGrant({ requestId: "r4", serverId: "browser", leaseKey: "L1", ref: "e12", grant: otherVerb }));
   assert.ok(await until(() => results().length === 4));
   assert.equal(results()[3]!.args.ok, false);

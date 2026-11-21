@@ -34,7 +34,10 @@ fn a_grant_matches_the_brokers_signature() {
             value: Some("3"),
         },
     );
-    assert_eq!(typed, "1700000000.wyJDqpYJriIfDpLIvTkve8-8jISSy_8NIpVJcTHzZ64");
+    assert_eq!(
+        typed,
+        "1700000000.wyJDqpYJriIfDpLIvTkve8-8jISSy_8NIpVJcTHzZ64"
+    );
     assert_ne!(g, typed, "a grant names its verb and value");
     let other_lease = mint(
         "k3y",
@@ -302,7 +305,11 @@ fn which_steps_get_a_card() {
         },
         Row {
             case: "a never word in the role, not the name",
-            args: with(ask("click", "Add to basket"), "role", json!("button pay now")),
+            args: with(
+                ask("click", "Add to basket"),
+                "role",
+                json!("button pay now"),
+            ),
             refused: Some(NEVER),
         },
         Row {
@@ -318,6 +325,11 @@ fn which_steps_get_a_card() {
         Row {
             case: "place order, any order",
             args: ask("click", "Order — place now"),
+            refused: Some(NEVER),
+        },
+        Row {
+            case: "a button that only says Order",
+            args: ask("click", "Order"),
             refused: Some(NEVER),
         },
         Row {

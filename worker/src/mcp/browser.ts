@@ -118,12 +118,25 @@ function hits(c: WordClass, seen: Set<string>): boolean {
 
 export type StepClass = "never" | "secret" | "ask";
 
-/** Where a step stands before any card: always the person's own, a sign-in or secret, or askable. */
-export function stepClass(name: string, role: string, value: string | undefined, pageSecret: boolean): StepClass {
-  const seen = new Set([...tokens(name), ...tokens(role)]);
+/** Where a step stands before any card: always the person's own, a sign-in or secret, or askable.
+ * `text` is what the control shows when that differs from its accessible name, if the broker
+ * reports it. */
+export function stepClass(name: string, role: string, value: string | undefined, pageSecret: boolean, text?: string): StepClass {
+  const seen = new Set([...tokens(name), ...tokens(role), ...tokens(text)]);
   if (hits(WORDS.never, seen)) return "never";
   if (hits(WORDS.secret, seen) || (value ?? "").includes("{{secret:") || pageSecret) return "secret";
   return "ask";
+}
+
+/** True when the page's own address says the step is the person's own — a checkout, a payment
+ * or an order page. A false positive only refuses, which is the safe direction. */
+export function urlNever(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    return hits(WORDS.never, new Set(tokens(new URL(url).pathname)));
+  } catch {
+    return false;
+  }
 }
 
 /** A broker reference: letters, digits, `_` and `-`. */
@@ -134,6 +147,9 @@ export function plainRef(ref: unknown): ref is string {
 /** The control the call names, when it is one a card can approve: a verb on one reference. */
 export function oneControl(args: Record<string, unknown>): { verb: string; ref: string; value?: string } | null {
   if (args.request !== undefined) return null;
+  // The broker also reads these spellings, and prefers `ref` over `target`. A call that carries
+  // one of them might act on a control the card never saw, so it gets no card.
+  if (["ref", "key", "targetRef", "target_ref"].some((k) => args[k] !== undefined)) return null;
   const verb = typeof args.action === "string" ? args.action : "";
   if (!STEP_VERBS.includes(verb) || !plainRef(args.target)) return null;
   const value = typeof args.value === "string" ? args.value : undefined;
@@ -145,8 +161,10 @@ export function controlFinder(ref: string): string {
   return `/\\[ref=${ref}\\]|textbox/`;
 }
 
-/** One snapshot line: `- role "name" [ref=e12] …`. */
-function lineParts(line: string): { role: string; name: string } | null {
+/** One snapshot line: `- role "name" [ref=e12] …`. The bracketed attributes after the name are
+ * read as `key=value` pairs, quoted or bare; `text` is the text the control shows when it
+ * differs from its accessible name, on brokers that report it. */
+function lineParts(line: string): { role: string; name: string; text?: string } | null {
   const m = /^\s*-?\s*([A-Za-z][\w-]*)(?:\s+"((?:[^"\\]|\\.)*)")?/.exec(line);
   if (!m) return null;
   let name = m[2] ?? "";
@@ -155,11 +173,23 @@ function lineParts(line: string): { role: string; name: string } | null {
   } catch {
     /* kept as written */
   }
-  return { role: m[1]!.toLowerCase(), name };
+  let text: string | undefined;
+  for (const a of line.matchAll(/\[([A-Za-z][\w-]*)=([^\]]*)\]/g)) {
+    if (a[1] === "text") {
+      let v = a[2]!.trim();
+      try {
+        v = JSON.parse(v.startsWith('"') ? v : `"${v}"`) as string;
+      } catch {
+        /* kept as written */
+      }
+      text = v;
+    }
+  }
+  return { role: m[1]!.toLowerCase(), name, ...(text !== undefined ? { text } : {}) };
 }
 
 /** What the snapshot says about `ref`, and whether the page shows a sign-in or secret field. */
-export function readControl(snapshot: string, ref: string): { role: string; name: string; pageSecret: boolean } | null {
+export function readControl(snapshot: string, ref: string): { role: string; name: string; text?: string; pageSecret: boolean } | null {
   const lines = snapshot.split("\n");
   const own = lines.find((l) => l.includes(`[ref=${ref}]`));
   const parts = own ? lineParts(own) : null;
