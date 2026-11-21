@@ -18,7 +18,6 @@ import { QueuePanel } from '../queue/QueuePanel.tsx';
 import { QueueStore } from '../queue/store.ts';
 import { queueOps } from '../queue/api.ts';
 import { queueCount } from '../queue/model.ts';
-import { PagesEntry } from '../pages/PagesEntry.tsx';
 import { ProfileDisc } from '../profiles/Disc.tsx';
 import { ProfileItem, moveChatToProfile, profileChoices, rowsForProfile, shareChatWith, shareChoices, sharedFrom, useProfiles } from '../profiles/index.ts';
 import { ALL_DEVICES, type DeviceInfo } from '../devices/api.ts';
@@ -769,10 +768,8 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         onAttention={() => setInboxOpen(true)}
         onOpenChat={onSelect}
         remoteChatId={selected && (remote || other.hosts.has(selected)) ? selected : null}
+        profileId={activeProfile}
       />
-      <div className="sb-pages">
-        <PagesEntry api={api} bus={bus} profileId={activeProfile} />
-      </div>
       {(error ?? snap.error) && (
         <p className="sb-error" role="alert">
           {error ?? snap.error}

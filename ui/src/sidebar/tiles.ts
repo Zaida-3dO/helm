@@ -7,10 +7,10 @@ export const TILE_GAP = 4;
 /** New, Search and More: the tiles that are always there. */
 export const FIXED_SLOTS = 3;
 
-export type ViewTileId = 'flagged' | 'queue' | 'tasks' | 'schedules';
+export type ViewTileId = 'flagged' | 'pages' | 'queue' | 'tasks' | 'schedules';
 
 /** The order a fresh install starts with, before any view has been opened. */
-export const DEFAULT_VIEW_ORDER: readonly ViewTileId[] = ['flagged', 'queue', 'tasks', 'schedules'];
+export const DEFAULT_VIEW_ORDER: readonly ViewTileId[] = ['flagged', 'pages', 'queue', 'tasks', 'schedules'];
 
 /** The `localStorage` key of the saved view order (per device, keeps views that are off). */
 export const TILES_KEY = 'helm.sidebar.tiles';
@@ -33,12 +33,27 @@ export function splitViews<T>(views: readonly T[], fit: number): Split<T> {
   return { shown: views.slice(0, room), more: views.slice(room) };
 }
 
-/** The saved order restricted to the views that exist now, then any view the saved order does not
- *  know yet, in default order. */
+/** The saved order restricted to the views that exist now. A view the saved order does not know
+ *  yet joins right after the view that comes before it in the default order, when that one is
+ *  present (so a view added in an update lands where a fresh install has it); if none of its
+ *  predecessors is present it goes last. */
 export function orderViews<T extends string>(saved: readonly string[], available: readonly T[]): T[] {
   const have = new Set<string>(available);
-  const known = saved.filter((id, i) => have.has(id) && saved.indexOf(id) === i) as T[];
-  return [...known, ...available.filter((id) => !known.includes(id))];
+  const out = saved.filter((id, i) => have.has(id) && saved.indexOf(id) === i) as T[];
+  for (const id of available) {
+    if (out.includes(id)) continue;
+    let at = -1;
+    for (let i = available.indexOf(id) - 1; i >= 0; i--) {
+      const pos = out.indexOf(available[i]!);
+      if (pos >= 0) {
+        at = pos + 1;
+        break;
+      }
+    }
+    if (at >= 0) out.splice(at, 0, id);
+    else out.push(id);
+  }
+  return out;
 }
 
 /** A view was opened: it becomes the first view tile. */

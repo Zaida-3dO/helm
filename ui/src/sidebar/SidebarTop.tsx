@@ -1,7 +1,7 @@
 // The top of the sidebar: the 48 px title strip with the hide-sidebar button, the beacon (wheel
 // mark, wordmark, chevron) that opens the Workspace status popover, and the tile row: New and
-// Search, then Flagged, Tasks and Schedules in most-recently-used order, with More for the ones
-// that do not fit.
+// Search, then Flagged, Pages, Queue, Tasks and Schedules in most-recently-used order, with More
+// for the ones that do not fit.
 //
 // The hide button runs the shell's `sidebar.toggle` command (Ctrl+B) and is drawn only once that
 // command is registered; the sidebar does not own its own width or visibility.
@@ -12,10 +12,11 @@ import type { EventBus } from '../api/events.ts';
 import type { AttentionRow, AttentionSummary } from '../api/types.ts';
 import { dragHandlers } from '../topbar/caption.tsx';
 import { keys, useChord, useLayer } from '../ui/index.ts';
-import { IconBoard, IconChevronDown, IconClock, IconExternalLink, IconFlag, IconNewChat, IconPause, IconSearch, IconSidebarClose, IconSuccess, IconX } from '../ui/icons.tsx';
+import { IconBoard, IconChevronDown, IconClock, IconExternalLink, IconFlag, IconGrid, IconNewChat, IconPause, IconSearch, IconSidebarClose, IconSuccess, IconX } from '../ui/icons.tsx';
 import { WheelMark, Wordmark } from '../ui/status/index.ts';
 import { countText, inboxCount } from '../attention/model.ts';
 import { mayMove } from '../shell/motion.ts';
+import { usePagesEntry } from '../pages/PagesEntry.tsx';
 import { useSchedulesEntry } from '../schedules/SchedulesEntry.tsx';
 import { useTasksEntry } from '../tasks/TasksEntry.tsx';
 import { TileRow, type TileSpec } from './Tiles.tsx';
@@ -46,6 +47,8 @@ export interface SidebarTopProps {
   onOpenChat: (chatId: string) => void;
   /** The open chat's id when it runs on another PC: Tasks then shows that PC's board. */
   remoteChatId?: string | null;
+  /** The active profile whose pinned pages the Pages tile counts; nothing for every page. */
+  profileId?: string | null;
 }
 
 function useCommand(id: string): (() => void) | null {
@@ -62,13 +65,14 @@ export function flaggedBadge(attention: AttentionSummary | null): string {
   return n > 99 ? '99+' : countText(attention);
 }
 
-export function SidebarTop({ api, bus, attention, inboxOpen, queueCount, queueOpen, onQueue, onNewChat, onSearch, onAttention, onOpenChat, remoteChatId }: SidebarTopProps) {
+export function SidebarTop({ api, bus, attention, inboxOpen, queueCount, queueOpen, onQueue, onNewChat, onSearch, onAttention, onOpenChat, remoteChatId, profileId }: SidebarTopProps) {
   const hide = useCommand(SIDEBAR_TOGGLE);
   const hideChord = useChord(SIDEBAR_TOGGLE);
   const newChord = useChord(NEW_CHAT_COMMAND);
   const searchChord = useChord(SEARCH_COMMAND);
   const count = inboxCount(attention);
   const tasks = useTasksEntry(api, bus, remoteChatId);
+  const pages = usePagesEntry(api, bus, profileId);
   const schedules = useSchedulesEntry(api, bus, onOpenChat);
   const [saved, setSaved] = useState<string[]>(() => readOrder());
 
@@ -87,6 +91,16 @@ export function SidebarTop({ api, bus, attention, inboxOpen, queueCount, queueOp
       badge: count > 0 ? { text: flaggedBadge(attention), label: `${count} need attention` } : null,
       pressed: inboxOpen,
       disabled: attention === null,
+    },
+    pages: {
+      id: 'pages',
+      label: 'Pages',
+      icon: <IconGrid size={20} />,
+      testId: 'nav-pages',
+      title: 'Pages',
+      onActivate: pages.toggle,
+      pressed: pages.open,
+      badge: pages.count > 0 ? { text: String(pages.count), label: `${pages.count} pinned pages`, testId: 'nav-pages-count' } : null,
     },
     queue: {
       id: 'queue',
@@ -136,6 +150,7 @@ export function SidebarTop({ api, bus, attention, inboxOpen, queueCount, queueOp
       </div>
       <Beacon attention={attention} onOpenChat={onOpenChat} />
       <TileRow lead={lead} views={views} onOrder={remember} onUsed={(id) => remember(touchView(order, id as ViewTileId))} />
+      {pages.dialog}
     </div>
   );
 }

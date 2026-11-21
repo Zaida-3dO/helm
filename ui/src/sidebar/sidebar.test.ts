@@ -10,7 +10,7 @@ import { buildList, chatAncestors, headerSubtitle, HEIGHTS, nestRows, showsCalmW
 import { loadMore, readBudget, type PageResult } from './paging.ts';
 import { age, needsYouLabel, rowAttention, rowStateLabel, rowStatusLabel, trailingIndicator } from './status.ts';
 import { layout, visibleRange } from './virtual.ts';
-import { mergeOrder, moveView, orderViews, readOrder, slotsFit, splitViews, touchView, writeOrder } from './tiles.ts';
+import { DEFAULT_VIEW_ORDER, mergeOrder, moveView, orderViews, readOrder, slotsFit, splitViews, touchView, writeOrder } from './tiles.ts';
 
 function project(id: string, over: Partial<ProjectNode> = {}): ProjectNode {
   return {
@@ -569,10 +569,20 @@ test('the tile row: how many tiles fit, what goes under More, and the most-recen
   assert.deepEqual([3, 4, 5, 8].map(split), ['|flagged,tasks,schedules', 'flagged|tasks,schedules', 'flagged,tasks,schedules|', 'flagged,tasks,schedules|']);
   assert.deepEqual(splitViews(['flagged'], 3), { shown: ['flagged'], more: [] }, 'one view fits beside New and Search: no More');
   assert.deepEqual(splitViews([], 3), { shown: [], more: [] });
+  // With all five views and only four slots, Flagged keeps a tile and the rest overflow into More.
+  assert.deepEqual(splitViews(DEFAULT_VIEW_ORDER, 4), { shown: ['flagged'], more: ['pages', 'queue', 'tasks', 'schedules'] });
 
-  // The saved order: views that are off are skipped, new ones follow in default order, repeats collapse.
+  // The saved order: views that are off are skipped, new ones land after their predecessor in the
+  // default order, repeats collapse.
   assert.deepEqual(orderViews(['schedules', 'gone', 'schedules', 'flagged'], ['flagged', 'tasks', 'schedules']), ['schedules', 'flagged', 'tasks']);
   assert.deepEqual(orderViews([], ['flagged', 'tasks']), ['flagged', 'tasks']);
+  // A fresh install starts with Pages as the second view, after Flagged.
+  assert.deepEqual([...DEFAULT_VIEW_ORDER], ['flagged', 'pages', 'queue', 'tasks', 'schedules']);
+  assert.deepEqual(orderViews([], DEFAULT_VIEW_ORDER), [...DEFAULT_VIEW_ORDER]);
+  // A saved order made before Pages existed gets it after Flagged, not last.
+  assert.deepEqual(orderViews(['flagged', 'queue', 'tasks', 'schedules'], DEFAULT_VIEW_ORDER), ['flagged', 'pages', 'queue', 'tasks', 'schedules']);
+  // Views missing from the saved order join one by one, each after the nearest saved predecessor.
+  assert.deepEqual(orderViews(['tasks'], ['flagged', 'pages', 'tasks']), ['tasks', 'flagged', 'pages'], 'Flagged had no predecessor, so it went last; Pages joins after it');
   // Opening a view moves it to the front; an unknown view changes nothing.
   assert.deepEqual(touchView(['flagged', 'tasks', 'schedules'], 'schedules'), ['schedules', 'flagged', 'tasks']);
   assert.deepEqual(touchView(['flagged', 'tasks'], 'schedules'), ['flagged', 'tasks']);
