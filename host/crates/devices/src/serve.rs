@@ -1171,8 +1171,18 @@ impl Inner {
                 done(json!({}))
             }
             Op::Checkpoint(a) => done(self.port.checkpoint(a).await?),
-            Op::EditOpen(a) => done(self.port.edit_open(a).await?),
-            Op::Resend(a) => done(self.port.resend(a).await?),
+            Op::EditOpen(a) => {
+                self.edit_framing(asker, &a.chat_id).await?;
+                done(self.port.edit_open(a).await?)
+            }
+            Op::Resend(mut a) => {
+                // Rewriting a sent message is driving the chat: its owner, or someone it is
+                // shared with, and a household member's words are marked as theirs, as in a send.
+                if let Some(name) = self.edit_framing(asker, &a.chat_id).await? {
+                    a.text = crate::host::household_message(&name, &pc_name(&from.name), &a.text);
+                }
+                done(self.port.resend(a).await?)
+            }
             Op::Delete(a) => {
                 // Deleting a chat for good is the owner's alone. A household member may drive
                 // another person's chat, but not erase it: shared is not enough either.
@@ -1466,6 +1476,39 @@ impl Inner {
             });
         }
         Ok(files)
+    }
+
+    /// Whether `asker` may edit a message of this chat, and whose words the edit is. A household
+    /// member must own the chat or have it shared with them; the answer is the name to mark
+    /// their words with when the chat is not theirs, and nothing for the PC's own person.
+    async fn edit_framing(
+        &self,
+        asker: &Asker,
+        chat_id: &str,
+    ) -> Result<Option<String>, WireError> {
+        let Asker::Household { person_id, name } = asker else {
+            return Ok(None);
+        };
+        let chat = self
+            .port
+            .chat_brief(chat_id.to_owned())
+            .await?
+            .ok_or_else(WireError::not_found)?
+            .to_value();
+        if subs::owned_by(&chat, person_id) {
+            return Ok(None);
+        }
+        let shared = chat
+            .get("sharedWith")
+            .and_then(Value::as_array)
+            .is_some_and(|l| l.iter().any(|p| p.as_str() == Some(person_id)));
+        if !shared {
+            return Err(WireError::new(
+                code::REFUSED,
+                "Only the person this chat belongs to, or someone it is shared with, can edit its messages from another PC.",
+            ));
+        }
+        Ok(Some(name.clone()))
     }
 
     /// Forward a port of this PC to the asking one. The chat must be here and, for someone

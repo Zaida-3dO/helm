@@ -256,7 +256,7 @@ fn project_cwd(conn: &Connection, project_id: &str) -> rusqlite::Result<Option<S
 
 /// A household member's message on a chat shared with them, framed so the chat never takes it
 /// for its owner's words. `pc` is the device it was typed on.
-fn household_message(name: &str, pc: &str, body: &str) -> String {
+pub(crate) fn household_message(name: &str, pc: &str, body: &str) -> String {
     let name: String = name
         .chars()
         .filter(|c| !c.is_control() && !matches!(c, '[' | ']'))
