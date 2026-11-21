@@ -910,6 +910,8 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
             json!({"chatId": "c1", "action": "ready", "requestId": "tr-2", "timeoutMs": 5000}),
         ),
         ("board_cancel", json!({"chatId": "c1", "requestId": "tr-2"})),
+        // The `/` menu's list comes from the chat's own worker: a read, nothing of this PC.
+        ("skills", json!({"chatId": "c1"})),
     ] {
         assert!(
             b.rpc.call("dev-a", op, args).await.is_ok(),
@@ -952,6 +954,8 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         ("defaults_set", json!({"chatId": "c1", "model": "sonnet"})),
         ("stage", json!({"chatId": "c1", "path": "a.rs"})),
         ("unstage", json!({"chatId": "c1", "path": "a.rs"})),
+        // Promoting or discarding a side chat changes the chat there.
+        ("side_resolve", json!({"chatId": "c1", "action": "discard"})),
     ] {
         let e = b.rpc.call("dev-a", op, args).await.unwrap_err();
         assert_eq!(e.code, code::NOT_ALLOWED, "{op}");
@@ -1637,7 +1641,16 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
             Ok(json!(null)),
         ),
         ("chat_warm", json!({"chatId": "c1"}), Ok(json!(null))),
-        ("skills_list", json!({"chatId": "c1"}), Ok(json!([]))),
+        // The `/` menu of the window lists what the chat's worker reports on the PC that runs
+        // the chat, so the person sees that chat's commands, not this PC's.
+        (
+            "skills_list",
+            json!({"chatId": "c1"}),
+            Ok(json!([
+                { "name": "review", "description": "Review the current branch" },
+                { "name": "pdf-extract", "description": "Read a PDF", "scope": "helm-skill" },
+            ])),
+        ),
         (
             "title_suggest",
             json!({"chatId": "c1"}),
@@ -1853,6 +1866,13 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         // A permanent delete travels too; this watcher acts as the PC's own person, and the
         // install's own delete rules still answer there.
         ("chat_delete", json!({"chatId": "c1"}), Ok(json!(null))),
+        // A side chat's resolve travels too: promote answers with the record there, discard
+        // answers null. Both answer only for the chat's own person (the household rows).
+        (
+            "side_chat_resolve",
+            json!({"chatId": "c1", "action": "discard"}),
+            Ok(json!(null)),
+        ),
         (
             "interaction_answer",
             json!({"chatId": "c1", "requestId": "x", "confirmed": true}),
@@ -1994,6 +2014,60 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         .await
         .unwrap_err();
     assert_eq!(e.message, "That path is outside the chat's project folder.");
+    // The file viewer's own read of a picture that is too big for one frame: the read answers
+    // with the picture marked oversize and no bytes, and the whole picture then crosses in
+    // chunks — the viewer sees what a local read would have answered, with no marker left.
+    port.st().blob_reads.clear();
+    let shot = api
+        .call_host(
+            "file_read",
+            json!({"chatId": "c1", "path": "/work/big.png"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(shot["kind"], "image", "{shot}");
+    assert_eq!(
+        shot["size"],
+        json!(helm_devices::testing::FAKE_PICTURE_BYTES)
+    );
+    assert_eq!(shot["mime"], "image/png");
+    assert!(
+        shot.get("oversize").is_none(),
+        "the marker is not the viewer's"
+    );
+    assert_eq!(b64.decode(shot["bytes"].as_str().unwrap()).unwrap(), big,);
+    let offsets: Vec<u64> = port.st().blob_reads.iter().map(|(_, o)| *o).collect();
+    assert_eq!(offsets, [0, 655_360, 1_310_720, 1_966_080]);
+    // And the local limit is the local answer: a picture past what any read previews is not
+    // previewed, and no chunks are fetched for it.
+    port.st().blob_reads.clear();
+    let e = api
+        .call_host(
+            "file_read",
+            json!({"chatId": "c1", "path": "/work/huge.png"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        e.message,
+        "The image is larger than 8 MiB, so it is not previewed."
+    );
+    assert!(port.st().blob_reads.is_empty());
+    // A picture one frame can carry still crosses inside the view, no chunks asked.
+    port.st().blob_reads.clear();
+    let shot = api
+        .call_host(
+            "file_read",
+            json!({"chatId": "c1", "path": "/work/shot.png"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(shot["kind"], "image");
+    assert_eq!(
+        b64.decode(shot["bytes"].as_str().unwrap()).unwrap(),
+        helm_devices::testing::fake_picture(64),
+    );
+    assert!(port.st().blob_reads.is_empty());
     // An option board is read and answered from here; the first answer stands.
     let board = api
         .call_host(
@@ -2088,7 +2162,9 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         assert_eq!(st.snoozed[0].until, Some(50));
         assert_eq!(st.addressed, ["c1"]);
         // The panel reads all arrived as the panel's own ops; `dir_list` is answered by the
-        // file-view read, as it is here. Staging came through as the stage pair, and the
+        // file-view read, as it is here. The three last are the file viewer's own reads of
+        // pictures on the other PC: the big one, the past-the-limit one, and the small one.
+        // Staging came through as the stage pair, and the
         // board reads named the chat outside the board's own parameters, not inside them.
         assert_eq!(st.folders_asked, ["c1"]);
         assert_eq!(
@@ -2100,7 +2176,10 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
                 "archive_list",
                 "path_resolve",
                 "changes",
-                "diff"
+                "diff",
+                "file_read",
+                "file_read",
+                "file_read"
             ]
         );
         assert_eq!(st.stages.len(), 2);
@@ -2409,6 +2488,17 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         }]
     );
     assert_eq!(port.st().deleted, ["c1"]);
+    // The `/` menu asked the PC that runs the chat once, and the side chat was resolved
+    // there, not here.
+    assert_eq!(port.st().skills_asked, ["c1"]);
+    assert_eq!(
+        port.st().side_resolved,
+        [helm_devices::wire::SideResolveArgs {
+            chat_id: "c1".to_owned(),
+            action: "discard".to_owned(),
+            confirmed: None,
+        }]
+    );
     assert_eq!(
         port.st()
             .rows
@@ -3178,6 +3268,29 @@ async fn a_household_member_reads_the_whole_list_and_is_refused_nothing() {
         ("delete", json!({"chatId": "hers"}), None),
         ("delete", json!({"chatId": "mine"}), Some(code::REFUSED)),
         ("delete", json!({"chatId": "shared"}), Some(code::REFUSED)),
+        // A side chat's promote or discard is the owner's too: it shows a hidden chat in
+        // that PC's sidebar, or erases it for good.
+        (
+            "side_resolve",
+            json!({"chatId": "hers", "action": "discard", "confirmed": true}),
+            None,
+        ),
+        (
+            "side_resolve",
+            json!({"chatId": "mine", "action": "discard", "confirmed": true}),
+            Some(code::REFUSED),
+        ),
+        (
+            "side_resolve",
+            json!({"chatId": "shared", "action": "promote"}),
+            Some(code::REFUSED),
+        ),
+        // An action that is neither of the two is refused before anything is asked.
+        (
+            "side_resolve",
+            json!({"chatId": "hers", "action": "delete"}),
+            Some(code::BAD_ARGS),
+        ),
     ];
     for (op, args, want) in cases {
         let got = sam.rpc.call("dev-a", op, args.clone()).await;

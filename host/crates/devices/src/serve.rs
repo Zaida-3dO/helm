@@ -25,9 +25,9 @@ use crate::wire::{
     ForwardCloseArgs, ForwardOpenArgs, Frame, Hello, MoveProfileArgs, MuteArgs, Op, OrganizeArgs,
     PageArgs, PageIdArgs, PagesReadArgs, PanelStageArgs, PeerDevice, ProjectCreateArgs,
     ProjectSetArgs, Push, QuickOpenArgs, RemoteChat, RenameArgs, ResendArgs, RollOverArgs,
-    SendArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs,
-    VerbositySetArgs, WireError, MAX_CHUNK_BYTES, MAX_PAGE_ROWS, MAX_SEND_ATTACHMENTS,
-    MAX_SEND_BYTES, MAX_UPLOAD_BYTES, SUB_ROWS,
+    SendArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SideResolveArgs, SnoozeArgs,
+    SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError, MAX_CHUNK_BYTES, MAX_PAGE_ROWS,
+    MAX_SEND_ATTACHMENTS, MAX_SEND_BYTES, MAX_UPLOAD_BYTES, SUB_ROWS,
 };
 use base64::Engine as _;
 use helm_chats::types::{
@@ -319,6 +319,26 @@ pub trait ChatPort: Send + Sync {
             Err(WireError::new(
                 code::REFUSED,
                 "Chats on this PC can't be deleted from another PC.",
+            ))
+        })
+    }
+    /// Promote a side chat here, or discard it for good. The caller has already checked the
+    /// action and that the asking person owns the chat; this answers what the install's own
+    /// resolve answers with: the record when promoted, null when discarded.
+    fn side_resolve(&self, _a: SideResolveArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async {
+            Err(WireError::new(
+                code::REFUSED,
+                "Side chats on this PC can't be promoted or discarded from another PC.",
+            ))
+        })
+    }
+    /// The commands and skills a chat's worker here reported, for the `/` menu of its window.
+    fn skills(&self, _chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async {
+            Err(WireError::new(
+                code::REFUSED,
+                "This chat's commands aren't listed on this PC.",
             ))
         })
     }
@@ -1174,6 +1194,31 @@ impl Inner {
                 self.port.delete(a.chat_id).await?;
                 done(Value::Null)
             }
+            Op::SideResolve(a) => {
+                // Promoting shows a hidden chat in the sidebar and discarding erases one for
+                // good: like the delete, this is the chat's owner alone.
+                if !matches!(a.action.as_str(), "promote" | "discard") {
+                    return Err(WireError::bad_args(
+                        "A side chat resolve is promote or discard.",
+                    ));
+                }
+                if let Asker::Household { person_id, .. } = asker {
+                    let chat = self
+                        .port
+                        .chat_brief(a.chat_id.clone())
+                        .await?
+                        .ok_or_else(WireError::not_found)?
+                        .to_value();
+                    if !subs::owned_by(&chat, person_id) {
+                        return Err(WireError::new(
+                            code::REFUSED,
+                            "Only the person this chat belongs to can promote or discard it from another PC.",
+                        ));
+                    }
+                }
+                done(self.port.side_resolve(a).await?)
+            }
+            Op::Skills(a) => done(self.port.skills(a.chat_id).await?),
             Op::Attention(a) => done(self.port.attention_rows(a.chat_ids).await?),
             Op::ItemLinks(a) => done(self.port.item_links(a.chat_ids).await?),
             Op::Snooze(a) => {

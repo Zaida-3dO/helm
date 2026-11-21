@@ -9,11 +9,11 @@
 //! |---|---|
 //! | `chat_get`, `transcript_page` | the mirror (and the device that runs the chat, for older pages) |
 //! | `chat_send`, `chat_stop`, `interaction_answer`, `chat_set_model`, `chat_rename`, `chat_archive`, `chat_restore` | the device that runs the chat |
-//! | `chat_fork`, `chat_compact`, `chat_roll_over`, `chat_stack`, `stack_find`, `usage_cost`, `chat_export_markdown`, `chat_organize`, `unread_mark`, `chat_mute`, `chat_set_permission_mode`, `chat_verbosity_get`/`set`, `chat_warm`, `chat_stop_no_resend`, `tool_stop`, `checkpoint_info`, `message_edit_open`, `message_resend`, `chat_delete`, `attention_snooze`/`address`, `panel_context_get`, `quick_open`, `chat_folder`, `file_read`, `dir_list`, `file_stat`, `archive_list`, `path_resolve`, `changes`, `diff`, `changes_stage`, `changes_unstage` | the same op on the device that runs the chat (panel paths stay inside the chat's project folder there; a delete is for the chat's owner and answers there, with the copy following the device's news) |
+//! | `chat_fork`, `chat_compact`, `chat_roll_over`, `chat_stack`, `stack_find`, `usage_cost`, `chat_export_markdown`, `chat_organize`, `unread_mark`, `chat_mute`, `chat_set_permission_mode`, `chat_verbosity_get`/`set`, `chat_warm`, `chat_stop_no_resend`, `tool_stop`, `checkpoint_info`, `message_edit_open`, `message_resend`, `chat_delete`, `side_chat_resolve`, `skills_list`, `attention_snooze`/`address`, `panel_context_get`, `quick_open`, `chat_folder`, `file_read`, `dir_list`, `file_stat`, `archive_list`, `path_resolve`, `changes`, `diff`, `changes_stage`, `changes_unstage` | the same op on the device that runs the chat (panel paths stay inside the chat's project folder there; a delete and a side chat's resolve are for the chat's owner and answer there, with the copy following the device's news; a file view's picture too big for one frame comes across after in chunks) |
 //! | `shown_gallery_get`, `shown_image_get`, `shown_image_thumb`, `option_board_state`, `option_board_answer`, `attachment_get`, `local_image_get` (with the `chatId`) | the device that runs the chat; full-size pictures and a reply's picture inside the chat's project folder come across in chunks |
 //! | `message_output_save` | the output comes across in chunks and is saved on this PC, where the person chose |
 //! | `draft_save` | the mirror alone: a draft never leaves this PC |
-//! | `title_suggest`, `autocomplete_suggest`, `skills_list` | quietly, with an empty answer |
+//! | `title_suggest`, `autocomplete_suggest` | quietly, with an empty answer |
 //! | `model_catalogue` with a `deviceUid` | the models that device last said it offers |
 //! | any other op that names a mirror chat | refused: "This chat runs on {device}. Do that there." |
 //!
@@ -226,10 +226,14 @@ async fn route(
         | "chat_warm"
         | "chat_stop_no_resend"
         // Editing a sent message and deleting a chat go to the PC that runs it: the edit
-        // applies there, and a delete answers only for the chat's owner.
+        // applies there, and a delete answers only for the chat's owner. Resolving a side
+        // chat — promote or discard — is the owner's too, and answered there.
         | "message_edit_open"
         | "message_resend"
         | "chat_delete"
+        | "side_chat_resolve"
+        // The `/` menu lists the commands of the chat's own worker: asked where it runs.
+        | "skills_list"
         // What an agent showed in the chat, and the pictures a reply names: read there.
         | "shown_gallery_get"
         | "shown_image_get"
@@ -250,10 +254,9 @@ async fn route(
         | "diff"
         | "changes_stage"
         | "changes_unstage" => remote.chat_op(&op, args).await,
-        // Nothing to suggest or list for a chat that runs somewhere else.
+        // Nothing to suggest for a chat that runs somewhere else.
         "title_suggest" => Ok(json!({ "title": "", "titles": [] })),
         "autocomplete_suggest" => Ok(json!({ "completion": "", "retryAfterMs": null })),
-        "skills_list" => Ok(json!([])),
         _ => Err(elsewhere(&remote.device_name(&device))),
     }
 }

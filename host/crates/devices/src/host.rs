@@ -16,8 +16,8 @@ use crate::wire::{
     DevicePerson, EditOpenArgs, ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs,
     PageIdArgs, PagesReadArgs, PanelStageArgs, PersonInfo, ProfileInfo, ProjectCreateArgs,
     ProjectInfo, ProjectSetArgs, QuickOpenArgs, RemoteChat, RenameArgs, ResendArgs, RollOverArgs,
-    SetModelArgs, SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs,
-    VerbositySetArgs, WireError, MAX_BLOB_BYTES,
+    SetModelArgs, SetPermissionArgs, ShareArgs, SideResolveArgs, SnoozeArgs, SubmissionArgs,
+    ToolStopArgs, VerbositySetArgs, WireError, MAX_BLOB_BYTES,
 };
 use base64::Engine as _;
 use helm_chats::submit::{self, HostFile, HostImage, HostSend};
@@ -33,8 +33,9 @@ use std::sync::Arc;
 const LISTED: i64 = 2000;
 /// The most a panel or board read's answer may weigh: it has to fit one frame with its envelope.
 const ANSWER_BYTES: usize = 700 * 1024;
-/// The most raw bytes a picture may carry across: its base64 run plus the rest of the view
-/// has to fit one frame.
+/// The most raw bytes a picture may carry inside one view answer: its base64 run plus the
+/// rest of the view has to fit one frame. Bigger pictures answer with an `oversize` marker and
+/// no bytes; the watcher brings the whole picture across in `blob_read` chunks instead.
 const IMAGE_BYTES: u64 = 512 * 1024;
 /// A list's cursor is the revision clock's reading; the activity times it is compared with come
 /// from the wall clock, which may lag the revision clock a little, so a catch-up reaches back
@@ -522,17 +523,22 @@ impl HostPort {
         Ok(())
     }
 
-    /// A panel or board read's answer: small enough for one frame, pictures only within the
-    /// size that crosses, and no serving address for a PDF or media file — the short-lived
-    /// address the panel's own window opens belongs to this PC alone.
+    /// A panel or board read's answer: small enough for one frame, pictures over the size one
+    /// frame can carry marked for the chunked read instead of answered inline, and no serving
+    /// address for a PDF or media file — the short-lived address the panel's own window opens
+    /// belongs to this PC alone.
     fn fit_answer(v: Value) -> PortResult<Value> {
         let mut v = v;
-        if let Some(kind) = v.get("kind").and_then(Value::as_str) {
+        let kind = v.get("kind").and_then(Value::as_str).map(str::to_owned);
+        if let Some(kind) = kind.as_deref() {
             if kind == "image" && v.get("size").and_then(Value::as_u64).unwrap_or(0) > IMAGE_BYTES {
-                return Err(WireError::new(
-                    code::REFUSED,
-                    "A picture over 512 KiB is only shown on the PC this chat runs on.",
-                ));
+                // The picture is too big for one frame but well within the chunked read's
+                // cap: drop its bytes and say so. The watcher that asked re-reads the whole
+                // picture through `blob_read`, the way a reply's picture already crosses.
+                if let Some(m) = v.as_object_mut() {
+                    m.remove("bytes");
+                    m.insert("oversize".into(), json!(true));
+                }
             }
             if matches!(kind, "pdf" | "audio" | "video" | "font") {
                 if let Some(m) = v.as_object_mut() {
@@ -1989,6 +1995,29 @@ impl ChatPort for HostPort {
         })
     }
 
+    fn side_resolve(&self, a: SideResolveArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            // Promote or discard is the install's own resolve op's business: a promote answers
+            // with the record and emits the `chat` news the copies follow, a discard hard-
+            // deletes and emits the `chat_removed` news that takes the copy away.
+            let mut args = json!({ "chatId": a.chat_id, "action": a.action });
+            if let Some(c) = a.confirmed {
+                args["confirmed"] = json!(c);
+            }
+            self.op("side_chat_resolve", args).await
+        })
+    }
+
+    fn skills(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&chat_id)?;
+            // The list the worker on this PC reported for this chat: the `/` menu of a
+            // watcher's window asks the PC that runs the chat, exactly as the local one does.
+            self.op("skills_list", json!({ "chatId": chat_id })).await
+        })
+    }
+
     fn attention_rows(&self, chat_ids: Vec<String>) -> BoxFut<'_, PortResult<Value>> {
         Box::pin(async move {
             if chat_ids.len() > 500 {
@@ -2191,8 +2220,34 @@ impl ChatPort for HostPort {
 
 #[cfg(test)]
 mod tests {
-    use super::{devtools_ports, household_message, own_pins, typed_on_message};
+    use super::{devtools_ports, household_message, own_pins, typed_on_message, HostPort};
     use serde_json::{json, Value};
+
+    /// A picture too big for one frame keeps its kind, size and mime but loses its bytes and
+    /// says it is oversize, for the watcher to fetch in chunks; a small one crosses untouched,
+    /// and a media file keeps none of this PC's serving address.
+    #[test]
+    fn a_picture_too_big_for_one_frame_is_marked_not_refused() {
+        let big = json!({
+            "kind": "image", "size": 2 * 1024 * 1024, "mime": "image/png",
+            "bytes": "AAAA", "truncated": false,
+        });
+        let got = HostPort::fit_answer(big).unwrap();
+        assert_eq!(got["oversize"], json!(true));
+        assert_eq!(got["kind"], "image");
+        assert_eq!(got["size"], json!(2 * 1024 * 1024));
+        assert_eq!(got["mime"], "image/png");
+        assert!(got.get("bytes").is_none());
+
+        let small = json!({"kind": "image", "size": 1024, "bytes": "AAAA"});
+        let got = HostPort::fit_answer(small).unwrap();
+        assert_eq!(got["bytes"], "AAAA");
+        assert!(got.get("oversize").is_none());
+
+        let pdf = json!({"kind": "pdf", "size": 4096, "url": "http://127.0.0.1:9/x.pdf"});
+        let got = HostPort::fit_answer(pdf).unwrap();
+        assert!(got.get("url").is_none());
+    }
 
     /// Helm's own DevTools port is never forwarded, however the arguments name it.
     #[test]

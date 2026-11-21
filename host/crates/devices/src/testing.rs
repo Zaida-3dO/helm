@@ -9,8 +9,8 @@ use crate::wire::{
     DevicePerson, EditOpenArgs, ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs,
     PageIdArgs, PagesReadArgs, PanelStageArgs, PersonInfo, ProfileInfo, ProjectCreateArgs,
     ProjectInfo, ProjectSetArgs, QuickOpenArgs, RemoteChat, RenameArgs, ResendArgs, RollOverArgs,
-    SetModelArgs, SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs,
-    VerbositySetArgs, WireError,
+    SetModelArgs, SetPermissionArgs, ShareArgs, SideResolveArgs, SnoozeArgs, SubmissionArgs,
+    ToolStopArgs, VerbositySetArgs, WireError,
 };
 use base64::Engine as _;
 use helm_chats::types::{
@@ -194,6 +194,10 @@ pub struct FakeState {
     pub resends: Vec<ResendArgs>,
     /// Each chat asked to be deleted for good.
     pub deleted: Vec<String>,
+    /// Each side chat asked to be promoted or discarded, in order.
+    pub side_resolved: Vec<SideResolveArgs>,
+    /// Each chat whose command and skill list was asked.
+    pub skills_asked: Vec<String>,
     pub attention_for: Vec<Vec<String>>,
     pub item_links_for: Vec<Vec<String>>,
     pub snoozed: Vec<SnoozeArgs>,
@@ -806,6 +810,32 @@ impl ChatPort for FakePort {
             .map_or(0, Vec::len);
         self.st().panel_reads.push((a.local_op, a.args));
         ready(Ok(match a.local_op {
+            // A picture view answers as the real port does: inside the size one frame can
+            // carry it comes with its bytes, beyond it with an `oversize` marker and none.
+            "file_read" | "dir_list"
+                if path
+                    .as_ref()
+                    .and_then(Value::as_str)
+                    .is_some_and(|p| p.ends_with(".png")) =>
+            {
+                let p = path.clone().unwrap_or(Value::Null);
+                let raw = p.as_str().unwrap_or_default();
+                let size = if raw.ends_with("/huge.png") {
+                    9 * 1024 * 1024
+                } else if raw.ends_with("/big.png") {
+                    FAKE_PICTURE_BYTES as u64
+                } else {
+                    64
+                };
+                let mut view = json!({ "path": p, "kind": "image", "size": size, "mime": "image/png", "truncated": false });
+                if size > 512 * 1024 {
+                    view["oversize"] = json!(true);
+                } else {
+                    view["bytes"] = json!(base64::engine::general_purpose::STANDARD
+                        .encode(fake_picture(size as usize)));
+                }
+                view
+            }
             "file_read" | "dir_list" => json!({
                 "path": path.unwrap_or(Value::Null),
                 "kind": "text", "size": 5, "text": "one\n", "truncated": false,
@@ -935,6 +965,31 @@ impl ChatPort for FakePort {
         // answers null and its `chat_removed` news is what clears the copies elsewhere.
         self.st().deleted.push(chat_id);
         ready(Ok(()))
+    }
+
+    fn side_resolve(&self, a: SideResolveArgs) -> BoxFut<'_, PortResult<Value>> {
+        let mut st = self.st();
+        st.side_resolved.push(a.clone());
+        // A promote answers with the record that is now an ordinary chat, a discard with
+        // null. The fake keeps its chat so one test can keep asking after.
+        if a.action == "promote" {
+            let chat = st
+                .chats
+                .iter()
+                .find(|c| c.id() == a.chat_id)
+                .map(|c| c.to_value())
+                .unwrap_or(json!({ "id": a.chat_id }));
+            return ready(Ok(chat));
+        }
+        ready(Ok(Value::Null))
+    }
+
+    fn skills(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        self.st().skills_asked.push(chat_id);
+        ready(Ok(json!([
+            { "name": "review", "description": "Review the current branch" },
+            { "name": "pdf-extract", "description": "Read a PDF", "scope": "helm-skill" },
+        ])))
     }
 
     fn attention_rows(&self, chat_ids: Vec<String>) -> BoxFut<'_, PortResult<Value>> {
@@ -1075,8 +1130,9 @@ impl ChatPort for FakePort {
         })
     }
 
-    /// A 2 MiB picture for every picture ref, a small picture for a file in `/work`, and a
-    /// tool's output; anything else is refused as the real port refuses it.
+    /// A 2 MiB picture for every picture ref; for a file in `/work`, its size by name: 2 MiB
+    /// for `big.png`, 9 MiB for `huge.png`, a small picture otherwise; and a tool's output.
+    /// Anything else is refused as the real port refuses it.
     fn blob_read(&self, a: BlobReadArgs) -> BoxFut<'_, PortResult<Value>> {
         self.st().blob_reads.push((a.blob.clone(), a.offset));
         let r = &a.blob;
@@ -1090,7 +1146,14 @@ impl ChatPort for FakePort {
                         "That path is outside the chat's project folder.",
                     )));
                 }
-                ("image/png", "shot.png", fake_picture(64))
+                let size = if path.ends_with("/huge.png") {
+                    9 * 1024 * 1024
+                } else if path.ends_with("/big.png") {
+                    FAKE_PICTURE_BYTES
+                } else {
+                    64
+                };
+                ("image/png", "shot.png", fake_picture(size))
             } else {
                 (
                     "text/plain; charset=utf-8",

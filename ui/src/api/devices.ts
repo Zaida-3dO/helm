@@ -12,9 +12,11 @@
 // events for it. The panel ops that name the chat (`chat_folder`, `file_read`, `dir_list`,
 // `file_stat`, `archive_list`, `path_resolve`, `changes`, `diff`, `changes_stage`,
 // `changes_unstage`, `quick_open`) answer on the PC that runs the chat, kept inside that chat's
-// project folder there. Everything else that names such a chat is refused with "This chat runs on
-// {device}. Do that there." (`title_suggest`, `autocomplete_suggest` and `skills_list` answer
-// empty instead; `chat_warm` and the composer and chat-view actions travel to the PC that runs the chat.)
+// project folder there (a picture too big for one answer crosses in chunks, invisibly).
+// Everything else that names such a chat is refused with "This chat runs on
+// {device}. Do that there." (`title_suggest` and `autocomplete_suggest` answer empty instead;
+// `chat_warm`, the composer's `/`-menu list, and the chat-view actions — including promoting
+// or discarding a side chat — travel to the PC that runs the chat.)
 
 import type { Api } from './client.ts';
 import type { AttentionKind } from './generated/AttentionKind.ts';

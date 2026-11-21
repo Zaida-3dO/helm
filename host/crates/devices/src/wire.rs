@@ -766,6 +766,17 @@ pub struct ResendArgs {
     pub text: String,
 }
 
+/// Promote a side chat into an ordinary chat, or discard it for good, where the chat runs.
+/// `action` is checked on arrival; discarding one that has sent anything carries `confirmed`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SideResolveArgs {
+    pub chat_id: String,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed: Option<bool>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChatIdsArgs {
@@ -948,6 +959,10 @@ pub enum Op {
     Resend(ResendArgs),
     /// Delete a chat here for good. The chat's owner only; answered behind their confirm.
     Delete(ChatIdArgs),
+    /// Promote a side chat here, or discard it for good. The chat's owner only, like a delete.
+    SideResolve(SideResolveArgs),
+    /// The commands and skills of a chat's worker here, for the `/` menu of its window. A read.
+    Skills(ChatIdArgs),
     /// Needs-you and idle-check flag rows for named chats. A read.
     Attention(ChatIdsArgs),
     /// Board-item links for named chats, as the PC that runs them lists them. A read.
@@ -1076,6 +1091,8 @@ impl Op {
             "edit_open" => Op::EditOpen(args(a)?),
             "resend" => Op::Resend(args(a)?),
             "delete" => Op::Delete(args(a)?),
+            "side_resolve" => Op::SideResolve(args(a)?),
+            "skills" => Op::Skills(args(a)?),
             "attention" => Op::Attention(args(a)?),
             "item_links" => Op::ItemLinks(args(a)?),
             "snooze" => Op::Snooze(args(a)?),
@@ -1143,6 +1160,7 @@ impl Op {
                 | Op::Submission(_)
                 | Op::Resend(_)
                 | Op::Delete(_)
+                | Op::SideResolve(_)
                 | Op::Snooze(_)
                 | Op::Address(_)
                 | Op::DefaultsSet(_)
@@ -1412,6 +1430,18 @@ mod tests {
             ("forward_open", json!({"chatId": "c1", "port": 70000}), None),
             ("forward_open", json!({"chatId": "c1"}), None),
             ("forward_close", json!({"forwardId": "f1"}), Some(false)),
+            ("skills", json!({"chatId": "c1"}), Some(false)),
+            (
+                "side_resolve",
+                json!({"chatId": "c1", "action": "discard"}),
+                Some(true),
+            ),
+            (
+                "side_resolve",
+                json!({"chatId": "c1", "action": "promote", "confirmed": true}),
+                Some(true),
+            ),
+            ("side_resolve", json!({"chatId": "c1"}), None),
         ];
         for (op, args, run) in rows {
             let got = Op::parse(op, args.clone());

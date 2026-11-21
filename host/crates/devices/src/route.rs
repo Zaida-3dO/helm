@@ -1086,6 +1086,47 @@ impl Mirror {
         }))
     }
 
+    /// The file view's answer carried a picture marked oversize instead of its bytes: bring
+    /// the whole picture across in chunks and answer with what a local read answers. The same
+    /// local rule applies — beyond 8 MiB a picture is not previewed at all.
+    async fn complete_oversize_picture(&self, device: &str, chat_id: &str, answer: Value) -> Res {
+        let size = answer
+            .get("size")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        if size > helm_panel::viewer::IMAGE_LIMIT {
+            return Err(ApiError::new(
+                "refused",
+                "The image is larger than 8 MiB, so it is not previewed.",
+            ));
+        }
+        let path = answer
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let act = self.acting(chat_id)?;
+        let blob = self
+            .fetch_blob(
+                device,
+                chat_id,
+                &json!({ "file": path }),
+                helm_panel::viewer::IMAGE_LIMIT,
+                &[act],
+            )
+            .await
+            .map_err(|e| self.failed(device, e, "that picture"))?;
+        let mut answer = answer;
+        if let Some(m) = answer.as_object_mut() {
+            m.insert(
+                "bytes".into(),
+                json!(base64::engine::general_purpose::STANDARD.encode(&blob.bytes)),
+            );
+            m.remove("oversize");
+        }
+        Ok(answer)
+    }
+
     /// A picture sent with a message, full size. An older Helm there has no chunked read; its
     /// own answer still brings the pictures that fit one frame.
     async fn full_attachment(&self, device: &str, chat_id: &str, args: &Value) -> Res {
@@ -1346,6 +1387,9 @@ fn read_op(op: &str) -> Option<&'static str> {
         "checkpoint_info" => "checkpoint",
         // The edit window opens on the mirrored text: a read like the transcript itself.
         "message_edit_open" => "edit_open",
+        // The `/` menu lists what the chat's own worker reported: a read there, nothing of
+        // this PC's skills folders is involved.
+        "skills_list" => "skills",
         "chat_folder" => "chat_folder",
         "attachment_get" => "attachment_get",
         "file_read" | "dir_list" => "file_view",
@@ -1764,7 +1808,16 @@ impl RemoteChats for Mirror {
             // Reads answer while the device's run switch is off.
             if let Some(wire) = read_op(&op) {
                 m.check_up(&device)?;
-                return m.ask_as(&device, wire, args, "that read", &[]).await;
+                let answer = m.ask_as(&device, wire, args, "that read", &[]).await?;
+                // A picture the file view left out because one frame cannot carry it: bring
+                // the whole picture across in chunks, so the viewer gets what a local read
+                // would answer.
+                if op == "file_read"
+                    && answer.get("oversize").and_then(Value::as_bool) == Some(true)
+                {
+                    return m.complete_oversize_picture(&device, &chat_id, answer).await;
+                }
+                return Ok(answer);
             }
             // Moving, nesting, pinning and reordering answer with sidebar rows; the one this
             // call is about lives in this copy, so the copy is patched and no rows come back.
@@ -1788,9 +1841,12 @@ impl RemoteChats for Mirror {
                 // The two-phase edit answers with its new submission and the chat, not the
                 // chat record alone; the copies' transcript rewinds follow the device's
                 // refresh news. A delete answers null; the device's `chat_removed` news is
-                // what takes the copy away here.
+                // what takes the copy away here. A side chat's resolve is the same shape:
+                // promote answers with the record and its `chat` news shows it on the copy,
+                // discard answers null and the `chat_removed` news clears it.
                 "message_resend" => Some("resend"),
                 "chat_delete" => Some("delete"),
+                "side_chat_resolve" => Some("side_resolve"),
                 _ => None,
             } {
                 m.check_live(&device)?;
