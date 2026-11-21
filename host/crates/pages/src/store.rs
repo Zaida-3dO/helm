@@ -2,7 +2,9 @@
 //!
 //! - `pinned_pages`: one row per (profile, page). A page is pinned by the user or by an agent; the
 //!   row remembers the chat that pinned it, which is where the page's messages go. Deleting that
-//!   chat leaves the pin and clears the link.
+//!   chat leaves the pin and clears the link. A hand-reordered list is kept in `position` (0..n
+//!   within one profile's list, the pins that profile sees); pins without one keep the plain
+//!   newest-first order and sort after the placed ones.
 //! - `page_state`: the JSON a page saves with `helm.setState`, filed under the page's key (its
 //!   canonical path) and only ever reached through a session the host opened for that path, so a
 //!   page can neither name nor read another page's row. Saves are optimistic: a save quoting a
@@ -27,6 +29,7 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              title      TEXT NOT NULL,
              chat_id    TEXT REFERENCES chats(id) ON DELETE SET NULL,
              pinned_at  INTEGER NOT NULL,
+             position   INTEGER,
              UNIQUE (profile_id, path_key)
          );
          CREATE TABLE IF NOT EXISTS page_state (
@@ -36,6 +39,20 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              updated_at INTEGER NOT NULL
          );",
     )
+}
+
+/// Gives `pinned_pages` its `position` column (set only once someone reorders the list;
+/// unset pins keep the plain newest-first order). Re-running does nothing.
+pub fn add_pin_position(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    let has: bool = tx.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('pinned_pages') WHERE name = 'position'",
+        [],
+        |r| r.get::<_, i64>(0).map(|n| n > 0),
+    )?;
+    if !has {
+        tx.execute("ALTER TABLE pinned_pages ADD COLUMN position INTEGER", [])?;
+    }
+    Ok(())
 }
 
 /// A saved state and the revision it is at (0 and `null` before the first save).
@@ -99,6 +116,7 @@ pub fn state_reset(tx: &Transaction<'_>, key: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pin_json(
     id: String,
     profile_id: String,
@@ -106,6 +124,7 @@ fn pin_json(
     title: String,
     chat_id: Option<String>,
     pinned_at: i64,
+    position: Option<i64>,
 ) -> Value {
     json!({
         "id": id,
@@ -114,12 +133,13 @@ fn pin_json(
         "title": title,
         "chatId": chat_id,
         "pinnedAt": pinned_at,
+        "position": position,
     })
 }
 
 fn pin_by_key(tx: &Transaction<'_>, profile: &str, key: &str) -> rusqlite::Result<Option<Value>> {
     tx.query_row(
-        "SELECT id, profile_id, path, title, chat_id, pinned_at FROM pinned_pages
+        "SELECT id, profile_id, path, title, chat_id, pinned_at, position FROM pinned_pages
          WHERE profile_id = ?1 AND path_key = ?2",
         [profile, key],
         |r| {
@@ -130,6 +150,7 @@ fn pin_by_key(tx: &Transaction<'_>, profile: &str, key: &str) -> rusqlite::Resul
                 r.get(3)?,
                 r.get(4)?,
                 r.get(5)?,
+                r.get(6)?,
             ))
         },
     )
@@ -212,14 +233,17 @@ pub fn link_chat(tx: &Transaction<'_>, id: &str, chat_id: Option<&str>) -> rusql
     )? > 0)
 }
 
-/// The pinned pages, newest first. With a profile: that profile's pages and the ones pinned
-/// before any profile existed.
+/// One profile's view of the list: placed pins first by `position`, the rest newest first.
+const PIN_ORDER: &str = "ORDER BY position IS NULL, position, pinned_at DESC, rowid DESC";
+
+/// The pinned pages: once reordered by hand that order, otherwise newest first. With a profile:
+/// that profile's pages and the ones pinned before any profile existed.
 pub fn list(tx: &Transaction<'_>, profile: Option<&str>) -> rusqlite::Result<Vec<Value>> {
-    let mut st = tx.prepare(
-        "SELECT id, profile_id, path, title, chat_id, pinned_at FROM pinned_pages
+    let mut st = tx.prepare(&format!(
+        "SELECT id, profile_id, path, title, chat_id, pinned_at, position FROM pinned_pages
          WHERE (?1 IS NULL OR profile_id = ?1 OR profile_id = '')
-         ORDER BY pinned_at DESC, rowid DESC",
-    )?;
+         {PIN_ORDER}"
+    ))?;
     let rows = st.query_map([profile], |r| {
         Ok(pin_json(
             r.get(0)?,
@@ -228,9 +252,70 @@ pub fn list(tx: &Transaction<'_>, profile: Option<&str>) -> rusqlite::Result<Vec
             r.get(3)?,
             r.get(4)?,
             r.get(5)?,
+            r.get(6)?,
         ))
     })?;
     rows.collect()
+}
+
+/// Move a pin to stand just before another in its profile's list (or at the end when `before`
+/// is `None`), renumbering the whole list it sits in so the places are dense from 0. The list
+/// renumbered is the one that profile sees: its own pins and the pins left over from before
+/// profiles existed; a pin left over from then is moved within the list its anchor stands in.
+/// A move that changes nothing (same place, an unknown id, or an anchor in another profile's
+/// list) writes nothing and answers false.
+pub fn move_pin(tx: &Transaction<'_>, id: &str, before: Option<&str>) -> rusqlite::Result<bool> {
+    let owner = |pin: &str| -> rusqlite::Result<Option<String>> {
+        tx.query_row(
+            "SELECT profile_id FROM pinned_pages WHERE id = ?1",
+            [pin],
+            |r| r.get(0),
+        )
+        .optional()
+    };
+    let Some(profile) = owner(id)? else {
+        return Ok(false);
+    };
+    // A pin from before profiles existed has no list of its own: it moves within the list
+    // its anchor stands in, or the leftover pins alone when dropped at the end.
+    let scope = if profile.is_empty() {
+        match before.map(owner).transpose()? {
+            Some(Some(anchor)) if !anchor.is_empty() => anchor,
+            _ => String::new(),
+        }
+    } else {
+        profile
+    };
+    let mut order: Vec<String> = {
+        let mut st = tx.prepare(&format!(
+            "SELECT id FROM pinned_pages WHERE profile_id = ?1 OR profile_id = '' {PIN_ORDER}"
+        ))?;
+        let rows = st.query_map([scope.as_str()], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<String>>>()?
+    };
+    let Some(at) = order.iter().position(|x| x == id) else {
+        return Ok(false);
+    };
+    order.remove(at);
+    let to = match before {
+        Some(b) if b == id => return Ok(false),
+        Some(b) => match order.iter().position(|x| x == b) {
+            Some(p) => p,
+            None => return Ok(false),
+        },
+        None => order.len(),
+    };
+    if to == at {
+        return Ok(false);
+    }
+    order.insert(to, id.to_owned());
+    for (i, pin_id) in order.iter().enumerate() {
+        tx.execute(
+            "UPDATE pinned_pages SET position = ?2 WHERE id = ?1",
+            params![pin_id, i as i64],
+        )?;
+    }
+    Ok(true)
 }
 
 /// Whether the page is pinned for `profile`: its own pin, or one pinned before profiles existed
@@ -252,7 +337,7 @@ pub fn is_pinned_for(tx: &Transaction<'_>, profile: &str, key: &str) -> rusqlite
 /// The pin for a page, for any profile that has pinned it.
 pub fn pins_for_key(tx: &Transaction<'_>, key: &str) -> rusqlite::Result<Vec<Value>> {
     let mut st = tx.prepare(
-        "SELECT id, profile_id, path, title, chat_id, pinned_at FROM pinned_pages
+        "SELECT id, profile_id, path, title, chat_id, pinned_at, position FROM pinned_pages
          WHERE path_key = ?1 ORDER BY pinned_at DESC",
     )?;
     let rows = st.query_map([key], |r| {
@@ -263,6 +348,7 @@ pub fn pins_for_key(tx: &Transaction<'_>, key: &str) -> rusqlite::Result<Vec<Val
             r.get(3)?,
             r.get(4)?,
             r.get(5)?,
+            r.get(6)?,
         ))
     })?;
     rows.collect()
@@ -427,5 +513,75 @@ mod tests {
             pin_it("over", "full", "one-more", None, None, 1),
             Err(PinError::TooMany)
         );
+    }
+
+    /// Hand reorder: a move places a pin where it is dropped and gives the list dense
+    /// positions; a pin pinned later joins the newest-first tail; a move that changes
+    /// nothing writes nothing; each profile moves its own list (the pins left over from
+    /// before profiles existed stand in every list that sees them).
+    #[test]
+    fn pins_can_be_reordered_by_hand() {
+        let (_d, db) = db();
+        let pin_it = |id: &str, profile: &str, now: i64| {
+            db.write(|tx| {
+                pin(
+                    tx,
+                    id,
+                    profile,
+                    &format!("k{id}"),
+                    &format!("C:\\w\\{id}.html"),
+                    Some(id),
+                    None,
+                    now,
+                )
+            })
+        };
+        pin_it("l", "", 5).unwrap(); // pinned before profiles existed: stands in every list
+        pin_it("a", "p", 10).unwrap();
+        pin_it("b", "p", 20).unwrap();
+        pin_it("c", "p", 30).unwrap();
+        let ids = |profile: Option<&str>| -> Vec<String> {
+            db.snapshot(|tx| list(tx, profile))
+                .unwrap()
+                .iter()
+                .map(|p| p["id"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(
+            ids(Some("p")),
+            ["c", "b", "a", "l"],
+            "newest first until someone reorders"
+        );
+
+        // Drag a above c: it takes the front place and the places become dense from 0.
+        assert!(db.write(|tx| move_pin(tx, "a", Some("c"))).unwrap());
+        assert_eq!(ids(Some("p")), ["a", "c", "b", "l"]);
+        // Drag l in front of b: it lands between them.
+        assert!(db.write(|tx| move_pin(tx, "l", Some("b"))).unwrap());
+        assert_eq!(ids(Some("p")), ["a", "c", "l", "b"]);
+        // A pin made after the reorder joins the tail, not the placed run.
+        pin_it("d", "p", 40).unwrap();
+        assert_eq!(ids(Some("p")), ["a", "c", "l", "b", "d"]);
+        // Drop b at the end, before nothing.
+        assert!(db.write(|tx| move_pin(tx, "b", None)).unwrap());
+        assert_eq!(ids(Some("p")), ["a", "c", "l", "d", "b"]);
+
+        // The same place, an unknown pin and an unknown anchor change nothing.
+        assert!(!db.write(|tx| move_pin(tx, "a", Some("c"))).unwrap());
+        assert!(!db.write(|tx| move_pin(tx, "gone", Some("c"))).unwrap());
+        assert!(!db.write(|tx| move_pin(tx, "a", Some("gone"))).unwrap());
+        assert_eq!(ids(Some("p")), ["a", "c", "l", "d", "b"]);
+
+        // The places are dense and readable on the rows themselves.
+        let rows = db.snapshot(|tx| list(tx, Some("p"))).unwrap();
+        assert_eq!(rows[0]["position"], json!(0));
+        assert_eq!(rows[1]["position"], json!(1));
+        assert_eq!(rows[4]["position"], json!(4));
+
+        // Another profile keeps its own tail; the shared leftover pin carries the place the
+        // first profile's reorder wrote, so it leads there too.
+        pin_it("x", "q", 50).unwrap();
+        assert_eq!(ids(Some("q")), ["l", "x"]);
+        assert_eq!(ids(None).len(), 6);
     }
 }

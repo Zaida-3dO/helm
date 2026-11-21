@@ -43,5 +43,6 @@ pub trait ChatProfiles: Send + Sync {
 pub struct ChatProfileLookup(pub std::sync::Arc<dyn ChatProfiles>);
 
 pub fn register_migrations(reg: &mut helm_core::db::MigrationRegistry) {
-    reg.initializer("pages", store::init);
+    reg.initializer("pages", store::init)
+        .initializer("pages-pin-position", store::add_pin_position);
 }

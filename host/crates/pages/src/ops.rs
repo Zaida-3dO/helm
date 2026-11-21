@@ -10,8 +10,9 @@
 //! | `page_state_reset` | blocking | `{session}` → `{revision: 0}` |
 //! | `page_pin` | blocking | `{path, title?, chatId?, profileId?}` → `{page, created}` |
 //! | `page_unpin` | blocking | `{id}` → `{removed}` |
+//! | `page_pin_move` | blocking | `{id, beforeId?}` → `{moved}`: place a pin just before another in its profile's list (or at the end when `beforeId` is absent) |
 //! | `page_link_chat` | blocking | `{id, chatId?}` → `{linked}` |
-//! | `page_list` | blocking | `{profileId?, chatId?}` → `{pages}` (a chat's profile stands in for `profileId`) |
+//! | `page_list` | blocking | `{profileId?, chatId?}` → `{pages}` (a chat's profile stands in for `profileId`), in the hand-made order if the list was ever reordered, newest first otherwise |
 //! | `page_icon` | blocking | `{path}` → `{icon}`: a data URL of the page bundle's own favicon (a `<link rel=icon>` file beside it, else `favicon.ico`/`.png`/`.svg` there, at most 64 KiB), or `null` |
 //!
 //! The answers are built as JSON here, and the UI's copy of them (`ui/src/pages/`) is typed by hand
@@ -40,6 +41,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("page_state_reset", OpClass::Blocking, page_state_reset)
         .blocking("page_pin", OpClass::Blocking, page_pin)
         .blocking("page_unpin", OpClass::Blocking, page_unpin)
+        .blocking("page_pin_move", OpClass::Blocking, page_pin_move)
         .blocking("page_link_chat", OpClass::Blocking, page_link_chat)
         .blocking("page_list", OpClass::Blocking, page_list)
         .blocking("page_icon", OpClass::Blocking, page_icon);
@@ -296,6 +298,28 @@ fn page_unpin(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct MoveArgs {
+    id: String,
+    #[serde(default)]
+    before_id: Option<String>,
+}
+
+/// `page_pin_move`: place a pin just before another in the list its profile sees, or at the
+/// end with no anchor. The renderer arranges the drag; the host keeps the order.
+fn page_pin_move(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: MoveArgs = parse(args)?;
+    let db = ctx.services.need::<Database>()?;
+    let moved = db
+        .write(|tx| store::move_pin(tx, &a.id, a.before_id.as_deref()))
+        .map_err(internal)?;
+    if moved {
+        changed(ctx);
+    }
+    Ok(json!({ "moved": moved }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct LinkArgs {
     id: String,
     #[serde(default)]
@@ -481,6 +505,7 @@ mod tests {
     fn a_page_opens_saves_is_pinned_and_closes_through_the_ops() {
         let files = tempfile::tempdir().unwrap();
         std::fs::write(files.path().join("plan.html"), "<p>plan</p>").unwrap();
+        std::fs::write(files.path().join("plan2.html"), "<p>plan 2</p>").unwrap();
         std::fs::write(files.path().join("notes.txt"), "no").unwrap();
         let mut reg = MigrationRegistry::new();
         reg.initializer("pages", store::init);
@@ -658,6 +683,39 @@ mod tests {
             false
         );
 
+        // Hand reorder: two pins, newest first; placing the older above the newer sticks,
+        // and an unknown pin or an anchor outside the same list changes nothing.
+        let abs2 = files
+            .path()
+            .join("plan2.html")
+            .to_string_lossy()
+            .into_owned();
+        let one = page_pin(&ctx, json!({"path": abs, "profileId": "profile-c"})).unwrap();
+        let two = page_pin(&ctx, json!({"path": abs2, "profileId": "profile-c"})).unwrap();
+        assert_eq!(titles(json!({"profileId": "profile-c"})), ["plan2", "plan"]);
+        assert_eq!(
+            page_pin_move(
+                &ctx,
+                json!({"id": one["page"]["id"], "beforeId": two["page"]["id"]})
+            )
+            .unwrap()["moved"],
+            true
+        );
+        assert_eq!(titles(json!({"profileId": "profile-c"})), ["plan", "plan2"]);
+        assert_eq!(
+            page_pin_move(&ctx, json!({"id": "nope", "beforeId": two["page"]["id"]})).unwrap()
+                ["moved"],
+            false
+        );
+        assert_eq!(
+            page_pin_move(&ctx, json!({"id": one["page"]["id"], "beforeId": "nope"})).unwrap()
+                ["moved"],
+            false,
+            "an anchor outside the list moves nothing"
+        );
+        page_unpin(&ctx, json!({"id": one["page"]["id"]})).unwrap();
+        page_unpin(&ctx, json!({"id": two["page"]["id"]})).unwrap();
+
         // Closing ends the session for every op that needs it.
         assert_eq!(
             page_close(&ctx, json!({"session": session})).unwrap()["closed"],
@@ -761,7 +819,7 @@ mod tests {
     fn every_op_registers_once() {
         let mut reg = OpRegistry::new();
         register_ops(&mut reg);
-        assert_eq!(reg.names().count(), 11);
+        assert_eq!(reg.names().count(), 12);
         assert!(reg.names().all(|n| n.starts_with("page_")));
     }
 }
