@@ -1170,7 +1170,7 @@ async fn a_busy_chat_gets_a_steer_whatever_the_send_mode() {
         "asap: a steer, never a stop"
     );
     // An old stored "queue" mode changes nothing: it is still a steer, never a stop.
-    settle().await;
+    until_turned_down(&e, &chat, &telegram::submission_id("b")).await;
     sql(
         &e.db,
         "UPDATE chats SET status = 'running' WHERE id = ?1",

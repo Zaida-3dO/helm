@@ -764,8 +764,11 @@ pub(crate) fn open_repair_chat(c: &Ctx, o: &ServiceOutage, now: i64) -> Result<S
         .as_str()
         .ok_or("chat_create answered no id")?
         .to_owned();
-    helm_chats::titles::rename(&c.rt, &id, &format!("Fix the {words} service"))
-        .map_err(|e| e.message)?;
+    // A name that did not take leaves the chat as it is: the task is still there to run, and
+    // giving up here would leave a chat with no profile and no message.
+    if let Err(e) = helm_chats::titles::rename(&c.rt, &id, &format!("Fix the {words} service")) {
+        log::warn!("relay: the repair chat was not named: {}", e.message);
+    }
     // The repair chat belongs to the profile whose hub line reported the outage. A refused
     // assignment keeps the chat; the task is still there to run.
     if let Err(e) = c.handle.block_on(c.ops.invoke(
@@ -789,7 +792,7 @@ pub(crate) fn open_repair_chat(c: &Ctx, o: &ServiceOutage, now: i64) -> Result<S
         o.since
     );
     let sid = telegram::submission_id(&format!("repair/{}/{}", o.service, now));
-    host_send(
+    match host_send(
         &c.rt,
         HostSend {
             chat_id: &id,
@@ -797,9 +800,18 @@ pub(crate) fn open_repair_chat(c: &Ctx, o: &ServiceOutage, now: i64) -> Result<S
             text: &text,
             origin: helm_chats::types::SubmissionOrigin::App,
         },
-    )
-    .map(|_| id)
-    .map_err(|e| e.message)
+    ) {
+        Ok(_) => Ok(id),
+        Err(e) => {
+            // The chat never got its task: take it back rather than leave it empty.
+            let args = json!({ "chatId": &id });
+            let _ = c
+                .handle
+                .block_on(c.ops.invoke("chat_archive", args.clone()));
+            let _ = c.handle.block_on(c.ops.invoke("chat_delete", args));
+            Err(e.message)
+        }
+    }
 }
 
 /// Put one message into its chat (blocking). `Err` leaves it unacknowledged at the hub.

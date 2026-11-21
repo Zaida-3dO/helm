@@ -2005,14 +2005,12 @@ async fn sends_beyond_the_active_cap_wait_in_the_queue_and_open_when_one_frees()
     .await;
     // The chat that waited is working now and counts against the cap: the third stays waiting
     // behind it instead of opening beside it.
-    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-    assert_eq!(
+    h.until("the third is held at the limit again", |h| {
         h.col(&format!(
             "SELECT reason FROM chat_dispatch_holds WHERE chat_id = '{third}'"
-        )),
-        ["at_limit"],
-        "a chat that waited and then opened still counts as working"
-    );
+        )) == ["at_limit"]
+    })
+    .await;
     assert_eq!(h.status(&third), "starting");
     let _ = busy;
 }
