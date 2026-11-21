@@ -12,8 +12,10 @@
 //!   anyone's Telegram but the chat owner's: those are the rules for every card Helm applies.
 //! - **On Approve** the host mints a one-time grant: HMAC-SHA256, under a key Helm makes at start
 //!   and keeps only in memory, over the lease, the control's reference, its accessible name, the
-//!   site's host name and the second it was made. The broker accepts it once, within two minutes,
-//!   for exactly that tuple, and refuses it on any other lease or control. The key reaches the
+//!   site's host name, the second it was made, the approved verb, and a digest of the value the
+//!   step carries (a grant for "type 3" is not a grant for "type 3000"). The broker accepts it
+//!   once, within two minutes, for exactly that tuple, and refuses it on any other lease or
+//!   control. The key reaches the
 //!   broker in its own environment ([`SECRET_ENV`]) and joins the worker's redaction list like
 //!   every resolved secret; it is in no log, op result or tool answer.
 //! - **The grant never passes through the agent.** It goes to the chat's worker as a line on its
@@ -38,7 +40,7 @@ use hmac::{Hmac, Mac};
 use rusqlite::Transaction;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::Sha256;
+use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -86,6 +88,23 @@ pub struct Tuple<'a> {
     pub name: &'a str,
     pub host: &'a str,
     pub issued_at: u64,
+    /// The verb the owner approved: a grant for "click Pay" is not a grant for `type` on the
+    /// same control.
+    pub verb: &'a str,
+    /// The value the step carries (the key, the text, the option), if any.
+    pub value: Option<&'a str>,
+}
+
+/// The digest of the value the call carries, as the broker binds it: hex SHA-256, and the empty
+/// string for a verb that carries none. The value itself never travels in a grant.
+fn value_digest(value: Option<&str>) -> String {
+    match value {
+        None | Some("") => String::new(),
+        Some(v) => sha2::Sha256::digest(v.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
+    }
 }
 
 /// A grant in the broker's wire form, `<issued-at>.<base64url tag>`. The fields are joined with
@@ -94,12 +113,14 @@ pub struct Tuple<'a> {
 pub fn mint(key: &str, t: &Tuple<'_>) -> String {
     let esc = |s: &str| s.replace('\\', "\\\\").replace('|', "\\|");
     let payload = format!(
-        "{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}",
         esc(t.lease_key),
         esc(t.reference),
         esc(t.name),
         esc(t.host),
-        t.issued_at
+        t.issued_at,
+        esc(t.verb),
+        esc(&value_digest(t.value))
     );
     let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("HMAC takes any key");
     mac.update(payload.as_bytes());
@@ -434,6 +455,8 @@ impl Applier for StepApplier {
                 name: &s.name,
                 host: &s.host,
                 issued_at,
+                verb: &s.verb,
+                value: s.value.as_deref(),
             },
         );
         let line = json!({

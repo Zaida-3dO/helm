@@ -612,7 +612,7 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
         throw new McpError(`${name} is no longer available because its server changed. Discover it again with app_mcp_tools.`);
       }
       const browser = e.server.preset === BROKER_PRESET;
-      const source = { kind: "mcp", server: e.red.text(e.server.name), tool: e.red.text(l.tool) };
+      const source = { kind: "mcp" as const, server: e.red.text(e.server.name), tool: e.red.text(l.tool) };
       // Only Helm's own retry may carry an owner grant: whatever an agent sends is dropped.
       const sent = (browser ? withoutGrant(args ?? {}) : (args ?? {})) as Json;
       if (browser && l.tool === "browser_act") {

@@ -4,8 +4,9 @@ use helm_hosttools::{CallOrigin, WorkerBroadcast};
 use helm_ipc::{NullSink, Services};
 use std::collections::HashSet;
 
-/// The grant format, pinned against a value computed by Node's `crypto` the way the browser
-/// broker checks it: a pipe or backslash in the name is escaped, and the tag is base64url.
+/// The grant format, pinned against values computed by Node's `crypto` running the browser
+/// broker's own payload function: seven fields joined with `|` (lease, ref, name, host, second,
+/// verb, value digest), each escaped, the tag base64url. A value enters only as its hex digest.
 #[test]
 fn a_grant_matches_the_brokers_signature() {
     let g = mint(
@@ -16,9 +17,25 @@ fn a_grant_matches_the_brokers_signature() {
             name: "Add to basket | now \\ x",
             host: "shop.example",
             issued_at: 1_700_000_000,
+            verb: "click",
+            value: None,
         },
     );
-    assert_eq!(g, "1700000000.t_AFwawBvpYq0NohOSxczUxIN7iGDjVYlPnN0yph9BI");
+    assert_eq!(g, "1700000000.x76d8Ihdy2a6CIxaL-5F7OQ4HtbTkJufYIsh_0HaJeU");
+    let typed = mint(
+        "k3y",
+        &Tuple {
+            lease_key: "lease-1",
+            reference: "e12",
+            name: "Add to basket | now \\ x",
+            host: "shop.example",
+            issued_at: 1_700_000_000,
+            verb: "type",
+            value: Some("3"),
+        },
+    );
+    assert_eq!(typed, "1700000000.wyJDqpYJriIfDpLIvTkve8-8jISSy_8NIpVJcTHzZ64");
+    assert_ne!(g, typed, "a grant names its verb and value");
     let other_lease = mint(
         "k3y",
         &Tuple {
@@ -27,9 +44,15 @@ fn a_grant_matches_the_brokers_signature() {
             name: "Add to basket | now \\ x",
             host: "shop.example",
             issued_at: 1_700_000_000,
+            verb: "click",
+            value: None,
         },
     );
-    assert_ne!(g, other_lease, "a grant names its lease");
+    assert_eq!(
+        other_lease, "1700000000.ZOTZVuX6vJrrOXiD6jmCeh71h5rjDdl_fvRO-aLKvV4",
+        "a grant names its lease"
+    );
+    assert_ne!(g, other_lease);
     assert!(grant_key().is_some_and(|k| k.len() >= 43));
 }
 
@@ -38,6 +61,7 @@ fn a_grant_matches_the_brokers_signature() {
 struct Worker {
     answers: Arc<StepAnswers>,
     running: bool,
+    db: Arc<Database>,
     /// The control's name as the page reports it at retry time.
     page_name: Mutex<String>,
     lines: Mutex<Vec<(String, Value)>>,
@@ -45,20 +69,38 @@ struct Worker {
 }
 
 impl Worker {
-    fn new(answers: Arc<StepAnswers>, running: bool) -> Arc<Self> {
+    fn new(answers: Arc<StepAnswers>, running: bool, db: Arc<Database>) -> Arc<Self> {
         Arc::new(Self {
             answers,
             running,
+            db,
             page_name: Mutex::new("Add to basket".into()),
             lines: Mutex::default(),
             spent: Mutex::default(),
         })
     }
 
-    /// The broker's check of one grant against the live tuple.
+    /// The broker's check of one grant against the live tuple. The retried call repeats the
+    /// staged step exactly, so its verb and value come from the card the grant answers for.
     fn verify(&self, line: &Value) -> (bool, String) {
         let grant = line["grant"].as_str().unwrap_or("");
         let issued: u64 = grant.split('.').next().unwrap().parse().unwrap();
+        let id = line["requestId"].as_str().unwrap_or("");
+        let (verb, value) = self
+            .db
+            .snapshot(|tx| -> rusqlite::Result<(String, Option<String>)> {
+                let t: String = tx.query_row(
+                    "SELECT target FROM consent_requests WHERE id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )?;
+                let s: Value = serde_json::from_str(&t).unwrap_or(Value::Null);
+                Ok((
+                    s["verb"].as_str().unwrap_or("").to_owned(),
+                    s["value"].as_str().map(str::to_owned),
+                ))
+            })
+            .unwrap_or_default();
         let want = mint(
             grant_key().unwrap(),
             &Tuple {
@@ -67,6 +109,8 @@ impl Worker {
                 name: &self.page_name.lock().unwrap(),
                 host: "shop.example",
                 issued_at: issued,
+                verb: &verb,
+                value: value.as_deref(),
             },
         );
         if grant != want {
@@ -137,7 +181,7 @@ fn env(running: bool) -> Env {
     register_allow_kinds(&mut kinds);
     let kinds = Arc::new(kinds);
     let answers = Arc::new(StepAnswers::default());
-    let worker = Worker::new(answers.clone(), running);
+    let worker = Worker::new(answers.clone(), running, db.clone());
     let mut services = Services::new();
     services.insert(store);
     services.insert(db.clone());
@@ -240,6 +284,31 @@ fn which_steps_get_a_card() {
             case: "choosing a slot",
             args: with(ask("select", "Delivery slot"), "value", json!("Tue 9-10")),
             refused: None,
+        },
+        Row {
+            case: "ticking a box",
+            args: ask("check", "Gift wrap"),
+            refused: None,
+        },
+        Row {
+            case: "filling a note",
+            args: with(ask("fill", "Note"), "value", json!("Leave at door")),
+            refused: None,
+        },
+        Row {
+            case: "pressing a key on a named control",
+            args: with(ask("press", "Basket note"), "value", json!("Enter")),
+            refused: None,
+        },
+        Row {
+            case: "a never word in the role, not the name",
+            args: with(ask("click", "Add to basket"), "role", json!("button pay now")),
+            refused: Some(NEVER),
+        },
+        Row {
+            case: "ticking a payment box",
+            args: ask("check", "Pay deposit"),
+            refused: Some(NEVER),
         },
         Row {
             case: "checkout",
@@ -427,6 +496,14 @@ fn approve_mints_one_grant_for_that_chat_and_reports_the_browser() {
         assert_eq!(
             e.worker.verify(l).1,
             "refused (attached.grant_invalid): replayed"
+        );
+        // The same grant carried to another lease: the signature covers the lease, so the
+        // browser sees a forged grant there.
+        let mut other_lease = l.clone();
+        other_lease["leaseKey"] = json!("L2");
+        assert_eq!(
+            e.worker.verify(&other_lease).1,
+            "refused (attached.grant_invalid): forged"
         );
     }
     assert!(

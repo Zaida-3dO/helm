@@ -14,12 +14,13 @@
 //
 // Gate mode (`page` set) answers browser_act the way an attached browser decides it: the site
 // list, the password / one-time-code / card fields, the consequence words, and the owner grant
-// (HMAC-SHA256 under BROKER_OWNER_GRANT_SECRET from the environment, over the lease, the ref,
-// the control's name and the host, `<issued>.<base64url tag>`, two minutes, spent once per
-// process). browser_navigate, browser_read (with find and inline), browser_capture and
-// browser_claim answer in the broker's accepted JSON shape.
+// (HMAC-SHA256 under BROKER_OWNER_GRANT_SECRET from the environment over seven escaped fields —
+// lease, ref, control name, host, issued second, verb and the hex SHA-256 of the call's value
+// (empty for a verb that carries none) — as `<issued>.<base64url tag>`, two minutes wide with
+// five seconds of early skew, spent once per process). browser_navigate, browser_read (with
+// find and inline), browser_capture and browser_claim answer in the broker's accepted JSON shape.
 
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -60,16 +61,25 @@ const words = (s: string | undefined) => (s ?? "").toLowerCase().match(/[\p{L}\p
 const accepted = (value: Json) => ({ content: [{ type: "text", text: JSON.stringify({ outcome: "accepted", value }, null, 2) }] });
 const refused = (rule: string, message: string) => ({ content: [{ type: "text", text: `refused (${rule}): ${message}` }], isError: true });
 
-function verdict(grant: string, tuple: string[]): string {
+/** The digest of a call's value as the real broker binds it: hex SHA-256, empty for no value. */
+function valueDigest(value: string | undefined): string {
+  if (value === undefined || value === "") return "";
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function verdict(grant: string, t: { leaseKey: string; ref: string; accessibleName: string; urlHost: string; verb: string; value?: string }): string {
   const secret = process.env.BROKER_OWNER_GRANT_SECRET;
   if (!secret) return "no_secret";
   const at = grant.lastIndexOf(".");
   const issued = at > 0 ? Number(grant.slice(0, at)) : 0;
   const tag = Buffer.from(at > 0 ? grant.slice(at + 1) : grant, "base64url");
-  const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
-  const want = createHmac("sha256", secret).update([...tuple.map(esc), String(issued)].join("|")).digest();
+  const esc = (s: string) => s.split(String.fromCharCode(92)).join(String.fromCharCode(92, 92)).split("|").join(String.fromCharCode(92) + "|");
+  const want = createHmac("sha256", secret)
+    .update([esc(t.leaseKey), esc(t.ref), esc(t.accessibleName), esc(t.urlHost), String(issued), esc(t.verb), esc(valueDigest(t.value))].join("|"))
+    .digest();
   if (tag.length !== 32 || !timingSafeEqual(tag, want)) return "forged";
-  if (Math.abs(Date.now() / 1000 - issued) > 120) return "expired";
+  const age = Math.floor(Date.now() / 1000) - issued;
+  if (age > 120 || age < -5) return "expired";
   if (spent.has(grant)) return "replayed";
   spent.add(grant);
   return "valid";
@@ -90,7 +100,14 @@ function gateAct(page: Page, args: Json): Json {
   if (c.inputType === "password" || ac.some((t) => ["password", "current-password", "new-password", "one-time-code", "cc-number", "cc-csc", "cc-exp"].includes(t)))
     return no("attached.field_forbidden", "This control is a secret field, and an agent never types into one.");
   if (grant !== undefined) {
-    const v = verdict(grant, [String(args.lease_key ?? ""), ref, c.name, page.host]);
+    const v = verdict(grant, {
+      leaseKey: String(args.lease_key ?? ""),
+      ref,
+      accessibleName: c.name,
+      urlHost: page.host,
+      verb: String(args.action ?? ""),
+      value: typeof args.value === "string" ? args.value : undefined,
+    });
     if (v !== "valid" && v !== "no_secret") return no("attached.grant_invalid", `The owner grant did not verify (${v}); the step is refused.`);
   }
   const seen = new Set([...words(c.name), ...words(c.role)]);
