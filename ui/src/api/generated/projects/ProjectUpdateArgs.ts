@@ -20,7 +20,12 @@ startupFiles?: Array<string>,
 /**
  * Replaces the MCP servers the project's chats get; an empty list clears them.
  */
-startupServers?: Array<string>, pinned?: boolean, collapsed?: boolean, 
+startupServers?: Array<string>, pinned?: boolean, 
+/**
+ * The profile `pinned` and the reorder are for, when another PC's person pins here; the
+ * profile the sidebar shows when left out.
+ */
+pinProfileId?: string, collapsed?: boolean, 
 /**
  * Reorder within the sibling pin group: place before this project (`null` = last). Rewrites the
  * group's positions 0..n atomically; a no-op move writes nothing.

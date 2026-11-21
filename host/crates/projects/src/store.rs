@@ -275,12 +275,36 @@ pub fn validate_icon_image(png_base64: &str) -> Res<Vec<u8>> {
 
 /// Whether a project reads as pinned (`l` is its `project_local` row): pinned by the profile the
 /// sidebar shows, or by none recorded. With every profile shown (`:pin_profile` is empty, see
-/// [`pin_scope`]) any pin counts. Each profile keeps its own pins, so a board one person pinned
-/// never sits empty in another's sidebar.
+/// [`pin_scope`]) any pin counts. Each profile keeps its own pins (a row of `project_pins` each),
+/// so a board one person pinned never sits empty in another's sidebar.
 macro_rules! pinned_sql {
     () => {
-        "(COALESCE(l.pinned, 0) = 1 AND (:pin_profile = ''
-              OR COALESCE(l.pinned_profile_id, '') IN ('', :pin_profile)))"
+        "EXISTS (SELECT 1 FROM project_pins pn WHERE pn.project_id = l.project_id
+                   AND (:pin_profile = '' OR pn.profile_id IN ('', :pin_profile)))"
+    };
+}
+
+/// Where a pinned project sits among the pins of the profile the sidebar shows (null: after those
+/// with a place).
+macro_rules! pin_sort_sql {
+    () => {
+        "(SELECT pn.sort FROM project_pins pn WHERE pn.project_id = l.project_id
+            AND (:pin_profile = '' OR pn.profile_id IN ('', :pin_profile))
+          ORDER BY pn.profile_id = :pin_profile DESC, pn.sort IS NULL, pn.sort LIMIT 1)"
+    };
+}
+
+/// The place a project is ordered by within its pin group: the profile's own pin order for a pinned
+/// project, the shared position for any other.
+macro_rules! slot_sql {
+    () => {
+        concat!(
+            "CASE WHEN ",
+            pinned_sql!(),
+            " THEN ",
+            pin_sort_sql!(),
+            " ELSE l.position END"
+        )
     };
 }
 
@@ -305,7 +329,11 @@ const PROJECT_SELECT: &str = concat!(
 const PROJECT_ORDER: &str = concat!(
     "ORDER BY ",
     pinned_sql!(),
-    " DESC, l.position IS NULL, l.position, p.created_at DESC, p.id"
+    " DESC, ",
+    slot_sql!(),
+    " IS NULL, ",
+    slot_sql!(),
+    ", p.created_at DESC, p.id"
 );
 
 /// The profile whose pins the sidebar shows, as `:pin_profile`: the active one, or empty when it
@@ -325,6 +353,30 @@ fn pin_owner(tx: &Transaction<'_>) -> String {
             .map(|p| p.id)
             .unwrap_or_default(),
     }
+}
+
+/// The profile a pin operation is for, as (the pins it reads, the owner a new pin gets): the
+/// profile named, when another PC's person pins here, else the one the sidebar shows.
+fn pin_target(tx: &Transaction<'_>, named: Option<&str>) -> Res<(String, String)> {
+    match named.filter(|n| !n.is_empty()) {
+        Some(id) => {
+            if helm_profiles::store::get(tx, id)?.is_none() {
+                return Err(bad("That profile does not exist."));
+            }
+            Ok((id.to_owned(), id.to_owned()))
+        }
+        None => Ok((pin_scope(tx), pin_owner(tx))),
+    }
+}
+
+/// Whether `id` is pinned as `scope` sees it (see [`pinned_sql`]).
+fn is_pinned(tx: &Transaction<'_>, id: &str, scope: &str) -> rusqlite::Result<bool> {
+    tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM project_pins
+                        WHERE project_id = ?1 AND (?2 = '' OR profile_id IN ('', ?2)))",
+        params![id, scope],
+        |r| r.get(0),
+    )
 }
 
 /// A list stored as JSON text; anything unreadable is an empty list.
@@ -676,22 +728,15 @@ pub fn set_parent(tx: &Transaction<'_>, id: &str, parent: Option<&str>) -> Res<(
     Ok(())
 }
 
-/// The ids of `id`'s siblings in its pin group, in sidebar order (including `id`).
-fn project_siblings(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<Vec<String>> {
+/// The ids of `id`'s siblings in its pin group, in sidebar order (including `id`), and whether
+/// that group is the pinned one, as the profile `scope` sees them.
+fn project_siblings(
+    tx: &Transaction<'_>,
+    id: &str,
+    scope: &str,
+) -> rusqlite::Result<(Vec<String>, bool)> {
     let parent = parent_of(tx, id)?;
-    let scope = pin_scope(tx);
-    let pinned = tx
-        .query_row(
-            concat!(
-                "SELECT ",
-                pinned_sql!(),
-                " FROM project_local l WHERE l.project_id = :id"
-            ),
-            named_params! {":id": id, ":pin_profile": scope},
-            |r| r.get::<_, i64>(0),
-        )
-        .optional()?
-        .unwrap_or(0);
+    let pinned = is_pinned(tx, id, scope)? as i64;
     let mut st = tx.prepare(&format!(
         "SELECT p.id FROM projects p
          LEFT JOIN project_local l ON l.project_id = p.id
@@ -704,13 +749,17 @@ fn project_siblings(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<Vec<Stri
         named_params! {":parent": parent, ":pinned": pinned, ":pin_profile": scope},
         |r| r.get(0),
     )?;
-    rows.collect()
+    Ok((
+        rows.collect::<rusqlite::Result<Vec<String>>>()?,
+        pinned != 0,
+    ))
 }
 
 /// Move `id` before `before` (or last) within its sibling pin group. A move that changes nothing
-/// writes nothing; otherwise every position in the group is rewritten 0..n.
-fn reorder_project(tx: &Transaction<'_>, id: &str, before: Option<&str>) -> Res<bool> {
-    let current = project_siblings(tx, id)?;
+/// writes nothing; otherwise every place in the group is rewritten 0..n: the position of an
+/// unpinned project, the order of the pins `scope` sees for a pinned one.
+fn reorder_project(tx: &Transaction<'_>, id: &str, before: Option<&str>, scope: &str) -> Res<bool> {
+    let (current, pinned) = project_siblings(tx, id, scope)?;
     let next = reorder(&current, id, before)
         .ok_or_else(|| bad("A project can only move within its own pin group."))?;
     if next == current {
@@ -718,10 +767,18 @@ fn reorder_project(tx: &Transaction<'_>, id: &str, before: Option<&str>) -> Res<
     }
     for (i, p) in next.iter().enumerate() {
         ensure_local(tx, p)?;
-        tx.execute(
-            "UPDATE project_local SET position = ?2 WHERE project_id = ?1",
-            params![p, i as i64],
-        )?;
+        if pinned {
+            tx.execute(
+                "UPDATE project_pins SET sort = ?2
+                 WHERE project_id = ?1 AND (?3 = '' OR profile_id IN ('', ?3))",
+                params![p, i as i64, scope],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE project_local SET position = ?2 WHERE project_id = ?1",
+                params![p, i as i64],
+            )?;
+        }
     }
     Ok(true)
 }
@@ -871,20 +928,34 @@ pub fn update_project(tx: &Transaction<'_>, a: &ProjectUpdateArgs) -> Res<i64> {
     if let Some(parent) = &a.parent_id {
         set_parent(tx, id, parent.as_deref())?;
     }
+    let (scope, owner) = pin_target(tx, a.pin_profile_id.as_deref())?;
     if let Some(p) = a.pinned {
-        if p != node.pinned {
-            // Pinning moves the project to the end of its new pin group. A pin belongs to the
-            // profile that made it; unpinning clears it for everyone.
-            let owner = if p { pin_owner(tx) } else { String::new() };
-            tx.execute(
-                "UPDATE project_local SET pinned = ?2, pinned_profile_id = ?3, position = NULL
-                 WHERE project_id = ?1",
-                params![id, p as i64, owner],
-            )?;
+        if p != is_pinned(tx, id, &scope)? {
+            // Pinning puts the project at the end of that profile's pins. A pin belongs to the
+            // profile that made it, so unpinning takes away that profile's pin (and one made
+            // before profiles) and leaves the others.
+            if p {
+                tx.execute(
+                    "INSERT INTO project_pins(project_id, profile_id, sort, pinned_at)
+                     VALUES (?1, ?2, NULL, ?3)
+                     ON CONFLICT(project_id, profile_id) DO UPDATE SET sort = NULL",
+                    params![id, owner, helm_core::now_ms()],
+                )?;
+            } else {
+                tx.execute(
+                    "DELETE FROM project_pins
+                     WHERE project_id = ?1 AND (?2 = '' OR profile_id IN ('', ?2))",
+                    params![id, scope],
+                )?;
+                tx.execute(
+                    "UPDATE project_local SET position = NULL WHERE project_id = ?1",
+                    [id],
+                )?;
+            }
         }
     }
     if let Some(before) = &a.before_project_id {
-        reorder_project(tx, id, before.as_deref())?;
+        reorder_project(tx, id, before.as_deref(), &scope)?;
     }
     if let Some(path) = &a.path {
         if node.kind == ProjectKind::Board {

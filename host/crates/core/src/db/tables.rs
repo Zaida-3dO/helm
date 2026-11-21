@@ -90,6 +90,7 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("project_archive_members", Data),
     ("project_local", Data),
     ("project_parents", Data),
+    ("project_pins", Data),
     ("project_top_level", Data),
     ("repositories", Tool),
     ("repo_checkouts", Tool),

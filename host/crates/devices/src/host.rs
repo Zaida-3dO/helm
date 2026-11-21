@@ -407,6 +407,59 @@ impl HostPort {
         self.dispatcher.call_host(op, args).await.map_err(wire)
     }
 
+    /// A pin or a folder change of a project here. A pin is the pin of `profile` (the person who
+    /// asked from another PC) when one is given, else of the profile this PC's sidebar shows.
+    async fn project_set_for(
+        &self,
+        a: ProjectSetArgs,
+        profile: Option<String>,
+    ) -> PortResult<Value> {
+        if a.pinned.is_none() && a.folder_project_id.is_none() {
+            return Err(WireError::bad_args("Name what to change."));
+        }
+        let (kind, revision) = self
+            .db()?
+            .snapshot(|tx| {
+                let kind: Option<String> = tx
+                    .query_row(
+                        "SELECT kind FROM projects WHERE id = ?1",
+                        [&a.project_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                // The side table belongs to the projects crate; no row is revision 0.
+                let revision: i64 = tx
+                    .query_row(
+                        "SELECT revision FROM project_local WHERE project_id = ?1",
+                        [&a.project_id],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .unwrap_or(None)
+                    .unwrap_or(0);
+                Ok::<_, rusqlite::Error>((kind, revision))
+            })
+            .map_err(db_err)?;
+        let kind =
+            kind.ok_or_else(|| WireError::new(code::NOT_FOUND, "That project is not on this PC."))?;
+        let mut args = json!({ "projectId": a.project_id, "revision": revision });
+        if let Some(p) = a.pinned {
+            args["pinned"] = json!(p);
+            if let Some(profile) = profile {
+                args["pinProfileId"] = json!(profile);
+            }
+        }
+        if let Some(f) = a.folder_project_id.as_deref() {
+            if kind != "board" {
+                return Err(WireError::bad_args("Only a board takes a folder this way."));
+            }
+            self.folder_path(f)?;
+            args["primaryFolderProjectId"] = json!(f);
+        }
+        self.op("project_update", args).await?;
+        Ok(json!({}))
+    }
+
     /// The chat's project folder on this PC, taken through the panel's own path gate. A chat
     /// without a folder (a board-only grouping, or a path the gate refuses) has none.
     fn project_folder(&self, chat_id: &str) -> PortResult<std::path::PathBuf> {
@@ -576,9 +629,8 @@ impl HostPort {
                         COALESCE((SELECT f.id FROM projects f
                                   WHERE f.id = l.primary_folder_project_id AND f.kind = 'folder'
                                     AND f.path IS NOT NULL), ''),
-                        CASE WHEN COALESCE(l.pinned, 0) = 1
-                              AND (?1 IS NULL OR COALESCE(l.pinned_profile_id, '') IN ('', ?1))
-                             THEN 1 ELSE 0 END
+                        EXISTS (SELECT 1 FROM project_pins pn WHERE pn.project_id = p.id
+                                  AND (?1 IS NULL OR pn.profile_id IN ('', ?1)))
                  FROM projects p LEFT JOIN project_local l ON l.project_id = p.id
                  WHERE p.kind IN ('folder', 'board')
                    AND (p.kind = 'board' OR p.path IS NOT NULL)
@@ -821,26 +873,16 @@ impl ChatPort for HostPort {
         a: ProjectSetArgs,
     ) -> BoxFut<'_, PortResult<Value>> {
         Box::pin(async move {
-            let pin = a.pinned == Some(true);
-            let project_id = a.project_id.clone();
-            let out = self.project_set(a).await?;
-            // The projects op files a new pin under this PC's active profile; one made from
-            // another PC is the asking person's, so their sidebar there shows it.
-            if pin && !person_id.is_empty() {
-                let db = self.db()?;
-                db.write(|tx| {
-                    if let Some(profile) = profile_of_person(tx, &person_id)? {
-                        tx.execute(
-                            "UPDATE project_local SET pinned_profile_id = ?2
-                             WHERE project_id = ?1 AND pinned = 1",
-                            [&project_id, &profile],
-                        )?;
-                    }
-                    Ok::<_, rusqlite::Error>(())
-                })
-                .map_err(db_err)?;
-            }
-            Ok(out)
+            // A pin made from another PC is the asking person's: it goes to their profile here, so
+            // their sidebar shows it and the pins of anyone else stay as they are.
+            let profile = if person_id.is_empty() {
+                None
+            } else {
+                self.db()?
+                    .snapshot(|tx| profile_of_person(tx, &person_id))
+                    .map_err(db_err)?
+            };
+            self.project_set_for(a, profile).await
         })
     }
 
@@ -1969,50 +2011,7 @@ impl ChatPort for HostPort {
     }
 
     fn project_set(&self, a: ProjectSetArgs) -> BoxFut<'_, PortResult<Value>> {
-        Box::pin(async move {
-            if a.pinned.is_none() && a.folder_project_id.is_none() {
-                return Err(WireError::bad_args("Name what to change."));
-            }
-            let (kind, revision) = self
-                .db()?
-                .snapshot(|tx| {
-                    let kind: Option<String> = tx
-                        .query_row(
-                            "SELECT kind FROM projects WHERE id = ?1",
-                            [&a.project_id],
-                            |r| r.get(0),
-                        )
-                        .optional()?;
-                    // The side table belongs to the projects crate; no row is revision 0.
-                    let revision: i64 = tx
-                        .query_row(
-                            "SELECT revision FROM project_local WHERE project_id = ?1",
-                            [&a.project_id],
-                            |r| r.get(0),
-                        )
-                        .optional()
-                        .unwrap_or(None)
-                        .unwrap_or(0);
-                    Ok::<_, rusqlite::Error>((kind, revision))
-                })
-                .map_err(db_err)?;
-            let kind = kind.ok_or_else(|| {
-                WireError::new(code::NOT_FOUND, "That project is not on this PC.")
-            })?;
-            let mut args = json!({ "projectId": a.project_id, "revision": revision });
-            if let Some(p) = a.pinned {
-                args["pinned"] = json!(p);
-            }
-            if let Some(f) = a.folder_project_id.as_deref() {
-                if kind != "board" {
-                    return Err(WireError::bad_args("Only a board takes a folder this way."));
-                }
-                self.folder_path(f)?;
-                args["primaryFolderProjectId"] = json!(f);
-            }
-            self.op("project_update", args).await?;
-            Ok(json!({}))
-        })
+        Box::pin(self.project_set_for(a, None))
     }
 
     fn chat_brief(&self, chat_id: String) -> BoxFut<'_, PortResult<Option<RemoteChat>>> {

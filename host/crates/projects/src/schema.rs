@@ -33,7 +33,7 @@ pub fn register(reg: &mut MigrationRegistry) {
         .one_time("projects-icon-and-description", add_icon_and_description)
         .one_time("projects-startup-instructions", add_startup_instructions)
         .one_time("projects-startup-set", add_startup_set)
-        .one_time("projects-pins-per-profile", pins_per_profile)
+        .one_time("projects-pins-table", pins_table)
         .initializer("projects-startup", crate::startup::init)
         .initializer("projects-repositories", crate::repos::init);
 }
@@ -42,7 +42,6 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     tx.execute_batch(&format!(
         "CREATE TABLE IF NOT EXISTS project_local (
              project_id                 TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
-             pinned                     INTEGER NOT NULL DEFAULT 0,
              position                   INTEGER,
              collapsed                  INTEGER NOT NULL DEFAULT 0,
              icon                       TEXT,
@@ -56,8 +55,14 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              startup_files              TEXT,
              startup_servers            TEXT,
              icon_image                 BLOB,
-             title_pending              INTEGER NOT NULL DEFAULT 0,
-             pinned_profile_id          TEXT NOT NULL DEFAULT ''
+             title_pending              INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE TABLE IF NOT EXISTS project_pins (
+             project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+             profile_id  TEXT NOT NULL,
+             sort        INTEGER,
+             pinned_at   INTEGER NOT NULL,
+             PRIMARY KEY (project_id, profile_id)
          );
          CREATE TABLE IF NOT EXISTS project_parents (
              project_id  TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
@@ -221,34 +226,45 @@ fn add_startup_set(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Pins became per profile after the table existed: a profile made before gets the column here,
-/// and every pin it already has goes to the home profile, whose sidebar it was made in. With no
-/// home profile yet, a pin keeps no owner and shows for every profile.
-fn pins_per_profile(tx: &Transaction<'_>) -> rusqlite::Result<()> {
-    let present: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('project_local') WHERE name = 'pinned_profile_id')",
-        [],
-        |r| r.get(0),
-    )?;
-    if !present {
-        tx.execute_batch(
-            "ALTER TABLE project_local ADD COLUMN pinned_profile_id TEXT NOT NULL DEFAULT ''",
-        )?;
+/// Pins became one row per profile (`project_pins`) after they were a flag on the project's local
+/// row, kept for the whole PC and, for a while, with one owner. Every pin made until now moves to
+/// the profile that owned it, else to the home profile, whose sidebar it was made in (with no home
+/// profile yet it keeps no owner and shows for every profile), keeping its place in the order.
+/// The old columns stay where they are, unread.
+fn pins_table(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    let has = |column: &str| -> rusqlite::Result<bool> {
+        tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('project_local') WHERE name = ?1)",
+            [column],
+            |r| r.get(0),
+        )
+    };
+    if !has("pinned")? {
+        return Ok(());
     }
+    let owner = if has("pinned_profile_id")? {
+        "COALESCE(NULLIF(l.pinned_profile_id, ''), "
+    } else {
+        "COALESCE("
+    };
     let profiles: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'profiles')",
         [],
         |r| r.get(0),
     )?;
-    if profiles {
-        tx.execute(
-            "UPDATE project_local
-             SET pinned_profile_id = (SELECT id FROM profiles WHERE is_home = 1)
-             WHERE pinned = 1 AND pinned_profile_id = ''
-               AND EXISTS (SELECT 1 FROM profiles WHERE is_home = 1)",
-            [],
-        )?;
-    }
+    let home = if profiles {
+        "(SELECT id FROM profiles WHERE is_home = 1), ''"
+    } else {
+        "''"
+    };
+    tx.execute(
+        &format!(
+            "INSERT OR IGNORE INTO project_pins(project_id, profile_id, sort, pinned_at)
+             SELECT l.project_id, {owner}{home}), l.position, 0
+             FROM project_local l WHERE l.pinned = 1"
+        ),
+        [],
+    )?;
     Ok(())
 }
 

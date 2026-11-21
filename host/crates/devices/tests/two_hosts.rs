@@ -2733,9 +2733,12 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
     db.write(|tx| {
         tx.execute_batch(
             "CREATE TABLE project_local (
-                 project_id TEXT PRIMARY KEY, pinned INTEGER NOT NULL DEFAULT 0,
+                 project_id TEXT PRIMARY KEY,
                  archived INTEGER NOT NULL DEFAULT 0, closed INTEGER NOT NULL DEFAULT 0,
                  primary_folder_project_id TEXT, revision INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE project_pins (
+                 project_id TEXT NOT NULL, profile_id TEXT NOT NULL, sort INTEGER,
+                 pinned_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (project_id, profile_id));
              CREATE TABLE board_projects (project_id TEXT PRIMARY KEY, stale INTEGER NOT NULL DEFAULT 0);
              INSERT INTO board_projects(project_id) VALUES ('brd-1');
              INSERT INTO project_local(project_id, primary_folder_project_id, revision)
@@ -2899,13 +2902,12 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
     calls.lock().unwrap().clear();
 
     // Each person's hello names their own pins and the ones made before profiles, never
-    // another person's; a pin made from afar is filed under the asking person's profile.
+    // another person's; a pin made from afar is asked for under the asking person's profile.
     db.write(|tx| {
         tx.execute_batch(
-            "ALTER TABLE project_local ADD COLUMN pinned_profile_id TEXT;
-             INSERT INTO project_local(project_id, pinned, pinned_profile_id) VALUES ('proj-w', 1, '');
-             UPDATE project_local SET pinned = 1, pinned_profile_id = 'p-b' WHERE project_id = 'brd-1';
-             INSERT INTO project_local(project_id, pinned, pinned_profile_id) VALUES ('brd-2', 1, 'p-a');",
+            "INSERT INTO project_pins(project_id, profile_id) VALUES ('proj-w', '');
+             INSERT INTO project_pins(project_id, profile_id) VALUES ('brd-1', 'p-b');
+             INSERT INTO project_pins(project_id, profile_id) VALUES ('brd-2', 'p-a');",
         )
     })
     .unwrap();
@@ -2928,14 +2930,36 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
         let got = pins(remote.hello_as(person.into()).await.unwrap());
         assert_eq!(got, want, "{person}");
     }
-    remote
-        .project_set_as("person-b".into(), set("brd-2", Some(true), None))
-        .await
-        .unwrap();
+    // The ask names the asking person's profile (none for a person with no profile here), and the
+    // projects op files the pin or takes it off for that profile alone.
+    for (person, on, profile) in [
+        ("person-b", true, Some("p-b")),
+        ("person-a", false, Some("p-a")),
+        ("person-x", true, None),
+    ] {
+        remote
+            .project_set_as(person.into(), set("brd-2", Some(on), None))
+            .await
+            .unwrap();
+        let mut want = json!({"projectId": "brd-2", "revision": 0, "pinned": on});
+        if let Some(profile) = profile {
+            want["pinProfileId"] = json!(profile);
+        }
+        assert_eq!(
+            calls.lock().unwrap().remove(0),
+            ("project_update".to_owned(), want),
+            "{person}"
+        );
+    }
+    // Once the op has filed person-b's pin, both people have it and neither lost theirs.
+    db.write(|tx| {
+        tx.execute_batch("INSERT INTO project_pins(project_id, profile_id) VALUES ('brd-2', 'p-b')")
+    })
+    .unwrap();
     let got = pins(remote.hello_as("person-b".into()).await.unwrap());
     assert_eq!(got, ["brd-1", "brd-2", "proj-w"]);
     let got = pins(remote.hello_as("person-a".into()).await.unwrap());
-    assert_eq!(got, ["proj-w"]);
+    assert_eq!(got, ["brd-2", "proj-w"]);
     calls.lock().unwrap().clear();
 
     // The catalogue op failing (here: no profile folder for it to read) is logged, not fatal:

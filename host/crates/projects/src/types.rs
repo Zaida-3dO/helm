@@ -341,6 +341,11 @@ pub struct ProjectUpdateArgs {
     #[serde(default)]
     #[ts(optional)]
     pub pinned: Option<bool>,
+    /// The profile `pinned` and the reorder are for, when another PC's person pins here; the
+    /// profile the sidebar shows when left out.
+    #[serde(default)]
+    #[ts(optional)]
+    pub pin_profile_id: Option<String>,
     #[serde(default)]
     #[ts(optional)]
     pub collapsed: Option<bool>,
