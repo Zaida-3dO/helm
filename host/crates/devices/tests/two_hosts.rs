@@ -2898,6 +2898,46 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
     assert_eq!(calls.lock().unwrap().len(), 2);
     calls.lock().unwrap().clear();
 
+    // Each person's hello names their own pins and the ones made before profiles, never
+    // another person's; a pin made from afar is filed under the asking person's profile.
+    db.write(|tx| {
+        tx.execute_batch(
+            "ALTER TABLE project_local ADD COLUMN pinned_profile_id TEXT;
+             INSERT INTO project_local(project_id, pinned, pinned_profile_id) VALUES ('proj-w', 1, '');
+             UPDATE project_local SET pinned = 1, pinned_profile_id = 'p-b' WHERE project_id = 'brd-1';
+             INSERT INTO project_local(project_id, pinned, pinned_profile_id) VALUES ('brd-2', 1, 'p-a');",
+        )
+    })
+    .unwrap();
+    let pins = |h: helm_devices::wire::Hello| {
+        let mut v: Vec<String> = h
+            .projects
+            .into_iter()
+            .filter(|p| p.pinned)
+            .map(|p| p.id)
+            .collect();
+        v.sort();
+        v
+    };
+    for (person, want) in [
+        ("person-a", vec!["brd-2", "proj-w"]),
+        ("person-b", vec!["brd-1", "proj-w"]),
+        ("person-x", vec!["proj-w"]),
+        ("", vec!["brd-1", "brd-2", "proj-w"]),
+    ] {
+        let got = pins(remote.hello_as(person.into()).await.unwrap());
+        assert_eq!(got, want, "{person}");
+    }
+    remote
+        .project_set_as("person-b".into(), set("brd-2", Some(true), None))
+        .await
+        .unwrap();
+    let got = pins(remote.hello_as("person-b".into()).await.unwrap());
+    assert_eq!(got, ["brd-1", "brd-2", "proj-w"]);
+    let got = pins(remote.hello_as("person-a".into()).await.unwrap());
+    assert_eq!(got, ["proj-w"]);
+    calls.lock().unwrap().clear();
+
     // The catalogue op failing (here: no profile folder for it to read) is logged, not fatal:
     // the hello still answers, with no catalogue.
     let mut bare = Services::new();
@@ -3501,4 +3541,148 @@ async fn the_copy_holds_every_chat_of_the_pc_whoever_the_laptop_acts_for() {
     tap.observe(&AppEvent::new("profiles_changed"));
     settle().await;
     assert!(b.mirror.owner("own-s").is_some() && b.mirror.owner("own-t").is_some());
+}
+
+/// A server on the host's loopback, opened from the other PC's: the window's ops on the viewing
+/// PC, the person and switch checks on the host, and the end when the host drops off the hub.
+/// Real sockets, so real time.
+#[tokio::test]
+async fn a_port_of_one_pc_opens_on_another_and_closes_when_that_pc_goes() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let echo_port = echo.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = echo.accept().await {
+            tokio::spawn(async move {
+                let (mut r, mut w) = s.split();
+                let _ = tokio::io::copy(&mut r, &mut w).await;
+            });
+        }
+    });
+
+    let router = MemRouter::new();
+    let port = Arc::new(FakePort::new("dev-a", "Desk"));
+    port.add_chat("c1", "First", 10);
+    port.add_chat_of("c2", "Theirs", 11, "person-b", &[]);
+    let link_a = router.connect("dev-a", Some("person-a"), Some("Alex"), true);
+    let host = Service::new(
+        port.clone(),
+        link_a.clone(),
+        tokio::runtime::Handle::current(),
+    );
+    host.announce();
+    let b = side(&router, "dev-b", "Laptop", None, "person-a", "Alex", &[]);
+    let viewer = Service::new(
+        Arc::new(FakePort::new("dev-b", "Laptop")),
+        b.link.clone(),
+        tokio::runtime::Handle::current(),
+    );
+    let changes = Arc::new(Mutex::new(0usize));
+    let seen = changes.clone();
+    viewer.on_forwards_changed(move || *seen.lock().unwrap() += 1);
+    let mut services = Services::new();
+    services.insert(b.db.clone());
+    let tap = Arc::new(helm_devices::EventTap::default());
+    tap.attach(viewer.clone());
+    services.insert(tap);
+    let slot = Arc::new(MirrorSlot::default());
+    slot.attach(b.mirror.clone());
+    services.insert(slot);
+    let mut ops = OpRegistry::new();
+    helm_devices::register_ops(&mut ops);
+    let api = Dispatcher::new(
+        ops,
+        OpCtx {
+            services: Arc::new(services),
+            events: b.sink.clone(),
+        },
+        false,
+    );
+    until(|| b.mirror.owner("c1").is_some()).await;
+
+    // Opened from the chat: the echo server's port is taken on this machine, so the forward
+    // listens on another free port here and says which.
+    let open = json!({"chatId": "c1", "port": echo_port, "title": "Preview"});
+    let f = api
+        .call_host("devices_forward_open", open.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            f["deviceName"].as_str(),
+            f["port"].as_u64(),
+            f["title"].as_str()
+        ),
+        (Some("Desk"), Some(echo_port as u64), Some("Preview"))
+    );
+    let local = f["localPort"].as_u64().unwrap() as u16;
+    assert_ne!(local, echo_port);
+    let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", local))
+        .await
+        .unwrap();
+    sock.write_all(b"ping").await.unwrap();
+    let mut back = [0u8; 4];
+    sock.read_exact(&mut back).await.unwrap();
+    assert_eq!(&back, b"ping");
+    // Asked again, the same forward answers.
+    let again = api.call_host("devices_forward_open", open).await.unwrap();
+    assert_eq!(again["forwardId"], f["forwardId"]);
+    let listed = api.call_host("devices_forwards", json!({})).await.unwrap();
+    assert_eq!(listed["forwards"].as_array().unwrap().len(), 1);
+    assert_eq!(*changes.lock().unwrap(), 1);
+
+    // On the host: another person may forward from their own chat but not from this PC's
+    // person's, and nothing is forwarded with the switch off.
+    let tablet = Watcher::of(&router, "dev-c", "Tablet", true, "person-b", "Blake");
+    settle().await;
+    let e = tablet
+        .rpc
+        .call(
+            "dev-a",
+            "forward_open",
+            json!({"chatId": "c1", "port": echo_port}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, code::REFUSED);
+    let theirs = tablet
+        .rpc
+        .call(
+            "dev-a",
+            "forward_open",
+            json!({"chatId": "c2", "port": echo_port}),
+        )
+        .await
+        .unwrap();
+    tablet
+        .rpc
+        .call(
+            "dev-a",
+            "forward_close",
+            json!({"forwardId": theirs["forwardId"]}),
+        )
+        .await
+        .unwrap();
+    port.set_run(false);
+    let e = tablet
+        .rpc
+        .call(
+            "dev-a",
+            "forward_open",
+            json!({"chatId": "c2", "port": echo_port}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, code::NOT_ALLOWED);
+    port.set_run(true);
+
+    // The host drops off the hub: the forward ends here, its connection closes and the window
+    // hears it.
+    link_a.set_up(false);
+    let mut rest = Vec::new();
+    let read = tokio::time::timeout(Duration::from_secs(5), sock.read_to_end(&mut rest)).await;
+    assert!(read.is_ok(), "the connection stayed open");
+    until(|| *changes.lock().unwrap() == 2).await;
+    let listed = api.call_host("devices_forwards", json!({})).await.unwrap();
+    assert_eq!(listed["forwards"], json!([]));
 }
