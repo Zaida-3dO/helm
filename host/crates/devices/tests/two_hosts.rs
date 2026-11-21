@@ -1083,7 +1083,7 @@ async fn allow_cards_show_on_every_pc_and_the_first_answer_wins() {
         .unwrap_err();
     assert_eq!(e.code, "conflict");
 
-    // Answered on the host PC itself: the window's own click moves the same store, and the
+    // Answered on the chat's home PC itself: the window's own click moves the same store, and the
     // service's consent event closes the card on the other PCs.
     port.st()
         .consent

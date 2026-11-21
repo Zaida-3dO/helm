@@ -1,9 +1,10 @@
 // The strip at the top of a chat that runs on another device: where it runs and, when it cannot be
-// changed from here, why. Mounted by ChatView for a chat whose host is not this PC.
+// changed from here, why. Mounted by ChatView for a chat whose home PC is not this PC; this PC is
+// the seat the person is typing at.
 //
-// It also lists the ports of that PC forwarded to this one for the chat, each with Open (this
-// PC's browser, at a loopback address built here) and Stop, and offers "Forward a port…" while the
-// device is live.
+// It also lists the ports of the chat's home PC forwarded to this one for the chat, each with Open
+// (this PC's browser, at a loopback address built here) and Stop, and offers "Forward a port…"
+// while the device is live.
 
 import { useEffect, useMemo, useState } from 'react';
 import { handleLink } from '../panel/links.ts';
@@ -61,12 +62,12 @@ function useForwardList(load: (ops: DeviceOps) => Promise<Forward[]>): Forward[]
 const loadViewed = (ops: DeviceOps) => ops.forwards();
 const loadHosted = (ops: DeviceOps) => ops.forwardsHosted();
 
-/** The ports of other PCs forwarded to this PC. */
+/** The ports of other PCs (chats' home PCs) forwarded to this PC, the seat. */
 export function useForwards(): Forward[] {
   return useForwardList(loadViewed);
 }
 
-/** The ports of this PC other PCs are viewing. */
+/** The ports of this PC that people's seats on other PCs have open. */
 export function useHostedForwards(): Forward[] {
   return useForwardList(loadHosted);
 }
@@ -106,7 +107,9 @@ export function RemoteChatBar({ state, chatId }: { state: RemoteChatState; chatI
       <span className="remote-bar-glyph" aria-hidden="true">
         <IconMonitor size={12} />
       </span>
-      <span className="remote-bar-device">Runs on {state.deviceName}</span>
+      <span className="remote-bar-device" title={`The chat's home PC: ${state.deviceName}`}>
+        Home PC: {state.deviceName}
+      </span>
       {state.text && (
         <span className="remote-bar-state" data-testid="remote-chat-state" title={state.text}>
           {state.text}
@@ -133,7 +136,7 @@ export function RemoteChatBar({ state, chatId }: { state: RemoteChatState; chatI
               <input
                 className="remote-fwd-input"
                 data-testid="remote-forward-port"
-                aria-label={`Port on ${state.deviceName}`}
+                aria-label={`Port on ${state.deviceName}, the chat's home PC`}
                 inputMode="numeric"
                 placeholder="Port"
                 value={port}
@@ -159,7 +162,7 @@ export function RemoteChatBar({ state, chatId }: { state: RemoteChatState; chatI
               type="button"
               className="remote-fwd-btn"
               data-testid="remote-forward-add"
-              title={`Open a port of ${state.deviceName} (a dev server, say) on this PC`}
+              title={`Open a port of the chat's home PC ${state.deviceName} (a dev server, say) on your PC`}
               onClick={() => setAsking(true)}
             >
               Forward a port…

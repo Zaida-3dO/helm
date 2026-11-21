@@ -68,7 +68,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.async_tool(
         ToolSpec::write(
             "app_forward_port",
-            "Let the user open a web server running on this PC (a dev server on localhost) from the other PC they are typing on: give the port and optionally a short title. Their messages start with a [Typed on <PC>] line when they type on another PC. Only offer one when they work from another PC or ask for it; on this PC, localhost works as is.",
+            "Let the user open a web server running on the chat's home PC (this PC — a dev server on localhost) from their seat, the other PC they are typing on: give the port and optionally a short title. Their messages start with a [Typed on <PC>] line when they type from another PC. Only offer one when they work from another PC or ask for it; on this PC, localhost works as is.",
             json!({
                 "type": "object",
                 "properties": {

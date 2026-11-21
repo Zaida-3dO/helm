@@ -554,7 +554,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
         busy={busy}
         onRollOver={() => setRollConfirm(rollOverConfirm(chat.title, () => rollOverChat(ops, chatId, (m) => setNotice(m))))}
       />
-      {/* Allow cards show on every device that has the chat open, the host PC included; on a
+      {/* Allow cards show on every device that has the chat open, the home PC included; on a
           mirrored chat the answer travels to the PC that runs it, and the first answer wins. */}
       {accessoriesAt('consent').map((a) => (
         <div key={a.id} className="composer-accessory" data-accessory={a.id}>

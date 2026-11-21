@@ -45,8 +45,8 @@
 //! | `devices_forward_open` | async | `{chatId, port, title?}` → `Forward`: the port of the PC that runs a copied chat, opened on this PC's `127.0.0.1` (the same port when free); event `devices_forwards_changed` |
 //! | `devices_forwards` | blocking | `{}` → `{forwards: [Forward]}`, the ports of another PC opened here, oldest first |
 //! | `devices_forward_close` | blocking | `{forwardId}` → `{}`: stop one; the other PC is told |
-//! | `devices_forwards_hosted` | blocking | `{}` → `{forwards: [Forward]}`, oldest first: the ports of this PC another PC is viewing now (`deviceUid` names the viewing PC) |
-//! | `devices_forward_hosted_stop` | blocking | `{forwardId}` → `{}`: stop sharing one of this PC's ports; the viewing PC is told |
+//! | `devices_forwards_hosted` | blocking | `{}` → `{forwards: [Forward]}`, oldest first: the ports of this PC that seats on other PCs have open now (`deviceUid` names the seat PC) |
+//! | `devices_forward_hosted_stop` | blocking | `{forwardId}` → `{}`: stop sharing one of this PC's ports; the seat PC is told |
 //!
 //! `Forward` is `{forwardId, chatId, deviceUid, deviceName, port, localPort, url, title, streams,
 //! openedAt, lastUsedAt}` (times in Unix ms). A forward ends when stopped, after 30 minutes with

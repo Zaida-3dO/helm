@@ -81,15 +81,15 @@ export interface ThisDevice {
 }
 
 /**
- * One port forward between two PCs, seen from one of them: the host side of the hub line carries
- * it. For the viewing PC `127.0.0.1:<localPort>` reaches `localhost:<port>` on the other PC; for
- * the PC the server runs on `localPort` is that port and `deviceUid` names the viewing PC. It
- * lives only while both PCs run.
+ * One port forward between two PCs, seen from one of them: the household hub link carries
+ * it. At a person's seat `127.0.0.1:<localPort>` reaches `localhost:<port>` on the chat's home PC;
+ * on that home PC `localPort` is the port itself and `deviceUid` names the seat PC. It lives only
+ * while both PCs run.
  */
 export interface Forward {
   forwardId: string;
   chatId: string;
-  /** The PC the port is on. */
+  /** The PC on the far end of the forward: the chat's home PC in the viewed list, a person's seat in the hosted one. */
   deviceUid: string;
   deviceName: string;
   port: number;
@@ -149,14 +149,14 @@ export function deviceOps(api: Api) {
     shareChat: (a: { chatId: string; personId: string; shared: boolean }) => api<unknown>('devices_share_chat', a),
     /** Hand a mirrored chat to one of the profiles on the PC that runs it. */
     moveProfile: (a: { chatId: string; profileId: string }) => api<unknown>('devices_move_profile', a),
-    /** Forward a port of the PC a chat runs on to this PC (loopback only, on both ends). */
+    /** Ask the chat's home PC to offer one of its ports to this PC, the seat (loopback only, on both ends). */
     forwardOpen: (a: { chatId: string; port: number; title?: string }) => api<Forward>('devices_forward_open', a),
-    /** Every port forwarded to this PC now. */
+    /** Every port of a chat's home PC opened here at the seat now. */
     forwards: () => api<{ forwards: Forward[] }>('devices_forwards', {}).then((r) => (Array.isArray(r?.forwards) ? r.forwards : [])),
     forwardClose: (forwardId: string) => api<unknown>('devices_forward_close', { forwardId }),
-    /** Every port of this PC another PC is viewing now (the other PC's list of the same op). */
+    /** Every port of this PC that seats on other PCs have open now (the other PC's list of the same op). */
     forwardsHosted: () => api<{ forwards: Forward[] }>('devices_forwards_hosted', {}).then((r) => (Array.isArray(r?.forwards) ? r.forwards : [])),
-    /** Stop sharing one of this PC's ports; the viewing PC is told. */
+    /** Stop sharing one of this PC's ports; the seat PC is told. */
     forwardHostedStop: (forwardId: string) => api<unknown>('devices_forward_hosted_stop', { forwardId }),
     /** Copy a file of a chat that runs on another PC to this PC; null when the person cancelled the dialog. */
     fileSave: (chatId: string, path: string) => api<{ path: string | null }>('devices_file_save', { chatId, path }).then((r) => r?.path ?? null),

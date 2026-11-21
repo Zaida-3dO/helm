@@ -1,9 +1,9 @@
 // Settings → Devices: this PC's name, whether other devices may run chats on it, and the other
-// devices on the household hub. A chat always runs on the device it was started on, under that
-// device's Claude sign-in and plan; the switch here decides whether another device, yours or
-// someone else's in the household, may start and steer chats on this PC. Reading chats needs only
-// pairing, not this switch. Below them, the ports of other PCs forwarded to this one, and the
-// ports of this PC another PC is viewing — each list with Stop.
+// devices on the household hub. A chat runs on its home PC — the PC it runs on — under that PC's
+// Claude sign-in and plan; the switch here decides whether a chat started on another device, yours
+// or someone else's in the household, may take this PC as its home PC. Reading chats needs only
+// pairing, not this switch. Below them, the ports of other PCs forwarded to this one (people's
+// seats), and the ports of this PC that seats on other PCs have open — each list with Stop.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useShell } from '../../shell/context.ts';
@@ -121,7 +121,7 @@ export function DevicesPane() {
       </SettingRow>
       <SettingRow
         title="Let other devices use chats on this PC"
-        description="Yours and your household's devices: chats run here, on this PC's Claude sign-in and plan."
+        description="A chat always runs on one PC, its home PC. This lets a chat started on your other devices take this PC as its home PC, on this PC's Claude sign-in and plan."
       >
         <Checkbox checked={runFromOthers} aria-label="Let other devices use chats on this PC" data-testid="device-run-switch" onChange={setRun} />
       </SettingRow>
@@ -158,8 +158,8 @@ export function DevicesPane() {
       <h3 className="hub-heading">Ports forwarded to this PC</h3>
       {forwards.length === 0 ? (
         <div className="setting-desc" data-testid="forwards-empty">
-          None. An agent can offer one, or use "Forward a port…" on a chat that runs on another PC. A forward ends when either PC
-          closes Helm, or after 30 minutes unused.
+          None. An agent can offer one, or use "Forward a port…" on a chat whose home PC is another PC. A forward ends when
+          either PC closes Helm, or after 30 minutes unused.
         </div>
       ) : (
         forwardRows(forwards, Date.now()).map(({ forward: f, line, use }) => (
@@ -179,8 +179,9 @@ export function DevicesPane() {
       <h3 className="hub-heading">Ports this PC shares with other PCs</h3>
       {hosted.length === 0 ? (
         <div className="setting-desc" data-testid="forward-hosted-empty">
-          None. A chat on another PC can open one of this PC's ports (a dev server, say); while it does, the port shows
-          here. Stop ends it there too. A share ends when either PC closes Helm, or after 30 minutes unused.
+          None. A chat running on this PC can offer its person, typing on another PC (their seat), a port of this PC to
+          open (a dev server, say); while they do, the port shows here. Stop ends it at their PC too. A share ends when
+          either PC closes Helm, or after 30 minutes unused.
         </div>
       ) : (
         hostedRows(hosted, Date.now()).map(({ forward: f, line, use }) => (

@@ -1099,11 +1099,11 @@ fn forward_json(mirror: Option<&Mirror>, f: crate::tunnel::ViewInfo) -> Value {
     v
 }
 
-/// `devices_forward_offer`: an agent of a chat that runs here offers a port of this PC to the
-/// person: `{port, title, typedOn: {deviceUid, name} | null, samePc}`. When their last message
-/// came from another PC, that PC opens the forward when the offer arrives; this checks now what
-/// that open would be refused for (the port policy, nothing listening, the switch off), so the
-/// agent hears it in words. When they type here nothing needs forwarding.
+/// `devices_forward_offer`: an agent of a chat whose home PC is here offers a port of this PC to
+/// the person: `{port, title, typedOn: {deviceUid, name} | null, samePc}`. When their last message
+/// came from another PC — their seat — that seat opens the forward when the offer arrives; this
+/// checks now what that open would be refused for (the port policy, nothing listening, the switch
+/// off), so the agent hears it in words. When they type here nothing needs forwarding.
 async fn devices_forward_offer(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ForwardArgs =
         serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
@@ -1203,8 +1203,8 @@ fn devices_forward_close(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     Ok(json!({}))
 }
 
-/// `devices_forwards_hosted`: the ports of this PC another PC is viewing right now, oldest first,
-/// in the same shape as `devices_forwards` — there `deviceUid` names the viewing PC and
+/// `devices_forwards_hosted`: the ports of this PC that seats on other PCs have open right now,
+/// oldest first, in the same shape as `devices_forwards` — there `deviceUid` names the seat PC and
 /// `localPort`/`url` are the server's own address on this PC.
 fn devices_forwards_hosted(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     serde_json::from_value::<NoArgs>(if args.is_null() { json!({}) } else { args })
