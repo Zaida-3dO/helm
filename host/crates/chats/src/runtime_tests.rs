@@ -6660,6 +6660,40 @@ async fn roll_over_hands_the_work_to_a_successor_and_archives_the_old_chat() {
         h.col(&format!("SELECT project_id = (SELECT project_id FROM chats WHERE id = '{chat}') FROM chats WHERE id = '{new}'")),
         ["1"]
     );
+    // The roll over ended in one write: the old chat archived and both sessions linked into
+    // one stack, named for the oldest of them.
+    assert_eq!(
+        h.col(&format!(
+            "SELECT COALESCE(next_session_id = '{new}', 0) FROM chats WHERE id = '{chat}'"
+        )),
+        ["1"],
+        "the archived chat's row points at its successor"
+    );
+    assert_eq!(
+        h.col(&format!(
+            "SELECT COALESCE(prev_session_id = '{chat}', 0) || '/' || COALESCE(next_session_id, 'x') FROM chats WHERE id = '{new}'"
+        )),
+        ["1/x"],
+        "the successor points back and is the stack's newest session"
+    );
+    assert_eq!(
+        h.col(&format!(
+            "SELECT stack_id FROM chats WHERE id IN ('{chat}', '{new}') ORDER BY created_at"
+        )),
+        [chat.as_str(), chat.as_str()],
+        "both sessions carry one stack id, named for the oldest"
+    );
+    // One call from either session gives the whole stack, oldest first, with the newest named.
+    let stack = h.call("chat_stack", json!({"chatId": chat})).await.unwrap();
+    assert_eq!(stack["stackId"].as_str(), Some(chat.as_str()));
+    assert_eq!(stack["latestId"].as_str(), Some(new.as_str()));
+    let listed: Vec<&str> = stack["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(listed, [chat.as_str(), new.as_str()]);
 }
 
 /// Attach a host seam carrying the harness's own services, so a flow started from inside the

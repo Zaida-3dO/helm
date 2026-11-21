@@ -159,6 +159,40 @@ pub struct ChatRecord {
     pub host_device_id: String,
     /// Profile ids, besides its own, that the chat is shown to.
     pub shared_with: Vec<String>,
+    /// The roll-over stack this chat belongs to: an id shared by every session of a chat that
+    /// rolled over, named for the oldest of them. `null` when this chat has never taken part in
+    /// a roll over.
+    pub stack_id: Option<String>,
+    /// The session this one was rolled over from; `null` for the stack's oldest session.
+    pub prev_session_id: Option<String>,
+    /// The session that rolled over from this one; `null` for the newest, where the chat
+    /// carries on.
+    pub next_session_id: Option<String>,
+}
+
+/// The roll-over stack of a chat, as `chat_stack` reports it: every session sharing the chat's
+/// `stack_id`, oldest first, and the newest of them — the one where the chat lives now. A chat
+/// that never rolled over answers with a stack of one: itself.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatStack {
+    /// The stack's id — the oldest session's id; `null` for a chat no roll over has touched.
+    pub stack_id: Option<String>,
+    /// The newest session of the stack.
+    pub latest_id: String,
+    /// Every session of the stack, oldest first.
+    pub sessions: Vec<StackSession>,
+}
+
+/// One session of a roll-over stack.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct StackSession {
+    pub id: String,
+    pub title: String,
+    pub archived: bool,
+    #[ts(type = "number")]
+    pub created_at: i64,
 }
 
 /// A turn start held in the queue, as `queue_list` reports it (see [`crate::queue`]).

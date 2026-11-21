@@ -23,6 +23,7 @@
 //! makes holds, and the only difference is who asks.
 
 use crate::actor::Cmd;
+use crate::clock::Clock;
 use crate::runtime::{ChatRuntime, Shared};
 use crate::submit::HostSend;
 use crate::types::*;
@@ -600,17 +601,40 @@ async fn carry_on(
             )
             .await;
     }
-    let ctx3 = ctx.clone();
-    let old = chat.id.clone();
-    tokio::task::spawn_blocking(move || crate::manage::chat_archive(&ctx3, json!({"chatId": old})))
-        .await
+    // The stack links on both rows, the succession row and the old chat's archive are one
+    // transaction: a finished roll over has its whole end state — both sessions linked, the old
+    // chat archived — or none of it. The succession row went in before the successor's first
+    // message (the project's startup carry-on reads it while that message is on its way); it is
+    // written here too so this transaction stands on its own.
+    let now = helm_core::now_ms();
+    let stack = chat.stack_id.clone().unwrap_or_else(|| chat.id.clone());
+    let archived = rt
+        .db()
+        .write(|tx| link_and_archive(tx, &chat.id, &new_id, &stack, now))
         .map_err(|e| e.to_string())?
-        .map_err(|e| {
+        .map_err(|r| {
             format!(
                 "The new chat is started but the old one was not archived: {}",
-                e.message
+                r.message
             )
         })?;
+    if archived {
+        // What the `chat_archive` op does after its write: retire or stop the actor, let the UI
+        // hear the row change, and republish attention. The roll over has happened by now, so a
+        // missing service stops the notice, not the flow.
+        rt.archived(&chat.id);
+        if let Ok(clock) = ctx.services.need::<Clock>() {
+            let rev = clock.next();
+            if let Ok(Some(rec)) = rt
+                .db()
+                .snapshot(|tx| crate::store::get_chat(tx, &chat.id, rev))
+            {
+                ctx.events
+                    .emit(ChatEvent::Chat { chat: rec }.to_app_event());
+            }
+        }
+        rt.publish_attention();
+    }
     // ifViewing is the old chat: the window follows only while the user is still looking at it,
     // otherwise the UI shows the title as a notice with an Open button.
     ctx.events.emit(
@@ -664,6 +688,91 @@ fn take_place(
     let mut changed = vec![new.to_owned(), old.to_owned()];
     changed.extend(children);
     Ok(changed)
+}
+
+/// The end of a roll over in one transaction: the stack links on both rows (the old session
+/// points at the successor, the successor back at it, both carry the stack id), the recorded
+/// succession its other readers use, and the old chat's archive. `Ok(true)` when this is what
+/// archived it.
+fn link_and_archive(
+    tx: &rusqlite::Transaction<'_>,
+    old: &str,
+    new: &str,
+    stack: &str,
+    now: i64,
+) -> rusqlite::Result<Result<bool, crate::archive::Refusal>> {
+    tx.execute(
+        "UPDATE chats SET stack_id = ?3, next_session_id = ?2 WHERE id = ?1",
+        [old, new, stack],
+    )?;
+    tx.execute(
+        "UPDATE chats SET stack_id = ?3, prev_session_id = ?1 WHERE id = ?2",
+        [old, new, stack],
+    )?;
+    tx.execute(
+        "INSERT OR REPLACE INTO chat_succession(chat_id, predecessor_id) VALUES (?1, ?2)",
+        [new, old],
+    )?;
+    crate::archive::archive_in_tx(tx, old, now)
+}
+
+/// The roll-over stack of a chat: every session sharing its `stack_id`, oldest first, and the
+/// newest of them — where the chat carries on. A chat no roll over has touched answers with a
+/// stack of one, itself; a chat that does not exist answers `None`.
+pub(crate) fn stack_of(
+    tx: &rusqlite::Transaction<'_>,
+    chat_id: &str,
+) -> rusqlite::Result<Option<ChatStack>> {
+    // The outer Option is the row; the inner one is the chat's stack id, null until some roll
+    // over touches it.
+    let found: Option<Option<String>> = tx
+        .query_row("SELECT stack_id FROM chats WHERE id = ?1", [chat_id], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    let Some(stack) = found else {
+        return Ok(None);
+    };
+    let mut st = tx.prepare(match &stack {
+        Some(_) => {
+            "SELECT id, title, archived, created_at, next_session_id FROM chats
+                 WHERE stack_id = ?1 ORDER BY created_at, id"
+        }
+        None => {
+            "SELECT id, title, archived, created_at, next_session_id FROM chats
+                 WHERE id = ?1"
+        }
+    })?;
+    let rows = match &stack {
+        Some(s) => st.query_map([s.as_str()], map_session),
+        None => st.query_map([chat_id], map_session),
+    }?;
+    let mut sessions: Vec<StackSession> = Vec::new();
+    let mut latest = chat_id.to_owned();
+    for row in rows {
+        let (session, next) = row?;
+        if next.is_none() {
+            latest = session.id.clone();
+        }
+        sessions.push(session);
+    }
+    Ok(Some(ChatStack {
+        stack_id: stack,
+        latest_id: latest,
+        sessions,
+    }))
+}
+
+fn map_session(r: &rusqlite::Row<'_>) -> rusqlite::Result<(StackSession, Option<String>)> {
+    Ok((
+        StackSession {
+            id: r.get(0)?,
+            title: r.get(1)?,
+            archived: r.get(2)?,
+            created_at: r.get(3)?,
+        },
+        r.get(4)?,
+    ))
 }
 
 #[cfg(test)]
@@ -780,5 +889,89 @@ mod tests {
             Some(new),
             "the old chat's children move under the successor"
         );
+    }
+
+    #[test]
+    fn the_roll_over_end_links_both_sessions_and_archives_the_old_one_in_one_write() {
+        let (_d, db) = crate::schema::tests::temp_db();
+        let mk = || {
+            db.write(|tx| crate::store::create_chat(tx, "C:/w/proj", None, None, 1))
+                .unwrap()
+        };
+        let (old, new) = (mk(), mk());
+        db.write(|tx| link_and_archive(tx, &old, &new, &old, 9))
+            .unwrap()
+            .unwrap();
+        let row = |id: &str| -> (Option<String>, Option<String>, Option<String>, i64) {
+            db.snapshot(|tx| {
+                tx.query_row(
+                    "SELECT stack_id, prev_session_id, next_session_id, archived FROM chats WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+            })
+            .unwrap()
+        };
+        assert_eq!(
+            row(&old),
+            (Some(old.clone()), None, Some(new.clone()), 1),
+            "the old session stays the stack's oldest and points at the successor"
+        );
+        assert_eq!(
+            row(&new),
+            (Some(old.clone()), Some(old.clone()), None, 0),
+            "the successor carries the same stack id and points back"
+        );
+        assert_eq!(
+            db.snapshot(|tx| {
+                tx.query_row(
+                    "SELECT predecessor_id FROM chat_succession WHERE chat_id = ?1",
+                    [&new],
+                    |r| r.get::<_, String>(0),
+                )
+            })
+            .unwrap(),
+            old,
+            "the succession its other readers use went in with the same write"
+        );
+    }
+
+    #[test]
+    fn stack_of_lists_a_three_session_chain_oldest_first_and_names_the_latest() {
+        let (_d, db) = crate::schema::tests::temp_db();
+        db.write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 0);
+                 INSERT INTO chats(id, project_id, title, created_at, updated_at, archived) VALUES
+                   ('a', 'p', 'Work', 1, 1, 0), ('b', 'p', 'Work', 2, 2, 0),
+                   ('c', 'p', 'Work', 3, 3, 0), ('x', 'p', 'Alone', 4, 4, 0);
+                 INSERT INTO chat_succession(chat_id, predecessor_id) VALUES ('b', 'a'), ('c', 'b');",
+            )?;
+            crate::schema::link_old_rolls(tx)?;
+            tx.execute("UPDATE chats SET archived = 1 WHERE id IN ('a', 'b')", [])
+        })
+        .unwrap();
+        // Asked from any session of the stack, the same answer comes back.
+        for from in ["a", "b", "c"] {
+            let stack = db.snapshot(|tx| stack_of(tx, from)).unwrap().unwrap();
+            assert_eq!(stack.stack_id.as_deref(), Some("a"));
+            assert_eq!(stack.latest_id, "c");
+            assert_eq!(
+                stack
+                    .sessions
+                    .iter()
+                    .map(|s| format!("{}{}", s.id, if s.archived { "!" } else { "" }))
+                    .collect::<Vec<_>>(),
+                ["a!", "b!", "c"],
+                "oldest first, archived sessions marked as such"
+            );
+        }
+        // A chat no roll over touched answers with itself alone, and no stack id.
+        let lone = db.snapshot(|tx| stack_of(tx, "x")).unwrap().unwrap();
+        assert_eq!(lone.stack_id, None);
+        assert_eq!(lone.latest_id, "x");
+        assert_eq!(lone.sessions.len(), 1);
+        assert_eq!(lone.sessions[0].title, "Alone");
+        assert!(db.snapshot(|tx| stack_of(tx, "nope")).unwrap().is_none());
     }
 }

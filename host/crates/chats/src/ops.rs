@@ -19,6 +19,7 @@
 //! | `chat_compact` | maintenance | [`ChatIdArgs`] → `null` |
 //! | `chat_warm` | blocking | [`ChatIdArgs`] → `null` |
 //! | `chat_roll_over` | async | [`ChatIdArgs`] → `{started}` (see [`crate::rollover`]) |
+//! | `chat_stack` | blocking | [`ChatIdArgs`] → [`ChatStack`] (the roll-over stack: every session and the newest) |
 //! | `attention_get` | blocking | `{}` → [`AttentionSummary`] |
 //!
 //! Argument parsing is strict (an unknown field is `bad_args`). Ops that touch a running chat go
@@ -66,6 +67,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("chat_compact", OpClass::Maintenance, chat_compact)
         .blocking("chat_warm", OpClass::Blocking, chat_warm)
         .blocking("attention_get", OpClass::Blocking, attention_get)
+        .blocking("chat_stack", OpClass::Blocking, chat_stack)
         .blocking("queue_list", OpClass::Blocking, queue_list)
         .blocking("queue_action", OpClass::Maintenance, queue_action)
         .blocking("chat_retry_now", OpClass::Maintenance, chat_retry_now)
@@ -114,6 +116,20 @@ async fn title_suggest(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
         title: titles.first().cloned().unwrap_or_default(),
         titles,
     })
+}
+
+/// `chat_stack {chatId}`: the roll-over stack of a chat — every session sharing its stack id,
+/// oldest first, and the newest one where the chat carries on. A light read for the UI and the
+/// agent tools; a chat no roll over touched answers with a stack of one. See
+/// [`crate::rollover::stack_of`].
+fn chat_stack(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ChatIdArgs = parse_args(args)?;
+    let db = ctx.services.need::<Database>()?;
+    let stack = db
+        .snapshot(|tx| crate::rollover::stack_of(tx, &a.chat_id))
+        .map_err(sql)?
+        .ok_or_else(not_found)?;
+    to_value(&stack)
 }
 
 /// `queue_list`: every turn start waiting for capacity (front of the lines first), what each
@@ -734,6 +750,7 @@ pub(crate) mod tests {
             ("chat_warm", OpClass::Blocking),
             ("chat_roll_over", OpClass::Async),
             ("attention_get", OpClass::Blocking),
+            ("chat_stack", OpClass::Blocking),
             ("chat_rename", OpClass::Maintenance),
             ("title_suggest", OpClass::Async),
             ("skills_list", OpClass::Blocking),

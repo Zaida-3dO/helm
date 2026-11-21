@@ -65,4 +65,19 @@ hostDeviceId: string,
 /**
  * Profile ids, besides its own, that the chat is shown to.
  */
-sharedWith: Array<string>, };
+sharedWith: Array<string>, 
+/**
+ * The roll-over stack this chat belongs to: an id shared by every session of a chat that
+ * rolled over, named for the oldest of them. `null` when this chat has never taken part in
+ * a roll over.
+ */
+stackId: string | null, 
+/**
+ * The session this one was rolled over from; `null` for the stack's oldest session.
+ */
+prevSessionId: string | null, 
+/**
+ * The session that rolled over from this one; `null` for the newest, where the chat
+ * carries on.
+ */
+nextSessionId: string | null, };

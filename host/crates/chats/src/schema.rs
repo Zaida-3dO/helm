@@ -23,6 +23,7 @@
 //! | `chat_file_cleanup` | files a hard delete left behind, removed after commit and retried at startup ([`crate::delete`]) |
 //! | `submission_context` | the panel-context block a composer send carried |
 //! | `chat_succession` | a roll-over successor's predecessor, read when the successor's first message is sent ([`crate::rollover`]) |
+//! | chats columns `stack_id`, `prev_session_id`, `next_session_id` | the roll-over stack: every session of a rolled-over chat shares a stack id (the oldest session's) and links to the sessions before and after it ([`crate::rollover`]) |
 //! | `chat_turn_usage` | per turn: the tokens and cost it used, projected from the session log's `usage` entries ([`crate::turn_usage`]) |
 //! | `chat_dispatch_holds` | the turn starts waiting for capacity, with their class, line and reason ([`crate::queue`]) |
 //! | view `chat_search_source` | the searchable message text the search crate indexes ([`crate::search_source`]) |
@@ -37,6 +38,7 @@
 
 use helm_core::db::MigrationRegistry;
 use rusqlite::Transaction;
+use std::collections::HashMap;
 
 pub const MAX_CONTINUATIONS: i64 = 100;
 
@@ -53,6 +55,7 @@ pub fn register(reg: &mut MigrationRegistry) {
         .initializer("chats-late-columns", late_columns)
         .initializer("chats-activity-state", activity_state)
         .initializer("chats-dispatch-holds", dispatch_holds)
+        .initializer("chats-rollover-stack", rollover_stack)
         .one_time("chats-origin-user-is-typed", origin_user_is_typed)
         .recovery_capture("chats-restart-capture", capture_continuations)
         .recovery_step("chats-retry-leftovers", cancel_retry_leftovers)
@@ -301,6 +304,101 @@ fn dispatch_holds(tx: &Transaction<'_>) -> rusqlite::Result<()> {
          );
          CREATE INDEX IF NOT EXISTS dispatch_holds_line ON chat_dispatch_holds(top DESC, seq);",
     )
+}
+
+/// The roll-over stack: every session of a rolled-over chat shares a `stack_id` — the oldest
+/// session's id — and each session names the session it was rolled over from and the one that
+/// rolled over from it. The roll-over flow writes these on both rows as it archives the old
+/// chat; roll overs recorded in `chat_succession` before the columns existed are linked here, so
+/// one window can span them too. The walk is cheap (chains are short; at most 50 hops) and a
+/// session that already carries a `stack_id` keeps it, so a re-run changes nothing and nothing
+/// is ever un-archived or re-parented.
+fn rollover_stack(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    for column in ["stack_id", "prev_session_id", "next_session_id"] {
+        let has: bool = tx.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('chats') WHERE name = ?1",
+            [column],
+            |r| r.get::<_, i64>(0).map(|n| n > 0),
+        )?;
+        if !has {
+            tx.execute(&format!("ALTER TABLE chats ADD COLUMN {column} TEXT"), [])?;
+        }
+    }
+    tx.execute(
+        "CREATE INDEX IF NOT EXISTS chats_stack ON chats(stack_id)",
+        [],
+    )?;
+    link_old_rolls(tx)
+}
+
+/// Walk every `chat_succession` chain and give its sessions one stack id and their links,
+/// leaving any session already linked alone. `pub(crate)` so the roll-over tests can link a
+/// chain the way a start-up would.
+pub(crate) fn link_old_rolls(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    // The chains as recorded: each successor with its predecessor, and each predecessor with
+    // its successor.
+    let mut pred: HashMap<String, String> = HashMap::new();
+    let mut succ: HashMap<String, String> = HashMap::new();
+    {
+        let mut st = tx.prepare("SELECT chat_id, predecessor_id FROM chat_succession")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (c, p) = row?;
+            succ.insert(p.clone(), c.clone());
+            pred.insert(c, p);
+        }
+    }
+    // A session whose stack is already known ends a walk and lends its id; this also makes a
+    // second pass do nothing.
+    let mut stack_of: HashMap<String, String> = HashMap::new();
+    {
+        let mut st = tx.prepare("SELECT id, stack_id FROM chats WHERE stack_id IS NOT NULL")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (id, s) = row?;
+            stack_of.insert(id, s);
+        }
+    }
+    let mut links: Vec<(String, String, Option<String>, Option<String>)> = Vec::new();
+    for c in pred.keys() {
+        if stack_of.contains_key(c) {
+            continue;
+        }
+        // Walk from this successor back to the oldest session: one that no successor names as
+        // its predecessor, one whose stack is already known, or the fiftieth hop.
+        let mut chain = vec![c.clone()];
+        let mut cur = pred[c].clone();
+        let stack = loop {
+            chain.push(cur.clone());
+            if let Some(s) = stack_of.get(&cur) {
+                break s.clone();
+            }
+            match pred.get(&cur) {
+                Some(n) if chain.len() < 50 => cur = n.clone(),
+                _ => break cur.clone(),
+            }
+        };
+        for id in &chain {
+            if stack_of.contains_key(id) {
+                continue;
+            }
+            links.push((
+                id.clone(),
+                stack.clone(),
+                pred.get(id).cloned(),
+                succ.get(id).cloned(),
+            ));
+            stack_of.insert(id.clone(), stack.clone());
+        }
+    }
+    for (id, stack, prev, next) in links {
+        tx.execute(
+            "UPDATE chats SET stack_id = ?1, prev_session_id = ?2, next_session_id = ?3
+             WHERE id = ?4 AND stack_id IS NULL",
+            rusqlite::params![stack, prev, next, id],
+        )?;
+    }
+    Ok(())
 }
 
 /// `chat_activity` gained the live-state column (what a busy chat is doing right now, as the
@@ -595,5 +693,46 @@ pub(crate) mod tests {
         );
         assert_eq!(ids.len(), 100);
         assert_eq!(ids[0], "c005");
+    }
+
+    /// Two roll overs recorded before the stack columns existed become one stack, oldest-named;
+    /// a second pass changes nothing, and no chat is un-archived by the walk.
+    #[test]
+    fn old_roll_overs_link_into_one_stack_and_a_re_run_changes_nothing() {
+        let (_d, db) = temp_db();
+        db.write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 0);
+                 INSERT INTO chats(id, project_id, created_at, updated_at, archived) VALUES
+                   ('a', 'p', 1, 1, 1), ('b', 'p', 2, 2, 1), ('c', 'p', 3, 3, 0),
+                   ('lonely', 'p', 4, 4, 0);
+                 INSERT INTO chat_succession(chat_id, predecessor_id) VALUES ('b', 'a'), ('c', 'b');",
+            )?;
+            rollover_stack(tx)
+        })
+        .unwrap();
+        let linked = || {
+            col(
+                &db,
+                "SELECT id || '/' || COALESCE(stack_id, 'x') || '/' || COALESCE(prev_session_id, 'x') \
+                     || '/' || COALESCE(next_session_id, 'x') FROM chats ORDER BY id",
+            )
+        };
+        assert_eq!(
+            linked(),
+            ["a/a/x/b", "b/a/a/c", "c/a/b/x", "lonely/x/x/x"],
+            "the stack is named for its oldest session; an unlinked chat gets nothing"
+        );
+        assert_eq!(
+            col(
+                &db,
+                "SELECT CAST(archived AS TEXT) FROM chats WHERE id = 'a'"
+            ),
+            ["1"],
+            "the walk never un-archives or archives"
+        );
+        let before = linked();
+        db.write(|tx| rollover_stack(tx)).unwrap();
+        assert_eq!(linked(), before, "a re-run is a no-op");
     }
 }

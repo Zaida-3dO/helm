@@ -67,6 +67,9 @@ pub fn fake_record(id: &str, title: &str, revision: i64) -> ChatRecord {
         profile_id: "profile-local".to_owned(),
         host_device_id: "host".to_owned(),
         shared_with: Vec::new(),
+        stack_id: None,
+        prev_session_id: None,
+        next_session_id: None,
     }
 }
 
