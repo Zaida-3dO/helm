@@ -452,7 +452,7 @@ impl Tunnels {
 
     /// Start listening for a forward the host agreed to: on the server's own port when it is
     /// free here (so the link the agent wrote works as written), else on any free port.
-    pub async fn view_start(&self, spec: ViewSpec) -> Result<ViewInfo, WireError> {
+    pub async fn view_start(&self, req: ViewSpec) -> Result<ViewInfo, WireError> {
         let full = || {
             refused(format!(
                 "This PC already has {MAX_FORWARDS} ports forwarded to it. Stop one first."
@@ -462,7 +462,7 @@ impl Tunnels {
             return Err(full());
         }
         let net = &self.inner.net;
-        let listener = match net.listen(spec.port).await {
+        let listener = match net.listen(req.port).await {
             Ok(l) => l,
             Err(_) => net.listen(0).await.map_err(|_| {
                 WireError::internal("This PC could not listen for the forwarded port.")
@@ -478,7 +478,7 @@ impl Tunnels {
             if st.count(Role::View, None) >= MAX_FORWARDS {
                 return Err(full());
             }
-            if st.fwds.contains_key(&spec.forward_id) {
+            if st.fwds.contains_key(&req.forward_id) {
                 return Err(WireError::new(
                     code::BAD_ARGS,
                     "That forward is already open.",
@@ -489,32 +489,32 @@ impl Tunnels {
                 .handle
                 .spawn(accept_loop(
                     Arc::downgrade(&self.inner),
-                    spec.forward_id.clone(),
+                    req.forward_id.clone(),
                     listener,
                 ))
                 .abort_handle();
             let w = Fwd {
                 role: Role::View,
-                peer: spec.host_uid.clone(),
-                port: spec.port,
+                peer: req.host_uid.clone(),
+                port: req.port,
                 local_port,
-                chat_id: spec.chat_id,
-                title: spec.title,
+                chat_id: req.chat_id,
+                title: req.title,
                 streams: HashMap::new(),
                 opened_at: now,
                 last_used_at: now,
                 idle_since: Some(Instant::now()),
                 listener: Some(accept),
             };
-            let info = w.info(&spec.forward_id);
-            st.fwds.insert(spec.forward_id.clone(), w);
+            let info = w.info(&req.forward_id);
+            st.fwds.insert(req.forward_id.clone(), w);
             info
         };
         log::info!(
             "tunnel: port {} of device {} opens here on 127.0.0.1:{local_port} ({})",
-            spec.port,
-            spec.host_uid,
-            spec.forward_id
+            req.port,
+            req.host_uid,
+            req.forward_id
         );
         self.inner.out.changed();
         Ok(info)
