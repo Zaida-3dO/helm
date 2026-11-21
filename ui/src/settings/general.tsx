@@ -2,19 +2,22 @@
 // every setting, and where updates come from. How Helm looks, moves and sounds lives in the
 // Appearance pane. Each control saves at once through the generic `preference` op and applies at once.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useShell } from '../shell/context.ts';
 import { Checkbox, SettingRow, toast } from '../ui/index.ts';
 import { registerSettingsPane } from './registry.ts';
 import { ChangedByChats } from './changed/ChangedByChats.tsx';
 import { parseNameList, SIDEBAR_ENTRIES } from './applied.ts';
 import { UpdateSourceRow } from '../updates/UpdateSourceRow.tsx';
+import { hubOps, type LauncherState } from '../api/hub.ts';
 
 function GeneralPane() {
   const shell = useShell();
+  const ops = useMemo(() => hubOps(shell.api), [shell.api]);
   const [compact, setCompact] = useState(false);
   const [allSettings, setAllSettings] = useState(false);
   const [hiddenItems, setHiddenItems] = useState<string[]>([]);
+  const [signIn, setSignIn] = useState(true);
   useEffect(() => {
     shell
       .api<unknown>('preference_get', { key: 'agentSettingsAll' })
@@ -28,7 +31,11 @@ function GeneralPane() {
       .api<unknown>('preference_get', { key: 'compactSidebar' })
       .then((v) => setCompact(v === true))
       .catch(() => undefined);
-  }, [shell]);
+    ops
+      .launcher()
+      .then((v: LauncherState) => setSignIn(v.startAtSignIn))
+      .catch(() => undefined);
+  }, [shell, ops]);
   const save = (key: string, value: unknown, undo: () => void) =>
     shell.api('preference', { key, value }).catch((e: unknown) => {
       undo();
@@ -75,6 +82,22 @@ function GeneralPane() {
             setAllSettings(on);
             shell.api('settings_all_set', { enabled: on }).catch((e: unknown) => {
               setAllSettings(!on);
+              toast.show({ kind: 'error', text: `Could not save: ${String((e as Error).message ?? e)}` });
+            });
+          }}
+        />
+      </SettingRow>
+      <SettingRow
+        title="Start Helm when I sign in"
+        description="A small always-on helper starts Helm hidden in the tray at sign-in and brings it back if it stops by itself. It starts in your own account, after you sign in; turning this off leaves the helper to the hub alone."
+        testId="setting-start-at-sign-in"
+      >
+        <Checkbox
+          checked={signIn}
+          onChange={(on) => {
+            setSignIn(on);
+            ops.saveLauncherSignIn(on).catch((e: unknown) => {
+              setSignIn(!on);
               toast.show({ kind: 'error', text: `Could not save: ${String((e as Error).message ?? e)}` });
             });
           }}

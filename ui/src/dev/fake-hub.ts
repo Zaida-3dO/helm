@@ -16,7 +16,8 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
   let who: { personName: string; machineName: string } | null = pairedAtStart() ? { personName: 'Alex', machineName: 'Desk PC' } : null;
   let since = 0;
   // The launcher: on by default once paired, like the host; its process and logon entry follow.
-  let launcherEnabled = pairedAtStart();
+  // The sign-in switch is on by default, and choosing it by hand brings the launcher with it.
+  const launcher: { enabled?: boolean; startAtSignIn?: boolean } = {};
   // Per-profile policy and link state, keyed as the host keys it (absent profile: "home").
   const scope = (a: Record<string, unknown>) => (typeof a.profileId === 'string' && a.profileId ? a.profileId : 'home');
   interface ProfileState {
@@ -61,11 +62,20 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
       case 'launcher_get':
       case 'launcher_set': {
         if (op === 'launcher_set') {
-          if (typeof a.enabled !== 'boolean') throw new ApiError('bad_args', 'Expected enabled to be true or false.');
-          launcherEnabled = a.enabled;
+          if (typeof a.enabled === 'boolean') launcher.enabled = a.enabled;
+          if (typeof a.startAtSignIn === 'boolean') launcher.startAtSignIn = a.startAtSignIn;
+          if (typeof a.enabled !== 'boolean' && typeof a.startAtSignIn !== 'boolean')
+            throw new ApiError('bad_args', 'Expected enabled or startAtSignIn to be true or false.');
         }
         const paired = !!who && (set.lanUrl || set.fallbackUrl) && set.token;
-        return { enabled: launcherEnabled, running: launcherEnabled && paired, registered: launcherEnabled && paired, wakeReady: launcherEnabled && paired };
+        const on = launcher.enabled ?? (paired || launcher.startAtSignIn === true);
+        return {
+          enabled: on,
+          startAtSignIn: launcher.startAtSignIn ?? true,
+          running: on && paired,
+          registered: on && paired,
+          wakeReady: on && paired,
+        };
       }
       case 'relay_connection_save':
         for (const k of ['lanUrl', 'fallbackUrl', 'token'] as const) {

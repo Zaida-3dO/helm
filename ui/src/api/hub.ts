@@ -20,11 +20,13 @@ export interface HubConnection {
   lineRefusal?: string;
 }
 
-/** What `launcher_get` and `launcher_set` answer about the small always-on launcher: the switch,
- * whether its process runs, whether it registers at logon, and whether the hub could wake this
- * PC through it. */
+/** What `launcher_get` and `launcher_set` answer about the small always-on launcher: the two
+ * switches, whether its process runs, whether it registers at logon, and whether the hub could
+ * wake this PC through it. `startAtSignIn` only has effect while `enabled` is on: it is the
+ * launcher that opens Helm at sign-in. */
 export interface LauncherState {
   enabled: boolean;
+  startAtSignIn: boolean;
   running: boolean;
   registered: boolean;
   wakeReady: boolean;
@@ -156,6 +158,9 @@ export function hubOps(api: Api) {
     launcher: () => api<LauncherState>('launcher_get', {}),
     /** Switch the launcher; the answer is the same state as `launcher_get`. */
     saveLauncher: (enabled: boolean) => api<LauncherState>('launcher_set', { enabled }),
+    /** Switch opening Helm at sign-in; the answer is the same state as `launcher_get`. */
+    saveLauncherSignIn: (startAtSignIn: boolean) =>
+      api<LauncherState>('launcher_set', { startAtSignIn }),
     telegram: (s: ChannelScope = {}) => api<TelegramSettings>('relay_telegram_get', scope(s)),
     saveTelegram: (
       s: Pick<TelegramSettings, 'maxAgeHours' | 'maxTokens' | 'awayAlerts' | 'approvals' | 'remoteAnswers' | 'model' | 'effort' | 'takeTelegram'> & ChannelScope,
