@@ -5,7 +5,7 @@ import { EventBus } from '../api/events.ts';
 import { chat } from '../dev/fixtures.ts';
 import type { DeviceChats, DeviceInfo, DevicesList, RemoteChatRecord } from './api.ts';
 import { menuLabel, menuOrder, remoteDevice, remoteList, remoteProfileChoices, remoteShareChoices, resolveSelected, scopeNote, showToggle, stateText } from './model.ts';
-import { DevicesStore, RemoteList } from './store.ts';
+import { DevicesStore, FOCUS_READ_MS, RemoteList } from './store.ts';
 import { composerFor, remoteChatState, remoteHostOf, seenText, unconfirmedText, waitingForApproval } from './state.ts';
 
 const NOW = Date.parse('2026-11-10T12:00:00');
@@ -169,6 +169,24 @@ test('the devices store follows the choice, falls back to this PC when that devi
   await old.reload();
   assert.deepEqual([old.snapshot.loaded, old.snapshot.list, old.snapshot.selected, old.snapshot.remote], [true, null, null, null]);
   store.stop();
+
+  // A window that comes back re-reads the list (so a PC that woke up shows at once), but at most
+  // once per FOCUS_READ_MS.
+  let reads = 0;
+  const counted = (async (op: string, args: unknown) => {
+    if (op === 'devices_list') reads++;
+    return h.api(op, args);
+  }) as Api;
+  const focus = new DevicesStore({ api: counted, bus: new EventBus() });
+  focus.start();
+  await settle();
+  assert.equal(reads, 1, 'starting reads once');
+  assert.equal(focus.readOnFocus(1_000_000), true, 'the first focus re-reads');
+  assert.equal(focus.readOnFocus(1_000_000 + FOCUS_READ_MS - 1), false, 'a second focus inside 10 s does not');
+  assert.equal(focus.readOnFocus(1_000_000 + FOCUS_READ_MS), true, 'once 10 s have passed it does');
+  await settle();
+  assert.equal(reads, 3);
+  focus.stop();
 });
 
 test("another device's chat list pages, refreshes from the first page, and ignores an answer that a newer read overtook", async () => {
@@ -236,10 +254,14 @@ test('a chat on another device reads by the device state: the words, the tone, w
   assert.match(today, /^Laptop is offline \(last seen \d{1,2}[:.]\d\d/);
   assert.doesNotMatch(seenText(seen, NOW), /Nov/);
   assert.ok(seenText(seen, NOW + 3 * 24 * 3600_000).length > seenText(seen, NOW).length, 'another day adds the date');
-  // The composer is off with the same words, and only for a chat that runs elsewhere.
+  // The composer is told the same words, and only for a chat that runs elsewhere. The editor is
+  // never locked by device state: an away device holds the send, a read-only one keeps Send off.
   const off = remoteChatState(lap({ run: false }), NOW);
-  assert.deepEqual(composerFor('lap', off), { deviceUid: 'lap', deviceName: 'Laptop', blocked: off.text });
+  assert.deepEqual(composerFor('lap', off), { deviceUid: 'lap', deviceName: 'Laptop', blocked: off.text, holds: false }, 'read-only: the refusal does not fix itself, so nothing is held');
   assert.equal(composerFor('lap', remoteChatState(lap(), NOW)).blocked, null);
+  const gone = remoteChatState(lap({ online: false, lastSeenAt: null }), NOW);
+  assert.deepEqual(composerFor('lap', gone), { deviceUid: 'lap', deviceName: 'Laptop', blocked: gone.text, holds: true }, 'away: Send holds and sends once the PC is back');
+  assert.equal(composerFor('lap', remoteChatState(lap({ state: 'reconnecting' }), NOW)).holds, true);
   const l = list(lap());
   assert.deepEqual([remoteHostOf({ hostDeviceId: 'lap' }, l), remoteHostOf({ hostDeviceId: 'me' }, l), remoteHostOf({ hostDeviceId: '' }, l), remoteHostOf({ hostDeviceId: 'lap' }, null), remoteHostOf(null, l)], ['lap', null, null, null, null]);
   // With no list, this PC's own uid still tells a chat that runs elsewhere, and that chat reads as reconnecting.

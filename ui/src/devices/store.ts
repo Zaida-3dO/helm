@@ -37,6 +37,9 @@ export interface DevicesDeps {
   bus: EventBus;
 }
 
+/** The shortest gap between two reads started because the window came back. */
+export const FOCUS_READ_MS = 10_000;
+
 export class DevicesStore {
   readonly ops: DeviceOps;
   private readonly deps: DevicesDeps;
@@ -45,6 +48,7 @@ export class DevicesStore {
   private started = false;
   private seq = 0;
   private offs: (() => void)[] = [];
+  private lastFocusRead = 0;
 
   constructor(deps: DevicesDeps) {
     this.deps = deps;
@@ -73,12 +77,36 @@ export class DevicesStore {
   start(): void {
     if (this.started) return;
     this.started = true;
+    this.lastFocusRead = Date.now();
     void this.reload();
     this.ops.self().then(
       (d) => this.set({ selfUid: d.uid || null }),
       () => undefined,
     );
     this.offs = [this.deps.bus.on('devices_changed', () => void this.reload()), this.deps.bus.on('preferences', () => void this.reloadSelected())];
+    // A window that comes back re-reads the list at once: a PC that woke up or reconnected shows
+    // without a restart, but not more than once per FOCUS_READ_MS.
+    if (typeof window !== 'undefined') {
+      const onFocus = () => void this.readOnFocus();
+      const onVisible = () => {
+        if (document.visibilityState === 'visible') void this.readOnFocus();
+      };
+      window.addEventListener('focus', onFocus);
+      document.addEventListener('visibilitychange', onVisible);
+      this.offs.push(() => {
+        window.removeEventListener('focus', onFocus);
+        document.removeEventListener('visibilitychange', onVisible);
+      });
+    }
+  }
+
+  /** The window came back: re-read the list unless the last such read is younger than
+   *  FOCUS_READ_MS. Answers whether it read. */
+  readOnFocus(now: number = Date.now()): boolean {
+    if (now - this.lastFocusRead < FOCUS_READ_MS) return false;
+    this.lastFocusRead = now;
+    void this.reload();
+    return true;
   }
 
   stop(): void {

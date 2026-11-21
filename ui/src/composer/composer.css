@@ -155,6 +155,28 @@
   margin: 0;
 }
 
+/* A send waiting for the PC that runs the chat to come back. */
+.composer-hold {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--warning);
+  border-radius: 8px;
+  color: var(--warning-text);
+  font-size: 12px;
+}
+
+.composer-hold-cancel {
+  border: 0;
+  background: none;
+  color: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  padding: 2px 4px;
+}
+
 @media (max-width: 1000px) {
   .composer-dock {
     max-width: calc(var(--chat-column) + 2 * 20px);

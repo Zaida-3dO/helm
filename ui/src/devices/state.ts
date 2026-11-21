@@ -22,12 +22,17 @@ export interface RemoteChatState {
   live: boolean;
 }
 
-/** What the composer and the new-chat page are told about a chat (or a new chat) on another device. */
+/** What the composer and the new-chat page are told about a chat (or a new chat) on another device.
+ *  Device state never locks the editor: it only decides what Send does. */
 export interface RemoteComposer {
   deviceUid: string;
   deviceName: string;
-  /** Why sending is off (the placeholder); null when it is on. */
+  /** Why sending is off (the tooltip); null when it is on. */
   blocked: string | null;
+  /** The device is only away (offline, or this PC's line is down): Send holds the message here and
+   *  sends it once, with the same submission id, when the device is back. False while it is live,
+   *  and false when it merely reads its chats to other devices — that refusal does not fix itself. */
+  holds: boolean;
 }
 
 /** The "didn't confirm" sentence a send that got no answer is shown with. */
@@ -91,7 +96,8 @@ export function remoteHostOf(chat: Pick<ChatRecord, 'hostDeviceId'> | null | und
 
 /** What the composer needs for a chat on another device. */
 export function composerFor(uid: string, st: RemoteChatState): RemoteComposer {
-  return { deviceUid: uid, deviceName: st.deviceName, blocked: st.live ? null : st.text };
+  const holds = st.state === 'offline' || st.state === 'reconnecting';
+  return { deviceUid: uid, deviceName: st.deviceName, blocked: st.live ? null : st.text, holds };
 }
 
 /** The line a tool card shows while an Allow request waits on the device the chat runs on. */

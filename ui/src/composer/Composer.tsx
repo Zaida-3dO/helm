@@ -26,6 +26,7 @@ import { bytesFromBase64 } from '../transcript/messageImages.ts';
 import { Recall } from './recall.ts';
 import { ImageViewer } from '../transcript/ImageViewer.tsx';
 import { commandWithArgs, helmCommand, matchesHidden, moveActive, SCOPE_LABEL, skillMenu, skillQuery, withHelmCommands, type Skill } from './skills.ts';
+import { SendHold } from './hold.ts';
 import { rollOverChat } from '../sidebar/actions.ts';
 import { ContextMenu, toast } from '../ui/index.ts';
 import { panelOps, type QuickItem } from '../api/panel.ts';
@@ -55,7 +56,8 @@ export interface ComposerProps {
   autocomplete?: boolean;
   /**
    * The chat runs on another device (or a new chat will). Only text can be sent, nothing is read
-   * from or written to this PC for it, and `blocked` turns the box off with that sentence.
+   * from or written to this PC for it. The editor is never locked by device state: `blocked` is
+   * the sentence for Send's tooltip, and `holds` makes Send wait for the device with the message.
    */
   remote?: RemoteComposer | null;
 }
@@ -84,6 +86,11 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   // A send the device never confirmed: it may have arrived, so the text stays and nothing is resent.
   const [unconfirmed, setUnconfirmed] = useState<string | null>(null);
   const offBy = remote?.blocked ?? null;
+  // The device the chat runs on is only away: Send holds the message rather than refusing it.
+  const away = remote !== null && remote.holds;
+  // One send at most waits for the device, under the id made when Send was pressed.
+  const hold = useMemo(() => new SendHold(), [chat.id]);
+  const [waiting, setWaiting] = useState<string | null>(null);
   const [empty, setEmpty] = useState(!chat.draft);
   const stopping = useRef(false);
   // True while a send is on its way to the host: a second press does not send the message twice.
@@ -100,7 +107,10 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   const checking = !runtime.checked;
   const starting = chat.status === 'starting' && pending.length === 0;
   // An archived chat cannot be sent to; restoring it (the banner above the box) is the way back.
-  const blocked = runtime.blocked || checking || starting || chat.archived || offBy !== null;
+  // A chat that runs on another PC is never blocked by this PC's Claude Code state. While its
+  // device is only away, Send holds the message (see send()); it stays off only where the device
+  // reads its chats to other devices, a refusal that does not fix itself.
+  const blocked = chat.archived || starting || (remote ? !away && offBy !== null : runtime.blocked || checking);
   const blockedRef = useRef(blocked);
   blockedRef.current = blocked;
   const scrollOnSendRef = useRef(true);
@@ -376,42 +386,19 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
     });
   };
 
-  const send = useCallback(
-    async (action: SendAction) => {
-      const text = editor.current?.getText() ?? '';
+  // The send itself: the message goes under the submission id it was given, and the host claims
+  // each id once, so one id can never run twice.
+  const deliver = useCallback(
+    async (text: string, action: SendAction, submissionId: string) => {
+      if (sendingRef.current) return;
       const images = attachedRef.current;
       const sentRefs = refsRef.current;
-      if (blockedRef.current) return;
-      setError(null);
-      if (!text.trim() && images.length === 0 && sentRefs.length === 0) return;
-      if (sendingRef.current) return;
-      // A Helm command is run here, not sent to Claude; the draft clears only once it has started.
-      if (helmCommand(text)?.name === 'rollover' && remote) {
-        setError('Rolling a chat over can only be done on the PC it runs on.');
-        return;
-      }
-      if (helmCommand(text)?.name === 'rollover') {
-        sendingRef.current = true;
-        setSending(true);
-        try {
-          if (await rollOverChat(ops, chat.id, (m) => toast.show({ kind: 'error', text: m }))) {
-            editor.current?.setText('');
-            setEmpty(true);
-            prevText.current = '';
-          }
-        } finally {
-          sendingRef.current = false;
-          setSending(false);
-        }
-        return;
-      }
       setUnconfirmed(null);
       sendingRef.current = true;
       setSending(true);
       const token = saver.beginSend();
       try {
         const extra = collectSendContributions(chat.id);
-        const submissionId = uid();
         await ops.send(chat.id, submissionId, text, action, saver.revision, {
           origin: 'composer',
           context: extra.context,
@@ -448,6 +435,57 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [chat.id, ops, saver, pending, remote],
   );
+
+  const send = useCallback(
+    async (action: SendAction) => {
+      const text = editor.current?.getText() ?? '';
+      const images = attachedRef.current;
+      const sentRefs = refsRef.current;
+      if (blockedRef.current) return;
+      setError(null);
+      if (!text.trim() && images.length === 0 && sentRefs.length === 0) return;
+      if (sendingRef.current) return;
+      // A Helm command is run here, not sent to Claude; the draft clears only once it has started.
+      // `/rollover` works for a chat that runs elsewhere too: the op is routed to that PC.
+      if (helmCommand(text)?.name === 'rollover') {
+        sendingRef.current = true;
+        setSending(true);
+        try {
+          if (await rollOverChat(ops, chat.id, (m) => toast.show({ kind: 'error', text: m }))) {
+            editor.current?.setText('');
+            setEmpty(true);
+            prevText.current = '';
+          }
+        } finally {
+          sendingRef.current = false;
+          setSending(false);
+        }
+        return;
+      }
+      if (away && remote) {
+        // The device is only away: the message waits here (its draft is already saved) and goes
+        // once, under this id, when the device is back. Pressing Send again replaces the wait.
+        hold.hold({ submissionId: uid(), action, text });
+        setWaiting(remote.deviceName);
+        return;
+      }
+      await deliver(text, action, uid());
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [chat.id, ops, saver, pending, remote, away, hold, deliver],
+  );
+
+  // The device is live again: the waiting message goes, exactly once — however many live updates
+  // follow. A refusal or an unconfirmed answer leaves it at that one; it is never resent by itself.
+  useEffect(() => {
+    if (!remote || remote.blocked !== null) {
+      if (!remote) setWaiting(null);
+      return;
+    }
+    const held = hold.release();
+    setWaiting(null);
+    if (held) void deliver(held.text, held.action, held.submissionId);
+  }, [remote, deliver, hold]);
 
   const stop = useCallback(
     async () => {
@@ -729,6 +767,22 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
           {unconfirmed}
         </div>
       )}
+      {waiting && (
+        <div className="composer-hold" role="status" data-testid="composer-hold">
+          <span>{`Waiting for ${waiting}: sends when it's back`}</span>
+          <button
+            type="button"
+            className="composer-hold-cancel"
+            data-testid="composer-hold-cancel"
+            onClick={() => {
+              hold.cancel();
+              setWaiting(null);
+            }}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
       {menu && (
         <div className="skill-menu" data-testid="skill-menu" data-mode={menu.mode}>
           <div className="skill-menu-head">
@@ -865,8 +919,8 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
         <Editor
           key={chat.id}
           initialText={chat.draft}
-          placeholder={offBy ?? (busy ? 'Steer the running task…' : 'Message Claude…')}
-          editable={offBy === null}
+          placeholder={away ? `${remote?.deviceName ?? 'That PC'} is away — your message waits here and sends when it's back` : offBy ?? (busy ? 'Steer the running task…' : 'Message Claude…')}
+          editable={!chat.archived}
           onChange={onChange}
           onKey={onKey}
           handle={editor}
@@ -947,7 +1001,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
               data-testid="send"
               disabled={blocked || sending || (empty && attached.length === 0 && refs.length === 0)}
               aria-busy={sending || undefined}
-              title={offBy ?? (chat.archived ? 'Restore this chat to send' : runtime.blocked ? 'Connect Claude Code to send' : checking ? 'Starting Claude Code…' : starting ? 'Claude Code is starting' : sendTooltip(ctx, busy))}
+              title={away ? `Sends as soon as ${remote?.deviceName ?? 'that PC'} is back` : offBy ?? (chat.archived ? 'Restore this chat to send' : runtime.blocked ? 'Connect Claude Code to send' : checking ? 'Starting Claude Code…' : starting ? 'Claude Code is starting' : sendTooltip(ctx, busy))}
               onClick={() => void send('default')}
             />
           </div>

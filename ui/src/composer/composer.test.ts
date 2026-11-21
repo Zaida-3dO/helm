@@ -6,6 +6,7 @@ import { inFlightView, waitReason } from './inFlight.ts';
 import { row, submission } from '../dev/fixtures.ts';
 import { liveRuns, wrapMarker } from './markup.ts';
 import { permissionLabel } from './permission.ts';
+import { SendHold } from './hold.ts';
 
 const key = (k: string, m: Partial<KeyShape> = {}): KeyShape => ({ key: k, ctrl: false, shift: false, alt: false, meta: false, ...m });
 const asap: KeyContext = { sendShortcut: 'mod-enter', mode: 'asap', showChoices: true };
@@ -158,6 +159,23 @@ test('wait reason: the running tool of this turn, else the next step', () => {
     [[user, running('Bash', 2), steer, row({ id: 5, role: 'assistant', text: 'ok' })], 'Waiting for Bash to finish'],
     [[row({ id: 0, role: 'toolResult', toolName: 'Bash', status: 'streaming' }), user], 'Claude reads it at its next step'],
   ] as const) assert.equal(waitReason(rows as never), want, JSON.stringify(rows.map((r) => r.id)));
+});
+
+test('a send to a device that is away waits and is handed over exactly once, keeping its submission id', () => {
+  const h = new SendHold();
+  assert.equal(h.release(), null, 'nothing waits yet');
+  h.hold({ submissionId: 'sub-1', action: 'default', text: 'hello' });
+  const held = h.release();
+  assert.deepEqual(held, { submissionId: 'sub-1', action: 'default', text: 'hello' }, 'once the device is live the held send comes to light, under the id made when Send was pressed');
+  assert.equal(h.release(), null, 'more live updates never send it a second time, whatever the answer was');
+  const c = new SendHold();
+  c.hold({ submissionId: 'sub-3', action: 'steer', text: 'wait for me' });
+  assert.deepEqual(c.cancel()?.submissionId, 'sub-3', 'Cancel takes the message back');
+  assert.equal(c.release(), null, 'and nothing goes on its own afterwards');
+  const r = new SendHold();
+  r.hold({ submissionId: 'sub-4', action: 'default', text: 'first' });
+  r.hold({ submissionId: 'sub-5', action: 'default', text: 'second' });
+  assert.equal(r.release()?.submissionId, 'sub-5', 'pressing Send again replaces what waited');
 });
 
 test('formatting keys wrap, unwrap, and leave the caret between empty markers', () => {
