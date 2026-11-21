@@ -56,11 +56,13 @@ impl SttFailure {
     /// briefly refusing answers the second time; a model that is not loaded or a call that simply
     /// ran out of time does not.
     pub fn is_transient(self) -> bool {
-        match self {
-            SttFailure::ConnectTimeout | SttFailure::Refused => true,
-            SttFailure::Status(502) | SttFailure::Status(503) => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            SttFailure::ConnectTimeout
+                | SttFailure::Refused
+                | SttFailure::Status(502)
+                | SttFailure::Status(503)
+        )
     }
 }
 
@@ -169,8 +171,18 @@ pub trait SttHealed: Send + Sync {
     /// The server answers `/health` again (or the hour is up): retry the notes still under the
     /// hour and end the ones past it.
     fn stt_back(&self, at: i64);
-    /// The server is still down: end what has been held past its hour.
+    /// End what has been held past its hour. The watch calls it on every look.
     fn stt_expire(&self, _at: i64) {}
+    /// The server looks fine but a note may still be held (a transcription failed between two
+    /// probes): try again the ones that have waited a while since their last try.
+    fn stt_retry_stale(&self, _at: i64) {}
+}
+
+/// Whether an HTTP answer from the health address means the server is up. A server with no
+/// `/health` route answers 404 (or 405 to a GET): it was reached, which is all that is left to
+/// ask of it, so it counts as up.
+fn health_answer_ok(status: u16) -> bool {
+    status < 400 || matches!(status, 404 | 405)
 }
 
 /// The server's own health address: the scheme and host of the transcriptions endpoint, with
@@ -205,7 +217,7 @@ pub fn spawn_health(stt_url: &str, health: Arc<SttHealth>) {
                 SttError::plain,
             )
             .await;
-            let ok = matches!(probe, Ok(s) if s < 400);
+            let ok = matches!(probe, Ok(s) if health_answer_ok(s));
             if ok {
                 h.note_ok(crate::telegram::now_ms());
                 if !was_ok {
@@ -298,6 +310,8 @@ where
         ms / 60_000 % 60,
         ms / 1000 % 60
     );
+    // The address may carry a key in its query or a login before the host: log the host only.
+    let endpoint = log_host(endpoint);
     match &r {
         Ok(_) => eprintln!("stt {at}: {endpoint} answered in {took} ms (try {n})"),
         Err(e) => eprintln!(
@@ -306,6 +320,16 @@ where
         ),
     }
     r
+}
+
+/// `host:port` of an address, with no scheme, login, path or query: what is safe to log.
+fn log_host(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host)
+        .to_owned()
 }
 
 /// The speech-to-text server over HTTP.
@@ -382,12 +406,10 @@ fn multipart(boundary: &str, file: (&str, &str, &[u8]), fields: &[(&str, &str)])
 fn stt_failed(e: ureq::Error, minutes: u64) -> SttError {
     let unit = if minutes == 1 { "minute" } else { "minutes" };
     match e {
-        ureq::Error::Timeout(t) if matches!(t, ureq::Timeout::Connect | ureq::Timeout::Resolve) => {
-            SttError {
-                kind: SttFailure::ConnectTimeout,
-                why: format!("the speech-to-text server could not be reached: {e}"),
-            }
-        }
+        ureq::Error::Timeout(ureq::Timeout::Connect | ureq::Timeout::Resolve) => SttError {
+            kind: SttFailure::ConnectTimeout,
+            why: format!("the speech-to-text server could not be reached: {e}"),
+        },
         ureq::Error::Timeout(_) => SttError {
             kind: SttFailure::ReadTimeout,
             why: format!("the speech-to-text server did not finish within {minutes} {unit}"),
@@ -486,7 +508,7 @@ impl Transcribe for Stt {
                     })?;
                 stt_reply(status, &text)
             },
-            |why| SttError::plain(why),
+            SttError::plain,
         ))
     }
 
@@ -647,6 +669,26 @@ mod tests {
             Some("https://speech.example/health")
         );
         assert_eq!(health_url("not a url"), None);
+        // A server with no health route is reached, so it is up; a refusal or an error is not.
+        assert!(
+            health_answer_ok(200) && health_answer_ok(404) && health_answer_ok(405),
+            "an answer, even \"no such route\", shows the server is there"
+        );
+        assert!(!health_answer_ok(500) && !health_answer_ok(503) && !health_answer_ok(401));
+        // What is logged of an address never carries a login, path or query (it may hold a key).
+        for (url, host) in [
+            (
+                "http://u:k3y@192.168.1.9:1079/v1/audio?key=abc",
+                "192.168.1.9:1079",
+            ),
+            (
+                "https://speech.example/v1/audio/transcriptions",
+                "speech.example",
+            ),
+            ("", ""),
+        ] {
+            assert_eq!(log_host(url), host, "{url}");
+        }
     }
 
     #[test]

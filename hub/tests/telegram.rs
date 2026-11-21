@@ -5,7 +5,7 @@
 use axum::body::{Body, Bytes};
 use axum::http::{header, HeaderMap, Request, StatusCode};
 use helm_hub::auth::{Client, Scopes};
-use helm_hub::heal::{HELD_MAX_MS, VOICE_HELD};
+use helm_hub::heal::{HELD_MAX_MS, HELD_RETRY_MS, VOICE_HELD};
 use helm_hub::launcher::Launchers;
 use helm_hub::lines::Lines;
 use helm_hub::mcp::Options;
@@ -1409,6 +1409,17 @@ async fn a_held_voice_note_waits_out_the_outage_and_goes_through_after() {
     // message waits in the queue with its recording.
     assert_eq!(api.sent_texts(), [VOICE_HELD]);
     assert!(down(&mut rx).is_empty(), "the note waits, not forwarded");
+    // A message sent after it is not stuck behind the outage: text still works.
+    let later = now_ms();
+    bridge
+        .on_update(&update(OWNER, "after", later / 1000), later)
+        .await;
+    settle().await;
+    assert_eq!(
+        down(&mut rx),
+        ["after"],
+        "text goes on past a held recording"
+    );
     // The speech server answers its health address again: the held recording goes by itself.
     voice.says(Ok("Back to you."));
     bridge.stt_back(now_ms());
@@ -1422,6 +1433,42 @@ async fn a_held_voice_note_waits_out_the_outage_and_goes_through_after() {
         3,
         "one try, the quick retry, and the retry after recovery: {seen:?}"
     );
+}
+
+/// A note held while the probe saw nothing wrong (the server answers its health address, one
+/// transcription failed) is not left for an outage edge that never comes: the watch tries it
+/// again once it has waited a minute, and not before.
+#[tokio::test]
+async fn a_held_note_is_retried_while_the_server_looks_fine_but_not_at_once() {
+    let note = json!({ "file_id": "f1", "mime_type": "audio/ogg", "file_size": 1234 });
+    let voice = FakeVoice::failing(Err(SttFailure::Refused));
+    let api = Arc::new(FakeApi::default());
+    let (line, _up) = Line::new();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    line.attach(tx);
+    let bridge = Arc::new(
+        Bridge::new(api.clone(), Arc::new(line), &cfg())
+            .with_voice(voice.clone())
+            .with_stt_retry(Duration::from_millis(5)),
+    );
+    bridge.register_self();
+    bridge
+        .on_update(&owner_message(json!({ "voice": note })), now_ms())
+        .await;
+    settle().await;
+    assert_eq!(api.sent_texts(), [VOICE_HELD]);
+    voice.says(Ok("Heard now."));
+    // Just held: too soon to try again, so the note stays.
+    bridge.stt_retry_stale(now_ms());
+    settle().await;
+    assert!(
+        down(&mut rx).is_empty(),
+        "not retried the moment it was held"
+    );
+    // A minute on, with the server still looking fine, it goes through.
+    bridge.stt_retry_stale(now_ms() + HELD_RETRY_MS + 1);
+    settle().await;
+    assert_eq!(down(&mut rx), ["[Voice note] Heard now."]);
 }
 
 #[tokio::test]

@@ -38,7 +38,7 @@
 //! [`VoiceBridge::tick`] runs the steps that depend on time or on a line coming up; it runs every
 //! [`TICK`] under [`VoiceBridge::run`] and after every call that changes state.
 
-use crate::heal::{HELD_AUDIO_MAX, HELD_MAX_MS, VOICE_HELD};
+use crate::heal::{HELD_AUDIO_MAX, HELD_COUNT_MAX, HELD_MAX_MS, HELD_RETRY_MS, VOICE_HELD};
 use crate::lines::{Lines, PersonUpstream};
 use crate::relay::{Channel, Line, Upstream};
 use crate::stt::{retry_transcribing, SttHealed, SttHealth, Transcribe, STT_RETRY_AFTER};
@@ -711,6 +711,9 @@ struct Held {
 /// it waits, audio and all, for the server to come back.
 struct HeldTurn {
     at: i64,
+    /// When it was last put through the server (or first held), so a retry is not repeated at
+    /// once.
+    tried: i64,
     person: i64,
     turn: String,
     audio: Vec<u8>,
@@ -1497,6 +1500,21 @@ impl VoiceBridge {
     /// Transcribe a recording on the speech-to-text server (one at a time) and record the result
     /// as [`VoiceBridge::heard`]. A failure is logged here and told to the phone in plain words.
     pub async fn transcribe_turn(&self, person: i64, turn: &str, audio: Vec<u8>, mime: &str) {
+        self.transcribe_turn_held(person, turn, audio, mime, None)
+            .await;
+    }
+
+    /// [`VoiceBridge::transcribe_turn`] for a recording that may have been held before:
+    /// `held_since` is when it was first held, kept if it fails again so its hour is counted
+    /// from the first failure and never restarted.
+    async fn transcribe_turn_held(
+        &self,
+        person: i64,
+        turn: &str,
+        audio: Vec<u8>,
+        mime: &str,
+        held_since: Option<i64>,
+    ) {
         let Some(stt) = self.stt.clone() else {
             self.heard(person, turn, Transcript::Failed(STT_OFF.into()), now_ms());
             return;
@@ -1529,7 +1547,15 @@ impl VoiceBridge {
                 eprintln!("voice: transcription failed: {why}");
                 // Trouble that should pass: the recording waits for the server to come back and
                 // is retried on its own; the phone is told it will happen.
-                if why.kind.is_transient() && self.hold(person, turn, &audio, mime, now_ms()) {
+                if why.kind.is_transient()
+                    && self.hold(
+                        person,
+                        turn,
+                        &audio,
+                        mime,
+                        held_since.unwrap_or_else(now_ms),
+                    )
+                {
                     self.heard(
                         person,
                         turn,
@@ -1547,22 +1573,72 @@ impl VoiceBridge {
     /// Set the recording aside for [`VoiceBridge::stt_back`]. False: the bridge already holds as
     /// much as it may, so this failure is an ordinary one.
     fn hold(&self, person: i64, turn: &str, audio: &[u8], mime: &str, at: i64) -> bool {
-        let held = self.stt_held_bytes.load(Ordering::SeqCst);
-        if held + audio.len() > HELD_AUDIO_MAX {
+        if audio.len() > HELD_AUDIO_MAX {
             return false;
         }
-        self.stt_held_bytes.fetch_add(audio.len(), Ordering::SeqCst);
-        self.stt_held
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .push_back(HeldTurn {
+        // Past the most notes or bytes one person may have held, their oldest stands failed
+        // (with the usual words) to make room.
+        let mut dropped: Vec<HeldTurn> = Vec::new();
+        {
+            let mut held = self.stt_held.lock().unwrap_or_else(|p| p.into_inner());
+            // A turn already held is not held twice.
+            if held.iter().any(|h| h.person == person && h.turn == turn) {
+                return true;
+            }
+            loop {
+                let (count, bytes) = held
+                    .iter()
+                    .filter(|h| h.person == person)
+                    .fold((0, 0), |(c, b), h| (c + 1, b + h.audio.len()));
+                if count < HELD_COUNT_MAX && bytes + audio.len() <= HELD_AUDIO_MAX {
+                    break;
+                }
+                let Some(i) = held.iter().position(|h| h.person == person) else {
+                    break;
+                };
+                let old = held.remove(i).expect("index within the queue");
+                self.stt_held_bytes
+                    .fetch_sub(old.audio.len(), Ordering::SeqCst);
+                dropped.push(old);
+            }
+            self.stt_held_bytes.fetch_add(audio.len(), Ordering::SeqCst);
+            held.push_back(HeldTurn {
                 at,
+                tried: now_ms(),
                 person,
                 turn: turn.to_owned(),
                 audio: audio.to_vec(),
                 mime: mime.to_owned(),
             });
+        }
+        for old in dropped {
+            self.drop_held(&old);
+        }
         true
+    }
+
+    /// A held turn that makes way for a newer one: it stands failed, and the phone is told so in
+    /// the same words any other failed transcription gets.
+    fn drop_held(&self, h: &HeldTurn) {
+        let at = now_ms();
+        let waiting = self
+            .with(h.person, at, |p, _| match p.turns.get_mut(&h.turn) {
+                Some(t) if t.state == TurnState::Failed => {
+                    t.state = TurnState::Transcribing;
+                    t.changed = at;
+                    true
+                }
+                _ => false,
+            })
+            .0;
+        if waiting {
+            self.heard(
+                h.person,
+                &h.turn,
+                Transcript::Failed(self.stt_failed_text()),
+                at,
+            );
+        }
     }
 
     /// The phone's words for a recording that waits for the server: the promise it will be
@@ -1765,13 +1841,41 @@ impl SttHealed for VoiceBridge {
     /// The speech server answers `/health` again: every recording still under its hour goes back
     /// through it, and its turn goes from failed to transcribing so the phone follows.
     fn stt_back(&self, at: i64) {
+        self.release_held(at, false);
+    }
+
+    /// The server looks fine, but turns are still held: the ones that have waited a while since
+    /// their last try go through again.
+    fn stt_retry_stale(&self, at: i64) {
+        self.release_held(at, true);
+    }
+
+    /// The outage is still on: recordings that waited their hour are let go, so the held set
+    /// cannot grow without end.
+    fn stt_expire(&self, at: i64) {
+        let mut held = self.stt_held.lock().unwrap_or_else(|p| p.into_inner());
+        while held.front().is_some_and(|h| at - h.at > HELD_MAX_MS) {
+            if let Some(h) = held.pop_front() {
+                self.stt_held_bytes
+                    .fetch_sub(h.audio.len(), Ordering::SeqCst);
+            }
+        }
+    }
+}
+
+impl VoiceBridge {
+    /// Put held recordings back through the server: all of them, or (`stale_only`) those whose
+    /// last try is a retry gap old. A turn goes from failed to transcribing so the phone follows.
+    fn release_held(&self, at: i64, stale_only: bool) {
         let Some(me) = self.strong() else { return };
-        let drained: Vec<HeldTurn> = self
-            .stt_held
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .drain(..)
-            .collect();
+        let drained: Vec<HeldTurn> = {
+            let mut held = self.stt_held.lock().unwrap_or_else(|p| p.into_inner());
+            let (take, keep): (VecDeque<HeldTurn>, VecDeque<HeldTurn>) = held
+                .drain(..)
+                .partition(|h| !stale_only || at - h.tried >= HELD_RETRY_MS);
+            *held = keep;
+            take.into_iter().collect()
+        };
         for h in drained {
             self.stt_held_bytes
                 .fetch_sub(h.audio.len(), Ordering::SeqCst);
@@ -1794,21 +1898,9 @@ impl SttHealed for VoiceBridge {
             }
             let me = me.clone();
             tokio::spawn(async move {
-                me.transcribe_turn(h.person, &h.turn, h.audio, &h.mime)
+                me.transcribe_turn_held(h.person, &h.turn, h.audio, &h.mime, Some(h.at))
                     .await;
             });
-        }
-    }
-
-    /// The outage is still on: recordings that waited their hour are let go, so the held set
-    /// cannot grow without end.
-    fn stt_expire(&self, at: i64) {
-        let mut held = self.stt_held.lock().unwrap_or_else(|p| p.into_inner());
-        while held.front().is_some_and(|h| at - h.at > HELD_MAX_MS) {
-            if let Some(h) = held.pop_front() {
-                self.stt_held_bytes
-                    .fetch_sub(h.audio.len(), Ordering::SeqCst);
-            }
         }
     }
 }

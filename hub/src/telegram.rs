@@ -96,7 +96,7 @@
 //! The queue and the waiting asks live in memory: a container restart drops them.
 
 use crate::auth::digest;
-use crate::heal::{HELD_AUDIO_MAX, HELD_MAX_MS, VOICE_HELD};
+use crate::heal::{HELD_AUDIO_MAX, HELD_COUNT_MAX, HELD_MAX_MS, HELD_RETRY_MS, VOICE_HELD};
 use crate::images;
 use crate::launcher::{LaunchOutcome, Plan, Reason, WakeOutcome};
 use crate::lines::{Lines, PersonRoute, PersonUpstream};
@@ -764,8 +764,12 @@ pub struct Bridge {
 
 /// One recording waiting out a speech-server outage: everything needed to finish its message
 /// later, exactly as the failed fetch left it.
+#[derive(Clone)]
 struct HeldPart {
     at: i64,
+    /// When it was last put through the server (or first held), so a retry is not repeated at
+    /// once.
+    tried: i64,
     slot: String,
     index: usize,
     chat: i64,
@@ -2082,37 +2086,40 @@ impl Bridge {
     /// Set a failed recording aside for [`Bridge::stt_back`]: the message keeps waiting with it.
     /// False when the bridge already holds as much as it may; then this failure is an ordinary
     /// one and the message goes without its text.
-    fn hold_recording(
-        &self,
-        slot: &str,
-        index: usize,
-        job: &Job,
-        chat: i64,
-        audio: &[u8],
-        name: &str,
-        mime: &str,
-        why: &SttError,
-        at: i64,
-    ) -> bool {
-        let held = self.stt_held_bytes.load(Ordering::SeqCst);
-        if held + audio.len() > HELD_AUDIO_MAX {
+    fn hold_recording(&self, part: &HeldPart) -> bool {
+        if part.audio.len() > HELD_AUDIO_MAX {
             return false;
         }
-        self.stt_held_bytes.fetch_add(audio.len(), Ordering::SeqCst);
-        self.stt_held
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .push_back(HeldPart {
-                at,
-                slot: slot.to_owned(),
-                index,
-                chat,
-                job: job.clone(),
-                audio: audio.to_vec(),
-                name: name.to_owned(),
-                mime: mime.to_owned(),
-                why: why.clone(),
-            });
+        // This bridge is one person's: past the most notes or bytes a person may have held, the
+        // oldest goes on without its text (with the usual failure words) to make room.
+        let mut dropped: Vec<HeldPart> = Vec::new();
+        {
+            let mut held = self.stt_held.lock().unwrap_or_else(|p| p.into_inner());
+            // A recording already held is not held twice.
+            if held
+                .iter()
+                .any(|h| h.slot == part.slot && h.index == part.index)
+            {
+                return true;
+            }
+            while held.len() >= HELD_COUNT_MAX
+                || self.stt_held_bytes.load(Ordering::SeqCst) + part.audio.len() > HELD_AUDIO_MAX
+            {
+                let Some(old) = held.pop_front() else { break };
+                self.stt_held_bytes
+                    .fetch_sub(old.audio.len(), Ordering::SeqCst);
+                dropped.push(old);
+            }
+            self.stt_held_bytes
+                .fetch_add(part.audio.len(), Ordering::SeqCst);
+            held.push_back(part.clone());
+        }
+        if let Some(me) = self.strong() {
+            for old in dropped {
+                let me = me.clone();
+                tokio::spawn(async move { me.finish_held_failed(old).await });
+            }
+        }
         true
     }
 
@@ -2191,17 +2198,18 @@ impl Bridge {
                         // Trouble that should pass: keep the recording, tell the chat up front,
                         // and let the message wait for [`Bridge::stt_back`].
                         if e.kind.is_transient()
-                            && self.hold_recording(
-                                slot,
+                            && self.hold_recording(&HeldPart {
+                                at: now_ms(),
+                                tried: now_ms(),
+                                slot: slot.to_owned(),
                                 index,
-                                job,
                                 chat,
-                                &bytes,
-                                &name,
-                                &mime,
-                                &e,
-                                now_ms(),
-                            )
+                                job: job.clone(),
+                                audio: bytes.clone(),
+                                name: name.clone(),
+                                mime: mime.clone(),
+                                why: e.clone(),
+                            })
                         {
                             let text = match self
                                 .stt_health
@@ -2300,14 +2308,14 @@ impl Bridge {
                 self.part_done(&slot, index, &job, part).await;
             }
             Err(e) => {
-                if e.kind.is_transient()
-                    && self.hold_recording(
-                        &h.slot, h.index, &h.job, h.chat, &h.audio, &h.name, &h.mime, &e, h.at,
-                    )
-                {
+                let h = HeldPart {
+                    why: e,
+                    tried: now_ms(),
+                    ..h
+                };
+                if h.why.kind.is_transient() && self.hold_recording(&h) {
                     return;
                 }
-                let h = HeldPart { why: e, ..h };
                 self.finish_held_failed(h).await;
             }
         }
@@ -2459,12 +2467,23 @@ impl Bridge {
                 keep
             });
             // The messages to send now, in order. Order is kept: nothing overtakes a message
-            // still gathering its files.
+            // still gathering its files, or a recording being transcribed. A recording held for
+            // the speech server to come back (up to an hour) is the exception: it is passed
+            // over, so the messages after it are not stuck behind an outage, and it goes when
+            // its transcript (or its failure) arrives.
+            let held: Vec<String> = self
+                .stt_held
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .iter()
+                .map(|h| h.slot.clone())
+                .collect();
             let due: Vec<String> = match generation {
                 Some(_) => st
                     .queue
                     .iter()
                     .filter(|q| q.sent_on.is_none() || now - q.sent_down_ms >= resend_ms)
+                    .filter(|q| q.text.is_some() || !held.contains(&q.id))
                     .map_while(|q| q.text.is_some().then(|| q.id.clone()))
                     .collect(),
                 None => vec![],
@@ -2972,18 +2991,19 @@ impl Poller {
     }
 }
 
-impl SttHealed for Bridge {
-    /// The speech server answers `/health` again (or the hour is up): every recording still
-    /// under its hour goes back through it, inside the one-transcription gate, and the one that
-    /// waited too long goes through without its text.
-    fn stt_back(&self, at: i64) {
+impl Bridge {
+    /// Put held recordings back through the server: all of them, or (`stale_only`) those whose
+    /// last try is a retry gap old. One past its hour goes on without its text.
+    fn release_held(&self, at: i64, stale_only: bool) {
         let Some(me) = self.strong() else { return };
-        let drained: Vec<HeldPart> = self
-            .stt_held
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .drain(..)
-            .collect();
+        let drained: Vec<HeldPart> = {
+            let mut held = self.stt_held.lock().unwrap_or_else(|p| p.into_inner());
+            let (take, keep): (VecDeque<HeldPart>, VecDeque<HeldPart>) = held
+                .drain(..)
+                .partition(|h| !stale_only || at - h.tried >= HELD_RETRY_MS);
+            *held = keep;
+            take.into_iter().collect()
+        };
         for h in drained {
             self.stt_held_bytes
                 .fetch_sub(h.audio.len(), Ordering::SeqCst);
@@ -3002,9 +3022,24 @@ impl SttHealed for Bridge {
             });
         }
     }
+}
 
-    /// The outage is still on: a recording that waited its hour goes without its text, so the
-    /// held set cannot grow without end and no message sits in the queue past its own lifetime.
+impl SttHealed for Bridge {
+    /// The speech server answers `/health` again (or the hour is up): every recording still
+    /// under its hour goes back through it, inside the one-transcription gate, and the one that
+    /// waited too long goes through without its text.
+    fn stt_back(&self, at: i64) {
+        self.release_held(at, false);
+    }
+
+    /// The server looks fine, but recordings are still held: the ones that have waited a while
+    /// since their last try go through again.
+    fn stt_retry_stale(&self, at: i64) {
+        self.release_held(at, true);
+    }
+
+    /// A recording that waited its hour goes without its text, so the held set cannot grow
+    /// without end and no message sits in the queue past its own lifetime.
     fn stt_expire(&self, at: i64) {
         let me = match self.strong() {
             Some(me) => me,
@@ -3042,6 +3077,17 @@ impl SttHealed for Telegram {
             .iter()
         {
             b.stt_back(at);
+        }
+    }
+
+    fn stt_retry_stale(&self, at: i64) {
+        for (_, b) in self
+            .bridges
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+        {
+            b.stt_retry_stale(at);
         }
     }
 

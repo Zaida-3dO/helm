@@ -4,8 +4,10 @@
 //! health probe sees the server answering again.
 //!
 //! [`Heal`] watches the probe's state [`HEALTH_PROBE/4`] apart: while the server is down it sends
-//! the PC a `service_down` frame at most once an hour and ends notes that have waited past their
-//! hour; the moment the server answers again it lets every bridge retry what it holds.
+//! the PC a `service_down` frame at most once an hour; the moment the server answers again it lets
+//! every bridge retry what it holds. A note held while the probe sees nothing wrong (the server
+//! answers `/health` but a transcription failed) is retried a minute after its last try, and every
+//! held note ends at its hour whether or not an outage was seen.
 
 use crate::lines::Lines;
 use crate::relay::Channel;
@@ -21,8 +23,13 @@ pub const FRAME_GAP_MS: i64 = 3_600_000;
 /// How long a failed voice note waits for the server to come back before it is sent without
 /// its transcript, or given up on.
 pub const HELD_MAX_MS: i64 = 3_600_000;
-/// The most recording audio one bridge holds through outages. New notes past that fail as before.
+/// The most recording audio one person has held through outages, and the most notes. A new note
+/// past either sends the person's oldest held one on without its text, with a notice.
 pub const HELD_AUDIO_MAX: usize = 32 * 1024 * 1024;
+pub const HELD_COUNT_MAX: usize = 10;
+/// How long a held note waits after a try before the watch tries it again while the server looks
+/// fine.
+pub const HELD_RETRY_MS: i64 = 60_000;
 /// What a person is told when their recording is being held for the server to come back.
 pub const VOICE_HELD: &str = "Voice is down; I'm getting it fixed and will transcribe this \
                               when it's back. Text messages still work.";
@@ -110,15 +117,22 @@ impl Heal {
                     eprintln!("stt: told the person's PC that the speech server is down");
                 }
             }
-            for h in &self.healed {
-                h.stt_expire(now_ms);
-            }
         } else if self.was_down.swap(false, Ordering::Relaxed) {
             // Back up: the next outage starts its frame count again, and everything held goes.
             self.last_frame_ms.store(0, Ordering::Relaxed);
             for h in &self.healed {
                 h.stt_back(now_ms);
             }
+        } else {
+            // The server looks fine, yet a note may be held (a transcription failed between two
+            // probes): the ones that have waited a while go through again.
+            for h in &self.healed {
+                h.stt_retry_stale(now_ms);
+            }
+        }
+        // A held note ends at its hour whether or not the probe saw an outage.
+        for h in &self.healed {
+            h.stt_expire(now_ms);
         }
     }
 
@@ -152,6 +166,7 @@ mod tests {
     struct Seen {
         backs: AtomicI64,
         expires: AtomicI64,
+        retries: AtomicI64,
     }
 
     impl SttHealed for Seen {
@@ -160,6 +175,9 @@ mod tests {
         }
         fn stt_expire(&self, _at: i64) {
             self.expires.fetch_add(1, Ordering::SeqCst);
+        }
+        fn stt_retry_stale(&self, _at: i64) {
+            self.retries.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -182,10 +200,11 @@ mod tests {
     fn one_frame_an_hour_while_down_and_bridges_go_when_it_is_back() {
         let (heal, health, rec, seen) = hub();
         let base = 1_763_000_000_000;
-        // Fine: nothing goes, nothing is retried.
+        // Fine: no frame, and no outage to come back from; what is held (nothing) is looked at.
         heal.tick(base);
         assert!(rec.0.lock().unwrap().is_empty());
         assert_eq!(seen.backs.load(Ordering::SeqCst), 0);
+        assert_eq!(seen.retries.load(Ordering::SeqCst), 1);
         health.note_down(base, "its health address does not answer");
         heal.tick(base);
         let frames = rec.0.lock().unwrap().len();
@@ -201,10 +220,12 @@ mod tests {
                 .is_some_and(|s| s.len() == 5 && s.chars().all(|c| c.is_ascii_digit() || c == ':')),
             "{f}"
         );
-        // Still down: expire runs each tick, but no second frame inside the hour.
+        // Still down: expire runs each tick, but no second frame inside the hour, and nothing is
+        // retried while the server is known to be down.
         heal.tick(base + 1_800_000);
         assert_eq!(rec.0.lock().unwrap().len(), 1);
-        assert_eq!(seen.expires.load(Ordering::SeqCst), 2);
+        assert_eq!(seen.expires.load(Ordering::SeqCst), 3);
+        assert_eq!(seen.retries.load(Ordering::SeqCst), 1);
         // Past the hour: one more frame.
         heal.tick(base + FRAME_GAP_MS + 1_000);
         assert_eq!(rec.0.lock().unwrap().len(), 2);
@@ -214,6 +235,11 @@ mod tests {
         assert_eq!(seen.backs.load(Ordering::SeqCst), 1);
         heal.tick(base + FRAME_GAP_MS + 3_000);
         assert_eq!(seen.backs.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            seen.retries.load(Ordering::SeqCst),
+            2,
+            "fine again: held notes are looked at, not only on the edge"
+        );
         // A fresh outage opens its frame at once, not an hour late.
         health.note_down(
             base + FRAME_GAP_MS + 4_000,
