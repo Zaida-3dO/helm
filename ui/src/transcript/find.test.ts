@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { countLabel, findMatches, mergeHostMatches, step } from './find.ts';
+import { countLabel, findMatches, mergeHostMatches, stackFoundToHost, step } from './find.ts';
 import { row } from '../dev/fixtures.ts';
 
 const rows = [
@@ -40,6 +40,22 @@ test('stepping starts at the newest match and wraps both ways', () => {
   assert.equal(countLabel(2, 120, false), '3 / 120');
   assert.equal(countLabel(0, 10_000, true), '1 / 10000+');
   assert.equal(countLabel(-1, 0, false), 'No matches');
+});
+
+test('a whole-stack search reads as host matches: ids are unique across the sessions', () => {
+  // Newest session first, as the host answers; the merge sorts them back into transcript order.
+  const fromStack = [
+    { sessionId: 'c2', id: 44, count: 1 },
+    { sessionId: 'c1', id: 9, count: 2 },
+  ];
+  const host = stackFoundToHost(fromStack);
+  assert.deepEqual(host, [{ id: 44, count: 1 }, { id: 9, count: 2 }]);
+  const { matches } = mergeHostMatches(host, [], new Set());
+  assert.deepEqual(matches, [
+    { rowId: 9, occurrence: 0 },
+    { rowId: 9, occurrence: 1 },
+    { rowId: 44, occurrence: 0 },
+  ]);
 });
 
 test('host matches fill in the rows that are not loaded; loaded rows are matched locally', () => {

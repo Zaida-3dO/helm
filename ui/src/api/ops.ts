@@ -2,7 +2,7 @@
 
 import type { Api } from './client.ts';
 import { buildActionSend } from '../actions/send.ts';
-import type { ChatFindResult } from './generated/index.ts';
+import type { ChatFindResult, ChatStack, StackFindResult } from './generated/index.ts';
 import type {
   AttentionSummary,
   ChatRecord,
@@ -21,6 +21,8 @@ export interface PageQuery {
   after?: string;
   around?: number;
   inclusive?: boolean;
+  /** Ask for the chat's whole roll-over stack as one transcript, instead of one session. */
+  stack?: boolean;
 }
 
 export interface InteractionAnswer {
@@ -55,6 +57,11 @@ export function chatOps(api: Api) {
     /** Find in chat over the whole stored history, one scan step (`after` = the previous `nextCursor`). */
     find: (chatId: string, query: string, includeActivity: boolean, after?: string) =>
       api<ChatFindResult>('chat_find', { chatId, query, includeActivity, ...(after ? { after } : {}) }),
+    /** The chat's roll-over stack: every session, oldest first, and the one the chat lives in now. */
+    stack: (chatId: string) => api<ChatStack>('chat_stack', { chatId }),
+    /** Find across every session of the stack: newest session first, newest row first. */
+    stackFind: (chatId: string, query: string, includeActivity: boolean) =>
+      api<StackFindResult>('stack_find', { chatId, query, includeActivity }),
     send: (chatId: string, submissionId: string, text: string, action: SendAction, draftRevision: number, extras: SendExtras = {}) =>
       api<{ submission: Submission; chat: ChatRecord }>('chat_send', {
         chatId,

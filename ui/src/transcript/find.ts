@@ -2,7 +2,7 @@
 // reader steps through them. Matching is case-insensitive over each row's text; "Include activity"
 // adds tool calls, thinking and context rows. Pure, so the bar and the tests share it.
 
-import type { MessageRow } from '../api/types.ts';
+import type { MessageRow, StackFound } from '../api/types.ts';
 
 export const FIND_MAX_QUERY = 256;
 export const FIND_CAP = 10_000;
@@ -65,6 +65,14 @@ export function countLabel(index: number, count: number, capped: boolean): strin
 export interface HostFound {
   id: number;
   count: number;
+}
+
+/**
+ * A whole-stack search's rows (newest session first) as host matches: row ids are unique across
+ * the stack's sessions, so they merge into the loaded rows the same way and sort back into order.
+ */
+export function stackFoundToHost(found: readonly StackFound[]): HostFound[] {
+  return found.map((f) => ({ id: f.id, count: f.count }));
 }
 
 /**

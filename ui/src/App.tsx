@@ -8,7 +8,7 @@ import { ActionRow, LeafSlots } from './actions/index.ts';
 import { CheckpointSlot } from './checkpoints/index.ts';
 import { ClaudeChatViewer } from './claudechats/index.ts';
 import { SearchDialog } from './search/index.ts';
-import { chatOps } from './api/ops.ts';
+import { chatOps, type ChatOps } from './api/ops.ts';
 import { ChatMenu, ProjectTags, Sidebar } from './sidebar/index.ts';
 import { ChatView } from './ChatView.tsx';
 import { SidePanel, registerLinkRoute } from './panel/index.ts';
@@ -53,7 +53,7 @@ import { TopBar } from './topbar/TopBar.tsx';
 import { EmptyMain } from './shell/EmptyMain.tsx';
 import { ShellShortcuts } from './shell/Shortcuts.tsx';
 import { SidebarResizer } from './shell/SidebarResizer.tsx';
-import { decideOpen, type OpenEvent } from './shell/follow.ts';
+import { decideOpen, openTarget, type OpenEvent } from './shell/follow.ts';
 import { SIDEBAR_VISIBLE_PREF, SIDEBAR_WIDTH_PREF, sidebarLayout } from './shell/layout.ts';
 import { TerminalDock } from './terminal/TerminalDock.tsx';
 import { SavedDueNotice } from './saved/SavedDueNotice.tsx';
@@ -66,6 +66,21 @@ import { SchedulesViewHost } from './schedules/SchedulesView.tsx';
 import { FrameStats } from './perf/index.ts'; // the frame-stats overlay (Mod+Shift+P)
 import { ErrorBoundary } from './safety/ErrorBoundary.tsx';
 import { Delight } from './delight/index.tsx'; // celebrations, the first-run intro, the pet's settings
+
+/**
+ * Open a chat window by id. A session that rolled over points at where the chat moved: the
+ * stack's newest session opens instead — one window spans the whole stack — and a message to
+ * land on is taken along, since a jump resolves to any session of the stack.
+ */
+async function openChatWindow(ops: ChatOps, shell: ShellController, chatId: string, messageId?: string): Promise<void> {
+  let target = chatId;
+  try {
+    if ((await ops.get(chatId)).chat.stackId !== null) target = openTarget(chatId, (await ops.stack(chatId)).latestId);
+  } catch {
+    // The id we were given still opens; ChatView reports what it cannot load.
+  }
+  shell.select(target, messageId ? { messageId } : {});
+}
 
 export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers: Flushers }) {
   const ops = useMemo(() => chatOps(api), [api]);
@@ -100,17 +115,17 @@ export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers:
         const d = decideOpen(e as OpenEvent, shell.selection.chatId);
         if (!d) return;
         if (d.kind === 'select') {
-          shell.select(d.chatId, d.messageId ? { messageId: d.messageId } : {});
+          void openChatWindow(ops, shell, d.chatId, d.messageId);
           return;
         }
         toast.show({
           kind: 'info',
           text: d.title ? `New chat started: ${d.title}` : 'A new chat is ready',
-          action: { label: 'Open', run: () => shell.select(d.chatId) },
+          action: { label: 'Open', run: () => void openChatWindow(ops, shell, d.chatId) },
           ttlMs: 8000,
         });
       }),
-    [bus, shell],
+    [bus, ops, shell],
   );
   // A roll over that could not finish says why (the old chat is left as it was).
   useEffect(
@@ -132,7 +147,8 @@ export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers:
         } catch {
           return 'That chat no longer exists.';
         }
-        shell.select(req.chatId);
+        // A rolled-over session's link opens the window the chat lives in now, at the message it names.
+        await openChatWindow(ops, shell, req.chatId, req.messageId !== undefined ? String(req.messageId) : undefined);
         return true;
       }),
     [ops, shell],

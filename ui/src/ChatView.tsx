@@ -42,6 +42,7 @@ import { recallPrompts } from './composer/recall.ts';
 import { SelectionToolbar } from './transcript/SelectionToolbar.tsx';
 import { useMentionRepo } from './pr/mentionRepo.ts';
 import { FindBar } from './transcript/FindBar.tsx';
+import { stackFoundToHost } from './transcript/find.ts';
 import { TimelineRail } from './transcript/TimelineRail.tsx';
 import { useWholeChat } from './transcript/useWholeChat.ts';
 import { setLocalImageLoader } from './markdown/localImages.ts';
@@ -151,7 +152,9 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
   );
 
   const reload = useCallback(async () => {
-    const [{ chat, thread }, page] = await Promise.all([ops.get(chatId), ops.page(chatId)]);
+    // The chat opens as one window across its roll-over stack: an older session's rows keep
+    // loading as the reader scrolls up, with a divider where the sessions meet.
+    const [{ chat, thread }, page] = await Promise.all([ops.get(chatId), ops.page(chatId, { stack: true })]);
     store.chat(chat);
     store.thread(thread);
     store.page(page, 'replace');
@@ -167,13 +170,27 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
   // links to an old row yet; the dev console can call window.__helmJump(rowId).
   const jumpAround = useCallback(
     async (rowId: number) => {
-      const page = await ops.page(chatId, { around: rowId, inclusive: true });
+      // The row may sit in any session of the stack; the host resolves it there.
+      const page = await ops.page(chatId, { around: rowId, inclusive: true, stack: true });
       store.setKeep(chatId, 'oldest');
       store.page(page, 'replace');
       setJumpTo(rowId);
     },
     [ops, store, chatId],
   );
+  // A selection that asked to land on one message (a chat link, an open event) jumps there once,
+  // loading that row's page from wherever it sits in the stack. The request is taken once, whether
+  // this chat was just opened or was already on screen.
+  useEffect(() => {
+    const take = () => {
+      const f = shell.takeFocus(chatId);
+      if (!f) return;
+      const rowId = Number(f.messageId);
+      if (Number.isFinite(rowId)) void jumpAround(rowId).catch(() => undefined);
+    };
+    take();
+    return shell.subscribe(take);
+  }, [shell, chatId, jumpAround]);
   useEffect(() => {
     if (!import.meta.env.DEV) return;
     (window as unknown as { __helmJump?: (id: number) => void }).__helmJump = (id) => void jumpAround(id);
@@ -293,10 +310,17 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
 
   const transcriptBox = useRef<HTMLDivElement>(null);
   // Ctrl+A then Ctrl+C copies the whole chat, not just the rows that are mounted.
-  const wholeChat = useWholeChat(transcriptBox, (before) => ops.page(chatId, before ? { before } : {}), (text) => setNotice(text));
+  const wholeChat = useWholeChat(transcriptBox, (before) => ops.page(chatId, { ...(before ? { before } : {}), stack: true }), (text) => setNotice(text));
   // Find in chat: the host searches the whole history; a match in a row that is not
-  // loaded loads the page around it first.
-  const hostFind = useCallback((q: string, activity: boolean, after?: string) => ops.find(chatId, q, activity, after), [ops, chatId]);
+  // loaded loads the page around it first. A chat with a roll-over stack searches every session
+  // of the stack in one answer instead of one chat's history.
+  const hostFind = useCallback(
+    (q: string, activity: boolean, after?: string) =>
+      chat?.stackId
+        ? ops.stackFind(chatId, q, activity).then((r) => ({ rows: stackFoundToHost(r.rows), nextCursor: null }))
+        : ops.find(chatId, q, activity, after),
+    [ops, chatId, chat?.stackId],
+  );
   const loadedIds = useRef(new Set<number>());
   loadedIds.current = new Set(view.rows.map((r) => r.id));
   const jumpToFound = useCallback(
@@ -394,15 +418,16 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
         ctx={ctx}
         jumpToRowId={jumpTo}
         scrollSignal={scrollSignal}
+        sessionMarks={view.sessionMarks}
         queue={queue}
         onLoadOlder={async () => {
           if (!view.olderCursor) return;
-          store.page(await ops.page(chatId, { before: view.olderCursor }), 'older');
+          store.page(await ops.page(chatId, { before: view.olderCursor, stack: true }), 'older');
         }}
         onJumpLatest={async () => {
           setJumpTo(null);
           store.setKeep(chatId, 'newest');
-          if (view.hasNewer) store.page(await ops.page(chatId), 'replace');
+          if (view.hasNewer) store.page(await ops.page(chatId, { stack: true }), 'replace');
         }}
         onFollowChange={(f) => store.setKeep(chatId, f ? 'newest' : 'oldest')}
       />

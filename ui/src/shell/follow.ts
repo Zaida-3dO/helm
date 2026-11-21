@@ -32,3 +32,12 @@ export function decideOpen(event: OpenEvent, currentChatId: string | null): Open
   const title = typeof event.title === 'string' && event.title.trim() !== '' ? event.title : null;
   return { kind: 'notice', chatId, title };
 }
+
+/**
+ * The window to open for a chat id. A session that rolled over is no longer where the chat lives:
+ * when the stack names a newer session, that one opens — one window spans the whole stack, and a
+ * message to land on is resolved across it. `latestId` is null when the chat never rolled over.
+ */
+export function openTarget(chatId: string, latestId: string | null | undefined): string {
+  return typeof latestId === 'string' && latestId !== '' && latestId !== chatId ? latestId : chatId;
+}

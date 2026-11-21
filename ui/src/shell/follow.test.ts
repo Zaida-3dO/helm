@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decideOpen } from './follow.ts';
+import { decideOpen, openTarget } from './follow.ts';
 
 // (event, chat on screen, expected decision): the window follows when the host names no guard
 // or the user is still looking at the guarded chat; otherwise the user only gets a notice.
@@ -19,4 +19,18 @@ test('an open-chat event follows, notices or is ignored by what it carries', () 
     assert.deepEqual(decideOpen(event, current), want, JSON.stringify(event));
   }
   assert.equal(decideOpen({ ifViewing: 'c1' }, 'c1'), null, 'an event with no chat id does nothing');
+});
+
+// A rolled-over session is not where the chat lives: the window to open is the stack's newest
+// session (one window spans the whole stack); a chat that never rolled over opens as itself.
+test('a rolled-over session id opens the newest session of its stack', () => {
+  const cases: [string, string | null | undefined, string][] = [
+    ['c1', 'c3', 'c3'], // oldest of three: straight to the newest
+    ['c2', 'c3', 'c3'], // the middle session: on to the newest
+    ['c3', 'c3', 'c3'], // already the newest
+    ['c1', null, 'c1'], // no stack
+    ['c1', undefined, 'c1'],
+    ['c1', '', 'c1'],
+  ];
+  for (const [chatId, latest, want] of cases) assert.equal(openTarget(chatId, latest), want, `${chatId} -> ${String(latest)}`);
 });
