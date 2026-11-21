@@ -4,10 +4,13 @@
 // (a cheap check of the modified time, then a re-read that keeps the reading position), and never
 // executes what it previews.
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { FileView, PanelOps } from '../../api/panel.ts';
 import { Markdown } from '../../markdown/index.ts';
-import { Button } from '../../ui/index.ts';
+import { Button, toast } from '../../ui/index.ts';
+import { deviceOps } from '../../devices/api.ts';
+import { useRemoteChat } from '../../devices/hooks.ts';
+import { useShell } from '../../shell/context.ts';
 import type { LinkTarget } from '../../markdown/index.ts';
 import { BackIcon, BrowseFolderIcon, ChevronIcon, CopyIcon, EyeIcon, EyeOffIcon, FileTextIcon, FolderOpenIcon, FolderTreeIcon, ForwardIcon, ReloadIcon, UpIcon, WrapIcon } from '../icons.tsx';
 import { gateTarget, handleLink } from '../links.ts';
@@ -74,6 +77,49 @@ function useObjectUrl(view: FileView | null): string | null {
   return url;
 }
 
+/**
+ * Whether the chat runs on another PC. Its files are read there, so "Show in File Explorer" would
+ * act on the wrong PC; such a viewer offers "Save to this PC" instead.
+ */
+function useRunsElsewhere(chatId: string | null): boolean {
+  const shell = useShell();
+  const kept = useSyncExternalStore(shell.store.subscribe, () => (chatId ? shell.store.view(chatId).chat : null));
+  const [read, setRead] = useState<{ chatId: string; hostDeviceId: string } | null>(null);
+  useEffect(() => {
+    if (!chatId || kept) return;
+    let live = true;
+    shell.ops.get(chatId).then(
+      (r) => live && setRead({ chatId, hostDeviceId: r.chat.hostDeviceId ?? '' }),
+      () => undefined,
+    );
+    return () => {
+      live = false;
+    };
+  }, [chatId, kept, shell]);
+  const chat = kept ?? (read && read.chatId === chatId ? read : null);
+  return useRemoteChat(shell.api, shell.bus, chat) !== null;
+}
+
+/** "Save to this PC": copies a file of a chat that runs on another PC here, through a save dialog. */
+function SaveHere({ chatId, path }: { chatId: string; path: string }) {
+  const shell = useShell();
+  const [saving, setSaving] = useState(false);
+  const save = () => {
+    setSaving(true);
+    deviceOps(shell.api)
+      .fileSave(chatId, path)
+      .then((saved) => saved && toast.show({ kind: 'info', text: `Saved to ${saved}` }))
+      .catch((e: unknown) => toast.show({ kind: 'error', text: `Not saved: ${e instanceof Error ? e.message : String(e)}` }))
+      .finally(() => setSaving(false));
+  };
+  return (
+    <Button className="fv-tool" data-testid="file-save-here" title="Save a copy of this file on this PC" disabled={saving} onClick={save}>
+      <FolderOpenIcon />
+      <span className="fv-btn-text">{saving ? 'Saving…' : 'Save to this PC'}</span>
+    </Button>
+  );
+}
+
 export interface FileViewerProps {
   ops: PanelOps;
   start: Location;
@@ -120,6 +166,7 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
   const baseline = useRef<number | undefined>(undefined);
   const [copied, setCopied] = useState(false);
   const [showHidden, setShowHidden] = useState(false);
+  const elsewhere = useRunsElsewhere(chatId);
 
   shownView.current = view;
   hasError.current = error !== null;
@@ -358,9 +405,13 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
             <span className="fv-btn-text">{copied ? 'Copied' : view.truncated ? 'Copy preview' : 'Copy'}</span>
           </Button>
         )}
-        <button type="button" className="fv-icon-btn" aria-label="Show in File Explorer" title="Show in File Explorer" onClick={() => void ops.reveal(loc.path).catch(() => undefined)}>
-          <FolderOpenIcon />
-        </button>
+        {elsewhere && chatId ? (
+          view?.kind !== 'dir' && <SaveHere chatId={chatId} path={loc.path} />
+        ) : (
+          <button type="button" className="fv-icon-btn" aria-label="Show in File Explorer" title="Show in File Explorer" onClick={() => void ops.reveal(loc.path).catch(() => undefined)}>
+            <FolderOpenIcon />
+          </button>
+        )}
         <Button className="fv-tool" title="Copy path" onClick={() => void navigator.clipboard?.writeText(displayPath(loc.path))}>
           <CopyIcon />
           <span className="fv-btn-text">Copy path</span>
