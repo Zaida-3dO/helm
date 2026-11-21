@@ -233,6 +233,22 @@ pub fn list(tx: &Transaction<'_>, profile: Option<&str>) -> rusqlite::Result<Vec
     rows.collect()
 }
 
+/// Whether the page is pinned for `profile`: its own pin, or one pinned before profiles existed
+/// (which every profile sees, as in [`list`]). An empty profile — an open beside no chat, where no
+/// profile is known — matches any pin, so opening a pinned page from the Pages list runs it
+/// online. The open's network rule reads this.
+pub fn is_pinned_for(tx: &Transaction<'_>, profile: &str, key: &str) -> rusqlite::Result<bool> {
+    let found: Option<i64> = tx
+        .query_row(
+            "SELECT 1 FROM pinned_pages
+             WHERE path_key = ?2 AND (profile_id = ?1 OR profile_id = '' OR ?1 = '')",
+            [profile, key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(found.is_some())
+}
+
 /// The pin for a page, for any profile that has pinned it.
 pub fn pins_for_key(tx: &Transaction<'_>, key: &str) -> rusqlite::Result<Vec<Value>> {
     let mut st = tx.prepare(
@@ -346,6 +362,23 @@ mod tests {
         // A profile sees its own pages and the unassigned ones.
         assert_eq!(titles(Some("profile-a")), ["Mine", "Progress"]);
         assert_eq!(db.snapshot(|tx| pins_for_key(tx, "k1")).unwrap().len(), 1);
+        // The network rule: a profile's own pin and the legacy unassigned pins count for it,
+        // another profile's pin does not; an unknown (empty) profile counts any pin.
+        let pinned_for =
+            |profile: &str, key: &str| db.snapshot(|tx| is_pinned_for(tx, profile, key)).unwrap();
+        assert!(pinned_for("", "k1"));
+        assert!(
+            pinned_for("profile-a", "k1"),
+            "a pin from before profiles applies to all"
+        );
+        assert!(pinned_for("profile-a", "k2"));
+        assert!(
+            !pinned_for("profile-b", "k2"),
+            "another profile's pin does not carry over"
+        );
+        assert!(pinned_for("", "k2"));
+        assert!(!pinned_for("profile-a", "k3"));
+        assert!(!pinned_for("profile-a", "never"));
         // The same page in two profiles is two pins.
         pin_it("i4", "profile-a", "k1", None, None, 50).unwrap();
         assert_eq!(db.snapshot(|tx| pins_for_key(tx, "k1")).unwrap().len(), 2);
@@ -368,6 +401,10 @@ mod tests {
         assert!(db.write(|tx| unpin(tx, "i2")).unwrap());
         assert!(!db.write(|tx| unpin(tx, "i2")).unwrap());
         assert_eq!(db.snapshot(|tx| state_get(tx, "k2")).unwrap().1, 1);
+        assert!(
+            !pinned_for("profile-a", "k2"),
+            "unpinning takes the network rule away too"
+        );
 
         // The per-profile cap.
         db.write(|tx| {

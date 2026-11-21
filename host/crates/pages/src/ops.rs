@@ -2,7 +2,7 @@
 //!
 //! | op | class | args → result |
 //! |---|---|---|
-//! | `page_open` | heavy | `{path, chatId?, network?}` → the session (`session`, `channel`, `url`, `path`, `key`, `title`, `network`, `scripts`, `revision`, `size`) plus `state`, `stateRevision` and `pins` |
+//! | `page_open` | heavy | `{path, chatId?}` → the session (`session`, `channel`, `url`, `path`, `key`, `title`, `network`, `scripts`, `revision`, `size`) plus `state`, `stateRevision` and `pins`; `network` is the host's own decision — on when the page is pinned for the chat's profile, off otherwise |
 //! | `page_reload` | heavy | `{session}` → the session again, re-read |
 //! | `page_close` | blocking | `{session}` → `{closed}` |
 //! | `page_status` | blocking | `{session}` → `{revision, changed, missing, error?}`: the file watch, polled by the open frame |
@@ -12,6 +12,7 @@
 //! | `page_unpin` | blocking | `{id}` → `{removed}` |
 //! | `page_link_chat` | blocking | `{id, chatId?}` → `{linked}` |
 //! | `page_list` | blocking | `{profileId?, chatId?}` → `{pages}` (a chat's profile stands in for `profileId`) |
+//! | `page_icon` | blocking | `{path}` → `{icon}`: a data URL of the page bundle's own favicon (a `<link rel=icon>` file beside it, else `favicon.ico`/`.png`/`.svg` there, at most 64 KiB), or `null` |
 //!
 //! The answers are built as JSON here, and the UI's copy of them (`ui/src/pages/`) is typed by hand
 //! from this table: there is no Rust type to generate bindings from.
@@ -40,7 +41,8 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("page_pin", OpClass::Blocking, page_pin)
         .blocking("page_unpin", OpClass::Blocking, page_unpin)
         .blocking("page_link_chat", OpClass::Blocking, page_link_chat)
-        .blocking("page_list", OpClass::Blocking, page_list);
+        .blocking("page_list", OpClass::Blocking, page_list)
+        .blocking("page_icon", OpClass::Blocking, page_icon);
 }
 
 fn parse<T: DeserializeOwned>(args: Value) -> Result<T, ApiError> {
@@ -110,8 +112,13 @@ struct OpenArgs {
     path: String,
     #[serde(default)]
     chat_id: Option<String>,
-    #[serde(default)]
-    network: bool,
+}
+
+/// The profile an op acts for: the chat's own, or the unassigned one when no chat is named.
+fn acting_profile(ctx: &OpCtx, chat_id: Option<&str>) -> String {
+    chat_id
+        .and_then(|c| ctx.services.get::<ChatProfileLookup>()?.0.profile_of(c))
+        .unwrap_or_default()
 }
 
 fn page_open(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
@@ -119,7 +126,14 @@ fn page_open(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let server = ctx.services.need::<PageServer>()?;
     let db = ctx.services.need::<Database>()?;
     let path = absolute(ctx, &a.path, a.chat_id.as_deref())?;
-    let opened = server.open(&path, a.network).map_err(page_error)?;
+    // The network follows the pin, not the sender: a page pinned for the acting profile runs
+    // online; anything else stays sealed offline. The UI has no say.
+    let checked = server.check(&path).map_err(page_error)?;
+    let profile = acting_profile(ctx, a.chat_id.as_deref());
+    let network = db
+        .snapshot(|tx| store::is_pinned_for(tx, &profile, &checked.key))
+        .map_err(internal)?;
+    let opened = server.open(&path, network).map_err(page_error)?;
     let (state, revision, pins) = db
         .snapshot(|tx| {
             let (s, r) = store::state_get(tx, &opened.key)?;
@@ -231,12 +245,10 @@ fn page_pin(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     }
     let path = absolute(ctx, &a.path, a.chat_id.as_deref())?;
     let checked = server.check(&path).map_err(page_error)?;
-    let profile = a.profile_id.clone().unwrap_or_else(|| {
-        a.chat_id
-            .as_deref()
-            .and_then(|c| ctx.services.get::<ChatProfileLookup>()?.0.profile_of(c))
-            .unwrap_or_default()
-    });
+    let profile = a
+        .profile_id
+        .clone()
+        .unwrap_or_else(|| acting_profile(ctx, a.chat_id.as_deref()));
     let id = uuid::Uuid::new_v4().simple().to_string();
     let shown = checked.path.to_string_lossy().into_owned();
     let (page, created) = db
@@ -329,6 +341,124 @@ fn page_list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     Ok(json!({ "pages": pages }))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct IconArgs {
+    path: String,
+}
+
+/// The largest favicon the list will show.
+const MAX_ICON_BYTES: usize = 64 * 1024;
+/// Plain favicon names a page bundle may carry beside its document, in the order they are tried
+/// when the document names none.
+const FALLBACK_ICONS: [&str; 3] = ["favicon.ico", "favicon.png", "favicon.svg"];
+
+fn page_icon(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: IconArgs = parse(args)?;
+    let server = ctx.services.need::<PageServer>()?;
+    let path = absolute(ctx, &a.path, None)?;
+    Ok(json!({ "icon": favicon_of(&server, &path)? }))
+}
+
+/// The page's own favicon as a data URL: the file its `<link rel=icon>` names beside it, else a
+/// plain `favicon.*` there. Each candidate goes through the same asset gate a page request would,
+/// so nothing outside the page's own folder is read. `None` when there is no local icon, the icon
+/// is not an image type, or it is larger than [`MAX_ICON_BYTES`].
+fn favicon_of(server: &PageServer, path: &str) -> Result<Option<String>, ApiError> {
+    let doc = server.bundle_read(path, None).map_err(page_error)?;
+    let html = String::from_utf8_lossy(&doc);
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(rel) = link_icon_href(&html) {
+        candidates.push(rel);
+    }
+    candidates.extend(FALLBACK_ICONS.map(str::to_owned));
+    for rel in candidates {
+        let bytes = match server.bundle_read(path, Some(&rel)) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        if bytes.is_empty() || bytes.len() > MAX_ICON_BYTES {
+            continue;
+        }
+        let ext = rel
+            .rsplit(['/', '\\'])
+            .next()
+            .and_then(|n| n.rsplit_once('.'))
+            .map(|(_, e)| e.to_ascii_lowercase())
+            .unwrap_or_default();
+        let Some(mime) = crate::server::asset_mime(&ext) else {
+            continue;
+        };
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes);
+        return Ok(Some(format!("data:{mime};base64,{b64}")));
+    }
+    Ok(None)
+}
+
+/// The `href` of the page's own `<link rel="icon">` (or `rel="shortcut icon"`) when it names a
+/// file beside the page: a bare or quoted relative path, no scheme, no host, no absolute path.
+/// Absolute web addresses, `data:` hrefs and missing links give `None` — the fallback names are
+/// still tried.
+fn link_icon_href(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let mut pos = 0;
+    while let Some(off) = lower[pos..].find("<link") {
+        let start = pos + off;
+        let Some(end_off) = lower[start..].find('>') else {
+            break;
+        };
+        pos = start + end_off + 1;
+        let tag = &html[start..=start + end_off];
+        let rel = attr_value(tag, "rel").map(|v| v.to_ascii_lowercase());
+        if !matches!(rel.as_deref(), Some("icon") | Some("shortcut icon")) {
+            continue;
+        }
+        let href = attr_value(tag, "href")?;
+        let href = href.trim();
+        if !href.is_empty()
+            && !href.contains(':')
+            && !href.starts_with('/')
+            && !href.starts_with('\\')
+        {
+            return Some(href.to_owned());
+        }
+    }
+    None
+}
+
+/// The value of an attribute in a tag: quoted or bare, matched case-insensitively on the name
+/// but keeping the value's own spelling (asset names can be case-sensitive).
+fn attr_value(tag: &str, name: &str) -> Option<String> {
+    let tag_l = tag.to_ascii_lowercase();
+    let name_l = name.to_ascii_lowercase();
+    let mut pos = 0;
+    while let Some(off) = tag_l[pos..].find(&name_l) {
+        let at = pos + off;
+        pos = at + name_l.len();
+        // An attribute starts after whitespace and is followed by `=`.
+        if !tag[..at].ends_with(char::is_whitespace) {
+            continue;
+        }
+        let rest = &tag[at + name_l.len()..];
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
+        let value = if let Some(r) = rest.strip_prefix('"') {
+            let end = r.find('"')?;
+            &r[..end]
+        } else if let Some(r) = rest.strip_prefix('\'') {
+            let end = r.find('\'')?;
+            &r[..end]
+        } else {
+            let ws = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            let gt = rest.find('>').unwrap_or(rest.len());
+            &rest[..ws.min(gt)]
+        };
+        return Some(value.to_owned());
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,7 +511,8 @@ mod tests {
             .into_owned();
         let code = |r: Result<Value, ApiError>| r.unwrap_err().code;
 
-        // Open: a session, no saved state yet, nothing pinned.
+        // Open: a session, no saved state yet, nothing pinned — so offline, with no say from the
+        // sender: asking for the network in the open is refused.
         let o = page_open(&ctx, json!({"path": abs})).unwrap();
         let session = o["session"].as_str().unwrap().to_owned();
         assert_eq!(
@@ -393,6 +524,10 @@ mod tests {
             (json!(false), Value::Null, json!(0))
         );
         assert_eq!(o["pins"], json!([]));
+        assert_eq!(
+            code(page_open(&ctx, json!({"path": abs, "network": true}))),
+            "bad_args"
+        );
         assert!(o["url"].as_str().unwrap().contains(&session));
         // Other files, unknown fields and a path with no folder to resolve against are refused.
         assert_eq!(
@@ -447,6 +582,15 @@ mod tests {
             Value::Null
         );
 
+        // A pin for another profile keeps this chat's open offline; the network follows the
+        // acting profile's own pin.
+        let foreign = page_pin(&ctx, json!({"path": abs, "profileId": "profile-b"})).unwrap();
+        assert_eq!(
+            page_open(&ctx, json!({"path": abs, "chatId": "c1"})).unwrap()["network"],
+            false
+        );
+        page_unpin(&ctx, json!({"id": foreign["page"]["id"]})).unwrap();
+
         // Pin from the chat with a path relative to its project; the chat's profile files it.
         let pinned = page_pin(
             &ctx,
@@ -488,10 +632,14 @@ mod tests {
         assert_eq!(titles(json!({})), ["Plan"]);
         assert_eq!(titles(json!({"chatId": "c1"})), ["Plan"]);
         assert!(titles(json!({"profileId": "profile-b"})).is_empty());
-        // Opening a pinned page reports its pin.
+        // Opening a pinned page reports its pin and runs online: the pin for the chat's profile
+        // decides, and an open with no chat (from the Pages list) counts any pin.
+        let pinned_open = page_open(&ctx, json!({"path": abs, "chatId": "c1"})).unwrap();
+        assert_eq!(pinned_open["pins"][0]["id"], json!(id));
+        assert_eq!(pinned_open["network"], true);
         assert_eq!(
-            page_open(&ctx, json!({"path": abs})).unwrap()["pins"][0]["id"],
-            json!(id)
+            page_open(&ctx, json!({"path": abs})).unwrap()["network"],
+            true
         );
         assert_eq!(
             page_link_chat(&ctx, json!({"id": id})).unwrap()["linked"],
@@ -524,11 +672,96 @@ mod tests {
         assert!(!events.kinds().is_empty());
     }
 
+    /// The list's icon: the file the page's own `<link rel=icon>` names beside it, else a plain
+    /// `favicon.*` there; web addresses, missing files, unlisted types and anything over 64 KiB
+    /// give nothing.
+    #[test]
+    fn a_page_icon_is_the_bundled_favicon_capped_or_nothing() {
+        let files = tempfile::tempdir().unwrap();
+        let dir = files.path();
+        std::fs::create_dir(dir.join("assets")).unwrap();
+        std::fs::write(dir.join("assets").join("i.svg"), "<svg/>").unwrap();
+        std::fs::write(dir.join("favicon.ico"), [0u8; 8]).unwrap();
+        std::fs::write(
+            dir.join("p1.html"),
+            "<head><link rel=\"shortcut icon\" href=\"assets/i.svg\"></head><p>x</p>",
+        )
+        .unwrap();
+        std::fs::write(dir.join("p2.html"), "<p>no link</p>").unwrap();
+        std::fs::write(
+            dir.join("p3.html"),
+            "<link rel=icon href=\"gone.png\"><p>3</p>",
+        )
+        .unwrap();
+        let plain = dir.join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        std::fs::write(
+            plain.join("p4.html"),
+            "<link rel=\"icon\" href=\"https://example.com/i.ico\"><p>4</p>",
+        )
+        .unwrap();
+        std::fs::write(plain.join("p6.html"), "<p>big</p>").unwrap();
+        std::fs::write(plain.join("favicon.png"), vec![7u8; MAX_ICON_BYTES + 1]).unwrap();
+        let p = |n: &str| dir.join(n).to_string_lossy().into_owned();
+        let events = Arc::new(RecordingSink::default());
+        let mut services = Services::new();
+        services.insert(Arc::new(PageServer::new(PrivateRoots::default())));
+        let ctx = OpCtx {
+            services: Arc::new(services),
+            events,
+        };
+        let icon = |a: Value| page_icon(&ctx, a).unwrap()["icon"].clone();
+
+        assert_eq!(
+            icon(json!({"path": p("p1.html")})).as_str().unwrap(),
+            format!(
+                "data:image/svg+xml;base64,{}",
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"<svg/>")
+            ),
+            "the page's own link comes first, with its folder"
+        );
+        assert!(
+            icon(json!({"path": p("p2.html")}))
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/x-icon;base64,"),
+            "favicon.ico beside the page"
+        );
+        assert!(
+            icon(json!({"path": p("p3.html")}))
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/x-icon;base64,"),
+            "a missing named icon falls back to the plain name"
+        );
+        assert!(
+            icon(json!({"path": p("plain/p4.html")})).is_null(),
+            "a web address is not a local file"
+        );
+        assert!(
+            icon(json!({"path": p("plain/p6.html")})).is_null(),
+            "an icon over 64 KiB is nothing"
+        );
+        assert_eq!(
+            page_icon(&ctx, json!({"path": p("none.html")}))
+                .unwrap_err()
+                .code,
+            "not_found"
+        );
+        std::fs::write(dir.join("s.txt"), "not a page").unwrap();
+        assert_eq!(
+            page_icon(&ctx, json!({"path": p("s.txt")}))
+                .unwrap_err()
+                .code,
+            "refused"
+        );
+    }
+
     #[test]
     fn every_op_registers_once() {
         let mut reg = OpRegistry::new();
         register_ops(&mut reg);
-        assert_eq!(reg.names().count(), 10);
+        assert_eq!(reg.names().count(), 11);
         assert!(reg.names().all(|n| n.starts_with("page_")));
     }
 }

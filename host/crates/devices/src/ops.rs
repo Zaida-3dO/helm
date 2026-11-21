@@ -882,14 +882,14 @@ async fn devices_pages(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
 struct PageOpenArgs {
     device_uid: String,
     page_id: String,
-    #[serde(default)]
-    network: bool,
 }
 
 /// `devices_page_open`: a page pinned on another PC, brought across and opened in a session
 /// here. Answers as `page_open` does (the session to load, its saved state, its pin there), so
 /// the page frame runs it the same way. The page's saved state is kept on this PC under the
 /// device and the pin; its messages go to the chat the pin names, which is the chat there.
+/// The network follows the pin as always, and the pin — with the decision — lives on the PC
+/// that owns the page: a page that came from a pin there runs online.
 async fn devices_page_open(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: PageOpenArgs =
         serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
@@ -902,8 +902,9 @@ async fn devices_page_open(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
         .await?;
     let key = format!("remote:{}:{}", a.device_uid, a.page_id);
     let shown = b.pin["path"].as_str().unwrap_or_default().to_owned();
+    let network = b.pin.get("id").and_then(Value::as_str).is_some();
     let opened = server
-        .open_bundle(&key, &shown, b.html, b.files, a.network)
+        .open_bundle(&key, &shown, b.html, b.files, network)
         .map_err(|e| ApiError::new("refused", e.message().to_owned()))?;
     let (state, revision) = db
         .snapshot(|tx| helm_pages::store::state_get(tx, &key))

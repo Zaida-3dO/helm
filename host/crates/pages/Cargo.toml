@@ -11,6 +11,7 @@ helm-core.workspace = true
 helm-ipc.workspace = true
 helm-panel = { path = "../panel" }
 helm-platform.workspace = true
+base64 = "0.22"
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true

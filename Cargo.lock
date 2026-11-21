@@ -2187,6 +2187,7 @@ dependencies = [
 name = "helm-pages"
 version = "2.3.4"
 dependencies = [
+ "base64 0.22.1",
  "helm-core",
  "helm-ipc",
  "helm-panel",

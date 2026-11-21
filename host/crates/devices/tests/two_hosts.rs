@@ -1872,7 +1872,16 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         ),
         (Some("Plan"), Some("c1"), Some(0))
     );
+    // The network follows the pin, and the pin lives there: the copy runs online, as it would
+    // on the PC that owns it.
+    assert_eq!(opened["network"], json!(true));
     let doc = pages.respond("GET", &format!("/{session}/index.html"));
+    assert!(
+        doc.headers
+            .iter()
+            .any(|(k, v)| *k == "content-security-policy" && v.contains("wss:")),
+        "the brought-across copy is opened with the network on"
+    );
     assert!(String::from_utf8(doc.body)
         .unwrap()
         .ends_with("<p>plan</p>"));
