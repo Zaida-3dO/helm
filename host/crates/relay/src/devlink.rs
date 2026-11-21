@@ -6,8 +6,8 @@
 //! is never queued for a later line, so a request that cannot go fails at once and says so.
 //!
 //! [`attach`] wires the host side: it builds the production chat port, starts the service that
-//! answers other devices, hands it the app's event tap, and has the device announce itself after
-//! the household switches on every new line.
+//! answers other devices (and carries the ports forwarded between PCs), hands it the app's event
+//! tap, and has the device announce itself after the household switches on every new line.
 
 use crate::client::{Client, DeviceSink, LineHandle, LineState};
 use crate::{telegram, voice};
@@ -180,6 +180,12 @@ impl ChatPort for ChannelPort {
     }
     fn hello(&self) -> BoxFut<'_, PortResult<Hello>> {
         self.port.hello()
+    }
+    fn hello_as(&self, person_id: String) -> BoxFut<'_, PortResult<Hello>> {
+        self.port.hello_as(person_id)
+    }
+    fn reserved_ports(&self) -> Vec<u16> {
+        self.port.reserved_ports()
     }
     fn remote_chat(&self, record: helm_chats::types::ChatRecord) -> RemoteChat {
         self.port.remote_chat(record)
@@ -394,6 +400,13 @@ impl ChatPort for ChannelPort {
     fn project_set(&self, a: helm_devices::wire::ProjectSetArgs) -> BoxFut<'_, PortResult<Value>> {
         self.port.project_set(a)
     }
+    fn project_set_as(
+        &self,
+        person_id: String,
+        a: helm_devices::wire::ProjectSetArgs,
+    ) -> BoxFut<'_, PortResult<Value>> {
+        self.port.project_set_as(person_id, a)
+    }
     fn chat_brief(&self, chat_id: String) -> BoxFut<'_, PortResult<Option<RemoteChat>>> {
         self.port.chat_brief(chat_id)
     }
@@ -448,6 +461,13 @@ pub fn attach(dispatcher: &Arc<helm_ipc::Dispatcher>) {
     let service = Service::new(port, link.clone(), rt.handle().clone());
     let announce = service.clone();
     link.on_up(move || announce.announce());
+    // Ports forwarded either way end with the line; the window hears when its list changes.
+    let down = service.clone();
+    link.on_down(move || down.line_down());
+    let events = dispatcher.ctx().events.clone();
+    service.on_forwards_changed(move || {
+        events.emit(helm_ipc::AppEvent::new("devices_forwards_changed"))
+    });
     // The watching side: this PC's copy of the other devices' chats, and the routing of the
     // chat ops that name one.
     if let (Some(db), Some(slot), Some(routes)) = (

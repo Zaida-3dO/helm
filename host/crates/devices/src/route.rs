@@ -268,6 +268,7 @@ impl Mirror {
                             | "that picture"
                             | "that file"
                             | "that board"
+                            | "that forward"
                     ) =>
             {
                 ApiError::new(
@@ -802,6 +803,42 @@ impl Mirror {
             &[],
         )
         .await
+    }
+
+    /// Ask the PC that runs this chat to forward one of its ports here, acting as the person
+    /// this chat's changes act as. Answers that PC's id and the forward's.
+    pub async fn forward_open(
+        &self,
+        chat_id: &str,
+        port: u16,
+    ) -> Result<(String, String), ApiError> {
+        let device = self.device_of(chat_id)?;
+        self.check_live(&device)?;
+        let act = self.acting(chat_id)?;
+        let r = self
+            .ask_as(
+                &device,
+                "forward_open",
+                json!({ "chatId": chat_id, "port": port }),
+                "that forward",
+                &[act],
+            )
+            .await?;
+        let id = r["forwardId"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| ApiError::internal("The other PC did not name the forward."))?;
+        Ok((device, id.to_owned()))
+    }
+
+    /// Tell `device` a forward it agreed to will not be used after all. Best effort: the
+    /// forward ends there by itself when idle.
+    pub async fn forward_close(&self, device: &str, forward_id: &str) {
+        let _ = self
+            .inner
+            .rpc
+            .call(device, "forward_close", json!({ "forwardId": forward_id }))
+            .await;
     }
 
     /// One read of the task board the PC that runs this chat has set up, sent as that PC's own

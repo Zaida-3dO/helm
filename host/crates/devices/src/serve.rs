@@ -17,15 +17,17 @@
 
 use crate::link::{BoxFut, DeviceLink};
 use crate::subs::{self, Out, Subs, CHATS_SUB, PUSH_ROW_BUDGET};
+use crate::tunnel::{self, LocalLoopback, TunnelOut, Tunnels};
 use crate::wire::{
     code, AnswerArgs, ArchiveArgs, AttachPutArgs, AttachmentGetArgs, AttachmentRef, BlobReadArgs,
     BoardCancelArgs, BoardReadArgs, Caller, ChatIdArgs, CheckpointArgs, ConsentDecideArgs,
-    CreateArgs, DefaultsArgs, DeviceFrame, DeviceInfo, DevicePerson, ForkArgs, Frame, Hello,
-    MoveProfileArgs, MuteArgs, Op, OrganizeArgs, PageArgs, PageIdArgs, PagesReadArgs,
-    PanelStageArgs, PeerDevice, ProjectCreateArgs, ProjectSetArgs, QuickOpenArgs, RemoteChat,
-    RenameArgs, RollOverArgs, SendArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SnoozeArgs,
-    SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError, MAX_CHUNK_BYTES, MAX_PAGE_ROWS,
-    MAX_SEND_ATTACHMENTS, MAX_SEND_BYTES, MAX_UPLOAD_BYTES, SUB_ROWS,
+    CreateArgs, DefaultsArgs, DeviceFrame, DeviceInfo, DevicePerson, ForkArgs, ForwardCloseArgs,
+    ForwardOpenArgs, Frame, Hello, MoveProfileArgs, MuteArgs, Op, OrganizeArgs, PageArgs,
+    PageIdArgs, PagesReadArgs, PanelStageArgs, PeerDevice, ProjectCreateArgs, ProjectSetArgs, Push,
+    QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs, SendArgs, SetModelArgs, SetPermissionArgs,
+    ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError,
+    MAX_CHUNK_BYTES, MAX_PAGE_ROWS, MAX_SEND_ATTACHMENTS, MAX_SEND_BYTES, MAX_UPLOAD_BYTES,
+    SUB_ROWS,
 };
 use base64::Engine as _;
 use helm_chats::types::{
@@ -34,6 +36,7 @@ use helm_chats::types::{
 use helm_ipc::AppEvent;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
@@ -125,6 +128,16 @@ pub trait ChatPort: Send + Sync {
         Vec::new()
     }
     fn hello(&self) -> BoxFut<'_, PortResult<Hello>>;
+    /// The hello as hub person `person_id` sees it: their profile's project pins (and the ones
+    /// pinned before profiles), not every profile's.
+    fn hello_as(&self, person_id: String) -> BoxFut<'_, PortResult<Hello>> {
+        let _ = person_id;
+        self.hello()
+    }
+    /// Helm's own listeners on this PC's loopback, which are never forwarded to another PC.
+    fn reserved_ports(&self) -> Vec<u16> {
+        Vec::new()
+    }
     /// A chat record as other devices see it.
     fn remote_chat(&self, record: ChatRecord) -> RemoteChat;
     /// The chats other devices may list (those changed since the cursor, all of them for 0) and
@@ -254,6 +267,16 @@ pub trait ChatPort: Send + Sync {
     fn project_create(&self, a: ProjectCreateArgs) -> BoxFut<'_, PortResult<Value>>;
     /// Pin a project here, or point a board at one of this install's folder projects.
     fn project_set(&self, a: ProjectSetArgs) -> BoxFut<'_, PortResult<Value>>;
+    /// [`ChatPort::project_set`] for hub person `person_id`: a pin is theirs, kept under their
+    /// profile here.
+    fn project_set_as(
+        &self,
+        person_id: String,
+        a: ProjectSetArgs,
+    ) -> BoxFut<'_, PortResult<Value>> {
+        let _ = person_id;
+        self.project_set(a)
+    }
     /// The chat as other devices see it, for a push after a sidebar change. `Ok(None)` when
     /// the chat is not this install's.
     fn chat_brief(&self, chat_id: String) -> BoxFut<'_, PortResult<Option<RemoteChat>>>;
@@ -322,7 +345,35 @@ struct Inner {
     /// here. Kept in memory only: after a restart nothing is known.
     typed: Mutex<HashMap<String, TypedOn>>,
     events: mpsc::UnboundedSender<AppEvent>,
+    /// The ports forwarded from this PC to others, and from others to this one.
+    tunnels: Arc<Tunnels>,
+    tunnel_line: Arc<TunnelLine>,
     _handle: Handle,
+}
+
+/// The forwards' way out: pushes of [`tunnel::SUB`] on the hub line.
+struct TunnelLine {
+    link: Arc<dyn DeviceLink>,
+    seq: AtomicU64,
+    changed: OnceLock<Box<dyn Fn() + Send + Sync>>,
+}
+
+impl TunnelOut for TunnelLine {
+    fn push(&self, to: &str, event: Value) -> bool {
+        self.link.send(Frame::DevPush(Push {
+            to: Some(to.to_owned()),
+            from: None,
+            sub: tunnel::SUB.to_owned(),
+            seq: self.seq.fetch_add(1, Ordering::Relaxed),
+            event,
+        }))
+    }
+
+    fn changed(&self) {
+        if let Some(f) = self.changed.get() {
+            f();
+        }
+    }
 }
 
 /// Serves this install's chats to other devices.
@@ -335,6 +386,16 @@ impl Service {
     /// Start serving: hear the link, and start the task that turns chat events into pushes.
     pub fn new(port: Arc<dyn ChatPort>, link: Arc<dyn DeviceLink>, handle: Handle) -> Service {
         let (events, rx) = mpsc::unbounded_channel();
+        let tunnel_line = Arc::new(TunnelLine {
+            link: link.clone(),
+            seq: AtomicU64::new(0),
+            changed: OnceLock::new(),
+        });
+        let tunnels = Arc::new(Tunnels::new(
+            tunnel_line.clone(),
+            Arc::new(LocalLoopback),
+            handle.clone(),
+        ));
         let inner = Arc::new(Inner {
             port,
             link: link.clone(),
@@ -344,6 +405,8 @@ impl Service {
             uploads: Mutex::new(HashMap::new()),
             typed: Mutex::new(HashMap::new()),
             events,
+            tunnels,
+            tunnel_line,
             _handle: handle.clone(),
         });
         let weak = Arc::downgrade(&inner);
@@ -355,6 +418,11 @@ impl Service {
                     h.spawn(async move { inner.dev_call(id, from, op, args).await });
                 }
                 Frame::Devices { list } => inner.on_devices(&list),
+                Frame::DevPush(p) if p.sub == tunnel::SUB => {
+                    if let Some(from) = p.from.as_deref() {
+                        inner.tunnels.on_push(from, &p.event);
+                    }
+                }
                 _ => {}
             }
         }));
@@ -396,6 +464,10 @@ impl Service {
                     .is_some_and(|m| m.contains_key("deviceRunFromOthers"));
                 if changed {
                     self.announce();
+                    // Switched off: the ports forwarded from here stop with it.
+                    if !self.inner.port.run_allowed() {
+                        self.inner.tunnels.end_hosted();
+                    }
                 }
             }
             "chat" | "chat_removed" | "thread" | "pending" | "refresh" | "message" | "consent"
@@ -411,6 +483,31 @@ impl Service {
     /// The devices currently watching, for diagnostics and tests.
     pub fn watchers(&self) -> Vec<String> {
         lock(&self.inner.subs).watchers()
+    }
+
+    /// The ports forwarded from this PC to others and from others to this one.
+    pub fn tunnels(&self) -> Arc<Tunnels> {
+        self.inner.tunnels.clone()
+    }
+
+    /// Run `f` whenever the list of ports forwarded to this PC changes.
+    pub fn on_forwards_changed(&self, f: impl Fn() + Send + Sync + 'static) {
+        let _ = self.inner.tunnel_line.changed.set(Box::new(f));
+    }
+
+    /// The line to the hub went down: every forward, either way, ends.
+    pub fn line_down(&self) {
+        self.inner.tunnels.retain_peers(|_| false);
+    }
+
+    /// Whether this PC lets other devices use its chats (and forward its ports).
+    pub fn run_allowed(&self) -> bool {
+        self.inner.port.run_allowed()
+    }
+
+    /// Helm's own listeners here, which are never forwarded.
+    pub fn reserved_ports(&self) -> Vec<u16> {
+        self.inner.port.reserved_ports()
     }
 
     /// The PC the chat's last message was typed on when that was another device; `None` when
@@ -549,6 +646,9 @@ impl Inner {
         // A watcher the hub no longer shows as up has its subscriptions dropped; it asks again
         // when it comes back.
         lock(&self.subs).retain_online(|uid| online.get(uid).copied().unwrap_or(false));
+        // So do its forwards, both ways.
+        self.tunnels
+            .retain_peers(|uid| online.get(uid).copied().unwrap_or(false));
         *lock(&self.online) = online;
     }
 
@@ -730,7 +830,10 @@ impl Inner {
         let uid = from.uid.as_str();
         let done = |v: Value| -> Result<(Value, Option<String>), WireError> { Ok((v, None)) };
         match op {
-            Op::Hello => done(to_value(&self.port.hello().await?)?),
+            Op::Hello => {
+                let person = from.person_id.clone().unwrap_or_default();
+                done(to_value(&self.port.hello_as(person).await?)?)
+            }
             Op::ChatsSub(a) => {
                 {
                     let mut subs = lock(&self.subs);
@@ -983,7 +1086,15 @@ impl Inner {
                 done(self.port.defaults_set(a).await?)
             }
             Op::ProjectCreate(a) => done(self.port.project_create(a).await?),
-            Op::ProjectSet(a) => done(self.port.project_set(a).await?),
+            Op::ProjectSet(a) => {
+                let person = from.person_id.clone().unwrap_or_default();
+                done(self.port.project_set_as(person, a).await?)
+            }
+            Op::ForwardOpen(a) => done(self.forward_open(from, asker, a).await?),
+            Op::ForwardClose(ForwardCloseArgs { forward_id }) => {
+                self.tunnels.host_close(uid, &forward_id);
+                done(json!({}))
+            }
             Op::ShownGallery(a) => done(self.port.shown("shown_gallery_get", to_value(&a)?).await?),
             Op::ShownImage(a) => done(self.port.shown("shown_image_thumb", to_value(&a)?).await?),
             Op::OptionBoard(a) => done(self.port.shown("option_board_state", to_value(&a)?).await?),
@@ -1166,6 +1277,40 @@ impl Inner {
             });
         }
         Ok(files)
+    }
+
+    /// Forward a port of this PC to the asking one. The chat must be here and, for someone
+    /// other than this PC's own person, theirs or shared with them; the port policy and the
+    /// check that something answers are the tunnel's.
+    async fn forward_open(
+        &self,
+        from: &Caller,
+        asker: &Asker,
+        a: ForwardOpenArgs,
+    ) -> Result<Value, WireError> {
+        let chat = self
+            .port
+            .chat_brief(a.chat_id.clone())
+            .await?
+            .ok_or_else(WireError::not_found)?
+            .to_value();
+        if let Asker::Household { person_id, .. } = asker {
+            let shared = chat
+                .get("sharedWith")
+                .and_then(Value::as_array)
+                .is_some_and(|l| l.iter().any(|p| p.as_str() == Some(person_id)));
+            if !subs::owned_by(&chat, person_id) && !shared {
+                return Err(WireError::new(
+                    code::REFUSED,
+                    "Only the person this chat belongs to, or someone it is shared with, can open its ports from another PC.",
+                ));
+            }
+        }
+        let id = self
+            .tunnels
+            .host_open(&from.uid, &a.chat_id, a.port, &self.port.reserved_ports())
+            .await?;
+        Ok(json!({ "forwardId": id }))
     }
 
     async fn send(

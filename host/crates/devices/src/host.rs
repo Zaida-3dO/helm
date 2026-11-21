@@ -114,6 +114,14 @@ fn db_err(e: rusqlite::Error) -> WireError {
     WireError::internal(e.to_string())
 }
 
+/// The DevTools ports named in WebView2's extra browser arguments (`--remote-debugging-port=N`).
+fn devtools_ports(args: &str) -> Vec<u16> {
+    args.split_whitespace()
+        .filter_map(|a| a.strip_prefix("--remote-debugging-port="))
+        .filter_map(|p| p.trim_matches('"').parse().ok())
+        .collect()
+}
+
 /// Whether `path` is `folder` itself or sits inside it. Both sides come from the panel's
 /// lexical gate, and every link along a watcher's path is refused before it is compared, so a
 /// plain prefix check is the containment. On Windows the comparison folds case and separators.
@@ -198,9 +206,13 @@ fn profile_of_person(conn: &Connection, person_id: &str) -> rusqlite::Result<Opt
     .optional()
 }
 
-fn folders(conn: &Connection, sql: &str) -> rusqlite::Result<Vec<ProjectInfo>> {
+fn folders(
+    conn: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> rusqlite::Result<Vec<ProjectInfo>> {
     let mut st = conn.prepare(sql)?;
-    let rows = st.query_map([], |r| {
+    let rows = st.query_map(params, |r| {
         Ok(ProjectInfo {
             id: r.get(0)?,
             name: r.get(1)?,
@@ -265,6 +277,32 @@ pub struct HostPort {
 }
 
 impl HostPort {
+    /// The hello for `person` (the hub person asking), or as every profile sees it.
+    fn hello_for(&self, person: Option<String>) -> BoxFut<'_, PortResult<Hello>> {
+        Box::pin(async move {
+            let (people, projects) = self.people_and_projects(person.as_deref())?;
+            // The catalogue is a bonus: if the op fails the hello still stands, with no
+            // catalogue, and the reader answers "that device's models are not known yet".
+            let catalogue = match self
+                .op("model_catalogue", json!({ "harness": "claude" }))
+                .await
+            {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    log::warn!("devices: no model catalogue in the hello: {e}");
+                    None
+                }
+            };
+            Ok(Hello {
+                device: self.device(),
+                people,
+                projects,
+                profiles: self.profile_list(),
+                catalogue,
+            })
+        })
+    }
+
     pub fn new(dispatcher: Arc<Dispatcher>) -> Arc<HostPort> {
         Arc::new(HostPort {
             dispatcher,
@@ -500,9 +538,18 @@ impl HostPort {
         .unwrap_or_default()
     }
 
-    fn people_and_projects(&self) -> PortResult<(Vec<PersonInfo>, Vec<ProjectInfo>)> {
+    /// The people and projects a hello names. `person` is the hub person asking: a project reads
+    /// as pinned when their profile here pinned it or it was pinned before profiles, so another
+    /// person's pins never show as theirs. With no person, any pin counts.
+    fn people_and_projects(
+        &self,
+        person: Option<&str>,
+    ) -> PortResult<(Vec<PersonInfo>, Vec<ProjectInfo>)> {
         let db = self.db()?;
         db.snapshot(|tx| {
+            // A person with no profile here sees only the pins made before profiles.
+            let pin_profile: Option<String> =
+                person.map(|p| profile_of_person(tx, p).ok().flatten().unwrap_or_default());
             let mut st = tx.prepare(
                 "SELECT hub_person_id, name, colour, about FROM profiles
                  WHERE hub_person_id IS NOT NULL ORDER BY name",
@@ -529,7 +576,9 @@ impl HostPort {
                         COALESCE((SELECT f.id FROM projects f
                                   WHERE f.id = l.primary_folder_project_id AND f.kind = 'folder'
                                     AND f.path IS NOT NULL), ''),
-                        COALESCE(l.pinned, 0)
+                        CASE WHEN COALESCE(l.pinned, 0) = 1
+                              AND (?1 IS NULL OR COALESCE(l.pinned_profile_id, '') IN ('', ?1))
+                             THEN 1 ELSE 0 END
                  FROM projects p LEFT JOIN project_local l ON l.project_id = p.id
                  WHERE p.kind IN ('folder', 'board')
                    AND (p.kind = 'board' OR p.path IS NOT NULL)
@@ -537,6 +586,7 @@ impl HostPort {
                    AND (p.kind = 'folder' OR (COALESCE(l.closed, 0) = 0 AND NOT EXISTS
                         (SELECT 1 FROM board_projects b WHERE b.project_id = p.id AND b.stale = 1)))
                  ORDER BY p.name",
+                [&pin_profile],
             )
             .or_else(|_| {
                 folders(
@@ -546,6 +596,7 @@ impl HostPort {
                      WHERE p.kind IN ('folder', 'board')
                        AND (p.kind = 'board' OR p.path IS NOT NULL)
                      ORDER BY p.name",
+                    [],
                 )
             })?;
             Ok::<_, rusqlite::Error>((people, projects))
@@ -750,27 +801,46 @@ impl ChatPort for HostPort {
     }
 
     fn hello(&self) -> BoxFut<'_, PortResult<Hello>> {
+        self.hello_for(None)
+    }
+
+    fn hello_as(&self, person_id: String) -> BoxFut<'_, PortResult<Hello>> {
+        self.hello_for(Some(person_id).filter(|p| !p.is_empty()))
+    }
+
+    /// The WebView2 DevTools port, when Helm runs with one: it drives Helm's own window.
+    fn reserved_ports(&self) -> Vec<u16> {
+        std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS")
+            .map(|args| devtools_ports(&args))
+            .unwrap_or_default()
+    }
+
+    fn project_set_as(
+        &self,
+        person_id: String,
+        a: ProjectSetArgs,
+    ) -> BoxFut<'_, PortResult<Value>> {
         Box::pin(async move {
-            let (people, projects) = self.people_and_projects()?;
-            // The catalogue is a bonus: if the op fails the hello still stands, with no
-            // catalogue, and the reader answers "that device's models are not known yet".
-            let catalogue = match self
-                .op("model_catalogue", json!({ "harness": "claude" }))
-                .await
-            {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    log::warn!("devices: no model catalogue in the hello: {e}");
-                    None
-                }
-            };
-            Ok(Hello {
-                device: self.device(),
-                people,
-                projects,
-                profiles: self.profile_list(),
-                catalogue,
-            })
+            let pin = a.pinned == Some(true);
+            let project_id = a.project_id.clone();
+            let out = self.project_set(a).await?;
+            // The projects op files a new pin under this PC's active profile; one made from
+            // another PC is the asking person's, so their sidebar there shows it.
+            if pin && !person_id.is_empty() {
+                let db = self.db()?;
+                db.write(|tx| {
+                    if let Some(profile) = profile_of_person(tx, &person_id)? {
+                        tx.execute(
+                            "UPDATE project_local SET pinned_profile_id = ?2
+                             WHERE project_id = ?1 AND pinned = 1",
+                            [&project_id, &profile],
+                        )?;
+                    }
+                    Ok::<_, rusqlite::Error>(())
+                })
+                .map_err(db_err)?;
+            }
+            Ok(out)
         })
     }
 
@@ -1997,8 +2067,22 @@ impl ChatPort for HostPort {
 
 #[cfg(test)]
 mod tests {
-    use super::{household_message, own_pins, typed_on_message};
+    use super::{devtools_ports, household_message, own_pins, typed_on_message};
     use serde_json::{json, Value};
+
+    /// Helm's own DevTools port is never forwarded, however the arguments name it.
+    #[test]
+    fn the_devtools_port_is_read_from_the_browser_arguments() {
+        for (args, ports) in [
+            ("", vec![]),
+            ("--disable-gpu", vec![]),
+            ("--remote-debugging-port=9222", vec![9222]),
+            ("--a --remote-debugging-port=\"9333\" --b", vec![9333]),
+            ("--remote-debugging-port=x", vec![]),
+        ] {
+            assert_eq!(devtools_ports(args), ports, "{args}");
+        }
+    }
 
     /// A person lists their own profiles' pages and the ones pinned before profiles, their own
     /// first; another person's pages are not listed.

@@ -800,6 +800,21 @@ pub struct ProjectSetArgs {
     pub folder_project_id: Option<String>,
 }
 
+/// Forward a port of this PC to the asking one, for a chat of the asking person here.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForwardOpenArgs {
+    pub chat_id: String,
+    pub port: u16,
+}
+
+/// End a forward the asking PC holds from this one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForwardCloseArgs {
+    pub forward_id: String,
+}
+
 /// An op a device carries for another, parsed.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
@@ -904,6 +919,12 @@ pub enum Op {
     /// One chunk of a big picture, a project file or a tool's whole output. Pictures are reads;
     /// a file or an output reads this PC's disk and runs with the switch.
     BlobRead(BlobReadArgs),
+    /// Forward a port of this PC to the asking PC: `{forwardId}`. Runs with the switch, for a
+    /// chat the acting person owns or that is shared with them; its bytes then travel as pushes
+    /// (see [`crate::tunnel`]).
+    ForwardOpen(ForwardOpenArgs),
+    /// End one of the asking PC's forwards. Needs no switch: stopping is always allowed.
+    ForwardClose(ForwardCloseArgs),
 }
 
 fn args<T: for<'de> Deserialize<'de>>(v: Value) -> Result<T, WireError> {
@@ -1013,6 +1034,8 @@ impl Op {
                 }
                 Op::BlobRead(r)
             }
+            "forward_open" => Op::ForwardOpen(args(a)?),
+            "forward_close" => Op::ForwardClose(args(a)?),
             _ => return Err(WireError::elsewhere()),
         })
     }
@@ -1067,6 +1090,7 @@ impl Op {
                 | Op::ArchiveList(_)
                 | Op::PathResolve(_)
                 | Op::OptionBoardAnswer(_)
+                | Op::ForwardOpen(_)
         )
     }
 }
@@ -1311,6 +1335,14 @@ mod tests {
                 json!({"chatId": "c1", "ref": {"path": "/a"}}),
                 None,
             ),
+            (
+                "forward_open",
+                json!({"chatId": "c1", "port": 5173}),
+                Some(true),
+            ),
+            ("forward_open", json!({"chatId": "c1", "port": 70000}), None),
+            ("forward_open", json!({"chatId": "c1"}), None),
+            ("forward_close", json!({"forwardId": "f1"}), Some(false)),
         ];
         for (op, args, run) in rows {
             let got = Op::parse(op, args.clone());

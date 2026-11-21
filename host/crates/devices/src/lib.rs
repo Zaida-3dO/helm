@@ -21,6 +21,7 @@
 //! | [`mirror`] | the watcher side: this PC's copy of other devices' chats (tables, subscriptions, catch-up, events) |
 //! | [`route`] | the chat ops for a copied chat: reads from the copy, changes sent to the device, refusals in words |
 //! | [`sends`] | the `remote_sends` table that makes a repeated send run once |
+//! | [`tunnel`] | port forwarding: a server on one PC's loopback opened from another PC's, carried as pushes over the hub line |
 //! | [`testing`] | a fake port and builders for tests |
 //!
 //! Ops (arguments and results are camelCase JSON; each change emits `device_changed`):
@@ -39,6 +40,15 @@
 //! | `devices_discard` | blocking | `{chatId, attachmentId}` → `{}`: take back a staged attachment |
 //! | `devices_typed_on` | blocking | `{chatId}` → `{deviceUid, name, at} \| null`: the PC the last message of a chat that runs here was typed on, when that was another device (`at` in Unix ms); `null` when it was typed here, or nothing is known since Helm started |
 //! | `devices_file_save` | async | `{chatId, path}` → `{path: string \| null}`: a copy of a file of a chat that runs on another device (inside its project folder there), brought across in chunks and saved on this PC where the person chooses; `null` when the dialog is cancelled |
+//! | `devices_forward_offer` | async | `{chatId, port, title?}` → `{port, title, typedOn: {deviceUid, name} \| null, samePc}`: an agent of a chat here offers a port of this PC; refused in words when the port may not be forwarded, nothing answers on it, or (for a person on another PC) the switch is off |
+//! | `devices_forward_open` | async | `{chatId, port, title?}` → `Forward`: the port of the PC that runs a copied chat, opened on this PC's `127.0.0.1` (the same port when free); event `devices_forwards_changed` |
+//! | `devices_forwards` | blocking | `{}` → `{forwards: [Forward]}`, oldest first |
+//! | `devices_forward_close` | blocking | `{forwardId}` → `{}`: stop one; the other PC is told |
+//!
+//! `Forward` is `{forwardId, chatId, deviceUid, deviceName, port, localPort, url, title, streams,
+//! openedAt, lastUsedAt}` (times in Unix ms). A forward ends when stopped, after 30 minutes with
+//! no connection, when either PC's line drops or it quits, and on the other PC when its switch
+//! goes off.
 //!
 //! `model_catalogue` also takes `deviceUid` (the models that device last reported). Every other
 //! chat op that names a copied chat is answered by [`route`] (see `helm_chats::remote`).
@@ -64,7 +74,11 @@
 //! (and those pinned before profiles) and read a pinned page's document and the files beside it
 //! that the document names (`pages_list`, `pages_files`, `pages_read`, all run with the switch),
 //! never any other path. A page is opened by its pin's id whoever pinned it, so a link to it from
-//! a shared chat still opens.
+//! a shared chat still opens. The `hello` names this PC's projects with the asking person's pins
+//! only (their profile's, and those pinned before profiles), and a pin made from afar is theirs.
+//! Ports: `forward_open` (with the switch, for a chat the acting person owns or that is shared
+//! with them) forwards one of this PC's loopback ports to the asking PC, and `forward_close` ends
+//! one; the bytes travel as pushes (see [`tunnel`]).
 
 pub mod host;
 pub mod identity;

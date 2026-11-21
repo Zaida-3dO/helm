@@ -41,7 +41,15 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .async_op("devices_board_read", devices_board_read)
         .async_op("devices_board_cancel", devices_board_cancel)
         .blocking("devices_typed_on", OpClass::Blocking, devices_typed_on)
-        .async_op("devices_file_save", devices_file_save);
+        .async_op("devices_file_save", devices_file_save)
+        .async_op("devices_forward_offer", devices_forward_offer)
+        .async_op("devices_forward_open", devices_forward_open)
+        .blocking("devices_forwards", OpClass::Blocking, devices_forwards)
+        .blocking(
+            "devices_forward_close",
+            OpClass::Blocking,
+            devices_forward_close,
+        );
 }
 
 fn fail(e: DeviceError) -> ApiError {
@@ -1004,4 +1012,155 @@ async fn devices_file_save(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
         blob.name
     };
     helm_chats::remote::save_here(saver, name, blob.bytes).await
+}
+
+// ---------------------------------------------------------------------------------------------
+// Ports forwarded between PCs
+// ---------------------------------------------------------------------------------------------
+
+fn service_of(ctx: &OpCtx) -> Option<crate::Service> {
+    ctx.services
+        .get::<crate::EventTap>()
+        .and_then(|t| t.service())
+}
+
+fn wire(e: crate::wire::WireError) -> ApiError {
+    ApiError::new(&e.code, e.message)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ForwardArgs {
+    chat_id: String,
+    port: u16,
+    #[serde(default)]
+    title: Option<String>,
+}
+
+/// The longest title a forward keeps.
+const MAX_FORWARD_TITLE: usize = 80;
+
+/// A forward's title as lists show it: one line, at most [`MAX_FORWARD_TITLE`] characters.
+fn forward_title(t: Option<String>) -> String {
+    t.unwrap_or_default()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_FORWARD_TITLE)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+/// A forward as the window lists it: the engine's fields and the name of the PC the port is on.
+fn forward_json(mirror: Option<&Mirror>, f: crate::tunnel::ViewInfo) -> Value {
+    let name = mirror
+        .map(|m| m.device_name(&f.device_uid))
+        .unwrap_or_else(|| f.device_uid.clone());
+    let mut v = serde_json::to_value(f).unwrap_or_else(|_| json!({}));
+    v["deviceName"] = json!(name);
+    v
+}
+
+/// `devices_forward_offer`: an agent of a chat that runs here offers a port of this PC to the
+/// person: `{port, title, typedOn: {deviceUid, name} | null, samePc}`. When their last message
+/// came from another PC, that PC opens the forward when the offer arrives; this checks now what
+/// that open would be refused for (the port policy, nothing listening, the switch off), so the
+/// agent hears it in words. When they type here nothing needs forwarding.
+async fn devices_forward_offer(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ForwardArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    if mirror_of(&ctx).is_some_and(|m| m.owner(&a.chat_id).is_some()) {
+        return Err(ApiError::new(
+            "refused",
+            "That chat runs on another PC; its ports are offered there.",
+        ));
+    }
+    let service = service_of(&ctx);
+    let reserved = service
+        .as_ref()
+        .map(|s| s.reserved_ports())
+        .unwrap_or_default();
+    crate::tunnel::check_port(a.port, &reserved).map_err(wire)?;
+    let typed = service.as_ref().and_then(|s| s.typed_on(&a.chat_id));
+    if let Some(s) = &service {
+        if typed.is_some() && !s.run_allowed() {
+            return Err(ApiError::new(
+                "not_allowed",
+                "This PC doesn't let other devices use its chats, so its ports can't be opened from another PC. Turn on \"Let other devices use chats on this PC\" first.",
+            ));
+        }
+        s.tunnels().check(a.port, &reserved).await.map_err(wire)?;
+    }
+    Ok(json!({
+        "port": a.port,
+        "title": forward_title(a.title),
+        "typedOn": typed.as_ref().map(|t| json!({ "deviceUid": t.device_uid, "name": t.name })),
+        "samePc": typed.is_none(),
+    }))
+}
+
+/// `devices_forward_open`: forward a port of the PC that runs a copied chat to this PC's
+/// loopback, as `Forward`. The same port of the same PC already forwarded is answered as it is.
+async fn devices_forward_open(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ForwardArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
+    let tunnels = service_of(&ctx).ok_or_else(no_hub)?.tunnels();
+    let device = mirror.owner(&a.chat_id).ok_or_else(|| {
+        ApiError::new(
+            "not_found",
+            "That chat does not run on another device of this household.",
+        )
+    })?;
+    // The PC there checks again, with its own listeners; this spares a round trip.
+    crate::tunnel::check_port(a.port, &[]).map_err(wire)?;
+    if let Some(f) = tunnels.viewing(&device, a.port) {
+        return Ok(forward_json(Some(&mirror), f));
+    }
+    let (device, forward_id) = mirror.forward_open(&a.chat_id, a.port).await?;
+    let spec = crate::tunnel::ViewSpec {
+        host_uid: device.clone(),
+        forward_id: forward_id.clone(),
+        port: a.port,
+        chat_id: a.chat_id,
+        title: forward_title(a.title),
+    };
+    match tunnels.view_start(spec).await {
+        Ok(f) => Ok(forward_json(Some(&mirror), f)),
+        Err(e) => {
+            mirror.forward_close(&device, &forward_id).await;
+            Err(wire(e))
+        }
+    }
+}
+
+/// `devices_forwards`: every port forwarded to this PC now, oldest first: `{forwards}`.
+fn devices_forwards(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    serde_json::from_value::<NoArgs>(if args.is_null() { json!({}) } else { args })
+        .map_err(|e| ApiError::bad_args(e.to_string()))?;
+    let mirror = mirror_of(ctx);
+    let forwards: Vec<Value> = service_of(ctx)
+        .map(|s| s.tunnels().forwards())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|f| forward_json(mirror.as_ref(), f))
+        .collect();
+    Ok(json!({ "forwards": forwards }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ForwardCloseArgs {
+    forward_id: String,
+}
+
+/// `devices_forward_close`: stop a port forwarded to this PC; the PC it comes from is told.
+/// A forward that has already ended is not an error.
+fn devices_forward_close(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ForwardCloseArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    if let Some(s) = service_of(ctx) {
+        s.tunnels().view_stop(&a.forward_id);
+    }
+    Ok(json!({}))
 }

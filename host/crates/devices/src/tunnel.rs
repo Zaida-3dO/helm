@@ -38,7 +38,7 @@
 //! this PC's loopback ([`LocalLoopback`] in the app).
 
 use crate::link::BoxFut;
-use crate::wire::{code, iso_utc, WireError};
+use crate::wire::{code, WireError};
 use base64::Engine as _;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -186,8 +186,9 @@ pub struct ViewInfo {
     pub url: String,
     pub title: String,
     pub streams: usize,
-    pub opened_at: String,
-    pub last_used_at: String,
+    /// Unix ms.
+    pub opened_at: i64,
+    pub last_used_at: i64,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -284,8 +285,8 @@ impl Fwd {
             url: format!("http://localhost:{}/", self.local_port),
             title: self.title.clone(),
             streams: self.streams.len(),
-            opened_at: iso_utc(self.opened_at),
-            last_used_at: iso_utc(self.last_used_at),
+            opened_at: self.opened_at,
+            last_used_at: self.last_used_at,
         }
     }
 
@@ -588,14 +589,34 @@ impl Tunnels {
     /// Device `uid` went offline or this PC's line dropped: every forward with it ends, with
     /// nothing said (there is no line to say it on).
     pub fn drop_peer(&self, uid: &str) {
+        self.retain_peers(|p| p != uid);
+    }
+
+    /// Keep only the forwards whose other PC `keep` names (the devices the hub shows as up); the
+    /// rest end with nothing said. With `|_| false`, this PC's own line dropped.
+    pub fn retain_peers(&self, keep: impl Fn(&str) -> bool) {
         let ids: Vec<String> = lock(&self.inner.st)
             .fwds
             .iter()
-            .filter(|(_, w)| w.peer == uid)
+            .filter(|(_, w)| !keep(&w.peer))
             .map(|(id, _)| id.clone())
             .collect();
         for id in ids {
             self.inner.end(&id, false);
+        }
+    }
+
+    /// This PC stopped letting other devices use its chats: every forward of a port here ends,
+    /// and the PCs viewing them are told.
+    pub fn end_hosted(&self) {
+        let ids: Vec<String> = lock(&self.inner.st)
+            .fwds
+            .iter()
+            .filter(|(_, w)| w.role == Role::Host)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.inner.end(&id, true);
         }
     }
 
