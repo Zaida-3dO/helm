@@ -771,6 +771,44 @@ impl HostPort {
     }
 }
 
+/// The store's page is 100 rows; a smaller limit keeps the newest ones and points the older
+/// cursor at the first row kept. Boundary marks whose rows were dropped go with them.
+fn limit_page(mut page: Value, limit: usize) -> Value {
+    let cut = match page.get_mut("messages").and_then(Value::as_array_mut) {
+        Some(rows) if rows.len() > limit => {
+            let excess = rows.len() - limit;
+            rows.drain(..excess);
+            rows.first()
+                .and_then(|r| r.get("id"))
+                .and_then(Value::as_i64)
+        }
+        _ => None,
+    };
+    if let Some(first) = cut {
+        page["hasOlder"] = json!(true);
+        page["olderCursor"] = json!(first.to_string());
+        let kept: std::collections::HashSet<i64> = page["messages"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|r| r.get("id").and_then(Value::as_i64))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(Value::Array(marks)) = page.get_mut("sessionMarks") {
+            marks.retain(|m| {
+                ["aboveMessageId", "belowMessageId"].iter().all(|k| {
+                    match m.get(*k).and_then(Value::as_i64) {
+                        Some(id) => kept.contains(&id),
+                        None => true,
+                    }
+                })
+            });
+        }
+    }
+    page
+}
+
 impl ChatPort for HostPort {
     fn device(&self) -> DeviceInfo {
         let none = || DeviceInfo {
@@ -1051,24 +1089,64 @@ impl ChatPort for HostPort {
             if let Some(b) = before {
                 args["before"] = json!(b.to_string());
             }
-            let mut page = self.op("transcript_page", args).await?;
-            // The store's page is 100 rows; a smaller limit keeps the newest ones and points the
-            // older cursor at the first row kept.
-            let cut = match page.get_mut("messages").and_then(Value::as_array_mut) {
-                Some(rows) if rows.len() > limit => {
-                    let excess = rows.len() - limit;
-                    rows.drain(..excess);
-                    rows.first()
-                        .and_then(|r| r.get("id"))
-                        .and_then(Value::as_i64)
-                }
-                _ => None,
-            };
-            if let Some(first) = cut {
-                page["hasOlder"] = json!(true);
-                page["olderCursor"] = json!(first.to_string());
+            let page = self.op("transcript_page", args).await?;
+            Ok(limit_page(page, limit))
+        })
+    }
+
+    fn page_stack(
+        &self,
+        chat_id: String,
+        before: Option<i64>,
+        after: Option<i64>,
+        around: Option<i64>,
+        stack: bool,
+        limit: usize,
+    ) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&chat_id)?;
+            let mut args = json!({ "chatId": chat_id });
+            if stack {
+                args["stack"] = json!(true);
             }
-            Ok(page)
+            if let Some(b) = before {
+                args["before"] = json!(b.to_string());
+            }
+            if let Some(a) = after {
+                args["after"] = json!(a.to_string());
+            }
+            if let Some(t) = around {
+                args["around"] = json!(t);
+            }
+            let page = self.op("transcript_page", args).await?;
+            Ok(limit_page(page, limit))
+        })
+    }
+
+    fn chat_stack(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&chat_id)?;
+            self.op("chat_stack", json!({ "chatId": chat_id })).await
+        })
+    }
+
+    fn stack_find(
+        &self,
+        chat_id: String,
+        query: String,
+        include_activity: Option<bool>,
+        limit: Option<i64>,
+    ) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&chat_id)?;
+            let mut args = json!({ "chatId": chat_id, "query": query });
+            if let Some(v) = include_activity {
+                args["includeActivity"] = json!(v);
+            }
+            if let Some(v) = limit {
+                args["limit"] = json!(v);
+            }
+            self.op("stack_find", args).await
         })
     }
 

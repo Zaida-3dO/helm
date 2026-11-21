@@ -159,6 +159,45 @@ pub trait ChatPort: Send + Sync {
         before: Option<i64>,
         limit: usize,
     ) -> BoxFut<'_, PortResult<Value>>;
+    /// The same page with the roll-over stack switches: forward and centred walks, and the
+    /// whole-stack flag. The default answers a plain latest/before page.
+    fn page_stack(
+        &self,
+        chat_id: String,
+        before: Option<i64>,
+        after: Option<i64>,
+        around: Option<i64>,
+        stack: bool,
+        limit: usize,
+    ) -> BoxFut<'_, PortResult<Value>> {
+        let _ = (after, around, stack);
+        self.page(chat_id, before, limit)
+    }
+    /// The roll-over stack of a chat, as the chats crate answers `chat_stack`. A PC that
+    /// runs chats over the device link answers it; the others refuse.
+    fn chat_stack(&self, _chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async {
+            Err(WireError::new(
+                code::REFUSED,
+                "No chat stacks are served here.",
+            ))
+        })
+    }
+    /// Find across a chat's whole roll-over stack, as the chats crate answers `stack_find`.
+    fn stack_find(
+        &self,
+        _chat_id: String,
+        _query: String,
+        _include_activity: Option<bool>,
+        _limit: Option<i64>,
+    ) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async {
+            Err(WireError::new(
+                code::REFUSED,
+                "No chat stacks are served here.",
+            ))
+        })
+    }
     /// Record a remote send; `false` when this `client_id` was seen before.
     fn claim_send(&self, client_id: &str, chat_id: &str) -> PortResult<bool>;
     /// Forget a claim whose send was refused, so the same id can be tried again.
@@ -901,6 +940,12 @@ impl Inner {
                 done(json!({}))
             }
             Op::Page(a) => done(self.page(a).await?),
+            Op::ChatStack(a) => done(self.port.chat_stack(a.chat_id).await?),
+            Op::StackFind(a) => done(
+                self.port
+                    .stack_find(a.chat_id, a.query, a.include_activity, a.limit)
+                    .await?,
+            ),
             Op::AttachPut(a) => {
                 self.attach_put(uid, a)?;
                 done(json!({}))
@@ -1120,12 +1165,40 @@ impl Inner {
 
     async fn page(&self, a: PageArgs) -> Result<Value, WireError> {
         let limit = a.limit.unwrap_or(MAX_PAGE_ROWS).clamp(1, MAX_PAGE_ROWS);
-        let mut page = self
-            .port
-            .page(a.chat_id, a.before_message_id, limit)
-            .await?;
+        let mut page = if a.stack || a.after_message_id.is_some() || a.around_message_id.is_some() {
+            self.port
+                .page_stack(
+                    a.chat_id,
+                    a.before_message_id,
+                    a.after_message_id,
+                    a.around_message_id,
+                    a.stack,
+                    limit,
+                )
+                .await?
+        } else {
+            self.port
+                .page(a.chat_id, a.before_message_id, limit)
+                .await?
+        };
         if let Some(Value::Array(rows)) = page.get_mut("messages") {
             subs::fit_rows(rows, PUSH_ROW_BUDGET);
+            // Dropping the oldest rows must not leave a boundary mark pointing at a row that
+            // no longer crosses: a mark survives only while every anchor it names is kept.
+            let kept: std::collections::HashSet<i64> = rows
+                .iter()
+                .filter_map(|r| r.get("id").and_then(Value::as_i64))
+                .collect();
+            if let Some(Value::Array(marks)) = page.get_mut("sessionMarks") {
+                marks.retain(|m| {
+                    ["aboveMessageId", "belowMessageId"].iter().all(|k| {
+                        match m.get(*k).and_then(Value::as_i64) {
+                            Some(id) => kept.contains(&id),
+                            None => true,
+                        }
+                    })
+                });
+            }
         }
         Ok(page)
     }

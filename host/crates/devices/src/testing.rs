@@ -447,6 +447,29 @@ impl ChatPort for FakePort {
         ))
     }
 
+    fn chat_stack(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        ready(Ok(json!({
+            "stackId": chat_id,
+            "latestId": chat_id,
+            "sessions": [{ "id": chat_id, "title": "far stack", "archived": false, "createdAt": 1 }],
+        })))
+    }
+
+    fn stack_find(
+        &self,
+        chat_id: String,
+        query: String,
+        _include_activity: Option<bool>,
+        _limit: Option<i64>,
+    ) -> BoxFut<'_, PortResult<Value>> {
+        // The echo names this PC's chat and the words asked, so a test can see the call
+        // crossed the wire and came back from the PC that runs the chat.
+        ready(Ok(json!({
+            "rows": [{ "sessionId": chat_id, "id": 7, "count": query.len() }],
+            "truncated": false,
+        })))
+    }
+
     fn claim_send(&self, client_id: &str, _chat_id: &str) -> PortResult<bool> {
         Ok(self.st().claimed.insert(client_id.to_owned()))
     }

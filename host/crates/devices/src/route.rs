@@ -1322,6 +1322,8 @@ fn not_allowed(name: &str) -> ApiError {
 fn read_op(op: &str) -> Option<&'static str> {
     Some(match op {
         "usage_cost" => "cost",
+        "chat_stack" => "chat_stack",
+        "stack_find" => "stack_find",
         "chat_verbosity_get" => "verbosity_get",
         "panel_context_get" => "context_on",
         "quick_open" => "quick_open",
@@ -1450,6 +1452,33 @@ impl RemoteChats for Mirror {
                 ));
             }
             let device = m.device_of(&a.chat_id)?;
+            // A stack page belongs wholly to the PC that runs the chat: this copy only ever
+            // holds the one opened session, so while that PC is up it answers the stack
+            // itself — it is also the only side that can walk forward or centre a jump.
+            if a.stack == Some(true) && m.inner.device_up(&device) {
+                let mut ask = json!({ "chatId": a.chat_id, "stack": true, "limit": PAGE_ROWS });
+                if let Some(id) = a
+                    .before
+                    .as_deref()
+                    .and_then(|c| c.trim().parse::<i64>().ok())
+                {
+                    ask["beforeMessageId"] = json!(id);
+                }
+                if let Some(id) = a
+                    .after
+                    .as_deref()
+                    .and_then(|c| c.trim().parse::<i64>().ok())
+                {
+                    ask["afterMessageId"] = json!(id);
+                }
+                if let Some(t) = a.around {
+                    ask["aroundMessageId"] = json!(t);
+                }
+                match m.inner.rpc.call(&device, "page", ask).await {
+                    Ok(v) => return Ok(v),
+                    Err(e) => log::info!("devices: a stack page was not read: {e}"),
+                }
+            }
             let local = m
                 .inner
                 .db

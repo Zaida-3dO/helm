@@ -1617,6 +1617,25 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
     let elsewhere = "This chat runs on Desk. Do that there.";
     let table: Vec<(&str, Value, Result<Value, &str>)> = vec![
         ("transcript_page", json!({"chatId": "c1"}), Ok(json!(null))),
+        // A roll-over stack lives whole on the PC that runs the chat: its calls answer
+        // there, and a stack page carries its switches across the link intact.
+        (
+            "chat_stack",
+            json!({"chatId": "c1"}),
+            Ok(
+                json!({"stackId": "c1", "latestId": "c1", "sessions": [{ "id": "c1", "title": "far stack", "archived": false, "createdAt": 1 }]}),
+            ),
+        ),
+        (
+            "stack_find",
+            json!({"chatId": "c1", "query": "keep"}),
+            Ok(json!({"rows": [{ "sessionId": "c1", "id": 7, "count": 4 }], "truncated": false})),
+        ),
+        (
+            "transcript_page",
+            json!({"chatId": "c1", "stack": true, "around": 3}),
+            Ok(json!(null)),
+        ),
         ("chat_warm", json!({"chatId": "c1"}), Ok(json!(null))),
         ("skills_list", json!({"chatId": "c1"}), Ok(json!([]))),
         (

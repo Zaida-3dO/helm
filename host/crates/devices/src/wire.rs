@@ -325,8 +325,30 @@ pub struct PageArgs {
     pub chat_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_message_id: Option<i64>,
+    /// Continue toward newer rows from this one: the way back after a jump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_message_id: Option<i64>,
+    /// Centre the page on this row: a jump into an older session of the stack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub around_message_id: Option<i64>,
+    /// Read the whole roll-over stack as one transcript: walks run on across session
+    /// boundaries and the answer carries where they meet.
+    #[serde(default)]
+    pub stack: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
+}
+
+/// Find across a chat's whole roll-over stack, read on the PC that runs the chat.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StackFindArgs {
+    pub chat_id: String,
+    pub query: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_activity: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -824,6 +846,10 @@ pub enum Op {
     ChatUnsub(ChatIdArgs),
     ChatsUnsub,
     Page(PageArgs),
+    /// The roll-over stack of a chat, read on the PC that runs it. A read.
+    ChatStack(ChatIdArgs),
+    /// Find across a stack's sessions, read there. A read.
+    StackFind(StackFindArgs),
     AttachPut(AttachPutArgs),
     Send(SendArgs),
     Stop(StopArgs),
@@ -959,6 +985,8 @@ impl Op {
                 Op::ChatsUnsub
             }
             "page" => Op::Page(args(a)?),
+            "chat_stack" => Op::ChatStack(args(a)?),
+            "stack_find" => Op::StackFind(args(a)?),
             "attach_put" => Op::AttachPut(args(a)?),
             "send" => Op::Send(args(a)?),
             "stop" => Op::Stop(args(a)?),
