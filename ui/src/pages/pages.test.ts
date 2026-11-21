@@ -268,10 +268,10 @@ test('one Pages list: this PC first, other PCs as plain rows with a detail, dedu
   assert.deepEqual(m2.rows, []);
   assert.deepEqual(m2.problems.map((p) => `${p.name}: ${p.message}`), ['Laptop: Laptop is offline.']);
 
-  // With no person in play (every profile shown) nothing is filtered; a PC whose hello named no
-  // profiles keeps its pins all the same.
-  const m3 = mergePages([], [rem('lap', 'Laptop', [pin('r3', 'qb', 'H:/p/c.html')]), rem('old', 'Desk 2', [pin('o1', 'zz', 'H:/p/e.html')])], l, 'per-1');
-  assert.deepEqual(shape(m3.rows), ['r3@Laptop', 'o1@Desk 2'], 'an older peer that says nothing about profiles keeps its pins');
+  // A PC this list does not know (an older peer whose hello named no profiles) keeps its pins; a
+  // known PC that does name its profiles still filters another person's.
+  const m3 = mergePages([], [rem('old', 'Desk 2', [pin('o1', 'zz', 'H:/p/e.html')]), rem('lap', 'Laptop', [pin('r3', 'qb', 'H:/p/c.html')])], l, 'per-1');
+  assert.deepEqual(shape(m3.rows), ['o1@Desk 2'], 'an older peer that says nothing about profiles keeps its pins');
   const m4 = mergePages([], [rem('lap', 'Laptop', [pin('r3', 'qb', 'H:/p/c.html')])], l, null);
   assert.deepEqual(shape(m4.rows), ['r3@Laptop'], 'every profile: nothing is filtered');
 

@@ -4,7 +4,7 @@ import { ApiError, type Api } from '../api/client.ts';
 import { EventBus } from '../api/events.ts';
 import { chat } from '../dev/fixtures.ts';
 import type { DeviceChats, DeviceInfo, DevicesList, RemoteChatRecord } from './api.ts';
-import { menuLabel, menuOrder, remoteDevice, remoteList, remoteProfileChoices, remoteShareChoices, resolveSelected, scopeNote, shownRemoteGroups, showToggle, stateText } from './model.ts';
+import { menuLabel, menuOrder, remoteDevice, remoteList, remoteProfileChoices, remoteProject, remoteRow, remoteShareChoices, resolveSelected, scopeNote, shownRemoteGroups, showToggle, stateText } from './model.ts';
 import { DevicesStore, FOCUS_READ_MS, RemoteList } from './store.ts';
 import { composerFor, remoteChatState, remoteHostOf, seenText, unconfirmedText, waitingForApproval } from './state.ts';
 
@@ -191,12 +191,13 @@ test('the devices store follows the choice, falls back to this PC when that devi
     return h.api(op, args);
   }) as Api;
   const focus = new DevicesStore({ api: counted, bus: new EventBus() });
+  const t0 = Date.now();
   focus.start();
   await settle();
   assert.equal(reads, 1, 'starting reads once');
-  assert.equal(focus.readOnFocus(1_000_000), true, 'the first focus re-reads');
-  assert.equal(focus.readOnFocus(1_000_000 + FOCUS_READ_MS - 1), false, 'a second focus inside 10 s does not');
-  assert.equal(focus.readOnFocus(1_000_000 + FOCUS_READ_MS), true, 'once 10 s have passed it does');
+  assert.equal(focus.readOnFocus(t0 + FOCUS_READ_MS), true, 'the first focus after the start re-reads');
+  assert.equal(focus.readOnFocus(t0 + 2 * FOCUS_READ_MS - 1), false, 'a second focus inside 10 s of that one does not');
+  assert.equal(focus.readOnFocus(t0 + 2 * FOCUS_READ_MS), true, 'once 10 s have passed it does');
   await settle();
   assert.equal(reads, 3);
   focus.stop();
