@@ -322,6 +322,44 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         port.st().sent,
         [("c1".to_owned(), id.to_owned(), "hi".to_owned())]
     );
+    // The chat is told the PC the words were typed on, as the hub stamped the sender, and the
+    // host remembers it for the chat until the person types on the host itself.
+    assert_eq!(port.st().sent_on[0].name, "Laptop");
+    let typed = host.typed_on("c1").expect("the typing PC is known");
+    assert_eq!(
+        (typed.device_uid.as_str(), typed.name.as_str()),
+        ("dev-b", "Laptop")
+    );
+    assert_eq!(host.typed_on("other"), None);
+    let mut older = fake_row("c1", 40, 40, "typed here before");
+    older.role = helm_chats::types::MessageRole::User;
+    older.timestamp = typed.at - 1;
+    let mut newer = older.clone();
+    newer.id = 41;
+    newer.timestamp = typed.at + 1;
+    // A message from Telegram is not the person at this PC; an older row typed here is not now.
+    let mut phone = newer.clone();
+    phone.details.origin = Some(helm_chats::types::SubmissionOrigin::Telegram);
+    for rows in [vec![older], vec![phone]] {
+        host.observe(
+            &ChatEvent::Message {
+                chat_id: "c1".into(),
+                revision: 22,
+                rows,
+            }
+            .to_app_event(),
+        );
+    }
+    assert!(host.typed_on("c1").is_some());
+    host.observe(
+        &ChatEvent::Message {
+            chat_id: "c1".into(),
+            revision: 23,
+            rows: vec![newer],
+        }
+        .to_app_event(),
+    );
+    assert_eq!(host.typed_on("c1"), None);
     let lost = "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d";
     let e = b
         .rpc
@@ -354,11 +392,31 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
             "project_set",
             json!({"projectId": "proj-1", "pinned": true}),
         ),
+        (
+            "option_board_answer",
+            json!({"chatId": "c1", "boardId": "b1", "labels": ["A"]}),
+        ),
+        (
+            "blob_read",
+            json!({"chatId": "c1", "ref": {"file": "/work/shot.png"}}),
+        ),
+        ("blob_read", json!({"chatId": "c1", "ref": {"output": 7}})),
     ] {
         let e = b.rpc.call("dev-a", op, args).await.unwrap_err();
         assert_eq!(e.code, code::NOT_ALLOWED, "{op}");
     }
     assert!(b.rpc.call("dev-a", "hello", json!({})).await.is_ok());
+    // What an agent showed in the chat is part of the chat: it reads with the switch off.
+    for (op, args) in [
+        ("shown_gallery", json!({"chatId": "c1", "galleryId": "g1"})),
+        ("option_board", json!({"chatId": "c1", "boardId": "b1"})),
+        (
+            "blob_read",
+            json!({"chatId": "c1", "ref": {"gallery": "g1", "index": 0}}),
+        ),
+    ] {
+        assert!(b.rpc.call("dev-a", op, args).await.is_ok(), "{op}");
+    }
     port.set_run(true);
     assert_eq!(
         b.rpc
@@ -397,6 +455,12 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         .await
         .unwrap();
     assert_eq!(port.st().stopped, ["c1".to_owned()]);
+    // Stop without resending: what the agent had not read stays unsent there too.
+    b.rpc
+        .call("dev-a", "stop", json!({"chatId": "c1", "noResend": true}))
+        .await
+        .unwrap();
+    assert_eq!(port.st().stopped_no_resend, ["c1".to_owned()]);
 
     // Answers: every waiting request may be answered from afar — a question, a plan, a tool
     // permission, a trust prompt, a secret input — with the words the request shows; a doctored
@@ -498,6 +562,40 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
             json!({"value": "C", "label": "C"}),
             Some(code::REFUSED),
         ),
+        // A question of several steps goes back a step from afar; a step it does not have is
+        // refused.
+        (
+            Some(Interaction {
+                step: Some(1),
+                steps: Some(3),
+                ..fake_interaction(
+                    "c1",
+                    "steps",
+                    Meth::Select,
+                    Some(Att::Question),
+                    Some(&pick),
+                )
+            }),
+            "steps",
+            json!({"goto": 0, "value": "half typed", "label": "Go back a step"}),
+            None,
+        ),
+        (
+            Some(Interaction {
+                step: Some(1),
+                steps: Some(3),
+                ..fake_interaction(
+                    "c1",
+                    "steps2",
+                    Meth::Select,
+                    Some(Att::Question),
+                    Some(&pick),
+                )
+            }),
+            "steps2",
+            json!({"goto": 3, "label": "Go back a step"}),
+            Some(code::REFUSED),
+        ),
         (
             None,
             "gone",
@@ -531,7 +629,11 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         .iter()
         .map(|a| a.request_id.clone())
         .collect();
-    assert_eq!(answered, ["perm", "plan", "trust", "secret", "pick"]);
+    assert_eq!(
+        answered,
+        ["perm", "plan", "trust", "secret", "pick", "steps"]
+    );
+    assert_eq!(port.st().answered[5].goto, Some(0));
 
     // The run switch gates the waiting requests too: with it off a question cannot be
     // answered from another PC, and putting it back lets the answer through.
@@ -1252,6 +1354,17 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
     let slot = Arc::new(MirrorSlot::default());
     slot.attach(b.mirror.clone());
     services.insert(slot);
+    // The save dialog of this PC: it picks a file in the watcher's folder and says which.
+    let saves = b.db.path().with_file_name("saved");
+    std::fs::create_dir_all(&saves).unwrap();
+    let suggested = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (into, named) = (saves.clone(), suggested.clone());
+    services.insert(Arc::new(helm_chats::output_save::FileSaver(Arc::new(
+        move |name: &str| {
+            named.lock().unwrap().push(name.to_owned());
+            Ok(Some(into.join(name)))
+        },
+    ))));
     let mut ops = OpRegistry::new();
     helm_chats::register_ops(&mut ops);
     helm_devices::register_ops(&mut ops);
@@ -1694,6 +1807,22 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
                 json!({"needsYou": [], "flagged": [{ "chatId": "c1", "kind": "idle", "reason": "quiet but unfinished" }], "unreachable": []}),
             ),
         ),
+        // What an agent showed in the chat reads from the PC that runs it.
+        (
+            "shown_image_thumb",
+            json!({"chatId": "c1", "galleryId": "g1", "index": 1}),
+            Ok(json!({"mime": "image/png", "bytes": "AAAA"})),
+        ),
+        (
+            "shown_gallery_get",
+            json!({"chatId": "c1", "galleryId": "g1"}),
+            Ok(json!(null)),
+        ),
+        (
+            "chat_stop_no_resend",
+            json!({"chatId": "c1"}),
+            Ok(json!(null)),
+        ),
         ("chat_delete", json!({"chatId": "c1"}), Err(elsewhere)),
         ("message_edit_open", json!({"chatId": "c1"}), Err(elsewhere)),
         (
@@ -1780,6 +1909,116 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         .unwrap_err();
     assert_eq!(e.code, "not_allowed");
     port.set_run(true);
+
+    // Pictures too big for one frame cross in chunks and are joined here: a gallery's full
+    // picture and a message's picture, two megabytes each, read from where the last chunk ended.
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let big = helm_devices::testing::fake_picture(helm_devices::testing::FAKE_PICTURE_BYTES);
+    for (op, args) in [
+        (
+            "shown_image_get",
+            json!({"chatId": "c1", "galleryId": "g1", "index": 0}),
+        ),
+        (
+            "attachment_get",
+            json!({"chatId": "c1", "attachmentId": "img-1"}),
+        ),
+    ] {
+        port.st().blob_reads.clear();
+        let got = api.call_host(op, args).await.unwrap();
+        assert_eq!(got["mime"], "image/png", "{op}");
+        assert_eq!(
+            b64.decode(got["bytes"].as_str().unwrap()).unwrap(),
+            big,
+            "{op}"
+        );
+        let offsets: Vec<u64> = port.st().blob_reads.iter().map(|(_, o)| *o).collect();
+        assert_eq!(offsets, [0, 655_360, 1_310_720, 1_966_080], "{op}");
+    }
+    // A picture a reply names by its path on that PC shows here, from inside the chat's
+    // project folder only.
+    let shot = api
+        .call_host(
+            "local_image_get",
+            json!({"chatId": "c1", "path": "/work/shot.png"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        b64.decode(shot["bytes"].as_str().unwrap()).unwrap(),
+        helm_devices::testing::fake_picture(64)
+    );
+    let e = api
+        .call_host(
+            "local_image_get",
+            json!({"chatId": "c1", "path": "/elsewhere/shot.png"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e.message, "That path is outside the chat's project folder.");
+    // An option board is read and answered from here; the first answer stands.
+    let board = api
+        .call_host(
+            "option_board_state",
+            json!({"chatId": "c1", "boardId": "b1"}),
+        )
+        .await
+        .unwrap();
+    assert!(board["answer"].is_null());
+    let answered = api
+        .call_host(
+            "option_board_answer",
+            json!({"chatId": "c1", "boardId": "b1", "labels": ["A"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answered["answer"]["labels"], json!(["A"]));
+    let again = api
+        .call_host(
+            "option_board_answer",
+            json!({"chatId": "c1", "boardId": "b1", "labels": ["B"]}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(again.code, "conflict");
+    // A tool's whole output and a project file are saved on this PC, where the person chose.
+    let saved = api
+        .call_host(
+            "message_output_save",
+            json!({"chatId": "c1", "messageId": 7}),
+        )
+        .await
+        .unwrap();
+    let path = std::path::PathBuf::from(saved["path"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        helm_devices::testing::FAKE_OUTPUT
+    );
+    let copy = api
+        .call_host(
+            "devices_file_save",
+            json!({"chatId": "c1", "path": "/work/shot.png"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(copy["path"].as_str().unwrap()).unwrap(),
+        helm_devices::testing::fake_picture(64)
+    );
+    assert_eq!(
+        *suggested.lock().unwrap(),
+        ["bash-output.txt".to_owned(), "shot.png".to_owned()]
+    );
+    let e = api
+        .call_host(
+            "devices_file_save",
+            json!({"chatId": "c1", "path": "/elsewhere/keys.txt"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e.message, "That path is outside the chat's project folder.");
+    assert_eq!(port.st().stopped_no_resend, ["c1".to_owned()]);
 
     // A chat that is not a copy is left to its own handler.
     let own = api
@@ -2329,6 +2568,58 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
     assert_eq!(seen("panel-1", None).await.unwrap()["mime"], "image/png");
     assert_eq!(seen("c-other", None).await.unwrap_err().code, "not_found");
 
+    // Anything bigger than a frame is read in chunks from where the last one ended: a picture
+    // of two megabytes in the chat's project folder arrives whole and in order, and the same
+    // read of the message's picture works too. Outside the folder, or a file that holds keys,
+    // is refused whatever the path says.
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let big = helm_devices::testing::fake_picture(2 * 1024 * 1024);
+    std::fs::write(work.join("big.png"), &big).unwrap();
+    std::fs::write(work.join(".env"), "KEY=1").unwrap();
+    let blob = |r: serde_json::Value, offset: u64| {
+        port.blob_read(
+            serde_json::from_value(json!({ "chatId": "panel-1", "ref": r, "offset": offset }))
+                .unwrap(),
+        )
+    };
+    let file = json!({ "file": work.join("big.png").to_string_lossy() });
+    let mut joined = Vec::new();
+    while joined.len() < big.len() {
+        let got = blob(file.clone(), joined.len() as u64).await.unwrap();
+        assert_eq!(
+            (
+                got["offset"].as_u64(),
+                got["total"].as_u64(),
+                got["mime"].as_str()
+            ),
+            (
+                Some(joined.len() as u64),
+                Some(big.len() as u64),
+                Some("image/png")
+            )
+        );
+        joined.extend(b64.decode(got["data"].as_str().unwrap()).unwrap());
+    }
+    assert_eq!(joined, big);
+    let sent = blob(json!({ "attachment": staged.id }), 0).await.unwrap();
+    assert_eq!(sent["total"].as_u64(), Some(png.len() as u64));
+    for (bad, want) in [
+        (json!({ "file": out.clone() }), "refused"),
+        (json!({ "file": sneaky.clone() }), "refused"),
+        (
+            json!({ "file": work.join(".env").to_string_lossy() }),
+            "refused",
+        ),
+        (
+            json!({ "file": work.join("src").to_string_lossy() }),
+            "bad_args",
+        ),
+        (json!({ "output": 999 }), "not_found"),
+    ] {
+        assert_eq!(blob(bad.clone(), 0).await.unwrap_err().code, want, "{bad}");
+    }
+
     // Pinned pages cross to a PC for the person they are filed under, and only inside the page's
     // own folder: the document and the files it names, a chunk at a time. The PC's own person
     // also sees the pages pinned before profiles; a pin of someone else is not found.
@@ -2376,11 +2667,15 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
         t.sort();
         t
     };
-    // Every pinned page is open to every person, whoever pinned it.
-    for person in ["person-a", "person-b"] {
+    // Each person lists the pages pinned under their own profiles and those pinned before
+    // profiles, never another person's; a pin still opens by its id, so a link to it works.
+    for (person, want) in [
+        ("person-a", ["Before profiles", "Plan"]),
+        ("person-b", ["Before profiles", "Theirs"]),
+    ] {
         assert_eq!(
             titles(port.pages_list(who(person)).await.unwrap()),
-            ["Before profiles", "Plan", "Theirs"],
+            want,
             "{person}"
         );
     }
