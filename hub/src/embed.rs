@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub const PC_TIMEOUT: Duration = Duration::from_millis(600);
-pub const NAS_TIMEOUT: Duration = Duration::from_millis(2500);
+pub const NAS_TIMEOUT: Duration = Duration::from_millis(5000);
 const CACHE: usize = 512;
 pub const DEFAULT_MODEL: &str = "nomic-embed-text";
 const QUERY_PREFIX: &str = "search_query: ";
