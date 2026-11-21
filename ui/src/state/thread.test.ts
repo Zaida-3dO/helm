@@ -62,6 +62,7 @@ test('pages: replace resets, older prepends', () => {
     newerCursor: null,
     runs: [],
     pending: [],
+    sessionMarks: [],
     revision: 1,
   };
   v = applyPage(v, { ...page, messages: [row({ id: 60, role: 'user' })] }, 'replace');
@@ -75,4 +76,92 @@ test('pages: replace resets, older prepends', () => {
     [55, 60],
   );
   assert.equal(v.hasOlder, false);
+});
+
+test('a stack page brings its sessions along and keeps one boundary mark each', () => {
+  let v = emptyView('c2');
+  const page = {
+    chatId: 'c2',
+    hasOlder: true,
+    hasNewer: false,
+    olderCursor: '11',
+    newerCursor: null,
+    runs: [],
+    pending: [],
+    sessionMarks: [{ sessionId: 'c1', title: 'First turn', rolledOverAt: 900, aboveMessageId: 12, belowMessageId: 20 }],
+    revision: 1,
+  };
+  v = applyPage(
+    v,
+    {
+      ...page,
+      messages: [
+        row({ id: 11, role: 'user', chatId: 'c1' }),
+        row({ id: 12, role: 'assistant', chatId: 'c1' }),
+        row({ id: 20, role: 'user', chatId: 'c2' }),
+      ],
+    },
+    'replace',
+  );
+  assert.deepEqual(
+    v.rows.map((r) => r.id),
+    [11, 12, 20],
+  );
+  assert.deepEqual(v.sessions, ['c2', 'c1'], 'the older session joins the accepted set');
+  assert.equal(v.sessionMarks.length, 1);
+  // The page below reports the same boundary with one anchor missing: the fuller copy stays.
+  v = applyPage(
+    v,
+    {
+      ...page,
+      hasOlder: false,
+      olderCursor: null,
+      messages: [row({ id: 5, role: 'user', chatId: 'c1' })],
+      sessionMarks: [{ sessionId: 'c1', title: 'First turn', rolledOverAt: 900, aboveMessageId: 12, belowMessageId: undefined }],
+    },
+    'older',
+  );
+  assert.deepEqual(
+    v.rows.map((r) => r.id),
+    [5, 11, 12, 20],
+  );
+  assert.equal(v.sessionMarks.length, 1);
+  assert.equal(v.sessionMarks[0]!.belowMessageId, 20, 'the fuller mark wins');
+  // One more page down crosses another boundary: rows of a session the view has not seen are
+  // accepted the moment that page names its session.
+  v = applyPage(
+    v,
+    {
+      ...page,
+      hasOlder: false,
+      olderCursor: null,
+      messages: [row({ id: 3, role: 'user', chatId: 'c0' }), row({ id: 4, role: 'assistant', chatId: 'c0' })],
+      sessionMarks: [{ sessionId: 'c0', title: 'Origin', rolledOverAt: 400, aboveMessageId: 4, belowMessageId: undefined }],
+    },
+    'older',
+  );
+  assert.deepEqual(
+    v.rows.map((r) => r.id),
+    [3, 4, 5, 11, 12, 20],
+  );
+  assert.ok(v.sessions.includes('c0'));
+  assert.equal(v.sessionMarks.length, 2);
+});
+
+test('a row outside the accepted sessions stays out', () => {
+  let v = emptyView('c2');
+  const page = {
+    chatId: 'c2',
+    hasOlder: false,
+    hasNewer: false,
+    olderCursor: null,
+    newerCursor: null,
+    runs: [],
+    pending: [],
+    sessionMarks: [],
+    revision: 1,
+    messages: [row({ id: 20, role: 'user', chatId: 'c2' })],
+  };
+  v = applyPage(v, page, 'replace');
+  assert.equal(applyRows(v, [row({ id: 9, role: 'assistant', chatId: 'c9' })]), v);
 });

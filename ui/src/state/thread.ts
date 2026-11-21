@@ -6,7 +6,7 @@
 // - A thread holds at most MAX_ROWS rows. Rows past the cap are dropped from the end the
 //   reader is not looking at, and the paging flag on that side is set again so they can be re-read.
 
-import type { ChatRecord, MessageRow, Submission, ThreadState, TranscriptPage } from '../api/types.ts';
+import type { ChatRecord, MessageRow, SessionMark, Submission, ThreadState, TranscriptPage } from '../api/types.ts';
 
 export const MAX_ROWS = 600;
 
@@ -26,6 +26,16 @@ export interface ThreadView {
   lastRunEndedAt: number | null;
   /** Bumped by a `refresh` event so the view knows to re-read its page. */
   refreshes: number;
+  /**
+   * The sessions whose rows may sit in this view: the chat itself, plus, when the page was read
+   * across a roll-over stack, every earlier or later session the pages carried.
+   */
+  sessions: string[];
+  /**
+   * Where the loaded rows meet a session boundary (one entry per older session), merged across
+   * pages; the transcript draws a divider from these.
+   */
+  sessionMarks: SessionMark[];
 }
 
 export function emptyView(chatId: string): ThreadView {
@@ -42,6 +52,8 @@ export function emptyView(chatId: string): ThreadView {
     pendingRevision: 0,
     lastRunEndedAt: null,
     refreshes: 0,
+    sessions: [chatId],
+    sessionMarks: [],
   };
 }
 
@@ -64,7 +76,8 @@ export function applyRows(view: ThreadView, incoming: MessageRow[], keep: Keep =
   const byId = new Map(view.rows.map((r) => [r.id, r]));
   let changed = false;
   for (const row of incoming) {
-    if (row.chatId !== view.chatId) continue;
+    // Only this chat's sessions: for a stack window, its archived earlier and later sessions too.
+    if (!view.sessions.includes(row.chatId)) continue;
     const held = byId.get(row.id);
     if (held && held.revision >= row.revision) continue;
     byId.set(row.id, row);
@@ -86,6 +99,32 @@ export function capRows(view: ThreadView, keep: Keep): ThreadView {
   return { ...view, rows, hasNewer: true, newerCursor: String(rows[rows.length - 1]!.id) };
 }
 
+/** The sessions a page adds to the set whose rows the view accepts (chat ids are few). */
+function mergeSessions(view: ThreadView, page: TranscriptPage): string[] {
+  let out: string[] | null = null;
+  for (const r of page.messages) {
+    if (view.sessions.includes(r.chatId) || out?.includes(r.chatId)) continue;
+    out = [...(out ?? view.sessions), r.chatId];
+  }
+  return out ?? view.sessions;
+}
+
+/**
+ * One boundary mark per older session. Pages can report the same boundary twice (one side in each
+ * page); the copy with fuller anchors wins.
+ */
+function mergeMarks(existing: SessionMark[], page: TranscriptPage): SessionMark[] {
+  const incoming = page.sessionMarks ?? [];
+  if (incoming.length === 0) return existing;
+  const bySession = new Map(existing.map((m) => [m.sessionId, m]));
+  const anchors = (m: SessionMark) => (m.aboveMessageId == null ? 0 : 1) + (m.belowMessageId == null ? 0 : 1);
+  for (const m of incoming) {
+    const held = bySession.get(m.sessionId);
+    if (!held || anchors(m) > anchors(held)) bySession.set(m.sessionId, m);
+  }
+  return [...bySession.values()];
+}
+
 /** Apply a transcript page. `replace` is a fresh read (open, refresh, or an "around" jump). */
 export function applyPage(view: ThreadView, page: TranscriptPage, how: 'replace' | 'older' | 'newer'): ThreadView {
   if (page.chatId !== view.chatId) return view;
@@ -100,16 +139,22 @@ export function applyPage(view: ThreadView, page: TranscriptPage, how: 'replace'
       pending: page.pending,
       pendingRevision: 0,
       lastRunEndedAt: endOfLastRun(page.runs),
+      sessions: mergeSessions({ ...view, sessions: [page.chatId] }, page),
+      sessionMarks: mergeMarks([], page),
     };
     const next = applyRows(base, page.messages, 'newest');
     return next === base ? base : next;
   }
+  // The session set grows before the rows are applied: a page that runs past a boundary carries
+  // rows of a session the view has not seen.
+  const sessions = mergeSessions(view, page);
+  const sessionMarks = mergeMarks(view.sessionMarks, page);
   if (how === 'older') {
-    const next = applyRows(view, page.messages, 'oldest');
-    return { ...next, hasOlder: page.hasOlder, olderCursor: page.olderCursor };
+    const next = applyRows({ ...view, sessions }, page.messages, 'oldest');
+    return { ...next, hasOlder: page.hasOlder, olderCursor: page.olderCursor, sessions, sessionMarks };
   }
-  const next = applyRows(view, page.messages, 'newest');
-  return { ...next, hasNewer: page.hasNewer, newerCursor: page.newerCursor, lastRunEndedAt: endOfLastRun(page.runs) };
+  const next = applyRows({ ...view, sessions }, page.messages, 'newest');
+  return { ...next, hasNewer: page.hasNewer, newerCursor: page.newerCursor, sessions, sessionMarks, lastRunEndedAt: endOfLastRun(page.runs) };
 }
 
 export function applyChat(view: ThreadView, chat: ChatRecord): ThreadView {
