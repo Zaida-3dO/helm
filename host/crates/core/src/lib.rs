@@ -14,7 +14,6 @@
 //! | [`credentials`] | AES-256-GCM envelopes; key in Credential Manager |
 //! | [`recovery`] | startup recovery of interrupted work |
 //! | [`lifecycle`] | quit |
-//! | [`signin_gate`] | one probe at a time while Claude's shared sign-in may need a refresh |
 //! | [`trail`] | run record, heartbeat and unclean-start note, so a silent end can be read later |
 //! | [`usage_windows`] | what the stored plan-usage windows say right now, for the queue's capacity hold |
 //! | [`ops`] | the `api` ops this crate serves |
@@ -33,7 +32,6 @@ pub mod profile;
 pub mod recovery;
 pub mod revisions;
 pub mod secrets;
-pub mod signin_gate;
 pub mod trail;
 pub mod usage_windows;
 

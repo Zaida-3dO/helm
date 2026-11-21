@@ -2,7 +2,7 @@
 // waited, which actions the queue will take for a row, and the chip's count. The build
 // queue's parts live here too, same reason. Pure, so the table test covers it without a host.
 
-import type { BuildQueueEntry, QueueEntry, QueueSignIn, QueueSummary } from '../api/generated/index.ts';
+import type { BuildQueueEntry, QueueEntry, QueueSummary } from '../api/generated/index.ts';
 
 /** Why a start waits, in one short line. Unknown reasons show as themselves. */
 export const REASON_LABEL: Record<string, string> = {
@@ -10,7 +10,6 @@ export const REASON_LABEL: Record<string, string> = {
   claude_capacity: 'Claude allowance used up',
   at_limit: 'Too many chats running',
   manual: 'Parked by you',
-  sign_in: "Waiting while Claude's sign-in is checked",
 };
 
 /** What kind of start it is, in a couple of words for the row's tag. */
@@ -100,18 +99,6 @@ export function untilText(until: number, now: number): string {
   const hh = String(d.getHours()).padStart(2, '0');
   const mm = String(d.getMinutes()).padStart(2, '0');
   return `at ${hh}:${mm}`;
-}
-
-/** One chat stopped by a failed Claude token refresh: still being tried again, or waiting for you. */
-export function signInLine(c: QueueSignIn): string {
-  return c.gaveUp
-    ? "Claude Code could not refresh its sign-in for about half an hour. Sign in again; Helm carries on by itself once it works."
-    : 'Claude could not refresh its sign-in; Helm is trying again.';
-}
-
-/** Whether any chat needs the person to sign in (Helm has used its tries). */
-export function needsSignIn(summary: QueueSummary | null): boolean {
-  return summary != null && summary.signIn.some((c) => c.gaveUp);
 }
 
 // ————— The build queue: features to run one after another. —————

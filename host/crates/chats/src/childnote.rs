@@ -417,11 +417,13 @@ mod tests {
                 "{label}"
             );
             assert_eq!(
-                db.snapshot(|tx| Ok::<_, rusqlite::Error>(printed_call_text(tx, "solo")?
-                    .as_deref()
-                    .and_then(named_tool)))
-                    .unwrap()
-                    .as_deref(),
+                db.snapshot(|tx| Ok::<_, rusqlite::Error>(
+                    printed_call_text(tx, "solo")?
+                        .as_deref()
+                        .and_then(named_tool)
+                ))
+                .unwrap()
+                .as_deref(),
                 want_name,
                 "{label}: name"
             );

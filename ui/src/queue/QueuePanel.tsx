@@ -13,8 +13,7 @@ import { chatOps } from '../api/ops.ts';
 import type { QueueStore } from './store.ts';
 import { BuildQueueStore } from './store.ts';
 import { buildQueueOps } from './api.ts';
-import { actionsFor, aheadOf, buildActionsFor, buildLine, buildStateLabel, CLASS_LABEL, claudeLine, needsSignIn, queueCount, serverLine, signInLine, untilText, waitLine } from './model.ts';
-import { SignInAgain } from '../transcript/SignInAgain.tsx';
+import { actionsFor, aheadOf, buildActionsFor, buildLine, buildStateLabel, CLASS_LABEL, claudeLine, queueCount, serverLine, untilText, waitLine } from './model.ts';
 import { Button, Dialog, moveItem, toast, useDragReorder, type DragRowProps } from '../ui/index.ts';
 import { IconChevronDown, IconChevronUp, IconExternalLink, IconPause, IconPlay, IconX } from '../ui/icons.tsx';
 import './queue.css';
@@ -77,24 +76,10 @@ export function QueuePanel({ store, api, bus, onOpen, onClose }: { store: QueueS
         <>
           {summary === null ? (
             <p className="queue-empty">Checking the queue…</p>
-          ) : summary.entries.length === 0 && summary.signIn.length === 0 ? (
+          ) : summary.entries.length === 0 ? (
             <p className="queue-empty" data-testid="queue-empty">Nothing is waiting.</p>
           ) : (
             summary.entries.map((e, i) => <QueueRow key={e.chatId} entry={e} index={i} summary={summary} claudeUntil={claudeUntil} act={act} onOpen={onOpen} onClose={onClose} reorder={reorder} />)
-          )}
-          {summary != null && summary.signIn.length > 0 && (
-            <div className="queue-signin" data-testid="queue-signin">
-              {summary.signIn.map((c) => (
-                <div key={c.chatId} className="queue-row" data-testid="queue-signin-row" data-chat-id={c.chatId} data-gave-up={c.gaveUp ? 'true' : 'false'}>
-                  <button type="button" className="queue-open" title="Open this chat" onClick={() => { onClose(); onOpen(c.chatId); }}>
-                    <span className="queue-title">{c.title}</span>
-                    <IconExternalLink size={13} />
-                  </button>
-                  <span className="queue-line">{signInLine(c)}</span>
-                </div>
-              ))}
-              {needsSignIn(summary) && <SignInAgain message="Claude Code could not refresh its sign-in for about half an hour. Sign in again; Helm carries on by itself once it works." />}
-            </div>
           )}
           {summary != null && (summary.servers.length > 0 || summary.claudeQueued > 0 || summary.claudeFull) && (
             <div className="queue-servers" data-testid="queue-servers">

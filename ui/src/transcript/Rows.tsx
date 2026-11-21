@@ -2,9 +2,8 @@
 // context rows, and error/retry rows. Every row carries the stable `transcript-row` hook with its
 // status and role.
 
-import { memo, useMemo, useState } from 'react';
+import { memo, useState } from 'react';
 import type { MessageRow } from '../api/types.ts';
-import { chatOps } from '../api/ops.ts';
 import { EditMessage, type EditState } from './EditMessage.tsx';
 import { boardRef, forwardRef, galleryRef, panelRef, type ForwardRef } from './cards.ts';
 import { GalleryCard } from './GalleryCard.tsx';
@@ -20,9 +19,7 @@ import { ReplyActions, UserActions } from './MessageActions.tsx';
 import { rowFootersFor, type SlotContext } from './slots.ts';
 import { Glyph } from './icons.tsx';
 import { SignInAgain } from './SignInAgain.tsx';
-import { isSignInBusyError, isSignInError } from './signin.ts';
-import { useShell } from '../shell/context.ts';
-import { Button, toast } from '../ui/index.ts';
+import { isSignInError } from './signin.ts';
 import { ToolCard, type ToolAction } from './ToolCard.tsx';
 import { GatekeeperReviewLink } from '../gatekeeper/ReviewLink.tsx';
 import { stopCheckLine, stopClass, stopKindLabel } from '../gatekeeper/model.ts';
@@ -128,42 +125,6 @@ const CONTEXT_LABEL: Record<string, string> = {
   signIn: 'Sign-in',
   startup: 'Startup',
 };
-
-/** The offer under a failed turn whose sign-in refresh collided with another Claude Code
- * process: one button that brings the chat's waiting retry to the next look. */
-function SignInBusy({ chatId, error }: { chatId: string; error: string }) {
-  const shell = useShell();
-  const ops = useMemo(() => chatOps(shell.api), [shell.api]);
-  const [state, setState] = useState<'idle' | 'busy' | 'done'>('idle');
-  const go = () => {
-    setState('busy');
-    void ops
-      .retryNow(chatId)
-      .then((r) => setState(r.scheduled ? 'done' : 'idle'))
-      .catch((e: unknown) => {
-        setState('idle');
-        toast.show({ kind: 'error', text: e instanceof Error ? e.message : String(e) });
-      });
-  };
-  return (
-    <div className="signin-offer" data-testid="error-signin-busy">
-      <span className="muted">Claude's sign-in was busy. Helm tries again by itself.</span>
-      {state === 'done' ? (
-        <span className="muted" data-testid="error-signin-busy-said">
-          Helm is trying this chat again.
-        </span>
-      ) : (
-        <Button variant="secondary" busy={state === 'busy'} onClick={go} data-testid="error-signin-retry">
-          Try now
-        </Button>
-      )}
-      <details data-testid="error-signin-busy-details">
-        <summary>Details</summary>
-        {error}
-      </details>
-    </div>
-  );
-}
 
 function Thinking({ text, streaming, onLink }: { text: string; streaming: boolean; onLink: RowContext['onLink'] }) {
   const preview = useThinkingPreview(text);
@@ -302,15 +263,11 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
         hideThinking={hideThinking}
         hideText={row.status === 'error' && !!row.text && row.text === row.details?.errorMessage}
       />
-      {row.status === 'error' && isSignInBusyError(row.details?.errorMessage) ? (
-        <SignInBusy chatId={ctx.chatId} error={row.details?.errorMessage ?? ''} />
-      ) : (
-        row.status === 'error' && (
-          <div className="error-row" data-testid="error-row">
-            <Glyph name="alert" size={14} />
-            <span>{row.details?.errorMessage ?? 'The request failed.'}</span>
-          </div>
-        )
+      {row.status === 'error' && (
+        <div className="error-row" data-testid="error-row">
+          <Glyph name="alert" size={14} />
+          <span>{row.details?.errorMessage ?? 'The request failed.'}</span>
+        </div>
       )}
       {row.status === 'error' && ctx.canSignIn !== false && isSignInError(row.details?.errorMessage) && <SignInAgain />}
       {row.status === 'interrupted' && (

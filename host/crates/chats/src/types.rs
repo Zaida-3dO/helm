@@ -226,20 +226,6 @@ pub struct QueueServer {
     pub queued: i64,
 }
 
-/// A chat whose turn failed because Claude Code could not refresh its sign-in token, as the
-/// queue and health view lists it.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct QueueSignIn {
-    pub chat_id: String,
-    pub title: String,
-    /// When its turn failed, Unix ms.
-    #[ts(type = "number")]
-    pub since: i64,
-    /// Helm has used its tries: only signing in again gets the chat going.
-    pub gave_up: bool,
-}
-
 /// `queue_list`: the queue whole in one read — every held start, front of the lines first,
 /// plus the load each place it waits on carries.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
@@ -256,9 +242,6 @@ pub struct QueueSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub claude_until: Option<i64>,
-    /// Chats stopped by a failed token refresh, newest first: being tried again, or given up on
-    /// and waiting for a sign-in.
-    pub sign_in: Vec<QueueSignIn>,
 }
 
 /// `queue_action`: one move on one held start; answers with the fresh [`QueueSummary`].

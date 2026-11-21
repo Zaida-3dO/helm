@@ -4,8 +4,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { aheadOf, actionsFor, buildActionsFor, buildLine, buildStateLabel, claudeLine, needsSignIn, queueCount, reasonLabel, sameLine, serverLine, signInLine, waitLine } from './model.ts';
-import type { BuildQueueEntry, QueueEntry, QueueSignIn, QueueSummary } from '../api/generated/index.ts';
+import { aheadOf, actionsFor, buildActionsFor, buildLine, buildStateLabel, claudeLine, queueCount, reasonLabel, sameLine, serverLine, waitLine } from './model.ts';
+import type { BuildQueueEntry, QueueEntry, QueueSummary } from '../api/generated/index.ts';
 
 const e = (over: Partial<QueueEntry>): QueueEntry => ({
   chatId: 'c',
@@ -23,7 +23,6 @@ const s = (over: Partial<QueueSummary>): QueueSummary => ({
   servers: [],
   claudeQueued: 0,
   claudeFull: false,
-  signIn: [],
   ...over,
 });
 
@@ -32,7 +31,6 @@ test('reasons read in plain words, unknown ones show as stored', () => {
   assert.equal(reasonLabel('claude_capacity'), 'Claude allowance used up');
   assert.equal(reasonLabel('at_limit'), 'Too many chats running');
   assert.equal(reasonLabel('manual'), 'Parked by you');
-  assert.equal(reasonLabel('sign_in'), "Waiting while Claude's sign-in is checked");
   assert.equal(reasonLabel('something_new'), 'something_new');
 });
 
@@ -44,8 +42,6 @@ test('the wait line names the reason, the reset time, or the place ahead', () =>
     [e({ reason: 'claude_capacity' }), 1, null, 'Claude allowance used up · 1 waiting ahead'],
     [e({ reason: 'manual' }), 3, null, 'Parked by you'],
     [e({ reason: 'at_limit' }), 0, null, 'Too many chats running'],
-    [e({ reason: 'sign_in', serverId: null }), 0, null, "Waiting while Claude's sign-in is checked"],
-    [e({ reason: 'sign_in', serverId: null }), 1, null, "Waiting while Claude's sign-in is checked · 1 waiting ahead"],
   ] as const) {
     assert.equal(waitLine(entry, ahead, until), want);
   }
@@ -89,16 +85,6 @@ test('the summary lines read in plain words', () => {
   assert.equal(claudeLine(s({}), now), 'Nothing is waiting on Claude.');
   assert.equal(queueCount(null), 0);
   assert.equal(queueCount(s({ entries: [e({}), e({ chatId: 'x' })] })), 2);
-});
-
-test('a failed token refresh reads as retrying until Helm gives up, then asks for a sign-in', () => {
-  const c = (gaveUp: boolean): QueueSignIn => ({ chatId: 'c', title: 'T', since: 0, gaveUp });
-  assert.match(signInLine(c(false)), /trying again/);
-  assert.match(signInLine(c(true)), /Sign in again/);
-  assert.equal(needsSignIn(null), false);
-  assert.equal(needsSignIn(s({})), false);
-  assert.equal(needsSignIn(s({ signIn: [c(false)] })), false, 'still being tried: nothing for the person to do');
-  assert.equal(needsSignIn(s({ signIn: [c(false), c(true)] })), true);
 });
 
 const b = (over: Partial<BuildQueueEntry>): BuildQueueEntry => ({

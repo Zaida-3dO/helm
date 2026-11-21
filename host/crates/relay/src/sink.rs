@@ -38,7 +38,7 @@
 //!
 //! A failed request is never the answer: error rows are left out, and a turn that stopped on an
 //! error gets a plain sentence instead ([`Stop`]). When Helm carries that turn on by itself (a
-//! busy sign-in, a lost connection), the exchange stays open with a line saying so, and the
+//! lost connection, a failing service), the exchange stays open with a line saying so, and the
 //! continued turn's answer is the one that goes up.
 
 use crate::client::{BoxFut, LineHandle, TelegramMessage, TelegramSink};
@@ -120,19 +120,17 @@ pub struct Snap {
 /// How a chat's turn stopped, when it stopped on an error.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Stop {
-    /// Helm carries the turn on by itself: Claude's sign-in was busy (`sign_in`), or the
-    /// connection or the service failed. `headline` is the error's first line.
-    Retrying { sign_in: bool, headline: String },
-    /// Helm stopped retrying because the sign-in keeps failing: the person has to sign in.
-    SignInNeeded,
+    /// Helm carries the turn on by itself: the connection or the service failed. `headline` is
+    /// the error's first line.
+    Retrying { headline: String },
     /// Any other error, by its first line.
     Error(String),
 }
 
 impl Stop {
     /// Read from the chat's row: its status and error, whether it runs on a local model, whether
-    /// the user is writing in it, and whether Helm stopped retrying it (on its sign-in, the
-    /// connection or the service) since it was last carried on. `None` unless it stopped on an
+    /// the user is writing in it, and whether Helm stopped retrying it (on the connection
+    /// or the service) since it was last carried on. `None` unless it stopped on an
     /// error.
     pub fn of(
         status: &str,
@@ -141,7 +139,7 @@ impl Stop {
         typing: bool,
         gave_up: bool,
     ) -> Option<Stop> {
-        use helm_chats::outage::{classify, Cause};
+        use helm_chats::outage::classify;
         if status != "interrupted" {
             return None;
         }
@@ -154,14 +152,10 @@ impl Stop {
             .to_owned();
         let cause = if local { None } else { classify(error) };
         Some(match cause {
-            Some(Cause::TokenRefresh) if gave_up => Stop::SignInNeeded,
             // Helm stopped retrying: the error is the exchange's last word.
             Some(_) if gave_up => Stop::Error(headline),
             // A chat the user is writing in is theirs to carry on: Helm does not.
-            Some(c) if !typing => Stop::Retrying {
-                sign_in: c == Cause::TokenRefresh,
-                headline,
-            },
+            Some(_) if !typing => Stop::Retrying { headline },
             _ => Stop::Error(headline),
         })
     }
@@ -169,18 +163,14 @@ impl Stop {
     /// The working line while Helm retries, if it does.
     pub fn status(&self) -> Option<&'static str> {
         match self {
-            Stop::Retrying { sign_in: true, .. } => Some(telegram::SIGN_IN_RETRYING),
             Stop::Retrying { .. } => Some(telegram::OUTAGE_RETRYING),
             _ => None,
         }
     }
 
-    /// The exchange's last word: what to do about a sign-in, or the error's headline.
+    /// The exchange's last word: the error's headline.
     pub fn last_word(&self) -> String {
         match self {
-            Stop::Retrying { sign_in: true, .. } | Stop::SignInNeeded => {
-                telegram::SIGN_IN_NEEDED.to_owned()
-            }
             Stop::Retrying { headline, .. } | Stop::Error(headline) => {
                 telegram::render_stopped(headline)
             }
@@ -953,25 +943,20 @@ pub fn snapshot(
         .snapshot(|tx| {
             // The chat's status, and what the mirror needs to word a stop: its error, whether it
             // runs on a local model, whether the user is writing in it, and whether Helm stopped
-            // retrying it since it was last carried on (a give-up line, on the sign-in or on any
-            // other outage, after the last continuation, in this exchange).
+            // retrying it since it was last carried on (a give-up line, after the last continuation,
+            // in this exchange).
             type ChatRow = (String, Option<String>, Option<String>, Option<String>, bool);
             let chat_row: Option<ChatRow> = tx
                 .query_row(
                     "SELECT c.status, c.error, c.provider, c.draft,
                             EXISTS(SELECT 1 FROM messages g
                                    WHERE g.chat_id = c.id AND g.id > ?2 AND g.role = 'context'
-                                     AND g.text IN (?3, ?4)
+                                     AND g.text = ?3
                                      AND g.id > COALESCE((SELECT MAX(o.id) FROM messages o
                                                           WHERE o.chat_id = c.id
                                                             AND o.source_key LIKE 'c:outage:%'), 0))
                      FROM chats c WHERE c.id = ?1",
-                    rusqlite::params![
-                        chat,
-                        baseline,
-                        helm_chats::outage::SIGN_IN_AGAIN_TEXT,
-                        helm_chats::outage::GAVE_UP_TEXT
-                    ],
+                    rusqlite::params![chat, baseline, helm_chats::outage::GAVE_UP_TEXT],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                 )
                 .optional()?;

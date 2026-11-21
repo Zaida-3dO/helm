@@ -139,7 +139,6 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     claudeQueued: 0,
     claudeFull: false,
     claudeUntil: null,
-    signIn: [],
   });
   const fakeQueueAct = (chatId: string, action: string, beforeChatId?: string) => {
     if (action === 'cancel' || action === 'release') fakeHolds = fakeHolds.filter((h) => h.chatId !== chatId);

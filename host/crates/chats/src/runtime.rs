@@ -247,20 +247,7 @@ pub trait Spawner: Send + Sync {
 
     /// The app is quitting: end any gatekeeper helper still running, so none outlives it.
     fn close_helpers(&self) {}
-
-    /// The sign-in gate the Claude processes this spawner starts share
-    /// ([`helm_core::signin_gate`]); `None` holds nothing (a fake worker has no sign-in to
-    /// refresh).
-    fn sign_in_gate(&self) -> Option<Arc<helm_core::signin_gate::SignInGate>> {
-        None
-    }
 }
-
-/// The longest a helper waits at the sign-in gate before it runs anyway.
-pub const SIGN_IN_HELPER_WAIT: Duration = Duration::from_secs(90);
-
-/// The least time a helper job gets to run after its wait at the sign-in gate.
-const HELPER_MIN_RUN: Duration = Duration::from_secs(3);
 
 /// How long the gatekeeper helper gets for one job. It sits inside the actor's hold deadline
 /// ([`Limits::gate_deadline`], 75 s), so a helper that hangs fails the hold quietly.
@@ -590,16 +577,11 @@ impl Spawner for ProcessSpawner {
         if self.closing.load(Ordering::SeqCst) {
             return Err("Helm is quitting".into());
         }
-        self.run_helper_until("gatekeeper", job, GATEKEEPER_TIMEOUT, Some(&self.closing))
+        self.run_helper_job("gatekeeper", job, GATEKEEPER_TIMEOUT, Some(&self.closing))
     }
 
     fn close_helpers(&self) {
         self.closing.store(true, Ordering::SeqCst);
-    }
-
-    /// Every real Claude process of the app shares one sign-in, so they share one gate.
-    fn sign_in_gate(&self) -> Option<Arc<helm_core::signin_gate::SignInGate>> {
-        Some(helm_core::signin_gate::global().clone())
     }
 }
 
@@ -607,53 +589,10 @@ impl ProcessSpawner {
     /// Run `helpers/<name>/src/main.ts` (beside the worker's source: `<repo>/worker/src` →
     /// `<repo>/helpers`) on one job and answer its JSON line.
     fn run_helper(&self, name: &str, job: &Value, timeout: Duration) -> Result<Value, String> {
-        self.run_helper_until(name, job, timeout, None)
+        self.run_helper_job(name, job, timeout, None)
     }
 
-    /// [`Self::run_helper`], ended early once `cancel` is set. A helper on Claude passes the
-    /// sign-in gate first ([`helm_core::signin_gate`]): it waits while another start checks the
-    /// sign-in (at most [`SIGN_IN_HELPER_WAIT`], or its own timeout when that is shorter), and
-    /// says how its request went. The wait comes out of the job's timeout, so the whole job still
-    /// ends within it (the job always keeps a few seconds to run). Autocomplete never waits: while the gate holds, it suggests
-    /// nothing. A job on a local model server has no sign-in and passes straight through.
-    fn run_helper_until(
-        &self,
-        name: &str,
-        job: &Value,
-        timeout: Duration,
-        cancel: Option<&AtomicBool>,
-    ) -> Result<Value, String> {
-        if job.get("localKey").is_some() {
-            return self.run_helper_job(name, job, timeout, cancel);
-        }
-        let gate = helm_core::signin_gate::global();
-        let began = std::time::Instant::now();
-        let ticket = if name == "autocomplete" {
-            gate.admit_background(helm_core::now_ms())
-                .ok_or("Claude's sign-in is being checked; no suggestion for now.")?
-        } else {
-            let stop = || cancel.is_some_and(|c| c.load(Ordering::SeqCst));
-            gate.admit_blocking(SIGN_IN_HELPER_WAIT.min(timeout), &stop)
-        };
-        let left = timeout
-            .saturating_sub(began.elapsed())
-            .max(HELPER_MIN_RUN.min(timeout));
-        let out = self.run_helper_job(name, job, left, cancel);
-        let refresh = match &out {
-            Ok(v) => v.get("error").and_then(Value::as_str),
-            Err(e) => Some(e.as_str()),
-        }
-        .map(crate::outage::is_token_refresh_error);
-        match refresh {
-            // No error: Claude answered.
-            None => ticket.answered(helm_core::now_ms()),
-            Some(true) => ticket.refresh_failed(helm_core::now_ms()),
-            // Any other failure says nothing about the sign-in: dropping the ticket frees it.
-            Some(false) => drop(ticket),
-        }
-        out
-    }
-
+    /// Run one helper job, ended early once `cancel` is set.
     fn run_helper_job(
         &self,
         name: &str,
@@ -752,9 +691,6 @@ pub(crate) struct Live {
     pub hold_reason: Option<&'static str>,
     /// The queue pushed this chat's held start to the front of its line.
     pub hold_top: bool,
-    /// Unix ms when this chat's start began to wait for the sign-in check, while it does; no
-    /// start waits there past [`helm_core::signin_gate::MAX_WAIT_MS`].
-    pub sign_in_since: Option<i64>,
 }
 
 /// One local model server's load right now: chats with a turn open on it and working, and chats

@@ -207,27 +207,24 @@ fn a_turn_that_never_starts_is_not_left_silent() {
 
 /// A turn that stopped on an error never sends the error up. While Helm retries it by itself the
 /// phone gets one line saying so and the exchange waits for the continued turn's answer; when
-/// Helm gives up on the sign-in, or the wait runs out, the last word says what to do; any other
-/// error goes up as its headline; and a stop from before the exchange began is not its own.
+/// the wait runs out, or Helm gives up, the last word is the error's headline; any other error
+/// goes up as its headline; and a stop from before the exchange began is not its own.
 #[test]
 fn a_stopped_turn_says_so_in_words_and_waits_for_helms_own_retry() {
-    use helm_chats::outage::SIGN_IN_BUSY_HEAD;
     let raw = "Failed to refresh OAuth token: another Claude Code process is refreshing it";
-    let worded = format!("{SIGN_IN_BUSY_HEAD}\n\n{raw}");
-    let busy_sign_in = Stop::Retrying {
-        sign_in: true,
-        headline: SIGN_IN_BUSY_HEAD.into(),
+    let retrying = Stop::Retrying {
+        headline: raw.into(),
     };
     // (status, error, local, typing, gave up) -> the stop.
     type Row<'a> = (&'a str, Option<&'a str>, bool, bool, bool, Option<Stop>);
     let rows: Vec<Row> = vec![
         (
             "interrupted",
-            Some(&worded),
+            Some(raw),
             false,
             false,
             false,
-            Some(busy_sign_in.clone()),
+            Some(retrying.clone()),
         ),
         (
             "interrupted",
@@ -235,7 +232,7 @@ fn a_stopped_turn_says_so_in_words_and_waits_for_helms_own_retry() {
             false,
             false,
             true,
-            Some(Stop::SignInNeeded),
+            Some(Stop::Error(raw.into())),
         ),
         // Helm stopped retrying a connection or service failure: the error is the last word.
         (
@@ -253,7 +250,6 @@ fn a_stopped_turn_says_so_in_words_and_waits_for_helms_own_retry() {
             false,
             false,
             Some(Stop::Retrying {
-                sign_in: false,
                 headline: "fetch failed".into(),
             }),
         ),
@@ -301,11 +297,11 @@ fn a_stopped_turn_says_so_in_words_and_waits_for_helms_own_retry() {
     let mut m = Mirror::new(0, T0);
     step_ok(&mut m, &busy(&[], &[]), T0);
     assert_eq!(
-        step_ok(&mut m, &snap(busy_sign_in.clone(), 9), T0 + 3_000),
-        [Up::Status(telegram::SIGN_IN_RETRYING.into())]
+        step_ok(&mut m, &snap(retrying.clone(), 9), T0 + 3_000),
+        [Up::Status(telegram::OUTAGE_RETRYING.into())]
     );
     for i in 1..6 {
-        assert!(step_ok(&mut m, &snap(busy_sign_in.clone(), 9), T0 + 3_000 + i * 500).is_empty());
+        assert!(step_ok(&mut m, &snap(retrying.clone(), 9), T0 + 3_000 + i * 500).is_empty());
     }
     let answered = Snap {
         busy: true,
@@ -317,18 +313,18 @@ fn a_stopped_turn_says_so_in_words_and_waits_for_helms_own_retry() {
         step_ok(&mut m, &answered, T0 + 60_000),
         [Up::Final("All done.".into())]
     );
-    // Helm gave up on the sign-in, or the wait ran out: the last word says what to do.
+    // Helm gave up, or the wait ran out: the last word is the error's headline.
     for (late, last) in [
-        (snap(Stop::SignInNeeded, 9), 0),
-        (snap(busy_sign_in.clone(), 9), telegram::RETRY_HOLD_MS),
+        (snap(Stop::Error(raw.into()), 9), 0),
+        (snap(retrying.clone(), 9), telegram::RETRY_HOLD_MS),
     ] {
         let mut m = Mirror::new(0, T0);
         step_ok(&mut m, &busy(&[], &[]), T0);
-        step_ok(&mut m, &snap(busy_sign_in.clone(), 9), T0 + 1);
+        step_ok(&mut m, &snap(retrying.clone(), 9), T0 + 1);
         let at = T0 + 1 + last;
         let mut out = step_ok(&mut m, &late, at);
         out.extend(step_ok(&mut m, &late, at + 500));
-        assert_eq!(out, [Up::Final(telegram::SIGN_IN_NEEDED.into())]);
+        assert_eq!(out, [Up::Final(telegram::render_stopped(raw))]);
         assert!(m.done);
     }
     // Any other error: its headline, never the raw detail or a reply it cut short.
@@ -663,17 +659,14 @@ async fn a_snapshot_lists_the_last_three_calls_in_their_own_words() {
         snap.turn_done.map(|t| t.1).as_deref(),
         Some("Here is the plan.")
     );
-    assert!(matches!(
-        snap.stopped,
-        Some(Stop::Retrying { sign_in: true, .. })
-    ));
-    // Helm's give-up line makes it a sign-in to ask for; a continuation sent after it (a sign-in
-    // re-armed the chat) makes it a retry again.
-    let text = helm_chats::outage::SIGN_IN_AGAIN_TEXT;
+    assert!(matches!(snap.stopped, Some(Stop::Retrying { .. })));
+    // Helm's give-up line makes it a plain error; a continuation sent after it (the person asked
+    // for another try) makes it a retry again.
+    let text = helm_chats::outage::GAVE_UP_TEXT;
     e.db.write(|tx| row(tx, "c:gave-up", "context", text, "complete"))
         .unwrap();
     let stopped = |e: &Env| snapshot(&e.ctx.rt, &e.db, &chat, 0, false).stopped;
-    assert_eq!(stopped(&e), Some(Stop::SignInNeeded));
+    assert!(matches!(stopped(&e), Some(Stop::Error(_))));
     e.db.write(|tx| {
         row(
             tx,
@@ -684,10 +677,7 @@ async fn a_snapshot_lists_the_last_three_calls_in_their_own_words() {
         )
     })
     .unwrap();
-    assert!(matches!(
-        stopped(&e),
-        Some(Stop::Retrying { sign_in: true, .. })
-    ));
+    assert!(matches!(stopped(&e), Some(Stop::Retrying { .. })));
 }
 
 #[tokio::test(flavor = "multi_thread")]

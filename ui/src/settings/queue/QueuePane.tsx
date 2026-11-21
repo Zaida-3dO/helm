@@ -8,8 +8,7 @@ import { useShell } from '../../shell/context.ts';
 import type { LocalModelsState } from '../../api/generated/localmodels/index.ts';
 import type { QueueSummary } from '../../api/generated/index.ts';
 import { queueOps } from '../../queue/api.ts';
-import { claudeLine, needsSignIn, serverLine, signInLine } from '../../queue/model.ts';
-import { SignInAgain } from '../../transcript/SignInAgain.tsx';
+import { claudeLine, serverLine } from '../../queue/model.ts';
 import { localModelsOps } from '../localmodels/api.ts';
 import { Button, Picker, TextInput, toast } from '../../ui/index.ts';
 
@@ -137,16 +136,6 @@ export function QueueSettings() {
           Refresh
         </Button>
       </div>
-      {summary != null && summary.signIn.length > 0 && (
-        <div className="queue-setting" data-testid="queue-signin">
-          {summary.signIn.map((c) => (
-            <p key={c.chatId} data-testid="queue-signin-row">
-              {c.title}: {signInLine(c)}
-            </p>
-          ))}
-          {needsSignIn(summary) && <SignInAgain message="Claude Code could not refresh its sign-in. Sign in again, then message the chats above." />}
-        </div>
-      )}
       <p>The queue line itself — who waits, in what order, and what to do about it — is the sidebar's Queue.</p>
     </div>
   );

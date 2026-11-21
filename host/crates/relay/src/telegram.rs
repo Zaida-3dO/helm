@@ -440,18 +440,12 @@ pub fn delivered_text(text: &str, age_minutes: Option<i64>, sent: &[SentNote]) -
     }
 }
 
-/// The working line while Helm tries again a turn that Claude's busy sign-in cut short.
-pub const SIGN_IN_RETRYING: &str =
-    "Claude's sign-in on the PC was busy; Helm is trying again by itself.";
 /// The working line while Helm tries again a turn that a lost connection or a failing service
 /// cut short.
 pub const OUTAGE_RETRYING: &str =
     "Claude could not be reached from the PC; Helm is trying again by itself.";
-/// The last word of an exchange when Helm has stopped retrying because the sign-in keeps
-/// failing.
-pub const SIGN_IN_NEEDED: &str = "Claude needs you to sign in again on the PC: open Helm and click Sign in again. Helm carries on by itself afterwards.";
 /// How long a mirror keeps an exchange open while Helm retries its stopped turn by itself,
-/// before it gives the last word anyway (a little over Helm's longest run of retries).
+/// before it gives the last word anyway (well over Helm's longest run of retries).
 pub const RETRY_HOLD_MS: i64 = 35 * 60_000;
 
 /// The last word of an exchange whose turn stopped on an error: its headline, never the raw

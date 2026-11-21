@@ -82,7 +82,6 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         AutocompleteArgs,
         AutocompleteResult,
         SideChatResolveArgs,
-        QueueSignIn,
         QueueSummary,
         QueueActionArgs,
         ChatStack,

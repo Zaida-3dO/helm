@@ -114,8 +114,6 @@ struct Launch {
     strip: &'static [&'static str],
     /// The whole environment to start from (a worker's), instead of Helm's own; `None` keeps Helm's.
     base_env: Option<Vec<(String, String)>>,
-    /// Told the exit code when the program ends.
-    after_exit: Option<fn(i64)>,
     /// Given the token the program prints (the token sign-in only); the token is then blanked in
     /// the replay.
     catch_token: Option<TokenSink>,
@@ -130,7 +128,6 @@ fn sign_in_launch(claude: PathBuf, base_env: Vec<(String, String)>) -> Launch {
         session_shell: "claude".into(),
         strip: &SIGN_IN_STRIP_ENV,
         base_env: Some(base_env),
-        after_exit: Some(sign_in_ended),
         catch_token: None,
     }
 }
@@ -142,15 +139,6 @@ fn setup_token_launch(claude: PathBuf, base_env: Vec<(String, String)>, save: To
         args: vec!["setup-token".into()],
         catch_token: Some(save),
         ..sign_in_launch(claude, base_env)
-    }
-}
-
-/// A sign-in that ended well (exit code 0) may have changed the sign-in every Claude process
-/// shares: the gate checks it afresh, and the chats that stopped waiting for a sign-in carry on.
-/// Helm reads nothing of what the sign-in wrote.
-fn sign_in_ended(code: i64) {
-    if code == 0 {
-        helm_core::signin_gate::global().signed_in();
     }
 }
 
@@ -272,7 +260,6 @@ impl TerminalManager {
                 session_shell: sh.title,
                 strip: &[],
                 base_env: None,
-                after_exit: None,
                 catch_token: None,
             },
             a.cols,
@@ -439,7 +426,7 @@ impl TerminalManager {
             id.clone(),
             launch.catch_token.clone(),
         );
-        spawn_waiter(session, child, self.events.clone(), id, launch.after_exit);
+        spawn_waiter(session, child, self.events.clone(), id);
         Ok(meta)
     }
 
@@ -609,15 +596,11 @@ fn spawn_waiter(
     mut child: Box<dyn portable_pty::Child + Send + Sync>,
     events: Arc<dyn EventSink>,
     id: String,
-    after_exit: Option<fn(i64)>,
 ) {
     std::thread::spawn(move || {
         let code = child.wait().map(|st| st.exit_code() as i64).unwrap_or(-1);
         s.running.store(false, Ordering::SeqCst);
         s.flow.close();
-        if let Some(f) = after_exit {
-            f(code);
-        }
         events.emit(
             AppEvent::new("terminal_exit")
                 .with("id", id)
@@ -895,14 +878,6 @@ mod tests {
         assert!(!strips("ANTHROPIC_API_KEY", &[]));
         assert!(strips("HELM_LOCAL_MODEL_KEY", &[]));
         assert!(strips("HELM_CLAUDE_TOKEN", &[]));
-        // Only a sign-in that ended well tells the sign-in gate, which then checks afresh.
-        let gate = helm_core::signin_gate::global();
-        let before = gate.sign_ins();
-        let ended = l.after_exit.expect("the sign-in reports its end");
-        ended(1);
-        assert_eq!(gate.sign_ins(), before);
-        ended(0);
-        assert_eq!(gate.sign_ins(), before + 1);
     }
 
     /// The token the sign-in prints is handed over once, whole, however the output was cut into

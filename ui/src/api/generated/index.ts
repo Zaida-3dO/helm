@@ -73,7 +73,6 @@ export type { MutedRow } from './MutedRow.ts';
 export type { QueueActionArgs } from './QueueActionArgs.ts';
 export type { QueueEntry } from './QueueEntry.ts';
 export type { QueueServer } from './QueueServer.ts';
-export type { QueueSignIn } from './QueueSignIn.ts';
 export type { QueueSummary } from './QueueSummary.ts';
 export type { RetryInfo } from './RetryInfo.ts';
 export type { RetryState } from './RetryState.ts';

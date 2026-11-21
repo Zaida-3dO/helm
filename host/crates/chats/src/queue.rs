@@ -1,7 +1,7 @@
 //! Who may open a turn now, and who waits.
 //!
 //! Nothing here refuses a start: when a turn cannot open, its send stays saved and the chat sits
-//! at its start, visibly queued, until the reason lifts. Four questions decide each turn start,
+//! at its start, visibly queued, until the reason lifts. Three questions decide each turn start,
 //! in one pure function ([`decide`]):
 //!
 //! - **A manual hold** — the user (or a queue tool) parked this chat; it waits until released,
@@ -14,14 +14,10 @@
 //! - **The local server's cap** — at most `localChatCap` of our chats work on one local model
 //!   server at a time (a server can set its own cap in its settings), and the rest queue at
 //!   their start, in order: pushed-to-top first, then normal before background, then first-come.
-//! - **Claude's sign-in** — while it may need a refresh, one Claude start goes first and the
-//!   rest wait for its answer ([`helm_core::signin_gate`]), so they do not all meet the refresh at
-//!   once. This one holds interactive starts too, on purpose: they go first in line, so the
-//!   person waiting on the phone is usually the one that goes, and the wait is seconds.
 //!
 //! The class comes from the submission's origin, never from a column on the chat: a Telegram or
 //! voice turn is *interactive* (a person is waiting on the other end — it is never queued behind
-//! the cap or the windows, only briefly behind the sign-in check); `schedule` and app notes are *background* (they move only when nobody
+//! the cap or the windows); `schedule` and app notes are *background* (they move only when nobody
 //! else is waiting); everything else is *normal*.
 //!
 //! A held start is recorded in `chat_dispatch_holds` while it stands, so the queue can be listed,
@@ -45,8 +41,6 @@ pub const CLAUDE_CAPACITY: Reason = "claude_capacity";
 pub const MANUAL: Reason = "manual";
 /// The app is already running as many working chats as it may run at once.
 pub const AT_LIMIT: Reason = "at_limit";
-/// Claude's sign-in is being checked: one start finds out, and this one waits for its answer.
-pub const SIGN_IN: Reason = "sign_in";
 
 /// Where a turn start came from, in queue terms.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,12 +145,10 @@ fn goes_first(w: &Waiter, mine: &Mine) -> bool {
 /// - `claude_full`: the plan windows read at or over the hold threshold.
 /// - `at_limit`: the app already runs its most working chats.
 /// - `manual`: this chat is parked by hand.
-/// - `sign_in`: Claude's sign-in is being checked and this start is not the one to check it.
 ///
-/// An interactive start is held by no rule but the sign-in check, which lasts seconds; with the
-/// windows full, or the chat parked by hand, it is answered in words instead of started (the
-/// person on the phone must not be left waiting on a park they cannot see). Otherwise a manual
-/// hold outranks everything.
+/// An interactive start is held by no rule: with the windows full, or the chat parked by hand,
+/// it is answered in words instead of started (the person on the phone must not be left waiting
+/// on a park they cannot see). Otherwise a manual hold outranks everything.
 #[allow(clippy::too_many_arguments)]
 pub fn decide(
     mine: &Mine,
@@ -166,7 +158,6 @@ pub fn decide(
     claude_full: bool,
     at_limit: bool,
     manual: bool,
-    sign_in: bool,
 ) -> Verdict {
     if manual {
         return if mine.class == QueueClass::Interactive {
@@ -179,8 +170,6 @@ pub fn decide(
     if mine.class == QueueClass::Interactive {
         return if claude_full {
             Verdict::Refuse
-        } else if sign_in {
-            Verdict::Hold(SIGN_IN, older)
         } else {
             Verdict::Go
         };
@@ -190,9 +179,6 @@ pub fn decide(
     }
     if at_limit {
         return Verdict::Hold(AT_LIMIT, older);
-    }
-    if sign_in {
-        return Verdict::Hold(SIGN_IN, older);
     }
     let over = working.saturating_add(1).saturating_sub(cap);
     match older + over {
@@ -481,37 +467,7 @@ pub fn move_hold(
 
 // ------------------------------------------------------------------ the queue as one read
 
-use crate::types::{QueueEntry, QueueServer, QueueSignIn, QueueSummary};
-
-/// Chats whose last turn failed on a token refresh, within `since` (Unix ms), newest first. A
-/// chat counts as given up on only by a flag filed after its last failure: one left from an
-/// earlier spell says nothing about this one.
-fn sign_in_chats(db: &Database, since: i64) -> Vec<QueueSignIn> {
-    db.snapshot(|tx| {
-        let mut st = tx.prepare(
-            "SELECT c.id, c.title, c.updated_at,
-                    EXISTS(SELECT 1 FROM chat_flags f WHERE f.chat_id = c.id AND f.question = ?2
-                          AND f.created_at >= c.updated_at)
-             FROM chats c
-             WHERE c.archived = 0 AND c.status = 'interrupted' AND c.updated_at >= ?1
-               AND instr(lower(COALESCE(c.error, '')), 'failed to refresh oauth token') > 0
-             ORDER BY c.updated_at DESC LIMIT 50",
-        )?;
-        let rows = st.query_map(
-            rusqlite::params![since, crate::outage::SIGN_IN_FLAG_QUESTION],
-            |r| {
-                Ok(QueueSignIn {
-                    chat_id: r.get(0)?,
-                    title: r.get(1)?,
-                    since: r.get(2)?,
-                    gave_up: r.get(3)?,
-                })
-            },
-        )?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-    })
-    .unwrap_or_default()
-}
+use crate::types::{QueueEntry, QueueServer, QueueSummary};
 
 /// The queue whole in one read: every held start, front of the lines first, with each chat's
 /// title; what every local server carries; and what the Claude windows say.
@@ -561,7 +517,6 @@ pub fn summary(db: &Database, rt: &crate::runtime::ChatRuntime) -> QueueSummary 
         claude_queued,
         claude_full,
         claude_until: capacity.and_then(|c| c.until),
-        sign_in: sign_in_chats(db, now - crate::outage::RECENT_MS),
     }
 }
 
@@ -789,39 +744,18 @@ mod tests {
 
     #[test]
     fn the_gate_is_one_table_of_answers() {
-        // (mine, waiters, working, cap, claude_full, at_limit, manual, sign_in, expected)
+        // (mine, waiters, working, cap, claude_full, at_limit, manual, expected)
         let normal = m(QueueClass::Normal, false, 5);
-        type Case = (
-            Mine,
-            Vec<Waiter>,
-            usize,
-            usize,
-            bool,
-            bool,
-            bool,
-            bool,
-            Verdict,
-        );
+        type Case = (Mine, Vec<Waiter>, usize, usize, bool, bool, bool, Verdict);
         let cases: Vec<Case> = vec![
             // A free server opens the turn.
-            (
-                normal,
-                vec![],
-                0,
-                3,
-                false,
-                false,
-                false,
-                false,
-                Verdict::Go,
-            ),
+            (normal, vec![], 0, 3, false, false, false, Verdict::Go),
             // A place over the cap waits, and says how many stand ahead.
             (
                 normal,
                 vec![],
                 3,
                 3,
-                false,
                 false,
                 false,
                 false,
@@ -839,7 +773,6 @@ mod tests {
                 false,
                 false,
                 false,
-                false,
                 Verdict::Behind(1),
             ),
             // Background waits behind a normal waiter even from an older place.
@@ -848,7 +781,6 @@ mod tests {
                 vec![w(QueueClass::Normal, false, 8)],
                 0,
                 3,
-                false,
                 false,
                 false,
                 false,
@@ -864,7 +796,6 @@ mod tests {
                 false,
                 false,
                 false,
-                false,
                 Verdict::Go,
             ),
             (
@@ -872,7 +803,6 @@ mod tests {
                 vec![w(QueueClass::Normal, true, 9)],
                 0,
                 3,
-                false,
                 false,
                 false,
                 false,
@@ -887,7 +817,6 @@ mod tests {
                 false,
                 false,
                 false,
-                false,
                 Verdict::Go,
             ),
             // Claude windows full: normal and background hold; interactive is answered instead.
@@ -897,7 +826,6 @@ mod tests {
                 0,
                 3,
                 true,
-                false,
                 false,
                 false,
                 Verdict::Hold(CLAUDE_CAPACITY, 0),
@@ -910,7 +838,6 @@ mod tests {
                 true,
                 false,
                 false,
-                false,
                 Verdict::Hold(CLAUDE_CAPACITY, 0),
             ),
             (
@@ -919,7 +846,6 @@ mod tests {
                 0,
                 3,
                 true,
-                false,
                 false,
                 false,
                 Verdict::Refuse,
@@ -933,7 +859,6 @@ mod tests {
                 false,
                 true,
                 false,
-                false,
                 Verdict::Hold(AT_LIMIT, 0),
             ),
             (
@@ -943,7 +868,6 @@ mod tests {
                 3,
                 false,
                 true,
-                false,
                 false,
                 Verdict::Go,
             ),
@@ -957,7 +881,6 @@ mod tests {
                 true,
                 false,
                 true,
-                false,
                 Verdict::Refuse,
             ),
             (
@@ -968,7 +891,6 @@ mod tests {
                 false,
                 false,
                 true,
-                false,
                 Verdict::Hold(MANUAL, 0),
             ),
             // Cap off (usize::MAX) only orders by the waiters.
@@ -980,35 +902,7 @@ mod tests {
                 false,
                 false,
                 false,
-                false,
                 Verdict::Go,
-            ),
-            // Claude's sign-in is being checked: a start that is not the one to check it waits,
-            // interactive too (first in its line), behind any manual park, full window or limit.
-            (
-                normal,
-                vec![w(QueueClass::Normal, false, 2)],
-                0,
-                usize::MAX,
-                false,
-                false,
-                false,
-                true,
-                Verdict::Hold(SIGN_IN, 1),
-            ),
-            (
-                m(QueueClass::Interactive, false, 9),
-                vec![
-                    w(QueueClass::Normal, false, 1),
-                    w(QueueClass::Interactive, false, 3),
-                ],
-                0,
-                usize::MAX,
-                false,
-                false,
-                false,
-                true,
-                Verdict::Hold(SIGN_IN, 1),
             ),
             (
                 m(QueueClass::Interactive, false, 1),
@@ -1018,7 +912,6 @@ mod tests {
                 true,
                 false,
                 false,
-                true,
                 Verdict::Refuse,
             ),
             (
@@ -1029,7 +922,6 @@ mod tests {
                 false,
                 true,
                 false,
-                true,
                 Verdict::Hold(AT_LIMIT, 0),
             ),
             (
@@ -1040,12 +932,11 @@ mod tests {
                 false,
                 false,
                 true,
-                true,
                 Verdict::Hold(MANUAL, 0),
             ),
         ];
-        for (mine, waiters, working, cap, cf, at_limit, manual, sign_in, want) in cases {
-            let got = decide(&mine, &waiters, working, cap, cf, at_limit, manual, sign_in);
+        for (mine, waiters, working, cap, cf, at_limit, manual, want) in cases {
+            let got = decide(&mine, &waiters, working, cap, cf, at_limit, manual);
             assert_eq!(
                 got, want,
                 "{mine:?} / waiters {waiters:?} / {working} of {cap}"

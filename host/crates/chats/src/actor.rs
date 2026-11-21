@@ -89,9 +89,6 @@ pub(crate) enum Cmd {
         after: std::time::Duration,
         local_after: std::time::Duration,
     },
-    /// The sign-in gate changed, or a while passed: a start held for the sign-in check asks
-    /// again.
-    SignInRecheck,
     /// Apply the staged edit once the worker has closed, then send its submission.
     ApplyEdit,
     /// The send behaviour changed: a different long-command setting relaunches
@@ -354,17 +351,7 @@ struct Actor {
     warmed: bool,
     /// When the last warm-up was attempted, for the gap between attempts.
     last_warm: Option<Instant>,
-    /// This turn's leave from the sign-in gate ([`helm_core::signin_gate`]), from the moment
-    /// the gate let the turn open until its first answer or its end. Dropping it (however the
-    /// turn ends) frees the gate if this turn was the one checking the sign-in.
-    sign_in: Option<helm_core::signin_gate::Ticket>,
-    /// A wake-up for a start held at the sign-in gate is on its way.
-    sign_in_waking: bool,
 }
-
-/// How often a start held at the sign-in gate asks again even when the gate says nothing: the
-/// gate's own time limits move it without anyone reporting.
-const SIGN_IN_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// A local chat's turn that is waiting for its model: the submission that opens the turn and any
 /// later sends held behind it. `sid` is `None` while a warm-up runs with no send yet: the first
@@ -463,7 +450,6 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         hold_class: None,
         hold_reason: None,
         hold_top: false,
-        sign_in_since: None,
     }));
     let actor = Actor {
         sh: sh.clone(),
@@ -528,8 +514,6 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         state: None,
         warmed: false,
         last_warm: None,
-        sign_in: None,
-        sign_in_waking: false,
     };
     sh.handle.spawn(actor.run(rx));
     ActorHandle { tx, live }
@@ -1482,7 +1466,6 @@ impl Actor {
         }
         self.clear_timer(|t| matches!(t, Timer::Ack(_) | Timer::ModelAck(_)));
         self.fail_run(&error);
-        self.sign_in = None;
         if let Some(s) = self.stopping.take() {
             let status = self.status();
             for r in s.replies {
@@ -1666,9 +1649,6 @@ impl Actor {
                 }
             }
         }
-        // A turn that ended above has reported to the sign-in gate; a leave taken for a turn
-        // that never got going goes with the worker.
-        self.sign_in = None;
         // Before the quit sequence hears the worker is gone, so the app cannot exit first.
         self.end_running_subagents("The worker stopped before this agent finished.");
         for r in self.shutdown_replies.drain(..) {
@@ -1760,7 +1740,6 @@ impl Actor {
 
     /// Close the run, finish any live rows and tools, clear interactions, set the chat status.
     fn end_run(&mut self, status: ChatStatus, error: Option<&str>, run_status: &str) {
-        self.end_sign_in(error);
         crate::timeline::finish(
             &mut self.timeline,
             &self.sh.cfg.profile_dir,
@@ -2361,11 +2340,7 @@ impl Actor {
         // another's, or the idle cap retires the wrong one.
         if !matches!(
             c,
-            Cmd::Retire
-                | Cmd::StallCheck { .. }
-                | Cmd::SendBehavior(_)
-                | Cmd::AfkSweep
-                | Cmd::SignInRecheck
+            Cmd::Retire | Cmd::StallCheck { .. } | Cmd::SendBehavior(_) | Cmd::AfkSweep
         ) {
             self.touch();
         }
@@ -2597,17 +2572,6 @@ impl Actor {
                 }
             }
             Cmd::Warm => self.warm_now(),
-            Cmd::SignInRecheck => {
-                self.sign_in_waking = false;
-                // Only a start still held for the sign-in check asks again; the same gate that
-                // held it answers, and holds it again (with a new wake-up) if it must still wait.
-                let held = self.live.lock().unwrap().hold_reason == Some(crate::queue::SIGN_IN);
-                if held {
-                    if let Some((sid, waiting)) = self.start_wait.take() {
-                        self.restart_prepare(sid, waiting);
-                    }
-                }
-            }
             Cmd::StallCheck { after, local_after } => {
                 self.check_local_wait();
                 // A turn held at the start — by the server's cap, by the plan windows or by
@@ -2866,16 +2830,11 @@ impl Actor {
             // Start the worker first, so it boots on the blocking pool while the
             // turn's writes below go to disk. A chat whose record is gone stops here.
             if !self.ensure_worker() {
-                // No turn opens now: the sign-in check, if this was it, is someone else's.
-                self.sign_in = None;
                 self.hold_until_exit(sid);
                 return;
             }
         }
         if !self.ensure_worker() {
-            if !busy {
-                self.sign_in = None;
-            }
             self.hold_until_exit(sid);
             return;
         }
@@ -3374,99 +3333,10 @@ impl Actor {
         let claude_full =
             local.is_none() && helm_core::usage_windows::claude_full(&self.sh.db, now()).is_some();
         let at_limit = self.working_chats() >= self.sh.cfg.limits.max_active;
-        // Claude's sign-in: a local chat has none to refresh.
-        let sign_in = local.is_none() && self.sign_in_wait(&mine);
         (
             class,
-            queue::decide(
-                &mine,
-                &waiters,
-                working,
-                cap,
-                claude_full,
-                at_limit,
-                manual,
-                sign_in,
-            ),
+            queue::decide(&mine, &waiters, working, cap, claude_full, at_limit, manual),
         )
-    }
-
-    /// Whether this Claude start must wait for the sign-in check: another start is checking it,
-    /// a refresh just failed, or one may check it now and a start ahead of this one in the
-    /// sign-in line goes first. Never past the longest wait the gate allows.
-    fn sign_in_wait(&self, mine: &crate::queue::Mine) -> bool {
-        let Some(gate) = self.sh.spawner.sign_in_gate() else {
-            return false;
-        };
-        let since = self.live.lock().unwrap().sign_in_since;
-        let ahead = crate::queue::ahead(mine, &self.sign_in_line());
-        gate.must_wait(now(), since, ahead)
-    }
-
-    /// The other chats of ours whose starts wait for the sign-in check.
-    fn sign_in_line(&self) -> Vec<crate::queue::Waiter> {
-        let handles: Vec<ActorHandle> = self
-            .sh
-            .actors
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(id, _)| **id != self.chat_id)
-            .map(|(_, h)| h.clone())
-            .collect();
-        let mut waiters = Vec::new();
-        for h in handles {
-            let l = h.live.lock().unwrap();
-            if let (Some(seq), Some(crate::queue::SIGN_IN)) = (l.held_at_start, l.hold_reason) {
-                waiters.push(crate::queue::Waiter {
-                    class: l.hold_class.unwrap_or(crate::queue::QueueClass::Normal),
-                    top: l.hold_top,
-                    seq,
-                });
-            }
-        }
-        waiters
-    }
-
-    /// Ask this actor to look again at its held start when the sign-in gate changes, or after
-    /// [`SIGN_IN_RECHECK`] at the latest. One wake-up at a time.
-    fn arm_sign_in_waker(&mut self) {
-        if self.sign_in_waking {
-            return;
-        }
-        let Some(gate) = self.sh.spawner.sign_in_gate() else {
-            return;
-        };
-        self.sign_in_waking = true;
-        let seen = gate.generation();
-        let me = self.me.clone();
-        self.sh.handle.spawn(async move {
-            let _ = tokio::time::timeout(SIGN_IN_RECHECK, gate.changed_after(seen)).await;
-            if let Some(tx) = me.upgrade() {
-                let _ = tx.send(Cmd::SignInRecheck).await;
-            }
-        });
-    }
-
-    /// The turn's start is over for the sign-in gate: a refresh failure (any chat's, probe or
-    /// not) makes everyone wait a little before the next check, and anything else simply frees
-    /// the gate if this turn was checking it.
-    fn end_sign_in(&mut self, error: Option<&str>) {
-        let ticket = self.sign_in.take();
-        let refresh =
-            error.and_then(crate::outage::classify) == Some(crate::outage::Cause::TokenRefresh);
-        if !refresh {
-            return;
-        }
-        match ticket {
-            Some(t) => t.refresh_failed(now()),
-            None if !self.is_local_chat() => {
-                if let Some(g) = self.sh.spawner.sign_in_gate() {
-                    g.refresh_failed(now());
-                }
-            }
-            None => {}
-        }
     }
 
     /// Park this turn start at the chat's start: the send stays saved, the chat shows as
@@ -3503,10 +3373,6 @@ impl Actor {
         self.set_local_ahead(ahead.map(|a| a as i64));
         self.set_status(ChatStatus::Starting, None);
         self.start_wait = Some((sid.to_owned(), Vec::new()));
-        if reason == crate::queue::SIGN_IN {
-            // Woken when the gate moves, not left to the maintenance tick.
-            self.arm_sign_in_waker();
-        }
     }
 
     /// Record and announce why this chat's turn start waits (the `chat_activity.queue_reason`
@@ -3514,12 +3380,6 @@ impl Actor {
     fn set_queue_reason(&self, on: Option<&'static str>) {
         {
             let mut live = self.live.lock().unwrap();
-            // The sign-in wait is timed from when it began, and ends with it.
-            if on == Some(crate::queue::SIGN_IN) {
-                live.sign_in_since.get_or_insert_with(now);
-            } else {
-                live.sign_in_since = None;
-            }
             if live.hold_reason == on {
                 return;
             }
@@ -3578,22 +3438,6 @@ impl Actor {
         let server = local.as_ref().map(|(s, _)| s.as_str());
         match verdict {
             crate::queue::Verdict::Go => {
-                if local.is_none() {
-                    if let Some(gate) = self.sh.spawner.sign_in_gate() {
-                        // A leave left from an earlier start is over: let it go first, or this
-                        // chat would wait behind its own old check.
-                        self.sign_in = None;
-                        let since = self.live.lock().unwrap().sign_in_since;
-                        match gate.admit(now(), since) {
-                            Some(t) => self.sign_in = Some(t),
-                            None => {
-                                // Another start began checking the sign-in since the look.
-                                self.arm_hold(sid, class, crate::queue::SIGN_IN, None, Some(0));
-                                return true;
-                            }
-                        }
-                    }
-                }
                 crate::queue::clear_auto_hold(&self.sh.db, &self.chat_id);
                 self.set_queue_reason(None);
                 self.live.lock().unwrap().hold_class = None;
@@ -4164,17 +4008,6 @@ impl Actor {
                 let key = self.msg_key(&str_of(&v, "messageId").unwrap_or_default());
                 let delta = v.get("delta").cloned().unwrap_or_default();
                 let text = str_of(&delta, "text").unwrap_or_default();
-                let words = matches!(
-                    str_of(&delta, "type").as_deref(),
-                    Some("text_delta" | "thinking_delta")
-                ) && !text.is_empty();
-                if words {
-                    // Claude is streaming a reply, so the sign-in works: whoever waited for
-                    // this start's check can go now, not when a long first message ends.
-                    if let Some(t) = self.sign_in.take() {
-                        t.answered(now());
-                    }
-                }
                 if let Some(m) = self.stream.get_mut(&key) {
                     let was_empty = m.text.is_empty() && m.thinking.is_empty();
                     match str_of(&delta, "type").as_deref() {
@@ -4879,13 +4712,6 @@ impl Actor {
                 text = e.clone();
             }
         }
-        if status == MessageStatus::Complete {
-            // Claude answered: the sign-in works, and whoever waited for that can go. A
-            // streamed reply has usually said so already; a message sent whole says it here.
-            if let Some(t) = self.sign_in.take() {
-                t.answered(now());
-            }
-        }
         let entry = MessageEntry {
             id: key.clone(),
             parent_id: None,
@@ -5164,17 +4990,13 @@ impl Actor {
     }
 
     /// A sign-in style failure while a Claude plan window reads used up is the limit, not a
-    /// sign-in problem: the chat's error says so (and is no longer retried as a token refresh).
-    /// A failed token refresh otherwise says, in words, that Helm tries again by itself, with the
-    /// raw line kept after it for the details fold.
+    /// sign-in problem: the chat's error says so (and is not retried).
     fn limit_notice_for(&self, error: String) -> String {
         if self.launched_local.is_some() {
             return error;
         }
         let cap = helm_core::usage_windows::capacity(&self.sh.db, now());
-        crate::outage::plan_limit_error(&chrono::Local, &error, cap)
-            .or_else(|| crate::outage::sign_in_busy_error(&error))
-            .unwrap_or(error)
+        crate::outage::plan_limit_error(&chrono::Local, &error, cap).unwrap_or(error)
     }
 
     /// The turn is over (`agent_settled`, or a forced end).

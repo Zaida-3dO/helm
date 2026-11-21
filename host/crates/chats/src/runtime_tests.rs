@@ -159,8 +159,6 @@ pub struct FakeSpawner {
     pub triage_jobs: Mutex<Vec<Value>>,
     /// The group size a worker reports when it starts.
     pub tree_at_launch: AtomicU32,
-    /// The sign-in gate its Claude starts share; none unless a test sets one.
-    pub sign_in: Mutex<Option<Arc<helm_core::signin_gate::SignInGate>>>,
 }
 
 impl Spawner for FakeSpawner {
@@ -202,10 +200,6 @@ impl Spawner for FakeSpawner {
     fn run_triage(&self, job: &Value) -> Result<(bool, String), String> {
         self.triage_jobs.lock().unwrap().push(job.clone());
         self.triage.lock().unwrap().clone()
-    }
-
-    fn sign_in_gate(&self) -> Option<Arc<helm_core::signin_gate::SignInGate>> {
-        self.sign_in.lock().unwrap().clone()
     }
 }
 
@@ -286,7 +280,6 @@ pub fn harness_with_services(limits: Limits, extra: impl FnOnce(&mut Services)) 
         triage: Mutex::new(Err("no triage in this test".into())),
         triage_jobs: Mutex::new(Vec::new()),
         tree_at_launch: AtomicU32::new(2),
-        sign_in: Mutex::new(None),
     });
     let rt = ChatRuntime::new(
         db.clone(),
@@ -1883,65 +1876,6 @@ async fn a_line_from_another_crate_becomes_a_context_row() {
         h.col("SELECT text FROM messages WHERE role = 'context'"),
         ["You turned Orchestrator on for this chat."]
     );
-}
-
-/// Three Claude chats start together while nothing is known of the sign-in: one opens and checks
-/// it, the other two wait at their start with the reason `sign_in` (no worker starts for them),
-/// and the first one's answer lets both go. A failed request on the way is no answer: it is
-/// stored as an error row whose text is empty, with the error in its details. The answer is the
-/// reply's first streamed words, not the end of the message.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn one_start_checks_the_sign_in_and_its_answer_lets_the_waiting_ones_go() {
-    let mut h = harness();
-    *h.spawner.sign_in.lock().unwrap() = Some(Arc::new(helm_core::signin_gate::SignInGate::new()));
-    let chats = [h.create().await, h.create().await, h.create().await];
-    for c in &chats {
-        h.send(c, "go", "default").await;
-    }
-    let mut w = h.worker().await;
-    w.ready().await;
-    let p = w.expect("prompt").await;
-    ack(&w, &p).await;
-    let first = w.req.chat_id.clone();
-    let others: Vec<String> = chats.iter().filter(|c| **c != first).cloned().collect();
-    let waiting = |h: &H| {
-        others.iter().all(|c| {
-            h.status(c) == "starting"
-                && h.col(&format!(
-                    "SELECT COALESCE(queue_reason, 'x') FROM chat_activity WHERE chat_id = '{c}'"
-                )) == ["sign_in"]
-        })
-    };
-    h.until("the other two wait for the sign-in check", waiting)
-        .await;
-    let text = "API Error: 500 the request failed";
-    w.emit(json!({"type": "message_end", "message": {"id": "err1", "role": "assistant", "content": [{"type": "text", "text": text}], "status": "error", "errorMessage": text}}))
-        .await;
-    h.until("the error row keeps its error in the details", |h| {
-        h.col("SELECT text || '|' || json_extract(details, '$.errorMessage') FROM messages WHERE status = 'error'")
-            == [format!("|{text}")]
-    })
-    .await;
-    assert!(waiting(&h), "an error is no answer: they still wait");
-    assert!(
-        h.workers.try_recv().is_err(),
-        "no worker for a waiting start"
-    );
-    w.emit(json!({"type": "message_start", "message": {"id": "m1", "role": "assistant", "content": []}}))
-        .await;
-    w.emit(json!({"type": "message_update", "messageId": "m1", "index": 0, "delta": {"type": "text_delta", "text": "Hel"}}))
-        .await;
-    let mut opened = Vec::new();
-    for _ in 0..2 {
-        let mut w = h.worker().await;
-        w.ready().await;
-        w.expect("prompt").await;
-        opened.push(w.req.chat_id.clone());
-    }
-    opened.sort();
-    let mut want = others.clone();
-    want.sort();
-    assert_eq!(opened, want, "the answer let both waiting starts go");
 }
 
 /// Retry states land on the failed message's details.
