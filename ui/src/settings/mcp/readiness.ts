@@ -3,7 +3,7 @@
 
 import type { ChatMcpProblem, McpPreset, McpServer, ServerStatus, ValueRef } from '../../api/mcp.ts';
 import type { OAuthConfig } from '../../api/generated/mcp/index.ts';
-import { GOOGLE_PRESET, keepsBridge } from './google.ts';
+import { GOOGLE_PRESET, runsBridge } from './google.ts';
 import type { OAuthStatus } from './oauth.ts';
 
 export interface Readiness {
@@ -45,9 +45,10 @@ function envMissing(s: McpServer, presets: McpPreset[]): boolean {
 export function serverReadiness(s: McpServer, status: ServerStatus | undefined, presets: McpPreset[] = [], oauth?: OAuthStatus): Readiness {
   const browserSignIn = s.transport.type !== 'stdio' && !!s.transport.oauth;
   if (!s.enabled) return { state: 'off', reason: 'Turned off: chats do not use this server.', actionLabel: 'Turn on', actionTarget: s.id };
-  // A Google accounts server without a client of its own is served by Helm's own Gmail tools:
-  // no process starts, no connection is made, and the row says what answers for it.
-  if (s.preset === GOOGLE_PRESET && !keepsBridge(s)) {
+  // A Google accounts server with no bridge of its own is served by Helm's own Gmail tools:
+  // no process starts, no connection is made, and the row says what answers for it. A server
+  // carrying its own client env, or one whose arguments ask for calendar, does start a bridge.
+  if (s.preset === GOOGLE_PRESET && !runsBridge(s)) {
     return { state: 'ready', reason: 'Built in: served by Helm.' };
   }
   if (status?.state === 'native') {

@@ -4,9 +4,9 @@
 // asks whether one is set and hands over the two values once.
 
 import type { Api } from '../../api/client.ts';
-import type { GoogleAccountList, GoogleClientState, GooglePermission, GoogleSignIn, McpEditorSnapshot, McpServer } from '../../api/generated/mcp/index.ts';
+import type { CalendarPermission, GoogleAccountList, GoogleClientState, GooglePermission, GoogleSignIn, McpEditorSnapshot, McpServer } from '../../api/generated/mcp/index.ts';
 
-export type { GoogleAccount, GoogleAccountList, GoogleClientState, GooglePermission, GoogleSignIn } from '../../api/generated/mcp/index.ts';
+export type { CalendarPermission, GoogleAccount, GoogleAccountList, GoogleClientState, GooglePermission, GoogleSignIn } from '../../api/generated/mcp/index.ts';
 
 /** The preset a Google accounts server is made from. */
 export const GOOGLE_PRESET = 'google_accounts';
@@ -27,6 +27,20 @@ export const PERMISSION_HELP: Record<GooglePermission, string> = {
   readonly: 'Chats can read and search mail. They cannot label, draft or send.',
   drafts: 'Chats can read, label and write drafts. They never send.',
   send: 'Chats can also send mail. Use this only if you want a chat to be able to send for you.',
+};
+
+/** The calendar level, beside the mail one. The host maps these to the bridge's calendar
+ * permission values and its Google scopes; `off` loads no calendar service at all. */
+export const CALENDAR_OPTIONS: { value: CalendarPermission; label: string }[] = [
+  { value: 'off', label: 'Off' },
+  { value: 'readonly', label: 'Read only' },
+  { value: 'edit_events', label: 'Edit events' },
+];
+
+export const CALENDAR_HELP: Record<CalendarPermission, string> = {
+  off: 'No calendar tools: chats only get mail.',
+  readonly: 'Chats can read calendars and events. They cannot change anything.',
+  edit_events: 'Chats can also create, change and delete events, the same way any other tool use is allowed.',
 };
 
 export const SIGN_IN_NOTE = 'Your browser opens Google’s sign-in. Helm never sees your password.';
@@ -67,6 +81,8 @@ export function googleOps(api: Api) {
     label: (serverId: string, email: string, label: string) => api<GoogleAccountList>('mcp_google_label', { serverId, email, label }),
     /** Rewrites the server's permission argument. */
     permission: (serverId: string, permission: GooglePermission) => api<McpEditorSnapshot>('mcp_google_permission', { serverId, permission }),
+    /** Rewrites the server's calendar level. */
+    calendar: (serverId: string, calendar: CalendarPermission) => api<McpEditorSnapshot>('mcp_google_calendar', { serverId, calendar }),
     /** Whether this profile already has a sign-in client. The values themselves never appear. */
     clientGet: () => api<GoogleClientState>('mcp_google_client_get', {}),
     /** Saves the client once. Write-only: a saved secret is never read back. */
@@ -91,6 +107,40 @@ export function keepsBridge(s: McpServer): boolean {
     (s.transport.args?.[0] ?? '').startsWith('workspace-mcp') &&
     GOOGLE_CLIENT_ENV.every((k) => !!s.transport.env?.[k])
   );
+}
+
+/** The calendar level the server's own arguments ask for, as the host reads it: absent is off,
+ * an unrecognised value is `null` (the host guesses nothing). */
+export function calendarInArgs(s: McpServer): CalendarPermission | null {
+  const args = s.transport.type === 'stdio' ? s.transport.args ?? [] : [];
+  let value: string | undefined;
+  for (const a of args) {
+    if (a === 'calendar' || a.startsWith('calendar:')) value = a;
+  }
+  if (!value) {
+    for (const a of args) {
+      const joined = a.startsWith('--permissions=') ? a.slice('--permissions='.length) : null;
+      const part = joined?.split(',').find((v) => v === 'calendar' || v.startsWith('calendar:'));
+      if (part) {
+        value = part;
+        break;
+      }
+    }
+  }
+  if (!value) return 'off';
+  if (value === 'calendar:readonly') return 'readonly';
+  if (value === 'calendar:full') return 'edit_events';
+  if (value === 'calendar') return null;
+  return null;
+}
+
+/** Whether a bridge process runs for this Google server: either it carries its own client env,
+ * or its arguments ask for a calendar level the host knows and is not off (the host starts the
+ * bridge for it when the profile's sign-in client is saved). */
+export function runsBridge(s: McpServer): boolean {
+  if (keepsBridge(s)) return true;
+  const cal = calendarInArgs(s);
+  return cal !== null && cal !== 'off';
 }
 
 /** Both fields filled in, before the host's own stricter check. */

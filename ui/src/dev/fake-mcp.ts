@@ -27,8 +27,8 @@ const PRESETS: McpPreset[] = [
 }));
 PRESETS.push({
   id: 'google_accounts',
-  name: 'Google accounts (Gmail)',
-  description: 'Several Gmail accounts, signed in with your own Google client.',
+  name: 'Google accounts (Gmail and Calendar)',
+  description: 'Several Gmail and Calendar accounts, signed in with your own Google client.',
   transport: 'stdio',
   urlPlaceholder: '',
   tokenHeader: '',
@@ -73,17 +73,33 @@ export function mcpFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
   const accounts: GoogleAccount[] = [];
   let googleClient = false;
   let googleSigningIn = false;
+  // Same shape as the host's google.ts: the level is absent when the arguments set one the
+  // picker does not know.
+  const calFlag = (args: string[] | undefined): string | undefined =>
+    args?.flatMap((x) => (x === 'calendar' || x.startsWith('calendar:') ? [x] : x.startsWith('--permissions=') ? x.slice(14).split(',').filter((v) => v === 'calendar' || v.startsWith('calendar:')) : []))[0];
   const googleList = (): GoogleAccountList => {
     const server = servers.find((x) => x.preset === 'google_accounts');
     const level = server?.transport.args?.find((x) => x.startsWith('gmail:'))?.slice(6);
     const permission = (['readonly', 'drafts', 'send'] as GooglePermission[]).find((p) => p === level);
-    // Same rule as the host: only a server carrying its own client env keeps the bridge.
-    const bridge =
+    const cal = calFlag(server?.transport.args);
+    const calendar =
+      cal === undefined ? 'off' : cal === 'calendar:readonly' ? 'readonly' : cal === 'calendar:full' ? 'edit_events' : undefined;
+    // Same rule as the host: the bridge runs for a server carrying its own client env, or for
+    // one whose arguments ask for a known calendar level once the profile's client is saved.
+    const legacy =
       !!server &&
       (server.transport.args?.[0] ?? '').startsWith('workspace-mcp') &&
       !!server.transport.env?.GOOGLE_OAUTH_CLIENT_ID &&
       !!server.transport.env?.GOOGLE_OAUTH_CLIENT_SECRET;
-    return { accounts: structuredClone(accounts), ...(permission ? { permission } : {}), uvFound: true, signingIn: googleSigningIn, hostServed: !bridge };
+    const bridge = legacy || (calendar !== undefined && calendar !== 'off' && googleClient);
+    return {
+      accounts: structuredClone(accounts),
+      ...(permission ? { permission } : {}),
+      ...(calendar ? { calendar } : {}),
+      uvFound: true,
+      signingIn: googleSigningIn,
+      hostServed: !bridge,
+    };
   };
   const check = (a: Record<string, unknown>) => {
     if (typeof a.revision === 'string' && a.revision !== revision()) throw new ApiError('conflict', 'The MCP settings changed since they were read.');
@@ -216,6 +232,21 @@ export function mcpFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         if (!s) throw new ApiError('bad_args', 'That is not a Google accounts server.');
         const args = (s.transport.args ?? []).filter((x) => !x.startsWith('gmail:'));
         s.transport.args = [...args, `gmail:${String(a.permission)}`];
+        rev++;
+        return snap();
+      }
+      case 'mcp_google_calendar': {
+        const s = servers.find((x) => x.id === a.serverId && x.preset === 'google_accounts');
+        if (!s) throw new ApiError('bad_args', 'That is not a Google accounts server.');
+        const args = s.transport.args ?? [];
+        const level = String(a.calendar);
+        const gmail = args.find((x) => x.startsWith('gmail:'));
+        const kept = args.filter((x) => x !== '--permissions' && !x.startsWith('gmail:') && x !== 'calendar' && !x.startsWith('calendar:'));
+        const adds = [
+          ...(gmail ? [gmail] : []),
+          ...(level === 'off' ? [] : [level === 'edit_events' ? 'calendar:full' : 'calendar:readonly']),
+        ];
+        s.transport.args = adds.length ? [...kept, '--permissions', ...adds] : kept;
         rev++;
         return snap();
       }

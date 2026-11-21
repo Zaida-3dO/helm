@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ChatMcpProblem, McpPreset, McpServer } from '../../api/mcp.ts';
-import { CONSOLE_STEPS, GOOGLE_PRESET, SIGN_IN_WINDOW_MS, blockState, clientLooksSet, watchState, type GoogleAccountList } from './google.ts';
+import { CALENDAR_HELP, CALENDAR_OPTIONS, CONSOLE_STEPS, GOOGLE_PRESET, SIGN_IN_WINDOW_MS, blockState, calendarInArgs, clientLooksSet, watchState, type GoogleAccountList } from './google.ts';
 import { canDisconnect, connectLabel } from './oauth.ts';
 import { BROKER_PRESET, blankServer, chatMcpNoticeText, copyImportable, draftFromPreset, isBrokerServer, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable, withProfileValue } from './readiness.ts';
 
@@ -193,6 +193,18 @@ test('the Google preset drafts a program, its row ignores the environment, and t
   assert.match(serverReadiness(legacy, undefined, [google]).reason, /connects when a chat/, 'a bridge server keeps the usual row');
   assert.equal(serverReadiness(legacy, { serverId: saved.id, state: 'failed', error: 'uvx missing', at: 1 }, [google]).reason, 'uvx missing');
   assert.equal(serverReadiness({ ...legacy, enabled: false }, undefined, [google]).state, 'off', 'off still wins');
+  // A calendar level in the arguments means a bridge runs for the calendar tools, so the row
+  // follows its connection like any program server's; only no level (or off) stays built in.
+  const withCal: McpServer = { ...saved, transport: { ...saved.transport, args: [...(saved.transport.args ?? []), 'calendar:readonly'] } };
+  assert.equal(calendarInArgs(withCal), 'readonly');
+  assert.equal(calendarInArgs(saved), 'off');
+  assert.equal(calendarInArgs({ ...saved, transport: { ...saved.transport, args: ['workspace-mcp', '--permissions=calendar:full'] } }), 'edit_events');
+  assert.equal(calendarInArgs({ ...saved, transport: { ...saved.transport, args: ['workspace-mcp', '--permissions', 'calendar:organize'] } }), null, 'a level the picker does not know is not guessed');
+  assert.match(serverReadiness(withCal, undefined, [google]).reason, /connects when a chat/, 'a calendar server keeps the usual row');
+  assert.equal(serverReadiness(withCal, { serverId: saved.id, state: 'connected', toolCount: 12, at: 1 }, [google]).reason, 'Connected · 12 tools');
+  // The picker offers exactly the levels the host maps, each with its help line.
+  assert.deepEqual(CALENDAR_OPTIONS.map((o) => o.value), ['off', 'readonly', 'edit_events']);
+  for (const o of CALENDAR_OPTIONS) assert.ok(CALENDAR_HELP[o.value].length > 0, o.value);
 
   const list = (over: Partial<GoogleAccountList> = {}): GoogleAccountList => ({ accounts: [], uvFound: true, signingIn: false, hostServed: false, ...over });
   assert.equal(blockState(null, null).kind, 'loading');

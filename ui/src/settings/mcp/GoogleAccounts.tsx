@@ -10,6 +10,8 @@ import { IconWarning } from '../../ui/icons.tsx';
 import { WheelMark } from '../../ui/status/index.ts';
 import { GoogleClientSetup } from './GoogleClientSetup.tsx';
 import {
+  CALENDAR_HELP,
+  CALENDAR_OPTIONS,
   PERMISSION_HELP,
   PERMISSION_OPTIONS,
   POLL_MS,
@@ -18,6 +20,7 @@ import {
   SIGN_IN_NOTE,
   blockState,
   watchState,
+  type CalendarPermission,
   type GoogleAccount,
   type GoogleAccountList,
   type GoogleOps,
@@ -157,6 +160,14 @@ export function GoogleAccountsDialog({
       if (raised) setNotice(RAISE_NOTE);
     });
 
+  // The calendar level belongs to the bridge process, which signs into Google itself with its
+  // own grant; changing it just rewrites the arguments.
+  const setCalendar = (level: CalendarPermission) =>
+    void attempt(async () => {
+      onSnapshot(await ops.calendar(server.id, level));
+      refresh();
+    });
+
   return (
     <Dialog title={`Google accounts · ${server.name}`} testId="google-accounts-dialog" onClose={onClose}>
       <section className="google-accounts" data-testid="google-accounts" data-server={server.id} data-state={state.kind} aria-label={`${server.name}: accounts`}>
@@ -232,6 +243,20 @@ export function GoogleAccountsDialog({
                     : 'The server’s arguments set a level this picker does not offer. Choose one to replace it.'}
                   {!list.hostServed && <> Changing it restarts the server.</>}{' '}
                   {RAISE_NOTE}
+                </p>
+                <div className="mcp-field google-calendar">
+                  <span>Calendar</span>
+                  <Segmented<CalendarPermission | 'custom'>
+                    label="What chats may do with calendar"
+                    testId="google-calendar"
+                    value={list.calendar ?? 'custom'}
+                    options={[...CALENDAR_OPTIONS, ...(list.calendar ? [] : [{ value: 'custom' as const, label: 'Custom', disabled: true }])]}
+                    onChange={(v) => v !== 'custom' && !busy && setCalendar(v)}
+                  />
+                </div>
+                <p className="mcp-help" data-testid="google-calendar-help">
+                  {list.calendar ? CALENDAR_HELP[list.calendar] : 'The server’s arguments set a calendar level this picker does not offer. Choose one to replace it.'}
+                  {!list.hostServed && <> Changing it restarts the server.</>}
                 </p>
               </>
             )}
