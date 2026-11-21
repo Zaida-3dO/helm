@@ -49,8 +49,8 @@ export class QueueStore {
   }
 
   /** One move; the host answers with the fresh queue, so the store takes it directly. */
-  async act(chatId: string, action: QueueAction): Promise<void> {
-    const s = await this.ops.act(chatId, action);
+  async act(chatId: string, action: QueueAction, beforeChatId?: string | null): Promise<void> {
+    const s = await this.ops.act(chatId, action, beforeChatId);
     this.summary = s;
     this.emit();
   }

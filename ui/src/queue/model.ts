@@ -53,12 +53,15 @@ export function sameLine(a: QueueEntry, b: QueueEntry): boolean {
   return a.serverId === b.serverId;
 }
 
-/** The actions a row offers. Mirrors the host's refusals so a dead click never shows. */
-export function actionsFor(entry: QueueEntry): { top: boolean; upDown: boolean; release: boolean; cancel: boolean } {
+/** The actions a row offers. Mirrors the host's refusals so a dead click never shows.
+ *  `drag` is the pointer way of the up/down pair: a hand-parked chat has no line to drag
+ *  along, so its row cannot be picked up. */
+export function actionsFor(entry: QueueEntry): { top: boolean; upDown: boolean; drag: boolean; release: boolean; cancel: boolean } {
   const line = entry.reason !== 'manual';
   return {
     top: line,
     upDown: line,
+    drag: line,
     release: entry.reason === 'manual',
     cancel: true,
   };

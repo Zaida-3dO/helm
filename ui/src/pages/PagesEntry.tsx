@@ -5,13 +5,14 @@
 // be read left quiet. Each row leads with the bundle's own favicon (asked once per path) or a
 // letter tile. Clicking one opens it as
 // a tab in the side panel; Unpin removes it from the list (its saved state stays, so pinning it
-// again finds it as it was). The mounting sidebar passes the active profile's id, or nothing for
-// every page.
+// again finds it as it was). A row for this PC can be dragged to reorder the pins; once
+// reordered the list keeps that order. The mounting sidebar passes the active profile's id, or
+// nothing for every page.
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { Api } from '../api/client.ts';
 import type { EventBus } from '../api/events.ts';
-import { Button, Dialog, toast } from '../ui/index.ts';
+import { Button, Dialog, moveItem, toast, useDragReorder } from '../ui/index.ts';
 import { IconUnpin } from '../ui/icons.tsx';
 import { pageOps } from './api.ts';
 import type { PinnedPage, RemotePages } from './api.ts';
@@ -76,6 +77,23 @@ export function usePagesEntry(api: Api, bus: EventBus, profileId?: string | null
     return mergePages(pages ?? [], remote ?? [], devicesStoreFor(api, bus).snapshot.list, personId);
   }, [api, bus, pages, remote, profileId]);
 
+  // Drag to reorder this PC's pins. Only the local rows are given to the hook, so a drag
+  // can only land between local rows: the order of another PC's pins lives on that PC.
+  const localIndexOf = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of merged.rows) if (!r.device) m.set(r.page.id, m.size);
+    return m;
+  }, [merged]);
+  const localIds = useMemo(() => [...localIndexOf.keys()], [localIndexOf]);
+  const reorder = useDragReorder((from, to) => {
+    const moved = localIds[from];
+    if (moved === undefined || to === from || to === from + 1) return;
+    const next = moveItem(localIds, from, to);
+    void ops
+      .pinMove(moved, next[to + 1] ?? null)
+      .catch((e: unknown) => toast.show({ kind: 'error', text: e instanceof Error ? e.message : String(e) }));
+  });
+
   // Fetch a favicon for each local page not asked for yet; a page without one gets null and the
   // letter tile, and a failed ask is remembered so it is not retried on every render.
   useEffect(() => {
@@ -125,8 +143,16 @@ export function usePagesEntry(api: Api, bus: EventBus, profileId?: string | null
       <ul className="pg-list">
         {merged.rows.map(({ page: p, device }) => {
           const icon = device ? null : icons[p.path];
+          const localIndex = device ? -1 : localIndexOf.get(p.id) ?? -1;
+          const live = localIndex >= 0 && reorder.drag?.from === localIndex;
           return (
-          <li key={device ? `${device.uid}:${p.id}` : p.id} className="pg-list-row">
+          <li
+            key={device ? `${device.uid}:${p.id}` : p.id}
+            className={`pg-list-row${live ? ' drag-live' : ''}`}
+            style={live ? { transform: `translateY(${reorder.drag!.offset}px)` } : undefined}
+            data-dragging={live ? 'true' : undefined}
+            {...(localIndex >= 0 ? reorder.rowProps(localIndex) : {})}
+          >
             <button
               type="button"
               className="pg-list-open"

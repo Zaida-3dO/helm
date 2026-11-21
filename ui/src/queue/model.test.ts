@@ -71,9 +71,9 @@ test('ahead counts only starts on the same line, and manual holds have no line',
 
 test('a row offers only the moves the host would take', () => {
   for (const [entry, want] of [
-    [e({ reason: 'local_cap' }), { top: true, upDown: true, release: false, cancel: true }],
-    [e({ reason: 'claude_capacity' }), { top: true, upDown: true, release: false, cancel: true }],
-    [e({ reason: 'manual' }), { top: false, upDown: false, release: true, cancel: true }],
+    [e({ reason: 'local_cap' }), { top: true, upDown: true, drag: true, release: false, cancel: true }],
+    [e({ reason: 'claude_capacity' }), { top: true, upDown: true, drag: true, release: false, cancel: true }],
+    [e({ reason: 'manual' }), { top: false, upDown: false, drag: false, release: true, cancel: true }],
   ] as const) {
     assert.deepEqual(actionsFor(entry), want, entry.reason);
   }

@@ -88,9 +88,11 @@ export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
   let comments: Array<Record<string, unknown>> = [];
   // Two pinned pages, one with a long title, so the Pages list has rows to show.
   let pinned = [
-    { id: 'pg1', profileId: '', path: `${FAKE_ROOT}\\pages\\budget\\page.html`, title: 'Budget', chatId: null, pinnedAt: 1 },
-    { id: 'pg2', profileId: '', path: `${FAKE_ROOT}\\notes\\weekly-plans\\garden\\planting-calendar.html`, title: 'Planting calendar for the spring beds and the greenhouse', chatId: null, pinnedAt: 2 },
+    { id: 'pg1', profileId: '', path: `${FAKE_ROOT}\\pages\\budget\\page.html`, title: 'Budget', chatId: null, pinnedAt: 1, position: null as number | null },
+    { id: 'pg2', profileId: '', path: `${FAKE_ROOT}\\notes\\weekly-plans\\garden\\planting-calendar.html`, title: 'Planting calendar for the spring beds and the greenhouse', chatId: null, pinnedAt: 2, position: null as number | null },
   ];
+  const pinnedInOrder = () =>
+    [...pinned].sort((a, b) => Number(a.position ?? 1e9) - Number(b.position ?? 1e9) || b.pinnedAt - a.pinnedAt);
   let pageSeq = 0;
   // A made-up working tree: one staged, one partly staged, one untracked file and a conflict.
   let records = [
@@ -236,7 +238,7 @@ export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         return { mode: 'files', items, partial: false };
       }
       case 'page_list':
-        return { pages: pinned };
+        return { pages: pinnedInOrder() };
       // A page opens onto a blank frame, so its tab, its bar and its menu can be looked at here.
       // As on the real host, the network follows the pin: a pinned page opens online.
       case 'page_open': {
@@ -256,9 +258,22 @@ export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
       case 'page_state_reset':
         return { revision: 1 };
       case 'page_pin': {
-        const page = { id: `pg${Date.now()}`, profileId: '', path: String(args.path ?? ''), title: String(args.path ?? '').split('\\').pop() ?? 'page', chatId: null, pinnedAt: Date.now() };
+        const page = { id: `pg${Date.now()}`, profileId: '', path: String(args.path ?? ''), title: String(args.path ?? '').split('\\').pop() ?? 'page', chatId: null, pinnedAt: Date.now(), position: null as number | null };
         pinned = [...pinned, page];
         return { page, created: true };
+      }
+      case 'page_pin_move': {
+        // The host's rule, in miniature: renumber the whole list dense from 0.
+        const order = pinnedInOrder().map((p) => p.id);
+        const at = order.indexOf(String(args.id));
+        if (at < 0) return { moved: false };
+        order.splice(at, 1);
+        const before = typeof args.beforeId === 'string' ? order.indexOf(String(args.beforeId)) : -1;
+        if (typeof args.beforeId === 'string' && before < 0) return { moved: false };
+        order.splice(before >= 0 ? before : order.length, 0, String(args.id));
+        const byId = new Map(pinned.map((p) => [p.id, p]));
+        pinned = order.map((id, i) => ({ ...byId.get(id)!, position: i }));
+        return { moved: true };
       }
       case 'page_icon':
         // The fake Budget page carries an icon; the rest show the letter tile.

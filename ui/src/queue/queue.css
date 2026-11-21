@@ -66,6 +66,18 @@
   flex-wrap: wrap;
 }
 
+/* A row under drag: lifted off the list, following the pointer, text not selectable. */
+.queue-row.drag-live {
+  position: relative;
+  z-index: 2;
+  background: var(--hover);
+  border-radius: 6px;
+  border-bottom-color: transparent;
+  opacity: 0.95;
+  cursor: grabbing;
+  user-select: none;
+}
+
 .queue-btn {
   padding: 2px 8px;
   font-size: 12px;

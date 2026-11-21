@@ -124,9 +124,14 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
   let sendBehavior: SendBehavior = { ...HOME_SEND_BEHAVIOR };
   const prefs = new Map<string, unknown>();
 
-  // A small capacity queue for the dev host: a held start so the Queue panel has a row to show.
+  // A small capacity queue for the dev host: held starts so the Queue panel has rows to show,
+  // reorder and drag alike.
   type FakeHold = { chatId: string; title: string; reason: string; class: string; serverId: string | null; since: number; top: boolean };
-  let fakeHolds: FakeHold[] = [{ chatId: 'dev-queue-chat', title: 'Waiting chat', reason: 'local_cap', class: 'normal', serverId: 'strata', since: 0, top: false }];
+  let fakeHolds: FakeHold[] = [
+    { chatId: 'dev-queue-chat', title: 'Waiting chat', reason: 'local_cap', class: 'normal', serverId: 'strata', since: 0, top: false },
+    { chatId: 'dev-queue-chat-2', title: 'Another waiting chat', reason: 'local_cap', class: 'normal', serverId: 'strata', since: 0, top: false },
+    { chatId: 'dev-queue-chat-3', title: 'A parked chat', reason: 'manual', class: 'normal', serverId: null, since: 0, top: false },
+  ];
   const fakeQueueList = () => ({
     entries: fakeHolds.map((h) => ({ ...h, since: Date.now() - 60_000 })),
     servers: [{ serverId: 'strata', working: 3, queued: fakeHolds.filter((h) => h.serverId === 'strata').length }],
@@ -135,11 +140,20 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     claudeUntil: null,
     signIn: [],
   });
-  const fakeQueueAct = (chatId: string, action: string) => {
+  const fakeQueueAct = (chatId: string, action: string, beforeChatId?: string) => {
     if (action === 'cancel' || action === 'release') fakeHolds = fakeHolds.filter((h) => h.chatId !== chatId);
     else if (action === 'hold') fakeHolds = fakeHolds.map((h) => (h.chatId === chatId ? { ...h, reason: 'manual', serverId: null } : h));
     else if (action === 'release') fakeHolds = fakeHolds.map((h) => (h.chatId === chatId ? { ...h, reason: 'local_cap' } : h));
     else if (action === 'top') fakeHolds = fakeHolds.map((h) => (h.chatId === chatId ? { ...h, top: true } : h));
+    else if (action === 'move') {
+      const at = fakeHolds.findIndex((h) => h.chatId === chatId);
+      if (at >= 0) {
+        const moved = fakeHolds.splice(at, 1)[0]!;
+        const anchor = beforeChatId ? fakeHolds.findIndex((h) => h.chatId === beforeChatId) : -1;
+        moved.top = anchor >= 0 ? fakeHolds[anchor]!.top : false; // as on the host: the anchor's front state
+        fakeHolds.splice(anchor >= 0 ? anchor : fakeHolds.length, 0, moved);
+      }
+    }
     return fakeQueueList();
   };
   const answers = new Map<string, (a: Record<string, unknown>) => void>();
@@ -1203,7 +1217,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     intro_allowed: () => ({ allowed: true }),
     preference_get: (a) => (a.key === 'sendBehavior' ? sendBehavior : (prefs.get(String(a.key)) ?? null)),
     queue_list: () => fakeQueueList(),
-    queue_action: (a) => fakeQueueAct(String(a.chatId), String(a.action)),
+    queue_action: (a) => fakeQueueAct(String(a.chatId), String(a.action), typeof a.beforeChatId === 'string' ? a.beforeChatId : undefined),
     preference: (a) => {
       if (a.key === 'sendBehavior') sendBehavior = { ...HOME_SEND_BEHAVIOR, ...(a.value as object) };
       else prefs.set(String(a.key), a.value);

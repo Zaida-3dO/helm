@@ -5,13 +5,13 @@
 
 import type { QueueEntry, QueueSummary } from '../api/generated/index.ts';
 import type { QueueStore } from './store.ts';
-import { aheadOf, CLASS_LABEL, claudeLine, needsSignIn, queueCount, serverLine, signInLine, untilText, waitLine } from './model.ts';
+import { actionsFor, aheadOf, CLASS_LABEL, claudeLine, needsSignIn, queueCount, serverLine, signInLine, untilText, waitLine } from './model.ts';
 import { SignInAgain } from '../transcript/SignInAgain.tsx';
-import { Button, Dialog, toast } from '../ui/index.ts';
+import { Button, Dialog, moveItem, toast, useDragReorder, type DragRowProps } from '../ui/index.ts';
 import { IconChevronDown, IconChevronUp, IconExternalLink, IconPause, IconPlay, IconX } from '../ui/icons.tsx';
 import './queue.css';
 
-type MoveAction = 'top' | 'up' | 'down' | 'hold' | 'release' | 'cancel';
+type MoveAction = 'top' | 'up' | 'down' | 'move' | 'hold' | 'release' | 'cancel';
 
 /** How many rows stand on this entry's line, so Down can stop at the end. */
 function lineSize(entries: readonly QueueEntry[], mine: QueueEntry): number {
@@ -28,16 +28,24 @@ export function QueuePanel({ store, onOpen, onClose }: { store: QueueStore; onOp
   const summary = store.getSnapshot();
   const now = Date.now();
   const claudeUntil = summary != null && summary.claudeFull && summary.claudeUntil != null ? untilText(summary.claudeUntil, now) : null;
-  const act = (chatId: string, action: MoveAction) => {
-    store.act(chatId, action).catch((e: unknown) => {
+  const act = (chatId: string, action: MoveAction, beforeChatId?: string | null) => {
+    store.act(chatId, action, beforeChatId).catch((e: unknown) => {
       toast.show({ kind: 'error', text: String((e as Error)?.message ?? e) });
     });
   };
+  // Drag one row to stand where it was dropped: the host renumbers the line and answers
+  // with the fresh queue, so the drop is only an intention until it agrees.
+  const reorder = useDragReorder((from, to) => {
+    if (!summary || to === from || to === from + 1) return;
+    const next = moveItem(summary.entries, from, to);
+    act(summary.entries[from]!.chatId, 'move', next[to + 1]?.chatId ?? null);
+  });
   return (
     <Dialog
       title="Queue"
       onClose={onClose}
       wide
+      padded
       testId="queue-panel"
       intro="Chats whose turn is waiting to open. A waiting chat keeps its message saved and opens on its own when its place frees."
     >
@@ -46,7 +54,7 @@ export function QueuePanel({ store, onOpen, onClose }: { store: QueueStore; onOp
       ) : summary.entries.length === 0 && summary.signIn.length === 0 ? (
         <p className="queue-empty" data-testid="queue-empty">Nothing is waiting.</p>
       ) : (
-        summary.entries.map((e) => <QueueRow key={e.chatId} entry={e} summary={summary} claudeUntil={claudeUntil} act={act} onOpen={onOpen} onClose={onClose} />)
+        summary.entries.map((e, i) => <QueueRow key={e.chatId} entry={e} index={i} summary={summary} claudeUntil={claudeUntil} act={act} onOpen={onOpen} onClose={onClose} reorder={reorder} />)
       )}
       {summary != null && summary.signIn.length > 0 && (
         <div className="queue-signin" data-testid="queue-signin">
@@ -79,25 +87,43 @@ export function QueuePanel({ store, onOpen, onClose }: { store: QueueStore; onOp
   );
 }
 
+interface QueueReorder {
+  rowProps: (index: number, draggable?: boolean) => DragRowProps;
+  drag: { from: number; to: number; offset: number } | null;
+}
+
 function QueueRow({
   entry: e,
+  index,
   summary,
   claudeUntil,
   act,
   onOpen,
   onClose,
+  reorder,
 }: {
   entry: QueueEntry;
+  index: number;
   summary: QueueSummary;
   claudeUntil: string | null;
-  act: (chatId: string, action: MoveAction) => void;
+  act: (chatId: string, action: MoveAction, beforeChatId?: string | null) => void;
   onOpen: (chatId: string) => void;
   onClose: () => void;
+  reorder: QueueReorder;
 }) {
   const ahead = aheadOf(summary.entries, e.chatId);
   const last = ahead >= lineSize(summary.entries, e) - 1;
+  const live = reorder.drag?.from === index;
   return (
-    <div className="queue-row" data-testid="queue-row" data-chat-id={e.chatId} data-reason={e.reason}>
+    <div
+      className={`queue-row${live ? ' drag-live' : ''}`}
+      style={live ? { transform: `translateY(${reorder.drag!.offset}px)` } : undefined}
+      {...reorder.rowProps(index, actionsFor(e).drag)}
+      data-testid="queue-row"
+      data-chat-id={e.chatId}
+      data-reason={e.reason}
+      data-dragging={live ? 'true' : undefined}
+    >
       <button type="button" className="queue-open" title="Open this chat" onClick={() => { onClose(); onOpen(e.chatId); }}>
         <span className="queue-title">{e.title}</span>
         <IconExternalLink size={13} />

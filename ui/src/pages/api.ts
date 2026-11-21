@@ -13,6 +13,8 @@ export interface PinnedPage {
   /** The chat the page's messages go to. */
   chatId: string | null;
   pinnedAt: number;
+  /** Its place in a hand-reordered list; null while the list keeps the plain newest-first order. */
+  position?: number | null;
 }
 
 /** An open page: the address to load, the channel it speaks on, and what it saved last. */
@@ -72,6 +74,8 @@ export function pageOps(api: Api) {
         ...(opts.profileId ? { profileId: opts.profileId } : {}),
       }),
     unpin: (id: string) => api<{ removed: boolean }>('page_unpin', { id }),
+    /** Place a pin just before another in its profile's list (at the end when `beforeId` is null). */
+    pinMove: (id: string, beforeId: string | null) => api<{ moved: boolean }>('page_pin_move', { id, ...(beforeId ? { beforeId } : {}) }),
     linkChat: (id: string, chatId: string | null) => api<{ linked: boolean }>('page_link_chat', { id, ...(chatId ? { chatId } : {}) }),
     /** The pages pinned on the household's other PCs that the active profile's person may open. */
     devicePages: () => api<{ devices: RemotePages[] }>('devices_pages', {}),

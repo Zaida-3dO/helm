@@ -118,6 +118,17 @@
   gap: 4px;
 }
 
+/* A row under drag: lifted off the list, following the pointer, text not selectable. */
+.pg-list-row.drag-live {
+  position: relative;
+  z-index: 2;
+  background: var(--hover);
+  border-radius: 6px;
+  opacity: 0.95;
+  cursor: grabbing;
+  user-select: none;
+}
+
 .pg-list-open {
   flex: 1;
   min-width: 0;
