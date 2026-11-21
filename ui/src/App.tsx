@@ -12,6 +12,12 @@ import { chatOps } from './api/ops.ts';
 import { ChatMenu, ProjectTags, Sidebar } from './sidebar/index.ts';
 import { ChatView } from './ChatView.tsx';
 import { SidePanel, registerLinkRoute } from './panel/index.ts';
+import { showSlot } from './panel/registry.ts';
+import { pageOps } from './pages/api.ts';
+import { openPageTab, openRemotePageTab } from './pages/open.ts';
+import { openTasks } from './tasks/index.ts';
+import { devicesStoreFor } from './devices/store.ts';
+import { remoteHostOf } from './devices/state.ts';
 import type { SendShortcut } from './composer/keymap.ts';
 import { SETTINGS_DIALOG, SettingsDialog } from './settings/index.ts';
 import './settings/general.tsx';
@@ -115,6 +121,8 @@ export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers:
       }),
     [bus],
   );
+  // Helm's own links, each checked by the link gate first (panel/links.ts). File links need no route
+  // here: they go to the host's resolve, as a path written in a reply does.
   // Chat links in replies (`helm://chats/<id>`) open that chat, if it still exists.
   useEffect(
     () =>
@@ -129,6 +137,45 @@ export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers:
       }),
     [ops, shell],
   );
+  // Page links (`helm://pages/<pin id>`) open that pinned page: on this PC for a chat that runs
+  // here, else on the PC the chat runs on (its pin ids are that PC's).
+  useEffect(() => {
+    const hostOf = async (chatId: string | null): Promise<string | null> => {
+      if (!chatId) return null;
+      const { chat } = await ops.get(chatId);
+      const devices = devicesStoreFor(api, bus);
+      devices.start();
+      return remoteHostOf(chat, devices.snapshot.list, devices.snapshot.selfUid);
+    };
+    const noRoom = 'The side panel has no room for another tab.';
+    const offPage = registerLinkRoute('page', async (req, ctx) => {
+      const pages = pageOps(api);
+      const host = await hostOf(ctx.chatId);
+      if (host) {
+        // The list names only the person's own pins; a pin of someone else's still opens by id.
+        const listed = await pages.devicePages().catch(() => null);
+        const found = listed?.devices.find((d) => d.deviceUid === host)?.pages.find((p) => p.id === req.pageId);
+        return openRemotePageTab(host, found ?? { id: req.pageId, path: '', title: 'Page' }) || noRoom;
+      }
+      const found = (await pages.list()).pages.find((p) => p.id === req.pageId);
+      if (!found) return 'That page is not pinned on this PC any more.';
+      return openPageTab(found.path) || noRoom;
+    });
+    // Panel links (`helm://panel/changes|files|tasks`) show that view for the chat.
+    const offPanel = registerLinkRoute('panel', async (req, ctx) => {
+      if (req.view === 'tasks') {
+        const host = await hostOf(ctx.chatId);
+        return openTasks(api, undefined, host ? ctx.chatId : null) || noRoom;
+      }
+      if (!ctx.chatId) return 'Open a chat first: that view belongs to a chat.';
+      showSlot(req.view);
+      return true;
+    });
+    return () => {
+      offPage();
+      offPanel();
+    };
+  }, [api, bus, ops]);
   // The global hotkey lives in the same key map as every other shortcut (scope "global": the host
   // registers it with Windows; the window listener never fires it).
   useEffect(() => {
