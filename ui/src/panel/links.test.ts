@@ -79,6 +79,10 @@ test('a chat link opens its chat through the chat route and nothing else', async
   const chat = (href: string) => ({ kind: 'chat' as const, href });
   assert.deepEqual(gateTarget(chat(`helm://chats/${id}`)), { action: 'chat', chatId: id });
   assert.deepEqual(gateTarget(chat(`helm://chats/${id}/messages/3`)), { action: 'chat', chatId: id, messageId: 3 });
+  // The gate reads the same tolerances: uppercase id, one trailing slash; anything more is refused.
+  assert.deepEqual(gateTarget(chat(`helm://chats/${id.toUpperCase()}`)), { action: 'chat', chatId: id });
+  assert.deepEqual(gateTarget(chat(`helm://chats/${id}/`)), { action: 'chat', chatId: id });
+  assert.deepEqual(gateTarget(chat(`helm://chats/${id}//`)), { action: 'refuse', reason: REFUSED.malformed });
   assert.deepEqual(gateTarget(chat(`helm://chats/${id}/x`)), { action: 'refuse', reason: REFUSED.malformed });
   assert.equal(gateTarget({ kind: 'chat' }).action, 'refuse');
   // A url target in the chat scheme is not a chat link: it is an address Helm does not open.
@@ -90,12 +94,14 @@ test('a chat link opens its chat through the chat route and nothing else', async
   const off = registerLinkRoute('chat', (req) => (req.chatId === id ? (opened.push(req.chatId), true) : 'That chat no longer exists.'));
   try {
     assert.deepEqual(await handleLink(chat(`helm://chats/${id}`), { chatId: 'c1' }), { ok: true, action: 'chat' });
+    // A written-up version of the same link opens the same chat, at the message it names.
+    assert.deepEqual(await handleLink(chat(`helm://chats/${id.toUpperCase()}/messages/7/`), { chatId: 'c1' }), { ok: true, action: 'chat' });
     const gone = '1b8f6a52-1c3d-4e5f-8a9b-0c1d2e3f4a5b';
     assert.deepEqual(await handleLink(chat(`helm://chats/${gone}`), { chatId: 'c1' }), { ok: false, reason: 'That chat no longer exists.' });
   } finally {
     off();
   }
-  assert.deepEqual(opened, [id]);
+  assert.deepEqual(opened, [id, id]);
   assert.equal(notices.at(-1), 'That chat no longer exists.');
 });
 

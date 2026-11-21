@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { classifyHref, helmFileHref, isImageName, parseChatLink, parseHelmLink, parseWikilink, targetAttrs, targetFromAttrs } from './links.ts';
+import { classifyHref, helmFileHref, isImageName, linkFromClick, parseChatLink, parseHelmLink, parseWikilink, targetAttrs, targetFromAttrs } from './links.ts';
 
 test('parseWikilink splits note, heading, block and alias', () => {
   assert.deepEqual(parseWikilink('Note'), { kind: 'vault', note: 'Note' });
@@ -38,19 +38,23 @@ test('classifyHref allows only the listed schemes', () => {
   }
 });
 
-test('chat links are accepted only in their strict forms', () => {
+test('chat links: strict forms, with the id case-insensitive and one trailing slash tolerated', () => {
   const id = '0b8f6a52-1c3d-4e5f-8a9b-0c1d2e3f4a5b';
   assert.deepEqual(classifyHref(`helm://chats/${id}`), { kind: 'chat', href: `helm://chats/${id}` });
   assert.deepEqual(parseChatLink(`helm://chats/${id}/messages/42`), { chatId: id, messageId: 42 });
+  // A hand-written or copied link: uppercase letters come back as the canonical lowercase id,
+  // and one trailing slash at the end is tolerated (the gate still re-validates the same way).
+  assert.deepEqual(parseChatLink(`helm://chats/${id.toUpperCase()}`), { chatId: id });
+  assert.deepEqual(parseChatLink(`helm://chats/${id}/`), { chatId: id });
+  assert.deepEqual(parseChatLink(`helm://chats/${id.toUpperCase()}/messages/42/`), { chatId: id, messageId: 42 });
   for (const bad of [
-    `helm://chats/${id}/`,
+    `helm://chats/${id}//`,
     `helm://chats/${id}?x=1`,
     `helm://chats/${id}#m`,
     `helm://u@chats/${id}`,
     `helm://chats:80/${id}`,
     `helm://chats/${id}/messages/abc`,
     `helm://chats/${id}/extra`,
-    `helm://chats/${id.toUpperCase()}`,
     'helm://chats/not-an-id',
     `other://chats/${id}`,
   ]) {
@@ -228,4 +232,34 @@ test('an obsidian:// link keeps the vault it names, through the data attributes 
   assert.deepEqual(t, { kind: 'vault', note: 'A/B', vault: 'My Vault' });
   const attrs = new Map(targetAttrs(t!));
   assert.deepEqual(targetFromAttrs((n) => attrs.get(n) ?? null), t);
+});
+
+test('a click on a rendered link is read the same whatever the button, and always cancelled', () => {
+  const id = '0b8f6a52-1c3d-4e5f-8a9b-0c1d2e3f4a5b';
+  const attrs = new Map(targetAttrs({ kind: 'chat', href: `helm://chats/${id}/messages/9` }));
+  const anchor = { getAttribute: (n: string) => attrs.get(n) ?? null };
+  for (const button of [0, 1]) {
+    let cancelled = false;
+    const event = {
+      target: { closest: (sel: string) => (sel === 'a[data-md-kind]' ? anchor : null) },
+      currentTarget: { contains: () => true },
+      preventDefault: () => {
+        cancelled = true;
+      },
+      button,
+    };
+    assert.deepEqual(linkFromClick(event), { kind: 'chat', href: `helm://chats/${id}/messages/9` }, `button ${button}`);
+    assert.ok(cancelled, `button ${button}: the webview must not navigate`);
+  }
+  // A click not on a link reads nothing and cancels nothing.
+  let cancelled = false;
+  const elsewhere = {
+    target: { closest: () => null },
+    currentTarget: { contains: () => true },
+    preventDefault: () => {
+      cancelled = true;
+    },
+  };
+  assert.equal(linkFromClick(elsewhere), null);
+  assert.equal(cancelled, false);
 });

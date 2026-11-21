@@ -2,6 +2,8 @@
 //
 // The renderer never navigates. Every anchor it produces carries its target in `data-md-*`
 // attributes, and the component turns a click into an `onLink(target)` call (index.ts contract).
+// Only chat links also carry their target as `href` (the canonical `helm://chats/...`), so a link
+// copied out of the app still names the chat; every other kind keeps a neutral `#`.
 
 import { driveForm, isRemoteOrDevicePath } from './paths.ts';
 import { hasExtension } from './pathrefs.ts';
@@ -27,16 +29,19 @@ export function isImageName(name: string): boolean {
   return IMAGE_EXTENSIONS.test(name);
 }
 
-const CHAT_LINK = /^helm:\/\/chats\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\/messages\/(\d{1,15}))?$/;
+const CHAT_LINK = /^helm:\/\/chats\/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})(?:\/messages\/(\d{1,15}))?\/?$/;
 
 /**
- * A chat link: `helm://chats/<id>`, optionally `/messages/<number>`. Strict on purpose: lowercase
- * canonical id, no user info, port, query, fragment, trailing slash or extra segments.
+ * A chat link: `helm://chats/<id>`, optionally `/messages/<number>`. The id is read case-insensitively
+ * and comes back lowercase, and one trailing slash is tolerated, because a hand-written or copied
+ * link often has one. Everything else stays strict: no user info, port, query, fragment, doubled
+ * slash or extra segments.
  */
 export function parseChatLink(href: string): { chatId: string; messageId?: number } | null {
   const m = CHAT_LINK.exec(href);
   if (!m) return null;
-  return m[2] === undefined ? { chatId: m[1] as string } : { chatId: m[1] as string, messageId: Number(m[2]) };
+  const chatId = (m[1] as string).toLowerCase();
+  return m[2] === undefined ? { chatId } : { chatId, messageId: Number(m[2]) };
 }
 
 /** The panel views a `helm://panel/<view>` link may show. */

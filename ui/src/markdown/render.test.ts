@@ -212,6 +212,16 @@ test('http, mailto, file and plain path links are url targets with an href', () 
   }
 });
 
+test('a chat link carries its canonical helm:// href, so a copied or unhandled click still points at the chat', () => {
+  const id = '0b8f6a52-1c3d-4e5f-8a9b-0c1d2e3f4a5b';
+  const html = renderToHtml('[x](helm://chats/0B8F6A52-1C3D-4E5F-8A9B-0C1D2E3F4A5B/messages/7/)');
+  assert.match(html, /<a class="md-link md-link-chat" href="helm:\/\/chats\/0b8f6a52-1c3d-4e5f-8a9b-0c1d2e3f4a5b\/messages\/7"/);
+  assert.match(html, /data-md-kind="chat"/);
+  // Other kinds keep the neutral '#': only chat links wear their address.
+  const other = renderToHtml('[x](helm://panel/changes)');
+  assert.match(other, /<a class="md-link md-link-helm" href="#"/);
+});
+
 test('bare URLs autolink', () => {
   assert.match(renderToHtml('go to https://example.com now'), /data-md-kind="url"/);
 });

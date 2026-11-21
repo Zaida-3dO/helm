@@ -3,6 +3,7 @@ import type { MouseEvent } from 'react';
 import { LONG_TEXT_CHARS, renderShort, sharedOffloader } from './engine.ts';
 import { linkFromClick, targetFromAttrs } from './links.ts';
 import type { LinkTarget } from './links.ts';
+import { handleLink } from '../panel/links.ts';
 import { ImageViewer } from '../transcript/ImageViewer.tsx';
 import { loadLocalImage } from './localImages.ts';
 import { diagramKind, renderDiagram, renderMath } from './mermaid.ts';
@@ -19,7 +20,10 @@ export interface MarkdownProps {
   interactive?: boolean;
   /** `owner/repo` of the chat's GitHub repository, so a bare `#12` links to its pull request. */
   mentionRepo?: string;
-  /** A vault or url link was clicked. Without a handler, clicks do nothing (they never navigate). */
+  /**
+   * A link was clicked. Without one, the click goes to the app's link gate (panel/links), so chat,
+   * page and panel links work in any Markdown; nothing ever navigates the webview.
+   */
   onLink?: (target: LinkTarget) => void;
   /**
    * Content for `![[...]]` embeds: Markdown text for a note (the section, if the target names a
@@ -62,6 +66,11 @@ function useRenderedHtml(text: string, options: RenderOptions): string {
   if (!long) return renderShort(text, stable);
   // While the worker is busy, keep showing the last result rather than flashing plain text.
   return off.cached(text, stable) ?? workerHtml ?? renderPlain(text.slice(0, 2000));
+}
+
+/** With no caller-supplied handler, the app's link gate decides what the link does. */
+function defaultOnLink(target: LinkTarget): void {
+  void handleLink(target, { chatId: null });
 }
 
 const INLINE_IMAGE = /^(?:data:image\/(?:png|jpe?g|gif|webp|avif|bmp|svg\+xml);|blob:)/i;
@@ -359,27 +368,34 @@ export function Markdown({
 
   const linkFor = (event: MouseEvent<HTMLElement>): LinkTarget | null => linkFromClick(event);
 
+  // One handler serves left clicks and middle clicks alike: a middle click on a link opens it the
+  // same way, it does not ask the webview to navigate. Without an onLink the gate decides.
+  const rootClick = (event: MouseEvent<HTMLElement>): void => {
+    const picture = (event.target as Element).closest<HTMLImageElement>('img.md-image-local');
+    if (picture?.src && event.currentTarget.contains(picture)) {
+      setZoomed({ url: picture.src, name: picture.alt || 'Picture' });
+      return;
+    }
+    const tool = (event.target as Element).closest<HTMLElement>('[data-md-tool]');
+    if (tool && event.currentTarget.contains(tool)) {
+      runTool(tool);
+      return;
+    }
+    const target = linkFor(event);
+    if (target) (onLink ?? defaultOnLink)(target);
+  };
+
   return (
     <>
       <div
         ref={ref}
         className={className ? `md-root ${className}` : 'md-root'}
-        onClick={(event) => {
-          const picture = (event.target as Element).closest<HTMLImageElement>('img.md-image-local');
-          if (picture?.src && event.currentTarget.contains(picture)) {
-            setZoomed({ url: picture.src, name: picture.alt || 'Picture' });
-            return;
-          }
-          const tool = (event.target as Element).closest<HTMLElement>('[data-md-tool]');
-          if (tool && event.currentTarget.contains(tool)) {
-            runTool(tool);
-            return;
-          }
-          const target = linkFor(event);
-          if (target) onLink?.(target);
-        }}
+        onClick={rootClick}
         onAuxClick={(event) => {
-          linkFor(event);
+          // The middle button opens the link; any other auxiliary button (browser back/forward)
+          // is only cancelled, so the webview never navigates to the href.
+          if (event.button === 1) rootClick(event);
+          else linkFor(event);
         }}
         dangerouslySetInnerHTML={incremental ? undefined : { __html: html }}
       />

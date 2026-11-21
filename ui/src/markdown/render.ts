@@ -10,7 +10,7 @@ import { escapeAttr, escapeHtml } from './escape.ts';
 import { splitFrontmatter } from './frontmatter.ts';
 import type { Property } from './frontmatter.ts';
 import { highlightCode } from './highlight.ts';
-import { classifyHref, isImageName, parseWikilink, targetAttrs } from './links.ts';
+import { classifyHref, isImageName, parseChatLink, parseWikilink, targetAttrs } from './links.ts';
 import { localImagePath } from './localImages.ts';
 import { pathInCode, pathInProse, PROSE_PATH_RUN, trimProseRun } from './pathrefs.ts';
 import type { LinkTarget } from './links.ts';
@@ -36,8 +36,21 @@ function attrString(attrs: Array<[string, string]>): string {
   return attrs.map(([k, v]) => ` ${k}="${escapeAttr(v)}"`).join('');
 }
 
+/**
+ * The canonical address of a chat link. Chat links carry their real `helm://` address as `href`,
+ * not `#`: a click this app never intercepts (a copied link, a middle click outside a handler)
+ * then still points where the link says it does, instead of the address bar showing `#`. Other
+ * kinds keep `#` — the renderer never lets the webview navigate.
+ */
+function canonicalChatHref(href: string | undefined): string | null {
+  const chat = href ? parseChatLink(href) : null;
+  if (!chat) return null;
+  return `helm://chats/${chat.chatId}${chat.messageId === undefined ? '' : `/messages/${chat.messageId}`}`;
+}
+
 function anchor(target: LinkTarget, innerHtml: string, extraClass = '', title = ''): string {
-  const href = target.kind === 'url' ? (target.href ?? '#') : '#';
+  let href = target.kind === 'url' ? (target.href ?? '#') : '#';
+  if (target.kind === 'chat') href = canonicalChatHref(target.href) ?? '#';
   const cls = `md-link md-link-${target.kind}${extraClass ? ` ${extraClass}` : ''}`;
   const titleAttr = title ? ` title="${escapeAttr(title)}"` : '';
   return (
