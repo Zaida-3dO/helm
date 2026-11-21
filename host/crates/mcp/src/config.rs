@@ -365,7 +365,7 @@ impl McpStore {
                     && !(without_chat_person && sends_chat_person(s))
                     && !(not_home && is_home_only(s))
             })
-            .map(|s| self.resolve_one(s, env, person, profile))
+            .map(|s| self.resolve_one(s, env, person, profile, not_home))
             .collect();
         Ok((revision, resolved))
     }
@@ -395,7 +395,7 @@ impl McpStore {
             .load()?
             .iter()
             .find(|s| s.enabled && s.id == id)
-            .map(|s| self.resolve_one(s, &|k| std::env::var(k).ok(), person, None)))
+            .map(|s| self.resolve_one(s, &|k| std::env::var(k).ok(), person, None, false)))
     }
 
     /// One draft server with its references resolved, for a connection test. A literal secret
@@ -403,7 +403,7 @@ impl McpStore {
     /// store as usual. A browser sign-in is attached only when the draft is at the address the
     /// sign-in was made for.
     pub fn resolve_draft(&self, s: &McpServer) -> ResolvedServer {
-        self.resolve_one(s, &|k| std::env::var(k).ok(), None, None)
+        self.resolve_one(s, &|k| std::env::var(k).ok(), None, None, false)
     }
 
     /// The server list as another PC of the same person may see it: every secret value, saved
@@ -471,6 +471,7 @@ impl McpStore {
         env: &dyn Fn(&str) -> Option<String>,
         person: Option<&str>,
         profile: Option<&str>,
+        not_home: bool,
     ) -> ResolvedServer {
         let t = &s.transport;
         let mut out = ResolvedServer {
@@ -511,8 +512,10 @@ impl McpStore {
                     &s.id,
                     r,
                     profile,
-                    false,
-                    &format!("Environment {k}"),
+                    RefSite {
+                        header: false,
+                        label: &format!("Environment {k}"),
+                    },
                     env,
                     &mut kept,
                 )?;
@@ -539,8 +542,10 @@ impl McpStore {
                         &s.id,
                         r,
                         profile,
-                        true,
-                        &format!("Header {k}"),
+                        RefSite {
+                            header: true,
+                            label: &format!("Header {k}"),
+                        },
                         env,
                         &mut secrets,
                     )?,
@@ -558,7 +563,8 @@ impl McpStore {
         }
         if s.preset.as_deref() == Some(crate::google::PRESET_ID) && out.error.is_none() {
             if let Some(profile_dir) = self.path.parent() {
-                crate::google::prepare(&self.creds, profile_dir, &mut out);
+                let scope = crate::google::GoogleScope { profile, not_home };
+                crate::google::prepare(&self.creds, profile_dir, scope, &mut out);
             }
         }
         // The built-in browser checks the grants Helm mints when the user approves one of its
@@ -596,11 +602,11 @@ impl McpStore {
         server_id: &str,
         r: &ValueRef,
         profile: Option<&str>,
-        header: bool,
-        label: &str,
+        site: RefSite<'_>,
         env: &dyn Fn(&str) -> Option<String>,
         secrets: &mut Vec<String>,
     ) -> Result<String, String> {
+        let RefSite { header, label } = site;
         // The chat's profile has its own value for this secret: read that one, bound to the
         // profile, and never the shared one or another profile's.
         let own = profile
@@ -662,6 +668,13 @@ impl McpStore {
         }
         Ok(format!("{}{}", r.prefix.as_deref().unwrap_or(""), raw))
     }
+}
+
+/// Where a reference is used: whether it is an HTTP header value, and how to name it in an error.
+#[derive(Clone, Copy)]
+struct RefSite<'a> {
+    header: bool,
+    label: &'a str,
 }
 
 fn read_secret_file(path: &str) -> Result<String, String> {

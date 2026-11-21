@@ -249,9 +249,34 @@ pub struct GoogleClientState {
 // ---- where things live ----------------------------------------------------------------------
 
 /// The folder the bridge program keeps its own sign-ins in (only for a server still carrying
-/// its own client secrets).
-pub fn credentials_dir(profile_dir: &Path) -> std::path::PathBuf {
-    profile_dir.join("mcp").join("google")
+/// its own client secrets, or one with Calendar set). `profile` is a profile other than the home
+/// one: it gets a folder of its own, so one person's chat never reaches another's sign-ins. The
+/// home profile (and an install with no profiles) keeps the folder sign-ins were always saved in.
+pub fn credentials_dir(profile_dir: &Path, profile: Option<&str>) -> std::path::PathBuf {
+    let base = profile_dir.join("mcp").join("google");
+    match profile {
+        Some(id) => base.join(
+            id.chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect::<String>(),
+        ),
+        None => base,
+    }
+}
+
+/// The profile a chat's Google servers are prepared for: its id, and whether it is a profile
+/// other than the home one. The default is an install with no person profiles, where nothing
+/// is scoped.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GoogleScope<'a> {
+    pub profile: Option<&'a str>,
+    pub not_home: bool,
 }
 
 /// The profile's sign-in client, as kept in the credential store.
@@ -354,9 +379,8 @@ fn listed_with_owner(creds: &CredentialStore) -> Vec<(GoogleAccount, Option<Stri
     accounts
 }
 
-/// Every account, whoever signed it in. The legacy bridge's guidance line uses this: the
-/// bridge serves its own per-account grants and is not itself scoped per profile. Chats and
-/// the Settings list use [`accounts_for`].
+/// Every account, whoever signed it in. Anything that acts for a person, or tells the agent
+/// which accounts it has, uses [`accounts_for`] instead.
 pub fn listed_accounts(creds: &CredentialStore) -> Vec<GoogleAccount> {
     listed_with_owner(creds)
         .into_iter()
@@ -620,9 +644,11 @@ fn remove_account(creds: &CredentialStore, email: &str) -> Result<(), String> {
     index_remove(creds, email)
 }
 
-/// `Accounts: work = a@x, b@y`, for the agent; none when nobody is signed in.
-fn accounts_line(creds: &CredentialStore) -> Option<String> {
-    let accounts = listed_accounts(creds);
+/// `Accounts: work = a@x, b@y`, for the agent: the accounts the chat's profile may use; none when
+/// there are none.
+fn accounts_line(creds: &CredentialStore, scope: GoogleScope<'_>) -> Option<String> {
+    let home = scope.profile.filter(|_| !scope.not_home);
+    let accounts = accounts_for(creds, scope.profile, home);
     if accounts.is_empty() {
         return None;
     }
@@ -738,7 +764,12 @@ fn clamp_gmail(args: &[String]) -> Vec<String> {
 /// to `gmail:drafts`: sending exists only as `app_gmail_send`, behind the Allow card, and the
 /// bridge must not offer a card-less send. The account list for the agent comes from the stored
 /// identities either way.
-pub fn prepare(creds: &CredentialStore, profile_dir: &Path, out: &mut ResolvedServer) {
+pub fn prepare(
+    creds: &CredentialStore,
+    profile_dir: &Path,
+    scope: GoogleScope<'_>,
+    out: &mut ResolvedServer,
+) {
     out.args = pin_workspace_mcp(&without_tool_flags(&out.args));
     let legacy = runs_workspace_mcp(&out.args)
         && [CLIENT_ID_ENV, CLIENT_SECRET_ENV]
@@ -759,8 +790,11 @@ pub fn prepare(creds: &CredentialStore, profile_dir: &Path, out: &mut ResolvedSe
             out.env
                 .entry(CLIENT_SECRET_ENV.into())
                 .or_insert_with(|| c.client_secret.clone());
+            // The saved client's secret is handed to the bridge as an environment variable, so
+            // the worker scrubs it from everything the server says.
+            out.secrets.push(c.client_secret);
         }
-        let dir = credentials_dir(profile_dir);
+        let dir = credentials_dir(profile_dir, scope.profile.filter(|_| scope.not_home));
         let _ = helm_core::privfs::create_private_dir_all(&dir);
         out.env
             .entry(CREDENTIALS_ENV.into())
@@ -783,7 +817,7 @@ pub fn prepare(creds: &CredentialStore, profile_dir: &Path, out: &mut ResolvedSe
         // Nothing signs this one in from the outside: Helm serves Gmail itself.
         out.host_served = true;
     }
-    if let Some(line) = accounts_line(creds) {
+    if let Some(line) = accounts_line(creds, scope) {
         out.guidance = Some(match out.guidance.take() {
             Some(g) if !g.is_empty() => format!("{g} {line}"),
             _ => line,
@@ -2015,6 +2049,34 @@ mod tests {
             resolve_account_for(creds, "home@x.com", Some("home"), Some("home")).as_deref(),
             Some("home@x.com")
         );
+        // What the agent is told lists only the chat's own profile's accounts, and a profile
+        // other than the home one keeps its bridge sign-ins in a folder of its own.
+        let line = |profile: Option<&str>, not_home: bool| {
+            accounts_line(creds, GoogleScope { profile, not_home })
+        };
+        assert_eq!(
+            line(Some("home"), false).as_deref(),
+            Some("Accounts: home@x.com")
+        );
+        assert_eq!(
+            line(Some("sam"), true).as_deref(),
+            Some("Accounts: sam@x.com")
+        );
+        assert_eq!(
+            line(None, false).as_deref(),
+            Some("Accounts: home@x.com, sam@x.com")
+        );
+        let (home_dir, sam_dir) = (
+            credentials_dir(d.path(), None),
+            credentials_dir(d.path(), Some("sam")),
+        );
+        assert_ne!(home_dir, sam_dir);
+        assert!(sam_dir.starts_with(&home_dir));
+        assert_eq!(
+            credentials_dir(d.path(), Some("../x")).parent(),
+            Some(home_dir.as_path()),
+            "a profile id never leaves the folder"
+        );
     }
 
     /// The profile helpers read the chats and profiles tables the way the rest of the host
@@ -2164,7 +2226,7 @@ mod tests {
         // server (the picker shows it) but host-served servers never run the bridge at all.
         let mut r = resolved();
         r.args = strings(&DEFAULT_ARGS);
-        prepare(creds, d.path(), &mut r);
+        prepare(creds, d.path(), GoogleScope::default(), &mut r);
         assert_eq!(r.args[0], "workspace-mcp==2.4.2");
         assert!(r.host_served, "no client of its own: Helm serves it");
         assert!(!r.env.contains_key(CREDENTIALS_ENV));
@@ -2184,12 +2246,12 @@ mod tests {
         old.env.insert(CLIENT_ID_ENV.into(), "old-id".into());
         old.env
             .insert(CLIENT_SECRET_ENV.into(), "old-secret".into());
-        prepare(creds, d.path(), &mut old);
+        prepare(creds, d.path(), GoogleScope::default(), &mut old);
         assert!(!old.host_served, "a legacy server keeps its bridge");
         assert_eq!(permission_of(&old.args), Some(GooglePermission::Drafts));
         assert_eq!(
             old.env[CREDENTIALS_ENV],
-            credentials_dir(d.path()).to_string_lossy()
+            credentials_dir(d.path(), None).to_string_lossy()
         );
         let port: u16 = old.env[PORT_ENV].parse().unwrap();
         assert!(port >= 1024);
@@ -2197,7 +2259,7 @@ mod tests {
         assert_eq!(old.env["OAUTHLIB_INSECURE_TRANSPORT"], "1");
         // A user's own port stands.
         old.env.insert(PORT_ENV.into(), "9999".into());
-        prepare(creds, d.path(), &mut old);
+        prepare(creds, d.path(), GoogleScope::default(), &mut old);
         assert_eq!(
             (old.env[PORT_ENV].as_str(), old.env["PORT"].as_str()),
             ("9999", "9999")
@@ -2212,7 +2274,7 @@ mod tests {
             "--permissions",
             "gmail:drafts",
         ]);
-        prepare(creds, d.path(), &mut both);
+        prepare(creds, d.path(), GoogleScope::default(), &mut both);
         assert_eq!(
             both.args,
             strings(&["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"])
@@ -2239,7 +2301,7 @@ mod tests {
             "gmail:send",
             "calendar:readonly",
         ]);
-        prepare(creds, d.path(), &mut cal);
+        prepare(creds, d.path(), GoogleScope::default(), &mut cal);
         assert!(!cal.host_served, "Calendar runs through the bridge");
         assert_eq!(
             cal.args,
@@ -2255,7 +2317,7 @@ mod tests {
         assert_eq!(cal.env[CLIENT_SECRET_ENV], "pc-secret");
         assert_eq!(
             cal.env[CREDENTIALS_ENV],
-            credentials_dir(d.path()).to_string_lossy()
+            credentials_dir(d.path(), None).to_string_lossy()
         );
         assert!(cal.env.contains_key(PORT_ENV));
         // A saved level the picker offers survives resolve on the stored server.
@@ -2268,7 +2330,7 @@ mod tests {
         creds.forget(CLIENT_ENTRY).unwrap();
         let mut lonely = resolved();
         lonely.args = strings(&["workspace-mcp", "--permissions", "calendar:full"]);
-        prepare(creds, d.path(), &mut lonely);
+        prepare(creds, d.path(), GoogleScope::default(), &mut lonely);
         assert!(lonely.host_served, "no client: no bridge");
         assert!(!lonely.env.contains_key(CLIENT_ID_ENV));
     }
@@ -2572,7 +2634,7 @@ mod tests {
             r.args = strings(saved);
             r.env.insert(CLIENT_ID_ENV.into(), "id".into());
             r.env.insert(CLIENT_SECRET_ENV.into(), "secret".into());
-            prepare(st.creds(), d.path(), &mut r);
+            prepare(st.creds(), d.path(), GoogleScope::default(), &mut r);
             assert!(!r.host_served, "{saved:?} keeps the bridge");
             assert_eq!(r.args, strings(want), "{saved:?}");
         }

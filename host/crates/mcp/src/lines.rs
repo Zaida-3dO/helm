@@ -183,7 +183,10 @@ pub fn register_worker_lines(l: &mut WorkerLines) {
             return;
         };
         if let Some(store) = ctx.services.get::<McpStatusStore>() {
-            if store.update(st.clone()) {
+            let profile = chat_person(ctx.services, ctx.chat_id)
+                .profile
+                .unwrap_or_default();
+            if store.update(&profile, st.clone()) {
                 ctx.events.emit(
                     AppEvent::new("mcp_status")
                         .with("serverId", st.server_id)

@@ -46,7 +46,15 @@ pub fn register_ops(reg: &mut OpRegistry) {
         })
         .blocking("mcp_servers_status", OpClass::Blocking, |ctx, _| {
             let st = ctx.services.need::<crate::status::McpStatusStore>()?;
-            to_value(&st.list())
+            // What the active profile's chats last said; with no profiles, the newest of any.
+            let active = ctx
+                .services
+                .get::<helm_core::db::Database>()
+                .and_then(|db| crate::google::active_profile(&db));
+            to_value(&match active {
+                Some(p) => st.list_for(&p),
+                None => st.list(),
+            })
         })
         .blocking("mcp_chat_problems", OpClass::Blocking, |ctx, args| {
             let a: ChatProblemsArgs = parse(args)?;

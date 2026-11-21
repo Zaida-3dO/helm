@@ -69,7 +69,7 @@ pub fn problems(services: &Services, chat_id: &str) -> Vec<ChatMcpProblem> {
             out.push(problem(id, name, state, err.to_owned()));
             continue;
         }
-        match status.get(id) {
+        match status.get(who.profile.as_deref().unwrap_or(""), id) {
             Some(st) if st.state == ServerState::Failed => {
                 out.push(problem(
                     id,
@@ -187,16 +187,16 @@ mod tests {
     }
 
     fn status_of(services: &Services, id: &str, state: ServerState, error: Option<&str>) {
-        services
-            .get::<McpStatusStore>()
-            .unwrap()
-            .update(ServerStatus {
+        services.get::<McpStatusStore>().unwrap().update(
+            "",
+            ServerStatus {
                 server_id: id.into(),
                 state,
                 error: error.map(str::to_owned),
                 tool_count: None,
                 at: 5,
-            });
+            },
+        );
     }
 
     struct Only;

@@ -1,6 +1,7 @@
 //! Per-server status across workers. Workers send `mcp_status` lines; the host
-//! keeps the newest per server and serves it to Settings → MCP (`mcp_servers_status`, and the
-//! `mcp_status` event as a signal to re-read).
+//! keeps the newest per server for each profile (one person's connection trouble is not
+//! another's) and serves it to Settings → MCP (`mcp_servers_status`, and the `mcp_status` event
+//! as a signal to re-read).
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -38,12 +39,14 @@ const MAX_ERROR: usize = 2_000;
 
 #[derive(Default)]
 pub struct McpStatusStore {
-    latest: Mutex<BTreeMap<String, ServerStatus>>,
+    /// Keyed by profile id (empty where there are no profiles) and server id.
+    latest: Mutex<BTreeMap<(String, String), ServerStatus>>,
 }
 
 impl McpStatusStore {
-    /// Keeps `s` if it is at least as new as what is held. Returns whether it changed anything.
-    pub fn update(&self, mut s: ServerStatus) -> bool {
+    /// Keeps `s`, a line from a chat of `profile`, if it is at least as new as what is held for
+    /// that profile. Returns whether it changed anything.
+    pub fn update(&self, profile: &str, mut s: ServerStatus) -> bool {
         if let Some(e) = &mut s.error {
             if e.len() > MAX_ERROR {
                 let mut cut = MAX_ERROR;
@@ -54,10 +57,11 @@ impl McpStatusStore {
             }
         }
         let mut m = self.latest.lock().unwrap_or_else(|p| p.into_inner());
-        match m.get(&s.server_id) {
+        let key = (profile.to_owned(), s.server_id.clone());
+        match m.get(&key) {
             Some(old) if old.at > s.at || *old == s => false,
             _ => {
-                m.insert(s.server_id.clone(), s);
+                m.insert(key, s);
                 true
             }
         }
@@ -66,25 +70,43 @@ impl McpStatusStore {
     /// Forgets servers that are no longer configured.
     pub fn retain(&self, ids: &[String]) {
         let mut m = self.latest.lock().unwrap_or_else(|p| p.into_inner());
-        m.retain(|k, _| ids.contains(k));
+        m.retain(|(_, id), _| ids.contains(id));
     }
 
-    /// The newest line for one server, if any worker has sent one.
-    pub fn get(&self, id: &str) -> Option<ServerStatus> {
+    /// The newest line for one server from a chat of `profile`, if any worker has sent one.
+    pub fn get(&self, profile: &str, id: &str) -> Option<ServerStatus> {
         self.latest
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .get(id)
+            .get(&(profile.to_owned(), id.to_owned()))
             .cloned()
     }
 
-    pub fn list(&self) -> Vec<ServerStatus> {
+    /// What `profile`'s chats last said of each server.
+    pub fn list_for(&self, profile: &str) -> Vec<ServerStatus> {
         self.latest
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .values()
-            .cloned()
+            .iter()
+            .filter(|((p, _), _)| p == profile)
+            .map(|(_, s)| s.clone())
             .collect()
+    }
+
+    /// The newest line for each server, from whichever profile sent it: for where no profile is
+    /// in play.
+    pub fn list(&self) -> Vec<ServerStatus> {
+        let m = self.latest.lock().unwrap_or_else(|p| p.into_inner());
+        let mut newest: BTreeMap<&str, &ServerStatus> = BTreeMap::new();
+        for s in m.values() {
+            if newest
+                .get(s.server_id.as_str())
+                .is_none_or(|o| o.at <= s.at)
+            {
+                newest.insert(s.server_id.as_str(), s);
+            }
+        }
+        newest.into_values().cloned().collect()
     }
 }
 
@@ -105,18 +127,24 @@ mod tests {
     #[test]
     fn newest_wins_across_workers() {
         let s = McpStatusStore::default();
-        assert!(s.update(st("a", ServerState::Connected, 10)));
+        assert!(s.update("p", st("a", ServerState::Connected, 10)));
         assert!(
-            !s.update(st("a", ServerState::Failed, 5)),
+            !s.update("p", st("a", ServerState::Failed, 5)),
             "an older line is ignored"
         );
         assert!(
-            !s.update(st("a", ServerState::Connected, 10)),
+            !s.update("p", st("a", ServerState::Connected, 10)),
             "a repeat changes nothing"
         );
-        assert!(s.update(st("a", ServerState::Failed, 11)));
+        assert!(s.update("p", st("a", ServerState::Failed, 11)));
         assert_eq!(s.list()[0].state, ServerState::Failed);
-        s.update(st("b", ServerState::Idle, 1));
+        // Another profile's chats have their own say, and one's trouble is not the other's.
+        assert!(s.update("q", st("a", ServerState::Connected, 12)));
+        assert_eq!(s.get("p", "a").unwrap().state, ServerState::Failed);
+        assert_eq!(s.get("q", "a").unwrap().state, ServerState::Connected);
+        assert_eq!(s.list_for("p")[0].state, ServerState::Failed);
+        assert!(s.list_for("nobody").is_empty());
+        s.update("p", st("b", ServerState::Idle, 1));
         s.retain(&["b".into()]);
         assert_eq!(s.list().len(), 1);
     }
@@ -132,7 +160,7 @@ mod tests {
         let mut long = st("x", ServerState::Failed, 1);
         long.error = Some("é".repeat(1500));
         let s = McpStatusStore::default();
-        s.update(long);
+        s.update("p", long);
         assert!(s.list()[0].error.as_ref().unwrap().len() <= 2000);
     }
 }
