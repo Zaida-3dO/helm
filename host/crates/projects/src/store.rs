@@ -933,7 +933,8 @@ pub fn update_project(tx: &Transaction<'_>, a: &ProjectUpdateArgs) -> Res<i64> {
         if p != is_pinned(tx, id, &scope)? {
             // Pinning puts the project at the end of that profile's pins. A pin belongs to the
             // profile that made it, so unpinning takes away that profile's pin (and one made
-            // before profiles) and leaves the others.
+            // before profiles) and leaves the others. With every profile shown, that is the
+            // profile a pin made there goes to (the home profile), so another person's pin stays.
             if p {
                 tx.execute(
                     "INSERT INTO project_pins(project_id, profile_id, sort, pinned_at)
@@ -945,7 +946,7 @@ pub fn update_project(tx: &Transaction<'_>, a: &ProjectUpdateArgs) -> Res<i64> {
                 tx.execute(
                     "DELETE FROM project_pins
                      WHERE project_id = ?1 AND (?2 = '' OR profile_id IN ('', ?2))",
-                    params![id, scope],
+                    params![id, owner],
                 )?;
                 tx.execute(
                     "UPDATE project_local SET position = NULL WHERE project_id = ?1",

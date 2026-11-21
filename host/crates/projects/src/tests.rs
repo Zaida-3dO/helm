@@ -1104,6 +1104,23 @@ fn group_counts_and_pins_follow_the_profile_the_sidebar_shows() {
     assert_eq!(first(&db), board);
     active(None);
     assert!(node(&db, &other).pinned && node(&db, &board).pinned);
+    // Unpinning with every profile shown takes away home's pin (where a pin made there goes) and
+    // leaves another profile's.
+    active(Some(&pat));
+    pin(&board, true);
+    active(None);
+    pin(&board, false);
+    active(Some(&pat));
+    assert!(
+        node(&db, &board).pinned,
+        "Pat's pin survives an unpin in All profiles"
+    );
+    active(Some(&home));
+    assert!(!node(&db, &board).pinned, "home's pin came off");
+    active(Some(&pat));
+    pin(&board, false);
+    active(Some(&home));
+    pin(&board, true);
     // Unpinning, from home's sidebar, is home's own pin only.
     active(Some(&home));
     pin(&board, false);
