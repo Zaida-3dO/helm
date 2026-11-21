@@ -9,9 +9,9 @@ test('an open-chat event follows, notices or is ignored by what it carries', () 
     // The tray or the pet: no guard, always select; a messageId rides along.
     [{ chatId: 'c2', messageId: 42 }, 'c1', { kind: 'select', chatId: 'c2', messageId: '42' }],
     // The chat that started it is still on screen: follow.
-    [{ chatId: 'c2', ifViewing: 'c1', title: 'Next (continued)' }, 'c1', { kind: 'select', chatId: 'c2', messageId: undefined }],
+    [{ chatId: 'c2', ifViewing: 'c1', title: 'Next' }, 'c1', { kind: 'select', chatId: 'c2', messageId: undefined }],
     // The user moved on: a notice naming the new chat instead of pulling the window.
-    [{ chatId: 'c2', ifViewing: 'c1', title: 'Next (continued)' }, 'c9', { kind: 'notice', chatId: 'c2', title: 'Next (continued)' }],
+    [{ chatId: 'c2', ifViewing: 'c1', title: 'Next' }, 'c9', { kind: 'notice', chatId: 'c2', title: 'Next' }],
     // A notice without a usable title falls back in the UI, not here.
     [{ chatId: 'c2', ifViewing: 'c1', title: '  ' }, null, { kind: 'notice', chatId: 'c2', title: null }],
   ];

@@ -91,19 +91,19 @@ test('the shown context size follows the last measured call and the model\'s rea
 });
 
 test('the roll-over threshold: the default constant, and the setting read through parse', () => {
-  assert.equal(ROLL_OVER_TOKENS, 180_000);
+  assert.equal(ROLL_OVER_TOKENS, 300_000);
   for (const [v, want] of [
-    [null, 180_000],
-    [undefined, 180_000],
-    [0, 180_000],
-    [-5, 180_000],
+    [null, 300_000],
+    [undefined, 300_000],
+    [0, 300_000],
+    [-5, 300_000],
     [1, 1],
     [250_000, 250_000],
     [2_000_000, 2_000_000],
-    [2_000_001, 180_000],
-    [1.5, 180_000],
-    ['100000', 180_000],
-    [{}, 180_000],
+    [2_000_001, 300_000],
+    [1.5, 300_000],
+    ['100000', 300_000],
+    [{}, 300_000],
   ] as const) {
     assert.equal(parseRolloverTokens(v), want, String(v));
   }

@@ -6643,9 +6643,18 @@ async fn roll_over_hands_the_work_to_a_successor_and_archives_the_old_chat() {
         Some(chat.as_str()),
         "the window follows only while the old chat is still on screen"
     );
-    assert!(
-        opened["title"].as_str().is_some_and(|t| !t.is_empty()),
-        "the notice names the successor: {opened:?}"
+    // The successor keeps the old chat's title exactly: same work, same name, no marker.
+    let old_title = h.col(&format!("SELECT title FROM chats WHERE id = '{chat}'"))[0].clone();
+    assert!(!old_title.is_empty());
+    assert_eq!(
+        h.col(&format!("SELECT title FROM chats WHERE id = '{new}'")),
+        [old_title.as_str()],
+        "the successor carries the old chat's title as it is"
+    );
+    assert_eq!(
+        opened["title"].as_str(),
+        Some(old_title.as_str()),
+        "the notice names the successor by that title: {opened:?}"
     );
     assert_eq!(
         h.col(&format!("SELECT project_id = (SELECT project_id FROM chats WHERE id = '{chat}') FROM chats WHERE id = '{new}'")),

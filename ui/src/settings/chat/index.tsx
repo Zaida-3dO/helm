@@ -315,7 +315,7 @@ function ChatPane() {
         <TextInput
           aria-label="Ask a chat to roll over at this many tokens"
           data-testid="settings-rollover-tokens"
-          placeholder="180000 (0 = never)"
+          placeholder="300000 (0 = never)"
           spellCheck={false}
           value={rollTokens}
           onChange={(e) => setRollTokens(e.target.value)}

@@ -48,7 +48,7 @@ pub const REQUEST: &str = "This chat is being rolled over into a fresh one becau
 
 /// Context size at which a quiet chat is asked to roll over, when the setting is unset
 /// (`0` in the setting switches the asking off).
-pub const DEFAULT_ROLLOVER_TOKENS: i64 = 180_000;
+pub const DEFAULT_ROLLOVER_TOKENS: i64 = 300_000;
 
 /// Chats the automatic trigger has already fired for. Once per process run: after a restart a
 /// chat still over the threshold is asked again, which is bounded (a successor starts well under
@@ -546,8 +546,9 @@ async fn carry_on(
             chat.id
         );
     }
-    let title: String = chat.title.chars().take(200).collect();
-    let successor_title = format!("{title} (continued)");
+    // The successor keeps the old chat's title as it is: the work keeps its name across a roll
+    // over, and the hand-off message inside the new chat says which chat it came from.
+    let successor_title = chat.title.clone();
     let _ = crate::titles::rename(rt, &new_id, &successor_title);
     let sent = crate::submit::chat_send(
         rt,
