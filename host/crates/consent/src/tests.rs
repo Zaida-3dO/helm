@@ -809,8 +809,10 @@ fn upkeep_holds_an_applying_note_until_the_outcome_or_a_stop() {
             .map(|d| d.text)
             .collect()
     };
-    // Allowed (applying about to start): no note.
+    // Allowed (applying about to start): no note. The card carries a picture, so upkeep
+    // reads a row with a text value just before used_at.
     let a = stage(&e, "c0", "alpha", T0);
+    store::set_picture(&e.db, &e.kinds, &a.id, "gallery-1").unwrap();
     store::decide(&e.db, &e.kinds, &a.id, Decision::Allow, None, None, T0).unwrap();
     assert!(owed(T0 + 1).is_empty());
     // Spent, no outcome yet: still none; ten minutes on, Helm says it stopped while applying.

@@ -341,6 +341,24 @@ fn by_tool_use(tx: &Transaction<'_>, chat: &str, id: &str) -> rusqlite::Result<O
 const COLUMNS: &str = "id, chat_id, kind, summary, reason, evidence, state, grant_minutes,
     created_at, expires_at, decided_at, grant_expires_at, note, outcome, decided_via, picture";
 
+/// How many columns [`COLUMNS`] names. The upkeep select appends `used_at` after all of them,
+/// so it is read at this index; counting from `COLUMNS` keeps the two in step when a column
+/// is added.
+const COLUMN_COUNT: usize = count_columns(COLUMNS);
+
+const fn count_columns(columns: &str) -> usize {
+    let bytes = columns.as_bytes();
+    let mut count = 1;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b',' {
+            count += 1;
+        }
+        i += 1;
+    }
+    count
+}
+
 fn row_to_view(kinds: &AllowKinds, r: &rusqlite::Row<'_>) -> rusqlite::Result<ConsentRequest> {
     let kind: String = r.get(2)?;
     Ok(ConsentRequest {
@@ -912,7 +930,10 @@ pub fn upkeep(db: &Database, kinds: &AllowKinds, now: i64) -> Result<Upkeep, Api
         ))?;
         let deliveries = st
             .query_map([], |r| {
-                Ok((row_to_view(kinds, r)?, r.get::<_, Option<i64>>(15)?))
+                Ok((
+                    row_to_view(kinds, r)?,
+                    r.get::<_, Option<i64>>(COLUMN_COUNT)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
