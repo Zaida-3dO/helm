@@ -20,6 +20,15 @@ fn chat_arg(ctx: &ToolCtx, mut args: Map<String, Value>) -> Value {
     Value::Object(args)
 }
 
+/// The `helm://pages/<id>` link that opens a page from a reply, or null for an id Helm would not
+/// make.
+fn link_of(page: &Value) -> Value {
+    page["id"]
+        .as_str()
+        .filter(|id| crate::panel_open::valid_pin_id(id))
+        .map_or(Value::Null, |id| json!(crate::panel_open::page_link(id)))
+}
+
 async fn pin(ctx: ToolCtx, a: Value) -> ToolResult {
     let mut args = Map::new();
     for k in ["path", "title"] {
@@ -41,6 +50,7 @@ async fn pin(ctx: ToolCtx, a: Value) -> ToolResult {
     };
     Ok(json!({
         "pinned": {"id": page["id"], "title": page["title"], "path": page["path"]},
+        "link": link_of(page),
         "created": r["created"],
         "note": note,
     }))
@@ -58,6 +68,7 @@ async fn list(ctx: ToolCtx, _a: Value) -> ToolResult {
                         "title": p["title"],
                         "path": p["path"],
                         "linkedChat": p["chatId"],
+                        "link": link_of(p),
                     })
                 })
                 .collect()
@@ -90,7 +101,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .async_tool(
         ToolSpec::read(
             "app_list_pages",
-            "List the pages pinned for the user's profile: id, title, file path and the chat each is linked to. Use it to find a page you built earlier before changing its file.",
+            "List the pages pinned for the user's profile: id, title, file path, the chat each is linked to and a helm:// link that opens it. Use it to find a page you built earlier before changing its file, or to show one with app_open_panel.",
             json!({"type": "object", "properties": {}, "additionalProperties": false}),
         )
         .self_locking(),
@@ -163,6 +174,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(p["pinned"]["id"], "p1");
+        assert_eq!(p["link"], "helm://pages/p1");
         let (op, args) = last();
         assert_eq!(op, "page_pin");
         assert_eq!(
@@ -173,6 +185,7 @@ mod tests {
         // List: ids, titles and links for the calling chat's profile.
         let l = call(&fake, "app_list_pages", json!({})).await.unwrap();
         assert_eq!(l["pages"][0]["linkedChat"], "me");
+        assert_eq!(l["pages"][0]["link"], "helm://pages/p1");
         assert_eq!(last().1, json!({"chatId": "me"}));
 
         // The op's refusal reaches the agent, and nothing changed.

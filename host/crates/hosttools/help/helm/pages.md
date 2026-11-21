@@ -10,4 +10,4 @@ It gets a `helm` object:
 - `await helm.sendMessage({text, data?, title?})`: asks the user to confirm, then posts the text into this chat as a message from the page, never as the user's own words
 - `helm.openLink(url)`
 
-To change a page, rewrite its file: the open tab reloads and keeps its saved state. A page cannot start work by itself. Pin one with app_pages {action: "pin", path, title?}.
+To change a page, rewrite its file: the open tab reloads and keeps its saved state. A page cannot start work by itself. Pin one with app_pages {action: "pin", path, title?}; show it to the user with app_open_panel {pageId}. Each page has a link, helm://pages/<id>, that opens it from a reply.

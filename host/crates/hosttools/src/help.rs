@@ -102,6 +102,11 @@ pub const SHIPPED: &[Shipped] = &[
         name: "consent",
         text: include_str!("../help/helm/consent.md"),
     },
+    Shipped {
+        namespace: "helm",
+        name: "screen",
+        text: include_str!("../help/helm/screen.md"),
+    },
 ];
 
 /// A shipped file split into its one-line summary and its body.
