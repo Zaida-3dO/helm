@@ -17,7 +17,13 @@ function turn() {
 }
 
 const shape = (items: Item[]) =>
-  items.map((i) => (i.kind === 'row' ? i.row.id : `${i.kind}[${i.rows.map((r) => r.id).join(',')}]`));
+  items.map((i) =>
+    i.kind === 'row'
+      ? i.row.id
+      : 'rows' in i
+        ? `${i.kind}[${i.rows.map((r: { id: number }) => r.id).join(',')}]`
+        : i.kind,
+  );
 
 test('a settled turn folds its tool calls, keeping notes, errors and the final reply', () => {
   const items = layout(turn(), false);

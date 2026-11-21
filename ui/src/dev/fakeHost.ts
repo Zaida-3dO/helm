@@ -1319,6 +1319,15 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       c.chat = { ...c.chat, archived: true, nextSessionId: s.chat.id, stackId, status: 'idle' };
       s.chat = { ...s.chat, title: c.chat.title, titleState: 'generated', projectId: c.chat.projectId, stackId, prevSessionId: c.chat.id, started: true };
       addRow(s, { role: 'user', text: 'Carry on where the earlier session left off: scroll up to read it.' });
+      // Chats started from the old session now hang under its successor, as the host does.
+      const moved: string[] = [];
+      for (const k of chats.values()) {
+        if (k.chat.parentChatId === c.chat.id) {
+          k.chat = { ...k.chat, parentChatId: s.chat.id };
+          moved.push(k.chat.id);
+        }
+      }
+      for (const id of moved) emitChat(find(id));
       emitChat(c);
       emitThread(s);
       emitChat(s);

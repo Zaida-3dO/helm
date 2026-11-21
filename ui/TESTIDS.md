@@ -315,3 +315,4 @@ Send now `Ctrl+Alt+Enter`, Stop and send waiting messages `Esc`.
 | `tool-allow-state` (remote) | On a chat of another device, an Allow request still waiting reads "Waiting for approval on <device>" | `data-state="remote"` |
 | `newchat-device` / `newchat-device-note` | The new-chat page aimed at another device: "New chat on <device>", and the line saying it is offline, read-only, reconnecting or has no project | `newchat-device`: `data-tone`; `newchat-project` lists that device's boards first, then its folders, and ends with a New project… row |
 | `device-project`, `device-project-title`, `device-project-description`, `device-project-folder`, `device-project-submit`, `device-project-error` | New project on another device (from the new-chat page aimed at it): title, description, one of its folders, submit and error line | |
+| `usage-card-asked` | The usage card's line saying when Helm last asked for the plan figures ("Asked <time> ago") | |
