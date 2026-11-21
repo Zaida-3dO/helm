@@ -13,11 +13,11 @@ use crate::serve::{ChatPort, ChatState, PageScope, PortResult, SentFile};
 use crate::wire::{
     code, AnswerArgs, ArchiveArgs, AttachmentGetArgs, BlobReadArgs, BlobRef, BoardCancelArgs,
     BoardReadArgs, CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo,
-    DevicePerson, ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, PageIdArgs,
-    PagesReadArgs, PanelStageArgs, PersonInfo, ProfileInfo, ProjectCreateArgs, ProjectInfo,
-    ProjectSetArgs, QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs, SetModelArgs,
-    SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs,
-    WireError, MAX_BLOB_BYTES,
+    DevicePerson, EditOpenArgs, ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs,
+    PageIdArgs, PagesReadArgs, PanelStageArgs, PersonInfo, ProfileInfo, ProjectCreateArgs,
+    ProjectInfo, ProjectSetArgs, QuickOpenArgs, RemoteChat, RenameArgs, ResendArgs, RollOverArgs,
+    SetModelArgs, SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs,
+    VerbositySetArgs, WireError, MAX_BLOB_BYTES,
 };
 use base64::Engine as _;
 use helm_chats::submit::{self, HostFile, HostImage, HostSend};
@@ -1945,6 +1945,47 @@ impl ChatPort for HostPort {
                 json!({ "chatId": a.chat_id, "messageId": a.message_id }),
             )
             .await
+        })
+    }
+
+    fn edit_open(&self, a: EditOpenArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            self.op(
+                "message_edit_open",
+                json!({ "chatId": a.chat_id, "messageId": a.message_id }),
+            )
+            .await
+        })
+    }
+
+    fn resend(&self, a: ResendArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            // The two-phase edit and the transcript rewind are the chat's own op's business:
+            // the actor closes the worker, applies the edit and emits the refresh the copies
+            // follow.
+            self.op(
+                "message_resend",
+                json!({
+                    "chatId": a.chat_id,
+                    "messageId": a.message_id,
+                    "revision": a.revision,
+                    "submissionId": a.submission_id,
+                    "text": a.text,
+                }),
+            )
+            .await
+        })
+    }
+
+    fn delete(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
+        Box::pin(async move {
+            self.here(&chat_id)?;
+            // The install's own delete rules still decide (an archived, idle chat only); the
+            // delete emits `chat_removed`, which is what takes the copy away on the other PC.
+            self.op("chat_delete", json!({ "chatId": chat_id })).await?;
+            Ok(())
         })
     }
 

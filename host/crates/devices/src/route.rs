@@ -1344,6 +1344,8 @@ fn read_op(op: &str) -> Option<&'static str> {
         "panel_context_get" => "context_on",
         "quick_open" => "quick_open",
         "checkpoint_info" => "checkpoint",
+        // The edit window opens on the mirrored text: a read like the transcript itself.
+        "message_edit_open" => "edit_open",
         "chat_folder" => "chat_folder",
         "attachment_get" => "attachment_get",
         "file_read" | "dir_list" => "file_view",
@@ -1783,6 +1785,12 @@ impl RemoteChats for Mirror {
                 "chat_fork" => Some("fork"),
                 "chat_roll_over" => Some("roll_over"),
                 "chat_export_markdown" => Some("export_markdown"),
+                // The two-phase edit answers with its new submission and the chat, not the
+                // chat record alone; the copies' transcript rewinds follow the device's
+                // refresh news. A delete answers null; the device's `chat_removed` news is
+                // what takes the copy away here.
+                "message_resend" => Some("resend"),
+                "chat_delete" => Some("delete"),
                 _ => None,
             } {
                 m.check_live(&device)?;

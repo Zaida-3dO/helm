@@ -21,13 +21,13 @@ use crate::tunnel::{self, LocalLoopback, TunnelOut, Tunnels};
 use crate::wire::{
     code, AnswerArgs, ArchiveArgs, AttachPutArgs, AttachmentGetArgs, AttachmentRef, BlobReadArgs,
     BoardCancelArgs, BoardReadArgs, Caller, ChatIdArgs, CheckpointArgs, ConsentDecideArgs,
-    CreateArgs, DefaultsArgs, DeviceFrame, DeviceInfo, DevicePerson, ForkArgs, ForwardCloseArgs,
-    ForwardOpenArgs, Frame, Hello, MoveProfileArgs, MuteArgs, Op, OrganizeArgs, PageArgs,
-    PageIdArgs, PagesReadArgs, PanelStageArgs, PeerDevice, ProjectCreateArgs, ProjectSetArgs, Push,
-    QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs, SendArgs, SetModelArgs, SetPermissionArgs,
-    ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError,
-    MAX_CHUNK_BYTES, MAX_PAGE_ROWS, MAX_SEND_ATTACHMENTS, MAX_SEND_BYTES, MAX_UPLOAD_BYTES,
-    SUB_ROWS,
+    CreateArgs, DefaultsArgs, DeviceFrame, DeviceInfo, DevicePerson, EditOpenArgs, ForkArgs,
+    ForwardCloseArgs, ForwardOpenArgs, Frame, Hello, MoveProfileArgs, MuteArgs, Op, OrganizeArgs,
+    PageArgs, PageIdArgs, PagesReadArgs, PanelStageArgs, PeerDevice, ProjectCreateArgs,
+    ProjectSetArgs, Push, QuickOpenArgs, RemoteChat, RenameArgs, ResendArgs, RollOverArgs,
+    SendArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs,
+    VerbositySetArgs, WireError, MAX_CHUNK_BYTES, MAX_PAGE_ROWS, MAX_SEND_ATTACHMENTS,
+    MAX_SEND_BYTES, MAX_UPLOAD_BYTES, SUB_ROWS,
 };
 use base64::Engine as _;
 use helm_chats::types::{
@@ -292,6 +292,36 @@ pub trait ChatPort: Send + Sync {
     fn submission(&self, a: SubmissionArgs) -> BoxFut<'_, PortResult<()>>;
     /// What going back to a message means for a chat here.
     fn checkpoint(&self, a: CheckpointArgs) -> BoxFut<'_, PortResult<Value>>;
+    /// A sent message's text and revision, for the edit window here. A read: the transcript
+    /// already mirrors across, so this answers with the run switch off.
+    fn edit_open(&self, _a: EditOpenArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async {
+            Err(WireError::new(
+                code::REFUSED,
+                "Messages in this chat can't be opened for editing from another PC.",
+            ))
+        })
+    }
+    /// Stage an edit of a sent message and send the new text: the edited message and everything
+    /// after it leave the transcript here, and the chat answers what its own resend answers with.
+    fn resend(&self, _a: ResendArgs) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async {
+            Err(WireError::new(
+                code::REFUSED,
+                "Messages in this chat can't be edited from another PC.",
+            ))
+        })
+    }
+    /// Delete one chat here for good. The caller has already checked that the asking person
+    /// owns the chat; this is the install's own delete.
+    fn delete(&self, _chat_id: String) -> BoxFut<'_, PortResult<()>> {
+        Box::pin(async {
+            Err(WireError::new(
+                code::REFUSED,
+                "Chats on this PC can't be deleted from another PC.",
+            ))
+        })
+    }
     /// The needs-you and flag rows of this install's chats among `chat_ids`.
     fn attention_rows(&self, chat_ids: Vec<String>) -> BoxFut<'_, PortResult<Value>>;
     /// This install's board-item links for `chat_ids`.
@@ -1122,6 +1152,28 @@ impl Inner {
                 done(json!({}))
             }
             Op::Checkpoint(a) => done(self.port.checkpoint(a).await?),
+            Op::EditOpen(a) => done(self.port.edit_open(a).await?),
+            Op::Resend(a) => done(self.port.resend(a).await?),
+            Op::Delete(a) => {
+                // Deleting a chat for good is the owner's alone. A household member may drive
+                // another person's chat, but not erase it: shared is not enough either.
+                if let Asker::Household { person_id, .. } = asker {
+                    let chat = self
+                        .port
+                        .chat_brief(a.chat_id.clone())
+                        .await?
+                        .ok_or_else(WireError::not_found)?
+                        .to_value();
+                    if !subs::owned_by(&chat, person_id) {
+                        return Err(WireError::new(
+                            code::REFUSED,
+                            "Only the person this chat belongs to can delete it from another PC.",
+                        ));
+                    }
+                }
+                self.port.delete(a.chat_id).await?;
+                done(Value::Null)
+            }
             Op::Attention(a) => done(self.port.attention_rows(a.chat_ids).await?),
             Op::ItemLinks(a) => done(self.port.item_links(a.chat_ids).await?),
             Op::Snooze(a) => {

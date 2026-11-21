@@ -9,7 +9,7 @@
 //! |---|---|
 //! | `chat_get`, `transcript_page` | the mirror (and the device that runs the chat, for older pages) |
 //! | `chat_send`, `chat_stop`, `interaction_answer`, `chat_set_model`, `chat_rename`, `chat_archive`, `chat_restore` | the device that runs the chat |
-//! | `chat_fork`, `chat_compact`, `chat_roll_over`, `chat_stack`, `stack_find`, `usage_cost`, `chat_export_markdown`, `chat_organize`, `unread_mark`, `chat_mute`, `chat_set_permission_mode`, `chat_verbosity_get`/`set`, `chat_warm`, `chat_stop_no_resend`, `tool_stop`, `checkpoint_info`, `attention_snooze`/`address`, `panel_context_get`, `quick_open`, `chat_folder`, `file_read`, `dir_list`, `file_stat`, `archive_list`, `path_resolve`, `changes`, `diff`, `changes_stage`, `changes_unstage` | the same op on the device that runs the chat (panel paths stay inside the chat's project folder there) |
+//! | `chat_fork`, `chat_compact`, `chat_roll_over`, `chat_stack`, `stack_find`, `usage_cost`, `chat_export_markdown`, `chat_organize`, `unread_mark`, `chat_mute`, `chat_set_permission_mode`, `chat_verbosity_get`/`set`, `chat_warm`, `chat_stop_no_resend`, `tool_stop`, `checkpoint_info`, `message_edit_open`, `message_resend`, `chat_delete`, `attention_snooze`/`address`, `panel_context_get`, `quick_open`, `chat_folder`, `file_read`, `dir_list`, `file_stat`, `archive_list`, `path_resolve`, `changes`, `diff`, `changes_stage`, `changes_unstage` | the same op on the device that runs the chat (panel paths stay inside the chat's project folder there; a delete is for the chat's owner and answers there, with the copy following the device's news) |
 //! | `shown_gallery_get`, `shown_image_get`, `shown_image_thumb`, `option_board_state`, `option_board_answer`, `attachment_get`, `local_image_get` (with the `chatId`) | the device that runs the chat; full-size pictures and a reply's picture inside the chat's project folder come across in chunks |
 //! | `message_output_save` | the output comes across in chunks and is saved on this PC, where the person chose |
 //! | `draft_save` | the mirror alone: a draft never leaves this PC |
@@ -225,6 +225,11 @@ async fn route(
         | "attention_address"
         | "chat_warm"
         | "chat_stop_no_resend"
+        // Editing a sent message and deleting a chat go to the PC that runs it: the edit
+        // applies there, and a delete answers only for the chat's owner.
+        | "message_edit_open"
+        | "message_resend"
+        | "chat_delete"
         // What an agent showed in the chat, and the pictures a reply names: read there.
         | "shown_gallery_get"
         | "shown_image_get"

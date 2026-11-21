@@ -745,6 +745,27 @@ pub struct CheckpointArgs {
     pub message_id: i64,
 }
 
+/// Open a sent message for editing, read where the chat runs: the answer is the message's text
+/// and the revision a later `resend` must carry back.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EditOpenArgs {
+    pub chat_id: String,
+    pub message_id: i64,
+}
+
+/// Stage an edit of a sent message and send the new text, where the chat runs. It answers what
+/// the chat's own resend answers with; the transcript rewinds there when the worker closes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResendArgs {
+    pub chat_id: String,
+    pub message_id: i64,
+    pub revision: i64,
+    pub submission_id: String,
+    pub text: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChatIdsArgs {
@@ -921,6 +942,12 @@ pub enum Op {
     Submission(SubmissionArgs),
     /// What going back to a message means there, for the confirmation dialog. A read.
     Checkpoint(CheckpointArgs),
+    /// A sent message's text, for the edit window. A read: the transcript is mirrored anyway.
+    EditOpen(EditOpenArgs),
+    /// Replace a sent message and everything after it, on the PC that runs the chat.
+    Resend(ResendArgs),
+    /// Delete a chat here for good. The chat's owner only; answered behind their confirm.
+    Delete(ChatIdArgs),
     /// Needs-you and idle-check flag rows for named chats. A read.
     Attention(ChatIdsArgs),
     /// Board-item links for named chats, as the PC that runs them lists them. A read.
@@ -1046,6 +1073,9 @@ impl Op {
             "tool_stop" => Op::ToolStop(args(a)?),
             "submission" => Op::Submission(args(a)?),
             "checkpoint" => Op::Checkpoint(args(a)?),
+            "edit_open" => Op::EditOpen(args(a)?),
+            "resend" => Op::Resend(args(a)?),
+            "delete" => Op::Delete(args(a)?),
             "attention" => Op::Attention(args(a)?),
             "item_links" => Op::ItemLinks(args(a)?),
             "snooze" => Op::Snooze(args(a)?),
@@ -1111,6 +1141,8 @@ impl Op {
                 | Op::Warm(_)
                 | Op::ToolStop(_)
                 | Op::Submission(_)
+                | Op::Resend(_)
+                | Op::Delete(_)
                 | Op::Snooze(_)
                 | Op::Address(_)
                 | Op::DefaultsSet(_)

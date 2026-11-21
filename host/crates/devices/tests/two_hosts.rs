@@ -1613,9 +1613,8 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
     );
     until(|| copy_state() == Some((Some(0), Some(false)))).await;
 
-    // Every chat op on a copied chat: answered from the copy, sent to the device, answered
-    // quietly, or refused with the sentence that says where to do it.
-    let elsewhere = "This chat runs on Desk. Do that there.";
+    // Every chat op on a copied chat: answered from the copy, sent to the device, or answered
+    // quietly. Anything the PC that runs the chat must decide answers with that PC's words.
     let table: Vec<(&str, Value, Result<Value, &str>)> = vec![
         ("transcript_page", json!({"chatId": "c1"}), Ok(json!(null))),
         // A roll-over stack lives whole on the PC that runs the chat: its calls answer
@@ -1843,8 +1842,17 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
             json!({"chatId": "c1"}),
             Ok(json!(null)),
         ),
-        ("chat_delete", json!({"chatId": "c1"}), Err(elsewhere)),
-        ("message_edit_open", json!({"chatId": "c1"}), Err(elsewhere)),
+        // Reading a sent message for the edit window answers with the text stored on the PC
+        // that runs the chat. (Its staged resend, and the transcript rewind that follows it,
+        // are exercised at the end of the test, once every chat op has had its turn.)
+        (
+            "message_edit_open",
+            json!({"chatId": "c1", "messageId": 1}),
+            Ok(json!({"messageId": 1, "revision": 5, "text": "hello"})),
+        ),
+        // A permanent delete travels too; this watcher acts as the PC's own person, and the
+        // install's own delete rules still answer there.
+        ("chat_delete", json!({"chatId": "c1"}), Ok(json!(null))),
         (
             "interaction_answer",
             json!({"chatId": "c1", "requestId": "x", "confirmed": true}),
@@ -2373,6 +2381,43 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         0
     );
     assert!(b.mirror.owner("c1").is_some());
+
+    // The two-phase edit end to end. The staged resend crosses to the PC that runs the chat,
+    // and the transcript rewinds there: the edited message and everything after it leave, and
+    // the resent text stands in their place. The device's refresh news — what the chat's actor
+    // emits once the edit is applied — is what makes the copy follow: it clears its rows and
+    // re-reads from the start.
+    api.call_host(
+        "message_resend",
+        json!({
+            "chatId": "c1", "messageId": 1, "revision": 5,
+            "submissionId": "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b0a",
+            "text": "hello again",
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(port.st().edit_opens, [("c1".to_owned(), 1)]);
+    assert_eq!(
+        port.st().resends,
+        [helm_devices::wire::ResendArgs {
+            chat_id: "c1".to_owned(),
+            message_id: 1,
+            revision: 5,
+            submission_id: "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b0a".to_owned(),
+            text: "hello again".to_owned(),
+        }]
+    );
+    assert_eq!(port.st().deleted, ["c1"]);
+    assert_eq!(
+        port.st()
+            .rows
+            .get("c1")
+            .map(|r| r.iter().map(|m| (m.id, m.text.clone())).collect::<Vec<_>>()),
+        Some(vec![(6, "hello again".to_owned())]),
+    );
+    host.observe(&refresh());
+    until(|| rows_of(&b, "c1") == vec![(6, "hello again".to_owned())]).await;
 }
 
 /// The hello on the production port, through the real op dispatcher: the catalogue op is
@@ -3128,6 +3173,11 @@ async fn a_household_member_reads_the_whole_list_and_is_refused_nothing() {
             json!({"projectId": "proj-1", "path": "/etc"}),
             Some(code::BAD_ARGS),
         ),
+        // Erasing a chat for good is the one exception: her own chat she may delete from
+        // afar, another person's not — even when it is shared with her.
+        ("delete", json!({"chatId": "hers"}), None),
+        ("delete", json!({"chatId": "mine"}), Some(code::REFUSED)),
+        ("delete", json!({"chatId": "shared"}), Some(code::REFUSED)),
     ];
     for (op, args, want) in cases {
         let got = sam.rpc.call("dev-a", op, args.clone()).await;

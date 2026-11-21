@@ -6,11 +6,11 @@ use crate::serve::{ChatPort, ChatState, PageScope, PanelRead, PortResult, SentFi
 use crate::wire::{
     code, AnswerArgs, ArchiveArgs, AttachmentGetArgs, BlobReadArgs, BlobRef, BoardCancelArgs,
     BoardReadArgs, CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo,
-    DevicePerson, ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, PageIdArgs,
-    PagesReadArgs, PanelStageArgs, PersonInfo, ProfileInfo, ProjectCreateArgs, ProjectInfo,
-    ProjectSetArgs, QuickOpenArgs, RemoteChat, RenameArgs, RollOverArgs, SetModelArgs,
-    SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs,
-    WireError,
+    DevicePerson, EditOpenArgs, ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs,
+    PageIdArgs, PagesReadArgs, PanelStageArgs, PersonInfo, ProfileInfo, ProjectCreateArgs,
+    ProjectInfo, ProjectSetArgs, QuickOpenArgs, RemoteChat, RenameArgs, ResendArgs, RollOverArgs,
+    SetModelArgs, SetPermissionArgs, ShareArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs,
+    VerbositySetArgs, WireError,
 };
 use base64::Engine as _;
 use helm_chats::types::{
@@ -188,6 +188,12 @@ pub struct FakeState {
     pub tool_stopped: Vec<ToolStopArgs>,
     pub submissions: Vec<SubmissionArgs>,
     pub checkpoint_for: Vec<CheckpointArgs>,
+    /// Each edit asked to open: (chat, message).
+    pub edit_opens: Vec<(String, i64)>,
+    /// Each staged edit-and-resend, in order.
+    pub resends: Vec<ResendArgs>,
+    /// Each chat asked to be deleted for good.
+    pub deleted: Vec<String>,
     pub attention_for: Vec<Vec<String>>,
     pub item_links_for: Vec<Vec<String>>,
     pub snoozed: Vec<SnoozeArgs>,
@@ -882,6 +888,53 @@ impl ChatPort for FakePort {
             "files": [],
             "filesRestored": false,
         })))
+    }
+
+    fn edit_open(&self, a: EditOpenArgs) -> BoxFut<'_, PortResult<Value>> {
+        self.st().edit_opens.push((a.chat_id.clone(), a.message_id));
+        let row = self
+            .st()
+            .rows
+            .get(&a.chat_id)
+            .and_then(|rows| rows.iter().find(|r| r.id == a.message_id))
+            .map(|r| json!({ "messageId": r.id, "revision": r.revision, "text": r.text }));
+        ready(row.ok_or_else(WireError::not_found))
+    }
+
+    fn resend(&self, a: ResendArgs) -> BoxFut<'_, PortResult<Value>> {
+        let mut st = self.st();
+        st.resends.push(a.clone());
+        // What the real op's phase two does to the transcript: the edited message and
+        // everything after it leave, and the new text arrives as one fresh row.
+        let rows = st.rows.entry(a.chat_id.clone()).or_default();
+        let newest = rows
+            .iter()
+            .map(|r| r.id)
+            .max()
+            .unwrap_or(0)
+            .max(a.message_id);
+        rows.retain(|r| r.id < a.message_id);
+        rows.push(MessageRow {
+            role: MessageRole::User,
+            ..fake_row(&a.chat_id, newest + 1, 1, &a.text)
+        });
+        let chat = st
+            .chats
+            .iter()
+            .find(|c| c.id() == a.chat_id)
+            .map(|c| c.to_value())
+            .unwrap_or(json!({"id": a.chat_id}));
+        ready(Ok(json!({
+            "submission": { "id": a.submission_id, "chatId": a.chat_id },
+            "chat": chat,
+        })))
+    }
+
+    fn delete(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
+        // The fake keeps its chat so one test can keep asking after; the real delete
+        // answers null and its `chat_removed` news is what clears the copies elsewhere.
+        self.st().deleted.push(chat_id);
+        ready(Ok(()))
     }
 
     fn attention_rows(&self, chat_ids: Vec<String>) -> BoxFut<'_, PortResult<Value>> {
