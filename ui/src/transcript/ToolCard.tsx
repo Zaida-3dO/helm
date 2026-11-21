@@ -33,6 +33,14 @@ import {
 } from './toolKinds.ts';
 import { formatElapsed } from './workBlocks.ts';
 
+/** A button on the row's summary line: what the call asked the PC showing the chat to do, again. */
+export interface ToolAction {
+  label: string;
+  title: string;
+  testId: string;
+  run: () => void;
+}
+
 export interface ToolCardProps {
   row: MessageRow;
   /** The Stop button shows only when the setting is on, the worker can stop one call, and this call is stoppable. */
@@ -40,6 +48,7 @@ export interface ToolCardProps {
   onStop: (toolCallId: string) => void;
   /** The chat runs on another device (its name): an Allow request waits for approval there. */
   remoteDevice?: string;
+  action?: ToolAction;
 }
 
 function useElapsed(since: number, live: boolean): number {
@@ -113,7 +122,7 @@ function AllowChip({ chatId, requestId, remoteDevice, running }: { chatId: strin
   );
 }
 
-export function ToolCard({ row, canStop, onStop, remoteDevice }: ToolCardProps) {
+export function ToolCard({ row, canStop, onStop, remoteDevice, action }: ToolCardProps) {
   const kind = toolKind(row.toolName);
   const status = toolStatus(row);
   const id = toolIdentity(row);
@@ -199,6 +208,11 @@ export function ToolCard({ row, canStop, onStop, remoteDevice }: ToolCardProps) 
         </span>
         {allowId && <AllowChip chatId={row.chatId} requestId={allowId} remoteDevice={remoteDevice} running={status === 'running'} />}
         {status === 'running' && <span className="tool-elapsed muted">{formatElapsed(elapsed)}</span>}
+        {action && (
+          <button type="button" className="tool-box-btn tool-action" data-testid={action.testId} title={action.title} onClick={action.run}>
+            {action.label}
+          </button>
+        )}
         {status === 'running' && canStop && row.toolCallId && (
           <button
             type="button"

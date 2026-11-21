@@ -10,6 +10,9 @@ import { FlagNote } from './attention/index.ts';
 import { Composer, isBusy } from './composer/Composer.tsx';
 import { useRemoteChat } from './devices/hooks.ts';
 import { RemoteChatBar } from './devices/RemoteChatBar.tsx';
+import { deviceOps } from './devices/api.ts';
+import { forwardLine } from './settings/devices/model.ts';
+import { autoOpenPicks, type ForwardRef } from './transcript/cards.ts';
 import type { SendShortcut } from './composer/keymap.ts';
 import { waitReason } from './composer/inFlight.ts';
 import { QueueList } from './composer/QueueList.tsx';
@@ -25,7 +28,7 @@ import type { EditState } from './transcript/EditMessage.tsx';
 import { forkAction } from './transcript/forkAction.ts';
 import { registerMessageAction } from './transcript/slots.ts';
 import { useShell } from './shell/context.ts';
-import { ConfirmDialog, useLayer, type ConfirmSpec } from './ui/index.ts';
+import { ConfirmDialog, toast, useLayer, type ConfirmSpec } from './ui/index.ts';
 import { rollOverChat, rollOverConfirm } from './sidebar/actions.ts';
 import { ContextBar } from './transcript/ContextBar.tsx';
 import { isTooLargeRefusal, type ChatContextReading } from './transcript/rowMeta.ts';
@@ -79,8 +82,47 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
   // there as a device-to-device call, answered by the same functions the local UI uses.
   const remote = useRemoteChat(shell.api, shell.bus, view.chat);
   const devOps = useMemo(() => remoteChatOps(shell.api), [shell]);
-  // Pictures on disk named in replies and tool cards come from the host.
-  useEffect(() => setLocalImageLoader((path) => shell.api<{ mime: string; bytes: string }>('local_image_get', { path })), [shell]);
+  // What an agent asked to show here acts by itself only for rows that arrive live while the chat is
+  // in view: newer than every row the last full read held (`readUpTo`; nothing acts before the
+  // first read), and once per row. History, a reload and a reconnect's catch-up never act.
+  const readUpTo = useRef(Number.POSITIVE_INFINITY);
+  const acted = useRef(new Set<number>());
+  const devices = useMemo(() => deviceOps(shell.api), [shell]);
+  // A port an agent offered from the PC the chat runs on, forwarded to this one (loopback only).
+  const forwardHere = useCallback(
+    (ref: ForwardRef) => {
+      devices
+        .forwardOpen({ chatId, port: ref.port, ...(ref.title ? { title: ref.title } : {}) })
+        .then((f) =>
+          toast.show({
+            kind: 'info',
+            text: forwardLine(f),
+            action: { label: 'Stop', run: () => void devices.forwardClose(f.forwardId).catch(() => undefined) },
+            ttlMs: 15_000,
+          }),
+        )
+        .catch((e: unknown) => toast.show({ kind: 'error', text: `Port ${ref.port} was not forwarded: ${e instanceof Error ? e.message : String(e)}` }));
+    },
+    [devices, chatId],
+  );
+  const remoteOn = remote !== null;
+  const isRemote = useRef(false);
+  isRemote.current = remoteOn;
+  useEffect(
+    () =>
+      shell.bus.on('message', (e) => {
+        if (e.chatId !== chatId || !Array.isArray(e.rows)) return;
+        const picks = autoOpenPicks(e.rows as MessageRow[], { after: readUpTo.current, done: acted.current, remote: isRemote.current });
+        // A window nobody is looking at opens nothing; the rows are spent all the same.
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+        if (picks.panel) void handleLink(picks.panel.ref.target, { chatId });
+        if (picks.forward) forwardHere(picks.forward.ref);
+      }),
+    [shell, chatId, forwardHere],
+  );
+  // Pictures on disk named in replies and tool cards come from the host; for a chat that runs on
+  // another PC, from that PC (the chat id tells this PC's host where to read).
+  useEffect(() => setLocalImageLoader((path) => shell.api<{ mime: string; bytes: string }>('local_image_get', { path, chatId })), [shell, chatId]);
   // Transcript element toggles, read once and followed on change.
   const [elements, setElements] = useState<ChatElements>({});
   useEffect(() => {
@@ -108,6 +150,8 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
     store.chat(chat);
     store.thread(thread);
     store.page(page, 'replace');
+    const top = page.messages.reduce((m, r) => Math.max(m, r.id), 0);
+    readUpTo.current = Number.isFinite(readUpTo.current) ? Math.max(readUpTo.current, top) : top;
   }, [ops, store, chatId]);
 
   useEffect(() => {
@@ -219,6 +263,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
         setEditing(null);
       },
       onCancelEdit: () => setEditing(null),
+      onForward: remoteOn ? forwardHere : undefined,
       canStopTool: (row: MessageRow) =>
         behavior.toolStop && Boolean(thread?.capabilities.stopTool) && Boolean(row.details?.stoppable) && row.status === 'streaming',
       onStopTool: stopTool,
@@ -226,7 +271,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       // shows any refusal in the shell's toast slot itself.
       onLink: (t: LinkTarget) => void handleLink(t, { chatId }),
     }),
-    [behavior.toolStop, thread?.capabilities.stopTool, thread?.stopCheck, stopTool, chatId, latestAssistantId, busy, interactionOpen, editing, ops, elements, mentionRepo, remote?.state.deviceName, chat?.model],
+    [behavior.toolStop, thread?.capabilities.stopTool, thread?.stopCheck, stopTool, chatId, latestAssistantId, busy, interactionOpen, editing, ops, elements, mentionRepo, remote?.state.deviceName, chat?.model, remoteOn, forwardHere],
   );
 
   // Escape while the chat works stops the turn; whatever it had not read goes back to it at
@@ -324,7 +369,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
           {chat.localAhead != null ? localWaitLabel(chat.localAhead) : LOCAL_WORKING_LABEL}
         </span>
       )}
-      {remote && <RemoteChatBar state={remote.state} />}
+      {remote && <RemoteChatBar state={remote.state} chatId={chatId} />}
       {notice && (
         <div className="notice" role="status">
           {notice}

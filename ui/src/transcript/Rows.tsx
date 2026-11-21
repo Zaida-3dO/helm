@@ -6,16 +6,16 @@ import { memo, useMemo, useState } from 'react';
 import type { MessageRow } from '../api/types.ts';
 import { chatOps } from '../api/ops.ts';
 import { EditMessage, type EditState } from './EditMessage.tsx';
-import { boardRef, galleryRef } from './cards.ts';
+import { boardRef, forwardRef, galleryRef, panelRef, type ForwardRef } from './cards.ts';
 import { GalleryCard } from './GalleryCard.tsx';
 import { Markdown, type LinkTarget } from './Markdown.tsx';
 import { MessageImages } from './MessageImages.tsx';
 import { MessageRefs } from './MessageRefs.tsx';
 import { OptionBoardCard } from './OptionBoard.tsx';
 import { RecapCard } from './RecapCard.tsx';
-import { bubbleText, fromTelegram, peerMessage } from './origin.ts';
+import { bubbleText, fromTelegram, peerMessage, typedOn } from './origin.ts';
 import { messageTimeLabel } from './rowMeta.ts';
-import { IconPaperPlane } from '../ui/icons.tsx';
+import { IconMonitor, IconPaperPlane } from '../ui/icons.tsx';
 import { ReplyActions, UserActions } from './MessageActions.tsx';
 import { rowFootersFor, type SlotContext } from './slots.ts';
 import { Glyph } from './icons.tsx';
@@ -23,7 +23,7 @@ import { SignInAgain } from './SignInAgain.tsx';
 import { isSignInBusyError, isSignInError } from './signin.ts';
 import { useShell } from '../shell/context.ts';
 import { Button, toast } from '../ui/index.ts';
-import { ToolCard } from './ToolCard.tsx';
+import { ToolCard, type ToolAction } from './ToolCard.tsx';
 import { GatekeeperReviewLink } from '../gatekeeper/ReviewLink.tsx';
 import { stopCheckLine, stopClass, stopKindLabel } from '../gatekeeper/model.ts';
 import { usePacedText, useThinkingPreview } from './usePaced.ts';
@@ -53,6 +53,27 @@ export interface RowContext {
   onEdit?: (row: MessageRow) => void;
   onResend?: (text: string) => Promise<void>;
   onCancelEdit?: () => void;
+  /** Forward a port an agent offered to this PC; set only for a chat that runs on another PC. */
+  onForward?: (ref: ForwardRef) => void;
+}
+
+/** The button a tool row offers for what its call asked the PC showing the chat to do. */
+function toolAction(row: MessageRow, ctx: RowContext): ToolAction | undefined {
+  const panel = panelRef(row);
+  if (panel) {
+    return {
+      label: 'Open',
+      title: panel.kind === 'page' ? `Show the page "${panel.label}" in the side panel` : `Show ${panel.label} in the side panel`,
+      testId: 'tool-open-panel',
+      run: () => ctx.onLink(panel.target),
+    };
+  }
+  const fwd = ctx.onForward ? forwardRef(row) : null;
+  if (fwd && ctx.onForward) {
+    const forward = ctx.onForward;
+    return { label: 'Forward', title: `Open port ${fwd.port} of ${ctx.remoteDevice ?? 'that PC'} on this PC`, testId: 'tool-forward-port', run: () => forward(fwd) };
+  }
+  return undefined;
 }
 
 function slotContext(row: MessageRow, ctx: RowContext, hasRecap = false): SlotContext {
@@ -181,11 +202,17 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
   const place = `${afterTool ? ' after-tool' : ''}${final ? ' final-answer' : ''}${indent ? ' indented' : ''}${afterFold ? ' after-fold' : ''}${beforeTool ? ' before-tool' : ''}`;
   if (row.role === 'user') {
     const peer = peerMessage(row);
+    const pc = typedOn(row);
     return (
       <div className={`row row-user status-${row.status}`} {...common}>
         {fromTelegram(row) && (
           <div className="row-origin muted" data-testid="row-origin" data-origin="telegram" title="Sent from Telegram">
             <IconPaperPlane size={12} /> Telegram
+          </div>
+        )}
+        {pc && (
+          <div className="row-origin muted" data-testid="row-origin" data-origin="remote" title={`Typed on ${pc}`}>
+            <IconMonitor size={12} /> from {pc}
           </div>
         )}
         {ctx.editing?.rowId === row.id && ctx.onResend && ctx.onCancelEdit ? (
@@ -233,7 +260,7 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
     }
     return (
       <div className={`row row-tool${place}`} {...common}>
-        <ToolCard row={row} canStop={ctx.canStopTool(row)} onStop={ctx.onStopTool} remoteDevice={ctx.remoteDevice} />
+        <ToolCard row={row} canStop={ctx.canStopTool(row)} onStop={ctx.onStopTool} remoteDevice={ctx.remoteDevice} action={toolAction(row, ctx)} />
       </div>
     );
   }
