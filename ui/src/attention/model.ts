@@ -47,6 +47,48 @@ export function countText(s: AttentionSummary | null): string {
   return n > inboxRows(s).length ? `${n}+` : String(n);
 }
 
+/**
+ * The profile the Flagged tile, the inbox and Workspace status are scoped to. The host's summary
+ * counts every chat on the PC (as do the taskbar badge, the tray and keep-awake, which stay that
+ * way); the app shows one profile's: its own chats, those shared with it, and the chats nobody
+ * owns when the home profile is shown. `activeId: null` means every profile.
+ */
+export interface AttentionScope {
+  activeId: string | null;
+  homeId: string | null;
+  /** The chats the active profile shows (its own and those shared with it), from the host. */
+  ids: ReadonlySet<string> | null;
+}
+
+/** An attention row once the host names the profile it belongs to ('' = nobody owns it). An older
+ *  host leaves the field out, and the profile's chat list decides on its own. */
+export type ProfiledAttentionRow = AttentionRow & { profileId?: string };
+
+/** Whether one attention row belongs to the scope. */
+export function attentionInScope(r: ProfiledAttentionRow, sc: AttentionScope): boolean {
+  if (sc.activeId === null) return true;
+  if (r.profileId === undefined) return sc.ids === null || sc.ids.has(r.chatId);
+  if (r.profileId === '') return sc.activeId === sc.homeId;
+  if (r.profileId === sc.activeId) return true;
+  // Owned elsewhere: in scope when the active profile's own list includes the chat, i.e. it is
+  // shared with it. With that list unread there is nothing to go by, so the row shows.
+  return sc.ids === null || sc.ids.has(r.chatId);
+}
+
+/** The summary as one profile's: rows out of scope are left out and the counts are recounted from
+ *  what remains (the host's counts cover the whole PC). With no active profile, unchanged. */
+export function scopeAttention(s: AttentionSummary | null, sc: AttentionScope): AttentionSummary | null {
+  if (!s || sc.activeId === null) return s;
+  const keep = (rows: AttentionRow[]) => rows.filter((r) => attentionInScope(r, sc));
+  const needsYou = keep(s.needsYou);
+  const flagged = keep(s.flagged);
+  const stalled = keep(s.stalled);
+  const unread = keep(s.unread);
+  const running = keep(s.running);
+  const once = new Set([...needsYou, ...flagged, ...stalled, ...unread].map((r) => r.chatId));
+  return { ...s, badge: once.size, busy: running.length, needsYou, flagged, stalled, unread, running, finished: keep(s.finished) };
+}
+
 /** Ctrl+Alt+A: the inbox chat after the open one, wrapping; the first when the open one is not listed. */
 export function nextAttention(rows: readonly InboxRow[], current: string | null): string | null {
   if (rows.length === 0) return null;

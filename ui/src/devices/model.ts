@@ -133,6 +133,15 @@ export function remoteShareChoices(device: DeviceInfo, chat: RemoteChatRecord): 
     .map((p) => ({ id: p.personId, name: p.person, shared: shared.has(p.personId) }));
 }
 
+/** The other computer's groups to draw: only those that hold a chat in the current view, or hold
+ *  the open chat. A project pinned on that computer orders its groups there, but its pin never
+ *  shows an empty group here. */
+export function shownRemoteGroups(projects: readonly ProjectNode[], rows: readonly SidebarRow[], selectedChatId: string | null): ProjectNode[] {
+  const groups = new Set(rows.map((r) => r.groupProjectId));
+  const selectedGroup = selectedChatId ? rows.find((r) => r.chatId === selectedChatId)?.groupProjectId : undefined;
+  return projects.filter((p) => p.chatCount > 0 || groups.has(p.id) || p.id === selectedGroup);
+}
+
 /**
  * The rows and projects for another computer's chats. A chat whose project the computer did not
  * list gets one made from the name the chat carries, so no chat is left without a group — the

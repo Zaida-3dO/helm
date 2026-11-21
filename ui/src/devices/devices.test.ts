@@ -4,7 +4,7 @@ import { ApiError, type Api } from '../api/client.ts';
 import { EventBus } from '../api/events.ts';
 import { chat } from '../dev/fixtures.ts';
 import type { DeviceChats, DeviceInfo, DevicesList, RemoteChatRecord } from './api.ts';
-import { menuLabel, menuOrder, remoteDevice, remoteList, remoteProfileChoices, remoteShareChoices, resolveSelected, scopeNote, showToggle, stateText } from './model.ts';
+import { menuLabel, menuOrder, remoteDevice, remoteList, remoteProfileChoices, remoteShareChoices, resolveSelected, scopeNote, shownRemoteGroups, showToggle, stateText } from './model.ts';
 import { DevicesStore, FOCUS_READ_MS, RemoteList } from './store.ts';
 import { composerFor, remoteChatState, remoteHostOf, seenText, unconfirmedText, waitingForApproval } from './state.ts';
 
@@ -130,6 +130,19 @@ function host(initial: { stored: string | null; devices: DevicesList | null; sav
   return { api, state, saved };
 }
 const settle = () => new Promise((r) => setTimeout(r, 0));
+
+test("another PC's groups: only those holding a chat in the view show; its pin orders groups, it shows no empty one", () => {
+  const rp = (id: string, over: Partial<RemoteProject> = {}, chatCount = 0) => remoteProject({ id, name: id, colour: null, kind: 'board', ...over }, chatCount);
+  const projects = [rp('p1', { pinned: true }, 2), rp('empty-there', { pinned: true }), rp('beyond-pages', {}, 3), rp('p2')];
+  const rows = [remoteRow(record('c1', { projectId: 'p1' }), false), remoteRow(record('c9', { projectId: 'p2' }), false)];
+  const kept = shownRemoteGroups(projects, rows, null);
+  assert.deepEqual(kept.map((p) => p.id), ['p1', 'beyond-pages', 'p2'], 'held chats, a count from over there, and the open chat group; a pin that holds nothing here drops out');
+  // A pin on a group that does show is kept as it was, so it still orders groups.
+  assert.equal(kept.find((p) => p.id === 'p1')?.pinned, true);
+  // An archived-only group shows in the archived view because its archived rows are in the view.
+  const arc = [remoteRow(record('c4', { projectId: 'pa', archived: true }), false)];
+  assert.deepEqual(shownRemoteGroups([rp('pa', { pinned: true }), rp('pb', { pinned: true })], arc, 'c4').map((p) => p.id), ['pa']);
+});
 
 test('the devices store follows the choice, falls back to this PC when that device leaves the hub, and puts the choice back if it is not saved', async () => {
   const h = host({ stored: 'lap', devices: list(device('lap', 'Laptop'), device('tab', 'Tablet')) });

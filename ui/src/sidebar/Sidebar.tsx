@@ -14,6 +14,7 @@ import type { ChatStore } from '../state/store.ts';
 import { SETTINGS_DIALOG } from '../settings/index.ts';
 import { SEARCH_DIALOG } from '../search/index.ts';
 import { AttentionInbox, inboxRows, nextAttention } from '../attention/index.ts';
+import { scopeAttention } from '../attention/model.ts';
 import { QueuePanel } from '../queue/QueuePanel.tsx';
 import { QueueStore } from '../queue/store.ts';
 import { queueOps } from '../queue/api.ts';
@@ -24,7 +25,7 @@ import { ALL_DEVICES, type DeviceInfo } from '../devices/api.ts';
 import { remoteChatOps } from '../api/devices.ts';
 import { DeviceToggle } from '../devices/DeviceToggle.tsx';
 import { useDevices, useRemoteList } from '../devices/hooks.ts';
-import { remoteProfileChoices, remoteShareChoices, scopeNote } from '../devices/model.ts';
+import { remoteProfileChoices, remoteShareChoices, scopeNote, shownRemoteGroups } from '../devices/model.ts';
 import { useSelection, useShell } from '../shell/context.ts';
 import { ConfirmDialog, ContextMenu, useBinding, type ConfirmSpec, type MenuItem } from '../ui/index.ts';
 import { SidebarActions, compactChat, exportChatMarkdown, rollOverChat, rollOverConfirm } from './actions.ts';
@@ -131,6 +132,12 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   // data keeps every row it has loaded.
   const activeProfile = prof.view?.activeId ?? null;
   const localRows = useMemo(() => rowsForProfile(snap.rows, activeProfile, prof.ids) as SidebarRow[], [snap.rows, activeProfile, prof.ids]);
+  // The Flagged tile, the inbox and Workspace status speak for the profile on screen; the taskbar
+  // badge, the tray and keep-awake keep counting every chat on the PC.
+  const scopedAttention = useMemo(
+    () => scopeAttention(snap.attention, { activeId: activeProfile, homeId: prof.view?.homeId ?? null, ids: prof.ids }),
+    [snap.attention, activeProfile, prof.view?.homeId, prof.ids],
+  );
   const [view, setView] = useState<'projects' | 'activity'>('projects');
   // The archived list offers the same Projects / Activity pair and opens in the Activity view.
   const [archived, setArchived] = useState(false);
@@ -161,15 +168,17 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const [remoteShut, setRemoteShut] = useState<ReadonlySet<string>>(() => new Set());
   const remoteProjectIds = useMemo(() => new Set(other.projects.map((p) => p.id)), [other.projects]);
   const shutRemote = (list: ProjectNode[]) => list.map((p) => (remoteShut.has(p.id) ? { ...p, collapsed: true } : p));
+  // A group of another PC is drawn only when it holds a chat in the current view (or the open
+  // chat): a project pinned over there orders groups there, but its pin shows no empty group here.
   const shownProjects = useMemo(() => {
-    if (remote) return shutRemote(other.projects);
+    if (remote) return shutRemote(shownRemoteGroups(other.projects, other.rows, selected));
     if (allDevices) {
       const mine = new Set(snap.projects.map((p) => p.id));
-      return [...snap.projects, ...shutRemote(other.projects.filter((p) => !mine.has(p.id)))];
+      return [...snap.projects, ...shutRemote(shownRemoteGroups(other.projects, shownRows, selected).filter((p) => !mine.has(p.id)))];
     }
     return snap.projects;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [remote, allDevices, other.projects, remoteShut, snap.projects]);
+  }, [remote, allDevices, other.projects, shownRows, selected, remoteShut, snap.projects]);
   // A row or group that runs on another computer: read here, changed there.
   // One object per (name, online) so a row's props stay equal between renders and ChatRow's memo holds.
   const remoteTags = useRef(new Map<string, { name: string; online: boolean }>());
@@ -538,7 +547,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     // AltGr arrives as Ctrl+Alt on Windows: never take a typed character from a text field.
     inInputs: false,
     run: () => {
-      const id = nextAttention(inboxRows(data.snapshot.attention), selected);
+      const id = nextAttention(inboxRows(scopedAttention), selected);
       if (id) onSelect(id);
     },
   });
@@ -758,7 +767,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       <SidebarTop
         api={api}
         bus={bus}
-        attention={snap.attention}
+        attention={scopedAttention}
         inboxOpen={inboxOpen}
         queueCount={queueCount(queueSnap)}
         queueOpen={queueOpen}
@@ -888,7 +897,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       {prompt && <PromptDialog prompt={prompt} onClose={() => setPrompt(null)} />}
       {confirm && <ConfirmDialog spec={confirm} onClose={() => setConfirm(null)} />}
       {cost && <CostDialog api={api} target={cost} onClose={() => setCost(null)} />}
-      {inboxOpen && <AttentionInbox summary={snap.attention} ops={ops} onOpen={onSelect} onClose={() => setInboxOpen(false)} />}
+      {inboxOpen && <AttentionInbox summary={scopedAttention} ops={ops} onOpen={onSelect} onClose={() => setInboxOpen(false)} />}
       {queueOpen && <QueuePanel store={queueStore} onOpen={onSelect} onClose={() => setQueueOpen(false)} />}
       <ItemPickerHost />
       {preview && !menu && !drag && (

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { AttentionRow, AttentionSummary } from '../api/types.ts';
-import { countText, failedChecks, flagFor, inboxCount, inboxRows, mutedKindLabel, mutedRows, nextAttention, parseDelayMinutes, priorityFor, snoozeChoices, triageKindFor, whenText } from './model.ts';
+import { countText, failedChecks, flagFor, inboxCount, inboxRows, mutedKindLabel, mutedRows, nextAttention, parseDelayMinutes, priorityFor, scopeAttention, snoozeChoices, triageKindFor, whenText } from './model.ts';
 
 const row = (chatId: string, kind: AttentionRow['kind'] = 'question'): AttentionRow => ({ chatId, title: chatId, project: 'p', kind, reason: 'r' });
 const summary = (over: Partial<AttentionSummary> = {}): AttentionSummary => ({
@@ -47,6 +47,36 @@ test('the count is the badge, never fewer than the rows, with "+" when the host 
   assert.equal(countText(summary({ badge: 11, needsYou: [row('a')] })), '11+');
   assert.equal(countText(summary({ badge: 1, needsYou: [row('a')] })), '1');
   assert.equal(inboxCount(null), 0);
+});
+
+test('the Flagged scope: one profile only — own, shared, unowned for the home profile; all profiles keeps everything', () => {
+  const prow = (chatId: string, over: { profileId?: string } = {}): AttentionRow => ({ ...row(chatId), ...over });
+  const s = summary({
+    badge: 6,
+    busy: 2,
+    needsYou: [prow('own', { profileId: 'p1' }), prow('shared', { profileId: 'p2' }), prow('theirs', { profileId: 'p2' })],
+    flagged: [prow('quiet-older-host')],
+    stalled: [prow('stuck', { profileId: '' })],
+    unread: [prow('unowned', { profileId: '' })],
+    running: [prow('run1', { profileId: 'p1' }), prow('run2', { profileId: 'p2' })],
+    finished: [prow('fin', { profileId: 'p2' })],
+  });
+  const sc = scopeAttention(s, { activeId: 'p1', homeId: 'h', ids: new Set(['shared', 'quiet-older-host']) })!;
+  assert.deepEqual(sc.needsYou.map((r) => r.chatId), ['own', 'shared'], 'its own first, and the ones shared with it');
+  assert.deepEqual(sc.flagged.map((r) => r.chatId), ['quiet-older-host'], 'an older host without the profile field follows the profile list');
+  assert.deepEqual([sc.stalled.map((r) => r.chatId), sc.unread.map((r) => r.chatId)], [[], []], 'chats nobody owns belong to the home profile, not to this one');
+  assert.deepEqual(sc.running.map((r) => r.chatId), ['run1']);
+  assert.deepEqual([sc.badge, sc.busy], [3, 1], 'the counts speak for what is shown, not for the whole PC');
+  // The home profile also sees the rows nobody owns.
+  const home = scopeAttention(s, { activeId: 'h', homeId: 'h', ids: new Set() })!;
+  assert.deepEqual([home.stalled.map((r) => r.chatId), home.unread.map((r) => r.chatId)], [['stuck'], ['unowned']]);
+  assert.deepEqual(home.flagged, [], 'the list is read and the chat is not on it, so the older-host row is out');
+  // "All profiles" keeps the summary exactly as the host sent it.
+  assert.equal(scopeAttention(s, { activeId: null, homeId: 'h', ids: null }), s);
+  assert.equal(scopeAttention(null, { activeId: 'p1', homeId: 'h', ids: null }), null);
+  // With the profile list unread there is nothing to go by, so rows still show.
+  const unknown = scopeAttention(s, { activeId: 'p1', homeId: 'h', ids: null })!;
+  assert.deepEqual(unknown.needsYou.map((r) => r.chatId), ['own', 'shared', 'theirs']);
 });
 
 test('Ctrl+Alt+A walks the inbox from the open chat, wrapping; from elsewhere it starts at the top', () => {
