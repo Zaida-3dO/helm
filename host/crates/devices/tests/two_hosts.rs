@@ -8,6 +8,7 @@ use helm_chats::remote::{RemoteSlot, Routes};
 use helm_chats::types::{
     ChatEvent, Interaction, InteractionAttention as Att, InteractionMethod as Meth,
 };
+use helm_core::credentials::CredentialStore;
 use helm_core::db::{Database, MigrationRegistry};
 use helm_devices::host::HostPort;
 use helm_devices::link::{DeviceLink, MemLink, MemRouter, Rpc};
@@ -3737,4 +3738,194 @@ async fn a_port_of_one_pc_opens_on_another_and_closes_when_that_pc_goes() {
     until(|| *changes.lock().unwrap() == 2).await;
     let listed = api.call_host("devices_forwards", json!({})).await.unwrap();
     assert_eq!(listed["forwards"], json!([]));
+}
+
+/// Settings → MCP's "Copy from another PC": the other PC answers with its own export — every
+/// secret value, saved secret id and credential-file path blanked — and this PC saves what
+/// arrives. A second copy of the same list skips the ids already kept; a household member may
+/// not read another PC's tool servers at all.
+#[tokio::test(start_paused = true)]
+async fn mcp_servers_copy_across_without_their_secrets() {
+    fn store(dir: &std::path::Path) -> helm_mcp::config::McpStore {
+        let creds = CredentialStore::new(
+            &dir.join("credentials"),
+            "testhash",
+            Arc::new(helm_platform::keychain::MemoryKeychain::default()),
+        );
+        helm_mcp::config::McpStore::new(dir, creds)
+    }
+    let router = MemRouter::new();
+    let port = Arc::new(FakePort::new("dev-a", "Desk"));
+    let link_a = router.connect("dev-a", Some("person-a"), Some("Alex"), true);
+    let host = Service::new(port.clone(), link_a, tokio::runtime::Handle::current());
+    host.announce();
+    settle().await;
+
+    // The serving PC's real store, with each secret kind once, exported by the MCP crate's own
+    // copy export: what the wire carries is exactly what a real Helm answers its person's
+    // other PC with.
+    let src = tempfile::tempdir().unwrap();
+    let src_store = store(src.path());
+    let tokfile = src.path().join("tok.txt");
+    std::fs::write(&tokfile, "file-token\n").unwrap();
+    use helm_mcp::types as mt;
+    let mut headers = std::collections::BTreeMap::new();
+    headers.insert(
+        "Authorization".to_string(),
+        mt::ValueRef {
+            kind: mt::RefKind::Literal,
+            value: Some("topsecret-token".into()),
+            secret_id: None,
+            prefix: Some("Bearer ".into()),
+        },
+    );
+    let mut env = std::collections::BTreeMap::new();
+    env.insert(
+        "SECRET_LIT".to_string(),
+        mt::ValueRef {
+            kind: mt::RefKind::Literal,
+            value: Some("envsecret".into()),
+            secret_id: None,
+            prefix: None,
+        },
+    );
+    env.insert(
+        "VAR_NAME".to_string(),
+        mt::ValueRef {
+            kind: mt::RefKind::Environment,
+            value: Some("KEEP_ME".into()),
+            secret_id: None,
+            prefix: None,
+        },
+    );
+    env.insert(
+        "TOKFILE".to_string(),
+        mt::ValueRef {
+            kind: mt::RefKind::File,
+            value: Some(tokfile.to_string_lossy().into_owned()),
+            secret_id: None,
+            prefix: None,
+        },
+    );
+    src_store
+        .mutate(None, |l| {
+            l.push(mt::McpServer {
+                id: "hub".into(),
+                name: "Hub".into(),
+                enabled: true,
+                transport: mt::Transport {
+                    kind: mt::TransportKind::Http,
+                    command: None,
+                    args: vec![],
+                    env: std::collections::BTreeMap::new(),
+                    url: Some("https://hub.example/mcp".into()),
+                    headers,
+                    oauth: None,
+                },
+                allow_private_http: false,
+                preset: None,
+            });
+            l.push(mt::McpServer {
+                id: "prog".into(),
+                name: "Program".into(),
+                enabled: true,
+                transport: mt::Transport {
+                    kind: mt::TransportKind::Stdio,
+                    command: Some("node.exe".into()),
+                    args: vec!["server.js".into()],
+                    env,
+                    url: None,
+                    headers: std::collections::BTreeMap::new(),
+                    oauth: None,
+                },
+                allow_private_http: false,
+                preset: None,
+            });
+            Ok(())
+        })
+        .unwrap();
+    port.st().mcp_servers = src_store
+        .export_copy()
+        .unwrap()
+        .iter()
+        .map(|s| serde_json::to_value(s).unwrap())
+        .collect();
+
+    // The watcher side: its own database, mirror and MCP store, with the window's ops.
+    let w = side(&router, "dev-b", "Laptop", None, "person-a", "Alex", &[]);
+    // Give the mirror the hub's list (its own device frame starts the broadcast) before it
+    // routes anything to the other PC.
+    settle().await;
+    let dst = tempfile::tempdir().unwrap();
+    let dst_store = store(dst.path());
+    let mut services = Services::new();
+    services.insert(w.db.clone());
+    let slot = Arc::new(MirrorSlot::default());
+    slot.attach(w.mirror.clone());
+    services.insert(slot);
+    services.insert(Arc::new(dst_store));
+    let mut ops = OpRegistry::new();
+    helm_devices::register_ops(&mut ops);
+    helm_mcp::register_ops(&mut ops);
+    let api = Dispatcher::new(
+        ops,
+        OpCtx {
+            services: Arc::new(services),
+            events: w.sink.clone(),
+        },
+        false,
+    );
+
+    let listed = api
+        .call_host("devices_mcp_list", json!({"deviceUid": "dev-a"}))
+        .await
+        .unwrap();
+    assert_eq!(listed["servers"].as_array().unwrap().len(), 2);
+    assert_eq!(port.st().mcp_list_asks, 1);
+    // The copy arrives with no secret of the other PC: no value, no saved id, no file path.
+    let tokpath = tokfile.to_string_lossy().into_owned();
+    let wire = serde_json::to_string(&listed).unwrap();
+    for gone in [
+        "topsecret-token",
+        "envsecret",
+        "file-token",
+        "lit_",
+        tokpath.as_str(),
+    ] {
+        assert!(!wire.contains(gone), "the copy must not carry {gone}");
+    }
+    // The shape crosses: names, the env variable it reads here, the token prefix.
+    assert!(
+        wire.contains("KEEP_ME") && wire.contains("Bearer") && wire.contains("node.exe"),
+        "{wire}"
+    );
+
+    // Import lands clean, and a second copy of the same list skips the ids kept here.
+    let imported = api
+        .call_host("mcp_copy_import", json!({"servers": listed["servers"]}))
+        .await
+        .unwrap();
+    assert_eq!(imported["servers"].as_array().unwrap().len(), 2);
+    let again = api
+        .call_host(
+            "mcp_copy_import",
+            json!({"servers": listed["servers"], "revision": imported["revision"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(again["servers"].as_array().unwrap().len(), 2);
+    assert_eq!(again["revision"], imported["revision"]);
+    // What saved here holds no secret either, and the blanked slots wait for their token.
+    let text = std::fs::read_to_string(dst.path().join("mcp-servers.json")).unwrap();
+    for gone in ["topsecret", "envsecret", "lit_", tokpath.as_str()] {
+        assert!(!text.contains(gone), "the saved copy must not carry {gone}");
+    }
+    // A household member who is not this PC's person may not read its tool servers.
+    let other = Watcher::of(&router, "dev-c", "Phone", true, "person-b", "Bo");
+    let e = other
+        .rpc
+        .call("dev-a", "mcp_list_get", json!({}))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, code::NOT_ALLOWED);
 }

@@ -1948,6 +1948,7 @@ dependencies = [
  "helm-core",
  "helm-hosttools",
  "helm-ipc",
+ "helm-mcp",
  "helm-pages",
  "helm-panel",
  "helm-platform",

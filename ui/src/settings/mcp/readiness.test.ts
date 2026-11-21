@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import type { ChatMcpProblem, McpPreset, McpServer } from '../../api/mcp.ts';
 import { CONSOLE_STEPS, GOOGLE_PRESET, SIGN_IN_WINDOW_MS, blockState, clientLooksSet, watchState, type GoogleAccountList } from './google.ts';
 import { canDisconnect, connectLabel } from './oauth.ts';
-import { BROKER_PRESET, blankServer, chatMcpNoticeText, draftFromPreset, isBrokerServer, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable } from './readiness.ts';
+import { BROKER_PRESET, blankServer, chatMcpNoticeText, copyImportable, draftFromPreset, isBrokerServer, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable } from './readiness.ts';
 
 const hub: McpPreset = {
   id: 'helm_hub',
@@ -265,4 +265,55 @@ test('the chat notice names the broken server, keeps the reason words, and point
     chatMcpNoticeText([problem('Local files', 'failed', 'The last connection failed.'), problem('Example CRM', 'signin_required', 'Needs you to sign in.')]),
     'Local files and 1 more are not connected on this PC: The last connection failed. Fix it in Settings → MCP.',
   );
+});
+
+test('a copied server keeps its shape but not its secret, and an id already kept is skipped', () => {
+  const remote: McpServer[] = [
+    {
+      id: 'agent_standup',
+      name: 'Agent Standup',
+      enabled: true,
+      preset: 'agent_standup',
+      allowPrivateHttp: false,
+      transport: {
+        type: 'http',
+        url: 'https://board.example/mcp',
+        headers: {
+          Authorization: { kind: 'literal', value: 'never-send', secretId: `lit_${'a'.repeat(32)}`, prefix: 'Bearer ' },
+          'X-Person': { kind: 'chatPerson' },
+        },
+      },
+    },
+    {
+      id: 'files',
+      name: 'Files',
+      enabled: true,
+      allowPrivateHttp: false,
+      transport: {
+        type: 'stdio',
+        command: 'node.exe',
+        env: {
+          KEEP: { kind: 'environment', value: 'KEEP' },
+          TOKPATH: { kind: 'file', value: 'C:/secrets/tok.txt' },
+        },
+      },
+    },
+    {
+      id: 'crm',
+      name: 'Example CRM',
+      enabled: true,
+      allowPrivateHttp: false,
+      transport: { type: 'http', url: 'https://crm.example/mcp' },
+    },
+  ];
+  const out = copyImportable(remote, ['crm']);
+  assert.deepEqual(
+    out.map((s) => s.id),
+    ['agent_standup', 'files'],
+    'an id this PC already has is not offered, never overwritten',
+  );
+  assert.deepEqual(out[0]!.transport.headers?.Authorization, { kind: 'literal', prefix: 'Bearer ' }, 'the token crosses as an empty slot, with its prefix');
+  assert.deepEqual(out[0]!.transport.headers?.['X-Person'], { kind: 'chatPerson' }, 'the chat-person header carries as it stands');
+  assert.deepEqual(out[1]!.transport.env?.KEEP, { kind: 'environment', value: 'KEEP' }, 'the variable name carries');
+  assert.deepEqual(out[1]!.transport.env?.TOKPATH, { kind: 'literal' }, 'a credential file on that PC crosses as an empty secret slot');
 });

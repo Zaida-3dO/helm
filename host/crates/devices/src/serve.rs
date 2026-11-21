@@ -327,6 +327,17 @@ pub trait ChatPort: Send + Sync {
     /// stays inside the chat's project folder, an output is that chat's own, and the whole is at
     /// most [`crate::wire::MAX_BLOB_BYTES`].
     fn blob_read(&self, a: BlobReadArgs) -> BoxFut<'_, PortResult<Value>>;
+    /// The MCP servers set up on this install, as this install's own `mcp_copy_export` answers:
+    /// `{servers}`, every secret value, saved id and credential path blanked. The asker is
+    /// checked by the caller: only this PC's own person may ask.
+    fn mcp_list(&self) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async {
+            Err(WireError::new(
+                code::REFUSED,
+                "No MCP settings are served here.",
+            ))
+        })
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -1149,6 +1160,15 @@ impl Inner {
                     .await?,
             ),
             Op::BlobRead(a) => done(self.port.blob_read(a).await?),
+            Op::McpListGet => {
+                // This PC's tool servers are its own person's settings: a household member
+                // may not read them from afar. The answer itself carries no secrets by
+                // construction — every value, saved id and credential path is blanked there.
+                if matches!(asker, Asker::Household { .. }) {
+                    return Err(WireError::not_allowed());
+                }
+                done(self.port.mcp_list().await?)
+            }
         }
     }
 

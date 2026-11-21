@@ -204,6 +204,32 @@ export function devicesFakeOps(): { prefixes: string[]; handler: FakeOpHandler }
         ctx.emit({ kind: 'devices_forwards_changed' });
         return {};
       }
+      case 'devices_mcp_list': {
+        const device = String(a.deviceUid);
+        if (!devices().some((d) => d.uid === device)) throw new ApiError('not_found', 'That device is not on the hub.');
+        const refusal = remoteFakeRefusal(device);
+        if (refusal) throw new ApiError(refusal.code, refusal.message);
+        // As the host's copy export answers: the shape of that PC's servers, every secret blanked.
+        return {
+          servers: [
+            {
+              id: 'agent_standup',
+              name: 'Agent Standup',
+              enabled: true,
+              preset: 'agent_standup',
+              allowPrivateHttp: false,
+              transport: { type: 'http', url: 'https://board.example/mcp', headers: { Authorization: { kind: 'literal', prefix: 'Bearer ' } } },
+            },
+            {
+              id: 'files',
+              name: 'Local files (on the other PC)',
+              enabled: true,
+              allowPrivateHttp: false,
+              transport: { type: 'stdio', command: 'node.exe', args: ['server.js'], env: { KEEP_ME: { kind: 'environment', value: 'KEEP_ME' }, SECRET_LIT: { kind: 'literal' } } },
+            },
+          ],
+        };
+      }
       case 'devices_file_save': {
         const name = String(a.path ?? '').split(/[\\/]/).pop() || 'file';
         return { path: `C:/Users/me/Downloads/${name}` };

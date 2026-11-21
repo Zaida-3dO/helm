@@ -44,6 +44,9 @@ export function mcpOps(api: Api) {
     chatProblems: (chatId: string) => api<ChatMcpProblem[]>('mcp_chat_problems', { chatId }),
     /** The broker's own checks for the built-in browser server; changes nothing. */
     doctor: (serverId: string) => api<DoctorOutcome>('mcp_broker_doctor', { serverId }),
+    /** Servers copied from another PC (brought across by `devices_mcp_list`): an id this PC
+     *  already has is skipped, and a blanked secret waits to be entered. */
+    importCopy: (servers: McpServer[]) => api<McpEditorSnapshot>('mcp_copy_import', { servers }),
     repoList: () => api<RepoServer[]>('mcp_repo_servers_list', {}),
     repoApprove: (s: RepoServer) => api<RepoServer[]>('mcp_repo_approve', { file: s.file, name: s.name, hash: s.hash }),
     repoRevoke: (s: RepoServer) => api<RepoServer[]>('mcp_repo_revoke', { file: s.file, name: s.name }),

@@ -2122,6 +2122,12 @@ impl ChatPort for HostPort {
         })
     }
 
+    fn mcp_list(&self) -> BoxFut<'_, PortResult<Value>> {
+        // The MCP crate's own export: it blanks every secret on the way out, so what crosses
+        // is the shape of this PC's servers with the secrets left out.
+        Box::pin(async move { self.op("mcp_copy_export", json!({})).await })
+    }
+
     fn blob_read(&self, a: BlobReadArgs) -> BoxFut<'_, PortResult<Value>> {
         Box::pin(async move {
             self.here(&a.chat_id)?;

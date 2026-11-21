@@ -138,6 +138,15 @@ export function mcpFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         rev++;
         return snap();
       }
+      case 'mcp_copy_import': {
+        check(a);
+        // Same rule as the host: an id this PC already has is skipped, never overwritten.
+        for (const s of structuredClone((a.servers ?? []) as McpServer[])) {
+          if (!servers.some((x) => x.id === s.id)) servers.push(s);
+        }
+        rev++;
+        return snap();
+      }
       case 'mcp_server_remove': {
         check(a);
         const i = servers.findIndex((x) => x.id === a.serverId);

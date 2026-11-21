@@ -37,6 +37,7 @@
 //! | `devices_attach` | async | `{chatId, kind, name, mime?, data?, path?}` → `{attachmentId}`: stage a picture (base64) or a file (path on this PC) for the next message to a chat that runs on another device; the send names the ids |
 //! | `devices_pages` | async | `{}` → `{devices: [{deviceUid, name, pages, problem?}]}`: the pages pinned on the other PCs of the household for the active profile's person (their own, then those pinned before profiles), each as the Pages list shows it; a PC that is offline or has its switch off carries a `problem` in words |
 //! | `devices_page_open` | async | `{deviceUid, pageId}` → as `page_open`: brings the page and the files beside it that it names across and opens it here, online because the pin that names it lives there; its messages go to the chat the pin names there, and its saved state stays on this PC |
+//! | `devices_mcp_list` | async | `{deviceUid}` → `{servers}`: the MCP tool servers set up on that PC, every secret value, saved secret id and credential-file path blanked there before it leaves; that PC answers only its own person |
 //! | `devices_discard` | blocking | `{chatId, attachmentId}` → `{}`: take back a staged attachment |
 //! | `devices_typed_on` | blocking | `{chatId}` → `{deviceUid, name, at} \| null`: the PC the last message of a chat that runs here was typed on, when that was another device (`at` in Unix ms); `null` when it was typed here, or nothing is known since Helm started |
 //! | `devices_file_save` | async | `{chatId, path}` → `{path: string \| null}`: a copy of a file of a chat that runs on another device (inside its project folder there), brought across in chunks and saved on this PC where the person chooses; `null` when the dialog is cancelled |
@@ -79,6 +80,9 @@
 //! Ports: `forward_open` (with the switch, for a chat the acting person owns or that is shared
 //! with them) forwards one of this PC's loopback ports to the asking PC, and `forward_close` ends
 //! one; the bytes travel as pushes (see [`tunnel`]).
+//! `mcp_list_get` reads this PC's MCP tool servers for Settings → MCP's "Copy from another PC":
+//! only a PC acting as this PC's own person is answered, and the answer carries no secrets —
+//! every secret value, saved secret id and credential-file path is blanked before it crosses.
 
 pub mod host;
 pub mod identity;

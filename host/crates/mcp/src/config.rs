@@ -360,6 +360,45 @@ impl McpStore {
         self.resolve_one(s, &|k| std::env::var(k).ok(), None)
     }
 
+    /// The server list as another PC of the same person may see it: every secret value, saved
+    /// secret id and credential-file path is blanked to an empty secret slot, while environment
+    /// names and the rest of the shape cross as they stand. Nothing blanked can resolve here;
+    /// the row waits for the person to enter the secret again.
+    pub fn export_copy(&self) -> Result<Vec<McpServer>, StoreError> {
+        Ok(self.load()?.iter().map(copy_shape).collect())
+    }
+
+    /// Servers copied from another PC of the same person, in the form [`McpStore::export_copy`]
+    /// sends: each secret slot blank, each environment name kept. An entry whose id this PC
+    /// already has is skipped, never overwritten, and nothing still carrying a secret value, a
+    /// saved id or another PC's file path is accepted. A blanked slot saves and reads back as
+    /// "enter it again", so the row says it needs its token.
+    pub fn import_copy(
+        &self,
+        servers: &[McpServer],
+        expected: Option<&str>,
+    ) -> Result<McpEditorSnapshot, StoreError> {
+        for s in servers {
+            let dirty = refs(s).any(|r| {
+                r.secret_id.is_some() || (r.kind != RefKind::Environment && r.value.is_some())
+            });
+            if dirty {
+                return Err(StoreError::Invalid(format!(
+                    "{}: a copied server may not carry a secret value, a saved secret id or a file path from the other PC.",
+                    s.name
+                )));
+            }
+        }
+        self.mutate(expected, |list| {
+            for s in servers {
+                if !list.iter().any(|e| e.id == s.id) {
+                    list.push(s.clone());
+                }
+            }
+            Ok(())
+        })
+    }
+
     /// Give an existing hub memory server the person header, once: chats that belong to another
     /// person then use that person's memories. Returns whether it changed anything. A person who
     /// removes the header afterwards is not given it again.
@@ -555,6 +594,21 @@ fn read_secret_file(path: &str) -> Result<String, String> {
         .map_err(|_| "the file cannot be read.".to_string())?;
     let text = String::from_utf8(bytes).map_err(|_| "the file is not text.".to_string())?;
     Ok(text.trim().to_owned())
+}
+
+/// One server with its secrets blanked for the copy: an environment name is read on the PC that
+/// connects, so it crosses as it stands; a literal value, a saved secret id and a credential
+/// file's path are that PC's own, and the slot crosses empty as a secret waiting to be entered.
+fn copy_shape(s: &McpServer) -> McpServer {
+    let mut c = s.clone();
+    for r in refs_mut(&mut c) {
+        if r.kind != RefKind::Environment && r.kind != RefKind::ChatPerson {
+            r.kind = RefKind::Literal;
+            r.value = None;
+            r.secret_id = None;
+        }
+    }
+    c
 }
 
 pub(crate) fn refs(s: &McpServer) -> impl Iterator<Item = &ValueRef> {
@@ -964,6 +1018,208 @@ pub(crate) mod tests {
         let one = st.resolve_server("memories", Some("9")).unwrap().unwrap();
         assert_eq!(one.headers[PERSON_HEADER], "9");
         assert!(st.resolve_server("nope", None).unwrap().is_none());
+    }
+
+    /// Seed one server of each secret kind: a literal header, an env header, a credential-file
+    /// env, a literal env, and a browser sign-in client with its client secret on its own server
+    /// (a sign-in server carries no Authorization header of its own).
+    fn seed_each_secret_kind(st: &McpStore, tokfile: &Path) {
+        let mut s = hub("s3cret-header-token");
+        s.id = "mix".into();
+        s.name = "Mix".into();
+        s.transport.headers.insert(
+            "X-Env".into(),
+            ValueRef {
+                kind: RefKind::Environment,
+                value: Some("MIX_TOKEN".into()),
+                secret_id: None,
+                prefix: None,
+            },
+        );
+        let mut g = stdio_server();
+        g.id = "signed".into();
+        g.name = "Signed".into();
+        g.transport.kind = TransportKind::Http;
+        g.transport.command = None;
+        g.transport.args = vec![];
+        g.transport.url = Some("https://signed.example/mcp".into());
+        g.transport.oauth = Some(OAuthConfig {
+            client_id: Some("client-id-1".into()),
+            client_secret: Some(ValueRef {
+                kind: RefKind::Literal,
+                value: Some("s3cret-client-secret".into()),
+                secret_id: None,
+                prefix: None,
+            }),
+            ..Default::default()
+        });
+        st.mutate(None, |l| {
+            l.push(s);
+            l.push(g);
+            let mut p = stdio_server();
+            p.transport.env.insert(
+                "MIX_FILE".into(),
+                ValueRef {
+                    kind: RefKind::File,
+                    value: Some(tokfile.to_string_lossy().into_owned()),
+                    secret_id: None,
+                    prefix: None,
+                },
+            );
+            p.transport.env.insert(
+                "MIX_LIT".into(),
+                ValueRef {
+                    kind: RefKind::Literal,
+                    value: Some("s3cret-env-secret".into()),
+                    secret_id: None,
+                    prefix: None,
+                },
+            );
+            p.transport.env.insert(
+                "MIX_KEEP".into(),
+                ValueRef {
+                    kind: RefKind::Environment,
+                    value: Some("KEEP_ME".into()),
+                    secret_id: None,
+                    prefix: None,
+                },
+            );
+            l.push(p);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn stdio_server() -> McpServer {
+        McpServer {
+            id: "prog".into(),
+            name: "Program".into(),
+            enabled: true,
+            transport: Transport {
+                kind: TransportKind::Stdio,
+                command: Some("node.exe".into()),
+                args: vec!["server.js".into()],
+                env: BTreeMap::new(),
+                url: None,
+                headers: BTreeMap::new(),
+                oauth: None,
+            },
+            allow_private_http: false,
+            preset: None,
+        }
+    }
+
+    #[test]
+    fn a_copy_blanks_every_secret_and_keeps_the_shape() {
+        let d = tempfile::tempdir().unwrap();
+        let st = store(d.path());
+        let tokfile = d.path().join("tok.txt");
+        std::fs::write(&tokfile, "from-file\n").unwrap();
+        seed_each_secret_kind(&st, &tokfile);
+        let copy = st.export_copy().unwrap();
+        let wire = serde_json::to_string(&copy).unwrap();
+        let tokpath = tokfile.to_string_lossy().into_owned();
+        for gone in [
+            "s3cret-header-token",
+            "s3cret-client-secret",
+            "s3cret-env-secret",
+            "lit_",
+            tokpath.as_str(),
+        ] {
+            assert!(!wire.contains(gone), "the copy must not carry {gone}");
+        }
+        // Environment names, the command, the preset shape and prefixes cross as they stand.
+        assert!(
+            wire.contains("MIX_TOKEN") && wire.contains("KEEP_ME") && wire.contains("client-id-1")
+        );
+        let mix = copy.iter().find(|s| s.id == "mix").unwrap();
+        assert_eq!(
+            mix.transport.headers["Authorization"],
+            ValueRef {
+                kind: RefKind::Literal,
+                value: None,
+                secret_id: None,
+                prefix: Some("Bearer ".into()),
+            },
+            "the token slot crosses empty, with its prefix"
+        );
+        let signed = copy.iter().find(|s| s.id == "signed").unwrap();
+        assert_eq!(
+            signed.transport.oauth.as_ref().unwrap().client_secret,
+            Some(ValueRef {
+                kind: RefKind::Literal,
+                value: None,
+                secret_id: None,
+                prefix: None,
+            })
+        );
+        let prog = copy.iter().find(|s| s.id == "prog").unwrap();
+        assert_eq!(
+            prog.transport.env["MIX_KEEP"].value.as_deref(),
+            Some("KEEP_ME")
+        );
+        // A credential file's path is blanked too: the slot arrives as a secret to enter.
+        assert_eq!(prog.transport.env["MIX_FILE"].kind, RefKind::Literal);
+        assert_eq!(prog.transport.env["MIX_FILE"].value, None);
+    }
+
+    #[test]
+    fn an_imported_copy_lands_needs_its_token_and_never_overwrites() {
+        let src = tempfile::tempdir().unwrap();
+        let sstore = store(src.path());
+        let tokfile = src.path().join("tok.txt");
+        std::fs::write(&tokfile, "from-file\n").unwrap();
+        seed_each_secret_kind(&sstore, &tokfile);
+        let copy = sstore.export_copy().unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        let dstore = store(dst.path());
+        let snap = dstore.import_copy(&copy, None).unwrap();
+        assert_eq!(snap.servers.len(), 3);
+        // A second copy of the same list skips the ids this PC already has: no overwrite, no
+        // duplicate, and the revision does not move without a change.
+        let again = dstore.import_copy(&copy, Some(&snap.revision)).unwrap();
+        assert_eq!(again.servers.len(), 3);
+        assert_eq!(again.servers, snap.servers);
+        // It saved clean: the file carries no value; and it reads as a secret that must be
+        // entered again — the row's "Needs its token", in the host's own words.
+        let text = std::fs::read_to_string(dst.path().join(FILE_NAME)).unwrap();
+        let tokpath = tokfile.to_string_lossy().into_owned();
+        for gone in ["s3cret", "lit_", tokpath.as_str()] {
+            assert!(!text.contains(gone), "the saved copy must not carry {gone}");
+        }
+        // Any blank slot answers with the host's own "enter it again" words when a chat tries
+        // the server: the row says it needs its token.
+        let env = |_: &str| None;
+        let (_, resolved) = dstore.resolve_enabled(&env).unwrap();
+        for id in ["mix", "prog"] {
+            let r = resolved.iter().find(|r| r.id == id).unwrap();
+            let err = r.error.as_deref().unwrap_or_default();
+            assert!(err.contains("Enter it again"), "{id}: {err}");
+        }
+        assert!(
+            resolved
+                .iter()
+                .find(|r| r.id == "prog")
+                .unwrap()
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("MIX_FILE"),
+            "the words name the slot that waits"
+        );
+        // An entry still carrying a secret of the other PC is refused.
+        let mut dirty = copy.clone();
+        dirty[0]
+            .transport
+            .headers
+            .values_mut()
+            .next()
+            .unwrap()
+            .value = Some("leak".into());
+        let err = dstore.import_copy(&dirty, None).unwrap_err();
+        assert!(matches!(err, StoreError::Invalid(_)));
+        assert_eq!(dstore.load().unwrap().len(), 3);
     }
 
     #[test]

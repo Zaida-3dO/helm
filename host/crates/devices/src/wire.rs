@@ -951,6 +951,11 @@ pub enum Op {
     ForwardOpen(ForwardOpenArgs),
     /// End one of the asking PC's forwards. Needs no switch: stopping is always allowed.
     ForwardClose(ForwardCloseArgs),
+    /// The MCP tool servers set up on this PC, for Settings → MCP's "Copy from another PC".
+    /// Every secret value, saved secret id and credential-file path is blanked on the way out;
+    /// environment names, commands and addresses cross as they stand. Answered only to a PC
+    /// acting as this PC's own person. A read.
+    McpListGet,
 }
 
 fn args<T: for<'de> Deserialize<'de>>(v: Value) -> Result<T, WireError> {
@@ -1064,6 +1069,10 @@ impl Op {
             }
             "forward_open" => Op::ForwardOpen(args(a)?),
             "forward_close" => Op::ForwardClose(args(a)?),
+            "mcp_list_get" => {
+                args::<NoArgs>(a)?;
+                Op::McpListGet
+            }
             _ => return Err(WireError::elsewhere()),
         })
     }

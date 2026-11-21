@@ -194,6 +194,10 @@ pub struct FakeState {
     pub addressed: Vec<String>,
     /// What `defaults_set` saved, as the three-field answer it would give back.
     pub defaults_saved: Option<Value>,
+    /// The MCP servers this fake answers `mcp_list` with, as the export sends them (secrets blank).
+    pub mcp_servers: Vec<Value>,
+    /// How often the MCP server list was asked for.
+    pub mcp_list_asks: usize,
     /// The projects made and changed from afar.
     pub projects_created: Vec<ProjectCreateArgs>,
     pub projects_set: Vec<ProjectSetArgs>,
@@ -908,6 +912,13 @@ impl ChatPort for FakePort {
     fn address(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
         self.st().addressed.push(chat_id);
         ready(Ok(()))
+    }
+
+    fn mcp_list(&self) -> BoxFut<'_, PortResult<Value>> {
+        let mut st = self.st();
+        st.mcp_list_asks += 1;
+        let servers = st.mcp_servers.clone();
+        ready(Ok(json!({ "servers": servers })))
     }
 
     fn defaults_get(&self, _chat_id: String) -> BoxFut<'_, PortResult<Value>> {

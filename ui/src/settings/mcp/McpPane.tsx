@@ -3,16 +3,17 @@
 // only ever sees a saved secret's id, never its value.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { mcpOps, type DoctorOutcome, type McpPreset, type McpServer, type RefKind, type RepoServer, type ServerStatus, type TestOutcome, type ValueRef } from '../../api/mcp.ts';
+import { mcpOps, type DoctorOutcome, type McpOps, type McpPreset, type McpServer, type RefKind, type RepoServer, type ServerStatus, type TestOutcome, type ValueRef } from '../../api/mcp.ts';
 import { shellOps } from '../../api/shell.ts';
+import { deviceOps, type DeviceInfo, type DeviceOps } from '../../devices/api.ts';
 import { useShell } from '../../shell/context.ts';
-import { Button, Checkbox, Segmented, TextArea, TextInput, toast } from '../../ui/index.ts';
+import { Button, Checkbox, Dialog, Segmented, TextArea, TextInput, toast } from '../../ui/index.ts';
 import { IconCheck, IconWarning } from '../../ui/icons.tsx';
 import { WheelMark } from '../../ui/status/index.ts';
 import { GoogleAccountsDialog } from './GoogleAccounts.tsx';
 import { GOOGLE_PRESET, googleOps, isGoogleServer } from './google.ts';
 import { WAITING_NOTE, canDisconnect, connectLabel, isOAuthServer, oauthOps, type OAuthStatus } from './oauth.ts';
-import { BROKER_PRESET, blankServer, draftFromPreset, isBrokerServer, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable } from './readiness.ts';
+import { BROKER_PRESET, blankServer, copyImportable, draftFromPreset, isBrokerServer, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable } from './readiness.ts';
 
 type Refs = { [key in string]?: ValueRef };
 
@@ -316,11 +317,149 @@ function Editor({
   );
 }
 
+/** The "Copy from another PC" dialog: pick one of the person's own paired PCs, tick the tool
+ * servers it has that this PC does not, and bring them over. Secrets crossed as empty slots —
+ * every copied row waits for its token until the person enters it, and a server this PC already
+ * has is left exactly as it is. */
+function CopyDialog({
+  ids,
+  mcp,
+  devices,
+  onApply,
+  onClose,
+}: {
+  ids: string[];
+  mcp: McpOps;
+  devices: DeviceOps;
+  onApply: (snap: { servers: McpServer[]; revision: string }) => void;
+  onClose: () => void;
+}) {
+  const [peers, setPeers] = useState<DeviceInfo[] | null>(null);
+  const [device, setDevice] = useState<DeviceInfo | null>(null);
+  const [offered, setOffered] = useState<McpServer[] | null>(null);
+  const [skipped, setSkipped] = useState(0);
+  const [picked, setPicked] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    devices
+      .list()
+      .then((l) => setPeers(l.devices.filter((d) => !d.isSelf)))
+      .catch((e: unknown) => {
+        setPeers([]);
+        setError(errorText(e));
+      });
+  }, [devices]);
+  const choose = (d: DeviceInfo) => {
+    setDevice(d);
+    setOffered(null);
+    setPicked([]);
+    setError(null);
+    devices
+      .mcpList(d.uid)
+      .then((r) => {
+        const list = copyImportable(r.servers, ids);
+        setSkipped(r.servers.length - list.length);
+        setOffered(list);
+      })
+      .catch((e: unknown) => setError(errorText(e)));
+  };
+  const importPicked = () => {
+    const chosen = (offered ?? []).filter((s) => picked.includes(s.id));
+    if (chosen.length === 0) return;
+    setBusy(true);
+    mcp
+      .importCopy(chosen)
+      .then((snap) => {
+        onApply(snap);
+        onClose();
+      })
+      .catch((e: unknown) => setError(errorText(e)))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <Dialog
+      title="Copy tool servers from another PC"
+      testId="mcp-copy-dialog"
+      busy={busy}
+      onClose={onClose}
+      intro={
+        <p className="mcp-help">
+          {device
+            ? `${device.name}: its servers that this PC does not have yet. A secret is never copied — an imported row waits until you enter its token, and a server already here is left as it is.`
+            : 'Pick one of your other PCs. Only a PC of yours answers; its secrets stay there.'}
+        </p>
+      }
+      footer={
+        <>
+          <Button variant="primary" data-testid="mcp-copy-import" disabled={busy || picked.length === 0} onClick={importPicked}>
+            {busy ? 'Copying…' : picked.length ? `Copy ${picked.length}` : 'Copy'}
+          </Button>
+          <Button data-testid="mcp-copy-close" onClick={onClose}>
+            Close
+          </Button>
+        </>
+      }
+    >
+      {peers === null && <p className="mcp-help">Loading your PCs…</p>}
+      {peers !== null && peers.length === 0 && <p className="mcp-help">No other PC shares your hub, so there is nothing to copy from.</p>}
+      <div className="mcp-actions">
+        {(peers ?? []).map((d) => (
+          <Button key={d.uid} data-testid={`mcp-copy-device-${d.uid}`} disabled={busy} onClick={() => choose(d)}>
+            {d.name}
+            {d.online ? '' : ' (offline)'}
+          </Button>
+        ))}
+      </div>
+      {device && offered === null && !error && <p className="mcp-help">Reading {device.name}’s server list…</p>}
+      {offered !== null && (
+        <>
+          <ul className="mcp-list">
+            {offered.map((s) => (
+              <li key={s.id} className="mcp-server" data-testid={`mcp-copy-row-${s.id}`}>
+                <div className="mcp-server-main">
+                  <span className="mcp-server-name">{s.name}</span>
+                  <span className="mcp-meta">{s.transport.type === 'stdio' ? s.transport.command : s.transport.url}</span>
+                </div>
+                <Checkbox
+                  aria-label={`Copy ${s.name}`}
+                  checked={picked.includes(s.id)}
+                  disabled={busy}
+                  onChange={(on) => setPicked((p) => (on ? [...p, s.id] : p.filter((x) => x !== s.id)))}
+                  label="Copy"
+                />
+              </li>
+            ))}
+          </ul>
+          {offered.length === 0 && (
+            <p className="mcp-help" data-testid="mcp-copy-empty">
+              Nothing to bring: every server there is already on this PC.
+            </p>
+          )}
+          {skipped > 0 && (
+            <p className="mcp-help">
+              {skipped} {skipped === 1 ? 'is' : 'are'} already on this PC, left exactly as they are.
+            </p>
+          )}
+        </>
+      )}
+      {error && (
+        <p className="mcp-error" role="alert">
+          {error}
+        </p>
+      )}
+    </Dialog>
+  );
+}
+
 export function McpPane() {
   const shell = useShell();
   const ops = useMemo(() => mcpOps(shell.api), [shell.api]);
   const google = useMemo(() => googleOps(shell.api), [shell.api]);
   const oauth = useMemo(() => oauthOps(shell.api), [shell.api]);
+  const devices = useMemo(() => deviceOps(shell.api), [shell.api]);
+  // The "Copy from another PC" dialog.
+  const [copyOpen, setCopyOpen] = useState(false);
   const [servers, setServers] = useState<McpServer[]>([]);
   // Per browser-signed-in server: whether a sign-in is kept, and an open or refused sign-in ('' = waiting).
   const [oauthState, setOauthState] = useState<Record<string, OAuthStatus>>({});
@@ -593,6 +732,18 @@ export function McpPane() {
             {error}
           </p>
         )}
+        {copyOpen && (
+          <CopyDialog
+            ids={ids}
+            mcp={ops}
+            devices={devices}
+            onApply={(s) => {
+              setServers(s.servers);
+              setRevision(s.revision);
+            }}
+            onClose={() => setCopyOpen(false)}
+          />
+        )}
         {draft && (
           <Editor
             draft={draft.server}
@@ -681,7 +832,13 @@ export function McpPane() {
           <Button data-testid="mcp-add-custom" onClick={() => setDraft({ server: blankServer(ids), isNew: true })}>
             Other server…
           </Button>
+          <Button data-testid="mcp-copy-remote" onClick={() => setCopyOpen(true)}>
+            Copy from another PC…
+          </Button>
         </div>
+        <p className="mcp-help">
+          Or bring the same servers you set up on another of your PCs. Their secrets never cross: each copied server waits for you to enter its token here.
+        </p>
       </section>
     </div>
   );

@@ -13,6 +13,8 @@
 //! | `mcp_servers_status` | blocking | `{}` → [`ServerStatus`](crate::status::ServerStatus)`[]` |
 //! | `mcp_chat_problems` | blocking | `{chatId}` → [`ChatMcpProblem`](crate::chat_problems::ChatMcpProblem)`[]` (the chat's servers it cannot use, with reason words) |
 //! | `mcp_broker_doctor` | blocking | `{serverId}` → [`DoctorOutcome`](crate::doctor::DoctorOutcome) (the browser server's own checks; listed in [`crate::doctor`]) |
+//! | `mcp_copy_export` | blocking | `{}` → `{servers}` — this PC's servers with every secret value, saved id and file path blanked, for the same person's other PCs (served to them over the device link, see `helm_devices`) |
+//! | `mcp_copy_import` | maintenance | `{servers, revision?}` → [`McpEditorSnapshot`]; servers copied from another PC: an id this PC has is skipped, and a blanked secret waits to be entered |
 //! | `mcp_repo_servers_list` | blocking | `{}` → [`RepoServer`](crate::repo_gate::RepoServer)`[]` (seen since launch) |
 //! | `mcp_repo_approve` | maintenance | `{file, name, hash}` → the list |
 //! | `mcp_repo_revoke` | maintenance | `{file, name}` → the list |
@@ -71,6 +73,21 @@ pub fn register_ops(reg: &mut OpRegistry) {
             g.revoke(&a.file, &a.name)
                 .map_err(|e| ApiError::internal(e.0))?;
             to_value(&g.seen())
+        })
+        .blocking("mcp_copy_export", OpClass::Blocking, |ctx, args| {
+            if !(args.is_null() || args.as_object().is_some_and(|o| o.is_empty())) {
+                return Err(ApiError::bad_args("mcp_copy_export takes no arguments."));
+            }
+            let st = ctx.services.need::<McpStore>()?;
+            Ok(serde_json::json!({ "servers": st.export_copy().map_err(api_error)? }))
+        })
+        .blocking("mcp_copy_import", OpClass::Maintenance, |ctx, args| {
+            let a: CopyImportArgs = parse(args)?;
+            let st = ctx.services.need::<McpStore>()?;
+            to_value(
+                &st.import_copy(&a.servers, a.revision.as_deref())
+                    .map_err(api_error)?,
+            )
         });
     crate::google::register_ops(reg);
     crate::oauth_ops::register_ops(reg);
@@ -95,6 +112,15 @@ struct RepoRevokeArgs {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatProblemsArgs {
     chat_id: String,
+}
+
+/// The servers Settings → MCP copied from another PC, as [`McpStore::export_copy`] sends them.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CopyImportArgs {
+    #[serde(default)]
+    revision: Option<String>,
+    servers: Vec<McpServer>,
 }
 
 pub(crate) fn api_error(e: StoreError) -> ApiError {

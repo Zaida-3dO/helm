@@ -20,6 +20,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .async_op("devices_attach", devices_attach)
         .async_op("devices_pages", devices_pages)
         .async_op("devices_page_open", devices_page_open)
+        .async_op("devices_mcp_list", devices_mcp_list)
         .blocking("devices_discard", OpClass::Blocking, devices_discard)
         .blocking(
             "devices_consent_list",
@@ -915,6 +916,24 @@ async fn devices_page_open(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
     out["stateRevision"] = json!(revision);
     out["pins"] = json!([b.pin]);
     Ok(out)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct McpListArgs {
+    device_uid: String,
+}
+
+/// `devices_mcp_list`: the MCP tool servers set up on one other PC, for Settings → MCP's
+/// "Copy from another PC": `{servers}`, each secret's value, saved secret id and credential-file
+/// path blanked there before it leaves that PC. That PC answers its own person only; a household
+/// member asking gets a refusal in words, as does an offline PC.
+async fn devices_mcp_list(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: McpListArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    let mirror = mirror_of(&ctx).ok_or_else(no_hub)?;
+    let person = mirror.acting_now()?;
+    mirror.mcp_list(&a.device_uid, &person).await
 }
 
 /// `devices_board_connection`: whether the PC that runs a mirrored chat has a task board set

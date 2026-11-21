@@ -5,6 +5,7 @@
 
 import type { Api } from '../api/client.ts';
 import type { DeviceState } from '../api/devices.ts';
+import type { McpServer } from '../api/mcp.ts';
 import type { ChatRecord } from '../api/types.ts';
 
 /** One computer on the hub, as `devices_list` reports it. */
@@ -153,6 +154,10 @@ export function deviceOps(api: Api) {
     forwardClose: (forwardId: string) => api<unknown>('devices_forward_close', { forwardId }),
     /** Copy a file of a chat that runs on another PC to this PC; null when the person cancelled the dialog. */
     fileSave: (chatId: string, path: string) => api<{ path: string | null }>('devices_file_save', { chatId, path }).then((r) => r?.path ?? null),
+    /** The MCP tool servers set up on another PC, for Settings → MCP's "Copy from another PC":
+     *  every secret value, saved secret id and credential-file path is already blanked there.
+     *  That PC answers only its own person; an offline one answers in words. */
+    mcpList: (deviceUid: string) => api<{ servers: McpServer[] }>('devices_mcp_list', { deviceUid }),
     self: () => api<ThisDevice>('device_get', {}),
     rename: (name: string) => api<ThisDevice>('device_rename', { name }),
     /** The stored choice; null when none was made (this computer). */

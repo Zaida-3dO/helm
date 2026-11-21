@@ -88,8 +88,11 @@ pub fn validate_ref(r: &ValueRef, place: RefPlace, label: &str) -> Result<(), In
                 Ok(())
             }
             (None, Some(id)) if is_secret_id(id) => Ok(()),
+            // A blank slot: a server copied from another PC whose secret has not been entered
+            // yet. It never connects as it stands; the row says it needs its token.
+            (None, None) => Ok(()),
             _ => Err(bad(format!(
-                "{label}: a literal needs either a new value or the saved secret's id."
+                "{label}: a literal carries either a new value or the saved secret's id, not both."
             ))),
         },
         RefKind::ChatPerson => {
@@ -614,6 +617,17 @@ mod tests {
             prefix: None,
         };
         assert!(validate_ref(&kept, RefPlace::Env, "x").is_ok());
+        // A blank slot (a copy whose secret was blanked on the way across) saves and waits.
+        let blank = ValueRef {
+            kind: RefKind::Literal,
+            value: None,
+            secret_id: None,
+            prefix: None,
+        };
+        assert!(
+            validate_ref(&blank, RefPlace::Env, "x").is_ok(),
+            "an empty secret slot saves, so a copied server can land waiting for its token"
+        );
         // The chat's person: a header with no value.
         let person = |value: Option<&str>| ValueRef {
             kind: RefKind::ChatPerson,

@@ -416,6 +416,9 @@ impl ChatPort for ChannelPort {
     fn blob_read(&self, a: helm_devices::wire::BlobReadArgs) -> BoxFut<'_, PortResult<Value>> {
         self.port.blob_read(a)
     }
+    fn mcp_list(&self) -> BoxFut<'_, PortResult<Value>> {
+        self.port.mcp_list()
+    }
 }
 
 /// Start answering other devices: needs the relay client, the app's event tap and the chat

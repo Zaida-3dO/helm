@@ -269,6 +269,7 @@ impl Mirror {
                             | "that file"
                             | "that board"
                             | "that forward"
+                            | "its tool servers"
                     ) =>
             {
                 ApiError::new(
@@ -876,6 +877,21 @@ impl Mirror {
             "pages_list",
             json!({}),
             "its pages",
+            &[person.to_owned()],
+        )
+        .await
+    }
+
+    /// The MCP tool servers set up on `device`, with every secret blanked there: for Settings →
+    /// MCP's "Copy from another PC". Asked only as the person both PCs share — that PC refuses
+    /// anyone else — so it needs the line up and the pairing, not the run switch.
+    pub async fn mcp_list(&self, device: &str, person: &str) -> Result<Value, ApiError> {
+        self.check_up(device)?;
+        self.ask_as(
+            device,
+            "mcp_list_get",
+            json!({}),
+            "its tool servers",
             &[person.to_owned()],
         )
         .await

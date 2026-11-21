@@ -221,6 +221,51 @@ export function toSaveable(d: McpServer): McpServer {
   };
 }
 
+/** One reference in a copied server: an environment name and the chat's person cross as they
+ * stand; anything else (a literal value, a saved id, another PC's file path) crosses as an
+ * empty secret slot. Applied again on arrival, so nothing secret can be saved from the dialog
+ * even if the other end ever sent more than it should. */
+function copyRef(r: ValueRef): ValueRef {
+  if (r.kind === 'environment' || r.kind === 'chatPerson') {
+    return { kind: r.kind, ...(r.value !== undefined ? { value: r.value } : {}) };
+  }
+  return { kind: 'literal', ...(r.prefix !== undefined ? { prefix: r.prefix } : {}) };
+}
+
+function copyRefs(m: { [key in string]?: ValueRef } | undefined) {
+  if (!m) return undefined;
+  const out: { [key in string]?: ValueRef } = {};
+  for (const [k, r] of Object.entries(m)) if (r) out[k] = copyRef(r);
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** What Settings → MCP's "Copy from another PC" may offer: the other PC's entries this PC does
+ * not already have (same id = skipped, never overwritten), re-blanked defensively. A blanked
+ * secret slot saves as-is and the row then says it needs its token. */
+export function copyImportable(remote: McpServer[], existingIds: string[]): McpServer[] {
+  return remote
+    .filter((s) => !existingIds.includes(s.id))
+    .map((s) => {
+      const t = s.transport;
+      return {
+        ...s,
+        transport: {
+          ...t,
+          ...(copyRefs(t.env) ? { env: copyRefs(t.env) } : {}),
+          ...(copyRefs(t.headers) ? { headers: copyRefs(t.headers) } : {}),
+          ...(t.oauth
+            ? {
+                oauth: {
+                  ...t.oauth,
+                  ...(t.oauth.clientSecret ? { clientSecret: copyRef(t.oauth.clientSecret) } : {}),
+                },
+              }
+            : {}),
+        },
+      };
+    });
+}
+
 /** "http://" to a host other than this computer: the card shows the unencrypted warning. */
 export function isPlainRemoteHttp(url: string | undefined): boolean {
   if (!url) return false;
