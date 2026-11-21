@@ -19,6 +19,7 @@
 //! | [`usage_windows`] | what the stored plan-usage windows say right now, for the queue's capacity hold |
 //! | [`ops`] | the `api` ops this crate serves |
 
+pub mod chat_token;
 pub mod credentials;
 pub mod db;
 pub mod drafts;

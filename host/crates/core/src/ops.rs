@@ -9,12 +9,17 @@
 //! | `quit_ready` | blocking | the UI reports drafts and settings saved |
 //! | `window_hide` | blocking | hide the main window (closing only hides it) |
 //! | `window_ready` | blocking | the UI drew its first frame: show the window created hidden |
+//! | `claude_token_status` | blocking | `{saved, savedAt?}`: whether chats have a saved Claude token (never the token) |
+//! | `claude_token_save` | maintenance | `{token}` → status; seals the token, emits `claude_token` |
+//! | `claude_token_forget` | maintenance | → status; removes the saved token from this PC, emits `claude_token` |
 
+use crate::chat_token;
 use crate::db::{Database, MigrationRegistry};
 use crate::lifecycle::{PlatformDialogs, QuitCoordinator, QuitOutcome, Shell, Workers};
 use crate::prefs;
 use crate::profile::Profile;
 use helm_ipc::{ApiError, AppEvent, OpClass, OpCtx, OpRegistry};
+use helm_platform::Platform;
 use serde_json::{json, Value};
 
 pub fn register_ops(reg: &mut OpRegistry) {
@@ -24,6 +29,17 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("quit_ready", OpClass::Blocking, quit_ready)
         .blocking("window_hide", OpClass::Blocking, window_hide)
         .blocking("window_ready", OpClass::Blocking, window_ready)
+        .blocking(
+            "claude_token_status",
+            OpClass::Blocking,
+            claude_token_status,
+        )
+        .blocking("claude_token_save", OpClass::Maintenance, claude_token_save)
+        .blocking(
+            "claude_token_forget",
+            OpClass::Maintenance,
+            claude_token_forget,
+        )
         .async_op("quit_request", quit_request);
 }
 
@@ -73,6 +89,39 @@ fn preference_set(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     ctx.events
         .emit(AppEvent::new("preferences").with("changed", json!({ key: value })));
     Ok(Value::Null)
+}
+
+fn token_store(ctx: &OpCtx) -> Result<crate::credentials::CredentialStore, ApiError> {
+    let profile = ctx.services.need::<Profile>()?;
+    let platform = ctx.services.need::<Platform>()?;
+    Ok(chat_token::credentials(&profile, &platform))
+}
+
+/// Tell the window the saved token changed. The event carries the same status the ops answer
+/// with, never the token.
+fn token_changed(ctx: &OpCtx, status: &chat_token::Status) -> Result<Value, ApiError> {
+    let v = serde_json::to_value(status).map_err(|e| ApiError::internal(e.to_string()))?;
+    ctx.events
+        .emit(AppEvent::new("claude_token").with("status", v.clone()));
+    Ok(v)
+}
+
+fn claude_token_status(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
+    serde_json::to_value(chat_token::status(&token_store(ctx)?))
+        .map_err(|e| ApiError::internal(e.to_string()))
+}
+
+/// The error is a fixed sentence: it never carries the pasted text.
+fn claude_token_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let token = str_arg(&args, "token").map_err(|_| ApiError::bad_args("token is missing"))?;
+    let status = chat_token::save(&token_store(ctx)?, token, crate::now_ms() as u64)
+        .map_err(ApiError::bad_args)?;
+    token_changed(ctx, &status)
+}
+
+fn claude_token_forget(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
+    let status = chat_token::forget(&token_store(ctx)?).map_err(ApiError::internal)?;
+    token_changed(ctx, &status)
 }
 
 fn quit_ready(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
@@ -146,6 +195,10 @@ mod tests {
         s.insert(Arc::new(PlatformDialogs(Arc::new(FixedDialogs(confirm)))));
         s.insert(Arc::new(Workers(Arc::new(NoWorkers))));
         s.insert(Arc::new(Shell(shell.clone())));
+        s.insert(Arc::new(Platform {
+            keychain: Arc::new(helm_platform::keychain::MemoryKeychain::default()),
+            ..Platform::native()
+        }));
         let sink = Arc::new(RecordingSink::default());
         let mut reg = OpRegistry::new();
         register_ops(&mut reg);
@@ -214,5 +267,50 @@ mod tests {
         assert_eq!(out["outcome"], "quit");
         assert_eq!(shell.0.load(Ordering::SeqCst), 100, "exit(0) was called");
         assert_eq!(sink.kinds(), ["quitting"]);
+    }
+
+    #[tokio::test]
+    async fn the_chat_token_ops_save_report_and_forget_without_echoing_it() {
+        let (_d, api, sink, _) = setup(true);
+        let token = "sk-ant-oat01-AbC123_def-GHI456jklMNO789pqrSTU";
+        let none = api
+            .call(&main(), "claude_token_status", Value::Null)
+            .await
+            .unwrap();
+        assert_eq!(none, json!({"saved": false}));
+
+        let bad = api
+            .call(
+                &main(),
+                "claude_token_save",
+                json!({"token": "not-a-token"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(bad.code, "bad_args");
+        assert!(!bad.message.contains("not-a-token"));
+
+        let saved = api
+            .call(&main(), "claude_token_save", json!({"token": token}))
+            .await
+            .unwrap();
+        assert_eq!(saved["saved"], true);
+        assert!(saved["savedAt"].as_u64().unwrap() > 0);
+        let again = api
+            .call(&main(), "claude_token_status", Value::Null)
+            .await
+            .unwrap();
+        assert_eq!(again, saved);
+
+        let gone = api
+            .call(&main(), "claude_token_forget", Value::Null)
+            .await
+            .unwrap();
+        assert_eq!(gone, json!({"saved": false}));
+        assert_eq!(sink.kinds(), ["claude_token", "claude_token"]);
+        assert!(
+            !format!("{:?}", sink.kinds()).contains("sk-ant"),
+            "events never carry the token"
+        );
     }
 }

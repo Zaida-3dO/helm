@@ -393,6 +393,12 @@ fn run_app(
                 debug,
                 app.path().resource_dir().ok().as_deref(),
             );
+            // Chats sign in with the saved Claude token when there is one; it is read from the
+            // credential store at each start.
+            let token_store = helm_core::chat_token::credentials(&profile, &platform);
+            let chat_token: helm_chats::ChatTokenSource = Arc::new(move || {
+                helm_core::chat_token::read(&token_store).map(|t| t.expose().to_owned())
+            });
             let spawner = Arc::new(
                 helm_chats::ProcessSpawner::new(
                     profile.path(""),
@@ -400,7 +406,8 @@ fn run_app(
                     debug,
                     worker_source,
                 )
-                .with_contributors(registrations::launch_contributors(&db)),
+                .with_contributors(registrations::launch_contributors(&db))
+                .with_chat_token(chat_token),
             );
             let tauri::async_runtime::RuntimeHandle::Tokio(tokio_handle) =
                 tauri::async_runtime::handle();

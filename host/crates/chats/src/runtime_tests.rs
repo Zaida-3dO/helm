@@ -8557,3 +8557,53 @@ async fn new_local_turns_wait_when_the_server_carries_its_cap() {
     let p6 = w6.expect("prompt").await;
     assert_eq!(p6["submissionId"], sid6.as_str());
 }
+
+/// The saved Claude token reaches a Claude worker or helper only as the handover variable. A
+/// local-model start never gets it, a stray value from the surrounding environment never
+/// survives, it is not part of the launch file, and the usage meter's helper does not read it.
+#[test]
+fn the_saved_claude_token_is_handed_over_only_to_claude_starts() {
+    use helm_workers::env::EnvMap;
+    use helm_workers::launch::CLAUDE_TOKEN_ENV;
+    const TOKEN: &str = "sk-ant-oat01-fake-chat-token-for-tests";
+    let reads = Arc::new(AtomicU32::new(0));
+    let source: ChatTokenSource = {
+        let reads = reads.clone();
+        Arc::new(move || {
+            reads.fetch_add(1, Ordering::SeqCst);
+            Some(TOKEN.to_owned())
+        })
+    };
+    let none: ChatTokenSource = Arc::new(|| None);
+
+    // A Claude worker or helper with a saved token: the variable, nothing else changes.
+    let mut env = EnvMap::default();
+    apply_chat_token(&mut env, Some(&source), false);
+    assert_eq!(env.get(CLAUDE_TOKEN_ENV), Some(TOKEN));
+    // Without a source or a token, the start is as it always was, and an inherited value (say
+    // from the person's own environment) is dropped rather than passed on.
+    for source in [None, Some(&none)] {
+        let mut env = EnvMap::default();
+        env.set(CLAUDE_TOKEN_ENV, "inherited");
+        apply_chat_token(&mut env, source, false);
+        assert_eq!(env.get(CLAUDE_TOKEN_ENV), None);
+    }
+    // A local-model start never gets it, and the store is not even read for one.
+    let before = reads.load(Ordering::SeqCst);
+    let mut env = EnvMap::default();
+    env.set(CLAUDE_TOKEN_ENV, "inherited");
+    apply_chat_token(&mut env, Some(&source), true);
+    assert_eq!(env.get(CLAUDE_TOKEN_ENV), None);
+    assert_eq!(reads.load(Ordering::SeqCst), before);
+
+    // Never in the launch file (which the worker reads from disk, and logs can show).
+    let rt = helm_workers::launch::ClaudeRuntime::default();
+    let claude = helm_workers::launch::claude_launch(&rt, None, None, None, None);
+    assert!(!serde_json::to_string(&claude).unwrap().contains(TOKEN));
+    // Nor in what an env map prints about itself.
+    assert!(!format!("{:?}", claude).contains(TOKEN));
+
+    // The usage meter keeps the normal sign-in: its helper's source never names the variable.
+    let usage = include_str!("../../usage/src/helper.rs");
+    assert!(!usage.contains("CLAUDE_TOKEN") && !usage.contains("chat_token"));
+}

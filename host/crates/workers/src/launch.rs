@@ -99,6 +99,11 @@ pub struct LocalSpec {
 /// and removes it from its own environment.
 pub const LOCAL_KEY_ENV: &str = "HELM_LOCAL_MODEL_KEY";
 
+/// The variable that carries the person's saved Claude token to a worker or helper that runs
+/// Claude. The process reads it once, removes it from its own environment and sets the token on
+/// the claude child alone. Never on a command line, never for a local-model chat.
+pub const CLAUDE_TOKEN_ENV: &str = "HELM_CLAUDE_TOKEN";
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchSendBehavior {

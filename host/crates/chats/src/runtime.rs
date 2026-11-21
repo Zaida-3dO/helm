@@ -310,6 +310,29 @@ pub(crate) fn apply_local_launch(
     Ok(())
 }
 
+/// Reads the person's saved Claude token from the credential store, each time it is asked, so a
+/// token saved or forgotten applies to the next start.
+pub type ChatTokenSource = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
+/// Put the saved Claude token in a launch's environment for the process that runs Claude: the
+/// worker, or a helper that asks Claude. Only a Claude start gets it; a local-model start never
+/// reads it, and any value the surrounding environment already had is dropped first, so only the
+/// saved token can arrive. It travels as this one variable, read once by the process, and is
+/// never part of `launch.json`, a job or a command line.
+pub(crate) fn apply_chat_token(
+    env: &mut helm_workers::env::EnvMap,
+    source: Option<&ChatTokenSource>,
+    local: bool,
+) {
+    env.remove(helm_workers::launch::CLAUDE_TOKEN_ENV);
+    if local {
+        return;
+    }
+    if let Some(token) = source.and_then(|read| read()) {
+        env.set(helm_workers::launch::CLAUDE_TOKEN_ENV, token);
+    }
+}
+
 /// The real spawner: stage `worker/src`, resolve Node on the worker's PATH, write `launch.json`,
 /// and start `node <main.ts> <launch.json>` in a Job Object.
 pub struct ProcessSpawner {
@@ -322,6 +345,7 @@ pub struct ProcessSpawner {
     worker_source: Option<PathBuf>,
     staged: Mutex<Option<PathBuf>>,
     contributors: LaunchContributors,
+    chat_token: Option<ChatTokenSource>,
 }
 
 impl ProcessSpawner {
@@ -339,7 +363,14 @@ impl ProcessSpawner {
             worker_source,
             staged: Mutex::new(None),
             contributors: LaunchContributors::new(),
+            chat_token: None,
         }
+    }
+
+    /// Where the saved Claude token comes from. Without one, Claude starts as they always have.
+    pub fn with_chat_token(mut self, source: ChatTokenSource) -> Self {
+        self.chat_token = Some(source);
+        self
     }
 
     /// The launch contributors every worker launch consults.
@@ -402,6 +433,7 @@ impl Spawner for ProcessSpawner {
         if let Some(l) = &req.local {
             apply_local_launch(&mut claude, &mut env, l)?;
         }
+        apply_chat_token(&mut env, self.chat_token.as_ref(), req.local.is_some());
         if extras.orchestrator_on {
             claude.subagent_soft_turns = runtime.subagent_turns(true);
             claude.orchestrator = true;
@@ -646,6 +678,7 @@ impl ProcessSpawner {
         );
         let node = resolve_node(&NodeLookup::for_worker(&env)).map_err(|e| e.to_string())?;
         let mut job = job.clone();
+        let local = job.get("localKey").is_some();
         // A background job routed at a local model server carries that server's key. It travels
         // like a worker launch does: as one environment variable the helper reads once, never in
         // the job JSON on stdin.
@@ -656,6 +689,9 @@ impl ProcessSpawner {
             }
             env.set(helm_workers::launch::LOCAL_KEY_ENV, k);
         }
+        // A job on Claude signs in with the saved token the same way (the usage meter has its own
+        // path and never gets it).
+        apply_chat_token(&mut env, self.chat_token.as_ref(), local);
         let (runtime, _) = ClaudeRuntime::load(&self.profile_dir);
         let low = runtime.low_priority;
         if let Some(t) = test_claude(
