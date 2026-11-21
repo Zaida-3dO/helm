@@ -59,11 +59,16 @@ adds to every run, locally and in CI, and slows everyone down.
 
 ## Hard rules
 
-1. **Auth.** Never read `~/.claude/.credentials.json` or any token store. Never call
-   `api.anthropic.com/api/oauth/*`. Claude is used only through the unmodified `claude` binary under
-   the user's own sign-in. The worker strips `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
-   `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_OAUTH_TOKEN` and `CLAUDECODE` from the claude child's
-   environment unless API-key mode is on, or the chat runs on a local model server configured in
+1. **Auth.** Never read `~/.claude/.credentials.json` or any other token store of Claude Code's, and
+   never call `api.anthropic.com/api/oauth/*`. Claude is used only through the unmodified `claude`
+   binary under the user's own account. The user may save a long-lived token made with
+   `claude setup-token` in Helm, which keeps it sealed in its own credential store. The host then
+   hands it to a worker or helper in `HELM_CLAUDE_TOKEN`; that process removes it from its own
+   environment once read and sets `CLAUDE_CODE_OAUTH_TOKEN` on the claude child only. It is never
+   put on a command line, never logged, never given to MCP servers and never given to a local-model
+   chat. The usage meter does not use it. Otherwise the worker strips `ANTHROPIC_API_KEY`,
+   `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_OAUTH_TOKEN` and `CLAUDECODE` from the
+   claude child's environment unless API-key mode is on, or the chat runs on a local model server configured in
    Helm on this machine. Then, and only then, it sets the base URL to that server's loopback
    address (plain http to `127.0.0.1`, `localhost` or `::1`; anything else is refused) and the token
    to that server's own key, handed over in `HELM_LOCAL_MODEL_KEY` and removed from the worker's

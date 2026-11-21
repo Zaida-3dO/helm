@@ -35,6 +35,13 @@ unless noted.
   The live check compares the meter with a second, direct run of the usage
   helper to catch it.
 
+## Which sign-in the meter uses
+
+The meter always runs on the PC's normal Claude sign-in, never on the saved chat token: a token
+made by `claude setup-token` makes model requests only and cannot read plan usage, so the usage
+helper is started without it (and strips the hand-over variable). When that normal sign-in lapses,
+only the meter says to sign in; chats go on with their token.
+
 ## Cadence
 
 On launch, every 10 minutes while the window is visible, and on Refresh; never more often than once

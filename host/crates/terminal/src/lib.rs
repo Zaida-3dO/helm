@@ -9,11 +9,13 @@
 //! | `terminal_resize` | blocking | `{id, cols, rows}` |
 //! | `terminal_close` | blocking | `{id}`: close the pseudo console, then end the Job after 2 s |
 //! | `terminal_sessions` | blocking | → [`TerminalSession`]`[]` |
-//! | `claude_sign_in` | blocking | `{cols?, rows?}` → [`TerminalSession`]: the unmodified `claude auth login` in a new session |
+//! | `claude_sign_in` | blocking | `{cols?, rows?, token?}` → [`TerminalSession`]: the unmodified `claude auth login` (or, with `token`, `claude setup-token`) in a new session |
 //!
 //! `claude_sign_in` is the only way a session runs something other than a shell, and it takes no
 //! program or arguments from the renderer: the host finds Claude Code the way a worker does and
-//! starts it with the fixed arguments `auth login`.
+//! starts it with the fixed arguments `auth login`, or `setup-token` when `token` is true. A
+//! `setup-token` session picks the token out of its own output (see [`capture`]), seals it as the
+//! chat token and blanks it in the session's replay.
 //!
 //! Output rides the one event channel as `terminal {id, seq, data}` in UTF-8-safe
 //! chunks of at most 64 KiB, and `terminal_exit {id, code}`. Output pauses past 1 MiB of
@@ -22,6 +24,7 @@
 //! not passed to the shell.
 
 pub mod bindings;
+pub mod capture;
 #[cfg(windows)]
 mod job;
 pub mod shell;
@@ -34,7 +37,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use stream::{split_chunks, utf16_units, FlowGate, Replay, Utf8Carry, CHUNK_MAX};
@@ -90,7 +93,16 @@ pub struct TerminalAttachResult {
     pub seq: u64,
 }
 
-/// What a session runs: a shell, or (only through [`sign_in_launch`]) the Claude sign-in.
+/// Called with a Claude token the sign-in session printed. It must never log it.
+pub type TokenSink = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// What replaces a captured token in the session's replay.
+const TOKEN_REPLACED: &str = "[Claude token saved by Helm]";
+/// How much of the newest output is searched for a token.
+const CAPTURE_WINDOW: usize = 16 * 1024;
+
+/// What a session runs: a shell, or (only through [`sign_in_launch`] and [`setup_token_launch`])
+/// the Claude sign-in.
 struct Launch {
     program: PathBuf,
     args: Vec<String>,
@@ -104,6 +116,9 @@ struct Launch {
     base_env: Option<Vec<(String, String)>>,
     /// Told the exit code when the program ends.
     after_exit: Option<fn(i64)>,
+    /// Given the token the program prints (the token sign-in only); the token is then blanked in
+    /// the replay.
+    catch_token: Option<TokenSink>,
 }
 
 /// `<claude> auth login`: the fixed arguments, and the environment a worker would strip.
@@ -116,6 +131,17 @@ fn sign_in_launch(claude: PathBuf, base_env: Vec<(String, String)>) -> Launch {
         strip: &SIGN_IN_STRIP_ENV,
         base_env: Some(base_env),
         after_exit: Some(sign_in_ended),
+        catch_token: None,
+    }
+}
+
+/// `<claude> setup-token`: the same session, but it makes the long-lived token chats sign in with,
+/// and `save` is given the token when it appears.
+fn setup_token_launch(claude: PathBuf, base_env: Vec<(String, String)>, save: TokenSink) -> Launch {
+    Launch {
+        args: vec!["setup-token".into()],
+        catch_token: Some(save),
+        ..sign_in_launch(claude, base_env)
     }
 }
 
@@ -153,6 +179,8 @@ struct Session {
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     replay: Mutex<Replay>,
     flow: FlowGate,
+    /// The terminal's width, as the renderer last set it.
+    cols: AtomicU16,
     #[cfg(windows)]
     job: Option<job::Job>,
 }
@@ -199,7 +227,7 @@ pub struct TerminalManager {
     shell_pref: Box<dyn Fn() -> String + Send + Sync>,
     /// The sign-in session, while there is one, so a second request shows it instead of starting
     /// another login.
-    sign_in: Mutex<Option<String>>,
+    sign_in: Mutex<Option<(String, bool)>>,
 }
 
 impl TerminalManager {
@@ -245,6 +273,7 @@ impl TerminalManager {
                 strip: &[],
                 base_env: None,
                 after_exit: None,
+                catch_token: None,
             },
             a.cols,
             a.rows,
@@ -260,8 +289,33 @@ impl TerminalManager {
         cols: u16,
         rows: u16,
     ) -> Result<TerminalSession, String> {
+        self.open_claude(claude, env, cols, rows, None)
+    }
+
+    /// A session running the unmodified `claude setup-token`; `save` is given the token it prints.
+    pub fn open_setup_token(
+        &self,
+        claude: PathBuf,
+        env: Vec<(String, String)>,
+        cols: u16,
+        rows: u16,
+        save: TokenSink,
+    ) -> Result<TerminalSession, String> {
+        self.open_claude(claude, env, cols, rows, Some(save))
+    }
+
+    fn open_claude(
+        &self,
+        claude: PathBuf,
+        env: Vec<(String, String)>,
+        cols: u16,
+        rows: u16,
+        save: Option<TokenSink>,
+    ) -> Result<TerminalSession, String> {
+        let token_flow = save.is_some();
         let mut current = self.sign_in.lock().unwrap();
-        if let Some(id) = current.as_ref() {
+        // A second request shows the sign-in that is already running, if it is the same kind.
+        if let Some((id, _)) = current.as_ref().filter(|(_, kind)| *kind == token_flow) {
             let running = self
                 .sessions
                 .lock()
@@ -282,8 +336,12 @@ impl TerminalManager {
         if !cwd.is_dir() {
             return Err(format!("{} is not a folder.", cwd.display()));
         }
-        let s = self.spawn(cwd, sign_in_launch(claude, env), cols, rows)?;
-        *current = Some(s.id.clone());
+        let launch = match save {
+            Some(save) => setup_token_launch(claude, env, save),
+            None => sign_in_launch(claude, env),
+        };
+        let s = self.spawn(cwd, launch, cols, rows)?;
+        *current = Some((s.id.clone(), token_flow));
         Ok(s)
     }
 
@@ -366,6 +424,7 @@ impl TerminalManager {
             killer: Mutex::new(child.clone_killer()),
             replay: Mutex::new(Replay::default()),
             flow: FlowGate::default(),
+            cols: AtomicU16::new(cols.clamp(2, 1000)),
             #[cfg(windows)]
             job,
         });
@@ -373,7 +432,13 @@ impl TerminalManager {
             .lock()
             .unwrap()
             .insert(id.clone(), session.clone());
-        spawn_reader(session.clone(), reader, self.events.clone(), id.clone());
+        spawn_reader(
+            session.clone(),
+            reader,
+            self.events.clone(),
+            id.clone(),
+            launch.catch_token.clone(),
+        );
         spawn_waiter(session, child, self.events.clone(), id, launch.after_exit);
         Ok(meta)
     }
@@ -430,7 +495,9 @@ impl TerminalManager {
             pixel_width: 0,
             pixel_height: 0,
         })
-        .map_err(|e| format!("resize: {e}"))
+        .map_err(|e| format!("resize: {e}"))?;
+        s.cols.store(cols.clamp(2, 1000), Ordering::SeqCst);
+        Ok(())
     }
 
     pub fn close(&self, id: &str) -> Result<(), String> {
@@ -477,10 +544,12 @@ fn spawn_reader(
     mut reader: Box<dyn Read + Send>,
     events: Arc<dyn EventSink>,
     id: String,
+    catch_token: Option<TokenSink>,
 ) {
     std::thread::spawn(move || {
         let mut buf = vec![0u8; CHUNK_MAX];
         let mut carry = Utf8Carry::default();
+        let mut catch_token = catch_token;
         loop {
             let n = match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
@@ -504,9 +573,35 @@ fn spawn_reader(
                         .with("data", piece),
                 );
             }
+            // A token sign-in: once the token has been printed whole, hand it over, blank it in
+            // the replay and look no further.
+            if let Some(save) = catch_token.as_ref() {
+                if let Some(token) = take_token(&s.replay, s.cols.load(Ordering::SeqCst) as usize) {
+                    save(&token);
+                    catch_token = None;
+                }
+            }
             s.flow.wait_for_room(Duration::from_millis(250));
         }
     });
+}
+
+/// The complete token in the session's newest output, if there is one; the replay then shows
+/// [`TOKEN_REPLACED`] in its place.
+fn take_token(replay: &Mutex<Replay>, cols: usize) -> Option<String> {
+    let mut replay = replay.lock().unwrap();
+    let text = replay.text();
+    let mut from = text.len().saturating_sub(CAPTURE_WINDOW);
+    while !text.is_char_boundary(from) {
+        from += 1;
+    }
+    let found = capture::find(&text[from..], cols)?;
+    let mut scrubbed = String::with_capacity(text.len());
+    scrubbed.push_str(&text[..from + found.span.start]);
+    scrubbed.push_str(TOKEN_REPLACED);
+    scrubbed.push_str(&text[from + found.span.end..]);
+    replay.replace_all(scrubbed);
+    Some(found.token)
 }
 
 fn spawn_waiter(
@@ -634,8 +729,9 @@ fn op_sessions(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
     Ok(json!(mgr(ctx)?.sessions()))
 }
 
-/// Start `claude auth login` in a new session. Claude Code is found as a worker finds it; Helm
-/// never reads the sign-in it writes.
+/// Start `claude auth login` in a new session, or with `token: true` `claude setup-token`, whose
+/// token Helm seals as the chat token. Claude Code is found as a worker finds it; Helm never reads
+/// the sign-in `auth login` writes.
 fn op_claude_sign_in(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let n = |k: &str, d: u16| {
         args.get(k)
@@ -659,9 +755,26 @@ fn op_claude_sign_in(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         .into_iter()
         .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
         .collect();
-    let s = mgr(ctx)?
-        .open_sign_in(claude, pairs, n("cols", 100), n("rows", 24))
-        .map_err(bad)?;
+    let (cols, rows) = (n("cols", 100), n("rows", 24));
+    let m = mgr(ctx)?;
+    let s = if args.get("token").and_then(Value::as_bool).unwrap_or(false) {
+        let platform = ctx.services.need::<helm_platform::Platform>()?;
+        let creds = Arc::new(helm_core::chat_token::credentials(&profile, &platform));
+        let events = ctx.events.clone();
+        // The token is sealed here, announced without its text, and never logged.
+        let save: TokenSink = Arc::new(move |raw| {
+            match helm_core::chat_token::save(&creds, raw, helm_core::now_ms() as u64) {
+                Ok(status) => {
+                    events.emit(AppEvent::new("claude_token").with("status", json!(status)))
+                }
+                Err(e) => log::warn!("the token from the sign-in was not saved: {e}"),
+            }
+        });
+        m.open_setup_token(claude, pairs, cols, rows, save)
+    } else {
+        m.open_sign_in(claude, pairs, cols, rows)
+    }
+    .map_err(bad)?;
     serde_json::to_value(s).map_err(|e| ApiError::internal(e.to_string()))
 }
 
@@ -772,6 +885,12 @@ mod tests {
             kept,
             ["PATH", "USERPROFILE", "CLAUDE_CONFIG_DIR", "ANTHROPIC_FOO"]
         );
+        // The token sign-in is the same session with its own fixed arguments and a place to put
+        // the token.
+        let t = setup_token_launch(PathBuf::from("claude.exe"), Vec::new(), Arc::new(|_| {}));
+        assert_eq!(t.args, ["setup-token"]);
+        assert_eq!(t.title, "Claude sign-in");
+        assert!(t.catch_token.is_some() && l.catch_token.is_none());
         // A shell launch brings no base and strips only the app-internal variables.
         assert!(!strips("ANTHROPIC_API_KEY", &[]));
         assert!(strips("HELM_LOCAL_MODEL_KEY", &[]));
@@ -784,6 +903,35 @@ mod tests {
         assert_eq!(gate.sign_ins(), before);
         ended(0);
         assert_eq!(gate.sign_ins(), before + 1);
+    }
+
+    /// The token the sign-in prints is handed over once, whole, however the output was cut into
+    /// reads, and the replay shows a note where it was.
+    #[test]
+    fn a_printed_token_is_taken_once_and_blanked_in_the_replay() {
+        let token = "sk-ant-oat01-AbC123_def-GHI456jklMNO789pqrSTUvwx-YZ0123456789abcdefghij";
+        let out = format!(
+            "Opening the browser...\r\n\r\nYour token:\r\n\x1b[1m{token}\x1b[0m\r\n\r\nStore it safely.\r\n"
+        );
+        let replay = Mutex::new(Replay::default());
+        let mut taken = Vec::new();
+        // Cut in the middle of the token: nothing is taken until the token is whole.
+        let cut = out.find("GHI456").unwrap();
+        let end = out.find("Store").unwrap();
+        for piece in [&out[..cut], &out[cut..end], &out[end..]] {
+            replay.lock().unwrap().push(piece);
+            taken.extend(take_token(&replay, 120));
+        }
+        assert_eq!(taken, [token]);
+        let shown = replay.lock().unwrap().text();
+        assert!(
+            !shown.contains("sk-ant-") && !shown.contains("GHI456"),
+            "{shown:?}"
+        );
+        assert!(shown.contains(TOKEN_REPLACED) && shown.contains("Your token:"));
+        assert!(shown.ends_with("Store it safely.\r\n"));
+        // Nothing left to take on the next read.
+        assert!(take_token(&replay, 120).is_none());
     }
 
     #[test]

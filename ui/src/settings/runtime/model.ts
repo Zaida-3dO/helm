@@ -136,3 +136,47 @@ export const PERMISSION_OPTIONS = [
   { value: 'bypass', title: 'Bypass permissions', subtitle: 'Runs every tool without asking' },
   { value: 'ask', title: 'Asks permission', subtitle: 'Asks before it edits or runs anything' },
 ];
+
+/** What `claude_token_status` answers: whether chats have a saved Claude token and when it was
+ * saved (Unix ms). The token itself never reaches the window. */
+export interface ClaudeTokenStatus {
+  saved: boolean;
+  savedAt?: number;
+}
+
+const DAY_MS = 86_400_000;
+/** A token made by `claude setup-token` lasts a year. */
+const TOKEN_LIFE_DAYS = 365;
+/** How long before it runs out the row starts to say so. */
+const TOKEN_WARN_DAYS = 14;
+
+export type TokenRowState = 'checking' | 'none' | 'saved' | 'expiring' | 'expired';
+
+/** What the sign-in row says for the saved token, as of `now`. */
+export function tokenRow(status: ClaudeTokenStatus | null, now: number): { state: TokenRowState; title: string; note: string } {
+  if (!status) return { state: 'checking', title: 'Chats sign in with a saved Claude token', note: 'Checking…' };
+  if (!status.saved) {
+    return {
+      state: 'none',
+      title: "Chats use this PC's Claude sign-in",
+      note: 'Many chats can refresh that one sign-in at the same moment and trip over each other. Save a long-lived Claude token and chats stop refreshing it. Sign in with a token opens a terminal tab and Helm picks the token up when it appears; you can also paste one.',
+    };
+  }
+  const savedAt = status.savedAt;
+  const day = savedAt === undefined ? '' : new Date(savedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  const title = `Chats sign in with a saved Claude token${day ? ` (saved ${day})` : ''}`;
+  if (savedAt === undefined) return { state: 'saved', title, note: '' };
+  const daysLeft = Math.ceil((savedAt + TOKEN_LIFE_DAYS * DAY_MS - now) / DAY_MS);
+  if (daysLeft <= 0) return { state: 'expired', title, note: 'This token has run out. Sign in again to make a new one.' };
+  if (daysLeft <= TOKEN_WARN_DAYS) {
+    return { state: 'expiring', title, note: `This token runs out in ${daysLeft} ${daysLeft === 1 ? 'day' : 'days'}. Sign in again to make a new one.` };
+  }
+  return { state: 'saved', title, note: 'Only the usage meter still uses the normal Claude sign-in.' };
+}
+
+/** Whether pasted text can be a Claude token (the host checks again): one run of letters, digits,
+ * dashes and underscores starting `sk-ant-`, and not a pay-as-you-go API key. */
+export function looksLikeToken(text: string): boolean {
+  const t = text.trim();
+  return /^sk-ant-[A-Za-z0-9_-]{13,}$/.test(t) && !t.startsWith('sk-ant-api');
+}

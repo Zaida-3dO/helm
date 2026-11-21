@@ -20,6 +20,7 @@ import {
   type SettingsPatch,
   type SubagentScope,
 } from './model.ts';
+import { ClaudeTokenRow } from './ClaudeTokenRow.tsx';
 import { UpgradeCommand } from './UpgradeCommand.tsx';
 import './runtime.css';
 
@@ -165,6 +166,7 @@ export function RuntimePane() {
       <section className="rt-section">
         <h3>Claude Code</h3>
         <p className="rt-help">These apply when a chat's worker next starts; a chat that is working keeps what it started with.</p>
+        <ClaudeTokenRow />
         <SettingRow title="Claude Code executable" description="Leave empty and Helm finds it (claude on PATH, ~/.local/bin, or the VS Code extension). A wrapper script such as claude.cmd is refused.">
           <TextInput
             className="rt-exe"

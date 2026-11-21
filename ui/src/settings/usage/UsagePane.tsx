@@ -56,7 +56,7 @@ function Readiness({ snap, error }: { snap: UsageSnapshot | null; error: string 
         {r.reason}
         {r.state === 'ready' && snap.reading?.stale ? ' The numbers below are out of date.' : ''}
       </p>
-      {r.actionTarget === 'signin' && <SignInAgain />}
+      {r.actionTarget === 'signin' && <SignInAgain login />}
     </>
   );
 }

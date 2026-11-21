@@ -114,6 +114,13 @@ impl Replay {
         self.parts.iter().map(String::as_str).collect()
     }
 
+    /// Replace everything held with `text` (a scrubbed copy of what [`Replay::text`] gave).
+    pub fn replace_all(&mut self, text: String) {
+        self.bytes = text.len();
+        self.parts.clear();
+        self.parts.push_back(text);
+    }
+
     pub fn len(&self) -> usize {
         self.bytes
     }

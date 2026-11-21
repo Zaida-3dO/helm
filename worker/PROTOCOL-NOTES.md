@@ -126,7 +126,12 @@ steering and tool control" for why it is delivery and not the acknowledgement.
 
 - **Credentials stay with the CLI:** `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`,
   `CLAUDE_CODE_OAUTH_TOKEN` and `CLAUDECODE` are removed from the claude child's environment unless
-  `claude.apiKeyMode` is true (compared case-insensitively, as Windows does). `CLAUDE_CODE_ENTRYPOINT`
+  `claude.apiKeyMode` is true (compared case-insensitively, as Windows does). The one thing set
+  after that stripping is the user's saved long-lived Claude token: the host hands it over in
+  `HELM_CLAUDE_TOKEN`, the worker reads it once, removes it from its own environment and sets it as
+  `CLAUDE_CODE_OAUTH_TOKEN` on the claude child only, so the child never refreshes a sign-in. It is
+  never put in arguments or logs, never passed to MCP servers, and never given to a chat on a local
+  model; `HELM_CLAUDE_TOKEN` is stripped from every child. `CLAUDE_CODE_ENTRYPOINT`
   and `CLAUDE_CODE_SSE_PORT` are always removed. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and
   `DISABLE_AUTOUPDATER=1` are always set. The one exception is a chat on a local model server
   (next section): it gets that server's address and key instead, never the user's sign-in.

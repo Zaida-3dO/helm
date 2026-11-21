@@ -124,3 +124,23 @@
   color: var(--text);
   font-family: var(--font-mono);
 }
+
+/* The sign-in row: its buttons, and the paste box under them. */
+.rt-token {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.rt-token-buttons,
+.rt-token-paste {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.rt-token-paste .ui-input {
+  width: 260px;
+}

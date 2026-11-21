@@ -11,6 +11,8 @@ export function shellFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
     dictationMic: null as { uid: string; name: string } | null,
     terminalShell: 'pwsh',
   };
+  // The saved Claude token's status; the real host seals the token itself and never shows it.
+  let claudeToken: { saved: boolean; savedAt?: number } = { saved: false };
   const mics = [
     { id: 'mic-array', name: 'Microphone Array (Realtek)', isDefault: true, available: true },
     { id: 'mic-usb', name: 'USB Microphone', isDefault: false, available: true },
@@ -33,11 +35,29 @@ export function shellFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         setTimeout(() => out(ctx, id, `PS ${cwd}> `), 10);
         return { id, shell: 'pwsh', cwd, title: 'pwsh', running: true };
       }
+      case 'claude_token_status':
+        return claudeToken;
+      case 'claude_token_save':
+        claudeToken = { saved: true, savedAt: Date.now() };
+        ctx.emit({ kind: 'claude_token', status: claudeToken });
+        return claudeToken;
+      case 'claude_token_forget':
+        claudeToken = { saved: false };
+        ctx.emit({ kind: 'claude_token', status: claudeToken });
+        return claudeToken;
       case 'claude_sign_in': {
-        // The real op starts `claude auth login`; this one prints a line and exits cleanly.
+        // The real op starts `claude auth login`, or `claude setup-token` with `token` (the host then
+        // saves the token it prints); this one prints a line, saves a stand-in and exits cleanly.
         const id = `term-${nextId++}`;
         const cwd = 'C:\\Users\\demo';
         terms.set(id, { seq: 0, line: '', cwd });
+        if (args.token) {
+          setTimeout(() => {
+            out(ctx, id, 'Your token:\r\n[Claude token saved by Helm]\r\n');
+            claudeToken = { saved: true, savedAt: Date.now() };
+            ctx.emit({ kind: 'claude_token', status: claudeToken });
+          }, 600);
+        }
         setTimeout(() => out(ctx, id, 'Opening your browser to sign in to Claude...\r\nLogin successful.\r\n'), 10);
         setTimeout(() => ctx.emit({ kind: 'terminal_exit', id, code: 0 }), 2000);
         return { id, shell: 'claude', cwd, title: 'Claude sign-in', running: true };
@@ -87,5 +107,5 @@ export function shellFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         throw new Error(`fake shell: unknown op ${op}`);
     }
   };
-  return { prefixes: ['shell_settings_', 'audio_inputs', 'window_zoom', 'open_external', 'terminal_', 'claude_sign_in'], handler };
+  return { prefixes: ['shell_settings_', 'audio_inputs', 'window_zoom', 'open_external', 'terminal_', 'claude_sign_in', 'claude_token_'], handler };
 }
