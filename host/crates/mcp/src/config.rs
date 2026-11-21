@@ -724,21 +724,20 @@ pub(crate) mod tests {
             Some(crate::presets::BROKER_PRESET_ID),
             "the worker recognises the built-in browser server by its preset"
         );
-        assert_eq!(
-            r[0].secrets,
-            ["tok-secret-1234"],
-            "the token is blanked out of results; the plain browser name is an ordinary word"
-        );
-        assert_eq!(r[0].env["BROKER_ATTACHED_BROWSERS"], "chrome");
         // The grant key reaches the browser server only, and as a secret the worker scrubs.
         let key = crate::owner_step::grant_key().unwrap();
+        assert_eq!(
+            r[0].secrets,
+            ["tok-secret-1234", key],
+            "the token and the grant key are blanked out of results; the plain browser name is an ordinary word"
+        );
+        assert_eq!(r[0].env["BROKER_ATTACHED_BROWSERS"], "chrome");
         assert_eq!(
             r[0].env
                 .get(crate::owner_step::SECRET_ENV)
                 .map(String::as_str),
             Some(key)
         );
-        assert!(r[0].secrets.iter().any(|s| s == key));
         assert!(!st
             .resolve_draft(&hub("t"))
             .env
