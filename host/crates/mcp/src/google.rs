@@ -7,6 +7,10 @@
 //! The Gmail calls themselves are made by the host ([`crate::gmail`]); the `workspace-mcp`
 //! server the preset starts is only the bridge for Google's other services, and its package
 //! name is pinned at resolve time so saved servers keep running the version Helm tested.
+//! Calendar is one of those other services: its level joins the bridge's permission arguments,
+//! and setting it starts the bridge even on a Gmail server Helm serves — the bridge asks Google
+//! for calendar scopes at a sign-in of its own, using the profile's saved client when the server
+//! does not carry one of its own.
 //!
 //! | op | class | args → result |
 //! |---|---|---|
@@ -15,6 +19,7 @@
 //! | `mcp_google_remove` | maintenance | `{serverId, email}` → [`GoogleAccountList`] |
 //! | `mcp_google_label` | maintenance | `{serverId, email, label}` → [`GoogleAccountList`] |
 //! | `mcp_google_permission` | maintenance | `{serverId, permission}` → [`McpEditorSnapshot`] |
+//! | `mcp_google_calendar` | maintenance | `{serverId, calendar}` → [`McpEditorSnapshot`] |
 //! | `mcp_google_client_get` | blocking | `{}` → [`GoogleClientState`] |
 //! | `mcp_google_client_set` | maintenance | `{clientId, clientSecret}` → [`GoogleClientState`] (write-only: the values are never read back) |
 //! | `mcp_google_client_clear` | maintenance | `{}` → `null` |
@@ -32,13 +37,17 @@
 //!   loopback-or-https Google sign-in can hand it over in the first place.
 //! - A refresh goes only to the token address kept at sign-in (Google's, always), and refreshes
 //!   of the accounts never overlap: Google retires a refresh token that was used twice.
+//! - Accounts belong to the person: the sealed index keeps the profile that signed each one in,
+//!   and a profile's chats and Settings screen see only their own. A row stored before owners
+//!   existed belongs to the home profile.
 
 use crate::config::McpStore;
 use crate::oauth::{self, AuthServer, StoredAuth, TokenSet, TokenStore};
 use crate::types::{McpEditorSnapshot, McpServer, RefKind, ResolvedServer};
 use base64::Engine as _;
 use helm_core::credentials::CredentialStore;
-use helm_ipc::{ApiError, OpClass, OpCtx, OpRegistry};
+use helm_ipc::{ApiError, OpClass, OpCtx, OpRegistry, Services};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
@@ -85,6 +94,11 @@ const SCOPE_LABELS: &str = "https://www.googleapis.com/auth/gmail.labels";
 /// needs this one.
 const SCOPE_MODIFY: &str = "https://www.googleapis.com/auth/gmail.modify";
 const SCOPE_SEND: &str = "https://www.googleapis.com/auth/gmail.send";
+/// Calendar scopes. Gmail sign-ins never carry these: the bridge program asks for them at its
+/// own sign-in, per the level set in its permission arguments.
+const SCOPE_CAL_READONLY: &str = "https://www.googleapis.com/auth/calendar.readonly";
+const SCOPE_CAL_EVENTS: &str = "https://www.googleapis.com/auth/calendar.events";
+const SCOPE_CAL_FULL: &str = "https://www.googleapis.com/auth/calendar";
 /// The credential-store entry holding the profile's sign-in client, and the identity sealing it.
 const CLIENT_ENTRY: &str = "google-client";
 const CLIENT_IDENTITY: &str = "google:client";
@@ -134,6 +148,52 @@ impl GooglePermission {
     }
 }
 
+/// What an account may do with Calendar, asked of the bridge program. The levels mirror the
+/// pinned bridge's `calendar:` permission levels exactly; the bridge asks Google for that
+/// level's scopes at its own sign-in. Editing events is gated only by Helm's normal per-tool
+/// Allow, like any other MCP tool — there is no card of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CalendarPermission {
+    Off,
+    Readonly,
+    EditEvents,
+}
+
+impl CalendarPermission {
+    /// The `--permissions` value for Calendar, `None` for Off: no value at all, so the bridge
+    /// loads no calendar service and asks for no calendar scope.
+    pub fn flag(self) -> Option<&'static str> {
+        match self {
+            CalendarPermission::Off => None,
+            CalendarPermission::Readonly => Some("calendar:readonly"),
+            CalendarPermission::EditEvents => Some("calendar:full"),
+        }
+    }
+
+    fn from_flag(flag: &str) -> Option<Self> {
+        if flag == "calendar:readonly" {
+            Some(Self::Readonly)
+        } else if flag == "calendar:full" {
+            Some(Self::EditEvents)
+        } else {
+            None
+        }
+    }
+
+    /// The scopes this level makes the bridge ask Google for. The bridge's levels are
+    /// cumulative, so the edit level carries the read scope as well.
+    pub fn scopes(self) -> Vec<&'static str> {
+        match self {
+            CalendarPermission::Off => Vec::new(),
+            CalendarPermission::Readonly => vec![SCOPE_CAL_READONLY],
+            CalendarPermission::EditEvents => {
+                vec![SCOPE_CAL_READONLY, SCOPE_CAL_FULL, SCOPE_CAL_EVENTS]
+            }
+        }
+    }
+}
+
 /// One signed-in address and its optional label.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -153,6 +213,11 @@ pub struct GoogleAccountList {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub permission: Option<GooglePermission>,
+    /// The Calendar level as the picker sees it: `off` when the arguments carry no calendar
+    /// value; absent when they carry one this picker does not offer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub calendar: Option<CalendarPermission>,
     /// `uvx` was found on `PATH` (only meaningful for a bridge server: a host-served one needs
     /// no program of its own).
     pub uv_found: bool,
@@ -237,6 +302,10 @@ struct IndexEntry {
     email: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     label: Option<String>,
+    /// The profile that signed this account in. `None` on a row stored before owners existed:
+    /// such an account belongs to the home profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner: Option<String>,
 }
 
 fn read_index(creds: &CredentialStore) -> Vec<IndexEntry> {
@@ -256,46 +325,84 @@ fn write_index(creds: &CredentialStore, list: &[IndexEntry]) -> Result<(), Strin
         .map_err(|e| e.to_string())
 }
 
-/// The accounts that have stored tokens, sorted, with their labels; index rows whose tokens are
-/// gone are dropped and the index rewritten.
-pub fn listed_accounts(creds: &CredentialStore) -> Vec<GoogleAccount> {
+/// The accounts that have stored tokens, sorted, with their labels and owning profiles;
+/// index rows whose tokens are gone are dropped and the index rewritten.
+fn listed_with_owner(creds: &CredentialStore) -> Vec<(GoogleAccount, Option<String>)> {
     let index = read_index(creds);
     let had = index.len();
     let mut keep: Vec<IndexEntry> = Vec::new();
-    let mut accounts: Vec<GoogleAccount> = Vec::new();
+    let mut accounts: Vec<(GoogleAccount, Option<String>)> = Vec::new();
     for e in index {
         let alive = TokenStore::load(creds, &account_entry(&e.email), &account_identity(&e.email))
             .is_ok_and(|a| a.is_some());
         if alive {
-            accounts.push(GoogleAccount {
-                email: e.email.clone(),
-                label: e.label.clone(),
-            });
+            accounts.push((
+                GoogleAccount {
+                    email: e.email.clone(),
+                    label: e.label.clone(),
+                },
+                e.owner.clone(),
+            ));
             keep.push(e);
         }
     }
     if keep.len() != had {
         let _ = write_index(creds, &keep);
     }
-    accounts.sort_by_key(|a| (a.email.to_ascii_lowercase(), a.email.clone()));
+    accounts.sort_by_key(|(a, _)| (a.email.to_ascii_lowercase(), a.email.clone()));
     accounts.truncate(MAX_ACCOUNTS);
     accounts
 }
 
-/// Keep (or add) one account's row, keeping its label unless a new one is given.
-fn index_upsert(creds: &CredentialStore, email: &str, label: Option<String>) -> Result<(), String> {
+/// Every account, whoever signed it in. The legacy bridge's guidance line uses this: the
+/// bridge serves its own per-account grants and is not itself scoped per profile. Chats and
+/// the Settings list use [`accounts_for`].
+pub fn listed_accounts(creds: &CredentialStore) -> Vec<GoogleAccount> {
+    listed_with_owner(creds)
+        .into_iter()
+        .map(|(a, _)| a)
+        .collect()
+}
+
+/// The accounts one profile may see and act on. An account belongs to the profile that signed
+/// it in; a row stored before owners existed belongs to the home profile. `requester` and
+/// `home` are both `None` on an install with no person profiles at all, where every account
+/// stays visible to everyone as before.
+pub fn accounts_for(
+    creds: &CredentialStore,
+    requester: Option<&str>,
+    home: Option<&str>,
+) -> Vec<GoogleAccount> {
+    listed_with_owner(creds)
+        .into_iter()
+        .filter(|(_, owner)| {
+            match requester {
+                // Nothing is scoped where no profiles exist: everyone sees every account.
+                None => true,
+                Some(r) => owner.as_deref().or(home) == Some(r),
+            }
+        })
+        .map(|(a, _)| a)
+        .collect()
+}
+
+/// Keep (or add) one account's row, keeping its label and owner unless new ones are given.
+fn index_upsert(
+    creds: &CredentialStore,
+    email: &str,
+    label: Option<String>,
+    owner: Option<String>,
+) -> Result<(), String> {
     let key = email.to_ascii_lowercase();
     let mut index = read_index(creds);
-    let label = label.or_else(|| {
-        index
-            .iter()
-            .find(|e| e.email.to_ascii_lowercase() == key)
-            .and_then(|e| e.label.clone())
-    });
+    let existing = index.iter().find(|e| e.email.to_ascii_lowercase() == key);
+    let label = label.or_else(|| existing.and_then(|e| e.label.clone()));
+    let owner = owner.or_else(|| existing.and_then(|e| e.owner.clone()));
     index.retain(|e| e.email.to_ascii_lowercase() != key);
     index.push(IndexEntry {
         email: email.to_owned(),
         label,
+        owner,
     });
     write_index(creds, &index)
 }
@@ -359,8 +466,21 @@ pub fn clean_label(raw: &str) -> Result<Option<String>, String> {
 /// Resolve `what` (an address or a label, matched without regard to case) to a signed-in
 /// account's canonical address.
 pub fn resolve_account(creds: &CredentialStore, what: &str) -> Option<String> {
+    resolve_in(what, &listed_accounts(creds))
+}
+
+/// [`resolve_account`] among the accounts `requester` may see.
+pub fn resolve_account_for(
+    creds: &CredentialStore,
+    what: &str,
+    requester: Option<&str>,
+    home: Option<&str>,
+) -> Option<String> {
+    resolve_in(what, &accounts_for(creds, requester, home))
+}
+
+fn resolve_in(what: &str, accounts: &[GoogleAccount]) -> Option<String> {
     let key = what.trim().to_ascii_lowercase();
-    let accounts = listed_accounts(creds);
     accounts
         .iter()
         .find(|a| a.email.to_ascii_lowercase() == key)
@@ -372,6 +492,94 @@ pub fn resolve_account(creds: &CredentialStore, what: &str) -> Option<String> {
             })
         })
         .map(|a| a.email.clone())
+}
+
+// ---- which profile is asking -------------------------------------------------------------------
+
+/// The home profile's id, when this install has one. `None` on a database without profiles.
+pub fn home_profile(db: &helm_core::db::Database) -> Option<String> {
+    db.snapshot(|tx| {
+        Ok::<_, rusqlite::Error>(
+            tx.query_row("SELECT id FROM profiles WHERE is_home = 1", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()
+            .unwrap_or_default(),
+        )
+    })
+    .ok()
+    .flatten()
+}
+
+/// The profile a chat acts as: its own, or the home profile when it has none of its own or the
+/// profile is gone. `None` when this install has no person profiles (or the database is too
+/// old to say).
+pub fn chat_profile(db: &helm_core::db::Database, chat_id: &str) -> Option<String> {
+    let own = db
+        .snapshot(|tx| {
+            let own = tx
+                .query_row(
+                    "SELECT NULLIF(profile_id, '') FROM chats WHERE id = ?1",
+                    [chat_id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .unwrap_or_default()
+                .flatten();
+            // A profile id that no longer names a profile counts as none, as everywhere else.
+            let own = match own {
+                Some(p) => tx
+                    .query_row("SELECT id FROM profiles WHERE id = ?1", [&p], |r| {
+                        r.get::<_, String>(0)
+                    })
+                    .optional()
+                    .unwrap_or_default(),
+                None => None,
+            };
+            Ok::<_, rusqlite::Error>(own)
+        })
+        .ok()
+        .flatten();
+    own.or_else(|| home_profile(db))
+}
+
+/// The profile the Settings screens act as: the one the sidebar is showing, else the home one
+/// (the same reading the gatekeeper's per-profile settings use). `None` when there are no
+/// profiles at all.
+pub fn active_profile(db: &helm_core::db::Database) -> Option<String> {
+    db.snapshot(|tx| {
+        let home = tx
+            .query_row("SELECT id FROM profiles WHERE is_home = 1", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()
+            .unwrap_or_default();
+        let chosen = helm_core::prefs::read(tx, "activeProfile")
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .filter(|p| !p.is_empty() && p != "all")
+            .filter(|id| {
+                tx.query_row("SELECT id FROM profiles WHERE id = ?1", [id], |_| Ok(()))
+                    .is_ok()
+            });
+        Ok::<_, rusqlite::Error>(chosen.or(home))
+    })
+    .ok()
+    .flatten()
+}
+
+/// The profile Settings acts as, and the home profile, for the account ops. Without a
+/// database nothing is scoped: every account shows, as before profiles existed.
+fn ui_scope(services: &Services) -> (Option<String>, Option<String>) {
+    match services.get::<helm_core::db::Database>() {
+        Some(db) => (active_profile(&db), home_profile(&db)),
+        None => (None, None),
+    }
+}
+
+/// Whether the scoped list holds `email` (matched without regard to case).
+fn scoped_has(accounts: &[GoogleAccount], email: &str) -> bool {
+    let key = email.trim().to_ascii_lowercase();
+    accounts.iter().any(|a| a.email.to_ascii_lowercase() == key)
 }
 
 /// Set or clear one account's label. An empty label clears it.
@@ -521,12 +729,13 @@ fn clamp_gmail(args: &[String]) -> Vec<String> {
     without_tool_flags(&out)
 }
 
-/// Add what only the host knows to a resolved Google server: the package pin, and — only for a
-/// server that still carries its own client secrets (a setup saved before the per-profile client
-/// existed) — the bridge program's folder and callback port. A server without a client of its
-/// own is host-served: Helm's own Gmail tools answer for it and the worker never starts a
-/// process for it. For a legacy server that keeps the bridge, `gmail:send` is clamped to
-/// `gmail:drafts`: sending exists only as `app_gmail_send`, behind the Allow card, and the
+/// Add what only the host knows to a resolved Google server: the package pin, and — for any
+/// server the bridge runs for (one that still carries its own client secrets, or a Gmail
+/// server with Calendar set) — the bridge program's folder, callback port and, when the server
+/// has no client of its own, the profile's saved sign-in client. A Gmail server without a
+/// client of its own and no Calendar is host-served: Helm's own Gmail tools answer for it and
+/// the worker never starts a process for it. Whenever the bridge runs, `gmail:send` is clamped
+/// to `gmail:drafts`: sending exists only as `app_gmail_send`, behind the Allow card, and the
 /// bridge must not offer a card-less send. The account list for the agent comes from the stored
 /// identities either way.
 pub fn prepare(creds: &CredentialStore, profile_dir: &Path, out: &mut ResolvedServer) {
@@ -535,8 +744,22 @@ pub fn prepare(creds: &CredentialStore, profile_dir: &Path, out: &mut ResolvedSe
         && [CLIENT_ID_ENV, CLIENT_SECRET_ENV]
             .iter()
             .all(|k| out.env.get(*k).is_some_and(|v| !v.is_empty()));
-    if legacy {
+    // The bridge has to run for anything past Gmail: Calendar goes through it, with a Google
+    // sign-in of its own. A Gmail server with Calendar set but no client of its own gets the
+    // profile's saved one, so turning Calendar on does not ask for a second OAuth client; one
+    // with no client anywhere cannot use the bridge at all and stays host-served.
+    let profile_client = if legacy { None } else { stored_client(creds) };
+    let wants_calendar = calendar_shown(&out.args).is_some_and(|c| c != CalendarPermission::Off);
+    if legacy || (wants_calendar && profile_client.is_some()) {
         out.args = clamp_gmail(&out.args);
+        if let Some(c) = profile_client {
+            out.env
+                .entry(CLIENT_ID_ENV.into())
+                .or_insert_with(|| c.client_id.clone());
+            out.env
+                .entry(CLIENT_SECRET_ENV.into())
+                .or_insert_with(|| c.client_secret.clone());
+        }
         let dir = credentials_dir(profile_dir);
         let _ = helm_core::privfs::create_private_dir_all(&dir);
         out.env
@@ -648,6 +871,107 @@ pub fn with_permission(args: &[String], level: GooglePermission) -> Vec<String> 
         out.push(want);
     }
     without_tool_flags(&out)
+}
+
+// ---- the Calendar level ------------------------------------------------------------------------
+
+/// Whether a `--permissions` value is a Calendar one: `calendar:<level>`, or the bare name.
+fn is_calendar_value(v: &str) -> bool {
+    v == "calendar" || v.starts_with("calendar:")
+}
+
+/// The Calendar value in the arguments' permission list, if the flag carries one (in either
+/// spelling).
+fn calendar_value(args: &[String]) -> Option<&str> {
+    if let Some(span) = permission_span(args) {
+        return args[span]
+            .iter()
+            .find(|a| is_calendar_value(a))
+            .map(String::as_str);
+    }
+    args.iter().find_map(|a| {
+        names_permissions(a)
+            .then(|| a.split_once('='))
+            .flatten()
+            .map(|(_, v)| v)
+            .filter(|v| is_calendar_value(v))
+    })
+}
+
+/// The Calendar level as the picker sees it: `Off` when the arguments name no calendar value,
+/// absent when they name one this picker does not offer (a hand-edited level, shown so the
+/// person can see it and choose over it, exactly as an unknown Gmail level is).
+pub fn calendar_shown(args: &[String]) -> Option<CalendarPermission> {
+    match calendar_value(args) {
+        None => Some(CalendarPermission::Off),
+        Some(v) => CalendarPermission::from_flag(v),
+    }
+}
+
+/// `args` with any `--permissions` flag left holding no values at all taken out — a flag whose
+/// only value just went away would stop the bridge from starting.
+fn strip_empty_permissions(args: &[String]) -> Vec<String> {
+    let mut out = args.to_vec();
+    let mut i = 0;
+    while i < out.len() {
+        let bare = names_permissions(&out[i])
+            && !out[i].contains('=')
+            && out.get(i + 1).is_none_or(|n| n.starts_with("--"));
+        if bare {
+            out.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// `args` with the Calendar level set: the value joins the Gmail one beside `--permissions`,
+/// replaces an existing one in place, or (for `Off`) goes — taking the flag along with it when
+/// nothing is left to hold.
+pub fn with_calendar(args: &[String], level: CalendarPermission) -> Vec<String> {
+    let want = level.flag();
+    let mut out = args.to_vec();
+    if let Some(span) = permission_span(&out) {
+        match (span.clone().find(|&k| is_calendar_value(&out[k])), want) {
+            (Some(k), Some(w)) => out[k] = w.to_owned(),
+            (None, Some(w)) => out.insert(span.end, w.to_owned()),
+            (Some(_), None) => {
+                let mut gone: Vec<usize> = span.filter(|&k| is_calendar_value(&out[k])).collect();
+                gone.sort_unstable();
+                for k in gone.into_iter().rev() {
+                    out.remove(k);
+                }
+                out = strip_empty_permissions(&out);
+            }
+            (None, None) => {}
+        }
+    } else if let Some(i) = out.iter().position(|a| {
+        names_permissions(a)
+            .then(|| a.split_once('='))
+            .flatten()
+            .is_some_and(|(_, v)| is_calendar_value(v))
+    }) {
+        match want {
+            Some(w) => out[i] = format!("--permissions={w}"),
+            None => {
+                out.remove(i);
+            }
+        }
+    } else if let Some(w) = want {
+        out.push("--permissions".into());
+        out.push(w.to_owned());
+    }
+    without_tool_flags(&out)
+}
+
+/// Whether resolving this saved server will start the bridge program: a server that carries
+/// its own client secrets, or one whose arguments ask for Calendar on a PC where the profile's
+/// sign-in client is saved (the bridge signs its accounts in with it).
+pub fn runs_bridge(server: &McpServer, creds: &CredentialStore) -> bool {
+    keeps_bridge(server)
+        || (calendar_shown(&server.transport.args).is_some_and(|c| c != CalendarPermission::Off)
+            && stored_client(creds).is_some())
 }
 
 // ---- the sign-in ----------------------------------------------------------------------------
@@ -784,27 +1108,31 @@ pub(crate) fn account_access(store: &McpStore, email: &str, force: bool) -> Resu
 }
 
 /// Keep a finished sign-in: its token set and its index row, in one turn with the refreshes and
-/// removals so none of them can land between the two writes or over this one.
+/// removals so none of them can land between the two writes or over this one. `owner` is the
+/// profile that started the sign-in; the account will only answer to that profile.
 fn keep_sign_in(
     creds: &CredentialStore,
     email: &str,
     auth: &StoredAuth,
+    owner: Option<String>,
 ) -> Result<(), oauth::OauthError> {
     let _turn = REFRESH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     TokenStore::save(creds, &account_entry(email), &account_identity(email), auth)?;
-    index_upsert(creds, email, None).map_err(|_| oauth::OauthError::Storage)
+    index_upsert(creds, email, None, owner).map_err(|_| oauth::OauthError::Storage)
 }
 
 /// Begin a browser sign-in for one account: build Google's sign-in address, hand it to the
 /// system browser, and finish the sign-in on a thread of its own (which keeps the tokens and
 /// tells the running chats). `hint` pre-fills Google's address box; without one Google shows
-/// its chooser.
+/// its chooser. `owner` is the profile that asked for the sign-in: the account will belong to
+/// it, and no other profile's chats or Settings screens will see it.
 fn begin_sign_in(
     st: &Arc<McpStore>,
     cell: Option<Arc<crate::lines::ServicesCell>>,
     open: &dyn helm_platform::OpenExternal,
     server: &McpServer,
     hint: Option<&str>,
+    owner: Option<String>,
 ) -> Result<GoogleSignIn, String> {
     let resolved = st.resolve_draft(server);
     if let Some(why) = resolved.error {
@@ -887,7 +1215,7 @@ fn begin_sign_in(
                 registered_redirect: None,
                 stored_at: None,
             };
-            keep_sign_in(st.creds(), &email, &auth)
+            keep_sign_in(st.creds(), &email, &auth, owner)
         });
         if let Err(e) = outcome {
             // The error words are the client module's: they name nothing secret.
@@ -910,6 +1238,7 @@ pub(crate) fn seed_account(
     email: &str,
     tokens: TokenSet,
     auth_server: Option<AuthServer>,
+    owner: Option<&str>,
 ) {
     let auth = StoredAuth {
         client: oauth::Client::pre_registered("g-client", Some("g-secret")),
@@ -926,7 +1255,7 @@ pub(crate) fn seed_account(
         &auth,
     )
     .unwrap();
-    index_upsert(creds, email, None).unwrap();
+    index_upsert(creds, email, None, owner.map(str::to_owned)).unwrap();
 }
 
 /// `uvx` is on `PATH`.
@@ -972,6 +1301,13 @@ struct LabelArgs {
 struct PermissionArgs {
     server_id: String,
     permission: GooglePermission,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CalendarArgs {
+    server_id: String,
+    calendar: CalendarPermission,
 }
 
 #[derive(Deserialize)]
@@ -1053,20 +1389,27 @@ pub fn forget_all_accounts(creds: &CredentialStore) {
     let _ = creds.forget(INDEX_ENTRY);
 }
 
-fn list_for(store: &McpStore, server: &McpServer) -> GoogleAccountList {
+fn list_for(
+    store: &McpStore,
+    server: &McpServer,
+    accounts: Vec<GoogleAccount>,
+) -> GoogleAccountList {
     GoogleAccountList {
-        accounts: listed_accounts(store.creds()),
+        accounts,
         permission: permission_of(&server.transport.args),
+        calendar: calendar_shown(&server.transport.args),
         uv_found: uvx_found(),
         signing_in: SIGNING_IN.load(Ordering::SeqCst),
-        host_served: !keeps_bridge(server),
+        host_served: !runs_bridge(server, store.creds()),
     }
 }
 
 fn accounts_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ServerArgs = parse(args)?;
     let (st, server) = google_server(ctx, &a.server_id)?;
-    to_value(&list_for(&st, &server))
+    let (req, home) = ui_scope(&ctx.services);
+    let accounts = accounts_for(st.creds(), req.as_deref(), home.as_deref());
+    to_value(&list_for(&st, &server, accounts))
 }
 
 fn add_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
@@ -1082,12 +1425,15 @@ fn add_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         .map_err(ApiError::bad_args)?;
     let cell = ctx.services.get::<crate::lines::ServicesCell>();
     let platform = ctx.services.need::<helm_platform::Platform>()?;
+    // The profile Settings is showing owns the account this sign-in adds.
+    let owner = ui_scope(&ctx.services).0;
     let out = begin_sign_in(
         &st,
         cell,
         platform.external.as_ref(),
         &server,
         hint.as_deref(),
+        owner,
     )
     .map_err(ApiError::bad_args)?;
     to_value(&out)
@@ -1096,23 +1442,39 @@ fn add_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
 fn remove_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: EmailArgs = parse(args)?;
     let (st, server) = google_server(ctx, &a.server_id)?;
+    let (req, home) = ui_scope(&ctx.services);
+    if !scoped_has(
+        &accounts_for(st.creds(), req.as_deref(), home.as_deref()),
+        &a.email,
+    ) {
+        return Err(ApiError::bad_args("That account is not signed in."));
+    }
     remove_account(st.creds(), a.email.trim()).map_err(ApiError::bad_args)?;
     let _ = ctx
         .services
         .get::<crate::lines::ServicesCell>()
         .map(|c| c.broadcast());
-    to_value(&list_for(&st, &server))
+    let accounts = accounts_for(st.creds(), req.as_deref(), home.as_deref());
+    to_value(&list_for(&st, &server, accounts))
 }
 
 fn label_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: LabelArgs = parse(args)?;
     let (st, server) = google_server(ctx, &a.server_id)?;
+    let (req, home) = ui_scope(&ctx.services);
+    if !scoped_has(
+        &accounts_for(st.creds(), req.as_deref(), home.as_deref()),
+        &a.email,
+    ) {
+        return Err(ApiError::bad_args("That account is not signed in."));
+    }
     set_label(st.creds(), a.email.trim(), &a.label).map_err(ApiError::bad_args)?;
     let _ = ctx
         .services
         .get::<crate::lines::ServicesCell>()
         .map(|c| c.broadcast());
-    to_value(&list_for(&st, &server))
+    let accounts = accounts_for(st.creds(), req.as_deref(), home.as_deref());
+    to_value(&list_for(&st, &server, accounts))
 }
 
 fn permission_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
@@ -1130,6 +1492,26 @@ fn permission_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
             Ok(())
         })
         .map_err(crate::ops::api_error)?;
+    to_value(&snap)
+}
+
+fn calendar_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: CalendarArgs = parse(args)?;
+    let (st, _) = google_server(ctx, &a.server_id)?;
+    let snap: McpEditorSnapshot = st
+        .mutate(None, |list| {
+            let s = list
+                .iter_mut()
+                .find(|s| s.id == a.server_id)
+                .ok_or_else(|| {
+                    crate::config::StoreError::Invalid("That server no longer exists.".into())
+                })?;
+            s.transport.args = with_calendar(&s.transport.args, a.calendar);
+            Ok(())
+        })
+        .map_err(crate::ops::api_error)?;
+    // The save itself re-sends the config to every worker, which is what starts or stops the
+    // bridge for the new level.
     to_value(&snap)
 }
 
@@ -1169,6 +1551,7 @@ pub(crate) fn register_ops(reg: &mut OpRegistry) {
         .blocking("mcp_google_remove", OpClass::Maintenance, remove_op)
         .blocking("mcp_google_label", OpClass::Maintenance, label_op)
         .blocking("mcp_google_permission", OpClass::Maintenance, permission_op)
+        .blocking("mcp_google_calendar", OpClass::Maintenance, calendar_op)
         .blocking("mcp_google_client_get", OpClass::Blocking, client_get_op)
         .blocking("mcp_google_client_set", OpClass::Maintenance, client_set_op)
         .blocking(
@@ -1264,7 +1647,7 @@ mod tests {
             &auth,
         )
         .unwrap();
-        index_upsert(creds, email, None).unwrap();
+        index_upsert(creds, email, None, None).unwrap();
     }
 
     /// A stand-in for the browser: opens the sign-in address, follows its one redirect to the
@@ -1475,6 +1858,202 @@ mod tests {
                 && send.contains(&SCOPE_MODIFY)
         );
         assert_eq!(send.len(), 7);
+        // Calendar is the bridge's own: its levels mirror the pinned bridge's `calendar:`
+        // permission levels, and a Gmail sign-in never carries them.
+        assert!(CalendarPermission::Off.scopes().is_empty());
+        assert_eq!(CalendarPermission::Readonly.scopes(), [SCOPE_CAL_READONLY]);
+        let cal = CalendarPermission::EditEvents.scopes();
+        assert!(
+            cal.contains(&SCOPE_CAL_READONLY)
+                && cal.contains(&SCOPE_CAL_FULL)
+                && cal.contains(&SCOPE_CAL_EVENTS)
+        );
+        assert_eq!(cal.len(), 3);
+        assert!(GooglePermission::Readonly
+            .scopes()
+            .iter()
+            .all(|s| !s.contains("calendar")));
+    }
+
+    /// The Calendar level joins the Gmail value beside `--permissions`, replaces an existing
+    /// one in place, and for `Off` goes — taking the flag too when nothing is left to hold.
+    #[test]
+    fn calendar_levels_join_replace_and_leave_the_arguments() {
+        for (args, level, want) in [
+            (
+                strings(&DEFAULT_ARGS),
+                CalendarPermission::Readonly,
+                strings(&[
+                    "workspace-mcp",
+                    "--permissions",
+                    "gmail:drafts",
+                    "calendar:readonly",
+                ]),
+            ),
+            (
+                strings(&DEFAULT_ARGS),
+                CalendarPermission::EditEvents,
+                strings(&[
+                    "workspace-mcp",
+                    "--permissions",
+                    "gmail:drafts",
+                    "calendar:full",
+                ]),
+            ),
+            (
+                strings(&[
+                    "workspace-mcp",
+                    "--permissions",
+                    "gmail:readonly",
+                    "calendar:full",
+                ]),
+                CalendarPermission::Readonly,
+                strings(&[
+                    "workspace-mcp",
+                    "--permissions",
+                    "gmail:readonly",
+                    "calendar:readonly",
+                ]),
+            ),
+            (
+                strings(&[
+                    "workspace-mcp",
+                    "--permissions",
+                    "gmail:drafts",
+                    "calendar:full",
+                ]),
+                CalendarPermission::Off,
+                strings(&DEFAULT_ARGS),
+            ),
+            (
+                // The flag held nothing but Calendar: the flag goes with it.
+                strings(&["workspace-mcp", "--permissions", "calendar:readonly"]),
+                CalendarPermission::Off,
+                strings(&["workspace-mcp"]),
+            ),
+            (
+                strings(&["--permissions=calendar:readonly"]),
+                CalendarPermission::EditEvents,
+                strings(&["--permissions=calendar:full"]),
+            ),
+            (
+                // No flag at all: one is appended.
+                strings(&["workspace-mcp", "--single-user"]),
+                CalendarPermission::Readonly,
+                strings(&[
+                    "workspace-mcp",
+                    "--single-user",
+                    "--permissions",
+                    "calendar:readonly",
+                ]),
+            ),
+        ] {
+            let got = with_calendar(&args, level);
+            assert_eq!(got, want, "{args:?} -> {level:?}");
+            assert_eq!(calendar_shown(&got), Some(level), "{args:?}");
+        }
+        assert_eq!(
+            calendar_shown(&strings(&DEFAULT_ARGS)),
+            Some(CalendarPermission::Off)
+        );
+        assert_eq!(
+            calendar_shown(&strings(&["--permissions", "calendar:organize"])),
+            None,
+            "a level the picker does not offer is not guessed"
+        );
+    }
+
+    /// Accounts belong to the profile that signed them in: a profile's chats and Settings see
+    /// only their own accounts, and rows stored before owners existed belong to the home one.
+    #[test]
+    fn accounts_belong_to_the_profile_that_signed_them_in() {
+        let d = tempfile::tempdir().unwrap();
+        let creds = store(d.path());
+        let creds = creds.creds();
+        sign_in(creds, "home@x.com", "tok-h", None); // no owner: the home profile's
+        index_upsert(creds, "sam@x.com", None, Some("sam".into())).unwrap();
+        TokenStore::save(
+            creds,
+            &account_entry("sam@x.com"),
+            &account_identity("sam@x.com"),
+            &StoredAuth {
+                client: oauth::Client::pre_registered("g-client", Some("g-secret")),
+                tokens: TokenSet {
+                    access_token: "tok-t".into(),
+                    token_type: "Bearer".into(),
+                    expires_at: Some(2_000_000_000),
+                    refresh_token: None,
+                    scope: None,
+                    id_token: None,
+                },
+                resource: None,
+                auth_server: None,
+                registered_redirect: None,
+                stored_at: None,
+            },
+        )
+        .unwrap();
+        let emails = |r: Option<&str>, h: Option<&str>| -> Vec<String> {
+            accounts_for(creds, r, h)
+                .into_iter()
+                .map(|a| a.email)
+                .collect()
+        };
+        assert_eq!(emails(Some("home"), Some("home")), ["home@x.com"]);
+        assert_eq!(emails(Some("sam"), Some("home")), ["sam@x.com"]);
+        assert_eq!(
+            emails(None, None),
+            ["home@x.com", "sam@x.com"],
+            "an install without person profiles lists everything, as before"
+        );
+        // Another profile's account cannot be resolved even by its exact address.
+        assert_eq!(
+            resolve_account_for(creds, "home@x.com", Some("sam"), Some("home")),
+            None
+        );
+        assert_eq!(
+            resolve_account_for(creds, "home@x.com", Some("home"), Some("home")).as_deref(),
+            Some("home@x.com")
+        );
+    }
+
+    /// The profile helpers read the chats and profiles tables the way the rest of the host
+    /// does, and answer `None` rather than failing when those tables are not there.
+    #[test]
+    fn profile_lookups_fall_back_instead_of_failing() {
+        use helm_core::db::{Database, MigrationRegistry};
+        let d = tempfile::tempdir().unwrap();
+        let db = Database::open(&d.path().join("t.db"), &MigrationRegistry::new()).unwrap();
+        db.write(|tx| {
+            tx.execute_batch(
+                "CREATE TABLE profiles (id TEXT PRIMARY KEY, is_home INTEGER);
+                 ALTER TABLE chats ADD COLUMN profile_id TEXT;
+                 INSERT INTO profiles (id, is_home) VALUES ('home', 1), ('sam', 0);
+                 INSERT INTO projects (id, name, created_at) VALUES ('p', 'P', 1);
+                 INSERT INTO chats (id, project_id, created_at, updated_at, profile_id)
+                 VALUES ('c-none', 'p', 1, 1, ''), ('c-sam', 'p', 1, 1, 'sam'),
+                        ('c-gone', 'p', 1, 1, 'deleted');",
+            )
+        })
+        .unwrap();
+        assert_eq!(home_profile(&db).as_deref(), Some("home"));
+        assert_eq!(chat_profile(&db, "c-none").as_deref(), Some("home"));
+        assert_eq!(chat_profile(&db, "c-sam").as_deref(), Some("sam"));
+        assert_eq!(chat_profile(&db, "c-gone").as_deref(), Some("home"));
+        assert_eq!(chat_profile(&db, "unknown").as_deref(), Some("home"));
+        assert_eq!(active_profile(&db).as_deref(), Some("home"));
+        db.write(|tx| {
+            helm_core::prefs::set_raw(tx, "activeProfile", &serde_json::json!("sam"))
+                .map_err(|_| rusqlite::Error::InvalidQuery)
+        })
+        .unwrap();
+        assert_eq!(active_profile(&db).as_deref(), Some("sam"));
+        db.write(|tx| {
+            helm_core::prefs::set_raw(tx, "activeProfile", &serde_json::json!("all"))
+                .map_err(|_| rusqlite::Error::InvalidQuery)
+        })
+        .unwrap();
+        assert_eq!(active_profile(&db).as_deref(), Some("home"));
     }
 
     #[test]
@@ -1521,7 +2100,7 @@ mod tests {
         );
 
         // An index row whose tokens are gone drops out of the list (and the index).
-        index_upsert(creds, "ghost@x.com", None).unwrap();
+        index_upsert(creds, "ghost@x.com", None, None).unwrap();
         assert_eq!(listed_accounts(creds).len(), 1);
         assert!(!read_index(creds).iter().any(|e| e.email == "ghost@x.com"));
     }
@@ -1638,6 +2217,60 @@ mod tests {
             both.args,
             strings(&["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"])
         );
+
+        // Calendar set: the bridge runs even for this host-served shape, and the profile's
+        // saved sign-in client is handed over so the bridge can sign its accounts in. The
+        // bridge's Gmail side is clamped like any other bridge's.
+        creds
+            .write(
+                CLIENT_ENTRY,
+                CLIENT_IDENTITY,
+                &serde_json::to_vec(&ClientPair {
+                    client_id: "pc-id".into(),
+                    client_secret: "pc-secret".into(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let mut cal = resolved();
+        cal.args = strings(&[
+            "workspace-mcp",
+            "--permissions",
+            "gmail:send",
+            "calendar:readonly",
+        ]);
+        prepare(creds, d.path(), &mut cal);
+        assert!(!cal.host_served, "Calendar runs through the bridge");
+        assert_eq!(
+            cal.args,
+            strings(&[
+                "workspace-mcp==2.4.2",
+                "--permissions",
+                "calendar:readonly",
+                "gmail:drafts",
+            ]),
+            "the bridge never gets a card-less send, and the calendar level stands"
+        );
+        assert_eq!(cal.env[CLIENT_ID_ENV], "pc-id");
+        assert_eq!(cal.env[CLIENT_SECRET_ENV], "pc-secret");
+        assert_eq!(
+            cal.env[CREDENTIALS_ENV],
+            credentials_dir(d.path()).to_string_lossy()
+        );
+        assert!(cal.env.contains_key(PORT_ENV));
+        // A saved level the picker offers survives resolve on the stored server.
+        assert_eq!(
+            calendar_shown(&cal.args),
+            Some(CalendarPermission::Readonly)
+        );
+        // No client anywhere and no own env: the bridge could not sign in, so Gmail stays
+        // host-served and no process is started.
+        creds.forget(CLIENT_ENTRY).unwrap();
+        let mut lonely = resolved();
+        lonely.args = strings(&["workspace-mcp", "--permissions", "calendar:full"]);
+        prepare(creds, d.path(), &mut lonely);
+        assert!(lonely.host_served, "no client: no bridge");
+        assert!(!lonely.env.contains_key(CLIENT_ID_ENV));
     }
 
     /// The accounts belong to the Google accounts server: editing or disabling it keeps them,
@@ -2039,7 +2672,15 @@ mod tests {
         })
         .unwrap();
 
-        let out = begin_sign_in(&st, None, &FakeBrowser, &s, Some("work@x.com")).unwrap();
+        let out = begin_sign_in(
+            &st,
+            None,
+            &FakeBrowser,
+            &s,
+            Some("work@x.com"),
+            Some("sam".into()),
+        )
+        .unwrap();
         assert!(out
             .auth_url
             .as_deref()
@@ -2078,6 +2719,23 @@ mod tests {
         }
         assert_eq!(seen.as_deref(), Some("work@x.com"));
         assert!(!SIGNING_IN.load(Ordering::SeqCst));
+        // The account belongs to the profile that asked for the sign-in.
+        assert_eq!(
+            read_index(st.creds())
+                .iter()
+                .find(|e| e.email == "work@x.com")
+                .and_then(|e| e.owner.as_deref()),
+            Some("sam")
+        );
+        assert_eq!(
+            accounts_for(st.creds(), Some("sam"), Some("home")).len(),
+            1,
+            "the asking profile sees it"
+        );
+        assert!(
+            accounts_for(st.creds(), Some("home"), Some("home")).is_empty(),
+            "another profile does not"
+        );
 
         // The kept set is a normal sign-in: its token refreshes at Google's kept address.
         let kept = TokenStore::load(
@@ -2098,7 +2756,7 @@ mod tests {
         assert_eq!(fresh, "fake-access-2");
         assert_eq!(fake.refreshes_served(), 1);
         // Nothing secret appears in anything the account list would say.
-        let said = serde_json::to_string(&list_for(&st, &s)).unwrap();
+        let said = serde_json::to_string(&list_for(&st, &s, listed_accounts(st.creds()))).unwrap();
         for leak in ["fake-access", "fake-refresh", "g-secret", "fakesignature"] {
             assert!(!said.contains(leak), "{leak} in {said}");
         }
@@ -2117,7 +2775,7 @@ mod tests {
         })
         .unwrap();
         let s = st.load().unwrap().remove(0);
-        let e = begin_sign_in(&st, None, &FakeBrowser, &s, None).unwrap_err();
+        let e = begin_sign_in(&st, None, &FakeBrowser, &s, None, None).unwrap_err();
         assert!(e.contains("Set the Google sign-in client"), "{e}");
         assert!(!SIGNING_IN.load(Ordering::SeqCst));
 
@@ -2134,7 +2792,7 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        let e = begin_sign_in(&st, None, &FakeBrowser, &s, None).unwrap_err();
+        let e = begin_sign_in(&st, None, &FakeBrowser, &s, None, None).unwrap_err();
         assert!(e.contains(TEST_AS_ENV), "{e}");
         std::env::remove_var(TEST_AS_ENV);
 
@@ -2148,7 +2806,7 @@ mod tests {
         });
         std::env::set_var(TEST_AS_ENV, &fake.base);
         // No id_email: the tokens arrive without an address, so nothing is kept.
-        begin_sign_in(&st, None, &FakeBrowser, &s, None).unwrap();
+        begin_sign_in(&st, None, &FakeBrowser, &s, None, None).unwrap();
         for _ in 0..100 {
             if !SIGNING_IN.load(Ordering::SeqCst) {
                 break;
@@ -2290,6 +2948,7 @@ mod tests {
             "work@x.com",
             old.tokens.clone(),
             old.auth_server.clone(),
+            None,
         );
         let refresher = {
             let st = st.clone();
@@ -2316,6 +2975,7 @@ mod tests {
             "work@x.com",
             old.tokens.clone(),
             old.auth_server.clone(),
+            None,
         );
         let refresher = {
             let st = st.clone();
@@ -2325,7 +2985,7 @@ mod tests {
         let signer = {
             let st = st.clone();
             let fresh = stored_auth(&base, "fresh-access", "fresh-refresh", 2_000_000_000);
-            std::thread::spawn(move || keep_sign_in(st.creds(), "work@x.com", &fresh))
+            std::thread::spawn(move || keep_sign_in(st.creds(), "work@x.com", &fresh, None))
         };
         std::thread::sleep(Duration::from_millis(150));
         assert!(!signer.is_finished(), "the sign-in waits for the refresh");

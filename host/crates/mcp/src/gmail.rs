@@ -146,11 +146,25 @@ struct Account {
     access: String,
 }
 
-/// The signed-in addresses (with their labels), for a refusal that names the choices.
-fn account_choices(store: &McpStore) -> String {
-    let list = google::listed_accounts(store.creds());
+/// The profile the calling chat acts as, and the home profile: Gmail only answers to accounts
+/// that profile signed in (rows from before owners existed belong to the home profile).
+fn chat_scope(ctx: &ToolCtx) -> (Option<String>, Option<String>) {
+    match ctx.services.get::<helm_core::db::Database>() {
+        Some(db) => (
+            google::chat_profile(&db, &ctx.caller_chat_id),
+            google::home_profile(&db),
+        ),
+        None => (None, None),
+    }
+}
+
+/// The signed-in addresses (with their labels) this chat may use, for a refusal that names the
+/// choices — another profile's accounts are never named.
+fn account_choices(store: &McpStore, ctx: &ToolCtx) -> String {
+    let (req, home) = chat_scope(ctx);
+    let list = google::accounts_for(store.creds(), req.as_deref(), home.as_deref());
     if list.is_empty() {
-        return "No Google account is signed in; the user signs one in under Settings → MCP."
+        return "No Google account is signed in for this chat's profile; the user signs one in under Settings → MCP."
             .to_owned();
     }
     let names: Vec<String> = list
@@ -182,18 +196,21 @@ fn resolve(
         .get::<McpStore>()
         .ok_or_else(|| ToolError::refused("MCP settings are not available."))?;
     let server = google_server(&store)?;
+    let (req, home) = chat_scope(ctx);
     let Some(account_arg) = arg_str(args, "account") else {
         return Err(ToolError::refused(format!(
             "The call names no account. {}",
-            account_choices(&store)
+            account_choices(&store, ctx)
         )));
     };
-    let email = google::resolve_account(store.creds(), account_arg).ok_or_else(|| {
-        ToolError::refused(format!(
-            "No signed-in Google account called \"{account_arg}\". {}",
-            account_choices(&store)
-        ))
-    })?;
+    let email =
+        google::resolve_account_for(store.creds(), account_arg, req.as_deref(), home.as_deref())
+            .ok_or_else(|| {
+                ToolError::refused(format!(
+                    "No signed-in Google account called \"{account_arg}\". {}",
+                    account_choices(&store, ctx)
+                ))
+            })?;
     let access = google::account_access(&store, &email, false).map_err(ToolError::refused)?;
     Ok((store, server, Account { email, access }))
 }
@@ -1411,7 +1428,8 @@ mod tests {
     }
 
     /// One Google server at `level`; `me@x.com` signed in with `access` and a second account
-    /// whose token the Gmail fake will refuse; a consent database with chat `c0`.
+    /// whose token the Gmail fake will refuse; a consent database with chat `c0` on the home
+    /// profile and chat `c-sam` on profile `sam`.
     fn env(level: GooglePermission, access: &str) -> Env {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(crate::config::tests::store(dir.path()));
@@ -1426,12 +1444,14 @@ mod tests {
             "me@x.com",
             tokens(access, Some("r-1")),
             Some(real_as()),
+            None,
         );
         crate::google::seed_account(
             store.creds(),
             "Work@Y.org",
             tokens("tok-work", None),
             Some(real_as()),
+            None,
         );
         let mut reg = MigrationRegistry::new();
         helm_consent::register_migrations(&mut reg);
@@ -1453,6 +1473,15 @@ mod tests {
                 "INSERT INTO chats(id, project_id, created_at, updated_at) VALUES ('c0', 'p', 1, 1)",
                 [],
             )?;
+            // Profiles are set up by another crate's migration; this test names them directly,
+            // the same way the chat-side tests do.
+            tx.execute_batch(
+                "CREATE TABLE profiles(id TEXT PRIMARY KEY, is_home INTEGER);
+                 ALTER TABLE chats ADD COLUMN profile_id TEXT;
+                 INSERT INTO profiles(id, is_home) VALUES ('home', 1), ('sam', 0);
+                 INSERT INTO chats(id, project_id, created_at, updated_at, profile_id)
+                     VALUES ('c-sam', 'p', 1, 1, 'sam');",
+            )?;
             Ok(())
         })
         .unwrap();
@@ -1468,6 +1497,11 @@ mod tests {
 
     /// Call one Gmail tool as an agent from chat `c0`.
     fn call(env: &Env, name: &str, args: Value) -> Result<Value, String> {
+        call_as(env, "c0", name, args)
+    }
+
+    /// Call one Gmail tool as an agent from a chosen chat.
+    fn call_as(env: &Env, chat: &str, name: &str, args: Value) -> Result<Value, String> {
         let mut reg = HostToolRegistry::new();
         register_gmail_tools(&mut reg);
         let entry = reg.get(name).expect("tool");
@@ -1484,7 +1518,7 @@ mod tests {
         services.insert(env.db.clone());
         services.insert(Arc::new(env.kinds.clone()));
         let ctx = ToolCtx {
-            caller_chat_id: "c0".into(),
+            caller_chat_id: chat.into(),
             is_child: false,
             tool_call_id: None,
             origin: CallOrigin::Agent,
@@ -1734,6 +1768,7 @@ mod tests {
                 token_endpoint: format!("{}/token", as_.base),
                 registration_endpoint: None,
             }),
+            None,
         );
         let err = call(&e, READ, json!({"account": "old@x.com", "id": "m-401"})).unwrap_err();
         assert!(!err.contains("tok-old") && !err.contains("r-old"), "{err}");
@@ -1745,6 +1780,70 @@ mod tests {
             .filter(|(_, t, _)| t.contains("m-401"))
             .count();
         assert_eq!(reads, 1);
+        std::env::remove_var(TEST_URL_ENV);
+    }
+
+    /// An account belongs to the profile that signed it in: a chat on another profile cannot use
+    /// it, and the choices a refusal offers name only the chat's own profile's accounts.
+    #[test]
+    fn an_account_serves_only_the_profile_that_signed_it_in() {
+        let _turn = GMAIL_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let fake = FakeGmail::start(&["tok-me", "tok-sam"]);
+        std::env::set_var(TEST_URL_ENV, &fake.base);
+        let e = env(GooglePermission::Readonly, "tok-me");
+        crate::google::seed_account(
+            e.store.creds(),
+            "sam@x.com",
+            tokens("tok-sam", None),
+            Some(real_as()),
+            Some("sam"),
+        );
+
+        // The home chat (no profile set: the home profile answers for it) uses its own account
+        // and is refused the other profile's, whose address never comes back as a choice.
+        let out = call(&e, READ, json!({"account": "me@x.com", "id": "m-plain"})).unwrap();
+        assert_eq!(out["account"], "me@x.com");
+        let err = call(&e, READ, json!({"account": "sam@x.com", "id": "m-plain"})).unwrap_err();
+        assert!(err.contains("No signed-in Google account"), "{err}");
+        assert!(
+            err.contains("Signed-in accounts: me@x.com, Work@Y.org."),
+            "its own profile's accounts are offered back: {err}"
+        );
+        assert_eq!(
+            err.matches("sam@x.com").count(),
+            1,
+            "the other profile's address is only the one it asked for: {err}"
+        );
+
+        // The chat on profile `sam` works with the sam-owned account and cannot reach the
+        // home one.
+        let out = call_as(
+            &e,
+            "c-sam",
+            READ,
+            json!({"account": "sam@x.com", "id": "m-plain"}),
+        )
+        .unwrap();
+        assert_eq!(out["account"], "sam@x.com");
+        let err = call_as(
+            &e,
+            "c-sam",
+            READ,
+            json!({"account": "me@x.com", "id": "m-plain"}),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("Signed-in accounts: sam@x.com."),
+            "only its own account is offered back: {err}"
+        );
+
+        // With no account named, the refusal lists the same scoped choices.
+        let err = call_as(&e, "c-sam", SEARCH, json!({"query": "x"})).unwrap_err();
+        assert!(err.contains("names no account"), "{err}");
+        assert!(
+            err.contains("sam@x.com") && !err.contains("me@x.com"),
+            "{err}"
+        );
         std::env::remove_var(TEST_URL_ENV);
     }
 

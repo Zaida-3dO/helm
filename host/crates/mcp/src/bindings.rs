@@ -62,6 +62,7 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         crate::repo_gate::RepoServer::ident(),
         crate::repo_gate::RepoServerState::ident(),
         crate::repo_gate::LaunchGate::ident(),
+        crate::google::CalendarPermission::ident(),
         crate::google::GoogleAccount::ident(),
         crate::google::GoogleAccountList::ident(),
         crate::google::GoogleClientState::ident(),
