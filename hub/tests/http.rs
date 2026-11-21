@@ -194,6 +194,18 @@ async fn write_search_read_list_roundtrip() {
     assert_eq!(s["structuredContent"]["mode"], "keyword");
     assert_eq!(s["structuredContent"]["results"][0]["id"], id);
 
+    // A dash and curly quotes in the query must not upset the search: the whole hub used to
+    // panic on them.
+    let s = call(
+        &app,
+        RO,
+        "memory_search",
+        json!({ "query": "sync — rule ’backup’" }),
+    )
+    .await;
+    assert_eq!(s["isError"], false);
+    assert_eq!(s["structuredContent"]["results"][0]["id"], id);
+
     // Hybrid: the vector alone is enough to find it.
     let s = call(
         &app,

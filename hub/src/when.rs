@@ -312,7 +312,10 @@ fn tokenize(q: &str) -> Vec<Token> {
             });
             i = end;
         } else {
-            i += 1;
+            // Step over a whole character: a byte index that lands in the middle of a
+            // multi-byte character (an em dash, a curly quote) would make the `&lower[i..]`
+            // slice above panic.
+            i += lower[i..].chars().next().map_or(1, |c| c.len_utf8());
         }
     }
     tokens
@@ -798,6 +801,15 @@ mod tests {
             (
                 "how does the relay retry work",
                 "how does the relay retry work",
+                (0, 0),
+                false,
+            ),
+            // Dashes and curly quotes: the tokenizer must step over whole characters, not
+            // bytes — stopping inside one used to panic the whole search.
+            ("foo — bar", "foo — bar", (0, 0), false),
+            (
+                "the ’backup’ rule — see ’ops’",
+                "the ’backup’ rule — see ’ops’",
                 (0, 0),
                 false,
             ),
