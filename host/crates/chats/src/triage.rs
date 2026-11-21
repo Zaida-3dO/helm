@@ -131,29 +131,48 @@ pub(crate) fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// A SQL condition on the chat `c` (a row of `chats`): it is waiting on helpers of its own, either
-/// a declared wait that is still open or a chat it started that is working now. The waits table
+/// The chats waiting on helpers of their own, as one set of chat ids: a chat they parented or
+/// started that is working now, or a wait they declared that is still open. The waits table
 /// belongs to another crate, so where it has not been made (a database without it) there are none.
 ///
-/// The condition is a plain set that does not mention `c`, so SQLite builds it once per statement
-/// instead of searching the chats again for every row. The `IS NOT NULL` filters matter: one NULL
-/// in the set would make `NOT (c.id IN (...))` unknown for every chat.
-pub(crate) fn helpers_working_sql(tx: &Transaction<'_>) -> rusqlite::Result<String> {
+/// The `IS NOT NULL` filters matter: one NULL in the set would make `NOT (c.id IN (...))`
+/// unknown for every chat.
+fn helpers_working_ids(tx: &Transaction<'_>) -> rusqlite::Result<String> {
     let waits: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_waits')",
         [],
         |r| r.get(0),
     )?;
     let mut sql = String::from(
-        "(c.id IN (SELECT k.parent_chat_id FROM chats k WHERE k.archived = 0                       AND k.status IN ('starting', 'running', 'stopping') AND k.parent_chat_id IS NOT NULL                    UNION ALL                    SELECT k.created_by_chat FROM chats k WHERE k.archived = 0                       AND k.status IN ('starting', 'running', 'stopping') AND k.created_by_chat IS NOT NULL",
+        "SELECT k.parent_chat_id FROM chats k WHERE k.archived = 0 AND k.status IN ('starting', 'running', 'stopping') AND k.parent_chat_id IS NOT NULL UNION ALL SELECT k.created_by_chat FROM chats k WHERE k.archived = 0 AND k.status IN ('starting', 'running', 'stopping') AND k.created_by_chat IS NOT NULL",
     );
     if waits {
         sql.push_str(
             " UNION ALL SELECT w.chat_id FROM agent_waits w WHERE w.state = 'open' AND w.chat_id IS NOT NULL",
         );
     }
-    sql.push_str("))");
     Ok(sql)
+}
+
+/// A SQL condition on the chat `c` (a row of `chats`): it is waiting on helpers of its own.
+/// The condition is a plain set that does not mention `c`, so SQLite builds it once per
+/// statement instead of searching the chats again for every row.
+pub fn helpers_working_sql(tx: &Transaction<'_>) -> rusqlite::Result<String> {
+    Ok(format!("(c.id IN ({}))", helpers_working_ids(tx)?))
+}
+
+/// The same rule asked of one named chat: does it have a working child of its own (parented
+/// or started) or an open wait it declared? The wait watcher reads it the same way the
+/// attention lists read [`helpers_working_sql`].
+pub fn helpers_working(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<bool> {
+    tx.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 WHERE ?1 IN ({}))",
+            helpers_working_ids(tx)?
+        ),
+        [chat_id],
+        |r| r.get::<_, bool>(0),
+    )
 }
 
 impl Priority {
@@ -688,6 +707,69 @@ mod tests {
             helpers: false,
             checked_kind: None,
         }
+    }
+
+    /// The one-chat form answers the same question the attention lists ask of every row, and
+    /// ignores finished helpers, archived ones and settled waits the same way.
+    #[test]
+    fn the_helpers_rule_reads_one_named_chat() {
+        let (_d, db) = crate::schema::tests::temp_db();
+        db.write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 1);
+                 INSERT INTO chats(id, project_id, status, created_at, updated_at)
+                     VALUES ('boss', 'p', 'idle', 1, 1);
+                 INSERT INTO chats(id, project_id, status, parent_chat_id, created_at, updated_at)
+                     VALUES ('kid', 'p', 'running', 'boss', 1, 1);
+                 INSERT INTO chats(id, project_id, status, created_by_chat, created_at, updated_at)
+                     VALUES ('made', 'p', 'starting', 'kid', 1, 1);
+                 INSERT INTO chats(id, project_id, status, created_at, updated_at)
+                     VALUES ('plain', 'p', 'idle', 1, 1);
+                 INSERT INTO chats(id, project_id, status, archived, parent_chat_id, created_at, updated_at)
+                     VALUES ('zombie', 'p', 'running', 1, 'plain', 1, 1);",
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+        let helpers = |id: &str| db.snapshot(|tx| helpers_working(tx, id)).unwrap();
+        assert!(helpers("boss"), "its child is running");
+        assert!(helpers("kid"), "the chat it started is starting");
+        assert!(!helpers("made"), "it started nothing itself");
+        assert!(!helpers("plain"), "its only helper chat is archived");
+        // The set form the lists use reads the same rule for the same row.
+        let set = db
+            .snapshot(|tx| {
+                let sql = helpers_working_sql(tx)?;
+                tx.query_row(
+                    &format!("SELECT EXISTS(SELECT 1 FROM chats c WHERE c.id = 'boss' AND {sql})"),
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )
+            })
+            .unwrap();
+        assert!(set);
+        // A helper that stops working stops counting; an open wait the chat declared counts,
+        // a settled one does not.
+        db.write(|tx| {
+            tx.execute(
+                "UPDATE chats SET status = 'idle' WHERE id IN ('kid', 'made')",
+                [],
+            )?;
+            tx.execute_batch(
+                "CREATE TABLE agent_waits(id TEXT PRIMARY KEY, chat_id TEXT, state TEXT);
+                 INSERT INTO agent_waits VALUES ('w1', 'boss', 'open');",
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+        assert!(helpers("boss"), "its own wait is open");
+        assert!(!helpers("plain"));
+        db.write(|tx| {
+            tx.execute("UPDATE agent_waits SET state = 'fired' WHERE id = 'w1'", [])?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+        assert!(!helpers("boss"), "the wait has settled");
     }
 
     #[test]
