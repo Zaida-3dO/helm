@@ -50,6 +50,16 @@ pub fn register_ops(reg: &mut OpRegistry) {
             "devices_forward_close",
             OpClass::Blocking,
             devices_forward_close,
+        )
+        .blocking(
+            "devices_forwards_hosted",
+            OpClass::Blocking,
+            devices_forwards_hosted,
+        )
+        .blocking(
+            "devices_forward_hosted_stop",
+            OpClass::Blocking,
+            devices_forward_hosted_stop,
         );
 }
 
@@ -1189,6 +1199,33 @@ fn devices_forward_close(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
     if let Some(s) = service_of(ctx) {
         s.tunnels().view_stop(&a.forward_id);
+    }
+    Ok(json!({}))
+}
+
+/// `devices_forwards_hosted`: the ports of this PC another PC is viewing right now, oldest first,
+/// in the same shape as `devices_forwards` — there `deviceUid` names the viewing PC and
+/// `localPort`/`url` are the server's own address on this PC.
+fn devices_forwards_hosted(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    serde_json::from_value::<NoArgs>(if args.is_null() { json!({}) } else { args })
+        .map_err(|e| ApiError::bad_args(e.to_string()))?;
+    let mirror = mirror_of(ctx);
+    let hosted: Vec<Value> = service_of(ctx)
+        .map(|s| s.tunnels().hosted())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|f| forward_json(mirror.as_ref(), f))
+        .collect();
+    Ok(json!({ "forwards": hosted }))
+}
+
+/// `devices_forward_hosted_stop`: stop sharing one of this PC's ports; the viewing PC is told.
+/// A share that has already ended is not an error.
+fn devices_forward_hosted_stop(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ForwardCloseArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    if let Some(s) = service_of(ctx) {
+        s.tunnels().host_stop(&a.forward_id);
     }
     Ok(json!({}))
 }

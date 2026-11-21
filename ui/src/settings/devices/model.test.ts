@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { Forward } from '../../devices/api.ts';
 import { forwardAddress } from '../../devices/api.ts';
 import type { DeviceRow } from './api.ts';
-import { forwardRows, nameOk, otherDevices, peopleLine, presence } from './model.ts';
+import { forwardRows, hostedRows, nameOk, otherDevices, peopleLine, presence } from './model.ts';
 
 const NOW = Date.parse('2026-11-10T12:00:00Z');
 const ago = (ms: number) => new Date(NOW - ms).toISOString();
@@ -67,4 +67,24 @@ test('forwards: one row per port in plain words, by PC then port, and only loopb
   assert.deepEqual(forwardRows([], NOW), []);
   // The browser gets an address built here, never the host's words as written.
   assert.deepEqual([5173, 0, 70000, 1.5].map((localPort) => forwardAddress({ localPort })), ['http://127.0.0.1:5173/', null, null, null]);
+
+  // Ports this PC shares with other PCs: the same shape and use, the other direction's words.
+  const host = (over: Partial<Forward>): Forward => ({
+    forwardId: 'h', chatId: 'c9', deviceUid: 'l', deviceName: 'Laptop', port: 3000, localPort: 3000, url: 'http://127.0.0.1:3000/',
+    title: '', streams: 0, openedAt: NOW - 9 * MIN, lastUsedAt: NOW - MIN, ...over,
+  });
+  const hosts = [
+    host({ forwardId: 'h2', port: 5173, title: 'App', streams: 3 }),
+    host({ forwardId: 'h3', deviceUid: 'a', deviceName: 'Attic', port: 4000, localPort: 4000, lastUsedAt: NOW - 7 * MIN }),
+    host({ forwardId: 'h1', port: 3000 }),
+  ];
+  assert.deepEqual(
+    hostedRows(hosts, NOW).map((r) => [r.forward.forwardId, r.line, r.use]),
+    [
+      ['h3', 'Port 4000 on this PC is shared with Attic', 'idle for 7 minutes'],
+      ['h1', 'Port 3000 on this PC is shared with Laptop', 'idle for 1 minute'],
+      ['h2', 'Port 5173 on this PC (App) is shared with Laptop', '3 connections open'],
+    ],
+  );
+  assert.deepEqual(hostedRows([], NOW), []);
 });

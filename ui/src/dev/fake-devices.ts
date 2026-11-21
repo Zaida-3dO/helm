@@ -16,8 +16,10 @@
 // are refused with the words the real host uses (`remoteFakeRefusal`).
 //
 // Port forwards are kept in memory (no socket is opened): "Forward a port…" on a remote chat's
-// bar, an agent's offer, and Settings → Devices all read and stop the same list. Port 3389 and
-// ports under 1024 are refused, as the real host does. "Save to this PC" answers a made-up path.
+// bar, an agent's offer, and Settings → Devices all read and stop the same list; the ports this
+// PC shares with another are seeded (one to the fake Laptop) and stopped from Settings. Port 3389
+// and ports under 1024 are refused, as the real host does. "Save to this PC" answers a made-up
+// path.
 
 import { ApiError } from '../api/client.ts';
 import type { DeviceState } from '../api/devices.ts';
@@ -45,6 +47,10 @@ const forwards: Forward[] = [];
 let forwardSeq = 0;
 let tell: (() => void) | null = null;
 const started = Date.now();
+/** Ports of this PC the fake Laptop is viewing, seeded so the Settings section has something. */
+const hosted: Forward[] = [
+  { forwardId: 'hf-1', chatId: 'rc-1', deviceUid: LAPTOP, deviceName: 'Laptop', port: 5173, localPort: 5173, url: 'http://127.0.0.1:5173/', title: 'Preview', streams: 1, openedAt: started - 10 * MIN, lastUsedAt: started - MIN },
+];
 
 function baseDevices(selfName: string, mode: string | null): DeviceInfo[] {
   const stateOf = (d: DeviceInfo): DeviceInfo => {
@@ -201,6 +207,14 @@ export function devicesFakeOps(): { prefixes: string[]; handler: FakeOpHandler }
       case 'devices_forward_close': {
         const i = forwards.findIndex((f) => f.forwardId === a.forwardId);
         if (i >= 0) forwards.splice(i, 1);
+        ctx.emit({ kind: 'devices_forwards_changed' });
+        return {};
+      }
+      case 'devices_forwards_hosted':
+        return { forwards: hosted };
+      case 'devices_forward_hosted_stop': {
+        const i = hosted.findIndex((f) => f.forwardId === a.forwardId);
+        if (i >= 0) hosted.splice(i, 1);
         ctx.emit({ kind: 'devices_forwards_changed' });
         return {};
       }

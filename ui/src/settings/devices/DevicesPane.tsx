@@ -2,14 +2,15 @@
 // devices on the household hub. A chat always runs on the device it was started on, under that
 // device's Claude sign-in and plan; the switch here decides whether another device, yours or
 // someone else's in the household, may start and steer chats on this PC. Reading chats needs only
-// pairing, not this switch. Below them, the ports of other PCs forwarded to this one, with Stop.
+// pairing, not this switch. Below them, the ports of other PCs forwarded to this one, and the
+// ports of this PC another PC is viewing — each list with Stop.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useShell } from '../../shell/context.ts';
 import { Button, Checkbox, SettingRow, TextInput } from '../../ui/index.ts';
-import { openForward, useForwards } from '../../devices/RemoteChatBar.tsx';
+import { openForward, useForwards, useHostedForwards } from '../../devices/RemoteChatBar.tsx';
 import { devicesOps, RUN_FROM_OTHERS_KEY, type DeviceRow } from './api.ts';
-import { forwardRows, nameOk, NAME_MAX, otherDevices, peopleLine, presence } from './model.ts';
+import { forwardRows, hostedRows, nameOk, NAME_MAX, otherDevices, peopleLine, presence } from './model.ts';
 import './devices.css';
 
 function errorText(e: unknown): string {
@@ -27,6 +28,7 @@ export function DevicesPane() {
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const forwards = useForwards();
+  const hosted = useHostedForwards();
 
   const loadSelf = useCallback(
     () =>
@@ -170,6 +172,22 @@ export function DevicesPane() {
                 Stop
               </Button>
             </div>
+          </SettingRow>
+        ))
+      )}
+
+      <h3 className="hub-heading">Ports this PC shares with other PCs</h3>
+      {hosted.length === 0 ? (
+        <div className="setting-desc" data-testid="forward-hosted-empty">
+          None. A chat on another PC can open one of this PC's ports (a dev server, say); while it does, the port shows
+          here. Stop ends it there too. A share ends when either PC closes Helm, or after 30 minutes unused.
+        </div>
+      ) : (
+        hostedRows(hosted, Date.now()).map(({ forward: f, line, use }) => (
+          <SettingRow key={`hosted-${f.forwardId}`} testId={`forward-hosted-row-${f.forwardId}`} title={line} description={use}>
+            <Button data-testid={`forward-hosted-stop-${f.forwardId}`} onClick={() => void ops.forwardHostedStop(f.forwardId).catch((e: unknown) => setError(errorText(e)))}>
+              Stop
+            </Button>
           </SettingRow>
         ))
       )}

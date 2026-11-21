@@ -43,8 +43,10 @@
 //! | `devices_file_save` | async | `{chatId, path}` → `{path: string \| null}`: a copy of a file of a chat that runs on another device (inside its project folder there), brought across in chunks and saved on this PC where the person chooses; `null` when the dialog is cancelled |
 //! | `devices_forward_offer` | async | `{chatId, port, title?}` → `{port, title, typedOn: {deviceUid, name} \| null, samePc}`: an agent of a chat here offers a port of this PC; refused in words when the port may not be forwarded, nothing answers on it, or (for a person on another PC) the switch is off |
 //! | `devices_forward_open` | async | `{chatId, port, title?}` → `Forward`: the port of the PC that runs a copied chat, opened on this PC's `127.0.0.1` (the same port when free); event `devices_forwards_changed` |
-//! | `devices_forwards` | blocking | `{}` → `{forwards: [Forward]}`, oldest first |
+//! | `devices_forwards` | blocking | `{}` → `{forwards: [Forward]}`, the ports of another PC opened here, oldest first |
 //! | `devices_forward_close` | blocking | `{forwardId}` → `{}`: stop one; the other PC is told |
+//! | `devices_forwards_hosted` | blocking | `{}` → `{forwards: [Forward]}`, oldest first: the ports of this PC another PC is viewing now (`deviceUid` names the viewing PC) |
+//! | `devices_forward_hosted_stop` | blocking | `{forwardId}` → `{}`: stop sharing one of this PC's ports; the viewing PC is told |
 //!
 //! `Forward` is `{forwardId, chatId, deviceUid, deviceName, port, localPort, url, title, streams,
 //! openedAt, lastUsedAt}` (times in Unix ms). A forward ends when stopped, after 30 minutes with

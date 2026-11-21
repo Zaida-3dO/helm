@@ -18,6 +18,8 @@ export function devicesOps(api: Api) {
     rename: devices.rename,
     list: devices.list,
     forwardClose: devices.forwardClose,
+    forwardsHosted: devices.forwardsHosted,
+    forwardHostedStop: devices.forwardHostedStop,
     runFromOthers: () => api<unknown>('preference_get', { key: RUN_FROM_OTHERS_KEY }).then((v) => v !== false),
     setRunFromOthers: (on: boolean) => api<unknown>('preference', { key: RUN_FROM_OTHERS_KEY, value: on }),
   };

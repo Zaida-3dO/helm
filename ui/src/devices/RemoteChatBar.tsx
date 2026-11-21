@@ -11,7 +11,7 @@ import { forwardRows } from '../settings/devices/model.ts';
 import { useShell } from '../shell/context.ts';
 import { toast } from '../ui/index.ts';
 import { IconMonitor } from '../ui/icons.tsx';
-import { deviceOps, forwardAddress, FORWARDS_CHANGED, type Forward } from './api.ts';
+import { deviceOps, forwardAddress, FORWARDS_CHANGED, type DeviceOps, type Forward } from './api.ts';
 import type { RemoteChatState } from './state.ts';
 import './remote.css';
 
@@ -31,30 +31,44 @@ export function typedPort(text: string): number | null {
 const FORWARDS_REFRESH_MS = 30_000;
 
 /**
- * The ports forwarded to this PC, kept fresh from the host's event. The event only comes when a
- * forward starts or ends, so the list is also read again every `FORWARDS_REFRESH_MS` while shown.
+ * One of the two forward lists, kept fresh from the host's event. The event comes when a forward
+ * starts or ends on either side, so the list is also read again every `FORWARDS_REFRESH_MS` while
+ * shown (open connections and idle time change in between).
  */
-export function useForwards(): Forward[] {
+function useForwardList(load: (ops: DeviceOps) => Promise<Forward[]>): Forward[] {
   const shell = useShell();
   const ops = useMemo(() => deviceOps(shell.api), [shell.api]);
   const [forwards, setForwards] = useState<Forward[]>([]);
   useEffect(() => {
     let live = true;
-    const load = () =>
-      ops.forwards().then(
+    const run = () =>
+      load(ops).then(
         (f) => live && setForwards(f),
         () => live && setForwards([]),
       );
-    void load();
-    const off = shell.bus.on(FORWARDS_CHANGED, () => void load());
-    const timer = setInterval(() => void load(), FORWARDS_REFRESH_MS);
+    void run();
+    const off = shell.bus.on(FORWARDS_CHANGED, () => void run());
+    const timer = setInterval(() => void run(), FORWARDS_REFRESH_MS);
     return () => {
       live = false;
       off();
       clearInterval(timer);
     };
-  }, [ops, shell.bus]);
+  }, [ops, shell.bus, load]);
   return forwards;
+}
+
+const loadViewed = (ops: DeviceOps) => ops.forwards();
+const loadHosted = (ops: DeviceOps) => ops.forwardsHosted();
+
+/** The ports of other PCs forwarded to this PC. */
+export function useForwards(): Forward[] {
+  return useForwardList(loadViewed);
+}
+
+/** The ports of this PC other PCs are viewing. */
+export function useHostedForwards(): Forward[] {
+  return useForwardList(loadHosted);
 }
 
 /** Opens a forward in this PC's browser, through the link gate like any web address. */

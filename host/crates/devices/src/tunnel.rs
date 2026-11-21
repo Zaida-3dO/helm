@@ -117,7 +117,8 @@ pub trait TunnelOut: Send + Sync {
     /// Send `event` to device `to` as a `dev_push` of [`SUB`]. `false` when the line is down:
     /// nothing was sent, and the stream it belonged to is dropped.
     fn push(&self, to: &str, event: Value) -> bool;
-    /// The list of forwards to this PC changed (one started or ended).
+    /// The list of forwards this PC takes part in changed (one started or ended, on either side);
+    /// a window showing either list reads it again.
     fn changed(&self) {}
 }
 
@@ -173,8 +174,9 @@ pub struct ViewSpec {
     pub title: String,
 }
 
-/// A forward to this PC, as the list of forwards shows it. The device's name is the caller's to
-/// add: the engine knows devices only by id.
+/// One forward this PC takes part in, as either list shows it. `device_uid` names the other PC:
+/// the host for a forward to this PC, the viewer for a port this PC shares. The device's name is
+/// the caller's to add: the engine knows devices only by id.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ViewInfo {
@@ -438,6 +440,7 @@ impl Tunnels {
             );
         }
         log::info!("tunnel: forwarding port {port} to device {viewer} ({id})");
+        self.inner.out.changed();
         Ok(id)
     }
 
@@ -447,6 +450,34 @@ impl Tunnels {
             .owned(forward_id, viewer, Role::Host)
             .is_some();
         found && self.inner.end(forward_id, false)
+    }
+
+    /// The ports of this PC other devices hold forwards for, oldest first: what the PC the ports
+    /// are on lists, each with the viewing PC as `device_uid`.
+    pub fn hosted(&self) -> Vec<ViewInfo> {
+        let st = lock(&self.inner.st);
+        let mut v: Vec<(i64, ViewInfo)> = st
+            .fwds
+            .iter()
+            .filter(|(_, w)| w.role == Role::Host)
+            .map(|(id, w)| (w.opened_at, w.info(id)))
+            .collect();
+        v.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| a.1.forward_id.cmp(&b.1.forward_id))
+        });
+        v.into_iter().map(|(_, i)| i).collect()
+    }
+
+    /// Stop sharing one of this PC's ports and tell the PC viewing it. `false` when there is no
+    /// such share. Unlike [`Tunnels::host_close`], this is asked on the PC the port is on, which
+    /// knows only the forward's id.
+    pub fn host_stop(&self, forward_id: &str) -> bool {
+        let found = lock(&self.inner.st)
+            .fwds
+            .get(forward_id)
+            .is_some_and(|w| w.role == Role::Host);
+        found && self.inner.end(forward_id, true)
     }
 
     // ----------------------------------------------------------------------- viewer
@@ -644,9 +675,7 @@ impl Inner {
             self.push(&w.peer, json!({"t": "end", "f": f}));
         }
         log::info!("tunnel: forward of port {} ended ({f})", w.port);
-        if w.role == Role::View {
-            self.out.changed();
-        }
+        self.out.changed();
         true
     }
 
@@ -1252,6 +1281,13 @@ mod tests {
         assert_eq!(info.local_port, info.port);
         assert_eq!(info.url, format!("http://127.0.0.1:{}/", info.port));
         assert_eq!(p.laptop.viewing("Desk", info.port), Some(info.clone()));
+        // The PC the port is on lists the share too, naming the PC viewing it.
+        let hosted = p.desk.hosted();
+        assert_eq!(hosted.len(), 1);
+        assert_eq!(hosted[0].device_uid, "Laptop");
+        assert_eq!(hosted[0].port, info.port);
+        assert_eq!(hosted[0].chat_id, "chat-1");
+        assert_eq!(hosted[0].streams, 0);
 
         // A megabyte out and back through the window, then the browser's end of input closes the
         // stream both ways.
@@ -1435,6 +1471,29 @@ mod tests {
             .unwrap_err();
         assert_eq!(e.code, code::REFUSED);
         p.desk.host_open("Other", "c", echo, &[]).await.unwrap();
+
+        // The PC the ports are on sees the shares it hosts and can stop one, naming only the
+        // forward; the viewing PC is told and this PC's list shrinks.
+        let hosted = p.desk.hosted();
+        assert_eq!(hosted.len(), MAX_FORWARDS + 1);
+        assert_eq!(
+            hosted.iter().filter(|h| h.device_uid == "Laptop").count(),
+            MAX_FORWARDS
+        );
+        assert!(hosted.iter().all(|h| h.chat_id == "c" && h.port == echo));
+        let to_laptop = hosted
+            .iter()
+            .find(|h| h.device_uid == "Laptop")
+            .unwrap()
+            .forward_id
+            .clone();
+        assert!(p.desk.host_stop(&to_laptop));
+        assert!(!p.desk.host_stop(&to_laptop));
+        assert_eq!(p.desk.hosted().len(), MAX_FORWARDS);
+        until("Desk says end to Laptop", || {
+            p.relay.said("Desk", "Laptop", "end")
+        })
+        .await;
 
         // And four to this PC, whichever PCs they come from.
         for n in 0..MAX_FORWARDS {

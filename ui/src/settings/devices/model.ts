@@ -1,5 +1,5 @@
 // Settings → Devices, without React: the plain-words status of a device, the name rule, and the
-// words for a port forwarded to this PC (also used by a remote chat's bar and its toast).
+// words for a port forwarded either way (also used by a remote chat's bar and its toast).
 
 import type { Forward } from '../../devices/api.ts';
 import type { DeviceRow } from './api.ts';
@@ -67,4 +67,18 @@ export function forwardRows(forwards: readonly Forward[], now: number, chatId?: 
     .slice()
     .sort((a, b) => a.deviceName.localeCompare(b.deviceName) || a.port - b.port)
     .map((forward) => ({ forward, line: forwardLine(forward), use: forwardUse(forward, now) }));
+}
+
+/** "Port 5173 on this PC is shared with Desk", with the title when the agent gave one. */
+export function hostedLine(f: Pick<Forward, 'port' | 'deviceName' | 'title'>): string {
+  const title = f.title.trim() ? ` (${f.title.trim()})` : '';
+  return `Port ${f.port} on this PC${title} is shared with ${f.deviceName}`;
+}
+
+/** The ports this PC shares with other PCs, one row each, by PC then port. */
+export function hostedRows(hosted: readonly Forward[], now: number): { forward: Forward; line: string; use: string }[] {
+  return hosted
+    .slice()
+    .sort((a, b) => a.deviceName.localeCompare(b.deviceName) || a.port - b.port)
+    .map((forward) => ({ forward, line: hostedLine(forward), use: forwardUse(forward, now) }));
 }

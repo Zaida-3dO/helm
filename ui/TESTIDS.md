@@ -228,6 +228,7 @@ Send now `Ctrl+Alt+Enter`, Stop and send waiting messages `Esc`.
 | `remote-forward` / `remote-forward-open` / `remote-forward-stop` | One forwarded port in the strip of a chat that runs on another PC, and its Open and Stop buttons | `remote-forward`: `data-port` |
 | `remote-forward-add` / `remote-forward-port` / `remote-forward-go` | The strip's Forward a port button, its port field and its Forward button | |
 | `forwards-empty` / `forward-row-<id>` / `forward-open-<id>` / `forward-stop-<id>` | Settings → Devices' forwarded ports: the empty note, one forward's row (id = the forward id) and its Open and Stop | |
+| `forward-hosted-empty` / `forward-hosted-row-<id>` / `forward-hosted-stop-<id>` | Settings → Devices' ports this PC shares with other PCs: the empty note, one share's row (id = the forward id) and its Stop | |
 | `file-save-here` | The file viewer's Save here button on a file of another PC (saves a copy on this PC) | |
 | `nav-archived` / `nav-settings` | The sidebar footer's Archived chats and Settings entries | `nav-archived`: `aria-pressed` while the archived list shows |
 | `pages-list` / `pages-row` / `pages-row-icon` / `pages-empty` | The Pages dialog, one pinned page in it (click opens it as a tab), the row's icon (the bundle's favicon or a letter tile), and the empty note; a row for this PC can also be dragged to reorder the pins | row: `data-dragging` (`true` while the row is under drag) |

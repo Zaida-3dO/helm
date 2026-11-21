@@ -81,8 +81,10 @@ export interface ThisDevice {
 }
 
 /**
- * A port of the PC a chat runs on, forwarded to this PC: `127.0.0.1:<localPort>` here reaches
- * `localhost:<port>` there, through the hub line. It lives only while both PCs run.
+ * One port forward between two PCs, seen from one of them: the host side of the hub line carries
+ * it. For the viewing PC `127.0.0.1:<localPort>` reaches `localhost:<port>` on the other PC; for
+ * the PC the server runs on `localPort` is that port and `deviceUid` names the viewing PC. It
+ * lives only while both PCs run.
  */
 export interface Forward {
   forwardId: string;
@@ -152,6 +154,10 @@ export function deviceOps(api: Api) {
     /** Every port forwarded to this PC now. */
     forwards: () => api<{ forwards: Forward[] }>('devices_forwards', {}).then((r) => (Array.isArray(r?.forwards) ? r.forwards : [])),
     forwardClose: (forwardId: string) => api<unknown>('devices_forward_close', { forwardId }),
+    /** Every port of this PC another PC is viewing now (the other PC's list of the same op). */
+    forwardsHosted: () => api<{ forwards: Forward[] }>('devices_forwards_hosted', {}).then((r) => (Array.isArray(r?.forwards) ? r.forwards : [])),
+    /** Stop sharing one of this PC's ports; the viewing PC is told. */
+    forwardHostedStop: (forwardId: string) => api<unknown>('devices_forward_hosted_stop', { forwardId }),
     /** Copy a file of a chat that runs on another PC to this PC; null when the person cancelled the dialog. */
     fileSave: (chatId: string, path: string) => api<{ path: string | null }>('devices_file_save', { chatId, path }).then((r) => r?.path ?? null),
     /** The MCP tool servers set up on another PC, for Settings → MCP's "Copy from another PC":
