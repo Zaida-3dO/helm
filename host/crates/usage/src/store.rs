@@ -64,6 +64,24 @@ fn same_window(a: Option<i64>, b: Option<i64>) -> bool {
     }
 }
 
+/// True when a control read brings a number **below** the one held for the same window (five_hour
+/// or weekly). Usage only climbs inside a window — a window that began again carries a new reset
+/// time — so a lower number for the same window is a suspect answer, worth one confirming
+/// re-read before it is accepted.
+pub fn below_held(
+    s: &StoredUsage,
+    five_hour: &Option<(Option<f64>, Option<i64>)>,
+    weekly: &Option<(Option<f64>, Option<i64>)>,
+) -> bool {
+    let low = |held: &Option<UsageWindow>, w: &Option<(Option<f64>, Option<i64>)>| match (held, w) {
+        (Some(h), Some((Some(pct), resets))) => {
+            h.pct.is_some_and(|hp| *pct < hp) && same_window(h.resets_at, *resets)
+        }
+        _ => false,
+    };
+    low(&s.five_hour, five_hour) || low(&s.weekly, weekly)
+}
+
 /// The window to keep when `new` arrives over `old`.
 pub fn merge_window(old: Option<&UsageWindow>, new: UsageWindow) -> UsageWindow {
     let Some(o) = old else { return new };
@@ -248,6 +266,41 @@ mod tests {
         let older = w(Some(5.0), Some(1_000_000), 50, UsageSource::RateLimitEvent);
         assert_eq!(merge_window(Some(&old), older).pct, Some(10.0));
         assert_eq!(merge_window(None, newer.clone()), newer);
+    }
+
+    /// A control number below the held one for the same window is suspect; a higher one, a new
+    /// window, a missing number either side, and nothing held are all taken at once.
+    #[test]
+    fn only_a_lower_number_for_the_same_window_needs_confirmation() {
+        let mut s = StoredUsage::default();
+        apply_control(
+            &mut s,
+            None,
+            Some((Some(40.0), Some(1_000_000))),
+            Some((Some(60.0), Some(9_000_000))),
+            vec![],
+            100,
+        );
+        assert!(below_held(&s, &Some((Some(30.0), Some(1_000_400))), &None));
+        assert!(below_held(&s, &None, &Some((Some(10.0), Some(9_000_300)))));
+        assert!(
+            !below_held(&s, &Some((Some(41.0), Some(1_000_400))), &None),
+            "higher is fine"
+        );
+        assert!(
+            !below_held(&s, &Some((Some(30.0), Some(1_000_000 + 3_600_000))), &None),
+            "a new window may legitimately sit lower"
+        );
+        assert!(
+            !below_held(&s, &Some((None, Some(1_000_000))), &None),
+            "no number in the read, nothing to compare"
+        );
+        let empty = StoredUsage::default();
+        assert!(!below_held(
+            &empty,
+            &Some((Some(0.0), Some(1_000_000))),
+            &None
+        ));
     }
 
     #[test]

@@ -11,6 +11,9 @@
 //! - A `no_figures` answer (the binary has limits but gave no numbers this time) is not re-read
 //!   that way: the last numbers stay on show with their age, and the UI's next poll reads again.
 //!   After an hour of it the readiness line offers signing in again.
+//! - A read whose number is **lower** than the one held for the same window is suspect (usage only
+//!   climbs inside a window): it is held back and confirmed by one re-read 5 s later, and that
+//!   answer is accepted whichever way it goes. Every control read is logged with its figures.
 //! - A read runs in a short-lived helper (`helpers/usage`) on a thread of its own; the op answers
 //!   at once and the result arrives as the `plan_usage` event.
 //! - Whatever the helper cannot read is a readiness state with a reason, never an error toast.
@@ -29,6 +32,9 @@ pub const NO_LIMITS_RETRIES: [std::time::Duration; 2] = [
     std::time::Duration::from_secs(15),
     std::time::Duration::from_secs(60),
 ];
+/// The wait before the one confirming re-read of a control read that came in lower than the
+/// number held for the same window.
+pub const LOWER_RECHECK_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// What the control reader answered, as the helper prints it.
 #[derive(Clone, Debug, PartialEq)]
@@ -39,6 +45,8 @@ pub enum ControlAnswer {
         weekly: Option<(Option<f64>, Option<i64>)>,
         per_model: Vec<(String, Option<f64>, Option<i64>)>,
         version: Option<String>,
+        /// The binary the read ran, when the reader knows it.
+        binary_path: Option<String>,
     },
     /// `no_binary`, `unsupported`, `no_limits`, `no_figures`, `timeout` or `error`.
     Failed {
@@ -92,6 +100,7 @@ pub fn parse_answer(v: &Value) -> ControlAnswer {
             plan: r.get("plan").and_then(Value::as_str).map(str::to_owned),
             five_hour: window(&r["fiveHour"]),
             weekly: window(&r["weekly"]),
+            binary_path: None,
             per_model: r["perModel"]
                 .as_array()
                 .map(|a| {
@@ -124,17 +133,31 @@ pub fn parse_answer(v: &Value) -> ControlAnswer {
     }
 }
 
+/// A control read held back because it came in lower than the number held for the same window,
+/// waiting for the confirming re-read.
+struct Held {
+    plan: Option<String>,
+    five_hour: Option<(Option<f64>, Option<i64>)>,
+    weekly: Option<(Option<f64>, Option<i64>)>,
+    per_model: Vec<(String, Option<f64>, Option<i64>)>,
+    at: i64,
+}
+
 #[derive(Default)]
 struct State {
     stored: StoredUsage,
     running: bool,
     last_attempt: Option<i64>,
+    /// When the last read was started, floor-checked or not — what the UI dates as "asked".
+    last_ask: Option<i64>,
     /// The last control read's failure, cleared by the next success.
     failure: Option<(String, String)>,
     /// `no_limits` re-reads used since the last reading.
     no_limits_retries: usize,
     /// When `no_figures` answers began, while they last; a reading or another failure clears it.
     no_figures_since: Option<i64>,
+    /// A reading held back until its confirming re-read answers.
+    pending_low: Option<Held>,
     version: Option<String>,
 }
 
@@ -144,6 +167,7 @@ pub struct UsageService {
     reader: Arc<dyn PlanReader>,
     state: Mutex<State>,
     retry_delays: Vec<std::time::Duration>,
+    lower_recheck: std::time::Duration,
 }
 
 impl UsageService {
@@ -158,12 +182,19 @@ impl UsageService {
                 ..State::default()
             }),
             retry_delays: NO_LIMITS_RETRIES.to_vec(),
+            lower_recheck: LOWER_RECHECK_DELAY,
         }
     }
 
     #[cfg(test)]
     fn with_retry_delays(mut self, d: Vec<std::time::Duration>) -> Self {
         self.retry_delays = d;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_lower_recheck(mut self, d: std::time::Duration) -> Self {
+        self.lower_recheck = d;
         self
     }
 
@@ -211,21 +242,62 @@ impl UsageService {
                     weekly,
                     per_model,
                     version,
+                    binary_path,
                 } => {
+                    log::info!(
+                        "plan usage read ({}; Claude Code {}): five_hour {}, weekly {}",
+                        binary_path.as_deref().unwrap_or("claude"),
+                        version.as_deref().unwrap_or("version unknown"),
+                        log_window(&five_hour),
+                        log_window(&weekly),
+                    );
                     st.failure = None;
                     st.no_figures_since = None;
                     st.no_limits_retries = 0;
                     if version.is_some() {
                         st.version = version;
                     }
-                    store::apply_control(&mut st.stored, plan, five_hour, weekly, per_model, now);
-                    store::save(&self.db, &st.stored, now);
+                    let confirming = st.pending_low.take();
+                    if confirming.is_none() && store::below_held(&st.stored, &five_hour, &weekly) {
+                        // Lower than the held number for the same window: usage only climbs
+                        // inside a window, so hold this reading back and confirm it with one
+                        // more read; that answer goes in whichever way it lands.
+                        st.pending_low = Some(Held {
+                            plan,
+                            five_hour,
+                            weekly,
+                            per_model,
+                            at: now,
+                        });
+                        retry = Some(self.lower_recheck);
+                    } else {
+                        if let Some(h) = confirming {
+                            store::apply_control(
+                                &mut st.stored,
+                                h.plan,
+                                h.five_hour,
+                                h.weekly,
+                                h.per_model,
+                                h.at,
+                            );
+                        }
+                        store::apply_control(
+                            &mut st.stored,
+                            plan,
+                            five_hour,
+                            weekly,
+                            per_model,
+                            now,
+                        );
+                        store::save(&self.db, &st.stored, now);
+                    }
                 }
                 ControlAnswer::Failed {
                     reason,
                     message,
                     version,
                 } => {
+                    log::warn!("plan usage read failed: {reason}: {message}");
                     if version.is_some() {
                         st.version = version;
                     }
@@ -239,6 +311,19 @@ impl UsageService {
                         st.no_limits_retries += 1;
                     }
                     st.failure = Some((reason, message));
+                    if let Some(h) = st.pending_low.take() {
+                        // The confirming read did not answer: the number it was checking is the
+                        // best Helm has, so it goes in after all.
+                        store::apply_control(
+                            &mut st.stored,
+                            h.plan,
+                            h.five_hour,
+                            h.weekly,
+                            h.per_model,
+                            h.at,
+                        );
+                        store::save(&self.db, &st.stored, now);
+                    }
                 }
             }
             snapshot_of(&st, now)
@@ -301,6 +386,7 @@ impl UsageService {
         } else {
             st.running = true;
             st.last_attempt = Some(now);
+            st.last_ask = Some(now);
             true
         }
     }
@@ -314,6 +400,7 @@ impl UsageService {
                 false
             } else {
                 st.running = true;
+                st.last_ask = Some(now);
                 if floor {
                     st.last_attempt = Some(now);
                 }
@@ -358,6 +445,7 @@ fn snapshot_of(st: &State, now: i64) -> UsageSnapshot {
         readiness,
         refreshing: st.running,
         next_refresh_at: st.last_attempt.map(|t| t + MIN_GAP_MS).filter(|t| *t > now),
+        asked_at: st.last_ask,
     }
 }
 
@@ -365,6 +453,21 @@ const WHERE_TO_ACT: &str = "Open Settings → Usage";
 const ACT_TARGET: &str = "settings:usage";
 /// After this long of `no_figures` answers, the readiness line offers signing in again.
 const SIGN_IN_HINT_AFTER_MS: i64 = 60 * 60_000;
+
+/// A control read's raw figures for the log.
+fn log_window(w: &Option<(Option<f64>, Option<i64>)>) -> String {
+    match w {
+        None => "no window".into(),
+        Some((pct, resets)) => format!(
+            "{} at reset {}",
+            pct.map(|p| p.to_string())
+                .unwrap_or_else(|| "no number".into()),
+            resets
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "unknown".into()),
+        ),
+    }
+}
 
 /// "less than a minute ago", "5 min ago", "2 h ago", "3 d ago".
 fn age_text(ms: i64) -> String {
@@ -491,6 +594,7 @@ mod tests {
             weekly: Some((Some(50.0), Some(9_000_000))),
             per_model: vec![],
             version: Some("2.1.289".into()),
+            binary_path: Some("C:\\claude\\claude.exe".into()),
         }
     }
 
@@ -643,6 +747,7 @@ mod tests {
             "a read was started"
         );
         assert_eq!(first.next_refresh_at, Some(t0 + MIN_GAP_MS));
+        assert_eq!(first.asked_at, Some(t0), "the UI can date the last ask");
         let done = wait_until(&svc, |s| s.reading.is_some());
         assert_eq!(
             done.reading
@@ -720,6 +825,72 @@ mod tests {
         assert_eq!(reader.calls.load(Ordering::SeqCst), 2);
     }
 
+    /// A read lower than the held number for the same window is not taken at once: one re-read
+    /// confirms it a few seconds later, and the confirming answer lands whichever way it goes.
+    /// A higher read needs no confirming.
+    #[test]
+    fn a_lower_read_in_the_same_window_is_confirmed_by_one_re_read() {
+        let (svc, reader, _sink, _d) =
+            service(vec![reading(7.0), reading(4.0), reading(6.0), reading(9.0)]);
+        let svc = Arc::new(
+            Arc::into_inner(svc)
+                .unwrap()
+                .with_lower_recheck(std::time::Duration::from_millis(40)),
+        );
+        let t0 = 1_000_000;
+        let budget = std::time::Duration::from_secs(1);
+        let pct = |s: &UsageSnapshot| s.reading.as_ref().unwrap().five_hour.as_ref().unwrap().pct;
+        let (snap, _) = svc.fresh_read(t0, budget);
+        assert_eq!(pct(&snap), Some(7.0));
+        // Lower, same window: held back; the meter keeps showing the older, higher number.
+        let (snap2, outcome) = svc.fresh_read(t0 + MIN_GAP_MS, budget);
+        assert_eq!(outcome, FreshOutcome::Read);
+        assert_eq!(pct(&snap2), Some(7.0), "the lower number waits");
+        assert_eq!(snap2.asked_at, Some(t0 + MIN_GAP_MS));
+        assert_eq!(reader.calls.load(Ordering::SeqCst), 2);
+        // The confirming read lands in its place; nothing re-reads after that.
+        let done = wait_until(&svc, |s| pct(s) == Some(6.0));
+        assert_eq!(done.readiness.state, ReadinessState::Ready);
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert_eq!(
+            reader.calls.load(Ordering::SeqCst),
+            3,
+            "confirmed once, never again for the same drop"
+        );
+        // A higher read needs no confirmation: it goes in at once.
+        svc.refresh(t0 + 2 * MIN_GAP_MS);
+        wait_until(&svc, |s| pct(s) == Some(9.0));
+        assert_eq!(reader.calls.load(Ordering::SeqCst), 4);
+    }
+
+    /// A confirming re-read that fails lets the held-back number in after all: it is still the
+    /// newest answer Helm has.
+    #[test]
+    fn a_failed_confirming_read_still_lands_the_number_it_was_checking() {
+        let (svc, reader, _sink, _d) = service(vec![reading(7.0), reading(4.0), no_figures()]);
+        let svc = Arc::new(
+            Arc::into_inner(svc)
+                .unwrap()
+                .with_lower_recheck(std::time::Duration::from_millis(40)),
+        );
+        let t0 = 1_000_000;
+        let budget = std::time::Duration::from_secs(1);
+        let pct = |s: &UsageSnapshot| s.reading.as_ref().unwrap().five_hour.as_ref().unwrap().pct;
+        svc.fresh_read(t0, budget);
+        let (snap2, _) = svc.fresh_read(t0 + MIN_GAP_MS, budget);
+        assert_eq!(pct(&snap2), Some(7.0), "held back first");
+        let done = wait_until(&svc, |s| pct(s) == Some(4.0));
+        assert!(
+            done.readiness
+                .reason
+                .starts_with("Claude Code didn't return usage figures this time; showing"),
+            "{}",
+            done.readiness.reason
+        );
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert_eq!(reader.calls.load(Ordering::SeqCst), 3, "no second re-read");
+    }
+
     #[test]
     fn an_unsupported_binary_is_a_readiness_state_with_the_version_and_a_place_to_act() {
         let (svc, _r, _s, _d) = service(vec![ControlAnswer::Failed {
@@ -785,6 +956,7 @@ mod tests {
                 weekly: None,
                 per_model: vec![("Fable".into(), Some(0.0), Some(20))],
                 version: Some("2.1.289".into()),
+                binary_path: None,
             }
         );
         let bad = parse_answer(&json!({"ok": false, "reason": "no_limits", "message": "m"}));

@@ -1278,6 +1278,7 @@ mod tests {
             },
             refreshing: false,
             next_refresh_at: Some(66_000_000),
+            asked_at: Some(65_000_000),
         }
     }
 
@@ -1342,6 +1343,7 @@ mod tests {
             },
             refreshing: false,
             next_refresh_at: None,
+            asked_at: None,
         };
         let none = plan_block(&empty, 1, Some(FreshOutcome::Failed));
         assert!(none["reading"].is_null());

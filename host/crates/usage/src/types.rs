@@ -126,6 +126,11 @@ pub struct UsageSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub next_refresh_at: Option<i64>,
+    /// When Helm last asked the binary for a reading (epoch milliseconds), once it has asked.
+    /// The numbers on show can be older than this: a merge keeps a number at the time it was read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub asked_at: Option<i64>,
 }
 
 /// Token counts and the cost the binary reported, summed over some messages.

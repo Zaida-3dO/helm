@@ -13,4 +13,9 @@ refreshing: boolean,
 /**
  * The earliest time another read may start (epoch milliseconds), when one ran lately.
  */
-nextRefreshAt?: number, };
+nextRefreshAt?: number, 
+/**
+ * When Helm last asked the binary for a reading (epoch milliseconds), once it has asked.
+ * The numbers on show can be older than this: a merge keeps a number at the time it was read.
+ */
+askedAt?: number, };

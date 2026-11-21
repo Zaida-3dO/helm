@@ -64,6 +64,29 @@ fn failed(reason: &str, message: impl Into<String>) -> ControlAnswer {
     }
 }
 
+/// Names the binary the job ran, so the host log can say which one answered. The job names no
+/// command when the helper is left to resolve `claude` itself.
+fn with_binary_path(answer: ControlAnswer, bin: &str) -> ControlAnswer {
+    match answer {
+        ControlAnswer::Reading {
+            plan,
+            five_hour,
+            weekly,
+            per_model,
+            version,
+            ..
+        } => ControlAnswer::Reading {
+            plan,
+            five_hour,
+            weekly,
+            per_model,
+            version,
+            binary_path: Some(bin.to_owned()),
+        },
+        f @ ControlAnswer::Failed { .. } => f,
+    }
+}
+
 impl ProcessReader {
     /// Run one helper job (node, the script, one JSON line back).
     pub fn run_job(&self, job: &Value, timeout: Duration) -> Result<Value, String> {
@@ -139,8 +162,13 @@ impl ProcessReader {
         } else if !runtime.executable.is_empty() {
             job["command"] = Value::String(runtime.executable);
         }
+        let bin = job
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or("claude")
+            .to_owned();
         let answer = match self.run_job(&job, host_wait) {
-            Ok(v) => parse_answer(&v),
+            Ok(v) => with_binary_path(parse_answer(&v), &bin),
             Err(e) => failed("error", e),
         };
         match &answer {
