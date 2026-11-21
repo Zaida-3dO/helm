@@ -61,21 +61,27 @@ adds to every run, locally and in CI, and slows everyone down.
 
 1. **Auth.** Never read `~/.claude/.credentials.json` or any other token store of Claude Code's, and
    never call `api.anthropic.com/api/oauth/*`. Claude is used only through the unmodified `claude`
-   binary under the user's own account. The user may save a long-lived token made with
-   `claude setup-token` in Helm, which keeps it sealed in its own credential store. The host then
-   hands it to a worker or helper in `HELM_CLAUDE_TOKEN`; that process removes it from its own
-   environment once read and sets `CLAUDE_CODE_OAUTH_TOKEN` on the claude child only. It is never
-   put on a command line, never logged, never given to MCP servers and never given to a local-model
-   chat. The usage meter does not use it. Otherwise the worker strips `ANTHROPIC_API_KEY`,
+   binary under the user's own account. The worker strips `ANTHROPIC_API_KEY`,
    `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_OAUTH_TOKEN` and `CLAUDECODE` from the
-   claude child's environment unless API-key mode is on, or the chat runs on a local model server configured in
-   Helm on this machine. Then, and only then, it sets the base URL to that server's loopback
-   address (plain http to `127.0.0.1`, `localhost` or `::1`; anything else is refused) and the token
-   to that server's own key, handed over in `HELM_LOCAL_MODEL_KEY` and removed from the worker's
-   environment once read. It never passes the user's sign-in or an Anthropic key in that case, and
-   never logs the key. Helm's own MCP client never gives it to MCP servers, but the claude child
-   holds it as `ANTHROPIC_AUTH_TOKEN`, so its hooks, its Bash commands and (with tools set to Full)
-   its own native MCP servers inherit it. It is only ever the key to a server on this machine.
+   claude child's environment unless API-key mode is on, a saved sign-in token is handed over (next
+   paragraph), or the chat runs on a local model server (the paragraph after).
+   - **The saved sign-in token.** The user may save a long-lived token made with
+     `claude setup-token` in Helm, which keeps it sealed in its own credential store. The host hands
+     it to a worker or helper in `HELM_CLAUDE_TOKEN`; that process removes it from its own
+     environment once read and sets `CLAUDE_CODE_OAUTH_TOKEN` on the claude child only. Who receives
+     it: the worker or helper that launches claude, and that claude child with everything the child
+     starts (its hooks, its Bash commands and, with tools set to Full, its own native MCP servers
+     all inherit the child's environment). Who never does: Helm's own MCP client and the servers it
+     starts (`HELM_CLAUDE_TOKEN` is stripped from them), a chat on a local model, an API-key launch,
+     any command line or log line, and the usage meter.
+   - **A local model server.** A chat that runs on a local model server configured in Helm on this
+     machine gets that server's loopback address (plain http to `127.0.0.1`, `localhost` or `::1`;
+     anything else is refused) as the base URL and that server's own key as the token, handed over
+     in `HELM_LOCAL_MODEL_KEY` and removed from the worker's environment once read. It never gets
+     the user's sign-in, the saved sign-in token or an Anthropic key, and the key is never logged.
+     The claude child holds that key as `ANTHROPIC_AUTH_TOKEN`, so its hooks, its Bash commands and
+     (with tools set to Full) its own native MCP servers inherit it; Helm's own MCP client never
+     passes it on. It is only ever the key to a server on this machine.
 2. **Windows hazards.**
    - Never `rm -rf` or `git worktree remove` a directory containing a `node_modules` junction:
      `rmdir` the junction first.
