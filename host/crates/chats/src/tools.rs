@@ -112,7 +112,8 @@ fn chat_meta(tx: &Transaction<'_>, boards: &Boards, id: &str) -> rusqlite::Resul
                         c.updated_at, c.harness, {}, c.thinking, c.parent_chat_id, c.pinned,
                         c.side_source_id, EXISTS(SELECT 1 FROM chat_mutes m WHERE m.chat_id = c.id),
                         CASE WHEN c.status IN ('starting', 'running', 'stopping')
-                             THEN a.state ELSE NULL END
+                             THEN a.state ELSE NULL END,
+                        c.stack_id, c.prev_session_id, c.next_session_id
                  FROM chats c JOIN projects p ON p.id = c.project_id
                  LEFT JOIN chat_activity a ON a.chat_id = c.id WHERE c.id = ?1",
                 crate::local::MODEL_ID_SQL
@@ -120,35 +121,57 @@ fn chat_meta(tx: &Transaction<'_>, boards: &Boards, id: &str) -> rusqlite::Resul
             [id],
             |r| {
                 let id = r.get::<_, String>(0)?;
-                Ok(json!({
-                    "link": chat_link(&id, None),
-                    "chatId": id,
-                    "title": r.get::<_, String>(1)?,
-                    "folderProjectId": r.get::<_, String>(2)?,
-                    "folderPath": r.get::<_, Option<String>>(3)?,
-                    "archived": r.get::<_, bool>(4)?,
-                    "status": r.get::<_, String>(5)?,
-                    "createdAt": r.get::<_, i64>(6)?,
-                    "updatedAt": r.get::<_, i64>(7)?,
-                    "harness": r.get::<_, String>(8)?,
-                    "model": r.get::<_, Option<String>>(9)?,
-                    "effort": r.get::<_, Option<String>>(10)?,
-                    "parentChatId": r.get::<_, Option<String>>(11)?,
-                    "pinned": r.get::<_, bool>(12)?,
-                    "sideChatOf": r.get::<_, Option<String>>(13)?,
-                    "muted": r.get::<_, bool>(14)?,
-                    // What a busy chat is doing now, as the maintenance tick last saw it
-                    // (queued / generating / tool / waitingUser / silent); null when idle.
-                    "state": r
-                        .get::<_, Option<String>>(15)?
-                        .and_then(|j| serde_json::from_str::<Value>(&j).ok()),
-                }))
+                Ok((
+                    json!({
+                        "link": chat_link(&id, None),
+                        "chatId": id,
+                        "title": r.get::<_, String>(1)?,
+                        "folderProjectId": r.get::<_, String>(2)?,
+                        "folderPath": r.get::<_, Option<String>>(3)?,
+                        "archived": r.get::<_, bool>(4)?,
+                        "status": r.get::<_, String>(5)?,
+                        "createdAt": r.get::<_, i64>(6)?,
+                        "updatedAt": r.get::<_, i64>(7)?,
+                        "harness": r.get::<_, String>(8)?,
+                        "model": r.get::<_, Option<String>>(9)?,
+                        "effort": r.get::<_, Option<String>>(10)?,
+                        "parentChatId": r.get::<_, Option<String>>(11)?,
+                        "pinned": r.get::<_, bool>(12)?,
+                        "sideChatOf": r.get::<_, Option<String>>(13)?,
+                        "muted": r.get::<_, bool>(14)?,
+                        // What a busy chat is doing now, as the maintenance tick last saw it
+                        // (queued / generating / tool / waitingUser / silent); null when idle.
+                        "state": r
+                            .get::<_, Option<String>>(15)?
+                            .and_then(|j| serde_json::from_str::<Value>(&j).ok()),
+                    }),
+                    r.get::<_, Option<String>>(16)?,
+                    r.get::<_, Option<String>>(17)?,
+                    r.get::<_, Option<String>>(18)?,
+                ))
             },
         )
         .optional()?;
-    let Some(mut m) = row else {
+    let Some((mut m, stack_id, prev, next)) = row else {
         return Ok(None);
     };
+    // A session of a roll-over stack says which stack it is in, which session of it runs the
+    // chat now, and what sits before and after it; an archived one also says where to follow.
+    if let Some(stack) = stack_id {
+        m["stackId"] = json!(stack);
+        m["previousSessionId"] = json!(prev);
+        m["nextSessionId"] = json!(next);
+        if let Some(st) = crate::rollover::stack_of(tx, id)? {
+            m["latestSessionId"] = json!(&st.latest_id);
+            if m["archived"] == true && st.latest_id != id {
+                m["followTo"] = json!(&st.latest_id);
+                m["followNote"] = json!(format!(
+                    "rolled over; the chat continues in {}",
+                    st.latest_id
+                ));
+            }
+        }
+    }
     let board = match shown_board_id(tx, boards, id, m["sideChatOf"].as_str())? {
         Some(b) => boards.board(tx, &b)?,
         None => None,
@@ -450,6 +473,12 @@ fn list_chats(ctx: &ToolCtx, a: Value) -> ToolResult {
         .get("includeCurrent")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    // A rolled-over chat is one stack of sessions; by default the list names each stack once,
+    // at the session that runs it now.
+    let include_earlier = a
+        .get("includeEarlierSessions")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let project = str_arg(&a, "projectId").map(str::to_owned);
     // `profile` is the retired spelling of `person`; both are taken.
     let person = str_arg(&a, "person")
@@ -484,12 +513,14 @@ fn list_chats(ctx: &ToolCtx, a: Value) -> ToolResult {
                 let mut st = tx.prepare(
                     "SELECT c.id, c.updated_at FROM chats c
                      WHERE c.archived = ?1 AND (?2 OR c.id <> ?3)
+                       AND (?4 OR c.next_session_id IS NULL)
                      ORDER BY c.updated_at DESC, c.id",
                 )?;
                 let ids = st
-                    .query_map(params![archived, include_current, caller], |r| {
-                        Ok((r.get::<_, i64>(1)?, Cand::Local(r.get::<_, String>(0)?)))
-                    })?
+                    .query_map(
+                        params![archived, include_current, caller, include_earlier],
+                        |r| Ok((r.get::<_, i64>(1)?, Cand::Local(r.get::<_, String>(0)?))),
+                    )?
                     .collect::<Result<Vec<_>, _>>()?;
                 cands.extend(ids);
             }
@@ -1299,11 +1330,26 @@ async fn send_message(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRe
     }
 }
 
-/// The chat that took this chat's place when it rolled over, if any.
+/// Where a roll-over chat carries on: the newest session of its stack, if that is not the chat
+/// itself. A row whose stack was never backfilled falls back to the one recorded succession.
 fn successor_of(ctx: &ToolCtx, id: &str) -> Result<Option<String>, ToolError> {
     let store = db(ctx)?;
     store
         .snapshot(|tx| {
+            let latest: Option<String> = tx
+                .query_row(
+                    "SELECT (SELECT s.id FROM chats s
+                              WHERE s.stack_id = c.stack_id AND s.next_session_id IS NULL
+                              ORDER BY s.created_at DESC, s.id DESC LIMIT 1)
+                     FROM chats c WHERE c.id = ?1 AND c.stack_id IS NOT NULL",
+                    [id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten();
+            if latest.is_some() {
+                return Ok(latest.filter(|l| l != id));
+            }
             tx.query_row(
                 "SELECT chat_id FROM chat_succession WHERE predecessor_id = ?1",
                 [id],
@@ -2131,7 +2177,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::read(
             "app_this_chat",
-            format!("This chat's own details: chatId (give it to a chat you start so it can report back with app_send_message), title, board, folder, parent chat, model, effort, muted, profile and device.{LINKS}"),
+            format!("This chat's own details: chatId (give it to a chat you start so it can report back with app_send_message), title, board, folder, parent chat, model, effort, muted, profile and device. A chat that has rolled over also names its stack (stackId, latestSessionId, previousSessionId, nextSessionId).{LINKS}"),
             obj(json!({}), &[]),
         ),
         this_chat,
@@ -2139,7 +2185,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .blocking(
         ToolSpec::read(
             "app_list_chats",
-            format!("List recent chats, newest first, or search their titles and messages (all query words must match). Excludes this chat unless includeCurrent. By default: your profile's chats on this PC; person and device (\"any\" for all) widen it, only when the user asks. More: app_help tool/app_list_chats.{LINKS}"),
+            format!("List recent chats, newest first, or search their titles and messages (all query words must match). Excludes this chat unless includeCurrent. By default: your profile's chats on this PC; person and device (\"any\" for all) widen it, only when the user asks. A chat that has rolled over is one stack of sessions: it is listed once, at the session that runs it now; includeEarlierSessions also lists its earlier sessions. More: app_help tool/app_list_chats.{LINKS}"),
             obj(
                 json!({
                     "query": {"type": "string", "maxLength": 512},
@@ -2150,7 +2196,8 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                     "archived": {"type": "boolean"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 50},
                     "offset": {"type": "integer", "minimum": 0, "maximum": 100000},
-                    "includeCurrent": {"type": "boolean"}
+                    "includeCurrent": {"type": "boolean"},
+                    "includeEarlierSessions": {"type": "boolean", "description": "Also list the earlier sessions of rolled-over chats, not just the session each chat runs in now."}
                 }),
                 &[],
             ),
@@ -2179,7 +2226,8 @@ By default the list covers your own profile's chats, including chats shared with
             ),
         )
         .guidelines(
-            "At most one of query, aroundMessageId, afterMessageId and beforeMessageId. query answers hits with snippets; a chat another PC runs is searched in this PC's copy only. A chat on another PC is read from this PC's copy of it, and from the PC that runs it for pages the copy lacks.",
+            "At most one of query, aroundMessageId, afterMessageId and beforeMessageId. query answers hits with snippets; a chat another PC runs is searched in this PC's copy only. A chat on another PC is read from this PC's copy of it, and from the PC that runs it for pages the copy lacks.
+A rolled-over chat is a stack of sessions: its chat fields name the stack (stackId, latestSessionId, previousSessionId, nextSessionId); an archived session also answers followTo — the session the chat continues in, whose messages you should read there.",
         ),
         read_chat,
     )
@@ -2481,6 +2529,20 @@ mod tests {
                     [new, old],
                 )?;
             }
+            // The b chain also carries the stack links a roll over leaves behind: its send
+            // lands on the newest session of the stack at once, not one hop at a time.
+            tx.execute(
+                "UPDATE chats SET stack_id = ?1, next_session_id = ?2 WHERE id = ?3",
+                params![b1, b2, b1],
+            )?;
+            tx.execute(
+                "UPDATE chats SET stack_id = ?1, prev_session_id = ?2, next_session_id = ?3 WHERE id = ?4",
+                params![b1, b1, b3, b2],
+            )?;
+            tx.execute(
+                "UPDATE chats SET stack_id = ?1, prev_session_id = ?2 WHERE id = ?3",
+                params![b1, b2, b3],
+            )?;
             for id in [&a1, &b1, &b2, &c1, &c2, &c3, &lone] {
                 tx.execute("UPDATE chats SET archived = 1 WHERE id = ?1", [id])?;
             }
@@ -2505,7 +2567,8 @@ mod tests {
             )) == ["1"]
         })
         .await;
-        // Two hops: b1 -> b2 -> b3, and b3 is live.
+        // Two deep: b1 -> b2 -> b3, and b3 is live. b carries the stack links, so the send
+        // follows the stack to its newest session; the result still names where it started.
         let r = call(
             &h,
             &tools,
@@ -2516,6 +2579,7 @@ mod tests {
         .await;
         assert_eq!(r["ok"], true, "{r}");
         assert_eq!(r["result"]["chatId"], b3.as_str());
+        assert_eq!(r["result"]["redirectedFrom"], b1.as_str());
         // The third hop is not followed: after two the target is still archived.
         let r = call(
             &h,
@@ -2554,6 +2618,98 @@ mod tests {
         assert_eq!(r["ok"], true, "{r}");
         assert_eq!(r["result"]["chatId"], a2.as_str());
         assert!(r["result"].get("redirectedFrom").is_none());
+    }
+
+    /// Read and status answers name the roll-over stack a session sits in: which stack, the
+    /// session that runs the chat now, the neighbours, and — for an archived session — where
+    /// to follow. The list names each stack once, at that newest session, unless asked for
+    /// every session.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chat_answers_carry_the_stack_of_a_rolled_over_chat() {
+        let h = harness();
+        let t = tools(&h);
+        let caller = h.create().await;
+        let s1 = h.create().await;
+        let s2 = h.create().await;
+        let s3 = h.create().await;
+        // s1 -> s2 -> s3, with the links a roll over leaves behind: one stack, s3 newest,
+        // the two it archived marked as such.
+        h.db.write(|tx| {
+            tx.execute(
+                "UPDATE chats SET stack_id = ?1, next_session_id = ?2, archived = 1 WHERE id = ?3",
+                params![s1, s2, s1],
+            )?;
+            tx.execute(
+                "UPDATE chats SET stack_id = ?1, prev_session_id = ?2, next_session_id = ?3, archived = 1 WHERE id = ?4",
+                params![s1, s1, s3, s2],
+            )?;
+            tx.execute(
+                "UPDATE chats SET stack_id = ?1, prev_session_id = ?2 WHERE id = ?3",
+                params![s1, s2, s3],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+        let r = call(&h, &t, &caller, "app_read_chat", json!({"chatId": s1})).await;
+        assert_eq!(r["ok"], true, "{r}");
+        let c = &r["result"]["chat"];
+        assert_eq!(c["stackId"], s1.as_str());
+        assert_eq!(c["latestSessionId"], s3.as_str());
+        assert!(c["previousSessionId"].is_null());
+        assert_eq!(c["nextSessionId"], s2.as_str());
+        // The archived first session says where the chat went.
+        assert_eq!(c["followTo"], s3.as_str());
+        assert_eq!(
+            c["followNote"].as_str().unwrap(),
+            format!("rolled over; the chat continues in {s3}")
+        );
+        // A middle session names both neighbours and still points at the newest.
+        let r = call(&h, &t, &caller, "app_read_chat", json!({"chatId": s2})).await;
+        let c = &r["result"]["chat"];
+        assert_eq!(c["previousSessionId"], s1.as_str());
+        assert_eq!(c["nextSessionId"], s3.as_str());
+        assert_eq!(c["followTo"], s3.as_str());
+        // The newest session names the stack but has nowhere to follow.
+        let r = call(&h, &t, &caller, "app_read_chat", json!({"chatId": s3})).await;
+        let c = &r["result"]["chat"];
+        assert_eq!(c["stackId"], s1.as_str());
+        assert_eq!(c["latestSessionId"], s3.as_str());
+        assert!(c.get("followTo").is_none());
+        // A chat no roll over touched names no stack at all.
+        let me = call(&h, &t, &caller, "app_this_chat", json!({})).await;
+        assert!(me["result"].get("stackId").is_none());
+        assert!(me["result"].get("followTo").is_none());
+        // List: archive the whole stack, then the default names it once, at s3; asking for
+        // earlier sessions names all three.
+        h.db.write(|tx| tx.execute("UPDATE chats SET archived = 1 WHERE id = ?1", [&s3]))
+            .unwrap();
+        let ids_of = |r: &Value| -> Vec<String> {
+            let mut v: Vec<String> = r["result"]["chats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["chatId"].as_str().unwrap().to_owned())
+                .collect();
+            v.sort();
+            v
+        };
+        let r = call(&h, &t, &caller, "app_list_chats", json!({"archived": true})).await;
+        assert_eq!(ids_of(&r), {
+            let mut v = vec![s3.clone()];
+            v.sort();
+            v
+        });
+        let r = call(
+            &h,
+            &t,
+            &caller,
+            "app_list_chats",
+            json!({"archived": true, "includeEarlierSessions": true}),
+        )
+        .await;
+        let mut all = vec![s1.clone(), s2.clone(), s3.clone()];
+        all.sort();
+        assert_eq!(ids_of(&r), all);
     }
 
     #[test]
