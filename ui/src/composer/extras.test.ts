@@ -183,7 +183,7 @@ test('the composer waits for the first runtime check, and the scroll-on-send set
   const { parseScrollOnSend } = await import('./scrollOnSend.ts');
   assert.equal(runtimeCheck.get().checked, false, 'nothing has answered yet');
   await runtimeCheck.refresh(async () => ({ node: { path: 'node' }, claude: { path: '' }, problems: ['Claude Code was not found'] }));
-  assert.deepEqual(runtimeCheck.get(), { blocked: true, problems: ['Claude Code was not found'], checked: true });
+  assert.deepEqual(runtimeCheck.get(), { blocked: true, problems: ['Claude Code was not found'], upgradeCommand: null, checked: true });
   for (const [stored, on] of [[null, true], [undefined, true], [true, true], [false, false], [0, true]] as const) {
     assert.equal(parseScrollOnSend(stored), on, String(stored));
   }
