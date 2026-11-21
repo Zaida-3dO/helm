@@ -17,6 +17,7 @@
 //! | [`oauth_ops`] | the Settings → MCP sign-in ops built on it: Connect, its status, Disconnect, and the worker's one-time ask for a fresh header |
 //! | [`owner_step`] | approving one step in the user's own browser from a card: the card, the one-time grant Helm mints on Approve, and the retry through the chat's worker |
 //! | [`repo_gate`] | the repository-server gate and its seeding from Claude Code |
+//! | [`server_change`] | the Approve card for MCP changes only the user may make: a refused server change, a person's own secret value, the Gmail and Calendar level |
 //! | [`status`] | the newest per-server status across workers (MC3) |
 //! | [`tools`] | their registration with the host-tool registry |
 //! | [`unencrypted`] | the notice and Undo when a chat turns on "Allow unencrypted on my network" |
@@ -41,6 +42,7 @@ pub mod owner_step;
 pub mod presets;
 pub mod probe;
 pub mod repo_gate;
+pub mod server_change;
 pub mod status;
 pub mod tools;
 pub mod types;

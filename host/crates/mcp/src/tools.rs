@@ -49,6 +49,17 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
             spec
         };
         r.blocking(spec, move |ctx, args| {
+            // askUser: true makes no change: it files an Approve card for the same call.
+            let mut args = args;
+            let ask = matches!(args.get("askUser"), Some(Value::Bool(true)));
+            if ask && name != admin::LIST {
+                return crate::server_change::stage_admin(ctx, name, args);
+            }
+            // Neither word is part of a change itself.
+            if let Some(o) = args.as_object_mut() {
+                o.remove("askUser");
+                o.remove("reason");
+            }
             let store = ctx
                 .services
                 .get::<McpStore>()
@@ -82,6 +93,9 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
             Ok(out)
         });
     }
+    // After the admin tools, so the list reads list, add, edit, update, remove, then the two
+    // that always ask.
+    crate::server_change::register_host_tools(r);
 }
 
 /// Answer the worker's header request. Every refusal happens before anything is sent, and no
@@ -161,9 +175,10 @@ mod tests {
         );
         assert!(!r.get(admin::LIST).unwrap().spec.mutating);
         assert!(r.get(admin::REMOVE).unwrap().spec.mutating);
-        // Listed with every feature off: the admin tools are ALWAYS.
+        // Listed with every feature off: the admin tools are ALWAYS, and so are the two that
+        // always ask the user (a person's own secret, the Google level).
         let listed = r.for_launch(&LaunchKeys::default());
-        assert_eq!(listed.len(), 5);
+        assert_eq!(listed.len(), 7);
         // The worker's browser-sign-in header question is registered but never listed.
         assert!(r.contains(crate::oauth_ops::HEADER_TOOL));
         assert!(

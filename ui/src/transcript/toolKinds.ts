@@ -74,14 +74,29 @@ export function toolTarget(row: MessageRow): string | null {
   );
 }
 
-/** The Allow request an `app_request_allow`, `app_stage_settings` or `app_project_startup` call filed: the id its result names, or null. */
+/** The MCP server tools that file an Approve card instead of changing something, when asked to (`askUser`) or by their nature; the others only file one when their result says pending. */
+const MCP_CARD_TOOLS = [
+  'app_mcp_servers',
+  'app_add_mcp_server',
+  'app_edit_mcp_server',
+  'app_update_mcp_server',
+  'app_remove_mcp_server',
+  'app_set_mcp_secret',
+  'app_set_mcp_level',
+];
+
+/** The Allow request an `app_request_allow`, `app_stage_settings`, `app_project_startup` or MCP server change call filed: the id its result names, or null. */
 export function allowRequestId(row: MessageRow): string | null {
   const id = toolIdentity(row);
-  if (id.source !== 'host' || !['app_request_allow', 'app_stage_settings', 'app_project_startup'].includes(id.tool)) return null;
+  if (id.source !== 'host') return null;
+  const always = ['app_request_allow', 'app_stage_settings', 'app_project_startup'].includes(id.tool);
+  if (!always && !MCP_CARD_TOOLS.includes(id.tool)) return null;
   try {
-    const v = JSON.parse(row.text) as { requestId?: unknown };
+    const v = JSON.parse(row.text) as { requestId?: unknown; state?: unknown };
+    if (!always && v.state !== 'pending') return null;
     return typeof v.requestId === 'string' && v.requestId ? v.requestId : null;
   } catch {
+    if (!always && !/"state"\s*:\s*"pending"/.test(row.text)) return null;
     return /"requestId"\s*:\s*"([^"]+)"/.exec(row.text)?.[1] ?? null;
   }
 }

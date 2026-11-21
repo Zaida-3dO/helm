@@ -7,6 +7,12 @@
 //! the "Allow unencrypted on my network" opt-in, but only for a plain-http server on a private
 //! address or name (see [`crate::unencrypted`] for the notice and Undo that follow), and it
 //! cannot carry the opt-in to a new host (changing a server's host clears it).
+//!
+//! A few changes are the user's alone (the browser server, the Google accounts' program, a
+//! built-in preset's removal). An agent that wants one sends the same call with `askUser: true`:
+//! nothing changes, and [`crate::server_change`] files an Approve card showing the exact change.
+//! Each list change below takes a [`Who`]: the agent's own call is refused those, and the
+//! approved one (run when the user clicks Approve) is not. Everything else applies to both.
 
 use crate::config::{McpStore, StoreError};
 use crate::types::*;
@@ -19,6 +25,23 @@ pub const ADD: &str = "app_add_mcp_server";
 pub const EDIT: &str = "app_edit_mcp_server";
 pub const UPDATE: &str = "app_update_mcp_server";
 pub const REMOVE: &str = "app_remove_mcp_server";
+
+/// Who is asking for a list change. An approved change skips only the refusals that exist
+/// because the user had not yet agreed to the very thing being asked; every other rule (the
+/// person header, the opt-in, and all config validation) applies either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Who {
+    Agent,
+    Approved,
+}
+
+/// What every refusal of a user-only change ends with.
+pub(crate) const ASK_USER: &str = "To ask the user, send the same call again with askUser: true. They see the exact command, arguments and variable names on an Approve card, and Helm saves the change once if they approve.";
+
+/// A user-only refusal: the reason, then how to ask.
+fn user_only(why: &str) -> StoreError {
+    StoreError::Invalid(format!("{why} {ASK_USER}"))
+}
 
 /// A refusal; nothing was changed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -94,7 +117,7 @@ pub fn list(store: &McpStore, args: Value) -> Result<Value, AdminError> {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AddServer {
+pub(crate) struct AddServer {
     id: String,
     name: String,
     enabled: bool,
@@ -105,51 +128,55 @@ struct AddServer {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AddArgs {
+pub(crate) struct AddArgs {
     revision: String,
     server: AddServer,
 }
 
-pub fn add(store: &McpStore, args: Value) -> Result<Value, AdminError> {
-    let a: AddArgs = parse(args)?;
-    let s = a.server;
-    if runs_broker(
-        s.transport.command.as_deref(),
-        &s.transport.args,
-        s.transport.env.keys(),
-    ) {
-        return Err(AdminError(BROKER_COPY.into()));
+/// Add one server to `list`.
+fn add_to(list: &mut Vec<McpServer>, s: AddServer, who: Who) -> Result<(), StoreError> {
+    if who == Who::Agent
+        && runs_broker(
+            s.transport.command.as_deref(),
+            &s.transport.args,
+            s.transport.env.keys(),
+        )
+    {
+        return Err(user_only(BROKER_COPY));
     }
     if s.allow_private_http
         && (s.transport.kind == TransportKind::Stdio
             || s.transport.oauth.is_some()
             || !is_private_plain_http(s.transport.url.as_deref()))
     {
-        return Err(AdminError(OPT_IN_NEEDS_PRIVATE_HTTP.into()));
+        return Err(StoreError::Invalid(OPT_IN_NEEDS_PRIVATE_HTTP.into()));
     }
-    let snap = store.mutate(Some(&a.revision), |list| {
-        if list.iter().any(|x| x.id == s.id) {
-            return Err(StoreError::Invalid(format!(
-                "A server with the id {} already exists.",
-                s.id
-            )));
-        }
-        list.push(McpServer {
-            id: s.id,
-            name: s.name,
-            enabled: s.enabled,
-            transport: s.transport,
-            allow_private_http: s.allow_private_http,
-            preset: None,
-        });
-        Ok(())
-    })?;
+    if list.iter().any(|x| x.id == s.id) {
+        return Err(StoreError::Invalid(format!(
+            "A server with the id {} already exists.",
+            s.id
+        )));
+    }
+    list.push(McpServer {
+        id: s.id,
+        name: s.name,
+        enabled: s.enabled,
+        transport: s.transport,
+        allow_private_http: s.allow_private_http,
+        preset: None,
+    });
+    Ok(())
+}
+
+pub fn add(store: &McpStore, args: Value) -> Result<Value, AdminError> {
+    let a: AddArgs = parse(args)?;
+    let snap = store.mutate(Some(&a.revision), |list| add_to(list, a.server, Who::Agent))?;
     Ok(agent_snapshot(snap.revision, &snap.servers))
 }
 
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct EditArgs {
+pub(crate) struct EditArgs {
     revision: String,
     server_id: String,
     name: Option<String>,
@@ -168,7 +195,7 @@ struct EditArgs {
     allow_private_http: Option<bool>,
 }
 
-const BROKER_COPY: &str = "The browser broker is set up in Settings > MCP; an agent cannot add or change a server that runs it.";
+const BROKER_COPY: &str = "The browser broker runs the user's own signed-in browser, so an agent cannot add or change a server that runs it directly.";
 
 /// Whether a stdio server's arguments name the broker program, or its variables carry the
 /// broker's settings.
@@ -191,7 +218,7 @@ fn host_of(url: Option<&str>) -> Option<String> {
 }
 
 /// Applies an edit to one server.
-fn apply_edit(s: &mut McpServer, e: EditArgs) -> Result<(), StoreError> {
+fn apply_edit(s: &mut McpServer, e: EditArgs, who: Who) -> Result<(), StoreError> {
     let bad = |m: &str| Err(StoreError::Invalid(m.to_owned()));
     // Which hub person a chat acts as is Helm's to set, from the chat's profile.
     let names_person = |k: &String| k.eq_ignore_ascii_case(crate::config::PERSON_HEADER);
@@ -206,7 +233,7 @@ fn apply_edit(s: &mut McpServer, e: EditArgs) -> Result<(), StoreError> {
     }
     // The Google accounts' program, its arguments (which hold the mail permission level) and its
     // sign-in settings are the user's to change.
-    if s.preset.as_deref() == Some(crate::google::PRESET_ID) {
+    if who == Who::Agent && s.preset.as_deref() == Some(crate::google::PRESET_ID) {
         let sign_in = |k: &String| {
             let u = k.to_ascii_uppercase();
             ["WORKSPACE_MCP_", "GOOGLE_OAUTH_", "OAUTHLIB_"]
@@ -219,14 +246,17 @@ fn apply_edit(s: &mut McpServer, e: EditArgs) -> Result<(), StoreError> {
             || e.env.as_ref().is_some_and(|m| m.keys().any(sign_in))
             || e.remove_env.as_ref().is_some_and(|l| l.iter().any(sign_in))
         {
-            return bad("The Google accounts' program, arguments and sign-in settings are changed in Settings > MCP.");
+            return Err(user_only(
+                "The Google accounts' program, arguments and sign-in settings are changed in Settings > MCP.",
+            ));
         }
     }
     // The browser server holds the person's own signed-in browser: an agent may rename it and
     // nothing else. Its program, arguments, every variable (a loader or search-path variable
     // would run the agent's own code inside the broker, which holds the token), its headers,
     // address and sign-in are the user's alone.
-    if s.preset.as_deref() == Some(crate::presets::BROKER_PRESET_ID)
+    if who == Who::Agent
+        && s.preset.as_deref() == Some(crate::presets::BROKER_PRESET_ID)
         && (e.command.is_some()
             || e.args.is_some()
             || e.kind.is_some()
@@ -239,19 +269,23 @@ fn apply_edit(s: &mut McpServer, e: EditArgs) -> Result<(), StoreError> {
             || e.remove_oauth
             || e.allow_private_http.is_some())
     {
-        return bad("The browser server can only be renamed by an agent; its program, settings, sites and token are changed in Settings > MCP.");
+        return Err(user_only(
+            "The browser server can only be renamed by an agent; its program, settings, sites and token are changed in Settings > MCP.",
+        ));
     }
     // Nor may an agent make a second copy of the broker, which none of the above would guard.
-    if runs_broker(
-        e.command.as_deref().or(s.transport.command.as_deref()),
-        e.args.as_ref().unwrap_or(&s.transport.args),
-        e.env
-            .iter()
-            .flat_map(|m| m.keys())
-            .chain(s.transport.env.keys()),
-    ) && (e.command.is_some() || e.args.is_some() || e.env.is_some())
+    if who == Who::Agent
+        && runs_broker(
+            e.command.as_deref().or(s.transport.command.as_deref()),
+            e.args.as_ref().unwrap_or(&s.transport.args),
+            e.env
+                .iter()
+                .flat_map(|m| m.keys())
+                .chain(s.transport.env.keys()),
+        )
+        && (e.command.is_some() || e.args.is_some() || e.env.is_some())
     {
-        return bad(BROKER_COPY);
+        return Err(user_only(BROKER_COPY));
     }
     if let Some(n) = e.name {
         s.name = n;
@@ -353,26 +387,33 @@ fn apply_edit(s: &mut McpServer, e: EditArgs) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Edit one server of `list`; the note is set when saved headers now travel unencrypted.
+fn edit_in(
+    list: &mut [McpServer],
+    a: EditArgs,
+    who: Who,
+) -> Result<Option<&'static str>, StoreError> {
+    let s = list
+        .iter_mut()
+        .find(|s| s.id == a.server_id)
+        .ok_or_else(|| StoreError::Invalid(format!("No server has the id {}.", a.server_id)))?;
+    let old_host = host_of(s.transport.url.as_deref());
+    apply_edit(s, a, who)?;
+    // Saved headers stay with a server whose address changed; here they now travel unencrypted.
+    Ok((s.allow_private_http
+        && !s.transport.headers.is_empty()
+        && host_of(s.transport.url.as_deref()) != old_host)
+        .then_some(
+            "This server's saved headers will now be sent in plain text over http to the new address. Remove them with removeHeaders if they are secrets.",
+        ))
+}
+
 pub fn edit(store: &McpStore, args: Value) -> Result<Value, AdminError> {
     let a: EditArgs = parse(args)?;
     let rev = a.revision.clone();
     let mut note = None;
     let snap = store.mutate(Some(&rev), |list| {
-        let s = list
-            .iter_mut()
-            .find(|s| s.id == a.server_id)
-            .ok_or_else(|| StoreError::Invalid(format!("No server has the id {}.", a.server_id)))?;
-        let old_host = host_of(s.transport.url.as_deref());
-        apply_edit(s, a)?;
-        // Saved headers stay with a server whose address changed; here they now travel unencrypted.
-        if s.allow_private_http
-            && !s.transport.headers.is_empty()
-            && host_of(s.transport.url.as_deref()) != old_host
-        {
-            note = Some(
-                "This server's saved headers will now be sent in plain text over http to the new address. Remove them with removeHeaders if they are secrets.",
-            );
-        }
+        note = edit_in(list, a, Who::Agent)?;
         Ok(())
     })?;
     let mut out = agent_snapshot(snap.revision, &snap.servers);
@@ -384,65 +425,126 @@ pub fn edit(store: &McpStore, args: Value) -> Result<Value, AdminError> {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct UpdateArgs {
+pub(crate) struct UpdateArgs {
     revision: String,
     server_id: String,
     enabled: bool,
 }
 
+/// Turn one server of `list` on or off.
+fn set_enabled(list: &mut [McpServer], a: &UpdateArgs, who: Who) -> Result<(), StoreError> {
+    let s = list
+        .iter_mut()
+        .find(|s| s.id == a.server_id)
+        .ok_or_else(|| StoreError::Invalid(format!("No server has the id {}.", a.server_id)))?;
+    // Switching the user's browser back on is the user's own click; switching it off is not
+    // refused.
+    if who == Who::Agent
+        && a.enabled
+        && !s.enabled
+        && s.preset.as_deref() == Some(crate::presets::BROKER_PRESET_ID)
+    {
+        return Err(user_only(
+            "The browser server is switched on in Settings > MCP.",
+        ));
+    }
+    s.enabled = a.enabled;
+    Ok(())
+}
+
 pub fn update(store: &McpStore, args: Value) -> Result<Value, AdminError> {
     let a: UpdateArgs = parse(args)?;
-    let snap = store.mutate(Some(&a.revision), |list| {
-        let s = list
-            .iter_mut()
-            .find(|s| s.id == a.server_id)
-            .ok_or_else(|| StoreError::Invalid(format!("No server has the id {}.", a.server_id)))?;
-        // Switching the user's browser back on is the user's own click; switching it off is not
-        // refused.
-        if a.enabled && !s.enabled && s.preset.as_deref() == Some(crate::presets::BROKER_PRESET_ID)
-        {
-            return Err(StoreError::Invalid(
-                "The browser server is switched on in Settings > MCP.".to_owned(),
-            ));
-        }
-        s.enabled = a.enabled;
-        Ok(())
-    })?;
+    let snap = store.mutate(Some(&a.revision), |list| set_enabled(list, &a, Who::Agent))?;
     Ok(agent_snapshot(snap.revision, &snap.servers))
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RemoveArgs {
+pub(crate) struct RemoveArgs {
     revision: String,
     server_id: String,
 }
 
-pub fn remove(store: &McpStore, args: Value) -> Result<Value, AdminError> {
-    let a: RemoveArgs = parse(args)?;
-    let snap = store.mutate(Some(&a.revision), |list| {
-        // A preset server may hold sign-ins that removing it forgets (the Google accounts), so
-        // like its arguments, taking it away is the user's own click.
-        if list
+/// Take one server out of `list`.
+fn remove_from(list: &mut Vec<McpServer>, a: &RemoveArgs, who: Who) -> Result<(), StoreError> {
+    // A preset server may hold sign-ins that removing it forgets (the Google accounts), so
+    // like its arguments, taking it away is the user's own click.
+    if who == Who::Agent
+        && list
             .iter()
             .any(|s| s.id == a.server_id && s.preset.is_some())
-        {
-            return Err(StoreError::Invalid(
-                "That server is a built-in preset; the user removes it in Settings > MCP."
-                    .to_owned(),
-            ));
-        }
-        let before = list.len();
-        list.retain(|s| s.id != a.server_id);
-        if list.len() == before {
-            return Err(StoreError::Invalid(format!(
-                "No server has the id {}.",
-                a.server_id
-            )));
-        }
-        Ok(())
-    })?;
+    {
+        return Err(user_only(
+            "That server is a built-in preset; the user removes it in Settings > MCP.",
+        ));
+    }
+    let before = list.len();
+    list.retain(|s| s.id != a.server_id);
+    if list.len() == before {
+        return Err(StoreError::Invalid(format!(
+            "No server has the id {}.",
+            a.server_id
+        )));
+    }
+    Ok(())
+}
+
+pub fn remove(store: &McpStore, args: Value) -> Result<Value, AdminError> {
+    let a: RemoveArgs = parse(args)?;
+    let snap = store.mutate(Some(&a.revision), |list| remove_from(list, &a, Who::Agent))?;
     Ok(agent_snapshot(snap.revision, &snap.servers))
+}
+
+/// One admin change, parsed: what [`crate::server_change`] stages and later applies.
+pub(crate) enum Change {
+    Add(AddArgs),
+    Edit(EditArgs),
+    SetEnabled(UpdateArgs),
+    Remove(RemoveArgs),
+}
+
+impl Change {
+    /// Parse one admin tool's arguments (with `revision`); `None` for a tool that changes no list.
+    pub(crate) fn parse(tool: &str, args: Value) -> Result<Option<Change>, AdminError> {
+        Ok(Some(match tool {
+            ADD => Change::Add(parse(args)?),
+            EDIT => Change::Edit(parse(args)?),
+            UPDATE => Change::SetEnabled(parse(args)?),
+            REMOVE => Change::Remove(parse(args)?),
+            _ => return Ok(None),
+        }))
+    }
+
+    /// The revision the arguments were made against.
+    pub(crate) fn revision(&self) -> &str {
+        match self {
+            Change::Add(a) => &a.revision,
+            Change::Edit(a) => &a.revision,
+            Change::SetEnabled(a) => &a.revision,
+            Change::Remove(a) => &a.revision,
+        }
+    }
+
+    /// The id of the server this change is about.
+    pub(crate) fn server_id(&self) -> &str {
+        match self {
+            Change::Add(a) => &a.server.id,
+            Change::Edit(a) => &a.server_id,
+            Change::SetEnabled(a) => &a.server_id,
+            Change::Remove(a) => &a.server_id,
+        }
+    }
+
+    /// Run the change on `list`. The staged card and the applying run both come through here,
+    /// with [`Who::Approved`], so what the user was shown is what is saved.
+    pub(crate) fn apply_to(self, list: &mut Vec<McpServer>, who: Who) -> Result<(), StoreError> {
+        match self {
+            Change::Add(a) => add_to(list, a.server, who),
+            Change::Edit(a) => edit_in(list, a, who).map(|_| ()),
+            Change::SetEnabled(a) => set_enabled(list, &a, who),
+            Change::Remove(a) => remove_from(list, &a, who),
+        }
+    }
 }
 
 /// One admin tool's definition, ready for the host-tool registry.
@@ -455,7 +557,31 @@ pub struct AdminToolDef {
     pub large_request: bool,
 }
 
-const GUIDANCE: &str = " Act only on the user's explicit request, confirm ambiguous matches with app_list_mcp_servers first, and report what changed. Every change needs the current revision from app_list_mcp_servers. Saving never connects or signs in. Prefer environment or file references for credentials; never paste a secret the user did not ask you to store. OAuth sign-in is user-only, in Settings → MCP. If the reply is lost, the change may have happened: list the servers before retrying.";
+const GUIDANCE: &str = " Act only on the user's explicit request, confirm ambiguous matches with app_list_mcp_servers first, and report what changed. Every change needs the current revision from app_list_mcp_servers. Saving never connects or signs in. Prefer environment or file references for credentials; never paste a secret the user did not ask you to store. OAuth sign-in is user-only, in Settings → MCP. A change only the user may make is refused with how to ask: send the call again with askUser: true (and a reason) and the user gets an Approve card. If the reply is lost, the change may have happened: list the servers before retrying.";
+
+/// The two arguments every changing admin tool takes: ask the user instead of changing, and why.
+fn ask_props() -> [(&'static str, Value); 2] {
+    [
+        (
+            "askUser",
+            json!({"type": "boolean", "description": "Make no change; file an Approve card showing the exact change, and save it once if the user approves. Also the way to ask for a change that is refused to an agent."}),
+        ),
+        (
+            "reason",
+            json!({"type": "string", "minLength": 1, "maxLength": 1000, "description": "With askUser: why, in a sentence."}),
+        ),
+    ]
+}
+
+/// `schema` with [`ask_props`] added to its properties.
+fn with_ask(mut schema: Value) -> Value {
+    if let Some(p) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        for (k, v) in ask_props() {
+            p.insert(k.into(), v);
+        }
+    }
+    schema
+}
 
 fn value_ref_schema() -> Value {
     json!({
@@ -502,7 +628,7 @@ pub fn tool_defs() -> Vec<AdminToolDef> {
         AdminToolDef {
             name: ADD,
             description: format!("Add one MCP server to Helm. stdio servers run a real .exe; remote servers use https; plain http is for this computer, or for the private network (10.x, 172.16-31.x, 192.168.x, Tailscale 100.64-127.x, fc00::/7) when the server has allowPrivateHttp true. Set allowPrivateHttp only when the user asked for a server on their own network: the user sees a notice with Undo.{GUIDANCE}"),
-            input_schema: json!({
+            input_schema: with_ask(json!({
                 "type": "object",
                 "properties": {
                     "revision": rev,
@@ -521,14 +647,14 @@ pub fn tool_defs() -> Vec<AdminToolDef> {
                 },
                 "required": ["revision", "server"],
                 "additionalProperties": false
-            }),
+            })),
             mutating: true,
             large_request: true,
         },
         AdminToolDef {
             name: EDIT,
             description: format!("Edit one MCP server in place (its id and enabled state stay). Moving onto stdio needs a command, off it a url; the old transport's fields are dropped. Changing only the url keeps the saved headers, so they go to the new host. Header names are case-insensitive. allowPrivateHttp turns \"Allow unencrypted on my network\" on or off for a plain-http server on a private address (the user sees a notice with Undo); moving the server to another host turns it off unless the same call sets it again.{GUIDANCE}"),
-            input_schema: json!({
+            input_schema: with_ask(json!({
                 "type": "object",
                 "properties": {
                     "revision": rev,
@@ -548,31 +674,31 @@ pub fn tool_defs() -> Vec<AdminToolDef> {
                 },
                 "required": ["revision", "serverId"],
                 "additionalProperties": false
-            }),
+            })),
             mutating: true,
             large_request: true,
         },
         AdminToolDef {
             name: UPDATE,
             description: format!("Enable or disable one MCP server.{GUIDANCE}"),
-            input_schema: json!({
+            input_schema: with_ask(json!({
                 "type": "object",
                 "properties": {"revision": rev, "serverId": sid, "enabled": {"type": "boolean"}},
                 "required": ["revision", "serverId", "enabled"],
                 "additionalProperties": false
-            }),
+            })),
             mutating: true,
             large_request: false,
         },
         AdminToolDef {
             name: REMOVE,
             description: format!("Remove one MCP server. A saved OAuth sign-in is kept, so re-adding the same server reuses it.{GUIDANCE}"),
-            input_schema: json!({
+            input_schema: with_ask(json!({
                 "type": "object",
                 "properties": {"revision": rev, "serverId": sid},
                 "required": ["revision", "serverId"],
                 "additionalProperties": false
-            }),
+            })),
             mutating: true,
             large_request: false,
         },
@@ -978,6 +1104,68 @@ mod tests {
             json!({"revision": rev(&st), "serverId": "fake", "oauth": {}, "removeOauth": true})
         )
         .is_err());
+    }
+
+    /// Every change that is the user's alone says how to ask for it, and changes nothing.
+    #[test]
+    fn user_only_refusals_say_how_to_ask() {
+        let d = tempfile::tempdir().unwrap();
+        let st = store(d.path());
+        add_stdio(&st, "fake");
+        add_stdio(&st, "google");
+        add_stdio(&st, "browser");
+        st.mutate(None, |l| {
+            for (id, preset) in [
+                ("google", crate::google::PRESET_ID),
+                ("browser", crate::presets::BROKER_PRESET_ID),
+            ] {
+                l.iter_mut().find(|s| s.id == id).unwrap().preset = Some(preset.into());
+            }
+            l.iter_mut().find(|s| s.id == "browser").unwrap().enabled = false;
+            Ok(())
+        })
+        .unwrap();
+        let before = st.load().unwrap();
+        let cases = [
+            (
+                ADD,
+                json!({"server": {"id": "copy", "name": "C", "enabled": true,
+                    "transport": {"type": "stdio", "command": "node.exe", "args": ["broker-tool.js"]}}}),
+            ),
+            (EDIT, json!({"serverId": "google", "command": "evil.exe"})),
+            (EDIT, json!({"serverId": "browser", "args": ["x"]})),
+            (
+                EDIT,
+                json!({"serverId": "fake", "args": ["broker-tool.js"]}),
+            ),
+            (UPDATE, json!({"serverId": "browser", "enabled": true})),
+            (REMOVE, json!({"serverId": "google"})),
+        ];
+        for (tool, mut args) in cases {
+            args["revision"] = json!(rev(&st));
+            let e = call(&st, tool, args.clone()).unwrap_err();
+            assert!(e.0.contains("askUser: true"), "{tool} {args}: {e}");
+            assert_eq!(st.load().unwrap(), before, "{tool} {args}");
+        }
+        // The approved run of the same change goes through, and still keeps the person header
+        // and the config rules.
+        let mut list = st.load().unwrap();
+        let change = |tool, args: Value| Change::parse(tool, args).unwrap().unwrap();
+        change(
+            EDIT,
+            json!({"revision": rev(&st), "serverId": "google", "command": "evil.exe"}),
+        )
+        .apply_to(&mut list, Who::Approved)
+        .unwrap();
+        assert_eq!(list[1].transport.command.as_deref(), Some("evil.exe"));
+        let e = change(
+            EDIT,
+            json!({"revision": rev(&st), "serverId": "fake",
+                "headers": {"x-helm-person": {"kind": "literal", "value": "7"}}}),
+        )
+        .apply_to(&mut list, Who::Approved)
+        .unwrap_err();
+        assert!(e.to_string().contains("person header"), "{e}");
     }
 
     #[test]

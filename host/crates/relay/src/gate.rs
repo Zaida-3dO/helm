@@ -123,6 +123,8 @@ pub const TABLE: &[(&str, Class)] = &[
     ("app_schedule", Class::Denied(SCHEDULES)),
     ("app_send_message", Class::Allowed),
     ("app_set_chat_archived", Class::Denied(CHANGES)),
+    ("app_set_mcp_level", Class::Denied(MCP)),
+    ("app_set_mcp_secret", Class::Denied(MCP)),
     ("app_settings", Class::Denied(SETTINGS)),
     ("app_show_images", Class::Denied(LOCAL)),
     ("app_stage_settings", Class::Denied(CONSENT)),

@@ -106,6 +106,8 @@ const GROUPS: &[(&str, &[&str])] = &[
             "app_edit_mcp_server",
             "app_update_mcp_server",
             "app_remove_mcp_server",
+            "app_set_mcp_secret",
+            "app_set_mcp_level",
             "app_import_mcp_servers",
             "app_mcp_oauth_header",
             "app_browser_step",
@@ -267,8 +269,8 @@ pub const FACADES: &[FacadeSpec] = &[
     FacadeSpec {
         name: "app_mcp_servers",
         group: "mcp",
-        description: "Manage the MCP servers Helm connects to (Settings > MCP): list them with the revision every change needs (list), add, edit, enable or disable (set_enabled), or remove one. Only on the user's explicit request.",
-        guidelines: "Every change needs the current revision from list. Saving never connects or signs in; OAuth sign-in is the user's, in Settings > MCP.\nlist: no arguments; secret values are never shown.\nadd: revision and server {name, type, command/args or url, env, headers...}.\nedit: revision, serverId and the fields to change.\nset_enabled: revision, serverId, enabled.\nremove: revision, serverId.\nstdio servers run a real .exe; remote servers use https; plain http only for this PC or a private network with allowPrivateHttp (only when the user asked). Prefer environment or file references for credentials. If a reply is lost, list before retrying.",
+        description: "Manage the MCP servers Helm connects to (Settings > MCP): list them with the revision every change needs (list), add, edit, enable or disable (set_enabled), or remove one, give a person their own value for a secret (set_secret), or raise the Gmail or Calendar level (set_level). Only on the user's explicit request.",
+        guidelines: "Every change needs the current revision from list. Saving never connects or signs in; OAuth sign-in is the user's, in Settings > MCP.\nlist: no arguments; secret values are never shown.\nadd: revision and server {name, type, command/args or url, env, headers...}.\nedit: revision, serverId and the fields to change.\nset_enabled: revision, serverId, enabled.\nremove: revision, serverId.\nA change only the user may make is refused with how to ask: add askUser: true (and reason) to any change and the user gets an Approve card instead of Helm saving it.\nset_secret: server, profile, secret (the variable or header name), valueFile (read once on approval, then deleted unless keepFile) and reason. Always an Approve card; it never shows the value.\nset_level: server (the Google accounts server), service (gmail or calendar), level and reason. Always an Approve card; it covers every account on that server.\nstdio servers run a real .exe; remote servers use https; plain http only for this PC or a private network with allowPrivateHttp (only when the user asked). Prefer environment or file references for credentials. If a reply is lost, list before retrying.",
         core: false,
         actions: &[
             ("list", "app_list_mcp_servers"),
@@ -276,6 +278,8 @@ pub const FACADES: &[FacadeSpec] = &[
             ("edit", "app_edit_mcp_server"),
             ("set_enabled", "app_update_mcp_server"),
             ("remove", "app_remove_mcp_server"),
+            ("set_secret", "app_set_mcp_secret"),
+            ("set_level", "app_set_mcp_level"),
         ],
         fixed: &[],
     },
