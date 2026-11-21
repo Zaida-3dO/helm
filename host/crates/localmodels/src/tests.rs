@@ -1301,6 +1301,13 @@ fn unload_frees_the_card_and_turning_back_on_undoes_it() {
     busy_chat(&r.db, "c-busy", "Refactor parser", "strata", "qwen-flash");
     busy_chat(&r.db, "c-claude", "Plan", "claude", "opus");
     assert_eq!(r.svc().lock_view().state, LockKind::On);
+    // The button needs a server that is on and has shown a model: switched on alone is not
+    // enough, and reading the view asks no server.
+    let asked = (o.total(), s.total());
+    assert!(!r.svc().lock_view().any_local, "on, but no model seen yet");
+    assert_eq!((o.total(), s.total()), asked);
+    r.svc().refresh();
+    assert!(r.svc().lock_view().any_local, "a model is in the catalogue");
 
     // 1. Unload.
     let view = r.svc().unload().unwrap();

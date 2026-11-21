@@ -1276,6 +1276,16 @@ impl LocalService {
     pub fn lock_view(&self) -> LockView {
         let st = self.settings();
         let state = self.lock_state();
+        // The button is for a server that is on and has shown at least one model: the stored
+        // catalogue says so, without asking any server.
+        let seen = self.seen();
+        let any_local = st.servers.iter().any(|s| {
+            s.enabled
+                && seen
+                    .servers
+                    .get(&s.id)
+                    .is_some_and(|v| !v.models.is_empty())
+        });
         let p = lock(&self.progress);
         LockView {
             state: match state {
@@ -1287,7 +1297,7 @@ impl LocalService {
             game: state.game().map(str::to_owned),
             working: p.pending > 0,
             report: p.report.clone(),
-            any_local: st.servers.iter().any(|s| s.enabled),
+            any_local,
             lift_minutes: st.game_lift_minutes,
             restart_task: st.restart_task.clone(),
         }
