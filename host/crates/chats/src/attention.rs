@@ -18,8 +18,10 @@
 //!   gave up on; it is never counted. A check's decision is a flagged row; its stall is a stalled
 //!   row; neither shows while the chat has an open wait or a working helper chat.
 //! - `busy` counts starting, running and stopping chats.
-//! - The running, stalled, unread and finished groups list at most [`MAX_ROWS`], newest
-//!   activity first. The needs-you and flagged groups are never cut short: each row there is a
+//! - The running, stalled, unread and finished groups list at most [`MAX_ROWS`] **per profile**,
+//!   newest activity first: every consumer shows one profile at a time, so one profile's busy
+//!   chats must not push another profile's rows off the list. The needs-you and flagged groups
+//!   are never cut short: each row there is a
 //!   flag drawn on a sidebar row, and a flag that is counted in the badge must have a row to
 //!   sit on. A chat can be in both of them (the consumers show it once).
 //!
@@ -32,6 +34,7 @@ use crate::types::*;
 use rusqlite::{params, Transaction};
 use std::collections::{HashMap, HashSet};
 
+/// The most rows each of the capped groups (running, stalled, unread, finished) lists per profile.
 pub const MAX_ROWS: usize = 8;
 
 /// The waiting tracker: chat id → the kind of its first pending blocking request.
@@ -88,6 +91,15 @@ struct Cand {
     flagged_kind: Option<crate::triage::Kind>,
     /// The question its own agent flagged for the user ([`crate::flags`]).
     asked: Option<(String, String)>,
+}
+
+/// One profile's share of the four capped groups.
+#[derive(Default)]
+struct Caps {
+    running: usize,
+    stalled: usize,
+    unread: usize,
+    finished: usize,
 }
 
 /// The plain-language reason a row is listed.
@@ -250,12 +262,20 @@ pub fn compute(
         },
         revision,
     };
+    // The capped groups are capped per profile, not across all profiles at once: the badge and
+    // tray count every chat on the PC, but the window, the inbox and Workspace status show one
+    // profile's rows at a time, and one profile's overflow must not hide another's.
+    let mut caps: HashMap<String, Caps> = HashMap::new();
     for c in &cands {
         if c.status.is_busy() {
             // Keep-awake counts every busy chat, muted or not.
             s.busy += 1;
-            if !c.muted && s.running.len() < MAX_ROWS {
-                s.running.push(row(c, AttentionKind::Running));
+            if !c.muted {
+                let cap = caps.entry(c.profile.clone()).or_default();
+                if cap.running < MAX_ROWS {
+                    cap.running += 1;
+                    s.running.push(row(c, AttentionKind::Running));
+                }
             }
         }
         // A chat marked addressed or snoozed is out until something happens in it.
@@ -304,12 +324,16 @@ pub fn compute(
         if need.is_some() || unread || stalled || idle_stalled || flagged {
             s.badge += 1;
         }
-        if (stalled || idle_stalled) && s.stalled.len() < MAX_ROWS {
-            let mut r = row(c, AttentionKind::Stalled);
-            if let Some(why) = c.flagged.as_ref().filter(|w| idle_stalled && !w.is_empty()) {
-                r.reason = why.clone();
+        if stalled || idle_stalled {
+            let cap = caps.entry(c.profile.clone()).or_default();
+            if cap.stalled < MAX_ROWS {
+                cap.stalled += 1;
+                let mut r = row(c, AttentionKind::Stalled);
+                if let Some(why) = c.flagged.as_ref().filter(|w| idle_stalled && !w.is_empty()) {
+                    r.reason = why.clone();
+                }
+                s.stalled.push(r);
             }
-            s.stalled.push(r);
         }
         if let Some(k) = need {
             let mut r = row(c, k);
@@ -319,11 +343,19 @@ pub fn compute(
             }
             s.needs_you.push(r);
         }
-        if unread && s.unread.len() < MAX_ROWS {
-            s.unread.push(row(c, AttentionKind::Unread));
+        if unread {
+            let cap = caps.entry(c.profile.clone()).or_default();
+            if cap.unread < MAX_ROWS {
+                cap.unread += 1;
+                s.unread.push(row(c, AttentionKind::Unread));
+            }
         }
-        if finished && s.finished.len() < MAX_ROWS {
-            s.finished.push(row(c, AttentionKind::Unread));
+        if finished {
+            let cap = caps.entry(c.profile.clone()).or_default();
+            if cap.finished < MAX_ROWS {
+                cap.finished += 1;
+                s.finished.push(row(c, AttentionKind::Unread));
+            }
         }
         if flagged {
             let mut r = row(c, AttentionKind::Triage);
@@ -886,8 +918,9 @@ mod tests {
     }
 
     #[test]
-    fn running_chats_are_busy_and_groups_hold_eight() {
+    fn running_chats_are_busy_and_groups_hold_eight_per_profile() {
         let (_d, db) = temp_db();
+        let mut ids = vec![];
         for i in 0..10 {
             let c = chat(&db, &format!("c{i}"));
             exec(
@@ -895,11 +928,51 @@ mod tests {
                 "UPDATE chats SET status = 'running' WHERE id = ?1",
                 &[&c],
             );
+            ids.push(c);
         }
         let s = summary(&db, &Needs::new());
         assert_eq!(s.busy, 10);
-        assert_eq!(s.running.len(), MAX_ROWS);
+        assert_eq!(s.running.len(), MAX_ROWS, "one profile: eight rows");
         assert_eq!(s.badge, 0, "running alone is not a badge");
+        // Nine chats of one profile and one of another, the other profile's the oldest activity.
+        // The cap is per profile, so the second profile's row and count survive the first
+        // profile's overflow; a shared cap would have cut it off.
+        for (i, c) in ids.iter().enumerate() {
+            let (profile, at) = if i < 9 {
+                ("p-one", 3000 + i)
+            } else {
+                ("p-two", 1000)
+            };
+            exec(
+                &db,
+                &format!(
+                    "UPDATE chats SET profile_id = '{profile}', updated_at = {at} WHERE id = ?1"
+                ),
+                &[c],
+            );
+        }
+        let s = summary(&db, &Needs::new());
+        assert_eq!(s.busy, 10, "keep-awake still counts every busy chat");
+        assert_eq!(
+            s.running.len(),
+            MAX_ROWS + 1,
+            "eight of one, one of the other"
+        );
+        let s = s.running.iter().find(|r| r.profile_id == "p-two").unwrap();
+        assert_eq!(s.reason, "Working");
+        // The same per-profile cap holds for the unread group: all ten marked unread, the oldest
+        // is still listed.
+        for c in &ids {
+            exec(
+                &db,
+                "INSERT INTO unread_marks(chat_id, token, marked_at) VALUES (?1, 't', 1)",
+                &[c],
+            );
+        }
+        let s = summary(&db, &Needs::new());
+        assert_eq!(s.badge, 10, "every marked chat counts once");
+        assert_eq!(s.unread.len(), MAX_ROWS + 1);
+        assert!(s.unread.iter().any(|r| r.profile_id == "p-two"));
     }
 
     #[test]
