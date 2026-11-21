@@ -6,8 +6,8 @@
 //! and every chat under it — children, grandchildren, and chats any of those started — gone quiet,
 //! and stayed quiet for two whole minutes? Quiet means no turn open, no waiting turn start held
 //! in the capacity queue, and no declared wait still open; an archived chat counts as quiet, and
-//! so does one that stopped or was interrupted — the queue's job is to know when the work stopped
-//! moving, not why. Then the entry is `done`, and the next `waiting` entry starts as a new chat:
+//! so does one that stopped. A chat that was interrupted a short while ago does not: Helm may
+//! carry it on by itself, so the entry waits for that rather than moving on. Then the entry is `done`, and the next `waiting` entry starts as a new chat:
 //! its title, the brief (or "Work on board item <id>") as the first message, the entry's model
 //! and project. Nothing is started ahead of the order; a `paused` entry is skipped and starts
 //! again at `resume`; `remove` stops tracking an entry but never stops a chat it already started.
@@ -22,6 +22,11 @@ use serde_json::json;
 
 /// How long the running entry's whole chat tree must stand quiet before the entry is done.
 pub const DONE_QUIET_MS: i64 = 120_000;
+
+/// How long an entry whose start failed waits before the first retry; it doubles after each
+/// further failure, up to [`RETRY_MAX_MS`].
+const RETRY_BASE_MS: i64 = 30_000;
+const RETRY_MAX_MS: i64 = 10 * 60_000;
 
 pub const WAITING: &str = "waiting";
 pub const RUNNING: &str = "running";
@@ -196,6 +201,7 @@ pub fn remove(rt: &ChatRuntime, id: &str, now: i64) -> rusqlite::Result<bool> {
         )? > 0)
     })?;
     rt.sh.build_queue_quiet.lock().unwrap().remove(id);
+    rt.sh.build_queue_failed.lock().unwrap().remove(id);
     Ok(wrote)
 }
 
@@ -217,11 +223,13 @@ fn mark_running(db: &Database, id: &str, chat_id: &str, now: i64) -> rusqlite::R
     })
 }
 
-/// Whether this chat or any chat under it (by parenthood, or by having been started by it) is
-/// still working: a turn open, a waiting turn start held, or a declared wait still open. The
-/// walk is a recursive set; `UNION` deduplicates it, so a parent chain cannot spin forever. The
-/// waits table belongs to another crate: where it has not been made there are no waits.
-fn tree_working(db: &Database, chat_id: &str) -> bool {
+/// Whether this chat or any chat under it (by parenthood, by having been started by it, or by
+/// having taken over from it in a roll-over) is still working: a turn open, a chat interrupted
+/// within the window Helm still carries one on by itself, a waiting turn start held, or a
+/// declared wait still open. The walk is a recursive set; `UNION` deduplicates it, so a parent
+/// chain cannot spin forever. The waits table belongs to another crate: where it has not been
+/// made there are no waits.
+fn tree_working(db: &Database, chat_id: &str, now: i64) -> bool {
     db.snapshot(|tx| {
         let waits: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_waits')",
@@ -233,10 +241,13 @@ fn tree_working(db: &Database, chat_id: &str) -> bool {
                  SELECT ?1
                  UNION SELECT c.id FROM chats c JOIN tree t ON c.parent_chat_id = t.id
                  UNION SELECT c.id FROM chats c JOIN tree t ON c.created_by_chat = t.id
+                 UNION SELECT s.chat_id FROM chat_succession s JOIN tree t ON s.predecessor_id = t.id
              )
              SELECT EXISTS(
                  SELECT 1 FROM tree t JOIN chats c ON c.id = t.id
-                  WHERE c.archived = 0 AND c.status IN ('starting', 'running', 'stopping')
+                  WHERE c.archived = 0
+                    AND (c.status IN ('starting', 'running', 'stopping')
+                         OR (c.status = 'interrupted' AND c.updated_at >= ?2))
                  UNION
                  SELECT 1 FROM tree t JOIN chat_dispatch_holds h ON h.chat_id = t.id{}
              )",
@@ -246,7 +257,8 @@ fn tree_working(db: &Database, chat_id: &str) -> bool {
                 ""
             }
         );
-        tx.query_row(&sql, [chat_id], |r| r.get::<_, bool>(0))
+        let since = now - crate::outage::RECENT_MS;
+        tx.query_row(&sql, params![chat_id, since], |r| r.get::<_, bool>(0))
     })
     // A read that cannot be answered keeps the entry running: settling it on a database hiccup
     // would start the next feature over live work.
@@ -256,6 +268,10 @@ fn tree_working(db: &Database, chat_id: &str) -> bool {
 /// Who starts a waiting entry's chat and sends its first message; answers the new chat's id.
 pub trait Starter: Send + Sync {
     fn start(&self, entry: &BuildQueueEntry) -> Result<String, String>;
+
+    /// Take back a chat that `start` made but that no entry took up (the entry was paused or
+    /// removed while the chat was being made), so it is not left running unowned.
+    fn discard(&self, _chat_id: &str) {}
 }
 
 /// The real starter: `chat_create` through the app's op context (attached with the host tools),
@@ -323,6 +339,14 @@ impl Starter for ChatStarter {
         }
         Ok(id)
     }
+
+    fn discard(&self, chat_id: &str) {
+        let Some(seam) = self.rt.sh.host.get().cloned() else {
+            return;
+        };
+        let args = json!({"chatId": chat_id});
+        let _ = crate::manage::chat_archive(&seam.ctx, args);
+    }
 }
 
 /// The folder a start runs in: the entry's project, which must be a folder project (a board
@@ -378,6 +402,7 @@ pub fn tick(rt: &ChatRuntime, now: i64, starter: &dyn Starter) {
     {
         return;
     }
+    let mut changed = false;
     {
         let mut quiet = rt.sh.build_queue_quiet.lock().unwrap();
         for e in rows.iter_mut().filter(|e| e.state == RUNNING) {
@@ -387,11 +412,12 @@ pub fn tick(rt: &ChatRuntime, now: i64, starter: &dyn Starter) {
                 quiet.remove(&e.id);
                 if mark_done(db, &e.id, now).unwrap_or(false) {
                     e.state = DONE.to_owned();
+                    changed = true;
                     log::warn!("build queue: {} lost its chat; settled as done", e.title);
                 }
                 continue;
             };
-            if tree_working(db, &chat) {
+            if tree_working(db, &chat, now) {
                 quiet.remove(&e.id);
                 continue;
             }
@@ -400,10 +426,14 @@ pub fn tick(rt: &ChatRuntime, now: i64, starter: &dyn Starter) {
                 quiet.remove(&e.id);
                 if mark_done(db, &e.id, now).unwrap_or(false) {
                     e.state = DONE.to_owned();
+                    changed = true;
                     log::info!("build queue: {} is done", e.title);
                 }
             }
         }
+    }
+    if changed {
+        publish(rt);
     }
     // One at a time: only a free slot starts the next entry, and only its front entry. A paused
     // entry holds its slot while its chat still works, so pausing never lets the next entry
@@ -411,7 +441,10 @@ pub fn tick(rt: &ChatRuntime, now: i64, starter: &dyn Starter) {
     // simply rejoins the tracking (the queue never starts a chat twice for one entry).
     let slot_held = rows.iter().any(|e| match e.state.as_str() {
         RUNNING => true,
-        PAUSED => e.chat_id.as_deref().is_some_and(|c| tree_working(db, c)),
+        PAUSED => e
+            .chat_id
+            .as_deref()
+            .is_some_and(|c| tree_working(db, c, now)),
         _ => false,
     });
     if slot_held {
@@ -420,17 +453,45 @@ pub fn tick(rt: &ChatRuntime, now: i64, starter: &dyn Starter) {
     let Some(next) = rows.iter().find(|e| e.state == WAITING).cloned() else {
         return;
     };
+    // An entry whose start keeps failing is tried less often, not on every look.
+    let backing_off = rt
+        .sh
+        .build_queue_failed
+        .lock()
+        .unwrap()
+        .get(&next.id)
+        .is_some_and(|&(_, retry_at)| now < retry_at);
+    if backing_off {
+        return;
+    }
     match starter.start(&next) {
         Ok(chat) => {
+            rt.sh.build_queue_failed.lock().unwrap().remove(&next.id);
             if mark_running(db, &next.id, &chat, now).unwrap_or(false) {
                 rt.sh.build_queue_quiet.lock().unwrap().remove(&next.id);
                 publish(rt);
                 log::info!("build queue: {} started as chat {chat}", next.title);
+            } else {
+                // The entry stopped waiting while its chat was being made: do not leave the
+                // chat running with no entry to track it.
+                starter.discard(&chat);
+                log::warn!(
+                    "build queue: {} changed while its chat was starting; the chat was set aside",
+                    next.title
+                );
             }
         }
         Err(msg) => {
             // Not skipped: nothing is started ahead of an entry that cannot start yet.
-            log::warn!("build queue: could not start {}: {msg}", next.title);
+            let mut failed = rt.sh.build_queue_failed.lock().unwrap();
+            let tries = failed.get(&next.id).map_or(0, |&(n, _)| n) + 1;
+            let wait = (RETRY_BASE_MS << (tries - 1).min(10)).min(RETRY_MAX_MS);
+            failed.insert(next.id.clone(), (tries, now + wait));
+            log::warn!(
+                "build queue: could not start {} (try {tries}, next in {} s): {msg}",
+                next.title,
+                wait / 1000
+            );
         }
     }
 }
@@ -575,10 +636,10 @@ mod tests {
         })
         .unwrap();
         assert!(
-            tree_working(&db, "c1"),
+            tree_working(&db, "c1", 0),
             "a busy grandchild keeps the whole tree working"
         );
-        assert!(!tree_working(&db, "c3"), "a bare idle chat stands alone");
+        assert!(!tree_working(&db, "c3", 0), "a bare idle chat stands alone");
         // A started-by chat is in the tree too, even without a parent link.
         db.write(|tx| {
             tx.execute(
@@ -588,7 +649,7 @@ mod tests {
             )
         })
         .unwrap();
-        assert!(tree_working(&db, "c3"), "a chat it started works");
+        assert!(tree_working(&db, "c3", 0), "a chat it started works");
         db.write(|tx| tx.execute("UPDATE chats SET status = 'idle' WHERE id = 'kid'", []))
             .unwrap();
         // A dispatch hold is a working start, and so is an open declared wait.
@@ -601,9 +662,9 @@ mod tests {
             1,
             0,
         );
-        assert!(tree_working(&db, "c3"), "a held start counts as working");
+        assert!(tree_working(&db, "c3", 0), "a held start counts as working");
         crate::queue::clear_hold(&db, "c3");
-        assert!(!tree_working(&db, "c3"), "released again");
+        assert!(!tree_working(&db, "c3", 0), "released again");
         db.write(|tx| {
             tx.execute_batch(
                 "CREATE TABLE agent_waits (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, state TEXT NOT NULL);
@@ -611,11 +672,11 @@ mod tests {
             )
         })
         .unwrap();
-        assert!(tree_working(&db, "c3"), "an open wait keeps it running");
+        assert!(tree_working(&db, "c3", 0), "an open wait keeps it running");
         db.write(|tx| tx.execute("UPDATE agent_waits SET state = 'settled'", []))
             .unwrap();
         assert!(
-            !tree_working(&db, "c3"),
+            !tree_working(&db, "c3", 0),
             "a settled wait says nothing about the chat"
         );
         // An archived working chat is out of the tree: the queue asks whether work is moving,
@@ -623,11 +684,39 @@ mod tests {
         db.write(|tx| tx.execute("UPDATE chats SET archived = 1 WHERE id = 'g'", []))
             .unwrap();
         assert!(
-            !tree_working(&db, "c1"),
+            !tree_working(&db, "c1", 0),
             "an archived working chat is quiet"
         );
         // An unknown chat works nowhere: an entry naming a deleted chat is not kept alive by it.
-        assert!(!tree_working(&db, "gone"), "no tree, no work");
+        assert!(!tree_working(&db, "gone", 0), "no tree, no work");
+        // A roll-over successor is in the tree through its link, with no parent or starter link.
+        db.write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO chats(id, project_id, created_at, updated_at, status)
+                   VALUES ('next', 'p', 0, 0, 'running');
+                 INSERT INTO chat_succession(chat_id, predecessor_id) VALUES ('next', 'c3');",
+            )
+        })
+        .unwrap();
+        assert!(
+            tree_working(&db, "c3", 0),
+            "work that moved to the successor is still the entry's work"
+        );
+        db.write(|tx| {
+            tx.execute(
+                "UPDATE chats SET status = 'interrupted' WHERE id = 'next'",
+                [],
+            )
+        })
+        .unwrap();
+        assert!(
+            tree_working(&db, "c3", 1_000),
+            "a chat interrupted a moment ago may be carried on, so the entry waits"
+        );
+        assert!(
+            !tree_working(&db, "c3", crate::outage::RECENT_MS + 1_000),
+            "one interrupted long ago will not be, so it counts as quiet"
+        );
     }
 
     /// The whole tick on hand-written rows: the two-minute window from a restart, and one start
@@ -794,6 +883,13 @@ mod tests {
             WAITING,
             "nothing starts ahead of an entry that cannot start"
         );
+        assert_eq!(starter.asked.lock().unwrap().len(), 1);
+        tick(rt, 2_000, &starter);
+        assert_eq!(
+            starter.asked.lock().unwrap().len(),
+            1,
+            "a start that just failed is not tried again at the next look"
+        );
         // A running entry whose chat was deleted (the link goes with it) settles at once, and
         // the next entry starts in its place.
         db.write(|tx| {
@@ -803,7 +899,7 @@ mod tests {
             )
         })
         .unwrap();
-        tick(rt, 2_000, &FakeStarter::new(&db));
+        tick(rt, 3_000, &FakeStarter::new(&db));
         assert_eq!(
             entry_by_id(&db, &e1.id).unwrap().state,
             DONE,

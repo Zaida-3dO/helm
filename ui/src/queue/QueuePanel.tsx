@@ -7,6 +7,7 @@
 
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import type { BuildQueueEntry, ModelCatalogue, QueueEntry, QueueSummary } from '../api/generated/index.ts';
+import type { ProjectNode } from '../api/projects.ts';
 import type { Api } from '../api/client.ts';
 import type { EventBus } from '../api/events.ts';
 import { chatOps } from '../api/ops.ts';
@@ -14,7 +15,7 @@ import type { QueueStore } from './store.ts';
 import { BuildQueueStore } from './store.ts';
 import { buildQueueOps } from './api.ts';
 import { actionsFor, aheadOf, buildActionsFor, buildLine, buildStateLabel, CLASS_LABEL, claudeLine, queueCount, serverLine, untilText, waitLine } from './model.ts';
-import { Button, Dialog, moveItem, toast, useDragReorder, type DragRowProps } from '../ui/index.ts';
+import { Button, Dialog, dropBefore, toast, useDragReorder, type DragRowProps } from '../ui/index.ts';
 import { IconChevronDown, IconChevronUp, IconExternalLink, IconPause, IconPlay, IconX } from '../ui/icons.tsx';
 import './queue.css';
 
@@ -35,7 +36,25 @@ function serverName(id: string): string {
   return id === 'strata' ? 'Strata' : id === 'ollama' ? 'Ollama' : id;
 }
 
-export function QueuePanel({ store, api, bus, onOpen, onClose }: { store: QueueStore; api: Api; bus: EventBus; onOpen: (chatId: string) => void; onClose: () => void }) {
+export function QueuePanel({
+  store,
+  api,
+  bus,
+  projects,
+  currentProjectId,
+  onOpen,
+  onClose,
+}: {
+  store: QueueStore;
+  api: Api;
+  bus: EventBus;
+  /** The projects a started build may run in (the build tab's picker). */
+  projects: readonly ProjectNode[];
+  /** The open chat's project: the picker starts on it. */
+  currentProjectId: string | null;
+  onOpen: (chatId: string) => void;
+  onClose: () => void;
+}) {
   const [tab, setTab] = useState<'chats' | 'build'>('chats');
   const summary = store.getSnapshot();
   const now = Date.now();
@@ -51,9 +70,10 @@ export function QueuePanel({ store, api, bus, onOpen, onClose }: { store: QueueS
   // Drag one row to stand where it was dropped: the host renumbers the line and answers
   // with the fresh queue, so the drop is only an intention until it agrees.
   const reorder = useDragReorder((from, to) => {
-    if (!summary || to === from || to === from + 1) return;
-    const next = moveItem(summary.entries, from, to);
-    act(summary.entries[from]!.chatId, 'move', next[to + 1]?.chatId ?? null);
+    if (!summary) return;
+    const before = dropBefore(summary.entries, from, to);
+    if (before === undefined) return;
+    act(summary.entries[from]!.chatId, 'move', before?.chatId ?? null);
   });
   return (
     <Dialog
@@ -96,7 +116,7 @@ export function QueuePanel({ store, api, bus, onOpen, onClose }: { store: QueueS
           </span>
         </>
       )}
-      {tab === 'build' && <BuildQueueTab store={buildStore} entries={buildEntries} api={api} onOpen={onOpen} onClose={onClose} />}
+      {tab === 'build' && <BuildQueueTab store={buildStore} entries={buildEntries} api={api} projects={projects} currentProjectId={currentProjectId} onOpen={onOpen} onClose={onClose} />}
     </Dialog>
   );
 }
@@ -188,8 +208,34 @@ function QueueRow({
 /** The Build queue tab: the line of features to run one after another, and the form that
  *  joins one at the back. The host starts a waiting entry's chat itself, one at a time,
  *  and pings the panel when the line moves. */
-function BuildQueueTab({ store, entries, api, onOpen, onClose }: { store: BuildQueueStore; entries: BuildQueueEntry[] | null; api: Api; onOpen: (chatId: string) => void; onClose: () => void }) {
+/** The projects a started chat can run in: a folder project with a folder, or a board that has one. */
+function buildProjects(projects: readonly ProjectNode[]): ProjectNode[] {
+  return projects.filter((p) => !p.archived && !p.closed && (p.kind === 'folder' ? !!p.path : p.primaryFolderProjectId != null));
+}
+
+function BuildQueueTab({
+  store,
+  entries,
+  api,
+  projects,
+  currentProjectId,
+  onOpen,
+  onClose,
+}: {
+  store: BuildQueueStore;
+  entries: BuildQueueEntry[] | null;
+  api: Api;
+  projects: readonly ProjectNode[];
+  currentProjectId: string | null;
+  onOpen: (chatId: string) => void;
+  onClose: () => void;
+}) {
   const [title, setTitle] = useState('');
+  // An entry names the project its chat runs in; the host refuses to start one that names none,
+  // so the picker starts on the open chat's project (else the first that can take a build).
+  const pickable = useMemo(() => buildProjects(projects), [projects]);
+  const [pickedProject, setPickedProject] = useState('');
+  const projectId = pickable.some((p) => p.id === pickedProject) ? pickedProject : pickable.some((p) => p.id === currentProjectId) ? currentProjectId! : (pickable[0]?.id ?? '');
   const [brief, setBrief] = useState('');
   const [itemId, setItemId] = useState('');
   const [model, setModel] = useState('');
@@ -216,15 +262,16 @@ function BuildQueueTab({ store, entries, api, onOpen, onClose }: { store: BuildQ
   // Drag the same way as the chat queue: the hook measures every row, only entries still
   // in line can be picked up, and the drop is an intention until the host agrees.
   const reorder = useDragReorder((from, to) => {
-    if (!entries || to === from || to === from + 1) return;
-    const next = moveItem(entries, from, to);
-    act(store.move(entries[from]!.id, next[to + 1]?.id ?? null));
+    if (!entries) return;
+    const before = dropBefore(entries, from, to);
+    if (before === undefined) return;
+    act(store.move(entries[from]!.id, before?.id ?? null));
   });
 
   const trimmedTitle = title.trim();
   const trimmedBrief = brief.trim();
   const trimmedItem = itemId.trim();
-  const canAdd = trimmedTitle !== '' && (trimmedBrief !== '' || trimmedItem !== '');
+  const canAdd = trimmedTitle !== '' && (trimmedBrief !== '' || trimmedItem !== '') && projectId !== '';
   const submit = () => {
     if (!canAdd) return;
     act(
@@ -232,6 +279,7 @@ function BuildQueueTab({ store, entries, api, onOpen, onClose }: { store: BuildQ
         title: trimmedTitle,
         ...(trimmedBrief !== '' ? { brief: trimmedBrief } : {}),
         ...(trimmedItem !== '' ? { itemId: trimmedItem } : {}),
+        projectId,
         ...(model !== '' ? { model } : {}),
       }),
     );
@@ -245,6 +293,12 @@ function BuildQueueTab({ store, entries, api, onOpen, onClose }: { store: BuildQ
       <div className="build-queue-form" data-testid="build-queue-form">
         <div className="build-queue-form-row">
           <input className="ui-input" placeholder="Title" value={title} onChange={(e) => setTitle(e.target.value)} data-testid="build-queue-add-title" />
+          <select className="ui-input build-queue-model" value={projectId} onChange={(e) => setPickedProject(e.target.value)} aria-label="Project to run in" title="The project the started chat runs in" data-testid="build-queue-add-project">
+            {pickable.length === 0 && <option value="">No project to run in</option>}
+            {pickable.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
           <select className="ui-input build-queue-model" value={model} onChange={(e) => setModel(e.target.value)} data-testid="build-queue-add-model">
             <option value="">Default model</option>
             {(catalogue?.models ?? []).map((m) => (

@@ -770,6 +770,9 @@ pub(crate) struct Shared {
     /// Per running build-queue entry: since when its whole chat tree has stood quiet. Empty
     /// after a restart, so a running entry's quiet window must be lived again.
     pub build_queue_quiet: Mutex<HashMap<String, i64>>,
+    /// Per waiting build-queue entry whose start failed: how many times in a row, and the time
+    /// before which it is not tried again, so a start that keeps failing backs off.
+    pub build_queue_failed: Mutex<HashMap<String, (u32, i64)>>,
 }
 
 /// The runtime service.
@@ -818,6 +821,7 @@ impl ChatRuntime {
                 outage_poke: tokio::sync::Notify::new(),
                 build_queue_poke: tokio::sync::Notify::new(),
                 build_queue_quiet: Mutex::new(HashMap::new()),
+                build_queue_failed: Mutex::new(HashMap::new()),
             }),
         };
         rt.start_tick();

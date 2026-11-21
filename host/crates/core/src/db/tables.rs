@@ -60,6 +60,8 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     // What a roll-over successor continues, and what a chat was told and reported of its project's
     // startup instructions (the instructions themselves are a column of project_local).
     ("chat_succession", Data),
+    // The features waiting to be run one after another, started by the host from the queue panel.
+    ("build_queue", Data),
     ("chat_startup", Data),
     ("chat_startup_sent", Data),
     ("agent_waits", Data),
