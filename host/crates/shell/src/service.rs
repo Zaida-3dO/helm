@@ -76,7 +76,17 @@ struct State {
     shutting_down: bool,
     devices: Vec<CaptureDevice>,
     badge: Option<Option<String>>,
+    /// The tray menu last handed to the app. An unchanged menu is not set again: replacing the
+    /// native menu closes it when it is open, and a busy PC changes its summary often.
+    tray_shown: Option<TrayMenu>,
+    /// Until when (clock ms) the tray menu is likely open: from the right-button press until a
+    /// menu event, at most [`TRAY_HOLD_MS`]. A change in that time waits for the menu to close.
+    tray_held_until: Option<i64>,
 }
+
+/// The longest a press on the tray icon holds back menu changes when no menu event follows (the
+/// menu was dismissed): the next change after it is published as usual.
+pub const TRAY_HOLD_MS: i64 = 10_000;
 
 pub struct ShellService {
     db: Arc<Database>,
@@ -379,9 +389,48 @@ impl ShellService {
         menu_model(st.summary.as_ref(), &st.devices, &st.settings)
     }
 
-    /// Rebuild the tray menu and record it.
+    /// Rebuild the tray menu and hand it to the app when it changed and is not likely open.
     pub fn publish_tray(&self) {
-        let menu = self.tray_menu(false);
+        self.set_tray_menu(false);
+    }
+
+    /// The tray icon's right button went down; the menu opens on release. The app gets a fresh
+    /// menu (the microphones re-read), and other changes wait until a menu event or
+    /// [`TRAY_HOLD_MS`], so the open menu is not replaced under the pointer.
+    pub fn tray_opening(&self) {
+        self.refresh_devices();
+        self.state.lock().unwrap().tray_held_until = None;
+        self.set_tray_menu(true);
+        let until = (self.clock)() + TRAY_HOLD_MS;
+        self.state.lock().unwrap().tray_held_until = Some(until);
+    }
+
+    /// A tray menu item was chosen, so the menu has closed: what waited is published now.
+    pub fn tray_closed(&self) {
+        self.state.lock().unwrap().tray_held_until = None;
+        self.set_tray_menu(false);
+    }
+
+    /// Set the tray menu: always with `force`, otherwise only when it differs from the one set
+    /// last and the menu is not held open.
+    fn set_tray_menu(&self, force: bool) {
+        let now = (self.clock)();
+        let menu = {
+            let mut st = self.state.lock().unwrap();
+            if st.tray_held_until.is_some_and(|t| now < t) {
+                return;
+            }
+            st.tray_held_until = None;
+            let menu = menu_model(st.summary.as_ref(), &st.devices, &st.settings);
+            if !force && st.tray_shown.as_ref() == Some(&menu) {
+                return;
+            }
+            // Before the app side exists nothing is shown, so the first menu after it is set.
+            if self.host().is_some() {
+                st.tray_shown = Some(menu.clone());
+            }
+            menu
+        };
         if let Some(h) = self.host() {
             h.set_tray(&menu);
         }
@@ -468,7 +517,7 @@ impl ShellService {
     /// menu so the ticks show what is really applied.
     fn retick_on_error(&self, r: Result<(), String>) -> Result<(), String> {
         if r.is_err() {
-            self.publish_tray();
+            self.set_tray_menu(true);
         }
         r
     }
@@ -815,7 +864,7 @@ mod tests {
     }
 
     #[test]
-    fn badge_follows_the_summary_and_is_only_set_on_change() {
+    fn badge_and_tray_menu_follow_the_summary_and_are_only_set_on_change() {
         let r = rig();
         r.host.take();
         r.svc
@@ -828,18 +877,41 @@ mod tests {
             .observe(&event("attention", "summary", summary(12, 0, &["c1"], &[])));
         r.svc
             .observe(&event("attention", "summary", summary(0, 0, &[], &[])));
-        let badges: Vec<_> = r
-            .host
-            .take()
-            .into_iter()
-            .filter(|l| l.starts_with("badge"))
-            .collect();
-        assert_eq!(badges, ["badge -", "badge 1", "badge 9+", "badge -"]);
+        let log = r.host.take();
+        let only = |log: &[String], prefix: &str| -> Vec<String> {
+            log.iter()
+                .filter(|l| l.starts_with(prefix))
+                .cloned()
+                .collect()
+        };
+        assert_eq!(
+            only(&log, "badge"),
+            ["badge -", "badge 1", "badge 9+", "badge -"]
+        );
         let counts: Vec<_> = probes(&r, "badge")
             .iter()
             .map(|v| v["count"].as_u64().unwrap())
             .collect();
         assert_eq!(counts, [0, 1, 12, 0]);
+        // The same menu is never set twice: replacing the native menu closes it when it is open.
+        assert_eq!(only(&log, "tray"), ["tray 1 2", "tray 0 2"]);
+
+        // A press on the tray icon sets a fresh menu and holds every change until a menu event.
+        r.svc.tray_opening();
+        r.svc
+            .observe(&event("attention", "summary", summary(1, 0, &["c2"], &[])));
+        r.svc.publish_tray();
+        assert_eq!(
+            only(&r.host.take(), "tray"),
+            ["tray 0 2"],
+            "held while open"
+        );
+        r.svc.tray_closed();
+        assert_eq!(
+            only(&r.host.take(), "tray"),
+            ["tray 1 2"],
+            "set once it closed"
+        );
     }
 
     #[test]

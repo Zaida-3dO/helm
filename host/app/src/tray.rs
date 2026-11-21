@@ -180,15 +180,15 @@ impl TauriShellHost {
                 button_state: MouseButtonState::Up,
                 ..
             } => me.toggle_window(),
-            // The menu opens on release; refresh the microphone list on press.
+            // The menu opens on release: set a fresh one (the microphone list re-read) on press,
+            // and hold other changes while it is likely open, since replacing it closes it.
             TrayIconEvent::Click {
                 button: MouseButton::Right,
                 button_state: MouseButtonState::Down,
                 ..
             } => {
                 if let Some(s) = me.service.get() {
-                    let menu = s.tray_menu(true);
-                    me.set_tray(&menu);
+                    s.tray_opening();
                 }
             }
             _ => {}
@@ -266,6 +266,10 @@ impl TauriShellHost {
 
     fn on_menu(&self, app: &AppHandle, id: &str) {
         let svc = self.service.get();
+        // A chosen item closes the menu: changes held while it was open can be shown now.
+        if let Some(s) = svc {
+            s.tray_closed();
+        }
         let report = |r: Result<(), String>| {
             if let Err(e) = r {
                 log::warn!("tray: {e}");
