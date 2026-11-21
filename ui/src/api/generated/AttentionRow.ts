@@ -5,4 +5,9 @@ export type AttentionRow = { chatId: string, title: string, project: string, kin
 /**
  * Why the chat is listed, in plain words.
  */
-reason: string, };
+reason: string, 
+/**
+ * The profile the chat belongs to; empty for a chat nobody owns (the home profile's). The
+ * window keeps the rows of the profile it shows; the badge, tray and keep-awake count all.
+ */
+profileId: string, };

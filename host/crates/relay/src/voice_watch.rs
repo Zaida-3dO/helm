@@ -414,6 +414,7 @@ mod tests {
             project: "p".into(),
             kind,
             reason: reason.into(),
+            profile_id: String::new(),
         }
     }
 

@@ -691,6 +691,7 @@ mod tests {
             project: "P".into(),
             kind: k,
             reason: String::new(),
+            profile_id: String::new(),
         };
         AttentionSummary {
             badge,
@@ -725,6 +726,7 @@ mod tests {
                 project: "P".into(),
                 kind: AttentionKind::Unread,
                 reason: String::new(),
+                profile_id: String::new(),
             })
             .collect();
         s
@@ -1134,6 +1136,7 @@ mod tests {
                     project: "P".into(),
                     kind: AttentionKind::Running,
                     reason: String::new(),
+                    profile_id: String::new(),
                 })
                 .collect();
             s

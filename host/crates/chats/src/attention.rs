@@ -73,6 +73,7 @@ struct Cand {
     id: String,
     title: String,
     project: String,
+    profile: String,
     status: ChatStatus,
     error: bool,
     marked: bool,
@@ -169,7 +170,8 @@ pub fn compute(
         "{COLS_HEAD}, (SELECT g.reason FROM chat_triage g WHERE {current}), \
          (SELECT f.question FROM chat_flags f WHERE f.chat_id = c.id), \
          (SELECT f.reason FROM chat_flags f WHERE f.chat_id = c.id), \
-         (SELECT COALESCE(g.kind, 'decision') FROM chat_triage g WHERE {current})"
+         (SELECT COALESCE(g.kind, 'decision') FROM chat_triage g WHERE {current}), \
+         COALESCE(c.profile_id, '')"
     );
     let read = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Cand> {
         Ok(Cand {
@@ -195,6 +197,7 @@ pub fn compute(
                 .get::<_, Option<String>>(13)?
                 .as_deref()
                 .and_then(crate::triage::Kind::parse),
+            profile: r.get(14)?,
         })
     };
     let mut cands: Vec<Cand> = {
@@ -228,6 +231,7 @@ pub fn compute(
         project: c.project.clone(),
         kind,
         reason: reason(kind, c.marked).to_owned(),
+        profile_id: c.profile.clone(),
     };
     let mut s = AttentionSummary {
         badge: 0,
@@ -435,6 +439,17 @@ mod tests {
             s.finished.is_empty(),
             "a marked chat is not also held as finished"
         );
+        // Each row names the profile its chat belongs to, empty for a chat nobody owns, so the
+        // window can keep the rows of the profile it shows.
+        assert_eq!(s.needs_you[0].profile_id, "");
+        exec(
+            &db,
+            "UPDATE chats SET profile_id = 'p-sam' WHERE id = ?1",
+            &[&a],
+        );
+        let s = summary(&db, &needs);
+        assert_eq!(s.needs_you[0].profile_id, "p-sam");
+        assert_eq!(s.unread[0].profile_id, "p-sam");
     }
 
     #[test]

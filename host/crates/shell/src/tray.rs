@@ -169,6 +169,7 @@ mod tests {
             project: "proj".into(),
             kind,
             reason: String::new(),
+            profile_id: String::new(),
         }
     }
 

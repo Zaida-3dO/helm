@@ -178,6 +178,7 @@ mod tests {
             project: "P".into(),
             kind: k,
             reason: String::new(),
+            profile_id: String::new(),
         };
         AttentionSummary {
             badge: 0,

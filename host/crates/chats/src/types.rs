@@ -310,6 +310,9 @@ pub struct AttentionRow {
     pub kind: AttentionKind,
     /// Why the chat is listed, in plain words.
     pub reason: String,
+    /// The profile the chat belongs to; empty for a chat nobody owns (the home profile's). The
+    /// window keeps the rows of the profile it shows; the badge, tray and keep-awake count all.
+    pub profile_id: String,
 }
 
 /// What a muted chat is holding for the user.

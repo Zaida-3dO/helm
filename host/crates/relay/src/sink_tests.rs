@@ -2665,6 +2665,7 @@ fn a_note(chat: &str) -> voice_watch::Note {
         project: "p".into(),
         kind: AttentionKind::Approval,
         reason: "Waiting for an approval".into(),
+        profile_id: String::new(),
     });
     let mut w = voice_watch::Watch::default();
     w.summary(&empty, Some("v"), 0);
