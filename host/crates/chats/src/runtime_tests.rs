@@ -3698,6 +3698,100 @@ async fn a_child_that_ends_its_turn_unfinished_tells_its_parent_once_per_spell()
     h.until("a second note", |h| notes(h).len() == 2).await;
 }
 
+/// A chat on a local model whose reply prints a tool call as text gets one corrective message
+/// from Helm, naming the tool; its next such turn is put in front of the person as a flag
+/// instead of nudged again. A Claude-model chat ending the same way gets neither: its harness
+/// runs that markup for real.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_local_chat_that_prints_tool_calls_is_nudged_once_then_flagged() {
+    async fn printed_call(w: &mut FakeWorker, mid: &str) {
+        w.emit(json!({"type": "message_start", "message": {"id": mid, "role": "assistant", "content": []}}))
+            .await;
+        w.emit(json!({"type": "message_end", "message": {"id": mid, "role": "assistant", "content": [{"type": "text", "text": "<tool_call>{\"name\": \"Bash\"}</tool_call>"}], "status": "complete"}}))
+            .await;
+        w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+            .await;
+    }
+    let mut h = harness();
+    let local = Arc::new(FakeLocal {
+        turns: Mutex::new(Vec::new()),
+        outcome: Mutex::new(Ok("qwen3:8b-helm-64k".into())),
+        gate: Mutex::new(None),
+        held_outcome: Mutex::new(None),
+        finished: Mutex::new(Vec::new()),
+        refreshed: Mutex::new(Vec::new()),
+        queue: Mutex::new(None),
+    });
+    h.rt.set_local_models(local.clone());
+    let made = h
+        .call(
+            "chat_create",
+            json!({"cwd": h.work.to_string_lossy(), "model": "local/strata/x"}),
+        )
+        .await
+        .unwrap();
+    let chat = made["id"].as_str().unwrap().to_owned();
+    let nudges = |h: &H| {
+        h.col(&format!(
+            "SELECT text FROM submissions WHERE chat_id = '{chat}' AND text LIKE '%wrote a tool call as text%'"
+        ))
+    };
+    let flagged = |h: &H| {
+        h.col(&format!(
+            "SELECT question || ':' || reason FROM chat_flags WHERE chat_id = '{chat}'"
+        ))
+    };
+    h.send(&chat, "start", "default").await;
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    ack(&w, &p).await;
+    // The first printed call: one corrective message back into the chat, naming the tool.
+    printed_call(&mut w, "m1").await;
+    h.until("nudged", |h| nudges(h).len() == 1).await;
+    assert!(nudges(&h)[0].contains("named \"Bash\""), "{:?}", nudges(&h));
+    // The nudge opened the next turn; it ends on a printed call again. Now the person is
+    // flagged and the chat is left alone.
+    let p2 = w.expect("prompt").await;
+    assert!(
+        p2["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("wrote a tool call"),
+        "the nudge itself is the next prompt"
+    );
+    ack(&w, &p2).await;
+    printed_call(&mut w, "m2").await;
+    h.until("flagged", |h| !flagged(h).is_empty()).await;
+    assert!(
+        flagged(&h)[0].contains("switch this chat to a Claude model"),
+        "{:?}",
+        flagged(&h)
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(nudges(&h).len(), 1, "the nudge never repeats");
+    // A Claude-model chat ending on the same markup gets neither nudge nor flag.
+    let (claude, _, mut wc) = running_turn(&mut h).await;
+    printed_call(&mut wc, "m3").await;
+    h.until("claude idle again", |h| h.status(&claude) == "idle")
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        h.col(&format!(
+            "SELECT count(*) FROM submissions WHERE chat_id = '{claude}' AND text LIKE '%wrote a tool call as text%'"
+        )),
+        ["0"],
+        "a Claude chat is not nudged"
+    );
+    assert!(
+        h.col(&format!(
+            "SELECT question FROM chat_flags WHERE chat_id = '{claude}'"
+        ))
+        .is_empty(),
+        "a Claude chat is not flagged"
+    );
+}
+
 /// A muted chat leaves the badge and every group, but keep-awake still counts it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_muted_chat_is_out_of_the_badge_but_still_busy() {

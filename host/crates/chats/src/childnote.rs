@@ -103,33 +103,104 @@ pub fn unreported_turn(
     if child_reported(tx, &parent, child)? {
         return Ok(None);
     }
+    Ok(turn_why(tx, child)?.map(|why| (parent, why)))
+}
+
+/// Why the chat's just-ended turn closed, read from the turn shape alone: a tool call printed
+/// as text, no closing reply, or `None` when it closed with words. It says nothing about
+/// parents or reports, so a chat that has none can ask it too.
+pub fn turn_why(tx: &Transaction<'_>, chat: &str) -> rusqlite::Result<Option<Unfinished>> {
+    Ok(match last_step(tx, chat)? {
+        Some((role, text)) if role == "assistant" && looks_like_unrun_tool_call(&text) => {
+            Some(Unfinished::PrintedToolCall)
+        }
+        Some((role, text)) if role == "assistant" && !text.trim().is_empty() => None,
+        _ => Some(Unfinished::NoReport),
+    })
+}
+
+/// The text of the printed call, when the chat's just-ended turn ends with one: the markup a
+/// tool name can be read out of.
+pub fn printed_call_text(tx: &Transaction<'_>, chat: &str) -> rusqlite::Result<Option<String>> {
+    Ok(last_step(tx, chat)?
+        .filter(|(role, text)| role == "assistant" && looks_like_unrun_tool_call(text))
+        .map(|(_, text)| text))
+}
+
+/// The tool a printed call names, when the markup carries one: `<function=Name>`, an
+/// `invoke name="Name"` or a `"name": "Name"` field. `None` when the markup names nothing.
+pub fn named_tool(text: &str) -> Option<String> {
+    /// Read an identifier (the characters a tool name is made of) from the front of `s`.
+    fn ident(s: &str) -> Option<String> {
+        let end = s
+            .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':')))
+            .unwrap_or(s.len());
+        let name: String = s.chars().take(end.min(64)).collect();
+        (!name.is_empty()).then_some(name)
+    }
+    let lower = text.to_ascii_lowercase();
+    if let Some(i) = lower.find("<function=") {
+        if let Some(name) = ident(&text[i + "<function=".len()..]) {
+            return Some(name);
+        }
+    }
+    let b = lower.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find("name") {
+        let start = from + rel;
+        let at = start + 4;
+        from = at;
+        // Not the tail of a longer word (`username`, `rename`), and followed by `=` or `:`
+        // (through a closing quote), not just the word.
+        if start > 0 && {
+            let prev = b[start - 1];
+            prev.is_ascii_alphanumeric() || prev == b'_'
+        } {
+            continue;
+        }
+        let mut j = at;
+        while j < b.len() && (b[j] as char).is_whitespace() {
+            j += 1;
+        }
+        if j < b.len() && b[j] == b'"' {
+            j += 1;
+        }
+        if !(j < b.len() && (b[j] == b'=' || b[j] == b':')) {
+            continue;
+        }
+        j += 1;
+        while j < b.len() && ((b[j] as char).is_whitespace() || b[j] == b'"' || b[j] == b'\'') {
+            j += 1;
+        }
+        if j < text.len() {
+            if let Some(name) = ident(&text[j..]) {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+/// The turn's newest step that is not a person's message or a note, of the chat's latest run.
+fn last_step(tx: &Transaction<'_>, chat: &str) -> rusqlite::Result<Option<(String, String)>> {
     let run_start: i64 = tx
         .query_row(
             "SELECT started_at FROM runs WHERE chat_id = ?1 ORDER BY started_at DESC, rowid DESC
              LIMIT 1",
-            [child],
+            [chat],
             |r| r.get(0),
         )
         .optional()?
         .unwrap_or(0);
-    // The turn's newest step that is not a person's message or a note.
-    let last: Option<(String, String)> = tx
-        .query_row(
-            "SELECT role, text FROM messages
-             WHERE chat_id = ?1 AND active = 1 AND timestamp >= ?2
-               AND role NOT IN ('user', 'context')
-             ORDER BY id DESC LIMIT 1",
-            rusqlite::params![child, run_start],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    Ok(match last {
-        Some((role, text)) if role == "assistant" && looks_like_unrun_tool_call(&text) => {
-            Some((parent, Unfinished::PrintedToolCall))
-        }
-        Some((role, text)) if role == "assistant" && !text.trim().is_empty() => None,
-        _ => Some((parent, Unfinished::NoReport)),
-    })
+    tx.query_row(
+        "SELECT role, text FROM messages
+         WHERE chat_id = ?1 AND active = 1 AND timestamp >= ?2
+           AND role NOT IN ('user', 'context')
+         ORDER BY id DESC LIMIT 1",
+        rusqlite::params![chat, run_start],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
 }
 
 /// The note the parent gets.
@@ -283,6 +354,93 @@ mod tests {
         })
         .unwrap();
         assert_eq!(db.snapshot(|tx| unreported_turn(tx, "solo")).unwrap(), None);
+    }
+
+    /// The turn-shape question stands on its own, so a chat with no parent can ask it too; the
+    /// printed markup then gives up the tool it names.
+    #[test]
+    fn a_parentless_chat_can_ask_why_its_turn_closed() {
+        // (last step role and text, why the turn closed, the tool the markup names)
+        let rows: [(&str, &str, Option<Unfinished>, Option<&str>); 7] = [
+            (
+                "assistant",
+                "<tool_call>{\"name\": \"Bash\"}</tool_call>",
+                Some(Unfinished::PrintedToolCall),
+                Some("Bash"),
+            ),
+            (
+                "assistant",
+                "I will run it.\n<function=Read>\n<parameter=path>x",
+                Some(Unfinished::PrintedToolCall),
+                Some("Read"),
+            ),
+            (
+                "assistant",
+                "<function_calls><invoke name=\"mcp__search__find\">",
+                Some(Unfinished::PrintedToolCall),
+                Some("mcp__search__find"),
+            ),
+            (
+                "assistant",
+                "Done: tests pass, twelve of twelve.",
+                None,
+                None,
+            ),
+            ("assistant", "  ", Some(Unfinished::NoReport), None),
+            ("toolResult", "ok", Some(Unfinished::NoReport), None),
+            ("none", "", Some(Unfinished::NoReport), None),
+        ];
+        for (role, text, want_why, want_name) in rows {
+            let (_d, db) = crate::schema::tests::temp_db();
+            db.write(|tx| {
+                tx.execute_batch(
+                    "INSERT INTO projects (id, name, created_at) VALUES ('p', 'P', 1);
+                     INSERT INTO chats (id, project_id, title, status, created_at, updated_at)
+                     VALUES ('solo', 'p', 'Solo', 'idle', 1, 1);
+                     INSERT INTO runs (id, chat_id, status, started_at)
+                     VALUES ('r', 'solo', 'complete', 100);",
+                )?;
+                if role != "none" {
+                    tx.execute(
+                        "INSERT INTO messages (chat_id, source_key, role, text, timestamp)
+                         VALUES ('solo', 'm1', ?1, ?2, 200)",
+                        rusqlite::params![role, text],
+                    )?;
+                }
+                Ok::<_, rusqlite::Error>(())
+            })
+            .unwrap();
+            let label = "{role}: {text}";
+            assert_eq!(
+                db.snapshot(|tx| turn_why(tx, "solo")).unwrap(),
+                want_why,
+                "{label}"
+            );
+            assert_eq!(
+                db.snapshot(|tx| Ok::<_, rusqlite::Error>(printed_call_text(tx, "solo")?
+                    .as_deref()
+                    .and_then(named_tool)))
+                    .unwrap()
+                    .as_deref(),
+                want_name,
+                "{label}: name"
+            );
+        }
+    }
+
+    /// A name is read from the markup, not from prose: the word alone, or inside a longer
+    /// word, names nothing.
+    #[test]
+    fn the_markup_gives_up_its_tool_name() {
+        for (text, want) in [
+            ("[TOOL_CALLS][{\"name\": \"x\"}]", Some("x")),
+            ("<function=Bash >", Some("Bash")),
+            ("<tool_call>no name here</tool_call>", None),
+            ("username: bob. named tools are fine.", None),
+            ("", None),
+        ] {
+            assert_eq!(named_tool(text).as_deref(), want, "{text}");
+        }
     }
 
     #[test]
