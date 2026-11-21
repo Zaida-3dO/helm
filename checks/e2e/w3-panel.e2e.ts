@@ -277,7 +277,7 @@ describe("panel: Changes, the gate, vault notes, the viewer and quick-open", { t
 
       // Each page's saved state is its own, as the host keeps it.
       const stateOf = async (file: string) => {
-        const s = (await api(page(), "page_open", { path: path.join(dir, file), network: false })) as { session: string; state: unknown };
+        const s = (await api(page(), "page_open", { path: path.join(dir, file) })) as { session: string; state: unknown };
         await api(page(), "page_close", { session: s.session });
         return s.state;
       };

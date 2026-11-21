@@ -44,6 +44,8 @@ async function until<T>(what: string, f: () => T | undefined | Promise<T | undef
 async function openUsagePane(): Promise<void> {
   if ((await page().locator(tid("usage-pane")).count()) > 0) return;
   await page().keyboard.press("Control+Comma");
+  // The tab bar is two rows: Usage lives under Machine & updates.
+  await page().click('.settings-group-tab[data-group="Machine & updates"]');
   await page().getByRole("tab", { name: "Usage", exact: true }).click();
   await page().waitForSelector(tid("usage-pane"), { timeout: 20_000 });
 }

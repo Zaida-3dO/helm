@@ -21,6 +21,8 @@ const page = () => app!.page;
 
 async function openMcpPane(): Promise<void> {
   await page().keyboard.press("Control+Comma");
+  // The tab bar is two rows: MCP lives under Tools & integrations.
+  await page().click('.settings-group-tab[data-group="Tools & integrations"]');
   await page().getByRole("tab", { name: "MCP" }).or(page().getByRole("button", { name: "MCP", exact: true })).first().click();
   await page().waitForSelector(tid("mcp-pane"), { timeout: 20_000 });
 }

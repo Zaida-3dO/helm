@@ -27,7 +27,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import net from "node:net";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
-import { BOT_USERNAME, FAKE_TRANSCRIPT, startFakeStt, startFakeTelegram, type FakeStt, type FakeTelegram } from "../../fakes/telegram/server.ts";
+import { FAKE_TRANSCRIPT, startFakeStt, startFakeTelegram, type FakeStt, type FakeTelegram } from "../../fakes/telegram/server.ts";
 import { api, dispose, launchApp, REPO, rows, scratchDir, tid, type App } from "./harness.ts";
 
 const HUB_EXE =
@@ -68,9 +68,13 @@ async function until<T>(what: string, f: () => T | undefined | Promise<T | undef
   }
 }
 
+/** A Telegram chat's title: the profile's name when it has one, then the day. */
+const TELEGRAM_TITLE = /^Telegram (.+ )?\d{4}-\d{2}-\d{2}$/;
+
 async function telegramChats(): Promise<Json[]> {
   const all = (await api(app!.page, "chat_list", {})) as Json[];
-  return all.filter((c) => String(c.title).startsWith(`Telegram ${BOT_USERNAME} `));
+  // The chat is titled with the profile's name and the day: "Telegram <name> <date>".
+  return all.filter((c) => TELEGRAM_TITLE.test(String(c.title)));
 }
 
 const phone = () => tg!.chat(ALLOWED_USER).map((m) => m.text);
@@ -117,7 +121,7 @@ describe("Telegram messages into chats, and the turn mirrored back", { timeout: 
       return c.length ? c : undefined;
     });
     assert.equal(chats.length, 1);
-    assert.match(String(chats[0].title), new RegExp(`^Telegram ${BOT_USERNAME} \\d{4}-\\d{2}-\\d{2}$`));
+    assert.match(String(chats[0].title), TELEGRAM_TITLE);
     chatId = chats[0].id;
     await until("the answer on the phone", () => (phone().some((t) => t.includes("You said:") && t.includes("hello from the phone")) ? true : undefined));
     const answer = tg!.sent.slice(before).find((c) => c.method === "sendMessage" && (c.text ?? "").includes("You said:"));
