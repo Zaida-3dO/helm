@@ -276,7 +276,9 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                  {MAX_PER_CHAT} open waits per chat. action list shows this chat's open waits; \
                  action cancel with waitId cancels one. A wait grants you nothing: act on the \
                  outcome within your own permissions. Stopping or archiving this chat cancels its \
-                 waits; a fired or cancelled wait never fires again."
+                 waits; a fired or cancelled wait never fires again. A chat_idle wait on a chat \
+                 that rolls over follows to the session the chat carries on in and keeps waiting; \
+                 its result names both sessions."
             ),
             json!({
                 "type": "object",
@@ -352,9 +354,12 @@ mod tests {
         let db = Arc::new(Database::open(&dir.path().join("t.sqlite3"), &reg).unwrap());
         let me = "11111111-1111-1111-1111-111111111111";
         let other = "22222222-2222-2222-2222-222222222222";
+        // An archived session of a roll over: a wait may be declared on it; the watcher
+        // follows it to the session that carries on.
+        let older = "44444444-4444-4444-4444-444444444444";
         db.write(|tx| {
             tx.execute("INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 1)", [])?;
-            for id in [me, other] {
+            for id in [me, other, older] {
                 tx.execute(
                     "INSERT INTO chats(id, project_id, created_at, updated_at) VALUES (?1, 'p', 1, 1)",
                     [id],
@@ -371,6 +376,17 @@ mod tests {
                 busy: true,
                 stopped: false,
                 error: None,
+                rolls_to: None,
+            },
+        );
+        probes.chats.lock().unwrap().insert(
+            older.into(),
+            ChatObs {
+                archived: true,
+                busy: false,
+                stopped: false,
+                error: None,
+                rolls_to: Some(other.into()),
             },
         );
         let svc = Arc::new(WaitsService::new(
@@ -505,6 +521,9 @@ mod tests {
         let mut ids = vec![];
         for args in [
             wait(json!({"kind": "chat_idle", "chatId": other, "note": "the reviewer"})),
+            // Declaring on a session archived by a roll over is allowed: the watcher follows
+            // it to the session that carries on.
+            wait(json!({"kind": "chat_idle", "chatId": older, "note": "an archived session"})),
             wait(json!({"kind": "file", "path": "C:/work/a..b.txt"})),
             wait(json!({"kind": "pr_checks", "repo": "o/r", "number": 3})),
             wait(json!({"kind": "file", "path": "\\\\host\\share\\x.txt"})),
@@ -516,13 +535,14 @@ mod tests {
         }
         let r = call("app_wait_for", json!({"action": "list"})).await;
         let listed = r["result"]["waits"].as_array().unwrap();
-        assert_eq!(listed.len(), 4);
+        assert_eq!(listed.len(), 5);
         assert_eq!(listed[0]["note"], "the reviewer");
+        assert_eq!(listed[1]["target"], format!("chat {older}"));
         assert_eq!(
-            listed[2]["target"],
+            listed[3]["target"],
             "the checks on https://github.com/o/r/pull/3"
         );
-        assert_eq!(listed[3]["target"], "file \\\\host\\share\\x.txt");
+        assert_eq!(listed[4]["target"], "file \\\\host\\share\\x.txt");
         // The chat that was busy when declared is remembered as seen working.
         assert_eq!(svc.list(None).unwrap()[0].state["seenBusy"], true);
 
@@ -539,7 +559,7 @@ mod tests {
         )
         .await;
         assert_eq!(r["result"]["cancelled"], false);
-        assert_eq!(svc.list(None).unwrap().len(), 3);
+        assert_eq!(svc.list(None).unwrap().len(), 4);
 
         // Background results come from the chat's worker; a call that reaches the host has none.
         let r = call("app_background_result", json!({"callId": "tu_1"})).await;

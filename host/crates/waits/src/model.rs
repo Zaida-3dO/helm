@@ -87,6 +87,10 @@ pub struct ChatObs {
     pub stopped: bool,
     /// The last turn's error, when it ended in one.
     pub error: Option<String>,
+    /// When a roll over archived this session, the newest session of its stack — where the
+    /// chat carries on. None when no roll over archived it, or when this session is the
+    /// newest of its stack.
+    pub rolls_to: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -199,29 +203,92 @@ fn judge_process(w: &mut Wait, started: Option<u64>) -> Option<Outcome> {
 
 fn judge_chat(w: &mut Wait, c: Option<&ChatObs>, now: i64) -> Option<Outcome> {
     let Some(c) = c else {
-        return out("gone", "The chat no longer exists.");
+        return named_follow(w, out("gone", "The chat no longer exists."));
     };
     if c.archived {
-        return out("gone", "The chat was archived.");
+        // A roll over archives one session but the chat carries on in the newest of its
+        // stack: move the wait there and keep waiting. Only when the wait already points
+        // at that newest session does the archive end it.
+        let next = match &w.target {
+            Target::ChatIdle { chat_id } => c
+                .rolls_to
+                .as_deref()
+                .filter(|t| *t != chat_id.as_str())
+                .map(str::to_owned),
+            _ => None,
+        };
+        if let Some(next) = next {
+            follow_roll_over(w, &next, now);
+            return None;
+        }
+        return named_follow(w, out("gone", "The chat was archived."));
     }
     if c.busy {
         w.state["seenBusy"] = json!(true);
         return None;
     }
     if c.stopped {
-        return out("stopped", "The chat was stopped.");
+        return named_follow(w, out("stopped", "The chat was stopped."));
     }
     let seen_busy = w.state["seenBusy"].as_bool().unwrap_or(false);
     if seen_busy {
-        return match &c.error {
-            Some(e) => out("errored", format!("Its turn ended in an error: {e}")),
-            None => out("finished", "Its turn ended."),
-        };
+        return named_follow(
+            w,
+            match &c.error {
+                Some(e) => out("errored", format!("Its turn ended in an error: {e}")),
+                None => out("finished", "Its turn ended."),
+            },
+        );
     }
-    // Idle and never seen working: give a just-sent message time to start a turn.
-    (now - w.created_at >= IDLE_GRACE_MS).then(|| Outcome {
-        code: "finished",
-        detail: "The chat was idle and did not start a turn.".into(),
+    // Idle and never seen working: give a just-sent message time to start a turn. A wait
+    // that followed a roll over starts the grace again: the newer session has only just
+    // taken the chat over.
+    let since = w
+        .state
+        .get("followedAt")
+        .and_then(Value::as_i64)
+        .unwrap_or(w.created_at)
+        .max(w.created_at);
+    named_follow(
+        w,
+        (now - since >= IDLE_GRACE_MS).then(|| Outcome {
+            code: "finished",
+            detail: "The chat was idle and did not start a turn.".into(),
+        }),
+    )
+}
+
+/// A roll over archived the session this chat_idle wait watched: move the wait to the
+/// session that carries on, keep the first session it moved off as `followedFrom` (so the
+/// result can name both), and restart the idle grace at the move.
+fn follow_roll_over(w: &mut Wait, to: &str, now: i64) {
+    if let Target::ChatIdle { chat_id } = &mut w.target {
+        if w.state
+            .get("followedFrom")
+            .and_then(Value::as_str)
+            .is_none()
+        {
+            w.state["followedFrom"] = json!(chat_id.clone());
+        }
+        *chat_id = to.to_owned();
+    }
+    w.state["followedAt"] = json!(now);
+}
+
+/// When a wait followed a roll over, its outcome names the session it started watching and
+/// the session the chat carries on in.
+fn named_follow(w: &Wait, o: Option<Outcome>) -> Option<Outcome> {
+    let o = o?;
+    let Some(from) = w.state.get("followedFrom").and_then(Value::as_str) else {
+        return Some(o);
+    };
+    let to = match &w.target {
+        Target::ChatIdle { chat_id } => chat_id.clone(),
+        _ => return Some(o),
+    };
+    Some(Outcome {
+        code: o.code,
+        detail: format!("{} Followed the roll over from {from} to {to}.", o.detail),
     })
 }
 
@@ -358,6 +425,18 @@ mod tests {
             busy,
             stopped: false,
             error: None,
+            rolls_to: None,
+        }))
+    }
+
+    /// A session archived by a roll over that carries on in `to`.
+    fn archived(to: Option<&str>) -> Observation {
+        Observation::Chat(Some(ChatObs {
+            archived: true,
+            busy: false,
+            stopped: false,
+            error: None,
+            rolls_to: to.map(str::to_owned),
         }))
     }
 
@@ -400,6 +479,7 @@ mod tests {
                 busy: false,
                 stopped: false,
                 error: err.map(str::to_owned),
+                rolls_to: None,
             }))
         };
         let url = || "https://github.com/o/r/pull/1".to_owned();
@@ -452,6 +532,7 @@ mod tests {
                         busy: false,
                         stopped: true,
                         error: None,
+                        rolls_to: None,
                     })),
                 )],
                 Some("stopped"),
@@ -461,6 +542,54 @@ mod tests {
                 chat_id(),
                 vec![(2_000, Observation::Chat(None))],
                 Some("gone"),
+            ),
+            // A roll over. An archived session with no newer one still ends the wait; one
+            // with a newer one moves the wait there and it keeps waiting — across a second
+            // roll over too — until that session's turn ends.
+            (
+                "chat archived with no successor",
+                chat_id(),
+                vec![(2_000, archived(None))],
+                Some("gone"),
+            ),
+            (
+                "an archived newest session ends the wait",
+                chat_id(),
+                vec![(2_000, archived(Some("other")))],
+                Some("gone"),
+            ),
+            (
+                "roll over: the wait moves and still waits",
+                chat_id(),
+                vec![
+                    (2_000, chat(true)),
+                    (4_000, archived(Some("later"))),
+                    (6_000, chat(true)),
+                ],
+                None,
+            ),
+            (
+                "roll over twice, then the newest session's turn ends",
+                chat_id(),
+                vec![
+                    (2_000, chat(true)),
+                    (3_000, archived(Some("mid"))),
+                    (4_000, archived(Some("newest"))),
+                    (5_000, chat(true)),
+                    (6_000, ended(None)),
+                ],
+                Some("finished"),
+            ),
+            (
+                "a followed chat keeps the idle grace from the move",
+                chat_id(),
+                // Followed at 2_000: idle at 4_000 is still inside the grace, fired past it.
+                vec![
+                    (2_000, archived(Some("later"))),
+                    (4_000, ended(None)),
+                    (7_500, ended(None)),
+                ],
+                Some("finished"),
             ),
             // A process.
             (
@@ -622,6 +751,41 @@ mod tests {
             }
             assert_eq!(got, want, "{name}");
         }
+    }
+
+    /// A wait that followed roll-overs ends up watching the newest session, and its message
+    /// names the session it started on and the one the chat carries on in.
+    #[test]
+    fn a_wait_that_followed_roll_overs_moves_and_names_both_sessions() {
+        let mut w = wait(Target::ChatIdle {
+            chat_id: "s1".into(),
+        });
+        assert_eq!(judge(&mut w, &chat(true), 2_000), None);
+        assert_eq!(judge(&mut w, &archived(Some("s2")), 3_000), None);
+        assert_eq!(judge(&mut w, &archived(Some("s3")), 4_000), None);
+        assert_eq!(
+            w.target,
+            Target::ChatIdle {
+                chat_id: "s3".into()
+            },
+            "the wait moved with the chat"
+        );
+        assert_eq!(w.state["followedFrom"], "s1");
+        let o = judge(&mut w, &chat(false), 5_000).unwrap();
+        assert_eq!(o.code, "finished");
+        assert!(
+            o.detail.contains("Followed the roll over from s1 to s3"),
+            "{o:?}"
+        );
+        let text = framed(
+            &w,
+            &Outcome {
+                code: o.code,
+                detail: o.detail.clone(),
+            },
+        );
+        assert!(text.contains("chat s3"), "{text}");
+        assert!(text.contains("from s1 to s3"), "{text}");
     }
 
     #[test]

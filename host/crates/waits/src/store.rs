@@ -131,11 +131,21 @@ pub fn open(tx: &Transaction<'_>, chat: Option<&str>) -> rusqlite::Result<Vec<Wa
         .collect())
 }
 
-/// Save the watcher's memory for an open wait.
-pub fn save_memory(tx: &Transaction<'_>, id: &str, memory: &Value) -> rusqlite::Result<()> {
+/// Save the watcher's memory for an open wait, and the target it now follows — a chat_idle
+/// wait moves to a newer session when the watched one is archived by a roll over.
+pub fn save_memory(
+    tx: &Transaction<'_>,
+    id: &str,
+    memory: &Value,
+    target: &Target,
+) -> rusqlite::Result<()> {
     tx.execute(
-        "UPDATE agent_waits SET memory = ?2 WHERE id = ?1 AND state = 'open'",
-        params![id, memory.to_string()],
+        "UPDATE agent_waits SET memory = ?2, target = ?3 WHERE id = ?1 AND state = 'open'",
+        params![
+            id,
+            memory.to_string(),
+            serde_json::to_string(target).unwrap_or_default()
+        ],
     )?;
     Ok(())
 }

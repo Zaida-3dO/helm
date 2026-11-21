@@ -54,6 +54,7 @@ impl Probes for RealProbes {
                                 ),
                                 stopped: status == "stopped",
                                 error: r.get(2)?,
+                                rolls_to: None,
                             })
                         },
                     )
@@ -72,6 +73,24 @@ impl Probes for RealProbes {
                                 |r| r.get::<_, bool>(0),
                             )
                             .unwrap_or(false);
+                    }
+                    // A session a roll over archived carries on in the newest session of its
+                    // stack: name it so a wait on it can follow. Read apart, so a database
+                    // without the stack columns simply says the chat does not carry on.
+                    if o.archived {
+                        o.rolls_to = tx
+                            .query_row(
+                                "SELECT (SELECT s.id FROM chats s
+                                          WHERE s.stack_id = c.stack_id
+                                            AND s.next_session_id IS NULL
+                                          ORDER BY s.created_at DESC, s.id DESC LIMIT 1)
+                                 FROM chats c WHERE c.id = ?1 AND c.stack_id IS NOT NULL",
+                                [chat_id],
+                                |r| r.get::<_, Option<String>>(0),
+                            )
+                            .ok()
+                            .flatten()
+                            .filter(|l| l != chat_id);
                     }
                     o
                 }))

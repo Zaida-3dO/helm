@@ -133,9 +133,11 @@ impl WaitsService {
         }
     }
 
-    /// Settle `w` if the observation says so, else keep what the watcher learned.
+    /// Settle `w` if the observation says so, else keep what the watcher learned — which
+    /// includes a chat target moved by a roll over, so the follow survives a restart.
     fn step(&self, mut w: Wait, obs: &Observation, now: i64) {
         let before = w.state.clone();
+        let target_before = w.target.clone();
         match model::judge(&mut w, obs, now) {
             Some(o) if self.child_watch_is_redundant(&w, &o) => {
                 // The parent already has one message about this turn: the wait ends quietly.
@@ -152,9 +154,13 @@ impl WaitsService {
                 }
                 self.polls.lock().unwrap().remove(&w.id);
             }
-            None if w.state != before => {
+            None if w.state != before || w.target != target_before => {
                 let state: Value = w.state.clone();
-                if let Err(e) = self.db.write(|tx| store::save_memory(tx, &w.id, &state)) {
+                let target = w.target.clone();
+                if let Err(e) = self
+                    .db
+                    .write(|tx| store::save_memory(tx, &w.id, &state, &target))
+                {
                     log::warn!("wait {} memory not saved: {e}", w.id);
                 }
             }
@@ -434,6 +440,7 @@ mod tests {
             busy: false,
             stopped: false,
             error: None,
+            rolls_to: None,
         }
     }
 
@@ -545,6 +552,123 @@ mod tests {
         assert!(full.contains("watch"), "{full}");
         let gone = svc.watch_child("nobody", last, "x").unwrap_err();
         assert!(gone.contains("no longer exists"), "{gone}");
+    }
+
+    /// A wait on a session that a roll over archived moves to the session that carries the
+    /// chat on (across a second roll over), survives that way in the table, and its message
+    /// names both the session it started on and the one the chat ended in. It fires once.
+    #[test]
+    fn a_chat_idle_wait_follows_a_roll_over_and_names_both_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = MigrationRegistry::new();
+        crate::register_migrations(&mut reg);
+        helm_chats::register_migrations(&mut reg);
+        let db = Arc::new(Database::open(&dir.path().join("t.sqlite3"), &reg).unwrap());
+        db.write(|tx| {
+            tx.execute("INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 1)", [])?;
+            for id in ["watcher", "s1", "s2", "s3"] {
+                tx.execute(
+                    "INSERT INTO chats(id, project_id, created_at, updated_at) VALUES (?1, 'p', 1, 1)",
+                    [id],
+                )?;
+            }
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+        let probes = Arc::new(Fake::default());
+        let put = |p: &Fake, id: &str, o: ChatObs| {
+            p.chats.lock().unwrap().insert(id.to_owned(), o);
+        };
+        put(
+            &probes,
+            "s1",
+            ChatObs {
+                busy: true,
+                ..idle()
+            },
+        );
+        put(&probes, "watcher", idle());
+        let sink = Arc::new(Sink::default());
+        let svc = WaitsService::new(db, probes.clone());
+        svc.set_sink(sink.clone());
+        let t0 = 1_000_000;
+        svc.declare(&wait(
+            "f1",
+            "watcher",
+            Target::ChatIdle {
+                chat_id: "s1".into(),
+            },
+            t0,
+            600,
+        ))
+        .unwrap()
+        .unwrap();
+        svc.sweep_local(t0 + 2_000); // seen working
+                                     // s1 is archived by a roll over carrying on in s2: the wait moves, nothing fires,
+                                     // and the move is what a restart would read back.
+        put(
+            &probes,
+            "s1",
+            ChatObs {
+                archived: true,
+                rolls_to: Some("s2".into()),
+                ..idle()
+            },
+        );
+        put(
+            &probes,
+            "s2",
+            ChatObs {
+                busy: true,
+                ..idle()
+            },
+        );
+        svc.sweep_local(t0 + 4_000);
+        let open = svc.list(Some("watcher")).unwrap();
+        assert_eq!(open.len(), 1, "the move does not fire the wait");
+        assert_eq!(
+            open[0].target,
+            Target::ChatIdle {
+                chat_id: "s2".into()
+            },
+            "the moved target is saved"
+        );
+        // A second roll over, then the newest session's turn ends.
+        put(
+            &probes,
+            "s2",
+            ChatObs {
+                archived: true,
+                rolls_to: Some("s3".into()),
+                ..idle()
+            },
+        );
+        put(
+            &probes,
+            "s3",
+            ChatObs {
+                busy: true,
+                ..idle()
+            },
+        );
+        svc.sweep_local(t0 + 6_000);
+        probes.chats.lock().unwrap().get_mut("s3").unwrap().busy = false;
+        svc.sweep_local(t0 + 8_000);
+        let sent = sink.sent.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1, "one message, exactly once");
+        assert_eq!(sent[0].0, "watcher");
+        assert!(sent[0].2.contains("chat s3"), "{}", sent[0].2);
+        assert!(
+            sent[0].2.contains("Followed the roll over from s1 to s3"),
+            "{}",
+            sent[0].2
+        );
+        svc.sweep_local(t0 + 10_000);
+        assert_eq!(
+            sink.sent.lock().unwrap().len(),
+            1,
+            "a fired wait never fires again"
+        );
     }
 
     #[test]
