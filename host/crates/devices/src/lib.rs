@@ -76,6 +76,7 @@ pub mod sends;
 pub mod serve;
 pub mod subs;
 pub mod testing;
+pub mod tunnel;
 pub mod wire;
 
 pub use identity::{self_name, self_uid, DeviceError};
