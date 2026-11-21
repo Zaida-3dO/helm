@@ -94,6 +94,9 @@ struct RuleWriteArgs {
     text: String,
     #[serde(default)]
     revision: Option<String>,
+    /// Set or clear the header's "always include in full" flag; absent keeps it as it is.
+    #[serde(default)]
+    always: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -350,6 +353,7 @@ fn knowledge_rule_write(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
         &a.title,
         &a.text,
         a.revision.as_deref(),
+        a.always,
         rules::MAX_RULE_FILE as usize,
     )
     .map_err(|e| conflict_error(e, "The rule could not be saved."))?;

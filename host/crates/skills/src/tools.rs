@@ -137,9 +137,13 @@ fn list_knowledge(ctx: &ToolCtx, a: Value) -> ToolResult {
     for (layer, label) in &layers {
         let root = layer.root(&data);
         for r in rules::list(&root) {
-            rule_rows.push(
-                json!({"scope": label, "path": r.path, "title": r.title, "loaded": !r.too_large}),
-            );
+            rule_rows.push(json!({
+                "scope": label,
+                "path": r.path,
+                "title": r.title,
+                "loaded": !r.too_large,
+                "always": r.always,
+            }));
         }
         for s in collected.skills.iter().filter(|s| &s.layer == layer) {
             skill_rows.push(json!({
@@ -180,12 +184,14 @@ fn save_rule(ctx: &ToolCtx, a: Value) -> ToolResult {
         Some(p) => Some(undo::stash(&data, &layer, Kind::Rule, p).map_err(io_error)?),
         None => None,
     };
+    let always = a.get("always").and_then(Value::as_bool);
     let entry = match rules::write(
         &root,
         replace,
         title,
         text,
         None,
+        always,
         rules::MAX_AGENT_RULE_TEXT,
     ) {
         Ok(e) => e,
@@ -202,7 +208,8 @@ fn save_rule(ctx: &ToolCtx, a: Value) -> ToolResult {
         name: entry.path.trim_start_matches("rules/").to_owned(),
         trash: None,
     });
-    let mut out = json!({"path": entry.path, "scope": label, "title": entry.title});
+    let mut out =
+        json!({"path": entry.path, "scope": label, "title": entry.title, "always": entry.always});
     if let Some(note) = file_change(ctx, &data, &before, &restore) {
         out["undo"] = json!(note);
     }
@@ -293,7 +300,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
         ToolSpec::write(
             "app_save_rule",
             format!(
-                "Save a rule: an instruction about how to work that this chat's person (or everyone) wants every later chat to follow. Use it when the user asks you to always or never do something. A fact or lesson belongs in memory_write instead. {SCOPE_NOTE} `replace` is the path of an existing rule to rewrite (from app_list_knowledge).{EXPLICIT}"
+                "Save a rule: an instruction about how to work that this chat's person (or everyone) wants every later chat to follow. Use it when the user asks you to always or never do something. A fact or lesson belongs in memory_write instead. {SCOPE_NOTE} `replace` is the path of an existing rule to rewrite (from app_list_knowledge). `always: true` keeps the rule whole in every chat's prompt however long it is, instead of listing it by one line: use for short, essential rules; a rewrite without it keeps the rule's current setting.{EXPLICIT}"
             ),
             json!({
                 "type": "object",
@@ -301,7 +308,8 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                     "title": {"type": "string", "minLength": 1, "maxLength": 120},
                     "text": {"type": "string", "minLength": 1, "maxLength": 16384},
                     "scope": scope_schema(""),
-                    "replace": {"type": "string", "maxLength": 128, "description": "The path of the rule to rewrite, such as rules/git-habits.md."}
+                    "replace": {"type": "string", "maxLength": 128, "description": "The path of the rule to rewrite, such as rules/git-habits.md."},
+                    "always": {"type": "boolean", "description": "true keeps a long rule whole in every chat's prompt instead of listing it by a line; use for short, essential rules. Omit to keep the rule's current setting."}
                 },
                 "required": ["title", "text"],
                 "additionalProperties": false
@@ -601,5 +609,54 @@ mod tests {
             json!({"name": "my-skill"})
         ))
         .contains("no skill"));
+
+        // `always: true` writes the header, a rewrite without it keeps the flag, and
+        // `always: false` clears it. The listing carries the flag too.
+        let pinned = data.join("knowledge/people/alex/rules/pinned-rule.md");
+        let saved = run(
+            "alex-chat",
+            "app_save_rule",
+            json!({"title": "Pinned rule", "text": "Read this whole.", "always": true}),
+        )
+        .unwrap();
+        assert_eq!(saved["path"], "rules/pinned-rule.md");
+        assert_eq!(saved["always"], true);
+        let text = fs::read_to_string(&pinned).unwrap();
+        assert!(
+            text.starts_with("---\nalways: true\n---\n# Pinned rule"),
+            "{text}"
+        );
+        run(
+            "alex-chat",
+            "app_save_rule",
+            json!({"title": "Pinned rule", "text": "Still whole.", "replace": "rules/pinned-rule.md"}),
+        )
+        .unwrap();
+        assert!(
+            fs::read_to_string(&pinned)
+                .unwrap()
+                .starts_with("---\nalways: true\n---\n"),
+            "a rewrite without `always` keeps the flag"
+        );
+        let cleared = run(
+            "alex-chat",
+            "app_save_rule",
+            json!({"title": "Pinned rule", "text": "By a line now.", "replace": "rules/pinned-rule.md", "always": false}),
+        )
+        .unwrap();
+        assert_eq!(cleared["always"], false);
+        let text = fs::read_to_string(&pinned).unwrap();
+        assert!(
+            !text.starts_with("---"),
+            "a rewrite clears the header: {text}"
+        );
+        let listed = run("alex-chat", "app_list_knowledge", json!({"scope": "me"})).unwrap();
+        let row = listed["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["path"] == "rules/pinned-rule.md")
+            .unwrap();
+        assert_eq!(row["always"], false);
     }
 }

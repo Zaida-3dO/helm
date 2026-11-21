@@ -41,6 +41,9 @@ pub struct RuleEntry {
     pub revision: String,
     /// Over the size limit: listed so it can be fixed, but never loaded into a chat.
     pub too_large: bool,
+    /// The header says `always: true`: the launch carries the whole rule into a chat's prompt,
+    /// however long it is. False for a rule too large to load, whose header is never read.
+    pub always: bool,
 }
 
 fn invalid(why: &str) -> io::Error {
@@ -126,6 +129,44 @@ pub fn split_front(text: &str) -> (Front, &str) {
     (f, &text[n..])
 }
 
+/// Put the header's `always` line right: `Some(true)` sets it, `Some(false)` removes it, and `None`
+/// leaves the header exactly as it is. Unrecognised lines stay; a header left with nothing in it
+/// goes away, and an empty header grows one only when asked for `true`.
+fn set_always(header: &str, always: Option<bool>) -> String {
+    let Some(want) = always else {
+        return header.to_owned();
+    };
+    if header.is_empty() {
+        return if want {
+            "---\nalways: true\n---\n".to_owned()
+        } else {
+            String::new()
+        };
+    }
+    let fence_end = header.find('\n').unwrap_or(header.len()) + 1;
+    let open = header[..fence_end].replace("\r\n", "\n");
+    let body = &header[fence_end..];
+    let inner = body[..body.rfind("---").unwrap_or(0)].replace('\r', "");
+    let mut lines = String::new();
+    for line in inner.lines() {
+        if line
+            .split_once(':')
+            .is_some_and(|(k, _)| k.trim() == "always")
+        {
+            continue;
+        }
+        lines.push_str(line);
+        lines.push('\n');
+    }
+    if lines.is_empty() && !want {
+        return String::new();
+    }
+    if want {
+        lines.insert_str(0, "always: true\n");
+    }
+    format!("{open}{lines}---\n")
+}
+
 /// The title of a rule's text: its first `# ` line, else `fallback`.
 pub fn title_of(text: &str, fallback: &str) -> String {
     let text = split_front(text).1;
@@ -169,6 +210,7 @@ fn entry(path: &Path, file: &str) -> Option<(RuleEntry, Option<String>)> {
                 size: meta.len(),
                 revision: String::new(),
                 too_large: true,
+                always: false,
             },
             None,
         ));
@@ -182,6 +224,7 @@ fn entry(path: &Path, file: &str) -> Option<(RuleEntry, Option<String>)> {
             size: meta.len(),
             revision: helm_core::sha256_hex(&bytes),
             too_large: false,
+            always: split_front(&text).0.always,
         },
         Some(text),
     ))
@@ -254,13 +297,16 @@ fn new_file_name(root: &Path, title: &str) -> io::Result<String> {
 
 /// Write a rule: a new file named from the title (`path` absent), or the file at `path` (which
 /// must exist) replaced. `expected_revision`, when given, must match the file's current revision,
-/// else `AlreadyExists` says it changed since it was read. `max_text` caps the text.
+/// else `AlreadyExists` says it changed since it was read. `always`, when given, sets or clears
+/// the header's `always: true` line (a rewrite without it keeps the flag as it is). `max_text`
+/// caps the text.
 pub fn write(
     root: &Path,
     path: Option<&str>,
     title: &str,
     text: &str,
     expected_revision: Option<&str>,
+    always: Option<bool>,
     max_text: usize,
 ) -> io::Result<RuleEntry> {
     let title = title.trim();
@@ -288,7 +334,8 @@ pub fn write(
     if body.len() as u64 > MAX_RULE_FILE {
         return Err(invalid("the rule is too large"));
     }
-    // A rewritten rule keeps its header (its summary, whether it is always carried).
+    // A rewritten rule keeps its header (its summary, whether it is always carried); `always`
+    // sets or clears the flag without disturbing the rest of the header.
     let mut header = String::new();
     let file = match path {
         Some(p) => {
@@ -305,10 +352,13 @@ pub fn write(
                     "the rule changed since it was read",
                 ));
             }
-            header = old[..front_len(&old)].to_owned();
+            header = set_always(&old[..front_len(&old)], always);
             file
         }
-        None => new_file_name(root, title)?,
+        None => {
+            header = set_always("", always);
+            new_file_name(root, title)?
+        }
     };
     let body = format!("{header}{body}");
     if body.len() as u64 > MAX_RULE_FILE {

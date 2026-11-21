@@ -16,4 +16,9 @@ revision: string,
 /**
  * Over the size limit: listed so it can be fixed, but never loaded into a chat.
  */
-tooLarge: boolean, };
+tooLarge: boolean, 
+/**
+ * The header says `always: true`: the launch carries the whole rule into a chat's prompt,
+ * however long it is. False for a rule too large to load, whose header is never read.
+ */
+always: boolean, };

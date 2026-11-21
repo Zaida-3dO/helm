@@ -220,12 +220,13 @@ mod tests {
             .unwrap()
             .contains("More words follow."));
         assert!(help.topic("c", "nope").is_none());
-        // A rewrite keeps the header.
+        // A rewrite keeps the header; passing `always` explicitly sets or clears just that flag.
         let e = rules::write(
             &root,
             Some("rules/pinned.md"),
             "Pinned",
             "New body.",
+            None,
             None,
             4096,
         )
@@ -235,6 +236,55 @@ mod tests {
         assert!(
             front.always && front.summary.as_deref() == Some("Never skipped."),
             "{e:?}"
+        );
+        // A rule without a header gains one only when asked for, and loses it again.
+        rules::write(
+            &root,
+            Some("rules/long.md"),
+            "Long one",
+            "Still a line rule.",
+            None,
+            None,
+            4096,
+        )
+        .unwrap();
+        assert!(
+            !fs::read_to_string(root.join("rules/long.md"))
+                .unwrap()
+                .starts_with("---"),
+            "a rewrite without `always` gains no header"
+        );
+        rules::write(
+            &root,
+            Some("rules/long.md"),
+            "Long one",
+            "Carried whole now.",
+            None,
+            Some(true),
+            4096,
+        )
+        .unwrap();
+        assert!(
+            fs::read_to_string(root.join("rules/long.md"))
+                .unwrap()
+                .starts_with("---\nalways: true\n---\n"),
+            "always: Some(true) writes the header"
+        );
+        rules::write(
+            &root,
+            Some("rules/long.md"),
+            "Long one",
+            "Back to a line.",
+            None,
+            Some(false),
+            4096,
+        )
+        .unwrap();
+        assert!(
+            !fs::read_to_string(root.join("rules/long.md"))
+                .unwrap()
+                .contains("always"),
+            "always: Some(false) clears it"
         );
         assert_eq!(
             rules::title_of(
