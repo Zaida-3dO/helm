@@ -59,6 +59,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `tool-save-full` / `tool-saved` | Save full output on a long output (the row holds only its start), and the line beside it | |
 | `work-fold-open` | The "Worked for …" row of a turn the reader has opened (click to fold again); the closed row keeps `work-fold` | |
 | `work-failed` | The "N failed" count on a "Worked for" row | |
+| `session-divider` | The thin divider where two sessions of a roll-over stack meet in one transcript ("Earlier session · <title> · rolled over <date>") | |
 | `tool-status` / `tool-box` / `result-grid` | A tool row's trailing status, its opened output or diff box, and the key/value grid for host and MCP results | `tool-card` also carries `data-source` (`host` `mcp` `native`) |
 | `thinking` | The Thinking disclosure of a reply | |
 | `interaction-card` | An approval, question or plan card | `data-attention` (`approval` `question` `plan`) |

@@ -57,7 +57,9 @@ export type Item =
       open: boolean;
     }
   // Agent calls that follow one another, drawn as one header over a grid of subagent cards.
-  | { kind: 'agents'; key: string; rows: MessageRow[]; flags: RowFlags[] };
+  | { kind: 'agents'; key: string; rows: MessageRow[]; flags: RowFlags[] }
+  // Where a roll-over stack's sessions meet in one transcript: a thin divider, no content.
+  | { kind: 'divider'; key: string; sessionId: string; title: string; rolledOverAt: number };
 
 /** A steer read mid-turn belongs to the running turn; only other user rows open a new turn. */
 function opensTurn(r: MessageRow): boolean {
@@ -127,19 +129,43 @@ function groupAgents(items: Item[]): Item[] {
 
 /**
  * Lay out rows as items. `live` says whether the newest turn is still running; `expanded` lists the
- * turn keys the reader has opened.
+ * turn keys the reader has opened; `dividers` names the older session at each roll-over boundary
+ * (keyed by that session's id) so the meeting of two sessions gets a divider row.
  */
-export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<string> = new Set()): Item[] {
+export function layout(
+  rows: MessageRow[],
+  live: boolean,
+  expanded: ReadonlySet<string> = new Set(),
+  dividers: ReadonlyMap<string, { title: string; rolledOverAt: number }> = new Map(),
+): Item[] {
   const items: Item[] = [];
   let i = 0;
+  // A page read across a roll-over stack: where the rows change session, put up a divider naming
+  // the older session the reader meets going up.
+  let lastChatId = '';
+  const boundary = (r: MessageRow): void => {
+    if (lastChatId !== '' && r.chatId !== lastChatId) {
+      const meta = dividers.get(lastChatId);
+      items.push({
+        kind: 'divider',
+        key: `div:${lastChatId}`,
+        sessionId: lastChatId,
+        title: meta?.title ?? '',
+        rolledOverAt: meta?.rolledOverAt ?? 0,
+      });
+    }
+    lastChatId = r.chatId;
+  };
   // Rows before the first user row (a page that starts mid-turn) are shown as they are,
   // except the empty ones, which are never drawn.
   while (i < rows.length && !opensTurn(rows[i]!)) {
     const r = rows[i++]!;
+    boundary(r);
     if (!undrawn(r)) items.push({ kind: 'row', row: r });
   }
   while (i < rows.length) {
     const user = rows[i++]!;
+    boundary(user);
     if (!isHelmNote(user)) items.push({ kind: 'row', row: user });
     const work: MessageRow[] = [];
     while (i < rows.length && !opensTurn(rows[i]!)) work.push(rows[i++]!);
@@ -267,6 +293,7 @@ const estimates = new WeakMap<MessageRow, number>();
 export function estimateItem(item: Item | undefined): number {
   if (!item) return ESTIMATE;
   if (item.kind === 'fold') return estimateHeight({ kind: 'fold', chars: 0, lines: 0 });
+  if (item.kind === 'divider') return 34;
   // A header and two cards a line.
   if (item.kind === 'agents') return 44 + 96 * Math.ceil(item.rows.length / 2);
   const row = item.row;

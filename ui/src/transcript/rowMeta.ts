@@ -169,6 +169,11 @@ export function turnTimes(items: Item[]): Map<number, number> {
   };
   for (const it of items) {
     if (it.kind === 'agents') continue;
+    // A divider between the sessions of a roll-over stack ends the turn above it.
+    if (it.kind === 'divider') {
+      close();
+      continue;
+    }
     if (it.kind === 'fold') elapsed = it.elapsedMs;
     else if (it.row.role === 'user' && it.row.details?.mode !== 'steer') close();
     else if (elapsed !== null && it.row.role === 'assistant' && it.row.text.trim()) reply = it.row.id;

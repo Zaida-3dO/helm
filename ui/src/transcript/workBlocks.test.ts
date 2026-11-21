@@ -325,3 +325,24 @@ test('a gallery or board never folds, and a settled turn with a checklist or thr
   const hasRecap = (rs: MessageRow[]) => layout(rs, false).some((i) => i.kind === 'row' && i.recap !== undefined);
   assert.deepEqual([hasRecap(bare(2)), hasRecap(bare(3))], [false, true]);
 });
+
+test('a page read across a roll-over stack gets one divider naming the older session', () => {
+  const stack = [
+    row({ id: 1, role: 'user', chatId: 'c1', timestamp: 0 }),
+    row({ id: 2, role: 'assistant', text: 'done', chatId: 'c1', timestamp: 1000 }),
+    row({ id: 3, role: 'user', text: 'carry on', chatId: 'c2', timestamp: 2000 }),
+  ];
+  const items = layout(stack, false, new Set(), new Map([['c1', { title: 'First turn', rolledOverAt: 1_500 }]]));
+  const div = items.find((i) => i.kind === 'divider');
+  assert.equal(div?.kind === 'divider' && div.sessionId === 'c1' && div.title === 'First turn' && div.rolledOverAt === 1_500, true);
+  // The divider sits where the older session's rows end, before the newer turn.
+  const at = items.findIndex((i) => i.kind === 'divider');
+  const above = items[at - 1];
+  const below = items[at + 1];
+  assert.ok(above?.kind === 'row' && above.row.id === 2);
+  assert.ok(below?.kind === 'row' && below.row.id === 3);
+  assert.equal(estimateItem(div) > 0, true);
+  // One session, or a boundary nobody told us about: still a divider (unnamed) or none at all.
+  assert.equal(layout(turn(), false).some((i) => i.kind === 'divider'), false);
+  assert.equal(layout(stack, false).some((i) => i.kind === 'divider'), true, 'a session change alone draws it, unnamed');
+});

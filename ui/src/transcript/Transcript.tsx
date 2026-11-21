@@ -4,7 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatOps } from '../api/ops.ts';
 import type { RemoteChatOps } from '../api/devices.ts';
-import type { MessageRow, Submission, ThreadState } from '../api/types.ts';
+import type { MessageRow, SessionMark, Submission, ThreadState } from '../api/types.ts';
 import { waitReason } from '../composer/inFlight.ts';
 import { QueueItem, inFlightItems } from '../composer/QueueList.tsx';
 import { FoldRow, Row, type RowContext } from './Rows.tsx';
@@ -24,6 +24,8 @@ export interface TranscriptProps {
   jumpToRowId?: number | null;
   /** Changes when the transcript should jump to the newest message and follow it (the reader sent one). */
   scrollSignal?: number;
+  /** Where the loaded rows meet a roll-over session boundary; each meeting draws a divider. */
+  sessionMarks?: SessionMark[];
   /**
    * Messages in flight, shown as the last items of the flow (their keys start `q:`). Leave out for
    * a transcript that is not at its newest page: they could not sit at the end of it.
@@ -38,9 +40,25 @@ function itemKey(i: Item): string {
   return i.kind === 'row' ? `r:${i.row.id}` : i.key;
 }
 
-export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLatest, onFollowChange, jumpToRowId, scrollSignal, queue }: TranscriptProps) {
+/** The thin divider where two sessions of a roll-over stack meet. */
+function SessionDivider({ title, rolledOverAt }: { title: string; rolledOverAt: number }) {
+  const when = rolledOverAt ? new Date(rolledOverAt).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '';
+  return (
+    <div className="session-divider" data-testid="session-divider">
+      Earlier session{title ? ` · ${title}` : ''}
+      {when ? ` · rolled over ${when}` : ''}
+    </div>
+  );
+}
+
+export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLatest, onFollowChange, jumpToRowId, scrollSignal, queue, sessionMarks }: TranscriptProps) {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
-  const items = useMemo(() => layout(rows, live, expanded), [rows, live, expanded]);
+  // Each older session of the stack names the divider drawn where its rows end.
+  const dividers = useMemo(
+    () => new Map((sessionMarks ?? []).map((m) => [m.sessionId, { title: m.title, rolledOverAt: m.rolledOverAt }])),
+    [sessionMarks],
+  );
+  const items = useMemo(() => layout(rows, live, expanded, dividers), [rows, live, expanded, dividers]);
   // A row inside a subagent group is found under the group's key.
   const byKey = useMemo(() => {
     const m = new Map<string, Item>();
@@ -115,6 +133,7 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
         if (item.kind === 'row') return (
             <Row row={item.row} ctx={ctx} final={item.final} afterTool={item.afterTool} indent={item.indent} afterFold={item.afterFold} hideThinking={item.hideThinking} beforeTool={item.beforeTool} noticeLive={item.noticeLive} recap={item.recap} turnMs={times.get(item.row.id)} skills={skills.get(item.row.id)} />
           );
+        if (item.kind === 'divider') return <SessionDivider title={item.title} rolledOverAt={item.rolledOverAt} />;
         if (item.kind === 'agents') return <AgentGroup rows={item.rows} flags={item.flags} ctx={ctx} />;
         return (
           <FoldRow
