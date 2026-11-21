@@ -32,6 +32,51 @@
   opacity: 0.85;
 }
 
+/* Ports of that PC forwarded to this one, and "Forward a port…", at the bar's end. */
+.remote-bar-forwards {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex: none;
+}
+.remote-fwd,
+.remote-fwd-ask {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.remote-fwd-port {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.remote-fwd-btn {
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.remote-fwd-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+.remote-fwd-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.remote-fwd-input {
+  width: 64px;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+}
+
 /* A note under the composer's box: a send nobody confirmed. */
 .composer-unconfirmed {
   padding: 6px 10px;

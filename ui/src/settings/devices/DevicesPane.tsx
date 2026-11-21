@@ -2,13 +2,14 @@
 // devices on the household hub. A chat always runs on the device it was started on, under that
 // device's Claude sign-in and plan; the switch here decides whether another device, yours or
 // someone else's in the household, may start and steer chats on this PC. Reading chats needs only
-// pairing, not this switch.
+// pairing, not this switch. Below them, the ports of other PCs forwarded to this one, with Stop.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useShell } from '../../shell/context.ts';
 import { Button, Checkbox, SettingRow, TextInput } from '../../ui/index.ts';
+import { openForward, useForwards } from '../../devices/RemoteChatBar.tsx';
 import { devicesOps, RUN_FROM_OTHERS_KEY, type DeviceRow } from './api.ts';
-import { nameOk, NAME_MAX, otherDevices, peopleLine, presence } from './model.ts';
+import { forwardRows, nameOk, NAME_MAX, otherDevices, peopleLine, presence } from './model.ts';
 import './devices.css';
 
 function errorText(e: unknown): string {
@@ -25,6 +26,7 @@ export function DevicesPane() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  const forwards = useForwards();
 
   const loadSelf = useCallback(
     () =>
@@ -147,6 +149,27 @@ export function DevicesPane() {
             <span className="dv-run" data-testid={`device-run-${d.uid}`}>
               Can run chats there: {d.run ? 'yes' : 'no'}
             </span>
+          </SettingRow>
+        ))
+      )}
+
+      <h3 className="hub-heading">Ports forwarded to this PC</h3>
+      {forwards.length === 0 ? (
+        <div className="setting-desc" data-testid="forwards-empty">
+          None. An agent can offer one, or use "Forward a port…" on a chat that runs on another PC. A forward ends when either PC
+          closes Helm, or after 30 minutes unused.
+        </div>
+      ) : (
+        forwardRows(forwards, Date.now()).map(({ forward: f, line, use }) => (
+          <SettingRow key={f.forwardId} testId={`forward-row-${f.forwardId}`} title={line} description={use}>
+            <div className="dv-forward-actions">
+              <Button data-testid={`forward-open-${f.forwardId}`} onClick={() => openForward(f, null)}>
+                Open
+              </Button>
+              <Button data-testid={`forward-stop-${f.forwardId}`} onClick={() => void ops.forwardClose(f.forwardId).catch((e: unknown) => setError(errorText(e)))}>
+                Stop
+              </Button>
+            </div>
           </SettingRow>
         ))
       )}

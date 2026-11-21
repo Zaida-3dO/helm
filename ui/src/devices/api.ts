@@ -79,6 +79,39 @@ export interface ThisDevice {
   name: string;
 }
 
+/**
+ * A port of the PC a chat runs on, forwarded to this PC: `localhost:<localPort>` here reaches
+ * `localhost:<port>` there, through the hub line. It lives only while both PCs run.
+ */
+export interface Forward {
+  forwardId: string;
+  chatId: string;
+  /** The PC the port is on. */
+  deviceUid: string;
+  deviceName: string;
+  port: number;
+  /** The port on this PC: the same one when it was free. */
+  localPort: number;
+  url: string;
+  title: string;
+  /** Connections open through it now. */
+  streams: number;
+  openedAt: number;
+  lastUsedAt: number;
+}
+
+/** The event the host sends when a forward opens, closes or changes. */
+export const FORWARDS_CHANGED = 'devices_forwards_changed';
+
+/**
+ * The address a forward opens in the browser: always plain http to this PC's loopback, built here
+ * from the local port, never taken from the host's answer as written.
+ */
+export function forwardAddress(f: Pick<Forward, 'localPort'>): string | null {
+  const p = f.localPort;
+  return Number.isInteger(p) && p >= 1 && p <= 65535 ? `http://localhost:${p}/` : null;
+}
+
 /** The preference that remembers which computer's chats the sidebar shows. */
 export const SELECTED_DEVICE_KEY = 'selectedDevice';
 
@@ -113,6 +146,13 @@ export function deviceOps(api: Api) {
     shareChat: (a: { chatId: string; personId: string; shared: boolean }) => api<unknown>('devices_share_chat', a),
     /** Hand a mirrored chat to one of the profiles on the PC that runs it. */
     moveProfile: (a: { chatId: string; profileId: string }) => api<unknown>('devices_move_profile', a),
+    /** Forward a port of the PC a chat runs on to this PC (loopback only, on both ends). */
+    forwardOpen: (a: { chatId: string; port: number; title?: string }) => api<Forward>('devices_forward_open', a),
+    /** Every port forwarded to this PC now. */
+    forwards: () => api<{ forwards: Forward[] }>('devices_forwards', {}).then((r) => (Array.isArray(r?.forwards) ? r.forwards : [])),
+    forwardClose: (forwardId: string) => api<unknown>('devices_forward_close', { forwardId }),
+    /** Copy a file of a chat that runs on another PC to this PC; null when the person cancelled the dialog. */
+    fileSave: (chatId: string, path: string) => api<{ path: string | null }>('devices_file_save', { chatId, path }).then((r) => r?.path ?? null),
     self: () => api<ThisDevice>('device_get', {}),
     rename: (name: string) => api<ThisDevice>('device_rename', { name }),
     /** The stored choice; null when none was made (this computer). */

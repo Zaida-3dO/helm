@@ -1,6 +1,7 @@
 // The device ops Settings → Devices uses. This PC's name and the list of devices come from the
-// sidebar's device module (`ui/src/devices/api.ts`); what is added here are the switches that let
-// other devices, whoever they belong to, run chats on this PC.
+// sidebar's device module (`ui/src/devices/api.ts`), and so does stopping a port forwarded to this
+// PC; what is added here are the switches that let other devices, whoever they belong to, run chats
+// on this PC.
 
 import type { Api } from '../../api/client.ts';
 import { deviceOps } from '../../devices/api.ts';
@@ -16,6 +17,7 @@ export function devicesOps(api: Api) {
     self: devices.self,
     rename: devices.rename,
     list: devices.list,
+    forwardClose: devices.forwardClose,
     runFromOthers: () => api<unknown>('preference_get', { key: RUN_FROM_OTHERS_KEY }).then((v) => v !== false),
     setRunFromOthers: (on: boolean) => api<unknown>('preference', { key: RUN_FROM_OTHERS_KEY, value: on }),
   };
