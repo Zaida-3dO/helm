@@ -43,10 +43,12 @@ pub fn plain_path(p: &Path) -> String {
     }
 }
 
-/// The command line the value holds: both paths quoted, so spaces are safe.
+/// The command line the value holds: both paths quoted, so spaces are safe, and `--at-logon`
+/// says this start came from Windows at sign-in (Helm starts the same program without it, and
+/// the launcher opens Helm at sign-in only for the Windows start).
 pub fn command(exe: &Path, profile_dir: &Path) -> String {
     format!(
-        "\"{}\" --profile \"{}\"",
+        "\"{}\" --profile \"{}\" --at-logon",
         plain_path(exe),
         plain_path(profile_dir)
     )

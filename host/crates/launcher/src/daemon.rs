@@ -54,6 +54,8 @@ pub struct HelmState {
 pub struct Daemon {
     profile_dir: PathBuf,
     is_default_profile: bool,
+    /// Windows started this launcher from the `Run` key at sign-in (`--at-logon`).
+    at_logon: bool,
     creds: CredentialStore,
     state: tokio_watch::Sender<HelmState>,
     /// Woken after a launch, so the watch picks the new Helm up at once.
@@ -64,6 +66,18 @@ pub struct Daemon {
     wake_told: Mutex<bool>,
 }
 
+/// Should the launcher open Helm as it comes up? Only when Windows started it at sign-in, the
+/// person's sign-in switch is on, and nothing is running yet. The answer is used once, at the
+/// launcher's own start: a Helm the person closes later stays closed, and the restart-after-
+/// crash rule ([`watch::decide`]) stays separate.
+pub fn opens_helm_at_logon(
+    started_at_logon: bool,
+    start_at_sign_in: bool,
+    helm_running: bool,
+) -> bool {
+    started_at_logon && start_at_sign_in && !helm_running
+}
+
 enum ConnectError {
     /// An older hub with no launcher line.
     Missing,
@@ -71,10 +85,15 @@ enum ConnectError {
 }
 
 impl Daemon {
-    pub fn new(profile: &Profile, keychain: Arc<dyn helm_platform::Keychain>) -> Arc<Self> {
+    pub fn new(
+        profile: &Profile,
+        keychain: Arc<dyn helm_platform::Keychain>,
+        at_logon: bool,
+    ) -> Arc<Self> {
         Arc::new(Daemon {
             profile_dir: profile.dir.clone(),
             is_default_profile: crate::ops::is_default_profile(profile),
+            at_logon,
             creds: CredentialStore::new(&profile.path("credentials"), &profile.hash, keychain),
             state: tokio_watch::channel(HelmState::default()).0,
             started: Notify::new(),
@@ -170,10 +189,20 @@ impl Daemon {
     /// Watch Helm: wait on it while it runs, and restart it after a crash.
     pub async fn watch_helm(self: Arc<Self>) {
         let mut restarts = watch::Restarts::default();
+        // The sign-in decision is made once, on the first look, not every time round.
+        let mut looked_at_start = false;
         loop {
             let handoff = self.handoff_or_exit();
             let exe = PathBuf::from(&handoff.helm_exe);
-            let Some(pid) = self.helm_pid(&exe) else {
+            let pid = self.helm_pid(&exe);
+            if !looked_at_start {
+                looked_at_start = true;
+                if opens_helm_at_logon(self.at_logon, handoff.start_at_sign_in, pid.is_some()) {
+                    log::info!("launcher: opening Helm for sign-in");
+                    let _ = self.start_helm(&exe);
+                }
+            }
+            let Some(pid) = pid else {
                 self.set_state(|s| s.helm_running = false);
                 let next = if self.starting() {
                     Duration::from_secs(1)
@@ -370,6 +399,49 @@ impl Daemon {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::opens_helm_at_logon;
+
+    #[test]
+    fn helm_opens_only_for_a_sign_in_start_with_the_switch_on_and_nothing_running() {
+        // (why, Windows started it at sign-in, the switch, Helm running, opens Helm?)
+        let rows: &[(&str, bool, bool, bool, bool)] = &[
+            (
+                "sign-in start, switch on, nothing running",
+                true,
+                true,
+                false,
+                true,
+            ),
+            ("Helm is already up at sign-in", true, true, true, false),
+            ("the person turned sign-in off", true, false, false, false),
+            (
+                "sign-in start, off switch, Helm up",
+                true,
+                false,
+                true,
+                false,
+            ),
+            (
+                "Helm itself started the launcher",
+                false,
+                true,
+                false,
+                false,
+            ),
+            ("the hub asked for this launcher", false, true, true, false),
+        ];
+        for (why, at_logon, switch, running, want) in rows {
+            assert_eq!(
+                opens_helm_at_logon(*at_logon, *switch, *running),
+                *want,
+                "{why}"
+            );
+        }
+    }
+}
+
 /// The hub's reason, for the log: one of the known words, never the hub's raw text.
 fn reason_text(reason: &str) -> &'static str {
     match reason {
@@ -519,6 +591,7 @@ pub fn main() -> ExitCode {
     let daemon = Daemon::new(
         &profile,
         Arc::new(helm_platform::keychain::NativeKeychain::new()),
+        args.iter().any(|a| a == "--at-logon"),
     );
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()

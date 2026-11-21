@@ -5,8 +5,9 @@
 //! process id that is gone and no `exit` is a run that was cut short: a crash.
 //!
 //! The launcher restarts Helm only after it has watched that process end, never because of a
-//! record it finds when it starts itself (a PC that lost power last night is not a reason to open
-//! Helm at logon). [`decide`] is the whole rule.
+//! record it finds when it starts itself: the restart rule never opens Helm on its own. Opening
+//! Helm at sign-in is the separate switch in [`crate::daemon::opens_helm_at_logon`]. [`decide`]
+//! is the whole restart rule.
 
 use serde::Deserialize;
 use std::collections::VecDeque;

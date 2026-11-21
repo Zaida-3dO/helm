@@ -7,8 +7,10 @@
 //! starts Helm (hidden in the tray) when the hub asks, restarts Helm after a crash (never after an
 //! orderly quit, and never while an update is writing the program), and tells the hub the PC's MAC
 //! and LAN broadcast address so the hub can wake it. It has no window, no chats and no token but
-//! the hub's, which it reads from the profile's credential store the way Helm does. It never opens
-//! Helm at logon on its own.
+//! the hub's, which it reads from the profile's credential store the way Helm does. When Windows
+//! starts it from the `Run` key it also opens Helm, hidden, if the sign-in switch is on (it is by
+//! default) and nothing is running; Helm itself starts the same program without that flag, so a
+//! switch flipped inside Helm never opens a second Helm.
 //!
 //! | module | what |
 //! |---|---|
@@ -22,9 +24,11 @@
 //! | [`ops`] | `launcher_get` and `launcher_set`, for Settings → Hub only |
 //! | [`sys`] | the Windows calls: processes, the instance mutex, the stop event, detached starts |
 //!
-//! The switch is on by default for a PC paired with a hub and off for one that is not; the
-//! person's own choice, once made, wins. Debug builds never start the launcher or write the real
-//! `Run` key unless asked (`HELM_TEST_LAUNCHER=1`, `HELM_TEST_LAUNCHER_REGISTER=1`).
+//! The launcher switch is on by default for a PC paired with a hub and off for one that is not;
+//! the sign-in switch is on by default everywhere, and switching it on by hand brings the
+//! launcher with it. In both cases the person's own choice, once made, wins. Debug builds never
+//! start the launcher or write the real `Run` key unless asked (`HELM_TEST_LAUNCHER=1`,
+//! `HELM_TEST_LAUNCHER_REGISTER=1`).
 
 pub mod daemon;
 pub mod frames;

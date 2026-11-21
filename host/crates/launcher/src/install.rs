@@ -5,8 +5,8 @@
 //!
 //! | file | written by | what |
 //! |---|---|---|
-//! | `launcher.json` | Helm, at every start and every switch | `{helmExe, version, enabled}`: what to start, and whether the launcher should run at all |
-//! | `choice.json` | Helm, when the person flips the switch | `{enabled}`; absent means the default (on while the PC is paired with a hub) |
+//! | `launcher.json` | Helm, at every start and every switch | `{helmExe, version, enabled, startAtSignIn}`: what to start, whether the launcher should run at all, and whether it opens Helm at sign-in |
+//! | `choice.json` | Helm, when the person flips either switch | `{enabled?, startAtSignIn?}`; an absent field means that switch's default (launcher on while the PC is paired with a hub; opening Helm at sign-in on) |
 //! | `status.json` | the launcher | `{hub, wake, at}`: whether its hub line is up and the hub has its wake details |
 //! | `launcher.pid` | the launcher | its process id, in decimal, while it runs: the installer ends exactly that process |
 //! | `helm-launcher.exe` | Helm | its own copy of the program shipped beside `helm.exe`, so an update never finds it locked |
@@ -43,6 +43,13 @@ pub struct Handoff {
     pub helm_exe: String,
     pub version: String,
     pub enabled: bool,
+    /// Open Helm, hidden, when Windows starts the launcher at sign-in and nothing is running.
+    #[serde(default = "default_true")]
+    pub start_at_sign_in: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 pub fn read_handoff(profile_dir: &Path) -> Option<Handoff> {
@@ -53,24 +60,49 @@ fn write_handoff(profile_dir: &Path, h: &Handoff) -> std::io::Result<()> {
     write_json(&dir(profile_dir).join("launcher.json"), h)
 }
 
-#[derive(Serialize, Deserialize)]
-struct Choice {
-    enabled: bool,
+/// The person's two switches; an absent field means they never touched that one.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Choice {
+    pub enabled: Option<bool>,
+    pub start_at_sign_in: Option<bool>,
 }
 
-/// The person's own choice, if they made one.
-pub fn choice(profile_dir: &Path) -> Option<bool> {
-    read_json::<Choice>(&dir(profile_dir).join("choice.json")).map(|c| c.enabled)
+/// The person's own choices, as saved (all default when there is no file).
+pub fn choice(profile_dir: &Path) -> Choice {
+    read_json::<Choice>(&dir(profile_dir).join("choice.json")).unwrap_or_default()
 }
 
-pub fn save_choice(profile_dir: &Path, enabled: bool) -> std::io::Result<()> {
-    write_json(&dir(profile_dir).join("choice.json"), &Choice { enabled })
+/// Save one or both switches at once; `None` leaves that switch as it stands.
+pub fn save_choice(
+    profile_dir: &Path,
+    enabled: Option<bool>,
+    start_at_sign_in: Option<bool>,
+) -> std::io::Result<()> {
+    let mut c = choice(profile_dir);
+    if let Some(e) = enabled {
+        c.enabled = Some(e);
+    }
+    if let Some(s) = start_at_sign_in {
+        c.start_at_sign_in = Some(s);
+    }
+    write_json(&dir(profile_dir).join("choice.json"), &c)
 }
 
-/// On unless the person turned it off; with no choice made, on exactly while the PC is paired
-/// with a hub (an unpaired install registers nothing).
-pub fn effective_enabled(choice: Option<bool>, paired: bool) -> bool {
-    choice.unwrap_or(paired)
+/// The launcher switch in force. On unless the person turned it off; with no choice made, on
+/// exactly while the PC is paired with a hub or the person switched on opening Helm at sign-in
+/// themselves (that needs the launcher, so it brings the launcher with it). An untouched install
+/// on an unpaired PC registers nothing.
+pub fn effective_enabled(choice: &Choice, paired: bool) -> bool {
+    choice
+        .enabled
+        .unwrap_or(paired || choice.start_at_sign_in == Some(true))
+}
+
+/// The sign-in switch in force: on unless the person turned it off. It only ever matters while
+/// the launcher itself is enabled — it is the launcher that opens Helm.
+pub fn effective_start_at_sign_in(choice: &Choice) -> bool {
+    choice.start_at_sign_in.unwrap_or(true)
 }
 
 /// What the launcher says about its line.
@@ -127,8 +159,10 @@ fn write_json<T: Serialize>(path: &Path, v: &T) -> std::io::Result<()> {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LauncherView {
-    /// The switch as it is in force: the person's choice, else on while paired.
+    /// The launcher switch as it is in force: the person's choice, else on while paired.
     pub enabled: bool,
+    /// The sign-in switch as it is in force: the person's choice, else on.
+    pub start_at_sign_in: bool,
     /// A launcher is running for this profile.
     pub running: bool,
     /// The `Run` value starts this profile's launcher at logon.
@@ -205,11 +239,13 @@ pub fn apply(s: &Setup) -> LauncherView {
     if !s.may_change {
         return view_unlocked(s);
     }
-    let enabled = effective_enabled(choice(s.profile_dir), s.paired);
+    let choices = choice(s.profile_dir);
+    let enabled = effective_enabled(&choices, s.paired);
     let handoff = Handoff {
         helm_exe: runkey::plain_path(&s.helm_exe),
         version: env!("CARGO_PKG_VERSION").to_owned(),
         enabled,
+        start_at_sign_in: effective_start_at_sign_in(&choices),
     };
     if let Err(e) = write_handoff(s.profile_dir, &handoff) {
         log::warn!("launcher: its settings file was not written: {e}");
@@ -264,8 +300,10 @@ pub fn view(s: &Setup) -> LauncherView {
 
 fn view_unlocked(s: &Setup) -> LauncherView {
     let running = running(s.profile_hash);
+    let choices = choice(s.profile_dir);
     LauncherView {
-        enabled: effective_enabled(choice(s.profile_dir), s.paired),
+        enabled: effective_enabled(&choices, s.paired),
+        start_at_sign_in: effective_start_at_sign_in(&choices),
         running,
         registered: s.run_key.get(&s.value_name()).as_deref() == Some(s.command().as_str()),
         wake_ready: running && read_status(s.profile_dir).is_some_and(|st| st.wake),
@@ -352,9 +390,17 @@ mod tests {
         assert!(key.values.lock().unwrap().is_empty());
         assert!(!dir(&profile).join(EXE_NAME).exists());
 
-        // Unpaired with no choice: off, nothing registered, nothing copied.
+        // Unpaired with no choice: off, nothing registered, nothing copied; the sign-in switch
+        // is on by default but only the launcher could act on it, and it does not run.
         let v = apply(&setup(&profile, &key, Some(shipped.clone()), false, true));
-        assert_eq!(v, LauncherView::default());
+        assert_eq!(
+            v,
+            LauncherView {
+                enabled: false,
+                start_at_sign_in: true,
+                ..Default::default()
+            }
+        );
         assert!(key.values.lock().unwrap().is_empty());
         assert!(!dir(&profile).join(EXE_NAME).exists());
         assert!(!read_handoff(&profile).unwrap().enabled);
@@ -371,14 +417,14 @@ mod tests {
         assert_eq!(
             cmd,
             format!(
-                "\"{}\" --profile \"{}\"",
+                "\"{}\" --profile \"{}\" --at-logon",
                 runkey::plain_path(&copy),
                 runkey::plain_path(&profile)
             )
         );
         assert!(cmd.contains("My Profile\\launcher") || cmd.contains("My Profile/launcher"));
         let h = read_handoff(&profile).unwrap();
-        assert!(h.enabled);
+        assert!(h.enabled && h.start_at_sign_in);
         assert!(h.helm_exe.ends_with("helm.exe"), "{}", h.helm_exe);
 
         // A new build replaces the copy.
@@ -387,21 +433,30 @@ mod tests {
         assert_eq!(std::fs::read(&copy).unwrap(), b"launcher v2");
 
         // The person turns it off: the value goes, and the handoff says off.
-        save_choice(&profile, false).unwrap();
+        save_choice(&profile, Some(false), None).unwrap();
         let v = apply(&setup(&profile, &key, Some(shipped.clone()), true, true));
         assert!(!v.enabled && !v.registered, "{v:?}");
         assert!(key.values.lock().unwrap().is_empty());
         assert!(!read_handoff(&profile).unwrap().enabled);
 
         // Turned on again while unpaired: the choice wins over the default.
-        save_choice(&profile, true).unwrap();
+        save_choice(&profile, Some(true), None).unwrap();
         let v = apply(&setup(&profile, &key, Some(shipped.clone()), false, true));
         assert!(v.enabled && v.registered, "{v:?}");
+
+        // The sign-in switch turned off while paired: the launcher keeps its hub link and its
+        // logon entry; only the handoff stops opening Helm.
+        save_choice(&profile, None, Some(false)).unwrap();
+        let v = apply(&setup(&profile, &key, Some(shipped.clone()), true, true));
+        assert!(v.enabled && v.registered && !v.start_at_sign_in, "{v:?}");
+        let h = read_handoff(&profile).unwrap();
+        assert!(h.enabled && !h.start_at_sign_in);
+        assert!(key.get(runkey::RUN_VALUE).is_some());
 
         // Another profile gets its own value and never touches the default profile's.
         let other = root.path().join("Second Profile");
         std::fs::create_dir_all(&other).unwrap();
-        let mut s = setup(&other, &key, Some(shipped), true, false);
+        let mut s = setup(&other, &key, Some(shipped.clone()), true, false);
         s.profile_hash = "fedcba9876543210fedcba9876543210";
         apply(&s);
         let values = key.values.lock().unwrap().clone();
@@ -413,6 +468,23 @@ mod tests {
             ]
         );
         assert!(values[runkey::RUN_VALUE].contains("My Profile"));
+
+        // An unpaired PC where the person switched on opening Helm at sign-in: the launcher
+        // follows it on and registers itself; without any such choice it would have registered
+        // nothing.
+        let sign = root.path().join("Sign-in Profile");
+        std::fs::create_dir_all(&sign).unwrap();
+        save_choice(&sign, None, Some(true)).unwrap();
+        let v = apply(&setup(&sign, &key, Some(shipped.clone()), false, true));
+        assert!(v.enabled && v.registered && v.start_at_sign_in, "{v:?}");
+        assert!(key.get(runkey::RUN_VALUE).is_some());
+
+        // The launcher's own switch, turned off in Hub settings, wins over the sign-in switch:
+        // no launcher at logon, so the logon entry goes even though sign-in is still on.
+        save_choice(&sign, Some(false), Some(true)).unwrap();
+        let v = apply(&setup(&sign, &key, Some(shipped), false, true));
+        assert!(!v.enabled && !v.registered && v.start_at_sign_in, "{v:?}");
+        assert!(key.get(runkey::RUN_VALUE).is_none());
 
         // The launcher's status reads back; wake counts only while it runs.
         write_status(

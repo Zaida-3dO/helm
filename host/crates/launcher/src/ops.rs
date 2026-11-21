@@ -3,8 +3,8 @@
 //!
 //! | op | args | result |
 //! |---|---|---|
-//! | `launcher_get` | `{}` | [`LauncherView`]: `{enabled, running, registered, wakeReady}` |
-//! | `launcher_set` | `{enabled}` | the person's choice is saved and applied; answers the same view |
+//! | `launcher_get` | `{}` | [`LauncherView`]: `{enabled, startAtSignIn, running, registered, wakeReady}` |
+//! | `launcher_set` | `{enabled?, startAtSignIn?}` (at least one) | the person's choice is saved and applied; answers the same view |
 
 use crate::install::{self, LauncherView, Setup};
 use crate::{hubline, runkey};
@@ -22,9 +22,10 @@ pub fn register_ops(reg: &mut OpRegistry) {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SetArgs {
-    enabled: bool,
+    enabled: Option<bool>,
+    start_at_sign_in: Option<bool>,
 }
 
 fn get(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
@@ -39,8 +40,14 @@ fn get(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
 }
 
 fn set(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
-    let a: SetArgs = serde_json::from_value(args)
-        .map_err(|_| ApiError::bad_args("Expected {enabled: true|false}."))?;
+    let a: SetArgs = serde_json::from_value(args).map_err(|_| {
+        ApiError::bad_args("Expected {enabled: true|false} or {startAtSignIn: true|false}.")
+    })?;
+    if a.enabled.is_none() && a.start_at_sign_in.is_none() {
+        return Err(ApiError::bad_args(
+            "Expected at least one of enabled or startAtSignIn.",
+        ));
+    }
     let profile = ctx.services.need::<Profile>()?;
     let platform = ctx.services.need::<Platform>()?;
     if !install::may_change(
@@ -52,7 +59,7 @@ fn set(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
              profile to try the switch.",
         ));
     }
-    install::save_choice(&profile.dir, a.enabled)
+    install::save_choice(&profile.dir, a.enabled, a.start_at_sign_in)
         .map_err(|_| ApiError::internal("The launcher switch could not be saved."))?;
     to_value(&with_setup(
         &profile,
