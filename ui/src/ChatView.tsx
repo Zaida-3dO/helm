@@ -296,9 +296,10 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       elements,
       editing,
       remoteDevice: remote?.state.deviceName,
-      onEdit: remote
-        ? undefined
-        : (row: MessageRow) => {
+      // Editing a sent message goes to the PC that runs the chat: the text reads from the
+      // mirror's device and the edit applies there; a refusal (busy, archived) comes back as
+      // that PC's own words.
+      onEdit: (row: MessageRow) => {
         ops
           .editOpen(chatId, row.id)
           .then((o) => setEditing({ rowId: o.messageId, revision: o.revision, text: o.text }))

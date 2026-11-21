@@ -104,7 +104,7 @@ export function ChatMenu({ chatId }: { chatId: string | null }) {
           mute: (m) => void act.mute(r, m),
           archive: () => void act.archive(r),
           restore: () => void act.restore(r),
-          remove: () => setConfirm(deleteChatConfirm(r, () => act.remove(r))),
+          remove: () => setConfirm(deleteChatConfirm(r, () => act.remove(r), device?.name)),
         },
       ).filter((i) => i.id !== 'children'));
       setMenu({ x, y, items });

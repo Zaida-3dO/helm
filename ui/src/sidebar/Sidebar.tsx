@@ -450,7 +450,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           mute: (m) => void act.mute(row, m),
           archive: () => archiveRow(row),
           restore: () => void act.restore(row),
-          remove: () => setConfirm(deleteChatConfirm(row, () => act.remove(row))),
+          remove: () => setConfirm(deleteChatConfirm(row, () => act.remove(row), device.name)),
         },
       ));
     }
@@ -1449,11 +1449,18 @@ function ChatRow({
   );
 }
 
-/** The questions asked before the two actions the sidebar cannot undo or that move a whole project. */
-export function deleteChatConfirm(row: SidebarRow, onConfirm: () => void | Promise<unknown>): ConfirmSpec {
+/** The questions asked before the two actions the sidebar cannot undo or that move a whole project.
+ *  A chat that runs on another PC is named by that PC: the delete happens there, for its owner. */
+export function deleteChatConfirm(
+  row: SidebarRow,
+  onConfirm: () => void | Promise<unknown>,
+  deviceName?: string,
+): ConfirmSpec {
   return {
     title: 'Delete chat permanently?',
-    body: `“${row.title || 'Untitled chat'}” and its history are removed from this PC. This cannot be undone.`,
+    body: deviceName
+      ? `Delete this chat on ${deviceName}? This cannot be undone.`
+      : `“${row.title || 'Untitled chat'}” and its history are removed from this PC. This cannot be undone.`,
     confirm: 'Delete permanently',
     danger: true,
     onConfirm,
