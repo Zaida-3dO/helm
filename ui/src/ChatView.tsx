@@ -343,7 +343,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
   const hostFind = useCallback(
     (q: string, activity: boolean, after?: string) =>
       chat?.stackId
-        ? ops.stackFind(chatId, q, activity).then((r) => ({ rows: stackFoundToHost(r.rows), nextCursor: null }))
+        ? ops.stackFind(chatId, q, activity).then((r) => ({ rows: stackFoundToHost(r.rows), nextCursor: null, truncated: r.truncated }))
         : ops.find(chatId, q, activity, after),
     [ops, chatId, chat?.stackId],
   );

@@ -70,7 +70,7 @@ function paint(root: HTMLElement, query: string, current: FindMatch | null): Ran
 export interface FindBarProps {
   rows: readonly MessageRow[];
   /** One step of the host's whole-history search; absent where there is no host (tests). */
-  hostFind?: (query: string, includeActivity: boolean, after?: string) => Promise<{ rows: HostFound[]; nextCursor: string | null }>;
+  hostFind?: (query: string, includeActivity: boolean, after?: string) => Promise<{ rows: HostFound[]; nextCursor: string | null; /** The host left matches out (its row limit). */ truncated?: boolean }>;
   /** The transcript box: its rows are searched for highlights and it hosts the bar. */
   container: RefObject<HTMLElement | null>;
   /** Bring a row into view (opening a folded turn if needed). */
@@ -102,24 +102,30 @@ export function FindBar({ rows, hostFind, container, onJump, onClose }: FindBarP
   }, [query]);
   // The host's matches over the whole stored history, for this query. Null while it is working.
   const [hostRows, setHostRows] = useState<HostFound[] | null>(null);
+  // The host stopped at its row limit: there are matches the list does not hold.
+  const [hostTruncated, setHostTruncated] = useState(false);
   useEffect(() => {
     setHostRows(null);
+    setHostTruncated(false);
     if (!open || !hostFind || !debounced.trim()) return;
     let stale = false;
     void (async () => {
       const found: HostFound[] = [];
       let total = 0;
       let after: string | undefined;
+      let more = false;
       try {
         for (;;) {
           const r = await hostFind(debounced, activity, after);
           if (stale) return;
+          more = more || r.truncated === true;
           found.push(...r.rows);
           total += r.rows.reduce((n, x) => n + x.count, 0);
           if (!r.nextCursor || total >= FIND_CAP) break;
           after = r.nextCursor;
         }
         setHostRows(found);
+        setHostTruncated(more);
       } catch {
         // The loaded rows still answer.
       }
@@ -226,7 +232,7 @@ export function FindBar({ rows, hostFind, container, onJump, onClose }: FindBarP
           }}
         />
         <span className="find-count" data-testid="find-count" aria-live="polite">
-          {debounced.trim() ? countLabel(safeIndex, matches.length, capped) : ''}
+          {debounced.trim() ? countLabel(safeIndex, matches.length, capped || hostTruncated) : ''}
         </span>
         <button type="button" className="find-btn" title="Older match · Enter" aria-label="Older match" disabled={!matches.length} onClick={() => go('older')}>
           <IconChevronUp size={14} />

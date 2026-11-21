@@ -27,5 +27,5 @@ export type { Binding, BindingScope, Conflict } from './keys.ts';
 export { useBinding, useChord, useHint, useLayer } from './hooks.ts';
 export { placeAtPoint, placeBelow, nextIndex } from './place.ts';
 export type { Rect } from './place.ts';
-export { useDragReorder, placeIndex, moveItem, DRAG_START_PX } from './useDragReorder.ts';
+export { useDragReorder, placeIndex, moveItem, dropBefore, DRAG_START_PX } from './useDragReorder.ts';
 export type { DragRowProps, DragState } from './useDragReorder.ts';

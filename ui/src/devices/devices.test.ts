@@ -191,8 +191,10 @@ test('the devices store follows the choice, falls back to this PC when that devi
     return h.api(op, args);
   }) as Api;
   const focus = new DevicesStore({ api: counted, bus: new EventBus() });
-  const t0 = Date.now();
   focus.start();
+  // Taken after the start, which stamps its own read: a clock tick between them cannot put the
+  // first focus inside the read interval.
+  const t0 = Date.now();
   await settle();
   assert.equal(reads, 1, 'starting reads once');
   assert.equal(focus.readOnFocus(t0 + FOCUS_READ_MS), true, 'the first focus after the start re-reads');

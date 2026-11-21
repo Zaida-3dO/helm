@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { Api } from '../api/client.ts';
 import type { EventBus } from '../api/events.ts';
-import { Button, Dialog, moveItem, toast, useDragReorder } from '../ui/index.ts';
+import { Button, Dialog, dropBefore, toast, useDragReorder } from '../ui/index.ts';
 import { IconUnpin } from '../ui/icons.tsx';
 import { pageOps } from './api.ts';
 import type { PinnedPage, RemotePages } from './api.ts';
@@ -87,10 +87,10 @@ export function usePagesEntry(api: Api, bus: EventBus, profileId?: string | null
   const localIds = useMemo(() => [...localIndexOf.keys()], [localIndexOf]);
   const reorder = useDragReorder((from, to) => {
     const moved = localIds[from];
-    if (moved === undefined || to === from || to === from + 1) return;
-    const next = moveItem(localIds, from, to);
+    const before = dropBefore(localIds, from, to);
+    if (moved === undefined || before === undefined) return;
     void ops
-      .pinMove(moved, next[to + 1] ?? null)
+      .pinMove(moved, before)
       .catch((e: unknown) => toast.show({ kind: 'error', text: e instanceof Error ? e.message : String(e) }));
   });
 

@@ -17,7 +17,9 @@ function GeneralPane() {
   const [compact, setCompact] = useState(false);
   const [allSettings, setAllSettings] = useState(false);
   const [hiddenItems, setHiddenItems] = useState<string[]>([]);
-  const [signIn, setSignIn] = useState(true);
+  // The helper's own state: opening Helm at sign-in is the helper's doing, so the switch shows on
+  // only while the helper is on and set to, and cannot be turned on while the helper is off.
+  const [launcher, setLauncher] = useState<LauncherState | null>(null);
   useEffect(() => {
     shell
       .api<unknown>('preference_get', { key: 'agentSettingsAll' })
@@ -33,7 +35,7 @@ function GeneralPane() {
       .catch(() => undefined);
     ops
       .launcher()
-      .then((v: LauncherState) => setSignIn(v.startAtSignIn))
+      .then((v: LauncherState) => setLauncher(v))
       .catch(() => undefined);
   }, [shell, ops]);
   const save = (key: string, value: unknown, undo: () => void) =>
@@ -89,17 +91,22 @@ function GeneralPane() {
       </SettingRow>
       <SettingRow
         title="Start Helm when I sign in"
-        description="A small always-on helper starts Helm hidden in the tray at sign-in and brings it back if it stops by itself. It starts in your own account, after you sign in; turning this off leaves the helper to the hub alone."
+        description={`A small always-on helper starts Helm hidden in the tray at sign-in and brings it back if it stops by itself. It starts in your own account, after you sign in; turning this off leaves the helper to the hub alone.${launcher && !launcher.enabled ? ' The helper is off (it runs while this PC is paired with a hub), so this does nothing for now.' : ''}`}
         testId="setting-start-at-sign-in"
       >
         <Checkbox
-          checked={signIn}
+          checked={launcher !== null && launcher.enabled && launcher.startAtSignIn}
+          disabled={launcher === null || !launcher.enabled}
           onChange={(on) => {
-            setSignIn(on);
-            ops.saveLauncherSignIn(on).catch((e: unknown) => {
-              setSignIn(!on);
-              toast.show({ kind: 'error', text: `Could not save: ${String((e as Error).message ?? e)}` });
-            });
+            const before = launcher;
+            setLauncher(before && { ...before, startAtSignIn: on });
+            ops
+              .saveLauncherSignIn(on)
+              .then((v) => setLauncher(v))
+              .catch((e: unknown) => {
+                setLauncher(before);
+                toast.show({ kind: 'error', text: `Could not save: ${String((e as Error).message ?? e)}` });
+              });
           }}
         />
       </SettingRow>

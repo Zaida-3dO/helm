@@ -41,7 +41,7 @@ export function inboxCount(s: AttentionSummary | null): number {
   return Math.max(s.badge, inboxRows(s).length);
 }
 
-/** "N" or "N+" when the host holds more than the rows it sent (8 per group). */
+/** "N" or "N+" when the host holds more than the rows it sent (8 per group per profile). */
 export function countText(s: AttentionSummary | null): string {
   const n = inboxCount(s);
   return n > inboxRows(s).length ? `${n}+` : String(n);

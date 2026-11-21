@@ -59,9 +59,9 @@ export function chatOps(api: Api) {
       api<ChatFindResult>('chat_find', { chatId, query, includeActivity, ...(after ? { after } : {}) }),
     /** The chat's roll-over stack: every session, oldest first, and the one the chat lives in now. */
     stack: (chatId: string) => api<ChatStack>('chat_stack', { chatId }),
-    /** Find across every session of the stack: newest session first, newest row first. */
+    /** Find across every session of the stack: newest session first, newest row first, up to the most rows the host answers (`truncated` says more were left out). */
     stackFind: (chatId: string, query: string, includeActivity: boolean) =>
-      api<StackFindResult>('stack_find', { chatId, query, includeActivity }),
+      api<StackFindResult>('stack_find', { chatId, query, includeActivity, limit: 200 }),
     send: (chatId: string, submissionId: string, text: string, action: SendAction, draftRevision: number, extras: SendExtras = {}) =>
       api<{ submission: Submission; chat: ChatRecord }>('chat_send', {
         chatId,

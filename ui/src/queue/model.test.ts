@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { aheadOf, actionsFor, buildActionsFor, buildLine, buildStateLabel, claudeLine, queueCount, reasonLabel, sameLine, serverLine, waitLine } from './model.ts';
 import type { BuildQueueEntry, QueueEntry, QueueSummary } from '../api/generated/index.ts';
+import { dropBefore } from '../ui/useDragReorder.ts';
 
 const e = (over: Partial<QueueEntry>): QueueEntry => ({
   chatId: 'c',
@@ -125,5 +126,18 @@ test('a build row offers only what the host would take for its state', () => {
     [b({ state: 'done', chatId: 'c1' }), { open: true, pause: false, resume: false, reorder: false, remove: true }],
   ] as const) {
     assert.deepEqual(buildActionsFor(entry), want, entry.state);
+  }
+});
+
+test('a drop one place down is a move; dropping where it was is not', () => {
+  const line = ['a', 'b', 'c', 'd'];
+  for (const [from, to, want] of [
+    [0, 0, undefined], // let go where it started
+    [0, 1, 'c'], // one place down: in front of c
+    [0, 3, null], // to the very end
+    [2, 1, 'b'], // one place up: in front of the row it passed
+    [3, 0, 'a'], // to the front
+  ] as const) {
+    assert.equal(dropBefore(line, from, to), want, `${from} -> ${to}`);
   }
 });

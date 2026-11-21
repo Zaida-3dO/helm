@@ -11,7 +11,8 @@ import { Button, toast } from '../ui/index.ts';
 import './signin.css';
 
 /** `message` replaces the default words when the cause is not an expired sign-in (a token refresh
- * that kept failing, say). `login` asks for the normal sign-in even when chats have a saved token
+ * that kept failing, say); a chat that signs in with a saved token never refreshes one, so the
+ * saved token's own words stand there whatever the row said. `login` asks for the normal sign-in even when chats have a saved token
  * (the usage meter reads usage through the normal one). */
 export function SignInAgain({ message, login }: { message?: string; login?: boolean }) {
   const shell = useShell();
@@ -29,10 +30,9 @@ export function SignInAgain({ message, login }: { message?: string; login?: bool
   return (
     <div className="signin-offer" data-testid="error-signin-offer">
       <span className="muted">
-        {message ??
-          (token
-            ? 'The saved Claude token was refused. Sign in again to make a new one, then send your message again.'
-            : "Claude's sign-in has expired. Sign in again, then send your message again.")}
+        {token
+          ? 'The saved Claude token was refused. Sign in again to make a new one, then send your message again.'
+          : (message ?? "Claude's sign-in has expired. Sign in again, then send your message again.")}
       </span>
       <Button variant="secondary" busy={busy} onClick={start} data-testid="error-signin">
         Sign in again

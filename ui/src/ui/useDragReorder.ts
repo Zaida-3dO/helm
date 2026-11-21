@@ -27,6 +27,16 @@ export function moveItem<T>(items: readonly T[], from: number, to: number): T[] 
   return out;
 }
 
+/**
+ * Where a drop puts the dragged row, as the entry it should stand in front of (`null`: the end
+ * of the line). `undefined` when the drop leaves the row where it was. `to` counts the rows
+ * without the dragged one, so one place down is `from + 1` and is a real move.
+ */
+export function dropBefore<T>(items: readonly T[], from: number, to: number): T | null | undefined {
+  if (to === from) return undefined;
+  return moveItem(items, from, to)[to + 1] ?? null;
+}
+
 export interface DragState {
   /** The row under the pointer. */
   from: number;
