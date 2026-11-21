@@ -41,7 +41,7 @@ pub fn chat_link(id: &str, message: Option<i64>) -> String {
 }
 
 /// One sentence for the descriptions of the tools whose results name chats.
-const LINKS: &str = " Each chat has a link field: point the user at a chat with a Markdown link whose target is that field, copied exactly, and whose text is its title; never make one up.";
+const LINKS: &str = " Each chat has a link field: show a chat to the user as a Markdown link to that field, copied exactly, with its title as the text; never make one up.";
 
 /// What the creating agent should put at the end of a first message, and do afterwards.
 const REPORT_BACK: &str = " The other chat does not report back by itself: end your message with an explicit report instruction saying what to report, when (on finishing, when blocked, when it finds something that changes the plan) and that the report goes to your own chat id with app_send_message; then end your turn. Its report arrives here as a new message. If it might finish or fail without reporting, also declare app_wait_for with kind chat_idle on it as a backstop.";
@@ -2378,7 +2378,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::read(
             "app_this_chat",
-            format!("This chat's own details: chatId (give it to a chat you start so it can report back with app_send_message), title, board, folder, parent chat, model, effort, muted, profile and device. A rolled-over chat also names its stack (stackId and the session ids). If a tool you expect is missing, call this and tell the person what it says: when toolServers is present, those tool servers are not connected on this PC, each with the reason.{LINKS}"),
+            format!("This chat's own details: chatId (give it to a chat you start so it can report back), title, board, folder, parent chat, model, effort, muted, profile, device and, once rolled over, its stack. If a tool you expect is missing, call this: toolServers, when present, names the tool servers not connected on this PC, each with the reason.{LINKS}"),
             obj(json!({}), &[]),
         ),
         this_chat,
@@ -2386,7 +2386,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .blocking(
         ToolSpec::read(
             "app_list_chats",
-            format!("List recent chats, newest first, or search their titles and messages (all query words must match). Excludes this chat unless includeCurrent. By default: your profile's chats on this PC; person and device (\"any\" for all) widen it, only when the user asks. A chat that has rolled over is one stack of sessions: it is listed once, at the session that runs it now; includeEarlierSessions also lists its earlier sessions. More: app_help tool/app_list_chats.{LINKS}"),
+            format!("List recent chats, newest first, or search their titles and messages (all query words must match). Excludes this chat unless includeCurrent. By default: your profile's chats on this PC; person and device (\"any\" for all) widen it, only when the user asks. A rolled-over chat is listed once, at its newest session. More: app_help tool/app_list_chats.{LINKS}"),
             obj(
                 json!({
                     "query": {"type": "string", "maxLength": 512},
@@ -2471,14 +2471,14 @@ A rolled-over chat is a stack of sessions: its chat fields name the stack (stack
             obj(
                 json!({
                     "projectId": {"type": "string", "description": "The board to show the chat on; defaults to this chat's board."},
-                    "folder": {"type": "string", "maxLength": 4096, "description": "An absolute folder to run in instead of the board's folder; it is added as a folder project when Helm has none over it."},
+                    "folder": {"type": "string", "maxLength": 4096, "description": "An absolute folder to run in instead of the board's."},
                     "message": {"type": "string", "minLength": 1, "maxLength": 16384},
                     "title": {"type": "string", "minLength": 1, "maxLength": 512},
                     "parentChatId": {"type": ["string", "null"], "minLength": 36, "maxLength": 36, "description": "Defaults to this chat; null for top level."},
                     "model": {"type": "string", "description": "A Claude model id (sonnet, opus, ...) or a local model id (local/<server>/<model>)."},
                     "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]},
                     "muted": {"type": "boolean", "description": MUTED_ARG},
-                    "watch": {"type": "boolean", "description": "Default true: Helm declares an app_wait_for chat_idle on the new chat for you (a day at most), so you hear when its turn ends even if it never reports. Pass false when you wait on it yourself."},
+                    "watch": {"type": "boolean", "description": "Default true: you are woken when its turn ends, even if it never reports (a wait of up to a day). false if you wait on it yourself."},
                     "device": {"type": "string", "description": "A paired PC (name or id) to run the chat on; unset: this PC. There projectId must be its own board; folder and parentChatId are refused, watch never declares."}
                 }),
                 &["message"],
