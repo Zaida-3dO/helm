@@ -87,16 +87,36 @@ impl SttError {
     }
 }
 
-/// The speech-to-text server's health: when it last answered `/health`.
+/// The speech-to-text server's health: when it last answered `/health`, and when it last stopped
+/// answering. The failed side matters too: the hub keeps the recording notes that failed while the
+/// server was down, and tells the person's PC about a standing outage.
 #[derive(Debug, Default)]
 pub struct SttHealth {
     /// `0`: never seen answering.
     last_ok_ms: AtomicI64,
+    /// `0`: not currently seen down. The first failure of a run of them.
+    down_since_ms: AtomicI64,
+    /// Why the current run of failures looks the way it does, in plain words.
+    down_detail: std::sync::Mutex<Option<String>>,
 }
 
 impl SttHealth {
     pub fn note_ok(&self, at_ms: i64) {
         self.last_ok_ms.store(at_ms.max(1), Ordering::Relaxed);
+        self.down_since_ms.store(0, Ordering::Relaxed);
+        if let Ok(mut d) = self.down_detail.lock() {
+            *d = None;
+        }
+    }
+
+    /// A health probe failed: the first failure of a run opens the outage at `at_ms`.
+    pub fn note_down(&self, at_ms: i64, detail: &str) {
+        self.down_since_ms
+            .compare_exchange(0, at_ms.max(1), Ordering::Relaxed, Ordering::Relaxed)
+            .ok();
+        if let Ok(mut d) = self.down_detail.lock() {
+            *d = Some(detail.to_owned());
+        }
     }
 
     pub fn last_ok_ms(&self) -> Option<i64> {
@@ -104,6 +124,22 @@ impl SttHealth {
             0 => None,
             ms => Some(ms),
         }
+    }
+
+    pub fn is_down(&self) -> bool {
+        self.down_since_ms.load(Ordering::Relaxed) != 0
+    }
+
+    /// When the current outage began, if one is running.
+    pub fn down_since_ms(&self) -> Option<i64> {
+        match self.down_since_ms.load(Ordering::Relaxed) {
+            0 => None,
+            ms => Some(ms),
+        }
+    }
+
+    pub fn down_detail(&self) -> Option<String> {
+        self.down_detail.lock().ok().and_then(|d| d.clone())
     }
 
     /// "unreachable since HH:MM" when the last good health answer is older than one probe; the
@@ -114,11 +150,27 @@ impl SttHealth {
         if now_ms - ok < HEALTH_PROBE.as_millis() as i64 {
             return None;
         }
-        let off = crate::rank::utc_offset_minutes(&std::env::var("TZ").unwrap_or_default(), ok);
-        let t = ok + i64::from(off) * 60_000;
-        let (hh, mm) = ((t / 3_600_000).rem_euclid(24), (t / 60_000).rem_euclid(60));
-        Some(format!("unreachable since {hh:02}:{mm:02}"))
+        Some(format!("unreachable since {}", clock_text(ok)))
     }
+}
+
+/// An instant as the person's wall clock, "HH:MM" (the container's `TZ`; only UTC and the house
+/// zone are known, anything else reads as UTC).
+pub fn clock_text(ms: i64) -> String {
+    let off = crate::rank::utc_offset_minutes(&std::env::var("TZ").unwrap_or_default(), ms);
+    let t = ms + i64::from(off) * 60_000;
+    let (hh, mm) = ((t / 3_600_000).rem_euclid(24), (t / 60_000).rem_euclid(60));
+    format!("{hh:02}:{mm:02}")
+}
+
+/// What a bridge does when the speech server's health says something changed: retry what it held
+/// during the outage, and finish off what has waited too long to be worth holding.
+pub trait SttHealed: Send + Sync {
+    /// The server answers `/health` again (or the hour is up): retry the notes still under the
+    /// hour and end the ones past it.
+    fn stt_back(&self, at: i64);
+    /// The server is still down: end what has been held past its hour.
+    fn stt_expire(&self, _at: i64) {}
 }
 
 /// The server's own health address: the scheme and host of the transcriptions endpoint, with
@@ -145,22 +197,34 @@ pub fn spawn_health(stt_url: &str, health: Arc<SttHealth>) {
         loop {
             let agent = agent.clone();
             let url = url.clone();
-            let ok = blocking_typed(
-                move || {
-                    let status = agent.get(&url).call().map(|r| r.status().as_u16());
-                    Ok::<bool, ()>(status.is_ok_and(|s| s < 400))
+            let probe = blocking_typed(
+                move || match agent.get(&url).call() {
+                    Ok(r) => Ok(r.status().as_u16()),
+                    Err(e) => Err(stt_failed(e, 1)),
                 },
-                |_| (),
+                SttError::plain,
             )
-            .await
-            .unwrap_or(false);
+            .await;
+            let ok = matches!(probe, Ok(s) if s < 400);
             if ok {
                 h.note_ok(crate::telegram::now_ms());
                 if !was_ok {
                     eprintln!("stt: the speech server answers /health again");
                 }
-            } else if was_ok {
-                eprintln!("stt: the speech server's /health did not answer");
+            } else {
+                let detail = match probe {
+                    Ok(s) => format!("its health address answered HTTP {s}"),
+                    Err(e) => match e.kind {
+                        SttFailure::ReadTimeout => {
+                            "its health address does not answer in time".into()
+                        }
+                        _ => "its health address does not answer".to_owned(),
+                    },
+                };
+                h.note_down(crate::telegram::now_ms(), &detail);
+                if was_ok {
+                    eprintln!("stt: the speech server's /health did not answer");
+                }
             }
             was_ok = ok;
             tokio::time::sleep(HEALTH_PROBE).await;
@@ -539,6 +603,26 @@ mod tests {
             t.why,
             "the speech-to-text server did not finish within 10 minutes"
         );
+    }
+
+    #[test]
+    fn a_running_outage_keeps_its_start_and_its_reason() {
+        let h = SttHealth::default();
+        assert!(!h.is_down(), "an unprobed server is not a known outage");
+        let base = 1_763_000_000_000;
+        h.note_down(base, "its health address does not answer");
+        h.note_down(base + 60_000, "its health address answered HTTP 503");
+        assert!(h.is_down());
+        // The outage keeps the moment it opened; the reason keeps the newest answer.
+        assert_eq!(h.down_since_ms(), Some(base));
+        assert_eq!(
+            h.down_detail().as_deref(),
+            Some("its health address answered HTTP 503")
+        );
+        h.note_ok(base + 120_000);
+        assert!(!h.is_down());
+        assert_eq!(h.down_since_ms(), None);
+        assert_eq!(h.down_detail(), None);
     }
 
     #[test]

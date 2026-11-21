@@ -123,6 +123,20 @@ pub struct TelegramMessage {
     pub bot: Option<String>,
 }
 
+/// A service the hub cannot reach, as its `service_down` frame carries it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServiceOutage {
+    /// The hub person whose PC this is for, verified by the hub. `None`: an older hub, which
+    /// means the PC's own (home) person.
+    pub person: Option<String>,
+    /// Which service, hub words for it: `stt` is the speech-to-text server.
+    pub service: String,
+    /// When the hub first noticed, as its wall clock: "HH:MM".
+    pub since: String,
+    /// What the hub's probe saw, in plain words.
+    pub detail: Option<String>,
+}
+
 /// Where Telegram messages go on the PC.
 pub trait TelegramSink: Send + Sync {
     /// `Ok` once the message is safely in Helm (it is then acknowledged to the hub).
@@ -131,6 +145,11 @@ pub trait TelegramSink: Send + Sync {
     fn stop<'a>(&'a self, person: Option<String>) -> BoxFut<'a, ()>;
     /// The user tapped button `index` of the approval ask `id` ([`LineHandle::telegram_ask`]).
     fn answer<'a>(&'a self, person: Option<String>, id: String, index: usize) -> BoxFut<'a, ()>;
+    /// The hub says one of its own services is down and asks the PC to deal with it. A PC that
+    /// has no answer for it does nothing.
+    fn service_down<'a>(&'a self, _outage: ServiceOutage) -> BoxFut<'a, ()> {
+        Box::pin(async {})
+    }
 }
 
 /// One turn for the voice chat as the hub forwarded it.
@@ -1078,6 +1097,27 @@ impl Client {
                     }
                 });
             }
+            Some("service_down") => {
+                let Some(service) = s("service") else {
+                    return;
+                };
+                let Ok(person) = self.frame_person(&v) else {
+                    log::info!(
+                        "relay: a service_down frame named a person this PC does not act for"
+                    );
+                    return;
+                };
+                let outage = ServiceOutage {
+                    person,
+                    service: service.to_owned(),
+                    since: s("since").unwrap_or_else(|| "a while".to_owned()),
+                    detail: s("detail"),
+                };
+                let sink = self.sink.clone();
+                tokio::spawn(async move {
+                    sink.service_down(outage).await;
+                });
+            }
             Some("voice") => {
                 let (Some(id), Some(text)) = (s("id"), s("text")) else {
                     return;
@@ -1251,6 +1291,7 @@ mod tests {
     struct Sink {
         got: Mutex<Vec<TelegramMessage>>,
         stops: Mutex<usize>,
+        down: Mutex<Vec<ServiceOutage>>,
         refuse: bool,
     }
     impl TelegramSink for Sink {
@@ -1273,6 +1314,10 @@ mod tests {
             _id: String,
             _index: usize,
         ) -> BoxFut<'a, ()> {
+            Box::pin(async {})
+        }
+        fn service_down<'a>(&'a self, outage: ServiceOutage) -> BoxFut<'a, ()> {
+            self.down.lock().unwrap().push(outage);
             Box::pin(async {})
         }
     }
@@ -1520,6 +1565,30 @@ mod tests {
         assert!(
             !format!("{got:?}").contains("AAAA"),
             "a picture never prints"
+        );
+        // The hub's own outage report reaches the sink, and the line gets no answer back.
+        ws.send(Message::Text(
+            json!({"type": "service_down", "service": "stt", "since": "09:12",
+                   "detail": "its health address does not answer"})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        for _ in 0..100 {
+            if !sink.down.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            &*sink.down.lock().unwrap(),
+            &[ServiceOutage {
+                person: None,
+                service: "stt".into(),
+                since: "09:12".into(),
+                detail: Some("its health address does not answer".into()),
+            }]
         );
         ws.send(Message::Text(
             json!({"type": "telegram_stop"}).to_string().into(),

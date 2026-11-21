@@ -96,20 +96,23 @@
 //! The queue and the waiting asks live in memory: a container restart drops them.
 
 use crate::auth::digest;
+use crate::heal::{HELD_AUDIO_MAX, HELD_MAX_MS, VOICE_HELD};
 use crate::images;
 use crate::launcher::{LaunchOutcome, Plan, Reason, WakeOutcome};
 use crate::lines::{Lines, PersonRoute, PersonUpstream};
 use crate::registry::{new_code, normalize_code};
 use crate::relay::{valid_ask_id, Channel, Line, Route, Upstream, OFFLINE};
 use crate::stt::{
-    agent_with, blocking, retry_transcribing, Stt, SttHealth, Transcribe, STT_RETRY_AFTER,
+    agent_with, blocking, retry_transcribing, Stt, SttHealed, SttHealth, Transcribe,
+    STT_RETRY_AFTER,
 };
 use base64::Engine as _;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 pub use crate::stt::{SttConfig, SttError, SttFuture, VoiceFuture, STT_CONNECT, STT_TIMEOUT};
@@ -620,6 +623,16 @@ struct Part {
     heard: Option<Heard>,
 }
 
+/// How one fetch ended.
+enum Fetched {
+    Part(Part),
+    /// A recording whose transcription failed with passing trouble; the bridge holds it and its
+    /// message waits, until [`Bridge::stt_back`] finishes it off.
+    Held,
+    /// The fetch itself failed, in plain words.
+    Failed(String),
+}
+
 /// A message whose files are being fetched.
 #[derive(Debug, Clone)]
 struct Gather {
@@ -741,6 +754,27 @@ pub struct Bridge {
     /// Every other bridge of this bot, so the files they hold share one budget. Grows when a
     /// link makes another bridge.
     siblings: Arc<Mutex<Vec<Weak<Bridge>>>>,
+    /// Recordings whose transcription failed with passing trouble; they wait for the server to
+    /// come back, and their message waits with them ([`Bridge::stt_back`]).
+    stt_held: Mutex<VecDeque<HeldPart>>,
+    stt_held_bytes: AtomicUsize,
+    /// The bridge's own handle, set once it is shared, so a retry can spawn its transcription.
+    me: OnceLock<Weak<Bridge>>,
+}
+
+/// One recording waiting out a speech-server outage: everything needed to finish its message
+/// later, exactly as the failed fetch left it.
+struct HeldPart {
+    at: i64,
+    slot: String,
+    index: usize,
+    chat: i64,
+    job: Job,
+    audio: Vec<u8>,
+    name: String,
+    mime: String,
+    /// The failure it is waiting out, kept for the words it is owed if the wait ends badly.
+    why: SttError,
 }
 
 pub fn now_ms() -> i64 {
@@ -1115,7 +1149,20 @@ impl Bridge {
             transcribing: tokio::sync::Semaphore::new(1),
             slow_after: SLOW_AFTER,
             siblings: Arc::new(Mutex::new(Vec::new())),
+            stt_held: Mutex::new(VecDeque::new()),
+            stt_held_bytes: AtomicUsize::new(0),
+            me: OnceLock::new(),
         }
+    }
+
+    /// Remember the bridge's own shared handle so held recordings can be retried by themselves.
+    /// Call it on the `Arc` the bot runs the bridge from.
+    pub fn register_self(self: &Arc<Self>) {
+        let _ = self.me.set(Arc::downgrade(self));
+    }
+
+    fn strong(&self) -> Option<Arc<Bridge>> {
+        self.me.get().and_then(|w| w.upgrade())
     }
 
     /// Say who this bridge speaks for, so its frames name that person and `/pc` can route them.
@@ -1944,8 +1991,12 @@ impl Bridge {
         let me = self.clone();
         let media = job.media;
         tokio::spawn(async move {
-            let got = me.fetch_part(&job, chat).await;
-            me.part_done(&slot, index, &job, got).await;
+            match me.fetch_part(&job, chat, &slot, index).await {
+                Fetched::Part(p) => me.part_done(&slot, index, &job, Ok(p)).await,
+                Fetched::Failed(why) => me.part_done(&slot, index, &job, Err(why)).await,
+                // A held recording: `stt_back` completes its message when the server is back.
+                Fetched::Held => {}
+            }
         });
         media.handled()
     }
@@ -1961,8 +2012,8 @@ impl Bridge {
 
     /// Transcribe a recording, trying once more when the first failure looks passing. When it
     /// takes longer than [`SLOW_AFTER`] in total, the chat is told once that it is still going,
-    /// and that message is removed when the transcription ends, either way. A failure names its
-    /// reason, and when the health probe has seen the server down, since when.
+    /// and that message is removed when the transcription ends, either way. The failure keeps its
+    /// kind, so the caller can tell a passing trouble from a real one.
     async fn transcribe(
         &self,
         voice: &Arc<dyn Voice>,
@@ -1970,7 +2021,7 @@ impl Bridge {
         audio: Vec<u8>,
         name: &str,
         mime: &str,
-    ) -> Result<String, String> {
+    ) -> Result<String, SttError> {
         let mut work = Box::pin(retry_transcribing(
             voice.endpoint(),
             self.stt_retry_after,
@@ -1980,7 +2031,7 @@ impl Bridge {
             },
         ));
         if let Ok(done) = tokio::time::timeout(self.slow_after, &mut work).await {
-            return self.stt_failure_text(done);
+            return done;
         }
         let notice = {
             let _g = self.ops.lock().await;
@@ -2012,54 +2063,100 @@ impl Bridge {
                 );
             }
         }
-        self.stt_failure_text(done)
+        done
     }
 
-    /// Turn a transcription failure into the plain words the chat is given: the reason, and
-    /// when the health probe has seen the server down a while, since when.
-    fn stt_failure_text(&self, done: Result<String, SttError>) -> Result<String, String> {
-        done.map_err(|e| {
-            match self
-                .stt_health
-                .as_ref()
-                .and_then(|h| h.since_text(now_ms()))
-            {
-                Some(since) => format!("{}; {since}", e.why),
-                None => e.why,
-            }
-        })
+    /// A transcription failure's plain words for the chat: the reason, and when the health
+    /// probe has seen the server down a while, since when.
+    fn failure_words(&self, e: &SttError) -> String {
+        match self
+            .stt_health
+            .as_ref()
+            .and_then(|h| h.since_text(now_ms()))
+        {
+            Some(since) => format!("{}; {since}", e.why),
+            None => e.why.clone(),
+        }
+    }
+
+    /// Set a failed recording aside for [`Bridge::stt_back`]: the message keeps waiting with it.
+    /// False when the bridge already holds as much as it may; then this failure is an ordinary
+    /// one and the message goes without its text.
+    fn hold_recording(
+        &self,
+        slot: &str,
+        index: usize,
+        job: &Job,
+        chat: i64,
+        audio: &[u8],
+        name: &str,
+        mime: &str,
+        why: &SttError,
+        at: i64,
+    ) -> bool {
+        let held = self.stt_held_bytes.load(Ordering::SeqCst);
+        if held + audio.len() > HELD_AUDIO_MAX {
+            return false;
+        }
+        self.stt_held_bytes.fetch_add(audio.len(), Ordering::SeqCst);
+        self.stt_held
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push_back(HeldPart {
+                at,
+                slot: slot.to_owned(),
+                index,
+                chat,
+                job: job.clone(),
+                audio: audio.to_vec(),
+                name: name.to_owned(),
+                mime: mime.to_owned(),
+                why: why.clone(),
+            });
+        true
     }
 
     /// `getFile`, the download, then a look at the bytes (is it a picture Helm shows?) and, for a
-    /// recording, the speech-to-text server.
-    async fn fetch_part(&self, job: &Job, chat: i64) -> Result<Part, String> {
+    /// recording, the speech-to-text server. A recording that fails with passing trouble ends up
+    /// `Held`: the bridge keeps it until [`Bridge::stt_back`] puts it through.
+    async fn fetch_part(&self, job: &Job, chat: i64, slot: &str, index: usize) -> Fetched {
         // A few at a time, so only those few files' bytes are in memory while they are fetched.
-        let turn = self
-            .downloads
-            .acquire()
-            .await
-            .map_err(|_| "the hub is shutting down".to_owned())?;
-        let file_id = job
-            .file_id
-            .as_deref()
-            .ok_or("Telegram sent no file with it")?;
-        let file = self
+        let turn = match self.downloads.acquire().await {
+            Ok(t) => t,
+            Err(_) => return Fetched::Failed("the hub is shutting down".to_owned()),
+        };
+        let file_id = match job.file_id.as_deref() {
+            Some(f) => f.to_owned(),
+            None => return Fetched::Failed("Telegram sent no file with it".to_owned()),
+        };
+        let file = match self
             .api
             .call("getFile", json!({ "file_id": file_id }))
             .await
-            .map_err(|e| format!("Telegram did not hand over the file ({})", e.description))?;
+        {
+            Ok(f) => f,
+            Err(e) => {
+                return Fetched::Failed(format!(
+                    "Telegram did not hand over the file ({})",
+                    e.description
+                ))
+            }
+        };
         if file
             .get("file_size")
             .and_then(Value::as_u64)
             .is_some_and(|n| n > MAX_FILE_BYTES)
         {
-            return Err(TOO_LARGE.into());
+            return Fetched::Failed(TOO_LARGE.into());
         }
-        let path = file
-            .get("file_path")
-            .and_then(Value::as_str)
-            .ok_or("Telegram gave no download path for it")?;
-        let bytes = self.download(path).await?;
+        let path = match file.get("file_path").and_then(Value::as_str) {
+            Some(p) => p.to_owned(),
+            None => return Fetched::Failed("Telegram gave no download path for it".to_owned()),
+        };
+        let bytes = match self.download(&path).await {
+            Ok(b) => b,
+            Err(e) => return Fetched::Failed(e),
+        };
         // The download is done: give the turn back before a transcription, which can take
         // minutes, so the files behind this one are not held up by it.
         drop(turn);
@@ -2081,22 +2178,74 @@ impl Bridge {
             (true, Some(voice)) => {
                 let name = own.clone().or(from_path.clone());
                 let name = name.unwrap_or_else(|| job.media.default_name().to_owned());
-                let _slot = self
-                    .transcribing
-                    .acquire()
+                let _slot = match self.transcribing.acquire().await {
+                    Ok(s) => s,
+                    Err(_) => return Fetched::Failed("the hub is shutting down".to_owned()),
+                };
+                match self
+                    .transcribe(voice, chat, bytes.clone(), &name, &mime)
                     .await
-                    .map_err(|_| "the hub is shutting down".to_owned())?;
-                Some(
-                    match self
-                        .transcribe(voice, chat, bytes.clone(), &name, &mime)
-                        .await
-                    {
-                        Ok(t) => Heard::Text(t.trim().to_owned()),
-                        Err(why) => Heard::Failed(why),
-                    },
-                )
+                {
+                    Ok(t) => Some(Heard::Text(t.trim().to_owned())),
+                    Err(e) => {
+                        // Trouble that should pass: keep the recording, tell the chat up front,
+                        // and let the message wait for [`Bridge::stt_back`].
+                        if e.kind.is_transient()
+                            && self.hold_recording(
+                                slot,
+                                index,
+                                job,
+                                chat,
+                                &bytes,
+                                &name,
+                                &mime,
+                                &e,
+                                now_ms(),
+                            )
+                        {
+                            let text = match self
+                                .stt_health
+                                .as_ref()
+                                .and_then(|h| h.since_text(now_ms()))
+                            {
+                                Some(since) => format!("{VOICE_HELD} It has been {since}."),
+                                None => VOICE_HELD.into(),
+                            };
+                            let _g = self.ops.lock().await;
+                            if let Err(e) = self.send(chat, &text, true).await {
+                                eprintln!(
+                                    "telegram: the held-note reply failed: {}",
+                                    e.description
+                                );
+                            }
+                            return Fetched::Held;
+                        }
+                        Some(Heard::Failed(self.failure_words(&e)))
+                    }
+                }
             }
         };
+        match self
+            .finish_part(job, bytes, mime, own, from_path, heard)
+            .await
+        {
+            Ok(p) => Fetched::Part(p),
+            Err(why) => Fetched::Failed(why),
+        }
+    }
+
+    /// The fetched bytes as a part: what kind of picture it is (if one shows in Helm), the name
+    /// it goes under, and the base64 the frame carries. `alt` is the name from the download path,
+    /// which a later retry no longer has.
+    async fn finish_part(
+        &self,
+        job: &Job,
+        bytes: Vec<u8>,
+        mime: String,
+        own: Option<String>,
+        alt: Option<String>,
+        heard: Option<Heard>,
+    ) -> Result<Part, String> {
         let picture = job.media.picture();
         let (kind, data, len) = blocking(move || {
             let kind = if picture { viewable(&bytes).ok() } else { None };
@@ -2110,7 +2259,7 @@ impl Bridge {
             // A picture shows under the file's own name, else a plain one.
             Some(k) => own.unwrap_or_else(|| format!("photo.{}", k.extension())),
             None => own
-                .or(from_path)
+                .or(alt)
                 .unwrap_or_else(|| job.media.default_name().to_owned()),
         };
         Ok(Part {
@@ -2124,6 +2273,63 @@ impl Bridge {
             },
             heard,
         })
+    }
+
+    /// Put a held recording back through the server. If that fails with passing trouble again
+    /// and its hour is not up it waits on; otherwise the message goes without its text, as a
+    /// failed transcription would have taken it from the start.
+    async fn retry_held(&self, h: HeldPart) {
+        let voice = match self.voice.clone() {
+            Some(v) => v,
+            None => {
+                self.finish_held_failed(h).await;
+                return;
+            }
+        };
+        let r = self
+            .transcribe(&voice, h.chat, h.audio.clone(), &h.name, &h.mime)
+            .await;
+        match r {
+            Ok(t) => {
+                let heard = Some(Heard::Text(t.trim().to_owned()));
+                let (slot, index, job) = (h.slot.clone(), h.index, h.job.clone());
+                let own = h.job.name.as_deref().and_then(clean_name);
+                let part = self
+                    .finish_part(&h.job, h.audio, h.mime, own, Some(h.name), heard)
+                    .await;
+                self.part_done(&slot, index, &job, part).await;
+            }
+            Err(e) => {
+                if e.kind.is_transient()
+                    && self.hold_recording(
+                        &h.slot, h.index, &h.job, h.chat, &h.audio, &h.name, &h.mime, &e, h.at,
+                    )
+                {
+                    return;
+                }
+                let h = HeldPart { why: e, ..h };
+                self.finish_held_failed(h).await;
+            }
+        }
+    }
+
+    /// A held recording gave up: its message completes with the failure words it is owed, the
+    /// way a failed transcription always completes.
+    async fn finish_held_failed(&self, h: HeldPart) {
+        let words = self.failure_words(&h.why);
+        let (slot, index, job) = (h.slot.clone(), h.index, h.job.clone());
+        let own = h.job.name.as_deref().and_then(clean_name);
+        let part = self
+            .finish_part(
+                &h.job,
+                h.audio,
+                h.mime,
+                own,
+                Some(h.name),
+                Some(Heard::Failed(words)),
+            )
+            .await;
+        self.part_done(&slot, index, &job, part).await;
     }
 
     /// One file of the message held at `slot` has been fetched (or not): keep it, within the caps,
@@ -2766,6 +2972,91 @@ impl Poller {
     }
 }
 
+impl SttHealed for Bridge {
+    /// The speech server answers `/health` again (or the hour is up): every recording still
+    /// under its hour goes back through it, inside the one-transcription gate, and the one that
+    /// waited too long goes through without its text.
+    fn stt_back(&self, at: i64) {
+        let Some(me) = self.strong() else { return };
+        let drained: Vec<HeldPart> = self
+            .stt_held
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .drain(..)
+            .collect();
+        for h in drained {
+            self.stt_held_bytes
+                .fetch_sub(h.audio.len(), Ordering::SeqCst);
+            if at - h.at > HELD_MAX_MS {
+                let me = me.clone();
+                tokio::spawn(async move { me.finish_held_failed(h).await });
+                continue;
+            }
+            let me = me.clone();
+            tokio::spawn(async move {
+                let _gate = match me.transcribing.acquire().await {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
+                me.retry_held(h).await;
+            });
+        }
+    }
+
+    /// The outage is still on: a recording that waited its hour goes without its text, so the
+    /// held set cannot grow without end and no message sits in the queue past its own lifetime.
+    fn stt_expire(&self, at: i64) {
+        let me = match self.strong() {
+            Some(me) => me,
+            None => return,
+        };
+        let due: Vec<HeldPart> = {
+            let mut held = self.stt_held.lock().unwrap_or_else(|p| p.into_inner());
+            let mut i = 0;
+            let mut due = Vec::new();
+            while i < held.len() {
+                if at - held[i].at > HELD_MAX_MS {
+                    let h = held.remove(i).expect("index within the queue");
+                    self.stt_held_bytes
+                        .fetch_sub(h.audio.len(), Ordering::SeqCst);
+                    due.push(h);
+                } else {
+                    i += 1;
+                }
+            }
+            due
+        };
+        for h in due {
+            let me = me.clone();
+            tokio::spawn(async move { me.finish_held_failed(h).await });
+        }
+    }
+}
+
+impl SttHealed for Telegram {
+    fn stt_back(&self, at: i64) {
+        for (_, b) in self
+            .bridges
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+        {
+            b.stt_back(at);
+        }
+    }
+
+    fn stt_expire(&self, at: i64) {
+        for (_, b) in self
+            .bridges
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+        {
+            b.stt_expire(at);
+        }
+    }
+}
+
 /// The bot for the whole household: one [`Bridge`] per person who has a Telegram account linked
 /// to them, sharing one bot and one poll. An update goes to the bridge that allows its sender, and
 /// what a person's machines send up goes to that person's bridge. The allow-list is the hub's
@@ -2868,6 +3159,7 @@ impl Telegram {
                 .with_person(person, lines.clone());
             bridge.siblings = siblings.clone();
             let bridge = Arc::new(bridge);
+            bridge.register_self();
             siblings
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -3177,6 +3469,7 @@ impl Telegram {
             }
             bridge.siblings = make.siblings.clone();
             let bridge = Arc::new(bridge);
+            bridge.register_self();
             make.siblings
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())

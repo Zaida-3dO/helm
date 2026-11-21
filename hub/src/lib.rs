@@ -7,6 +7,7 @@ pub mod apptools;
 pub mod auth;
 pub mod devices;
 pub mod embed;
+pub mod heal;
 pub mod images;
 pub mod import;
 pub mod index;

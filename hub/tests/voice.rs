@@ -8,12 +8,13 @@
 use axum::body::Bytes;
 use axum::http::{header, HeaderMap, StatusCode};
 use futures_util::{SinkExt, StreamExt};
+use helm_hub::heal::{Heal, FRAME_GAP_MS, SERVICE, VOICE_HELD};
 use helm_hub::lines::Lines;
 use helm_hub::mcp::Options;
 use helm_hub::registry::Registry;
 use helm_hub::server::{router, AppState};
 use helm_hub::store::Store;
-use helm_hub::stt::{Stt, SttConfig, SttHealth, STT_RETRY_AFTER};
+use helm_hub::stt::{Stt, SttConfig, SttHealed, SttHealth, STT_RETRY_AFTER};
 use helm_hub::telegram::now_ms;
 use helm_hub::voice::{VoiceBridge, VoiceConfig, AUDIO_BUDGET, BUSY, EXPIRED, STT_FAILED};
 use helm_hub::wake::Wake;
@@ -120,6 +121,8 @@ struct Hub {
     addr: String,
     lines: Arc<Lines>,
     bridge: Option<Arc<VoiceBridge>>,
+    /// The health the bridges hold, kept so a test can watch the outage like the hub does.
+    stt_health: Option<Arc<SttHealth>>,
     stt: FakeStt,
 }
 
@@ -144,6 +147,7 @@ async fn start(o: Opts) -> Hub {
     let (lines, _upstream) = Lines::new(registry.clone());
     let lines = Arc::new(lines);
     let stt = FakeStt::start().await;
+    let mut health = None;
     let mut state = AppState::new(
         Store::open_in_memory().unwrap(),
         registry,
@@ -174,13 +178,15 @@ async fn start(o: Opts) -> Hub {
                     timeout: Duration::from_secs(30),
                 })))
                 .with_stt_retry(o.stt_retry);
+            let h = Arc::new(SttHealth::default());
             if let Some(at) = o.stt_seen_ok {
-                let h = SttHealth::default();
                 h.note_ok(at);
-                b = b.with_stt_health(Arc::new(h));
+                b = b.with_stt_health(h.clone());
             }
+            health = Some(h);
         }
         let b = Arc::new(b);
+        b.register_self();
         tokio::spawn(b.clone().run(lines.voice_receiver()));
         state = state.with_voice(b.clone());
         bridge = Some(b);
@@ -193,6 +199,7 @@ async fn start(o: Opts) -> Hub {
         addr,
         lines,
         bridge,
+        stt_health: health,
         stt,
     }
 }
@@ -949,8 +956,9 @@ async fn a_spoken_turn_goes_to_helm_and_the_answer_comes_back() {
         (10, 200u16, "Synthetic words.", "heard", None, 1),
         (11, 500, "model not loaded", "failed", Some(STT_FAILED), 1),
         (12, 200, "{\"text\": \"  \"}", "empty", None, 1),
-        (13, 502, "busy, try again", "failed", Some(STT_FAILED), 2),
-        (14, 503, "not ready", "failed", Some(STT_FAILED), 2),
+        // Trouble that should pass holds the recording and promises it will be done later.
+        (13, 502, "busy, try again", "failed", Some(VOICE_HELD), 2),
+        (14, 503, "not ready", "failed", Some(VOICE_HELD), 2),
     ] {
         let before = hub.stt.count();
         hub.stt.says(status, text);
@@ -992,10 +1000,72 @@ async fn a_standing_speech_outage_tells_the_phone_since_when() {
     let f = next_where(&mut me, "failed", turn_is(t.clone(), "failed")).await;
     let msg = f["message"].as_str().unwrap();
     assert!(
-        msg.starts_with(STT_FAILED) && msg.contains("unreachable since "),
+        msg.starts_with(VOICE_HELD) && msg.contains("unreachable since "),
         "{msg}"
     );
     assert_eq!(hub.stt.count(), 2, "the 503 was tried twice");
+}
+
+#[tokio::test]
+async fn a_held_voice_note_goes_through_when_the_health_probe_sees_the_server_back() {
+    let hub = start(Opts {
+        stt_retry: Duration::from_millis(5),
+        ..Opts::default()
+    })
+    .await;
+    let (mut me, _welcome) = phone(&hub, PHONE, 0, true).await;
+    hub.stt.says(503, "not ready");
+    let t = id("turn", 1);
+    post_turn(&hub, &t, "", "audio/ogg", &ogg(1)).await;
+    let f = next_where(&mut me, "failed", turn_is(t.clone(), "failed")).await;
+    assert_eq!(f["message"].as_str().unwrap(), VOICE_HELD);
+    assert_eq!(
+        hub.stt.count(),
+        2,
+        "one try and the quick retry, then it waits"
+    );
+    // The health probe sees the server answering again: the held recording goes by itself.
+    hub.stt.says(200, "Back to you.");
+    hub.bridge().stt_back(now_ms());
+    let h = next_where(&mut me, "heard", turn_is(t.clone(), "heard")).await;
+    assert_eq!(h["transcript"], "Back to you.");
+    assert_eq!(hub.stt.count(), 3, "the held note was uploaded again");
+}
+
+#[tokio::test]
+async fn the_speech_outage_names_itself_to_the_pc_once_an_hour() {
+    let hub = start(Opts::default()).await;
+    let mut pc = pc(&hub).await;
+    let health = hub.stt_health.clone().expect("the speech line is on");
+    let heal = Heal::new(health.clone(), hub.lines.clone(), 1);
+    // A fine server tells nobody anything.
+    heal.tick(now_ms());
+    assert!(drain(&mut pc, 50).await.is_empty());
+    // The outage opens with one frame; still down half an hour on, nothing new.
+    let t = now_ms();
+    health.note_down(t, "its health address does not answer");
+    heal.tick(t);
+    let f = next_where(&mut pc, "service_down", is("service_down")).await;
+    assert_eq!(
+        (f["service"].as_str(), f["personId"].as_str()),
+        (Some(SERVICE), Some("1"))
+    );
+    assert!(f["detail"].as_str().unwrap().contains("health address"));
+    assert_eq!(f["since"].as_str().unwrap().len(), 5, "{f}");
+    heal.tick(t + FRAME_GAP_MS / 2);
+    assert!(
+        drain(&mut pc, 50).await.is_empty(),
+        "not twice inside the hour"
+    );
+    // Past the hour: one more, and the recovery edge asks the bridge for its held notes.
+    heal.tick(t + FRAME_GAP_MS + 1);
+    next_where(&mut pc, "service_down again", is("service_down")).await;
+    health.note_ok(t + FRAME_GAP_MS + 2);
+    heal.tick(t + FRAME_GAP_MS + 2);
+    assert!(
+        drain(&mut pc, 50).await.is_empty(),
+        "the recovery sends no frame"
+    );
 }
 
 #[tokio::test]

@@ -5,6 +5,7 @@
 use axum::body::{Body, Bytes};
 use axum::http::{header, HeaderMap, Request, StatusCode};
 use helm_hub::auth::{Client, Scopes};
+use helm_hub::heal::{HELD_MAX_MS, VOICE_HELD};
 use helm_hub::launcher::Launchers;
 use helm_hub::lines::Lines;
 use helm_hub::mcp::Options;
@@ -12,7 +13,7 @@ use helm_hub::registry::Registry;
 use helm_hub::relay::{Channel, Line, Upstream, OFFLINE};
 use helm_hub::server::{router, AppState};
 use helm_hub::store::Store;
-use helm_hub::stt::{SttError, SttFailure, SttFuture, SttHealth};
+use helm_hub::stt::{SttError, SttFailure, SttFuture, SttHealed, SttHealth};
 use helm_hub::telegram::{
     now_ms, parse_allowed, parse_receive, size_text, ApiError, ApiFuture, Bridge, Files, Handled,
     HttpFiles, HttpVoice, Receive, SttConfig, Telegram, TelegramApi, TelegramConfig, Voice,
@@ -111,7 +112,7 @@ impl TelegramApi for FakeApi {
 
 /// Downloads a few bytes and answers `heard`, once the gate lets it (open unless `held`).
 struct FakeVoice {
-    heard: Result<String, SttError>,
+    heard: Mutex<Result<String, SttError>>,
     gate: tokio::sync::Semaphore,
     seen: Mutex<Vec<String>>,
 }
@@ -125,7 +126,7 @@ impl FakeVoice {
     }
     fn gated(heard: Result<&str, &str>, permits: usize) -> Arc<Self> {
         Arc::new(FakeVoice {
-            heard: heard.map(str::to_owned).map_err(SttError::plain),
+            heard: Mutex::new(heard.map(str::to_owned).map_err(SttError::plain)),
             gate: tokio::sync::Semaphore::new(permits),
             seen: Mutex::new(vec![]),
         })
@@ -133,13 +134,17 @@ impl FakeVoice {
     /// A failure of a given kind, for the retry rules.
     fn failing(heard: Result<&str, SttFailure>) -> Arc<Self> {
         Arc::new(FakeVoice {
-            heard: heard.map(str::to_owned).map_err(|kind| SttError {
+            heard: Mutex::new(heard.map(str::to_owned).map_err(|kind| SttError {
                 kind,
                 why: "the speech-to-text server could not be reached".into(),
-            }),
+            })),
             gate: tokio::sync::Semaphore::new(100),
             seen: Mutex::new(vec![]),
         })
+    }
+    /// What transcription answers from now on: how the server "comes back" in a test.
+    fn says(&self, heard: Result<&str, SttError>) {
+        *self.heard.lock().unwrap() = heard.map(str::to_owned);
     }
 }
 
@@ -159,9 +164,10 @@ impl Voice for FakeVoice {
     ) -> SttFuture<'a, String> {
         let seen = format!("transcribe {name} {mime} {}", audio.len());
         self.seen.lock().unwrap().push(seen);
+        let heard = self.heard.lock().unwrap().clone();
         Box::pin(async move {
             self.gate.acquire().await.unwrap().forget();
-            self.heard.clone()
+            heard
         })
     }
 }
@@ -253,6 +259,7 @@ fn env_of(voice: Option<Arc<FakeVoice>>, files: Option<Arc<FakeFiles>>) -> Env {
         bridge = bridge.with_files(f);
     }
     let bridge = Arc::new(bridge);
+    bridge.register_self();
     Env { api, line, bridge }
 }
 
@@ -1348,6 +1355,7 @@ async fn passing_stt_trouble_is_retried_once_and_a_standing_outage_names_its_sta
             bridge = bridge.with_stt_health(Arc::new(h));
         }
         let bridge = Arc::new(bridge);
+        bridge.register_self();
         bridge
             .on_update(&owner_message(json!({ "voice": note })), now_ms())
             .await;
@@ -1361,16 +1369,113 @@ async fn passing_stt_trouble_is_retried_once_and_a_standing_outage_names_its_sta
         let sent = api.sent_texts();
         assert_eq!(sent.len(), 1, "{kind:?}: {sent:?}");
         let why = "the speech-to-text server could not be reached";
-        if down_for {
-            assert!(
-                sent[0].contains(why) && sent[0].contains("unreachable since "),
-                "{}",
-                sent[0]
-            );
+        if kind.is_transient() {
+            // Trouble that should pass: the recording is held and the chat is promised a later
+            // transcript, instead of the note that says it went without one.
+            if down_for {
+                assert!(
+                    sent[0].starts_with(VOICE_HELD) && sent[0].contains("unreachable since "),
+                    "{}",
+                    sent[0]
+                );
+            } else {
+                assert_eq!(sent, [VOICE_HELD], "{kind:?}");
+            }
         } else {
             assert_eq!(sent, [down_reply(why)], "{kind:?}");
         }
     }
+}
+
+#[tokio::test]
+async fn a_held_voice_note_waits_out_the_outage_and_goes_through_after() {
+    let note = json!({ "file_id": "f1", "mime_type": "audio/ogg", "file_size": 1234 });
+    let voice = FakeVoice::failing(Err(SttFailure::Refused));
+    let api = Arc::new(FakeApi::default());
+    let (line, _up) = Line::new();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    line.attach(tx);
+    let bridge = Arc::new(
+        Bridge::new(api.clone(), Arc::new(line), &cfg())
+            .with_voice(voice.clone())
+            .with_stt_retry(Duration::from_millis(5)),
+    );
+    bridge.register_self();
+    bridge
+        .on_update(&owner_message(json!({ "voice": note })), now_ms())
+        .await;
+    settle().await;
+    // The chat is told the note will be transcribed later; nothing reaches Helm yet, and the
+    // message waits in the queue with its recording.
+    assert_eq!(api.sent_texts(), [VOICE_HELD]);
+    assert!(down(&mut rx).is_empty(), "the note waits, not forwarded");
+    // The speech server answers its health address again: the held recording goes by itself.
+    voice.says(Ok("Back to you."));
+    bridge.stt_back(now_ms());
+    settle().await;
+    let got = down(&mut rx);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0], "[Voice note] Back to you.");
+    let seen = voice.seen.lock().unwrap().clone();
+    assert_eq!(
+        seen.iter().filter(|s| s.starts_with("transcribe")).count(),
+        3,
+        "one try, the quick retry, and the retry after recovery: {seen:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_held_voice_note_goes_without_its_text_once_its_hour_is_up() {
+    let note = json!({ "file_id": "f1", "mime_type": "audio/ogg", "file_size": 1234 });
+    let voice = FakeVoice::failing(Err(SttFailure::Refused));
+    let api = Arc::new(FakeApi::default());
+    let (line, _up) = Line::new();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    line.attach(tx);
+    let bridge = Arc::new(
+        Bridge::new(api.clone(), Arc::new(line), &cfg())
+            .with_voice(voice.clone())
+            .with_stt_retry(Duration::from_millis(5)),
+    );
+    bridge.register_self();
+    bridge
+        .on_update(&owner_message(json!({ "voice": note })), now_ms())
+        .await;
+    settle().await;
+    assert_eq!(api.sent_texts(), [VOICE_HELD]);
+    // The outage never ends. Past the hour the expire pass completes the message the way a
+    // failed transcription always does: the recording goes without its text, and the chat is
+    // told why.
+    bridge.stt_expire(now_ms() + HELD_MAX_MS + 1);
+    settle().await;
+    let got = down(&mut rx);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(
+        got[0].contains("(not transcribed"),
+        "the recording goes marked: {got:?}"
+    );
+    assert!(
+        api.sent_texts()[1..].iter().all(|t| t.contains(STT_DOWN)),
+        "{:?}",
+        api.sent_texts()
+    );
+    assert!(
+        api.sent_texts()
+            .iter()
+            .any(|t| t.contains("The recording went to Helm without its text.")),
+        "{:?}",
+        api.sent_texts()
+    );
+    // It is not held any more: a later recovery finds nothing to retry.
+    voice.says(Ok("too late"));
+    bridge.stt_back(now_ms() + HELD_MAX_MS + 2);
+    settle().await;
+    assert!(down(&mut rx).is_empty());
+    let seen = voice.seen.lock().unwrap().clone();
+    assert_eq!(
+        seen.iter().filter(|s| s.starts_with("transcribe")).count(),
+        2
+    );
 }
 
 #[tokio::test]

@@ -41,7 +41,7 @@
 //! lost connection, a failing service), the exchange stays open with a line saying so, and the
 //! continued turn's answer is the one that goes up.
 
-use crate::client::{BoxFut, LineHandle, TelegramMessage, TelegramSink};
+use crate::client::{BoxFut, LineHandle, ServiceOutage, TelegramMessage, TelegramSink};
 use crate::exec::AppExecutor;
 use crate::telegram::{self, ChatFacts, ChatPort, TagPolicy, TELEGRAM_ORIGIN};
 use helm_chats::submit::{
@@ -724,6 +724,84 @@ pub struct Ctx {
     pub sent_path: PathBuf,
 }
 
+/// How far apart two repair chats for the same service may be. The hub rate-limits its own
+/// reports to the same hour; this also covers a second PC, a reconnect and a restart.
+pub(crate) const REPAIR_GAP_MS: i64 = 3_600_000;
+
+/// The hub's name for a service, in the words a person would use.
+fn service_words(service: &str) -> &str {
+    match service {
+        "stt" => "speech-to-text",
+        other => other,
+    }
+}
+
+/// True when this outage opens a repair chat, recording the time so the next one inside the
+/// hour does not ([`REPAIR_GAP_MS`]).
+pub(crate) fn repair_due(last: &Mutex<HashMap<String, i64>>, service: &str, now: i64) -> bool {
+    let mut last = last.lock().unwrap_or_else(|p| p.into_inner());
+    if last.get(service).is_some_and(|t| now - t < REPAIR_GAP_MS) {
+        false
+    } else {
+        last.insert(service.to_owned(), now);
+        true
+    }
+}
+
+/// Open the chat that fixes a service the hub cannot reach (blocking): a chat of its own in the
+/// profile's repair folder, named for the service, its first message the task. `Ok` is the new
+/// chat's id.
+pub(crate) fn open_repair_chat(c: &Ctx, o: &ServiceOutage, now: i64) -> Result<String, String> {
+    let words = service_words(&o.service);
+    let folder = plain_path(&PathBuf::from(&c.folder).join("service-repair"));
+    std::fs::create_dir_all(&folder)
+        .map_err(|_| "The service chats' folder could not be made.".to_owned())?;
+    let chat = c
+        .handle
+        .block_on(c.ops.invoke("chat_create", json!({ "cwd": folder })))
+        .map_err(|e| e.message)?;
+    let id = chat["id"]
+        .as_str()
+        .ok_or("chat_create answered no id")?
+        .to_owned();
+    helm_chats::titles::rename(&c.rt, &id, &format!("Fix the {words} service"))
+        .map_err(|e| e.message)?;
+    // The repair chat belongs to the profile whose hub line reported the outage. A refused
+    // assignment keeps the chat; the task is still there to run.
+    if let Err(e) = c.handle.block_on(c.ops.invoke(
+        "profiles_assign_chats",
+        json!({ "chatIds": [&id], "profileId": c.profile_id }),
+    )) {
+        log::warn!(
+            "relay: the repair chat could not be kept to its profile: {}",
+            e.message
+        );
+    }
+    let detail = o
+        .detail
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .unwrap_or("no reason was given");
+    let text = format!(
+        "The {words} service has been unreachable since {} ({detail}). Find out why and bring \
+         it back, then say it is back.",
+        o.since
+    );
+    let sid = telegram::submission_id(&format!("repair/{}/{}", o.service, now));
+    host_send(
+        &c.rt,
+        HostSend {
+            chat_id: &id,
+            submission_id: &sid,
+            text: &text,
+            origin: helm_chats::types::SubmissionOrigin::App,
+        },
+    )
+    .map(|_| id)
+    .map_err(|e| e.message)
+}
+
 /// Put one message into its chat (blocking). `Err` leaves it unacknowledged at the hub.
 pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String> {
     let sid = telegram::submission_id(&msg.id);
@@ -1206,6 +1284,8 @@ pub struct ChatSink {
     watching: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     /// Approvals asked on Telegram and not yet answered ([`crate::approve`]).
     pub asks: crate::approve::Asks,
+    /// When each hub service's last repair chat was opened, so a standing outage gets one an hour.
+    repair: Mutex<HashMap<String, i64>>,
 }
 
 /// A path the worker can be started in: without Windows' verbatim prefix.
@@ -1228,6 +1308,7 @@ impl ChatSink {
             answered: Mutex::new(HashMap::new()),
             asks: crate::approve::Asks::default(),
             watching: Mutex::new(HashMap::new()),
+            repair: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1592,6 +1673,28 @@ impl TelegramSink for ChatSink {
                 .await
             {
                 log::warn!("relay: /stop from Telegram failed: {}", e.message);
+            }
+        })
+    }
+
+    fn service_down<'a>(&'a self, o: ServiceOutage) -> BoxFut<'a, ()> {
+        Box::pin(async move {
+            let Ok(c) = self.ctx(o.person.as_deref()) else {
+                log::info!("relay: a service outage named no profile that runs a channel here");
+                return;
+            };
+            let now = helm_core::now_ms();
+            if !repair_due(&self.repair, &o.service, now) {
+                return;
+            }
+            let (c2, service) = (c.clone(), o.service.clone());
+            let opened = tokio::task::spawn_blocking(move || open_repair_chat(&c2, &o, now))
+                .await
+                .map_err(|_| "The repair chat did not finish.".to_owned())
+                .and_then(|r| r);
+            match opened {
+                Ok(id) => log::info!("relay: opened chat {id} to fix the {service} service"),
+                Err(e) => log::warn!("relay: no repair chat for the {service} service: {e}"),
             }
         })
     }

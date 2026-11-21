@@ -38,14 +38,15 @@
 //! [`VoiceBridge::tick`] runs the steps that depend on time or on a line coming up; it runs every
 //! [`TICK`] under [`VoiceBridge::run`] and after every call that changes state.
 
+use crate::heal::{HELD_AUDIO_MAX, HELD_MAX_MS, VOICE_HELD};
 use crate::lines::{Lines, PersonUpstream};
 use crate::relay::{Channel, Line, Upstream};
-use crate::stt::{retry_transcribing, SttHealth, Transcribe, STT_RETRY_AFTER};
+use crate::stt::{retry_transcribing, SttHealed, SttHealth, Transcribe, STT_RETRY_AFTER};
 use crate::telegram::now_ms;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -706,6 +707,16 @@ struct Held {
     attachment: Attachment,
 }
 
+/// A spoken turn whose recording failed to transcribe while the speech server was in trouble;
+/// it waits, audio and all, for the server to come back.
+struct HeldTurn {
+    at: i64,
+    person: i64,
+    turn: String,
+    audio: Vec<u8>,
+    mime: String,
+}
+
 struct Live {
     gen: u64,
     tx: UnboundedSender<Out>,
@@ -1225,6 +1236,11 @@ pub struct VoiceBridge {
     /// Bytes of recordings held until they are transcribed, for the whole hub.
     audio_held: Arc<AtomicUsize>,
     audio_budget: usize,
+    /// Failed spoken turns waiting for the speech server to come back ([`VoiceBridge::stt_back`]).
+    stt_held: Mutex<VecDeque<HeldTurn>>,
+    stt_held_bytes: AtomicUsize,
+    /// The bridge's own handle, set once it is shared, so a retry can spawn its transcription.
+    me: OnceLock<Weak<VoiceBridge>>,
     /// Where every person's outbox `seq` starts: the clock when the bridge was made, so the seqs
     /// of a hub that restarted are above any `lastSeq` a phone kept from before.
     seq_base: u64,
@@ -1244,7 +1260,20 @@ impl VoiceBridge {
             seq_base: u64::try_from(now_ms()).unwrap_or(0),
             audio_held: Arc::new(AtomicUsize::new(0)),
             audio_budget: AUDIO_BUDGET,
+            stt_held: Mutex::new(VecDeque::new()),
+            stt_held_bytes: AtomicUsize::new(0),
+            me: OnceLock::new(),
         }
+    }
+
+    /// Remember the bridge's own shared handle so held recordings can be retried by themselves.
+    /// Call it on the `Arc` the hub runs the bridge from.
+    pub fn register_self(self: &Arc<Self>) {
+        let _ = self.me.set(Arc::downgrade(self));
+    }
+
+    fn strong(&self) -> Option<Arc<VoiceBridge>> {
+        self.me.get().and_then(|w| w.upgrade())
     }
 
     /// Hold at most `bytes` of recordings (instead of [`AUDIO_BUDGET`]).
@@ -1498,10 +1527,55 @@ impl VoiceBridge {
             Ok(text) => Transcript::Text(text),
             Err(why) => {
                 eprintln!("voice: transcription failed: {why}");
+                // Trouble that should pass: the recording waits for the server to come back and
+                // is retried on its own; the phone is told it will happen.
+                if why.kind.is_transient() && self.hold(person, turn, &audio, mime, now_ms()) {
+                    self.heard(
+                        person,
+                        turn,
+                        Transcript::Failed(self.stt_healing_text()),
+                        now_ms(),
+                    );
+                    return;
+                }
                 Transcript::Failed(self.stt_failed_text())
             }
         };
         self.heard(person, turn, result, now_ms());
+    }
+
+    /// Set the recording aside for [`VoiceBridge::stt_back`]. False: the bridge already holds as
+    /// much as it may, so this failure is an ordinary one.
+    fn hold(&self, person: i64, turn: &str, audio: &[u8], mime: &str, at: i64) -> bool {
+        let held = self.stt_held_bytes.load(Ordering::SeqCst);
+        if held + audio.len() > HELD_AUDIO_MAX {
+            return false;
+        }
+        self.stt_held_bytes.fetch_add(audio.len(), Ordering::SeqCst);
+        self.stt_held
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push_back(HeldTurn {
+                at,
+                person,
+                turn: turn.to_owned(),
+                audio: audio.to_vec(),
+                mime: mime.to_owned(),
+            });
+        true
+    }
+
+    /// The phone's words for a recording that waits for the server: the promise it will be
+    /// transcribed, and when the probe says the outage started.
+    fn stt_healing_text(&self) -> String {
+        match self
+            .stt_health
+            .as_ref()
+            .and_then(|h| h.since_text(now_ms()))
+        {
+            Some(since) => format!("{VOICE_HELD} It has been {since}."),
+            None => VOICE_HELD.into(),
+        }
     }
 
     /// What the phone is told when a transcription fails: the stock line, and when the health
@@ -1687,13 +1761,65 @@ impl VoiceBridge {
     }
 }
 
+impl SttHealed for VoiceBridge {
+    /// The speech server answers `/health` again: every recording still under its hour goes back
+    /// through it, and its turn goes from failed to transcribing so the phone follows.
+    fn stt_back(&self, at: i64) {
+        let Some(me) = self.strong() else { return };
+        let drained: Vec<HeldTurn> = self
+            .stt_held
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .drain(..)
+            .collect();
+        for h in drained {
+            self.stt_held_bytes
+                .fetch_sub(h.audio.len(), Ordering::SeqCst);
+            if at - h.at > HELD_MAX_MS {
+                continue; // past its hour: the turn stands failed, as the phone was told.
+            }
+            let waiting = self
+                .with(h.person, at, |p, _| match p.turns.get_mut(&h.turn) {
+                    Some(t) if t.state == TurnState::Failed => {
+                        t.state = TurnState::Transcribing;
+                        t.changed = at;
+                        p.keep(turn_frame(&h.turn, "transcribing"), at);
+                        true
+                    }
+                    _ => false,
+                })
+                .0;
+            if !waiting {
+                continue;
+            }
+            let me = me.clone();
+            tokio::spawn(async move {
+                me.transcribe_turn(h.person, &h.turn, h.audio, &h.mime)
+                    .await;
+            });
+        }
+    }
+
+    /// The outage is still on: recordings that waited their hour are let go, so the held set
+    /// cannot grow without end.
+    fn stt_expire(&self, at: i64) {
+        let mut held = self.stt_held.lock().unwrap_or_else(|p| p.into_inner());
+        while held.front().is_some_and(|h| at - h.at > HELD_MAX_MS) {
+            if let Some(h) = held.pop_front() {
+                self.stt_held_bytes
+                    .fetch_sub(h.audio.len(), Ordering::SeqCst);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::auth::{Client, Scopes};
     use crate::registry::Registry;
     use crate::stt::{SttError, SttFailure, SttFuture, SttHealth};
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use tokio::sync::mpsc;
 
     const T0: i64 = 1_800_000_000_000;
@@ -1766,6 +1892,18 @@ mod tests {
             app: "test/1".into(),
         };
         (r.bridge.attach_live(PERSON, token, &hello, tx, now), rx)
+    }
+
+    /// The phone opens the live socket on a bridge that is not inside a [`Rig`].
+    fn attach(b: &VoiceBridge, now: i64) -> (u64, mpsc::UnboundedReceiver<Out>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let hello = Hello {
+            last_seq: 0,
+            live: true,
+            mode: Mode::Conversation,
+            app: "test/1".into(),
+        };
+        (b.attach_live(PERSON, PHONE, &hello, tx, now), rx)
     }
 
     fn frames(rx: &mut mpsc::UnboundedReceiver<Out>) -> Vec<Value> {
@@ -2491,15 +2629,147 @@ mod tests {
                 tries,
                 "{kind:?} tried wrong"
             );
+            // Trouble that should pass holds the recording and promises; other failures do not.
+            let expect = if kind.is_transient() {
+                VOICE_HELD
+            } else {
+                STT_FAILED
+            };
             if down_for {
                 assert!(
-                    msg.starts_with(STT_FAILED) && msg.contains("unreachable since "),
+                    msg.starts_with(expect) && msg.contains("unreachable since "),
                     "{msg}"
                 );
             } else {
-                assert_eq!(msg, STT_FAILED);
+                assert_eq!(msg, expect);
             }
         }
+    }
+
+    /// A speech server that is told to be down, then back; it counts what it is asked for.
+    struct Flips {
+        down: AtomicBool,
+        tries: AtomicUsize,
+    }
+
+    impl Transcribe for Flips {
+        fn transcribe<'a>(
+            &'a self,
+            audio: Vec<u8>,
+            name: &'a str,
+            mime: &'a str,
+        ) -> SttFuture<'a, String> {
+            assert_eq!(
+                (audio.as_slice(), name, mime),
+                (&b"clip"[..], "turn.ogg", "audio/ogg")
+            );
+            self.tries.fetch_add(1, Ordering::SeqCst);
+            let down = self.down.load(Ordering::SeqCst);
+            Box::pin(async move {
+                if down {
+                    Err(SttError {
+                        kind: SttFailure::Refused,
+                        why: "synthetic: down".into(),
+                    })
+                } else {
+                    Ok("Back to you.".to_owned())
+                }
+            })
+        }
+    }
+
+    /// The same rig as [`rig`], but shared: a retry spawns from the bridge's own handle.
+    fn arc_bridge(stt: Arc<dyn Transcribe>) -> Arc<VoiceBridge> {
+        let registry = Arc::new(Mutex::new(Registry::open_in_memory().unwrap()));
+        let (lines, _up) = Lines::new(registry);
+        let b = Arc::new(
+            VoiceBridge::new(Arc::new(lines), VoiceConfig::default())
+                .with_seq_base(0)
+                .with_stt(stt)
+                .with_stt_retry(Duration::from_millis(1)),
+        );
+        b.register_self();
+        b
+    }
+
+    #[tokio::test]
+    async fn a_held_recording_goes_through_when_the_server_is_back() {
+        let flips = Arc::new(Flips {
+            down: AtomicBool::new(true),
+            tries: AtomicUsize::new(0),
+        });
+        let b = arc_bridge(flips.clone());
+        let (_g, mut live) = attach(&b, T0);
+        frames(&mut live); // the welcome
+        b.begin_turn(PERSON, spoken(1), now_ms());
+        b.transcribe_turn(PERSON, &id(1), b"clip".to_vec(), "audio/ogg")
+            .await;
+        let got = frames(&mut live);
+        assert_eq!(
+            types(&got),
+            ["turn:transcribing".to_owned(), "turn:failed".to_owned()]
+        );
+        assert_eq!(got[1]["message"].as_str().unwrap(), VOICE_HELD);
+        assert_eq!(
+            flips.tries.load(Ordering::SeqCst),
+            2,
+            "one try and one immediate retry, then it waits"
+        );
+        // The server answers again: the held recording goes by itself.
+        flips.down.store(false, Ordering::SeqCst);
+        b.stt_back(now_ms());
+        let mut seen: Vec<Value> = vec![];
+        for _ in 0..50 {
+            seen.extend(frames(&mut live));
+            if seen.iter().any(|f| f["state"] == "heard") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // The phone is taken from failed back through transcribing to heard with its words.
+        let back: Vec<String> = types(&seen)
+            .into_iter()
+            .filter(|t| t.starts_with("turn:"))
+            .collect();
+        assert_eq!(
+            back,
+            [
+                "turn:transcribing".to_owned(),
+                "turn:heard".to_owned(),
+                "turn:queued".to_owned()
+            ]
+        );
+        let heard = seen.iter().find(|f| f["state"] == "heard").unwrap();
+        assert_eq!(heard["transcript"], "Back to you.");
+        assert_eq!(
+            flips.tries.load(Ordering::SeqCst),
+            3,
+            "the held note was re-sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_held_recording_is_let_go_past_its_hour() {
+        let flips = Arc::new(Flips {
+            down: AtomicBool::new(true),
+            tries: AtomicUsize::new(0),
+        });
+        let b = arc_bridge(flips.clone());
+        let (_g, mut live) = attach(&b, T0);
+        frames(&mut live); // the welcome
+        b.begin_turn(PERSON, spoken(1), now_ms());
+        b.transcribe_turn(PERSON, &id(1), b"clip".to_vec(), "audio/ogg")
+            .await;
+        assert_eq!(frames(&mut live).len(), 2);
+        // The outage never ends: the expire pass lets it go, and the back pass has nothing.
+        let at = now_ms() + HELD_MAX_MS + 1;
+        b.stt_expire(at);
+        b.stt_back(at + 1);
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(frames(&mut live).is_empty());
+        assert_eq!(flips.tries.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

@@ -680,6 +680,83 @@ async fn a_snapshot_lists_the_last_three_calls_in_their_own_words() {
     assert!(matches!(stopped(&e), Some(Stop::Retrying { .. })));
 }
 
+/// The hub's outage report opens a repair chat, once per service per hour.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_hub_outage_opens_one_repair_chat_per_service_per_hour() {
+    let e = env();
+    let down = ServiceOutage {
+        person: None,
+        service: "stt".into(),
+        since: "09:12".into(),
+        detail: Some("its health address does not answer".into()),
+    };
+    let last = Mutex::new(HashMap::new());
+    let open = |at: i64| {
+        let (c, o, last) = (e.ctx.clone(), down.clone(), &last);
+        async move {
+            if !repair_due(last, &o.service, at) {
+                return Ok::<Option<String>, String>(None);
+            }
+            tokio::task::spawn_blocking(move || open_repair_chat(&c, &o, at))
+                .await
+                .unwrap()
+                .map(Some)
+        }
+    };
+    let first = open(T0).await.unwrap().expect("the outage opens a chat");
+    assert_eq!(
+        open(T0 + 60_000).await.unwrap(),
+        None,
+        "a second report inside the hour opens no second chat"
+    );
+    let again = open(T0 + REPAIR_GAP_MS + 1)
+        .await
+        .unwrap()
+        .expect("an hour on, one more");
+    assert_ne!(first, again);
+    let title = |id: &str| -> String {
+        e.db.snapshot(|tx| {
+            tx.query_row("SELECT title FROM chats WHERE id = ?1", [id], |r| r.get(0))
+        })
+        .unwrap()
+    };
+    assert_eq!(title(&first), "Fix the speech-to-text service");
+    let s = subs(&e.db, &first);
+    assert_eq!(s.len(), 1, "the task is the chat's first message");
+    assert_eq!(s[0].1, "app", "Helm opened the chat, not a person");
+    assert_eq!(
+        s[0].4,
+        "The speech-to-text service has been unreachable since 09:12 (its health address does \
+         not answer). Find out why and bring it back, then say it is back."
+    );
+    let calls = e.ops.calls.lock().unwrap().clone();
+    let creates: Vec<&Value> = calls
+        .iter()
+        .filter(|(o, _)| o == "chat_create")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(creates.len(), 2, "no chat for the rate-limited report");
+    let repair_folder = std::path::Path::new(&e.ctx.folder)
+        .join("service-repair")
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        creates[0]["cwd"]
+            .as_str()
+            .unwrap()
+            .ends_with(&repair_folder),
+        "{creates:?}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|(o, _)| o == "profiles_assign_chats")
+            .count(),
+        2,
+        "each repair chat is kept to the profile whose line reported it"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_starts_the_telegram_chat_with_origin_telegram_and_is_stored_once() {
     let e = env();

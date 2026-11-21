@@ -1,6 +1,7 @@
 use helm_hub::admin;
 use helm_hub::auth::Tokens;
 use helm_hub::embed::{self, QueryEmbedder};
+use helm_hub::heal;
 use helm_hub::import::{check_root, import_dir, parse_args, record_root};
 use helm_hub::lines::Lines;
 use helm_hub::mcp::Options;
@@ -533,7 +534,9 @@ fn serve() -> ExitCode {
                 bridge = bridge.with_stt_health(h.clone());
             }
         }
-        Arc::new(bridge)
+        let bridge = Arc::new(bridge);
+        bridge.register_self();
+        bridge
     });
     let voice_upstream = voice.as_ref().map(|_| lines.voice_receiver());
     let mut state = AppState::new(
@@ -583,9 +586,19 @@ fn serve() -> ExitCode {
             }
         };
         helm_hub::watchdog::start(watchdog_limit());
-        // The speech server's /health, so a voice failure can say since when it has been down.
+        // The speech server's /health, so a voice failure can say since when it has been down,
+        // and the watch that heals the trouble: one frame an hour to the PC, and the held notes
+        // back through the moment the server answers again.
         if let (Some(stt), Some(h)) = (&telegram_cfg.stt, stt_health.clone()) {
-            stt::spawn_health(&stt.url, h);
+            stt::spawn_health(&stt.url, h.clone());
+            let mut heal = heal::Heal::new(h, lines.clone(), owner.id);
+            if let Some(b) = &voice {
+                heal = heal.with_healed(b.clone());
+            }
+            if let Some(t) = &telegram {
+                heal = heal.with_healed(t.clone());
+            }
+            Arc::new(heal).spawn();
         }
         if let Some(bot) = telegram {
             eprintln!(
