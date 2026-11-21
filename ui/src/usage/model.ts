@@ -80,6 +80,13 @@ export function readLine(w: Numbered & { at: number }, now: number): string {
   return `Read ${asOf(w.at, now)} from ${sourceLabel(w.source)}${isEstimate(w) ? ' (an estimate)' : ''}`;
 }
 
+/** "Asked 5 min ago": when Helm last asked Claude Code for a reading, or null until it has.
+ * The numbers on show can be older than the ask — a merge keeps a number at the time it was read. */
+export function askedLine(snap: UsageSnapshot | null, now: number): string | null {
+  const at = snap?.askedAt;
+  return typeof at === 'number' ? `Asked ${asOf(at, now)}` : null;
+}
+
 export function resetLine(w: { resetsAt?: number }, now: number): string {
   if (typeof w.resetsAt !== 'number') return 'Reset time unknown';
   return expired(w, now) ? 'Window has reset' : `Resets ${clock(w.resetsAt)} (${relativeFuture(w.resetsAt, now)})`;
@@ -93,11 +100,13 @@ export function sourceLabel(source: 'control' | 'rate_limit_event'): string {
 export function bars(snap: UsageSnapshot | null, now: number): BarModel[] {
   const r = snap?.reading;
   if (!r) return [];
+  const asked = askedLine(snap, now);
   const one = (id: BarId, label: string, short: string, w: UsageWindow | undefined): BarModel[] => {
     if (!w) return [];
     const stale = r.stale || expired(w, now);
-    const used = typeof w.pct === 'number' ? `${label}: ${windowText(w)} used` : `${label}: ${UNKNOWN_WINDOW.toLowerCase()}`;
-    const tooltip = [used, resetLine(w, now), typeof w.pct === 'number' ? readLine(w, now) : '', stale ? 'Out of date' : ''].filter(Boolean).join('\n');
+    const has = typeof w.pct === 'number';
+    const used = has ? `${label}: ${windowText(w)} used` : `${label}: ${UNKNOWN_WINDOW.toLowerCase()}`;
+    const tooltip = [used, resetLine(w, now), has ? readLine(w, now) : '', has ? (asked ?? '') : '', stale ? 'Out of date' : ''].filter(Boolean).join('\n');
     return [{ id, label, short, pct: w.pct ?? null, text: windowText(w), estimate: isEstimate(w), stale, tooltip }];
   };
   return [...one('five_hour', '5-hour window', '5h', r.fiveHour), ...one('weekly', 'Weekly window', 'Wk', r.weekly)];

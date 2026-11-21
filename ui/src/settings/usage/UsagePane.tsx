@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { usageOps, type RequestModes, type UsageSnapshot } from '../../api/usage.ts';
 import { useShell } from '../../shell/context.ts';
 import { SignInAgain } from '../../transcript/SignInAgain.tsx';
-import { customRange, ESTIMATE_TITLE, expired, isEstimate, RANGES, rangeOf, readLine, resetLine, windowText, type RangeId } from '../../usage/model.ts';
+import { askedLine, customRange, ESTIMATE_TITLE, expired, isEstimate, RANGES, rangeOf, readLine, resetLine, windowText, type RangeId } from '../../usage/model.ts';
 import { useUsageStore } from '../../usage/UsageMeter.tsx';
 import { Button, PillTabs, Segmented, TextInput } from '../../ui/index.ts';
 import { FeedbackTab } from './FeedbackTab.tsx';
@@ -70,6 +70,7 @@ function PlanCards({ snap, now }: { snap: UsageSnapshot | null; now: number }) {
       </p>
     );
   }
+  const asked = askedLine(snap, now);
   const card = (id: string, title: string, w: { pct?: number; resetsAt?: number; at: number; source: 'control' | 'rate_limit_event' }) => {
     const stale = r.stale || expired(w, now);
     return (
@@ -80,6 +81,11 @@ function PlanCards({ snap, now }: { snap: UsageSnapshot | null; now: number }) {
         </div>
         <div className="usage-card-meta">{resetLine(w, now)}</div>
         <div className="usage-card-meta">{readLine(w, now)}</div>
+        {asked && typeof w.pct === 'number' ? (
+          <div className="usage-card-meta" data-testid="usage-card-asked">
+            {asked}
+          </div>
+        ) : null}
       </div>
     );
   };

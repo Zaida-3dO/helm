@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { EventBus } from '../api/events.ts';
 import type { UsageSnapshot, UsageWindow } from '../api/usage.ts';
-import { asOf, bars, type BarModel, compactTokensText, customRange, emptyTitle, localText, percentText, rangeOf, readLine, readNote, relativeFuture, shareText, tokensText, usdText, windowText } from './model.ts';
+import { askedLine, asOf, bars, type BarModel, compactTokensText, customRange, emptyTitle, localText, percentText, rangeOf, readLine, readNote, relativeFuture, shareText, tokensText, usdText, windowText } from './model.ts';
 import { POLL_MS, UsageStore } from './store.ts';
 
 const NOW = Date.parse('2026-10-18T12:00:00Z');
@@ -13,6 +13,7 @@ function snap(over: Partial<NonNullable<UsageSnapshot['reading']>> = {}): UsageS
     reading: { fiveHour: win(5, NOW + 3_600_000), weekly: win(56, NOW + 90_000_000), perModel: [], source: 'control', fetchedAt: NOW - 1000, stale: false, ...over },
     readiness: { state: 'ready', reason: 'Plan usage is up to date.' },
     refreshing: false,
+    askedAt: NOW - 1000,
   };
 }
 
@@ -22,6 +23,12 @@ test('two bars with the percentage, reset times and source in the tooltip', () =
   assert.match(b[0].tooltip, /5-hour window: 5% used/);
   assert.match(b[0].tooltip, /in 1h 0m/);
   assert.match(b[0].tooltip, /Claude Code usage report/);
+  assert.match(b[0].tooltip, /Asked just now/);
+  // Numbers older than the last ask show both ages: what is on show, and when Helm asked.
+  const older = { ...snap(), reading: { ...snap().reading!, fiveHour: win(5, NOW + 3_600_000, NOW - 7 * 60_000) }, askedAt: NOW - 60_000 };
+  const [ob] = bars(older, NOW) as [BarModel, BarModel];
+  assert.match(ob.tooltip, /Read 7 min ago/);
+  assert.match(ob.tooltip, /Asked 1 min ago/);
 });
 
 test('an old reading, and a window whose reset has passed, are greyed', () => {
@@ -36,7 +43,7 @@ test('a window with no number says it is unknown and never "just now"; a chat es
   const unknown = bars(snap({ weekly: win(undefined, NOW + 5000) }), NOW)[1];
   assert.equal(unknown?.text, '—');
   assert.match(unknown?.tooltip ?? '', /usage unknown for this window/);
-  assert.doesNotMatch(unknown?.tooltip ?? '', /just now|Read /);
+  assert.doesNotMatch(unknown?.tooltip ?? '', /just now|Read |Asked/);
   assert.equal(readLine(win(undefined, NOW + 5000), NOW), 'Usage unknown for this window');
   // The same number reads as an estimate when only a chat's rate-limit message supplied it.
   const est = bars(snap({ fiveHour: win(5, NOW + 3_600_000, NOW - 1000, 'rate_limit_event') }), NOW) as [BarModel, BarModel];
@@ -81,6 +88,11 @@ test('relative times and ranges', () => {
   assert.equal(relativeFuture(NOW - 5, NOW), 'now');
   assert.equal(asOf(NOW - 30_000, NOW), 'just now');
   assert.equal(asOf(NOW - 5 * 60_000, NOW), '5 min ago');
+  // "Asked <time> ago": when Helm asked, which may differ from when the number was read.
+  assert.equal(askedLine(snap(), NOW), 'Asked just now');
+  assert.equal(askedLine({ ...snap(), askedAt: NOW - 5 * 60_000 }, NOW), 'Asked 5 min ago');
+  assert.equal(askedLine({ ...snap(), askedAt: undefined }, NOW), null, 'not asked yet: no line');
+  assert.equal(askedLine(null, NOW), null);
   const today = rangeOf('today', NOW);
   assert.ok(today.since <= NOW && NOW - today.since < 86_400_000 + 3_600_000 && new Date(today.since).getHours() === 0);
   assert.deepEqual(rangeOf('all', NOW), { since: 0, until: NOW });
