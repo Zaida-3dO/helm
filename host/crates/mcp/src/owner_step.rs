@@ -374,15 +374,16 @@ pub fn register_allow_kinds(k: &mut AllowKinds) {
     );
 }
 
+/// One waiting answer: the chat it belongs to, and the channel its worker will answer on.
+type StepWaiter = (String, mpsc::Sender<(bool, String)>);
+
 /// The browser's answers to approved steps, waited for by request id. Each waiter remembers its
 /// chat, so only that chat's worker can answer it.
 #[derive(Default)]
-pub struct StepAnswers(Mutex<HashMap<String, (String, mpsc::Sender<(bool, String)>)>>);
+pub struct StepAnswers(Mutex<HashMap<String, StepWaiter>>);
 
 impl StepAnswers {
-    fn map(
-        &self,
-    ) -> std::sync::MutexGuard<'_, HashMap<String, (String, mpsc::Sender<(bool, String)>)>> {
+    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<String, StepWaiter>> {
         self.0.lock().unwrap_or_else(|p| p.into_inner())
     }
 
