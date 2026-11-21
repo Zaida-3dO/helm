@@ -60,14 +60,9 @@ export interface AttentionScope {
   ids: ReadonlySet<string> | null;
 }
 
-/** An attention row once the host names the profile it belongs to ('' = nobody owns it). An older
- *  host leaves the field out, and the profile's chat list decides on its own. */
-export type ProfiledAttentionRow = AttentionRow & { profileId?: string };
-
-/** Whether one attention row belongs to the scope. */
-export function attentionInScope(r: ProfiledAttentionRow, sc: AttentionScope): boolean {
+/** Whether one attention row belongs to the scope (`profileId` '' = nobody owns it). */
+export function attentionInScope(r: AttentionRow, sc: AttentionScope): boolean {
   if (sc.activeId === null) return true;
-  if (r.profileId === undefined) return sc.ids === null || sc.ids.has(r.chatId);
   if (r.profileId === '') return sc.activeId === sc.homeId;
   if (r.profileId === sc.activeId) return true;
   // Owned elsewhere: in scope when the active profile's own list includes the chat, i.e. it is

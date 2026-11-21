@@ -638,7 +638,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
   function attention() {
     const all = [...chats.values()].filter((c) => !c.chat.archived && !c.chat.sideSourceId);
     const list = all.filter((c) => !c.chat.muted);
-    const row = (c: FakeChat, kind: string) => ({ chatId: c.chat.id, title: c.chat.title || 'Untitled', project: folderName(c.chat.cwd), kind, reason: kind });
+    const row = (c: FakeChat, kind: string) => ({ chatId: c.chat.id, title: c.chat.title || 'Untitled', project: folderName(c.chat.cwd), kind, reason: kind, profileId: '' });
     // A card the gatekeeper is still holding is not waiting on you yet: like the host, it is
     // left out of the badge, the inbox and the muted list until the gate answers or fails.
     const awaiting = (i: Interaction) => i.attention && i.gate?.state !== 'checking';

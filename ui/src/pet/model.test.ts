@@ -19,7 +19,7 @@ import {
 } from './model.ts';
 
 const T0 = 1_000_000;
-const row = (chatId: string) => ({ chatId, title: chatId, project: 'p', kind: 'question', reason: '' });
+const row = (chatId: string) => ({ chatId, title: chatId, project: 'p', kind: 'question', reason: '', profileId: '' });
 const summary = (needsYou: string[], running: string[], unread: string[]) => ({
   needsYou: needsYou.map(row),
   running: running.map(row),

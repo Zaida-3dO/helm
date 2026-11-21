@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { ApiError, type Api } from '../api/client.ts';
 import { EventBus } from '../api/events.ts';
 import { chat } from '../dev/fixtures.ts';
-import type { DeviceChats, DeviceInfo, DevicesList, RemoteChatRecord } from './api.ts';
+import type { DeviceChats, DeviceInfo, DevicesList, RemoteChatRecord, RemoteProject } from './api.ts';
 import { menuLabel, menuOrder, remoteDevice, remoteList, remoteProfileChoices, remoteProject, remoteRow, remoteShareChoices, resolveSelected, scopeNote, shownRemoteGroups, showToggle, stateText } from './model.ts';
 import { DevicesStore, FOCUS_READ_MS, RemoteList } from './store.ts';
 import { composerFor, remoteChatState, remoteHostOf, seenText, unconfirmedText, waitingForApproval } from './state.ts';
