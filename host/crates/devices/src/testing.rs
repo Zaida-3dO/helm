@@ -607,12 +607,43 @@ impl ChatPort for FakePort {
         ready(Ok(out))
     }
 
-    fn create(&self, a: CreateArgs) -> BoxFut<'_, PortResult<String>> {
+    fn create(&self, a: CreateArgs) -> BoxFut<'_, PortResult<Value>> {
         let mut st = self.st();
         let r = if st.people.contains(&a.person_id) {
             let id = format!("new-{}", st.created.len() + 1);
+            // The record rides back the way the real host's does, so the asking PC can hold it.
+            let mut chat = json!({
+                "id": id,
+                "revision": 1,
+                "title": "",
+                "personId": a.person_id,
+                "sharedWith": [],
+                "archived": false,
+                "status": "idle",
+                "createdAt": 1,
+                "updatedAt": 1,
+                "harness": "claude",
+                "pinned": false,
+                "muted": false,
+            });
+            if let Some(t) = &a.title {
+                chat["title"] = json!(t);
+            }
+            if a.muted == Some(true) {
+                chat["muted"] = json!(true);
+            }
+            // The chat exists on this PC now: later sends and reads find it, as on the real host.
+            let rec = fake_record(&id, chat["title"].as_str().unwrap_or(""), 1);
+            st.chats.push(RemoteChat::from_record(
+                &rec,
+                Some(a.person_id.clone()),
+                Vec::new(),
+                "Work",
+                "#aabbcc",
+                false,
+            ));
             st.created.push(a);
-            Ok(id)
+            Ok(json!({ "chatId": id, "chat": chat }))
         } else {
             Err(WireError::new(
                 code::UNKNOWN_PERSON,

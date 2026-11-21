@@ -419,30 +419,31 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         assert!(b.rpc.call("dev-a", op, args).await.is_ok(), "{op}");
     }
     port.set_run(true);
-    assert_eq!(
-        b.rpc
-            .call(
-                "dev-a",
-                "create",
-                json!({"personId": "person-a", "projectId": "proj-1"})
-            )
-            .await
-            .unwrap(),
-        json!({"chatId": "new-1"})
-    );
+    let made = b
+        .rpc
+        .call(
+            "dev-a",
+            "create",
+            json!({"personId": "person-a", "projectId": "proj-1"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(made["chatId"], "new-1", "{made}");
+    // The answer carries the device's record of the chat, so the asking PC can hold it at once.
+    assert_eq!(made["chat"]["id"], "new-1");
+    assert_eq!(made["chat"]["personId"], "person-a");
     // A chat made from afar belongs to the acting person: the hub's verified person replaces
     // whatever name the request carried.
-    assert_eq!(
-        b.rpc
-            .call(
-                "dev-a",
-                "create",
-                json!({"personId": "nobody", "projectId": "proj-1"})
-            )
-            .await
-            .unwrap(),
-        json!({"chatId": "new-2"})
-    );
+    let made2 = b
+        .rpc
+        .call(
+            "dev-a",
+            "create",
+            json!({"personId": "nobody", "projectId": "proj-1"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(made2["chatId"], "new-2", "{made2}");
     assert_eq!(
         port.st()
             .created
@@ -2952,8 +2953,13 @@ async fn hello_works_on_the_production_port_through_the_real_ops() {
         project_id: project.into(),
         model: None,
         effort: None,
+        title: None,
+        muted: None,
     };
-    assert_eq!(remote.create(create("brd-1")).await.unwrap(), "made-1");
+    assert_eq!(
+        remote.create(create("brd-1")).await.unwrap()["chatId"],
+        "made-1"
+    );
     let first = calls.lock().unwrap().remove(0);
     assert_eq!(first.0, "chat_create");
     assert_eq!(first.1["cwd"], workp);
@@ -3698,6 +3704,42 @@ async fn one_pc_acts_as_each_of_its_profiles() {
         ["q1"]
     );
 
+    // The new-chat op works from afar as the window uses it: the chat starts on the desk for
+    // the profile the window shows, the desk's record of it is held in the copy at once, and
+    // its first words cross the link without waiting for the desk's next list news.
+    let made = api
+        .call_host(
+            "devices_create_chat",
+            json!({"deviceUid": "dev-d", "projectId": "proj-1"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(made["chatId"], "new-2", "{made}");
+    assert!(
+        b.mirror.owner("new-2").is_some(),
+        "the copy missed the new chat"
+    );
+    api.call_host(
+        "chat_send",
+        json!({"chatId": "new-2", "submissionId": "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b03",
+               "text": "First words across the link", "action": "steer", "draftRevision": 0}),
+    )
+    .await
+    .unwrap();
+    {
+        let st = port.st();
+        let c = st.created.last().unwrap();
+        assert_eq!(c.person_id, "person-p");
+        assert_eq!(c.project_id, "proj-1");
+        assert!(
+            st.sent
+                .iter()
+                .any(|(chat, _, text)| chat == "new-2" && text == "First words across the link"),
+            "{:?}",
+            st.sent
+        );
+    }
+
     // A PC that never announced Pat cannot act for them: the hub turns the call away and
     // nothing reaches the desk.
     let x = Watcher::of(&router, "pc-x", "Gale", true, "person-x", "Gale");
@@ -3707,7 +3749,7 @@ async fn one_pc_acts_as_each_of_its_profiles() {
         .await
         .unwrap_err();
     assert_eq!(e.code, code::NOT_ALLOWED);
-    assert_eq!(port.st().created.len(), 1);
+    assert_eq!(port.st().created.len(), 2);
 }
 
 /// The copy of another PC holds every chat of that PC from the first sync, whoever the laptop

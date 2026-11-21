@@ -138,7 +138,8 @@ impl Mirror {
         }
     }
 
-    /// Start a chat on `device` for the person, then open it here.
+    /// Start a chat on `device` for the person, then open it here. `title` and `muted` are
+    /// asked of the device outright, so the chat arrives already named and quiet.
     pub async fn create_chat(
         &self,
         device: &str,
@@ -146,6 +147,8 @@ impl Mirror {
         project_id: &str,
         model: Option<String>,
         effort: Option<String>,
+        title: Option<String>,
+        muted: Option<bool>,
     ) -> Result<String, ApiError> {
         self.check_live(device)?;
         let mut args = json!({ "personId": person_id, "projectId": project_id });
@@ -154,6 +157,12 @@ impl Mirror {
         }
         if let Some(e) = effort {
             args["effort"] = json!(e);
+        }
+        if let Some(t) = title {
+            args["title"] = json!(t);
+        }
+        if let Some(muted) = muted {
+            args["muted"] = json!(muted);
         }
         let act = [person_id.to_owned()];
         let made = self
@@ -164,6 +173,12 @@ impl Mirror {
             .and_then(Value::as_str)
             .ok_or_else(|| ApiError::internal("The new chat has no id."))?
             .to_owned();
+        // Hold the device's record of the new chat now, so it can be read, listed and sent to
+        // before the device's next list news arrives.
+        if let Some(chat) = made.get("chat").filter(|c| c.get("id").is_some()) {
+            self.inner
+                .apply_chats(device, std::slice::from_ref(chat), None);
+        }
         if let Err(e) = self.open_new_chat(device, &id).await {
             log::info!("devices: the new chat was not opened: {e}");
         }
@@ -1601,6 +1616,24 @@ impl RemoteChats for Mirror {
 
     fn send(&self, a: ChatSendArgs) -> Fut<Res> {
         self.send_as(a, None)
+    }
+
+    fn create_chat(&self, a: helm_chats::remote::RemoteCreateChat) -> Fut<Res> {
+        let m = self.clone();
+        Box::pin(async move {
+            let id = m
+                .create_chat(
+                    &a.device_uid,
+                    &a.person_id,
+                    &a.project_id,
+                    a.model,
+                    a.effort,
+                    a.title,
+                    Some(a.muted),
+                )
+                .await?;
+            Ok(json!({ "chatId": id }))
+        })
     }
 
     fn send_as(&self, a: ChatSendArgs, person: Option<String>) -> Fut<Res> {

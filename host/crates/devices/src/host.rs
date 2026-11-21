@@ -1365,7 +1365,7 @@ impl ChatPort for HostPort {
         })
     }
 
-    fn create(&self, a: CreateArgs) -> BoxFut<'_, PortResult<String>> {
+    fn create(&self, a: CreateArgs) -> BoxFut<'_, PortResult<Value>> {
         Box::pin(async move {
             let db = self.db()?;
             let (profile, path, known) = db
@@ -1419,7 +1419,33 @@ impl ChatPort for HostPort {
                 json!({ "chatIds": [chat_id], "profileId": profile }),
             )
             .await?;
-            Ok(chat_id)
+            // A title and a mute asked for across the link are applied before the answer, so the
+            // record that rides back already says them.
+            let title = a.title.as_deref().map(str::trim).filter(|t| !t.is_empty());
+            if let Some(t) = title {
+                self.op("chat_rename", json!({"chatId": chat_id, "title": t}))
+                    .await?;
+            }
+            if a.muted == Some(true) {
+                self.op("chat_mute", json!({"chatId": chat_id, "muted": true}))
+                    .await?;
+            }
+            // The new chat's record rides back so the asking PC holds it at once, before this
+            // PC's next list news. `personId` is attached the way the feed does.
+            let mut chat = made
+                .get("chat")
+                .filter(|c| c.get("id").is_some())
+                .cloned()
+                .or_else(|| made.get("id").map(|_| made.clone()))
+                .unwrap_or_else(|| json!({"id": chat_id}));
+            chat["personId"] = json!(a.person_id);
+            if let Some(t) = title {
+                chat["title"] = json!(t);
+            }
+            if a.muted == Some(true) {
+                chat["muted"] = json!(true);
+            }
+            Ok(json!({ "chatId": chat_id, "chat": chat }))
         })
     }
 

@@ -562,6 +562,12 @@ pub struct CreateArgs {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Name the chat before its first message; left out, its title comes on its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Start it muted, so nothing it does is announced. Left out is the PC's usual new chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muted: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

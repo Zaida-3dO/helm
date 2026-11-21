@@ -269,7 +269,15 @@ async fn devices_create_chat(ctx: OpCtx, args: Value) -> Result<Value, ApiError>
             )
         })?;
     let id = mirror
-        .create_chat(&a.device_uid, &person, &a.project_id, a.model, a.effort)
+        .create_chat(
+            &a.device_uid,
+            &person,
+            &a.project_id,
+            a.model,
+            a.effort,
+            None,
+            None,
+        )
         .await?;
     Ok(json!({ "chatId": id }))
 }

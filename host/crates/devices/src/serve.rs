@@ -234,7 +234,9 @@ pub trait ChatPort: Send + Sync {
     /// decided. A watcher reads this to make a tool row's chip say Allowed or Refused too.
     fn consent_states(&self, chat_id: String) -> BoxFut<'_, PortResult<Vec<Value>>>;
     /// Start a chat for the local profile linked to the person; `unknown_person` if none is.
-    fn create(&self, a: CreateArgs) -> BoxFut<'_, PortResult<String>>;
+    /// Answers `{chatId, chat?}`: the new chat's record rides back so the asking PC can hold it
+    /// in its copy at once, before this PC's next list news.
+    fn create(&self, a: CreateArgs) -> BoxFut<'_, PortResult<Value>>;
     fn set_model(&self, a: SetModelArgs) -> BoxFut<'_, PortResult<()>>;
     fn rename(&self, a: RenameArgs) -> BoxFut<'_, PortResult<()>>;
     fn archive(&self, a: ArchiveArgs) -> BoxFut<'_, PortResult<()>>;
@@ -1050,10 +1052,7 @@ impl Inner {
                 subs::fit_rows(&mut states, CONSENT_BUDGET);
                 done(json!({ "states": states }))
             }
-            Op::Create(a) => {
-                let chat_id = self.port.create(a).await?;
-                done(json!({ "chatId": chat_id }))
-            }
+            Op::Create(a) => done(self.port.create(a).await?),
             Op::SetModel(a) => {
                 self.port.set_model(a).await?;
                 done(json!({}))
