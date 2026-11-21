@@ -631,9 +631,21 @@ fn list_chats(ctx: &ToolCtx, a: Value) -> ToolResult {
 }
 
 /// This chat's own details: its id (what a child chat should report back to), title, board,
-/// parent chat and model.
+/// parent chat and model. Plus, when some of the chat's tool servers are not connected, the
+/// reason words — so an agent missing a tool can tell the person why, instead of going silent.
 fn this_chat(ctx: &ToolCtx, _a: Value) -> ToolResult {
-    meta(ctx, &ctx.caller_chat_id)
+    let mut m = meta(ctx, &ctx.caller_chat_id)?;
+    if let Some(g) = ctx.services.get::<helm_hosttools::McpChatProblemsGate>() {
+        let servers: Vec<Value> =
+            g.0.problems(&ctx.caller_chat_id)
+                .into_iter()
+                .map(|p| json!({ "name": p.name, "state": p.state, "reason": p.reason }))
+                .collect();
+        if !servers.is_empty() {
+            m["toolServers"] = json!(servers);
+        }
+    }
+    Ok(m)
 }
 
 /// `app_read_chat`: a chat that runs here is read from the database; a chat another device runs
@@ -2179,7 +2191,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::read(
             "app_this_chat",
-            format!("This chat's own details: chatId (give it to a chat you start so it can report back with app_send_message), title, board, folder, parent chat, model, effort, muted, profile and device. A chat that has rolled over also names its stack (stackId, latestSessionId, previousSessionId, nextSessionId).{LINKS}"),
+            format!("This chat's own details: chatId (give it to a chat you start so it can report back with app_send_message), title, board, folder, parent chat, model, effort, muted, profile and device. A chat that has rolled over also names its stack (stackId, latestSessionId, previousSessionId, nextSessionId). If a tool you expect is missing, call this and tell the person what it says: when toolServers is present, those tool servers are not connected on this PC, each with the reason.{LINKS}"),
             obj(json!({}), &[]),
         ),
         this_chat,
@@ -2712,6 +2724,58 @@ mod tests {
         let mut all = vec![s1.clone(), s2.clone(), s3.clone()];
         all.sort();
         assert_eq!(ids_of(&r), all);
+    }
+
+    /// `app_this_chat` carries the reason words for the chat's tool servers that are not
+    /// connected, so an agent missing a tool can tell the person why instead of going silent.
+    /// When nothing is broken it says nothing about tool servers at all.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_this_chat_names_the_tool_servers_that_are_not_connected() {
+        #[derive(Clone, Default)]
+        struct Problems(Vec<helm_hosttools::McpChatProblem>);
+        impl helm_hosttools::McpChatProblems for Problems {
+            fn problems(&self, _chat: &str) -> Vec<helm_hosttools::McpChatProblem> {
+                self.0.clone()
+            }
+        }
+        let down = helm_hosttools::McpChatProblem {
+            name: "Local files".into(),
+            state: "failed".into(),
+            reason: "The last connection failed.".into(),
+        };
+        let h = crate::runtime_tests::harness_with_services(crate::runtime_tests::limits(), {
+            let down = down.clone();
+            move |s: &mut helm_ipc::Services| {
+                s.insert(Arc::new(helm_hosttools::McpChatProblemsGate(Arc::new(
+                    Problems(vec![down]),
+                ))));
+            }
+        });
+        let t = tools(&h);
+        let caller = h.create().await;
+        let me = call(&h, &t, &caller, "app_this_chat", json!({})).await;
+        assert_eq!(me["ok"], true, "{me}");
+        assert_eq!(
+            me["result"]["toolServers"],
+            json!([{"name": "Local files", "state": "failed", "reason": "The last connection failed."}])
+        );
+        // Nothing not connected: no toolServers key at all.
+        let h = crate::runtime_tests::harness_with_services(crate::runtime_tests::limits(), {
+            let none = Problems::default();
+            move |s: &mut helm_ipc::Services| {
+                s.insert(Arc::new(helm_hosttools::McpChatProblemsGate(Arc::new(
+                    none,
+                ))));
+            }
+        });
+        let t = tools(&h);
+        let caller = h.create().await;
+        let me = call(&h, &t, &caller, "app_this_chat", json!({})).await;
+        assert_eq!(me["ok"], true, "{me}");
+        assert!(
+            me["result"].get("toolServers").is_none(),
+            "a fully connected chat gets no notice"
+        );
     }
 
     #[test]

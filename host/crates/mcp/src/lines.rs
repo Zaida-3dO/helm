@@ -126,7 +126,7 @@ impl ServicesCell {
     fn set(&self, s: &Arc<Services>) {
         *self.0.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::downgrade(s));
     }
-    fn get(&self) -> Option<Arc<Services>> {
+    pub(crate) fn get(&self) -> Option<Arc<Services>> {
         self.0
             .lock()
             .unwrap_or_else(|p| p.into_inner())

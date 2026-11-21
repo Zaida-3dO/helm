@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { McpPreset, McpServer } from '../../api/mcp.ts';
+import type { ChatMcpProblem, McpPreset, McpServer } from '../../api/mcp.ts';
 import { CONSOLE_STEPS, GOOGLE_PRESET, SIGN_IN_WINDOW_MS, blockState, clientLooksSet, watchState, type GoogleAccountList } from './google.ts';
 import { canDisconnect, connectLabel } from './oauth.ts';
-import { BROKER_PRESET, blankServer, draftFromPreset, isBrokerServer, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable } from './readiness.ts';
+import { BROKER_PRESET, blankServer, chatMcpNoticeText, draftFromPreset, isBrokerServer, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable } from './readiness.ts';
 
 const hub: McpPreset = {
   id: 'helm_hub',
@@ -240,4 +240,29 @@ test('a started sign-in is watched until a new address arrives, the host lets go
   // A watch that never saw the listener open (a host restart mid-wait) still ends at the window.
   assert.equal(watchState({ startedAt: 1_000, known: [], sawSigningIn: false }, 1_000, watch({ signingIn: false, accounts: [] })), 'waiting', 'the first quiet poll is not yet a refusal');
   assert.equal(watchState({ startedAt: 1_000, known: [], sawSigningIn: false }, 1_000 + SIGN_IN_WINDOW_MS, watch({ signingIn: false, accounts: [] })), 'timeout');
+});
+
+const problem = (name: string, state: ChatMcpProblem['state'], reason: string): ChatMcpProblem => ({
+  serverId: name.toLowerCase().replace(/\s+/g, '_'),
+  name,
+  state,
+  reason,
+});
+
+test('the chat notice names the broken server, keeps the reason words, and points at Settings', () => {
+  assert.equal(chatMcpNoticeText([]), null, 'nothing wrong, nothing said');
+  assert.equal(
+    chatMcpNoticeText([problem('Local files', 'failed', 'Connection refused')]),
+    'Local files is not connected on this PC: Connection refused. Fix it in Settings → MCP.',
+  );
+  // The host's words already end in a full stop: no double period.
+  assert.equal(
+    chatMcpNoticeText([problem('Example CRM', 'signin_required', 'Needs you to sign in.')]),
+    'Example CRM is not connected on this PC: Needs you to sign in. Fix it in Settings → MCP.',
+  );
+  // More than one broken server: still one line, carried by the first name.
+  assert.equal(
+    chatMcpNoticeText([problem('Local files', 'failed', 'The last connection failed.'), problem('Example CRM', 'signin_required', 'Needs you to sign in.')]),
+    'Local files and 1 more are not connected on this PC: The last connection failed. Fix it in Settings → MCP.',
+  );
 });

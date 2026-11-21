@@ -2,7 +2,7 @@
 // api(op, args).
 
 import type { Api } from './client.ts';
-import type { DoctorOutcome, McpEditorSnapshot, McpPreset, McpServer, RepoServer, ServerStatus, TestOutcome } from './generated/mcp/index.ts';
+import type { ChatMcpProblem, DoctorOutcome, McpEditorSnapshot, McpPreset, McpServer, RepoServer, ServerStatus, TestOutcome } from './generated/mcp/index.ts';
 
 /** "Use my Claude Code MCP servers" (user-only; on by default). */
 export const NATIVE_MCP_PREF = 'nativeMcp';
@@ -11,6 +11,7 @@ export const NATIVE_MCP_PREF = 'nativeMcp';
 export const MCP_ENABLED_PREF = 'mcpEnabled';
 
 export type {
+  ChatMcpProblem,
   DoctorCheck,
   DoctorOutcome,
   McpEditorSnapshot,
@@ -39,6 +40,8 @@ export function mcpOps(api: Api) {
     test: (server: McpServer) => api<TestOutcome>('mcp_server_test', { server }),
     presets: () => api<McpPreset[]>('mcp_presets_list', {}),
     status: () => api<ServerStatus[]>('mcp_servers_status', {}),
+    /** The one chat's tool servers it cannot use right now, with reason words for the person. */
+    chatProblems: (chatId: string) => api<ChatMcpProblem[]>('mcp_chat_problems', { chatId }),
     /** The broker's own checks for the built-in browser server; changes nothing. */
     doctor: (serverId: string) => api<DoctorOutcome>('mcp_broker_doctor', { serverId }),
     repoList: () => api<RepoServer[]>('mcp_repo_servers_list', {}),

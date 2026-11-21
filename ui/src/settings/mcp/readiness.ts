@@ -1,7 +1,7 @@
 // Settings → MCP logic with no React in it: per-server readiness, the empty
 // page's readiness, preset drafts and the editor-to-save conversion.
 
-import type { McpPreset, McpServer, ServerStatus, ValueRef } from '../../api/mcp.ts';
+import type { ChatMcpProblem, McpPreset, McpServer, ServerStatus, ValueRef } from '../../api/mcp.ts';
 import type { OAuthConfig } from '../../api/generated/mcp/index.ts';
 import { GOOGLE_PRESET, keepsBridge } from './google.ts';
 import type { OAuthStatus } from './oauth.ts';
@@ -79,6 +79,19 @@ export function serverReadiness(s: McpServer, status: ServerStatus | undefined, 
     default:
       return { state: 'ready', reason: 'Ready: connects when a chat first uses it.' };
   }
+}
+
+/** The chat view's one line: a server this chat was given that it cannot use on this PC. The
+ * reason is the host's own words (its fallback text when the worker sent none); the line says
+ * where to fix it. One row whatever the count: the first name carries it, "and N more" follows. */
+export function chatMcpNoticeText(problems: ChatMcpProblem[]): string | null {
+  const first = problems[0];
+  if (!first) return null;
+  const rest = problems.slice(1);
+  const who = rest.length ? `${first.name} and ${rest.length} more` : first.name;
+  const reason = first.reason.trim();
+  const period = /[.!?…]$/.test(reason) ? '' : '.';
+  return `${who} ${rest.length ? 'are' : 'is'} not connected on this PC: ${reason}${period} Fix it in Settings → MCP.`;
 }
 
 /** The page-level notice: only an empty list has one, and it says why and where to act. */

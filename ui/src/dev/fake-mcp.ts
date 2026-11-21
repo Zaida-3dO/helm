@@ -96,6 +96,16 @@ export function mcpFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         return PRESETS;
       case 'mcp_servers_status':
         return status;
+      case 'mcp_chat_problems':
+        // Same shape as the host's: only failed and sign-in servers come back, named, with words for the person.
+        return status
+          .filter((s) => s.state === 'failed' || s.state === 'signin_required')
+          .map((s) => ({
+            serverId: s.serverId,
+            name: servers.find((x) => x.id === s.serverId)?.name ?? s.serverId,
+            state: s.state,
+            reason: s.error ?? (s.state === 'failed' ? 'The last connection failed.' : 'Needs you to sign in.'),
+          }));
       case 'mcp_repo_servers_list':
         return repo;
       case 'mcp_repo_approve':

@@ -44,6 +44,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `chat-view` | The open chat | `data-chat-id`, `data-chat-status` |
 | `chat-status` | The chat's status, a visually hidden span (screen readers and tests; not a visible pill) | text = the status |
 | `chat-local-status` | A busy chat on a local model server, a visually hidden span: whether its turn waits queued there or is being answered | `data-ahead` (count ahead, 0 when unknown); text = the wording |
+| `chat-mcp-notice` | The chat's one line when a tool server it was given cannot connect on this PC ("<server> is not connected on this PC: <reason>. Fix it in Settings → MCP."); not drawn for a chat that runs on another device | text = the line |
 | `composer` | The editable message box (Lexical `contenteditable`) | |
 | `send` | Send button (reads Send, Steer or Interrupt) | `disabled` while the draft is empty |
 | `stop` | Stop button, shown only while a turn runs (Stop; whatever Claude had not read is sent again right away) | |

@@ -49,6 +49,8 @@ import { setLocalImageLoader } from './markdown/localImages.ts';
 import { registerSelectionAction } from './transcript/slots.ts';
 import { handleLink } from './panel/links.ts';
 import { openInPanel } from './panel/registry.ts';
+import { mcpOps } from './api/mcp.ts';
+import { chatMcpNoticeText } from './settings/mcp/readiness.ts';
 import { SIDE_CHAT_KIND, setSideChatOps } from './sidechat/index.tsx';
 import { sideChatAnchor } from './sidechat/anchor.ts';
 // Settings → Chat registers itself.
@@ -72,6 +74,7 @@ export interface ChatViewProps {
 export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatViewProps) {
   const view = useSyncExternalStore(store.subscribe, () => store.view(chatId));
   const [notice, setNotice] = useState<string | null>(null);
+  const [mcpNotice, setMcpNotice] = useState<string | null>(null);
   const [jumpTo, setJumpTo] = useState<number | null>(null);
   const [editing, setEditing] = useState<EditState | null>(null);
   const [rollConfirm, setRollConfirm] = useState<ConfirmSpec | null>(null);
@@ -109,6 +112,28 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
   const remoteOn = remote !== null;
   const isRemote = useRef(false);
   isRemote.current = remoteOn;
+  // A tool server this chat was given that cannot connect on this PC gets one notice line:
+  // read when the chat opens, and again whenever a status line moves. The host says why, in
+  // words for the person. A chat that runs elsewhere uses the other PC's servers, which this
+  // host cannot speak for — so no line for those.
+  const mcp = useMemo(() => mcpOps(shell.api), [shell.api]);
+  useEffect(() => {
+    if (remote) {
+      setMcpNotice(null);
+      return;
+    }
+    let live = true;
+    const ask = () =>
+      void mcp
+        .chatProblems(chatId)
+        .then((p) => live && setMcpNotice(chatMcpNoticeText(p)), () => live && setMcpNotice(null));
+    ask();
+    const off = shell.bus.on('mcp_status', ask);
+    return () => {
+      live = false;
+      off();
+    };
+  }, [mcp, shell.bus, chatId, remote]);
   useEffect(
     () =>
       shell.bus.on('message', (e) => {
@@ -399,6 +424,11 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
         </span>
       )}
       {remote && <RemoteChatBar state={remote.state} chatId={chatId} />}
+      {mcpNotice && (
+        <div className="notice" role="status" data-testid="chat-mcp-notice">
+          {mcpNotice}
+        </div>
+      )}
       {notice && (
         <div className="notice" role="status">
           {notice}

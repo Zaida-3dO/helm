@@ -27,6 +27,7 @@
 
 pub mod admin;
 pub mod bindings;
+pub mod chat_problems;
 pub mod config;
 pub mod doctor;
 pub mod gmail;
@@ -92,6 +93,11 @@ pub fn register_services(services: &mut Services, events: &Arc<dyn EventSink>) {
         }
         ev.emit(AppEvent::new("mcp_config").with("revision", rev));
     });
+    // The chat tools ask which of a chat's servers are not connected through the host-tools
+    // trait; the answer reads the app's Services back out of the cell above.
+    services.insert(Arc::new(helm_hosttools::McpChatProblemsGate(Arc::new(
+        chat_problems::ThroughWorkerServices(cell.clone()),
+    ))));
     services.insert(store);
     services.insert(status);
     services.insert(cell);

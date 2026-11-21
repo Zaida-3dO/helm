@@ -370,3 +370,23 @@ pub trait McpServerFilter: Send + Sync {
 /// The service wrapper for [`McpServerFilter`]. With none registered, every chat gets every server.
 #[derive(Clone)]
 pub struct McpServerFilterGate(pub std::sync::Arc<dyn McpServerFilter>);
+
+/// One of a chat's MCP servers it cannot use right now: the server's display name, what its
+/// connection looks like now (as the worker last reported), and the reason words for the person.
+#[derive(Clone, Debug)]
+pub struct McpChatProblem {
+    pub name: String,
+    pub state: String,
+    pub reason: String,
+}
+
+/// The MCP servers one chat was given that are not connected. Registered as the
+/// [`McpChatProblemsGate`] service by the MCP crate; a tool crate asks it when an agent wonders
+/// why a tool it expected is missing.
+pub trait McpChatProblems: Send + Sync {
+    fn problems(&self, chat_id: &str) -> Vec<McpChatProblem>;
+}
+
+/// The service wrapper for [`McpChatProblems`]. With none registered, chats get no report.
+#[derive(Clone)]
+pub struct McpChatProblemsGate(pub std::sync::Arc<dyn McpChatProblems>);

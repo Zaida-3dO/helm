@@ -11,6 +11,7 @@
 //! | `mcp_server_test` | blocking | [`McpServerTestArgs`](crate::probe::McpServerTestArgs) → [`TestOutcome`](crate::probe::TestOutcome) (connects once, saves nothing) |
 //! | `mcp_presets_list` | blocking | `{}` → [`McpPreset`](crate::presets::McpPreset)`[]` |
 //! | `mcp_servers_status` | blocking | `{}` → [`ServerStatus`](crate::status::ServerStatus)`[]` |
+//! | `mcp_chat_problems` | blocking | `{chatId}` → [`ChatMcpProblem`](crate::chat_problems::ChatMcpProblem)`[]` (the chat's servers it cannot use, with reason words) |
 //! | `mcp_broker_doctor` | blocking | `{serverId}` → [`DoctorOutcome`](crate::doctor::DoctorOutcome) (the browser server's own checks; listed in [`crate::doctor`]) |
 //! | `mcp_repo_servers_list` | blocking | `{}` → [`RepoServer`](crate::repo_gate::RepoServer)`[]` (seen since launch) |
 //! | `mcp_repo_approve` | maintenance | `{file, name, hash}` → the list |
@@ -44,6 +45,10 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("mcp_servers_status", OpClass::Blocking, |ctx, _| {
             let st = ctx.services.need::<crate::status::McpStatusStore>()?;
             to_value(&st.list())
+        })
+        .blocking("mcp_chat_problems", OpClass::Blocking, |ctx, args| {
+            let a: ChatProblemsArgs = parse(args)?;
+            to_value(&crate::chat_problems::problems(&ctx.services, &a.chat_id))
         })
         .blocking("mcp_broker_doctor", OpClass::Blocking, |ctx, args| {
             let a: crate::doctor::DoctorArgs = parse(args)?;
@@ -84,6 +89,12 @@ struct RepoApproveArgs {
 struct RepoRevokeArgs {
     file: String,
     name: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatProblemsArgs {
+    chat_id: String,
 }
 
 pub(crate) fn api_error(e: StoreError) -> ApiError {

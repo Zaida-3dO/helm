@@ -69,6 +69,15 @@ impl McpStatusStore {
         m.retain(|k, _| ids.contains(k));
     }
 
+    /// The newest line for one server, if any worker has sent one.
+    pub fn get(&self, id: &str) -> Option<ServerStatus> {
+        self.latest
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(id)
+            .cloned()
+    }
+
     pub fn list(&self) -> Vec<ServerStatus> {
         self.latest
             .lock()

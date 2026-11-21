@@ -57,9 +57,10 @@ pub use registry::{
 };
 pub use settings_ext::{PrefRule, PrefRules, SettingsExtension, SettingsExtensions};
 pub use spec::{
-    Availability, CatalogueEntry, Condition, LaunchKeys, McpLaunch, McpLaunchGate, McpLaunchSource,
-    McpServerFilter, McpServerFilterGate, RequestLimit, ToolSpec, WebToolsGate, WebToolsSource,
-    DEFAULT_TIMEOUT_MS, MAX_DESCRIPTION, MAX_TOOL_NAME_BYTES,
+    Availability, CatalogueEntry, Condition, LaunchKeys, McpChatProblem, McpChatProblems,
+    McpChatProblemsGate, McpLaunch, McpLaunchGate, McpLaunchSource, McpServerFilter,
+    McpServerFilterGate, RequestLimit, ToolSpec, WebToolsGate, WebToolsSource, DEFAULT_TIMEOUT_MS,
+    MAX_DESCRIPTION, MAX_TOOL_NAME_BYTES,
 };
 
 /// This crate's own tools: projects and repositories ([`tools`]). The chat tools register from
