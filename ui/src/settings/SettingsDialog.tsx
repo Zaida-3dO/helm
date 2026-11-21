@@ -1,6 +1,7 @@
-// The settings frame: a centred modal of fixed size on Ctrl+,. The title, the pill tabs and the
-// search field stay put (the first Escape clears the search); only the selected pane's body scrolls.
-// A search lists every matching row from every pane under its pane's name (see search.ts).
+// The settings frame: a centred modal of fixed size on Ctrl+,. The title, the two-row tab bar
+// (groups on the first row, the chosen group's panes on the second) and the search field stay put
+// (the first Escape clears the search); only the selected pane's body scrolls. A search lists
+// every matching row from every pane under its pane's name, whatever its group (see search.ts).
 // Panes come from the registry; each pane decides whether it saves per control or with a Save.
 
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
@@ -10,7 +11,7 @@ import { IconSearch } from '../ui/icons.tsx';
 import { applySearch, clearHighlight } from './search.ts';
 import { SettingsWatchers } from './watchers.tsx';
 import { settingsPanes, subscribeSettingsPanes, peekRequestedPane, clearRequestedPane } from './registry.ts';
-import { groupSettingsTabs, scrollEdges } from './layout.ts';
+import { settingsTabStrip, scrollEdges } from './layout.ts';
 
 export const SETTINGS_DIALOG = 'settings';
 
@@ -27,6 +28,7 @@ export function SettingsDialog() {
 function SettingsBody({ close }: { close: () => void }) {
   const panes = useSyncExternalStore(subscribeSettingsPanes, settingsPanes);
   const [tab, setTab] = useState<string | null>(peekRequestedPane);
+  const [group, setGroup] = useState<string | null>(null);
   useEffect(() => clearRequestedPane, []);
   const [query, setQuery] = useState('');
   useLayer('search', true, () => setQuery(''), () => query.length > 0);
@@ -41,7 +43,7 @@ function SettingsBody({ close }: { close: () => void }) {
   const searching = applied.trim().length > 0;
   const bodyRef = useRef<HTMLDivElement>(null);
   const [hits, setHits] = useState(0);
-  const current = panes.find((p) => p.id === tab) ?? panes[0];
+  const { groups, activeGroup, current } = settingsTabStrip(panes, group, tab);
   const version = useAppVersion();
   // Filter the rendered rows after every render and whenever a pane changes its own content
   // (data arriving late), so a search never shows a stale list.
@@ -95,8 +97,29 @@ function SettingsBody({ close }: { close: () => void }) {
       <span className="settings-foot-note">Runs Claude Code under your own login</span>
     </>
   );
+  const picking = query.trim() === '';
   const tabs = (
-    <div className="settings-tabs" role="tablist">
+    <div className="settings-tabs">
+      <div className="settings-tab-row" role="tablist" aria-label="Settings groups">
+        {groups.map((g) => (
+          <button
+            key={g.title}
+            type="button"
+            role="tab"
+            className="settings-tab settings-group-tab"
+            aria-selected={picking && g.title === activeGroup?.title}
+            data-group={g.title}
+            data-testid="settings-group"
+            onClick={() => {
+              setQuery('');
+              setApplied('');
+              setGroup(g.title);
+              setTab(g.panes[0]?.id ?? null);
+            }}
+          >
+            {g.title}
+          </button>
+        ))}
         <input
           type="search"
           className="settings-search"
@@ -106,29 +129,27 @@ function SettingsBody({ close }: { close: () => void }) {
           onChange={(e) => setQuery(e.target.value)}
           data-autofocus=""
         />
-        {groupSettingsTabs(panes).map((g) => (
-          <span className="settings-tab-group" key={g.title}>
-            <span className="settings-tab-group-label" aria-hidden="true">{g.title}</span>
-            {g.panes.map((p) => (
-              <button
-                key={p.id}
-                type="button"
-                role="tab"
-                className="settings-tab"
-                aria-selected={query.trim() === '' && p.id === current?.id}
-                data-tab={p.id}
-                onClick={() => {
-                  setQuery('');
-                  setApplied('');
-                  setTab(p.id);
-                }}
-              >
-                {p.title}
-              </button>
-            ))}
-          </span>
+      </div>
+      <div className="settings-tab-row" role="tablist" aria-label="Settings panes">
+        {(activeGroup?.panes ?? []).map((p) => (
+          <button
+            key={p.id}
+            type="button"
+            role="tab"
+            className="settings-tab"
+            aria-selected={picking && p.id === current?.id}
+            data-tab={p.id}
+            onClick={() => {
+              setQuery('');
+              setApplied('');
+              setTab(p.id);
+            }}
+          >
+            {p.title}
+          </button>
         ))}
       </div>
+    </div>
   );
   return (
     <Dialog title="Settings" onClose={close} wide testId="settings" footer={footer} intro={tabs}>

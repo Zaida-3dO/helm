@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SETTINGS_TAB_GROUPS, OTHER_GROUP_TITLE, groupSettingsTabs, scrollEdges } from './layout.ts';
+import { SETTINGS_TAB_GROUPS, OTHER_GROUP_TITLE, groupSettingsTabs, settingsTabStrip, scrollEdges } from './layout.ts';
 
 // Every settings pane registers with its own order, so the tab order never depends on which file
 // happens to be imported first. This reads the registrations from the source.
@@ -52,6 +52,40 @@ test('every settings pane sits in exactly one tab group, and unknown ids land in
   assert.deepEqual([...flat].sort(), [...ids].sort(), 'the groups together show every registered pane once');
   const unknown = groupSettingsTabs([{ id: 'a-unknown-pane' }, { id: 'chat' }]);
   assert.deepEqual(unknown.at(-1), { title: OTHER_GROUP_TITLE, panes: [{ id: 'a-unknown-pane' }] });
+});
+
+test('no registered pane needs an Other group; the Gatekeeper pane sits under Chat & agents', () => {
+  const chatGroup = SETTINGS_TAB_GROUPS.find((g) => g.title === 'Chat & agents');
+  assert.ok(chatGroup?.ids.includes('gatekeeper'), 'the Gatekeeper pane is not in Chat & agents');
+  const ids = registrations().map((r) => r.id);
+  const groups = groupSettingsTabs(ids.map((id) => ({ id })));
+  assert.ok(!groups.some((g) => g.title === OTHER_GROUP_TITLE), `a registered pane fell into Other: ${groups.at(-1)?.panes.map((p) => p.id).join(', ')}`);
+});
+
+test('the two-row tab bar shows the chosen group, then the panes of that group', () => {
+  const panes = [{ id: 'general' }, { id: 'appearance' }, { id: 'chat' }, { id: 'gatekeeper' }, { id: 'a-brand-new-pane' }];
+  // [clicked group, clicked pane, the panes row two shows]
+  const rows: [string | null, string | null, string[]][] = [
+    // Nothing clicked yet: the first pane's group.
+    [null, null, ['general', 'appearance']],
+    // A group click shows that group's panes.
+    ['Chat & agents', 'chat', ['chat', 'gatekeeper']],
+    ['Machine & updates', 'general', ['general', 'appearance']], // the pane decides while it is in another group
+    // A clicked pane that no longer exists falls back to the first pane's group.
+    ['Chat & agents', 'a-gone-pane', ['general', 'appearance']],
+    // An unknown pane stays reachable through Other.
+    ['Chat & agents', 'a-brand-new-pane', ['a-brand-new-pane']],
+  ];
+  for (const [group, pane, want] of rows) {
+    const strip = settingsTabStrip(panes, group, pane);
+    assert.deepEqual(strip.activeGroup?.panes.map((p) => p.id), want, `${group}/${pane}`);
+  }
+  // The body shows the clicked pane; a clicked pane in another group decides its own row, it is
+  // never silently switched.
+  assert.equal(settingsTabStrip(panes, 'Chat & agents', 'gatekeeper').current?.id, 'gatekeeper');
+  assert.equal(settingsTabStrip(panes, 'Chat & agents', 'general').current?.id, 'general');
+  // A group click (which carries its first pane) shows that pane.
+  assert.equal(settingsTabStrip(panes, 'Chat & agents', 'chat').current?.id, 'chat');
 });
 
 test('scroll fades show only on the edges that have more content', () => {

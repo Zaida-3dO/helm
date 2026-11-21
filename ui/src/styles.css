@@ -1391,32 +1391,20 @@ dd {
   padding: 0;
   border-bottom: 1px solid var(--line);
 }
+/* The tab bar is two fixed rows: the groups on the first (with the search box at its right), the
+   chosen group's panes on the second. Each row wraps if a name list outgrows the dialog. */
 .settings-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 20px 12px;
+}
+.settings-tab-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px 12px;
-  padding: 2px 20px 12px;
-}
-/* Tab groups: a small caption and its buttons move and wrap as one unit. A group wider than the
-   strip takes a line of its own and wraps its buttons inside it, so no tab runs off the dialog. */
-.settings-tab-group {
-  display: inline-flex;
-  flex-wrap: wrap;
-  align-items: center;
   gap: 4px 2px;
-  flex: 0 1 auto;
   min-width: 0;
-  max-width: 100%;
-}
-.settings-tab-group-label {
-  font-size: calc(10 * var(--ui-unit));
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--muted);
-  padding: 0 4px 0 2px;
-  white-space: nowrap;
 }
 .settings-tab {
   border: 1px solid transparent;
@@ -1437,11 +1425,20 @@ dd {
   border-color: var(--line);
   font-weight: 560;
 }
+/* The group row: a stronger, smaller-capitals button than a pane tab, since it changes the second
+   row rather than the pane. */
+.settings-group-tab {
+  font-size: calc(11 * var(--ui-unit));
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
 .settings-search {
-  /* Its own full-width row above the tab groups. */
-  flex: 1 1 100%;
-  min-width: 0;
-  margin-bottom: 4px;
+  /* At the right of the group row; it shrinks to a usable width before it wraps to its own line. */
+  flex: 1 1 140px;
+  max-width: 280px;
+  min-width: 120px;
+  margin-left: auto;
   height: 28px;
   padding: 0 10px !important;
   border: 1px solid var(--line) !important;
@@ -1491,6 +1488,10 @@ dd {
   margin: 26px 0 2px;
   font-size: calc(12 * var(--ui-unit));
   font-weight: 600;
+}
+/* One action button ending a pane (e.g. "Changes made by chats"). */
+.settings-body .settings-action-row {
+  margin: 18px 0 0;
 }
 /* Row titles read as headings over their descriptions. */
 .settings-body .setting-title {

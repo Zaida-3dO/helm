@@ -604,14 +604,26 @@ describe("visual sweep", { timeout: 20 * 60_000 }, () => {
   });
 
   test("settings panes", async () => {
+    // The tab bar is two rows: walk every group in row one, auditing the group bar and then each
+    // pane in row two.
     await page().keyboard.press("Escape");
     await page().keyboard.press("Control+Comma");
     await page().waitForSelector(tid("settings"), { timeout: 10_000 });
-    const tabs = await page().$$eval(".settings-tab", (els) => els.map((e) => e.getAttribute("data-tab") ?? ""));
-    for (const tab of tabs) {
-      await page().click(`.settings-tab[data-tab="${tab}"]`);
+    const groups = await page().$$eval(".settings-group-tab", (els) => els.map((e) => e.getAttribute("data-group") ?? ""));
+    assert.ok(groups.length >= 4, `the group row lists only ${groups.length} groups`);
+    for (const group of groups) {
+      await page().click(`.settings-group-tab[data-group="${group}"]`);
       await page().waitForTimeout(250);
-      await audit(`settings-${tab}`, { focus: true });
+      await audit(`settings-group-${group.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`, { focus: true });
+      const tabs = await page().$$eval(".settings-tabs > .settings-tab-row:nth-child(2) .settings-tab", (els) =>
+        els.map((e) => e.getAttribute("data-tab") ?? ""),
+      );
+      assert.ok(tabs.length > 0, `group "${group}" shows no panes`);
+      for (const tab of tabs) {
+        await page().click(`.settings-tab[data-tab="${tab}"]`);
+        await page().waitForTimeout(250);
+        await audit(`settings-${tab}`, { focus: true });
+      }
     }
     await page().keyboard.press("Escape");
   });

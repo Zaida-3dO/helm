@@ -162,6 +162,8 @@ describe("Telegram messages into chats, and the turn mirrored back", { timeout: 
   test("T4: Settings → Hub, a fresh chat, a forwarded message and the Telegram badge", async () => {
     const page = app!.page;
     await page.keyboard.press("Control+Comma");
+    // The tab bar is two rows: Hub lives under Machine & updates.
+    await page.click('.settings-group-tab[data-group="Machine & updates"]');
     await page.click('.settings-tab[data-tab="hub"]');
     await page.waitForSelector(tid("hub-state", '[data-state="online"]'), { timeout: 15_000 });
     await page.waitForSelector(tid("hub-telegram-reset"), { timeout: 10_000 });
@@ -183,6 +185,7 @@ describe("Telegram messages into chats, and the turn mirrored back", { timeout: 
     const fresh = chats.find((c) => c.id !== chatId)!;
     // Settings → Hub now names the new chat, and Open goes to it.
     await page.keyboard.press("Control+Comma");
+    await page.click('.settings-group-tab[data-group="Machine & updates"]');
     await page.click('.settings-tab[data-tab="hub"]');
     await page.locator(tid("hub-telegram-chat")).getByRole("button", { name: /^Open / }).click();
     await page.waitForSelector(tid("chat-view", `[data-chat-id="${fresh.id}"]`), { timeout: 15_000 });

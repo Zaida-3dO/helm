@@ -15,3 +15,16 @@ test('search words must all appear, in any order, ignoring case', () => {
   for (const [text, q, want] of rows) assert.equal(matchesQuery(text, q), want, `${q} in ${text}`);
   assert.deepEqual(searchTerms('  Send  Key '), ['send', 'key']);
 });
+
+test('every pane is searchable by its own words, whichever group it lives in', () => {
+  // The pane title matches whole when it matches at all, and grouped panes are no different:
+  // a pane moved under a new group header keeps the words a person would type for it.
+  const rows: [string, string, boolean][] = [
+    ['Gatekeeper', 'gate', true],
+    ['Gatekeeper', 'keeper', true],
+    ['Gatekeeper', 'gate keeper', true], // each word appears inside the word
+    ['Gatekeeper', 'gatekeeper mode', false],
+    ['Usage governor', 'governor', true],
+  ];
+  for (const [text, q, want] of rows) assert.equal(matchesQuery(text, q), want, `${q} in ${text}`);
+});
