@@ -22,7 +22,7 @@ working: boolean,
  */
 report: Array<string>, 
 /**
- * At least one server is switched on, so there is something to unload.
+ * At least one server is switched on and has a known model, so there is something to unload.
  */
 anyLocal: boolean, 
 /**

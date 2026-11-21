@@ -135,7 +135,7 @@ pub struct LockView {
     pub working: bool,
     /// One sentence per step of the last unload or turn back on.
     pub report: Vec<String>,
-    /// At least one server is switched on, so there is something to unload.
+    /// At least one server is switched on and has a known model, so there is something to unload.
     pub any_local: bool,
     /// Minutes after a game closes before local models come back.
     pub lift_minutes: u32,
