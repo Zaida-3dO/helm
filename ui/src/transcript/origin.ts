@@ -1,7 +1,8 @@
 // Where a user message came from, when not Helm's composer. A Telegram message carries notes for
 // the agent in front of its text ("answer briefly...", and what other chats sent the user since
-// the last message); the bubble hides them and shows a Telegram badge instead. The notes stay in
-// the stored text, since the agent needs them.
+// the last message); the bubble hides them and shows a Telegram badge instead. A message typed on
+// another PC starts with a line naming that PC; the bubble hides it and says "from <PC>". The notes
+// stay in the stored text, since the agent needs them.
 
 import type { MessageRow } from '../api/types.ts';
 
@@ -40,9 +41,25 @@ export function fromVoice(row: MessageRow): boolean {
   return row.details?.origin === 'voice';
 }
 
+/**
+ * The line the PC a chat runs on puts in front of the user's own words when they were typed on
+ * another PC, so the agent knows where the person is: exactly `[Typed on <name>]` and a newline,
+ * the name without brackets or control characters and at most 40 characters.
+ */
+// eslint-disable-next-line no-control-regex
+const TYPED_ON = /^\[Typed on ([^[\]\u0000-\u001f\u007f]{1,40})\]\n/;
+
+/** The PC a message from another PC was typed on, or null (typed here, or not that kind of message). */
+export function typedOn(row: MessageRow): string | null {
+  if (row.role !== 'user' || row.details?.origin !== 'remote') return null;
+  const name = TYPED_ON.exec(row.text)?.[1]?.trim();
+  return name ? name : null;
+}
+
 /** The text the bubble shows. */
 export function bubbleText(row: MessageRow): string {
   if (fromVoice(row)) return row.text.replace(VOICE_NOTE, '');
+  if (typedOn(row)) return row.text.replace(TYPED_ON, '');
   return fromTelegram(row) ? row.text.replace(TELEGRAM_NOTE, '') : row.text;
 }
 

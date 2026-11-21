@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { MessageRow } from '../api/types.ts';
-import { bubbleText, fromTelegram, fromVoice, isHelmNote, isQuietReply, peerMessage } from './origin.ts';
+import { bubbleText, fromTelegram, fromVoice, isHelmNote, isQuietReply, peerMessage, typedOn } from './origin.ts';
 
 const NOTE = '[Sent from Telegram: answer briefly in plain text, with no tables or long code. Offer choices as a numbered list. Only the final message of each turn reaches the user\'s phone, so make that message stand on its own. The user can reply "more" for detail.]';
 
@@ -44,6 +44,31 @@ test('a voice message shows without the primer and notes for the agent; other me
     assert.equal(bubbleText(r), shown, r.text);
     assert.equal(fromVoice(r), r.details?.origin === 'voice');
   }
+});
+
+test('the line naming the PC a message was typed on is hidden only for a message from another PC', () => {
+  const user = (text: string, origin?: MessageRow['details']['origin']) => row(text, origin);
+  const cases: [MessageRow, string | null, string][] = [
+    [user('[Typed on Laptop]\nhello', 'remote'), 'Laptop', 'hello'],
+    [user('[Typed on Desk upstairs]\nline one\n[Typed on X]\nkept', 'remote'), 'Desk upstairs', 'line one\n[Typed on X]\nkept'],
+    [user(`[Typed on ${'x'.repeat(40)}]\nok`, 'remote'), 'x'.repeat(40), 'ok'],
+    // Not that kind of message, or not exactly that line: shown as written.
+    [user('[Typed on Laptop]\nhello', 'typed'), null, '[Typed on Laptop]\nhello'],
+    [user('[Typed on Laptop]\nhello'), null, '[Typed on Laptop]\nhello'],
+    [user('[Typed on Laptop]\nhello', 'telegram'), null, '[Typed on Laptop]\nhello'],
+    [user('hello [Typed on Laptop]\n', 'remote'), null, 'hello [Typed on Laptop]\n'],
+    [user('[Typed on Laptop] hello', 'remote'), null, '[Typed on Laptop] hello'],
+    [user(`[Typed on ${'x'.repeat(41)}]\nlong`, 'remote'), null, `[Typed on ${'x'.repeat(41)}]\nlong`],
+    [user('[Typed on La[p]top]\nx', 'remote'), null, '[Typed on La[p]top]\nx'],
+    [user(`[Typed on La${String.fromCharCode(9)}ptop]\nx`, 'remote'), null, `[Typed on La${String.fromCharCode(9)}ptop]\nx`],
+    [user('[Typed on  ]\nx', 'remote'), null, '[Typed on  ]\nx'],
+    [user('plain words from the other PC', 'remote'), null, 'plain words from the other PC'],
+  ];
+  for (const [r, pc, shown] of cases) {
+    assert.equal(typedOn(r), pc, r.text);
+    assert.equal(bubbleText(r), shown, r.text);
+  }
+  assert.equal(typedOn({ ...row('[Typed on Laptop]\nx', 'remote'), role: 'assistant' }), null);
 });
 
 test('a message another chat sent splits into sender and body; anything else stays a plain bubble', () => {
