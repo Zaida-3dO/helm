@@ -637,6 +637,7 @@ mod host_tool_tests {
             "app_remove_mcp_server",
             "app_set_mcp_secret",
             "app_set_mcp_level",
+            "app_google_sign_in",
             "app_link_item",
             "app_orchestrator_on",
             "app_workflow",
@@ -717,9 +718,12 @@ mod host_tool_tests {
             [
                 "app_gmail_search",
                 "app_gmail_read",
+                "app_gmail_thread",
                 "app_gmail_labels",
                 "app_gmail_label",
+                "app_gmail_drafts",
                 "app_gmail_draft",
+                "app_gmail_trash",
                 "app_gmail_send"
             ]
         );
@@ -835,7 +839,7 @@ mod surface_tests {
         let reg = super::host_tools();
         for (label, keys, listed_cap, visible_cap) in [
             ("default", LaunchKeys::default(), 10_500, 44),
-            ("everything on", everything_on(), 11_500, 53),
+            ("everything on", everything_on(), 11_500, 56),
         ] {
             let all = reg.for_launch(&keys);
             let visible: Vec<_> = all.iter().filter(|e| e.alias_of.is_none()).collect();

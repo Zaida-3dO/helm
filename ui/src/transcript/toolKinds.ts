@@ -83,6 +83,7 @@ const MCP_CARD_TOOLS = [
   'app_remove_mcp_server',
   'app_set_mcp_secret',
   'app_set_mcp_level',
+  'app_google_sign_in',
 ];
 
 /** The Allow request an `app_request_allow`, `app_stage_settings`, `app_project_startup` or MCP server change call filed: the id its result names, or null. */
