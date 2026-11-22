@@ -105,6 +105,9 @@ pub const AUTOCOMPLETE: PrefKey = PrefKey::classified("autocomplete");
 pub const TASK_TRIAGE: PrefKey = PrefKey::classified("taskTriage");
 /// The model background jobs ask: `{claude, local}` each a name or null; the small default when missing.
 pub const BACKGROUND_MODEL: PrefKey = PrefKey::classified("backgroundModel");
+/// Settings > Chat: whether the title of a chat on a local model server may be made by Claude's
+/// small model from that chat's first message alone (on when missing).
+pub const TITLES_LOCAL_VIA_CLAUDE: PrefKey = PrefKey::classified("titlesLocalViaClaude");
 /// Settings > General: the sidebar entries the user hides, by id.
 pub const HIDDEN_SIDEBAR_ITEMS: PrefKey = PrefKey::classified("hiddenSidebarItems");
 /// Settings > Chat: skill names hidden from the `/` menu, without a leading `$`.
@@ -130,6 +133,7 @@ pub const GENERIC_ALLOWLIST: &[PrefKey] = &[
     DEVICE_RUN_FROM_OTHERS,
     SELECTED_DEVICE,
     IDE_CONTEXT,
+    TITLES_LOCAL_VIA_CLAUDE,
     SCROLL_ON_SEND,
     DOUBLE_SHIFT,
     SEND_BEHAVIOR,
@@ -238,8 +242,8 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
                 })
             }
         }
-        "nativeMcp" | "mcpEnabled" | "ideContext" | "scrollOnSend" | "doubleShift"
-        | "pauseAnimationsOnScroll" | "deviceRunFromOthers" => {
+        "nativeMcp" | "mcpEnabled" | "ideContext" | "titlesLocalViaClaude" | "scrollOnSend"
+        | "doubleShift" | "pauseAnimationsOnScroll" | "deviceRunFromOthers" => {
             if value.is_boolean() {
                 Ok(())
             } else {
@@ -781,6 +785,7 @@ mod tests {
             ("selectedDevice", json!("dev-7"), json!(42)),
             ("selectedDevice", Value::Null, json!("")),
             ("ideContext", json!(true), json!(1)),
+            ("titlesLocalViaClaude", json!(false), json!("no")),
             ("scrollOnSend", json!(false), json!("no")),
             ("doubleShift", json!(false), json!("no")),
             ("rolloverTokens", json!(180_000), json!("soon")),

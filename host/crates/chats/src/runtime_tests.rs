@@ -4436,8 +4436,9 @@ async fn a_configured_background_model_rides_on_the_helper_job() {
         "an unset preference changes nothing"
     );
 
-    // A local chat with no local model chosen never hands its words to Claude: no job runs and
-    // the fallback title stays.
+    // A local chat with no local model chosen is named by Claude's small model from its first
+    // message alone (the `titlesLocalViaClaude` preference is on when missing): the job asks haiku,
+    // has no local route, and carries no other title and no later request.
     let made = h
         .call(
             "chat_create",
@@ -4448,15 +4449,90 @@ async fn a_configured_background_model_rides_on_the_helper_job() {
     let unset_local = made["id"].as_str().unwrap().to_owned();
     h.send(&unset_local, "private words for the local model", "default")
         .await;
+    h.until("local title via Claude", |h| {
+        h.spawner.title_jobs.lock().unwrap().len() >= 2
+    })
+    .await;
+    let via = h.spawner.title_jobs.lock().unwrap()[1].clone();
+    assert_eq!(via["firstRequest"], "private words for the local model");
+    assert_eq!(via["model"], "haiku");
+    assert!(via.get("localBaseUrl").is_none() && via.get("localKey").is_none());
+    h.until("the first user row", |h| {
+        !h.col(&format!(
+            "SELECT id FROM messages WHERE chat_id = '{unset_local}' AND role = 'user'"
+        ))
+        .is_empty()
+    })
+    .await;
+    h.db.write(|tx| {
+        tx.execute(
+            "INSERT INTO messages(chat_id, source_key, role, text, timestamp) VALUES (?1, 'u2', 'user', 'a second, later request', ?2)",
+            rusqlite::params![unset_local, helm_core::now_ms() + 5],
+        )
+    })
+    .unwrap();
+    *h.spawner.title.lock().unwrap() = Ok("Private words for a local model".into());
+    let s = h
+        .call("title_suggest", json!({"chatId": unset_local}))
+        .await
+        .unwrap();
+    assert_eq!(s["title"], "Private words for a local model");
+    let suggest = h.spawner.title_jobs.lock().unwrap().last().unwrap().clone();
+    assert_eq!(suggest["suggest"], 3);
+    assert_eq!(suggest["model"], "haiku");
+    for k in ["latest", "siblingTitles", "profileTitles", "recent"] {
+        assert!(
+            suggest.get(k).is_none(),
+            "{k} stays off a local chat's job: {suggest}"
+        );
+    }
+    assert!(!suggest.to_string().contains("a second, later request"));
+    assert!(!suggest.to_string().contains("q3 spend"));
+
+    *h.spawner.title.lock().unwrap() = Ok("Fix the login redirect".into());
+    // With the preference off a local chat's words never go to Claude: no job runs and the
+    // fallback title stays.
+    h.db.write(|tx| helm_core::prefs::set_generic(tx, "titlesLocalViaClaude", &json!(false)))
+        .unwrap();
+    let before = h.spawner.title_jobs.lock().unwrap().len();
+    let made = h
+        .call(
+            "chat_create",
+            json!({"cwd": h.work.to_string_lossy(), "model": "local/ollama/qwen3-8b"}),
+        )
+        .await
+        .unwrap();
+    let kept_local = made["id"].as_str().unwrap().to_owned();
+    h.send(&kept_local, "more private words", "default").await;
     h.until("local fallback", |h| {
-        title_of(h, &unset_local).1 == "fallback/failed"
+        title_of(h, &kept_local).1 == "fallback/failed"
     })
     .await;
     assert_eq!(
         h.spawner.title_jobs.lock().unwrap().len(),
-        1,
+        before,
         "no title job ran for the local chat"
     );
+    h.until("the user row", |h| {
+        !h.col(&format!(
+            "SELECT id FROM messages WHERE chat_id = '{kept_local}' AND role = 'user'"
+        ))
+        .is_empty()
+    })
+    .await;
+    // The Rename dialog is answered at once, with the reason (the chat's own title is already the
+    // start of its first message, so there is no other name to offer).
+    let off = h
+        .call("title_suggest", json!({"chatId": kept_local}))
+        .await
+        .unwrap_err();
+    assert_eq!(off.code, "unavailable");
+    assert!(
+        off.message.contains("no background model is chosen"),
+        "{}",
+        off.message
+    );
+    assert_eq!(h.spawner.title_jobs.lock().unwrap().len(), before);
 
     // The generic writer behind the `preference` op (the op itself lives in core, outside this
     // crate's harness; the writer is the part that classifies and validates).
@@ -4483,8 +4559,9 @@ async fn a_configured_background_model_rides_on_the_helper_job() {
     h.send(&local_chat, "summarise the notes on backups", "default")
         .await;
 
-    h.until("three title jobs", |h| {
-        h.spawner.title_jobs.lock().unwrap().len() >= 3
+    // A local model that is chosen wins, whatever the preference says.
+    h.until("both title jobs", |h| {
+        h.spawner.title_jobs.lock().unwrap().len() >= before + 2
     })
     .await;
     let jobs = h.spawner.title_jobs.lock().unwrap().clone();

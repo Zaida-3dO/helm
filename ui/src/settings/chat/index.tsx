@@ -22,6 +22,7 @@ function ChatPane() {
   const [ac, setAc] = useState(false);
   // Whether agents may read the code editor's open file and selection (off by default).
   const [ide, setIde] = useState(false);
+  const [localTitles, setLocalTitles] = useState(true);
   // Read live (and updated through the preference event this page dispatches on a change).
   const scrollOnSend = useScrollOnSend();
   const doubleShift = useDoubleShift();
@@ -67,6 +68,10 @@ function ChatPane() {
         setBgClaude(savedBg.current.claude ?? '');
         setBgLocal(savedBg.current.local ?? '');
       })
+      .catch(() => undefined);
+    void shell
+      .api<unknown>('preference_get', { key: 'titlesLocalViaClaude' })
+      .then((v) => setLocalTitles(v !== false))
       .catch(() => undefined);
     void shell
       .api<unknown>('preference_get', { key: 'ideContext' })
@@ -283,7 +288,7 @@ function ChatPane() {
       </SettingRow>
       <SettingRow
         title="Background model"
-        description="The model quiet behind-the-scenes jobs ask: naming a chat, completing your sentence and, for Claude chats only, the idle check. Leave blank for the small built-in model. For chats that run on a local model server, name a model on that server; it is only used there, and with none named those chats get no automatic title or completion."
+        description="The model quiet behind-the-scenes jobs ask: naming a chat, completing your sentence and, for Claude chats only, the idle check. Leave blank for the small built-in model. For chats that run on a local model server, name a model on that server; it is only used there, and with none named those chats get no completion, and their titles follow the setting below."
         testId="setting-background-model"
       >
         <div style={{ display: 'grid', gap: 6, minWidth: 240 }}>
@@ -306,6 +311,24 @@ function ChatPane() {
             onBlur={saveBackgroundModel}
           />
         </div>
+      </SettingRow>
+      <SettingRow
+        title="Titles for local chats may use Claude Haiku (only the first message is sent)"
+        description="A chat on a local model server gets its automatic title and its Rename suggestions from Claude's small model when no local background model is named above. Only that chat's first message is sent. Turn it off to keep those words on this PC: such a chat is then named from the start of its first message."
+        testId="setting-local-titles"
+      >
+        <Checkbox
+          checked={localTitles}
+          aria-label="Titles for local chats may use Claude Haiku (only the first message is sent)"
+          data-testid="settings-local-titles"
+          onChange={(on) => {
+            setLocalTitles(on);
+            void shell.api('preference', { key: 'titlesLocalViaClaude', value: on }).catch((err: unknown) => {
+              setLocalTitles(!on);
+              saveError(err);
+            });
+          }}
+        />
       </SettingRow>
       <SettingRow
         title="Ask a chat to roll over"

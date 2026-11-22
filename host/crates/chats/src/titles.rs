@@ -3,6 +3,9 @@
 //! - The fallback title (first non-blank line, at most 72 characters) is written by `chat_send` and
 //!   by a host send (another chat's message, a schedule, the phone); a message from another chat is
 //!   read without its header.
+//! - A chat on a local model server is named by its own local background model when one is chosen,
+//!   else by Claude's small model from its first message alone, unless the person turned that off
+//!   (the `titlesLocalViaClaude` preference, on by default); with neither, the fallback stays.
 //! - A title job starts with the first submission of a fresh chat (still "New chat", no messages)
 //!   or of a fork, from either path. At most [`MAX_CONCURRENT`] helper runs at once and [`MAX_JOBS`] jobs in all; a
 //!   job past that fails at once and the fallback stays. The helper (`helpers/titles`) has its own
@@ -188,8 +191,9 @@ pub fn start(rt: &ChatRuntime, chat_id: &str, job_body: Value) {
         return;
     }
     let mut job_body = job_body;
-    // A local chat's words never go to Claude: with no usable local model the fallback title stays.
-    if let Err(why) = crate::background::decorate_local_only(&rt.sh, chat_id, &mut job_body) {
+    // A local chat is named by its own local background model, else by Claude's small model from
+    // its first message alone (the person can switch that off); with neither the fallback stays.
+    if let Err(why) = crate::background::decorate_title(&rt.sh, chat_id, &mut job_body) {
         log::warn!("chat {chat_id}: no automatic title ({why}); the fallback stays");
         set_job(rt, chat_id, Some("failed"));
         return;
@@ -210,6 +214,8 @@ pub fn start(rt: &ChatRuntime, chat_id: &str, job_body: Value) {
         }
         let permit = rt.sh.titles.slots.acquire().await;
         let spawner = rt.sh.spawner.clone();
+        let route = route_note(&job_body);
+        let started = std::time::Instant::now();
         let out = tokio::time::timeout(
             HOST_TIMEOUT,
             tokio::task::spawn_blocking(move || spawner.run_title(&job_body)),
@@ -218,18 +224,38 @@ pub fn start(rt: &ChatRuntime, chat_id: &str, job_body: Value) {
         drop(permit);
         rt.sh.titles.jobs.fetch_sub(1, Ordering::SeqCst);
         match out {
-            Ok(Ok(Ok(title))) => finish(&rt, &chat, &title),
+            Ok(Ok(Ok(title))) => {
+                log::info!(
+                    "chat {chat}: title made in {} ms ({route})",
+                    started.elapsed().as_millis()
+                );
+                finish(&rt, &chat, &title)
+            }
             other => {
                 let why = match other {
                     Ok(Ok(Err(e))) => e,
                     Err(_) => "timed out".into(),
                     _ => "the helper did not run".into(),
                 };
-                log::warn!("chat {chat}: no automatic title ({why}); the fallback stays");
+                log::warn!(
+                    "chat {chat}: no automatic title ({why}, after {} ms, {route}); the fallback stays",
+                    started.elapsed().as_millis()
+                );
                 set_job(&rt, &chat, Some("failed"));
             }
         }
     });
+}
+
+/// Which model a background job asks, for the log: the route and the model name (the helper's own
+/// small default, haiku, when none is named).
+fn route_note(job: &Value) -> String {
+    let model = job["model"].as_str().unwrap_or("haiku");
+    if job.get("localBaseUrl").is_some() {
+        format!("local model {model}")
+    } else {
+        format!("Claude {model}")
+    }
 }
 
 /// A title with the characters that change how it reads without showing (direction overrides,
@@ -468,9 +494,12 @@ pub async fn suggest(rt: &ChatRuntime, chat_id: &str) -> Result<Suggestions, hel
     body["siblingTitles"] = json!(siblings);
     body["profileTitles"] = json!(profile);
     body["timeoutMs"] = json!(SUGGEST_TIMEOUT.as_millis() as u64 - 2_000);
-    let why = match crate::background::decorate_local_only(&rt.sh, chat_id, &mut body) {
+    let started = std::time::Instant::now();
+    let mut route = String::new();
+    let why = match crate::background::decorate_title(&rt.sh, chat_id, &mut body) {
         Err(why) => why,
         Ok(()) => {
+            route = route_note(&body);
             let spawner = rt.sh.spawner.clone();
             let r = tokio::time::timeout(
                 SUGGEST_TIMEOUT,
@@ -480,7 +509,14 @@ pub async fn suggest(rt: &ChatRuntime, chat_id: &str) -> Result<Suggestions, hel
             match r {
                 Ok(Ok(Ok(raw))) => match pick_suggestions(raw, &current) {
                     list if list.is_empty() => "the model gave nothing new".to_owned(),
-                    titles => return Ok(Suggestions { titles, note: None }),
+                    titles => {
+                        log::info!(
+                            "chat {chat_id}: {} suggested names in {} ms ({route})",
+                            titles.len(),
+                            started.elapsed().as_millis()
+                        );
+                        return Ok(Suggestions { titles, note: None });
+                    }
                 },
                 Ok(Ok(Err(e))) => e,
                 Ok(Err(_)) => "the helper did not run".to_owned(),
@@ -488,7 +524,11 @@ pub async fn suggest(rt: &ChatRuntime, chat_id: &str) -> Result<Suggestions, hel
             }
         }
     };
-    log::warn!("chat {chat_id}: no suggested names from the model ({why}); offering one from the first message");
+    log::warn!(
+        "chat {chat_id}: no suggested names from the model ({why}, after {} ms{}); offering one from the first message",
+        started.elapsed().as_millis(),
+        if route.is_empty() { String::new() } else { format!(", {route}") }
+    );
     match suggestion_from_message(first, &current) {
         Some(title) => Ok(Suggestions {
             titles: vec![title],

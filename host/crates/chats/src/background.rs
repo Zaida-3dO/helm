@@ -9,8 +9,11 @@
 //!   helper through its environment (`ProcessSpawner::run_helper` moves it there out of the job),
 //!   exactly as a worker launch does; the helper builds the child's environment with the worker's
 //!   own loopback-only rule.
-//! - A local chat's title and draft are not run at all when no `local` name is chosen
-//!   ([`decorate_local_only`], [`decorate_checked`]); the idle check skips local chats entirely.
+//! - A local chat's draft is not run at all when no `local` name is chosen
+//!   ([`decorate_checked`]); the idle check skips local chats entirely. A local chat's title takes
+//!   the `local` name when one is chosen, and otherwise goes to Claude's small model with that
+//!   chat's first message alone, unless the `titlesLocalViaClaude` preference is off
+//!   ([`decorate_title`]).
 //! - A missing field or a chat with no name chosen leaves the job untouched, and the job runs on
 //!   the default it would have used. A name that is chosen but cannot be used (a server that does
 //!   not resolve) is reported to the caller: [`decorate_checked`] answers the reason, and a job
@@ -100,16 +103,9 @@ pub(crate) fn decorate_checked(sh: &Shared, chat_id: &str, job: &mut Value) -> R
     Ok(())
 }
 
-/// [`decorate_checked`] for a job that carries a local chat's own words and so must never reach
-/// Claude: besides a chosen model that cannot be used, a local chat with no local model chosen at
-/// all is an error.
-pub(crate) fn decorate_local_only(
-    sh: &Shared,
-    chat_id: &str,
-    job: &mut Value,
-) -> Result<(), String> {
-    decorate_checked(sh, chat_id, job)?;
-    let local = sh
+/// Whether this chat runs on a local model server.
+fn is_local_chat(sh: &Shared, chat_id: &str) -> Result<bool, String> {
+    Ok(sh
         .db
         .snapshot(|tx| {
             tx.query_row(
@@ -120,10 +116,52 @@ pub(crate) fn decorate_local_only(
             .optional()
         })
         .map_err(|_| "the chat could not be read".to_owned())?
-        .unwrap_or(false);
-    if local && job.get("localBaseUrl").is_none() {
+        .unwrap_or(false))
+}
+
+/// Whether a local chat's title may be made by Claude when no local background model is chosen
+/// (the `titlesLocalViaClaude` preference, on when missing).
+fn titles_via_claude(sh: &Shared) -> bool {
+    sh.db
+        .snapshot(|tx| {
+            Ok::<_, rusqlite::Error>(helm_core::prefs::get_or(
+                tx,
+                helm_core::prefs::TITLES_LOCAL_VIA_CLAUDE,
+                true,
+            ))
+        })
+        .unwrap_or(true)
+}
+
+/// A title job holds one message only: no later request, no recent excerpts, and none of the
+/// person's other titles. Used when a local chat's words go to Claude for a name.
+pub(crate) fn first_message_only(job: &mut Value) {
+    if let Some(o) = job.as_object_mut() {
+        for k in ["latest", "recent", "siblingTitles", "profileTitles"] {
+            o.remove(k);
+        }
+    }
+}
+
+/// [`decorate_checked`] for a title job. A local chat with a local background model chosen is
+/// named by it; with none chosen it is named by Claude's small model from its first message alone
+/// while the `titlesLocalViaClaude` preference allows (on by default), and otherwise not at all:
+/// a local chat's words never go to Claude unless the person has allowed it.
+pub(crate) fn decorate_title(sh: &Shared, chat_id: &str, job: &mut Value) -> Result<(), String> {
+    decorate_checked(sh, chat_id, job)?;
+    if !is_local_chat(sh, chat_id)? || job.get("localBaseUrl").is_some() {
+        return Ok(());
+    }
+    if !titles_via_claude(sh) {
         return Err("no background model is chosen for chats on a local model server".into());
     }
+    first_message_only(job);
+    let claude = sh
+        .db
+        .snapshot(|tx| Ok::<_, rusqlite::Error>(helm_core::prefs::read(tx, PREF_KEY)))
+        .ok()
+        .and_then(|p| names(p).0);
+    job["model"] = json!(claude.unwrap_or_else(|| "haiku".to_owned()));
     Ok(())
 }
 

@@ -150,7 +150,7 @@ test("a configured model is asked by name, and a local job keeps to the loopback
   fs.writeFileSync(
     script,
     `import fs from "node:fs";
-const wanted = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_USE_GATEWAY", "CLAUDE_CODE_MAX_CONTEXT_TOKENS", "HELM_LOCAL_MODEL_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"];
+const wanted = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_USE_GATEWAY", "CLAUDE_CODE_MAX_CONTEXT_TOKENS", "HELM_LOCAL_MODEL_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "MAX_THINKING_TOKENS"];
 fs.writeFileSync(${JSON.stringify(record)}, JSON.stringify({ argv: process.argv.slice(2), env: Object.fromEntries(wanted.map((k) => [k, process.env[k] ?? null])) }));
 process.stdin.resume();
 process.stdin.on("end", () => {
@@ -161,9 +161,17 @@ process.stdin.on("end", () => {
   const read = () => JSON.parse(fs.readFileSync(record, "utf8")) as { argv: string[]; env: Record<string, string | null> };
   const modelFlag = (argv: string[]) => argv[argv.indexOf("--model") + 1];
 
-  // The built-in small model when nothing is configured, a named one when configured.
-  assert.deepEqual(await makeTitle({ firstRequest: "plan it", command: process.execPath, commandArgs: [script] }), { title: "Plan the release" });
+  // The built-in small model when nothing is configured, a named one when configured. Thinking is
+  // off whatever the environment says: a small model left to think on a naming prompt takes 15 to
+  // 30 seconds, which is what left the Rename dialog waiting.
+  process.env.MAX_THINKING_TOKENS = "31999";
+  try {
+    assert.deepEqual(await makeTitle({ firstRequest: "plan it", command: process.execPath, commandArgs: [script] }), { title: "Plan the release" });
+  } finally {
+    delete process.env.MAX_THINKING_TOKENS;
+  }
   assert.equal(modelFlag(read().argv), "haiku");
+  assert.equal(read().env.MAX_THINKING_TOKENS, "0", "a Claude job never thinks");
   assert.deepEqual(await makeTitle({ firstRequest: "plan it", command: process.execPath, commandArgs: [script], model: "qwen-turbo" }), { title: "Plan the release" });
   let seen = read();
   assert.equal(modelFlag(seen.argv), "qwen-turbo");
@@ -189,6 +197,7 @@ process.stdin.on("end", () => {
   assert.equal(seen.env.ANTHROPIC_DEFAULT_HAIKU_MODEL, "small-4k");
   assert.equal(seen.env.CLAUDE_CODE_USE_GATEWAY, "1");
   assert.equal(seen.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "8192");
+  assert.equal(seen.env.MAX_THINKING_TOKENS, "0", "a local job does not take the chat effort's thinking budget");
   assert.equal(seen.env.HELM_LOCAL_MODEL_KEY, null, "the hand-over name never reaches the child");
   assert.equal(seen.env.ANTHROPIC_API_KEY, null);
   assert.equal(seen.env.CLAUDE_CODE_OAUTH_TOKEN, null, "the local route never carries the user's sign-in");

@@ -142,6 +142,10 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
         High("The model that reads your chats for titles and checks is yours to approve."),
     ),
     (
+        "titlesLocalViaClaude",
+        High("Whether a local chat's first message may go to Claude for a title is yours to approve."),
+    ),
+    (
         "ideContext",
         High("Lets agents read your editor's open file and selection, so you approve it."),
     ),

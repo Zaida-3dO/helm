@@ -575,6 +575,12 @@ fn table() -> Vec<Entry> {
             about: "The model background jobs ask (titles, autocomplete, the idle check): {claude, local}, each a model name or null for the small default. They read the words of every chat.",
         },
         Entry {
+            key: "titlesLocalViaClaude",
+            kind: Kind::Bool,
+            default: || json!(true),
+            about: "Whether the title of a chat on a local model server may be made by Claude's small model. Only that chat's first message is sent. Off, such a chat is named only by the local background model, or keeps the start of its first message.",
+        },
+        Entry {
             key: "ideContext",
             kind: Kind::Bool,
             default: || json!(false),

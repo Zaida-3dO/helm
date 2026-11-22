@@ -15,6 +15,9 @@
 // - A Claude job may carry the person's saved Claude token in HELM_CLAUDE_TOKEN; it is set on the
 //   claude child as its own sign-in (never for a local job, never on the command line) and the
 //   hand-over name itself never reaches the child.
+// - Thinking is off for the child (`MAX_THINKING_TOKENS=0`, also on a local route, where the budget
+//   would otherwise be the chat effort's). These are quick looks: Haiku left to think on a naming
+//   prompt takes 15 to 30 seconds instead of one or two.
 // - The child is stopped gently: its input is already closed, so it is given a moment to exit on
 //   its own before it is killed. A claude killed in the middle of refreshing its sign-in can leave
 //   its lock behind.
@@ -232,17 +235,14 @@ export function askClaude(job: TitleJob, prompt: string): Promise<string> {
       reject(e);
       return;
     }
-    const child = spawn(command, args, {
-      cwd,
-      env: buildClaudeEnv(
-        process.env,
-        launch.local
-          ? { local: launch.local, localKey: takeLocalKey({ ...process.env } as Record<string, string | undefined>) }
-          : { claudeToken: takeClaudeToken({ ...process.env } as Record<string, string | undefined>) },
-      ),
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-    });
+    const env = buildClaudeEnv(
+      process.env,
+      launch.local
+        ? { local: launch.local, localKey: takeLocalKey({ ...process.env } as Record<string, string | undefined>) }
+        : { claudeToken: takeClaudeToken({ ...process.env } as Record<string, string | undefined>) },
+    );
+    env.MAX_THINKING_TOKENS = "0";
+    const child = spawn(command, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     let out = "";
     let done = false;
     const finish = (f: () => void) => {
