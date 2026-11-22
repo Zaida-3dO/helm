@@ -10,6 +10,9 @@
   min-height: 22px;
   align-items: center;
 }
+.title-suggest-note {
+  flex-basis: 100%;
+}
 .title-suggest-option {
   max-width: 100%;
   overflow: hidden;

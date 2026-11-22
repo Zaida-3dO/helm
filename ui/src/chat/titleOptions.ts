@@ -27,3 +27,45 @@ export function suggestionOptions(answer: unknown, opened: string): string[] {
 export function suggestionsVisible(value: string, opened: string): boolean {
   return value === opened;
 }
+
+/** How long the rename box waits for the host before it stops and says so. The host gives up on
+ * the model after 25 seconds and answers by then; this is the box's own limit for a host that
+ * never does. */
+export const SUGGEST_WAIT_MS = 35_000;
+
+/** What the box shows once the host has answered or failed: the options, and a plain line when
+ * the person should know something (the options are not the model's, or there are none). */
+export interface SuggestionResult {
+  options: string[];
+  note: string;
+}
+
+/** Ask the host for names and always come back: with the host's answer, with the reason it could
+ * not answer, or with a timeout note once `waitMs` has passed. Never waits on nothing. */
+export async function askForNames(
+  ask: () => Promise<unknown>,
+  opened: string,
+  waitMs: number = SUGGEST_WAIT_MS,
+): Promise<SuggestionResult> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<SuggestionResult>((resolve) => {
+    timer = setTimeout(() => resolve({ options: [], note: 'No names came back in time. Type one in.' }), waitMs);
+  });
+  const answered = ask().then(
+    (answer): SuggestionResult => {
+      const options = suggestionOptions(answer, opened);
+      const said = (answer as { message?: unknown } | null)?.message;
+      const note = typeof said === 'string' ? said.trim() : '';
+      return { options, note: options.length || note ? note : 'No names came back. Type one in.' };
+    },
+    (e: unknown): SuggestionResult => {
+      const why = e instanceof Error ? e.message.trim() : '';
+      return { options: [], note: why || 'Could not ask for names. Type one in.' };
+    },
+  );
+  try {
+    return await Promise.race([answered, timedOut]);
+  } finally {
+    clearTimeout(timer);
+  }
+}

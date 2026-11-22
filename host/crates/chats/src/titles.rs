@@ -1,8 +1,10 @@
 //! Automatic titles and renames.
 //!
-//! - The fallback title (first non-blank line, at most 72 characters) is written by `chat_send`.
+//! - The fallback title (first non-blank line, at most 72 characters) is written by `chat_send` and
+//!   by a host send (another chat's message, a schedule, the phone); a message from another chat is
+//!   read without its header.
 //! - A title job starts with the first submission of a fresh chat (still "New chat", no messages)
-//!   or of a fork. At most [`MAX_CONCURRENT`] helper runs at once and [`MAX_JOBS`] jobs in all; a
+//!   or of a fork, from either path. At most [`MAX_CONCURRENT`] helper runs at once and [`MAX_JOBS`] jobs in all; a
 //!   job past that fails at once and the fallback stays. The helper (`helpers/titles`) has its own
 //!   45 s timeout and one stricter retry; the host also gives up after [`HOST_TIMEOUT`].
 //! - Success writes the title as `generated` unless the user renamed the chat meanwhile: a manual
@@ -14,7 +16,8 @@
 //! - `chat_rename {chatId, title}` (1–512 bytes) sets the title and marks it manual.
 //!   `title_suggest {chatId}` runs the helper and answers up to three suggestions without writing
 //!   any; the helper also sees the titles (only) of the chat's siblings and of its profile's recent
-//!   chats, so the options follow the person's naming habits.
+//!   chats, so the options follow the person's naming habits. When the helper cannot answer, the
+//!   answer is one name cut from the first message, with a plain note saying why.
 
 use crate::runtime::ChatRuntime;
 use crate::store;
@@ -37,6 +40,49 @@ pub fn job(first_request: &str, latest: Option<&str>, forked: bool) -> Value {
         j["latest"] = json!(l);
     }
     j
+}
+
+/// What a message from another chat is about: the host's header and fixed paragraph in front of
+/// it are not the chat's subject, so a title is made from the body that follows them.
+pub fn unframed(text: &str) -> &str {
+    match text
+        .strip_prefix("[Message from another chat:")
+        .and_then(|rest| {
+            rest.split_once(
+                "
+
+",
+            )
+        }) {
+        Some((_, body)) if !body.trim().is_empty() => body,
+        _ => text,
+    }
+}
+
+/// The fallback title for a first message: its first non-blank line, at most
+/// [`store::FALLBACK_TITLE_CHARS`] characters.
+pub fn fallback_title(text: &str) -> Option<String> {
+    unframed(text)
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(|l| l.chars().take(store::FALLBACK_TITLE_CHARS).collect())
+}
+
+/// Write the fallback title in place of "New chat", never over a manual title.
+pub(crate) fn write_fallback(
+    tx: &rusqlite::Transaction<'_>,
+    chat_id: &str,
+    text: &str,
+) -> rusqlite::Result<()> {
+    if let Some(fallback) = fallback_title(text) {
+        tx.execute(
+            "UPDATE chats SET title = ?1 WHERE id = ?2 AND title = ?3
+               AND NOT EXISTS(SELECT 1 FROM chat_titles t WHERE t.chat_id = ?2 AND t.state = 'manual')",
+            params![fallback, chat_id, store::DEFAULT_TITLE],
+        )?;
+    }
+    Ok(())
 }
 
 fn set_job(rt: &ChatRuntime, chat_id: &str, job: Option<&str>) {
@@ -366,11 +412,42 @@ fn pick_suggestions(raw: Vec<String>, current: &str) -> Vec<String> {
     out
 }
 
+/// The options `title_suggest` answers, and a plain-words note when they are not the model's.
+pub struct Suggestions {
+    pub titles: Vec<String>,
+    pub note: Option<String>,
+}
+
+/// A name taken from the first message, for when the helper cannot answer: its first line cut at
+/// a word boundary to the plain title length, and never the title the chat has now.
+fn suggestion_from_message(first: &str, current: &str) -> Option<String> {
+    let line = fallback_title(first)?;
+    let line = line.trim_end_matches(['.', ':', ',', ';']).trim();
+    let short = if line.chars().count() <= SUGGESTION_FALLBACK_CHARS {
+        line.to_owned()
+    } else {
+        let cut: String = line.chars().take(SUGGESTION_FALLBACK_CHARS).collect();
+        match cut.rsplit_once(' ') {
+            Some((head, _)) if head.chars().count() >= SUGGESTION_FALLBACK_CHARS / 2 => {
+                head.to_owned()
+            }
+            _ => cut,
+        }
+    };
+    pick_suggestions(vec![short], current).pop()
+}
+
+/// How long a fallback suggestion is at most.
+const SUGGESTION_FALLBACK_CHARS: usize = 50;
+
 /// `title_suggest`: run the helper on the chat's first and latest requests, plus the titles of its
 /// siblings and of the profile's recent chats so the options follow the person's naming habits;
 /// answers up to three options and writes nothing. The context is titles only: no message text
-/// from any other chat reaches the model.
-pub async fn suggest(rt: &ChatRuntime, chat_id: &str) -> Result<Vec<String>, helm_ipc::ApiError> {
+/// from any other chat reaches the model. When the helper cannot answer (it failed, it ran out of
+/// time, or the chat is on a local model server with no background model chosen) the answer is a
+/// name from the chat's first message instead, with a note saying why, so the person is never
+/// left waiting on nothing.
+pub async fn suggest(rt: &ChatRuntime, chat_id: &str) -> Result<Suggestions, helm_ipc::ApiError> {
     let texts: Vec<String> = rt
         .db()
         .snapshot(|tx| {
@@ -390,37 +467,45 @@ pub async fn suggest(rt: &ChatRuntime, chat_id: &str) -> Result<Vec<String>, hel
     };
     let (current, siblings, profile) = naming_context(rt, chat_id).map_err(crate::ops::sql)?;
     let latest = texts.last().filter(|_| texts.len() > 1);
-    let mut body = job(first, latest.map(String::as_str), false);
+    let mut body = job(unframed(first), latest.map(|l| unframed(l)), false);
     body["suggest"] = json!(MAX_SUGGESTIONS);
     body["currentTitle"] = json!(current);
     body["siblingTitles"] = json!(siblings);
     body["profileTitles"] = json!(profile);
     body["timeoutMs"] = json!(SUGGEST_TIMEOUT.as_millis() as u64 - 2_000);
-    if let Err(why) = crate::background::decorate_local_only(&rt.sh, chat_id, &mut body) {
-        return Err(helm_ipc::ApiError::new(
-            "unavailable",
-            format!("No suggestion: {why}."),
-        ));
-    }
-    let spawner = rt.sh.spawner.clone();
-    let r = tokio::time::timeout(
-        SUGGEST_TIMEOUT,
-        tokio::task::spawn_blocking(move || spawner.run_title_suggestions(&body)),
-    )
-    .await;
-    match r {
-        Ok(Ok(Ok(raw))) => match pick_suggestions(raw, &current) {
-            list if list.is_empty() => Err(helm_ipc::ApiError::new(
-                "unavailable",
-                "No suggestion: the helper gave nothing new.",
+    let why = match crate::background::decorate_local_only(&rt.sh, chat_id, &mut body) {
+        Err(why) => why,
+        Ok(()) => {
+            let spawner = rt.sh.spawner.clone();
+            let r = tokio::time::timeout(
+                SUGGEST_TIMEOUT,
+                tokio::task::spawn_blocking(move || spawner.run_title_suggestions(&body)),
+            )
+            .await;
+            match r {
+                Ok(Ok(Ok(raw))) => match pick_suggestions(raw, &current) {
+                    list if list.is_empty() => "the model gave nothing new".to_owned(),
+                    titles => return Ok(Suggestions { titles, note: None }),
+                },
+                Ok(Ok(Err(e))) => e,
+                Ok(Err(_)) => "the helper did not run".to_owned(),
+                Err(_) => "the model took too long".to_owned(),
+            }
+        }
+    };
+    log::warn!("chat {chat_id}: no suggested names from the model ({why}); offering one from the first message");
+    match suggestion_from_message(first, &current) {
+        Some(title) => Ok(Suggestions {
+            titles: vec![title],
+            note: Some(format!(
+                "No ideas from the model ({}). This is the start of your first message.",
+                why.trim_end_matches('.')
             )),
-            list => Ok(list),
-        },
-        Ok(Ok(Err(e))) => Err(helm_ipc::ApiError::new(
+        }),
+        None => Err(helm_ipc::ApiError::new(
             "unavailable",
-            format!("No suggestion: {e}"),
+            format!("No suggestion: {}.", why.trim_end_matches('.')),
         )),
-        _ => Err(helm_ipc::ApiError::new("timeout", "No suggestion in time.")),
     }
 }
 

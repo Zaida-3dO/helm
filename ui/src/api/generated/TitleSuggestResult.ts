@@ -8,4 +8,9 @@ title: string,
 /**
  * Up to three options, best first.
  */
-titles: Array<string>, };
+titles: Array<string>, 
+/**
+ * Set when the options are not the model's own (it could not answer), saying why in plain
+ * words.
+ */
+message?: string, };

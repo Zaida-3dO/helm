@@ -1669,6 +1669,11 @@ pub struct TitleSuggestResult {
     pub title: String,
     /// Up to three options, best first.
     pub titles: Vec<String>,
+    /// Set when the options are not the model's own (it could not answer), saying why in plain
+    /// words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub message: Option<String>,
 }
 
 /// `attachment_put`: one image, base64. PNG, JPEG, GIF or WebP.

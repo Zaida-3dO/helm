@@ -1,12 +1,13 @@
 // Name suggestions under a chat's title field, in the sidebar's Rename dialog and the top bar's
 // rename box. It asks the host as soon as it appears, shows a loading line meanwhile, then up to
-// three options; one click hands the option to `onPick`. It never fills the field itself, goes away
-// once the person has typed, and shows nothing at all when the host has no suggestion.
+// three options; one click hands the option to `onPick`. It never fills the field itself and goes
+// away once the person has typed. It never waits on nothing: when the host cannot answer, or does
+// not in time, a line says so, and a note under the options says when they are not the model's.
 
 import { useEffect, useState } from 'react';
 import type { Api } from '../api/client.ts';
 import './titleSuggestions.css';
-import { suggestionOptions, suggestionsVisible } from './titleOptions.ts';
+import { askForNames, suggestionsVisible, type SuggestionResult } from './titleOptions.ts';
 
 export interface TitleSuggestionsProps {
   api: Api;
@@ -19,24 +20,30 @@ export interface TitleSuggestionsProps {
 }
 
 export function TitleSuggestions({ api, chatId, value, opened, onPick }: TitleSuggestionsProps) {
-  // null: still asking. An empty list, or a failure, shows nothing.
-  const [options, setOptions] = useState<string[] | null>(null);
+  // null: still asking.
+  const [result, setResult] = useState<SuggestionResult | null>(null);
   useEffect(() => {
     let live = true;
-    setOptions(null);
-    api<unknown>('title_suggest', { chatId })
-      .then((r) => live && setOptions(suggestionOptions(r, opened)))
-      .catch(() => live && setOptions([]));
+    setResult(null);
+    void askForNames(() => api<unknown>('title_suggest', { chatId }), opened).then((r) => live && setResult(r));
     return () => {
       live = false;
     };
     // The box is opened once for one title: a later `opened` is not a new question.
   }, [api, chatId]);
-  if (!suggestionsVisible(value, opened) || (options !== null && options.length === 0)) return null;
-  if (options === null) {
+  if (!suggestionsVisible(value, opened)) return null;
+  if (result === null) {
     return (
       <div className="title-suggest title-suggest-loading" role="status" aria-busy="true" data-testid="title-suggestions" data-state="loading">
         Thinking of names…
+      </div>
+    );
+  }
+  const { options, note } = result;
+  if (options.length === 0) {
+    return (
+      <div className="title-suggest title-suggest-loading" role="status" data-testid="title-suggestions" data-state="failed">
+        {note}
       </div>
     );
   }
@@ -48,6 +55,7 @@ export function TitleSuggestions({ api, chatId, value, opened, onPick }: TitleSu
           {t}
         </button>
       ))}
+      {note && <span className="title-suggest-note">{note}</span>}
     </div>
   );
 }

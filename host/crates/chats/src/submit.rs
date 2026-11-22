@@ -284,14 +284,7 @@ pub fn chat_send(
             }
             // The fallback title: the first non-blank line, at most 72
             // characters, replacing only "New chat" and never a manual title.
-            if let Some(line) = a.text.lines().map(str::trim).find(|l| !l.is_empty()) {
-                let fallback: String = line.chars().take(store::FALLBACK_TITLE_CHARS).collect();
-                tx.execute(
-                    "UPDATE chats SET title = ?1 WHERE id = ?2 AND title = ?3
-                       AND NOT EXISTS(SELECT 1 FROM chat_titles t WHERE t.chat_id = ?2 AND t.state = 'manual')",
-                    params![fallback, a.chat_id, store::DEFAULT_TITLE],
-                )?;
-            }
+            crate::titles::write_fallback(tx, &a.chat_id, &a.text)?;
             // Clear the draft unless the composer has saved a newer one meanwhile. A send from a
             // button, a notification or a quick reply never touches the draft.
             if origin == SendOrigin::Composer {
@@ -623,6 +616,8 @@ fn host_send_inner(
         }
     }
     let stored_by_this_send = std::cell::Cell::new(false);
+    // Whether this send is a fresh chat's first message (or a fork's), and so starts a title job.
+    let title_job = std::cell::Cell::new(None);
     let written: Result<Result<(bool, bool), ApiError>, rusqlite::Error> = rt.db().write(|tx| {
         // The same look again, now that nothing else can write: it may have changed.
         let busy = match host_intake(tx, &s)? {
@@ -646,6 +641,9 @@ fn host_send_inner(
             ids.push(r.id.clone());
             refs.push(r);
         }
+        // A message the host sends (another chat's, a schedule's, the phone's) names a fresh chat
+        // exactly as a typed one does.
+        title_job.set(crate::titles::wants_job(tx, s.chat_id)?);
         insert_submission(
             tx,
             &NewSubmission {
@@ -659,6 +657,7 @@ fn host_send_inner(
                 now,
             },
         )?;
+        crate::titles::write_fallback(tx, s.chat_id, s.text)?;
         if afk_note {
             tx.execute(
                 "UPDATE submission_meta SET afk_note = 1 WHERE submission_id = ?1",
@@ -708,6 +707,13 @@ fn host_send_inner(
         rt.command(s.chat_id, Cmd::Dispatch(s.submission_id.to_owned()))?;
         emit_pending(rt, s.chat_id);
         emit_chat(rt, s.chat_id);
+        if let (Some(forked), true) = (title_job.get(), stored_by_this_send.get()) {
+            crate::titles::start(
+                rt,
+                s.chat_id,
+                crate::titles::job(crate::titles::unframed(s.text), None, forked),
+            );
+        }
     }
     Ok(HostSent {
         delivered: dispatch,
