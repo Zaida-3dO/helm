@@ -241,7 +241,7 @@ test('the Google preset drafts a program, its row ignores the environment, and t
   assert.equal(blockState(list({ uvFound: false, hostServed: true }), false).kind, 'no-client', 'a host-served server needs no uv');
   assert.equal(blockState(list(), false).kind, 'no-client');
   assert.equal(blockState(list(), true).kind, 'empty');
-  assert.equal(blockState(list({ accounts: [{ email: 'a@x.com' }], permission: 'drafts' }), true).kind, 'ready');
+  assert.equal(blockState(list({ accounts: [{ email: 'a@x.com', needsSignIn: [] }], permission: 'drafts' }), true).kind, 'ready');
 });
 
 test('the setup checklist is the six console steps, each with its console page', () => {
@@ -265,19 +265,28 @@ test('the client form enables Save only once both values are filled', () => {
 
 test('a started sign-in is watched until a new address arrives, the host lets go, or the window ends', () => {
   const w = { startedAt: 1_000, known: ['old@x.com'], sawSigningIn: true };
-  const watch = (over: Partial<GoogleAccountList> = {}): GoogleAccountList => ({ accounts: [{ email: 'old@x.com' }], uvFound: true, signingIn: true, hostServed: true, ...over });
+  const old = { email: 'old@x.com', needsSignIn: [] };
+  const watch = (over: Partial<GoogleAccountList> = {}): GoogleAccountList => ({ accounts: [old], uvFound: true, signingIn: true, hostServed: true, ...over });
   assert.equal(watchState(w, 1_000, watch({ accounts: [] })), 'waiting', 'no accounts is not a new one');
   assert.equal(watchState(w, 1_000, watch()), 'waiting', 'an address that was already there is not new');
   assert.equal(watchState(w, 1_000 + SIGN_IN_WINDOW_MS - 1, watch()), 'waiting');
   assert.equal(watchState(w, 1_000 + SIGN_IN_WINDOW_MS, watch()), 'timeout', 'the window matches the host listener (5 min)');
-  assert.equal(watchState(w, 5_000, watch({ accounts: [{ email: 'old@x.com' }, { email: 'NEW@gmail.com' }] })), 'added', 'a new address is added');
-  assert.equal(watchState(w, 5_000, watch({ accounts: [{ email: 'old@x.com' }, { email: 'OLD@X.COM' }] })), 'waiting', 'case and repeats do not make an address new');
-  assert.equal(watchState(w, 1_000 + SIGN_IN_WINDOW_MS * 2, watch({ accounts: [{ email: 'new@gmail.com' }] })), 'added', 'an address that arrived in time is still added');
+  assert.equal(watchState(w, 5_000, watch({ accounts: [old, { email: 'NEW@gmail.com', needsSignIn: [] }] })), 'added', 'a new address is added');
+  assert.equal(watchState(w, 5_000, watch({ accounts: [old, { email: 'OLD@X.COM', needsSignIn: [] }] })), 'waiting', 'case and repeats do not make an address new');
+  assert.equal(watchState(w, 1_000 + SIGN_IN_WINDOW_MS * 2, watch({ accounts: [{ email: 'new@gmail.com', needsSignIn: [] }] })), 'added', 'an address that arrived in time is still added');
   // Cancel or Deny at Google ends the host's listener: the wait ends with it, not at the window.
   assert.equal(watchState(w, 5_000, watch({ signingIn: false })), 'refused', 'the listener let go with no new address');
   // A watch that never saw the listener open (a host restart mid-wait) still ends at the window.
   assert.equal(watchState({ startedAt: 1_000, known: [], sawSigningIn: false }, 1_000, watch({ signingIn: false, accounts: [] })), 'waiting', 'the first quiet poll is not yet a refusal');
   assert.equal(watchState({ startedAt: 1_000, known: [], sawSigningIn: false }, 1_000 + SIGN_IN_WINDOW_MS, watch({ signingIn: false, accounts: [] })), 'timeout');
+  // Signing an account in again ends with its mark gone (renewed), or still there (refused:
+  // cancelled, or some boxes left unticked). While the host's listener is open it keeps waiting.
+  const again = { ...w, again: 'Old@X.com' };
+  const marked = { email: 'old@x.com', needsSignIn: ['calendar'] };
+  assert.equal(watchState(again, 5_000, watch({ accounts: [marked] })), 'waiting', 'still open');
+  assert.equal(watchState(again, 5_000, watch({ accounts: [old], signingIn: false })), 'renewed', 'the mark is gone');
+  assert.equal(watchState(again, 5_000, watch({ accounts: [marked], signingIn: false })), 'refused', 'still marked');
+  assert.equal(watchState(w, 5_000, watch({ accounts: [marked], signingIn: false })), 'refused', 'a plain add never reads as renewed');
 });
 
 const problem = (name: string, state: ChatMcpProblem['state'], reason: string): ChatMcpProblem => ({

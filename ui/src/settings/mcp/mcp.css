@@ -199,6 +199,12 @@
 .google-accounts .mcp-list {
   margin: 4px 0 0;
 }
+.google-needs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
 .google-account .google-label {
   width: 160px;
 }

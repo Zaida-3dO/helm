@@ -9,8 +9,10 @@
 //!
 //! - **What is asked of Google.** Every Gmail permission, whatever the server's level is now, so
 //!   raising the level later needs no second trip to Google's page. The level setting and the
-//!   Allow card on each send stay what decide what a chat may do. Calendar is not part of this
-//!   sign-in: it has its own sign-in through the bridge program the first time it is used.
+//!   Allow card on each send stay what decide what a chat may do. When the server's Calendar
+//!   level is on, the same page also asks for the calendar permissions of that level, and Helm
+//!   hands the sign-in to the calendar bridge, so Calendar needs no page of its own. An account
+//!   listed as needing a sign-in again is fixed with this same call.
 //! - **The sign-in client stays the user's.** Its secret belongs to the profile and is entered
 //!   in Settings; an agent cannot set it, and the refusal says so.
 //! - **Finishing needs this PC.** Google sends the answer back to a loopback address, so the
@@ -89,7 +91,7 @@ fn canonical(_tx: &Transaction<'_>, _chat: &str, target: &Value) -> Result<Canon
         format!("Server: {}", t.server_name),
         account,
         owner,
-        "Asks Google for: every Gmail permission (read, drafts, labels and changes, send)."
+        "Asks Google for: every Gmail permission (read, drafts, labels and changes, send), and the calendar ones when the server has Calendar on."
             .to_owned(),
         "What chats may do is still set by the server's level, and each send needs its own Allow."
             .to_owned(),
