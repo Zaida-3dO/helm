@@ -767,8 +767,8 @@
 }
 
 /* The collapse chevron sits just left of the title, at the title's indent (the title's left edge
-   is fixed: left padding + the status slot + the flex gap), and follows it when a trailing mark
-   shifts the text. It never shifts the title: rows with and without children keep their titles on
+   is fixed: left padding + the status slot + the flex gap, and a trailing mark leaves that edge
+   where it is), so the chevron stays put and never moves onto the title. It never shifts the title: rows with and without children keep their titles on
    the level's left edge, and each nesting level's step carries the chevron in with it. */
 .sb-root .sb-children {
   position: absolute;
@@ -779,10 +779,6 @@
   height: 22px;
   border-radius: 4px;
   color: var(--sb-muted);
-}
-
-.sb-chat-wrap[data-trailing='true'] .sb-children {
-  left: 52.5px;
 }
 
 .sb-root .sb-children:hover {

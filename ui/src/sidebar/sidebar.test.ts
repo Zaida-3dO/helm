@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import type { ProjectNode, ProjectOps, SidebarRow } from '../api/projects.ts';
 import type { AttentionSummary } from '../api/types.ts';
 import { SidebarData } from './data.ts';
@@ -633,4 +634,37 @@ test('the tile row: how many tiles fit, what goes under More, and the most-recen
   mem.set('helm.sidebar.tiles', '[1,"tasks",null]');
   assert.deepEqual(readOrder(store), ['tasks']);
   assert.doesNotThrow(() => writeOrder(['x'], { getItem: () => null, setItem: () => { throw new Error('full'); } }));
+});
+
+test('the collapse chevron sits in its own space left of the title, with or without a trailing mark', () => {
+  const css = readFileSync(new URL('./sidebar.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules = css.split('}').map((chunk) => {
+    const [selector = '', body = ''] = chunk.split('{');
+    return { selector: selector.trim(), body };
+  });
+  const px = (selector: string, prop: string): number => {
+    for (const rule of rules) {
+      if (rule.selector !== selector) continue;
+      const m = new RegExp(`(?:^|[;\\s])${prop}:\\s*([\\d.]+)px`).exec(rule.body);
+      if (m) return Number(m[1]);
+    }
+    throw new Error(`${selector} has no ${prop} in px`);
+  };
+  const padLeft = Number(/padding:\s*0 [\d.]+px 0 ([\d.]+)px/.exec(rules.find((r) => r.selector === '.sb-root .sb-chat')?.body ?? '')?.[1]);
+  const slot = px('.sb-ind', 'width');
+  const gap = px('.sb-root .sb-chat', 'gap');
+  const titleLeft = padLeft + slot + gap;
+
+  // Idle row: the status slot sits before the title. Trailing row: the slot moves to the far edge
+  // and the text's own margin stands in for it, so the title's left edge is the same.
+  assert.equal(px('.sb-chat-wrap[data-trailing=\'true\'] .sb-chat-text', 'margin-left') + padLeft, titleLeft);
+
+  // The chevron is one fixed span in the left gutter, and ends before the title starts.
+  const left = px('.sb-root .sb-children', 'left');
+  assert.ok(left + px('.sb-root .sb-children', 'width') <= titleLeft, 'the chevron ends before the title starts');
+  assert.ok(left >= padLeft - slot, 'the chevron starts inside the row, left of the title');
+
+  // No state moves the chevron: nothing but the base rule sets its left edge.
+  const movers = rules.filter((r) => /\.sb-children\b/.test(r.selector) && /(^|[;\s])(left|margin-left|transform|translate):/.test(r.body));
+  assert.deepEqual(movers.map((r) => r.selector), ['.sb-root .sb-children']);
 });
