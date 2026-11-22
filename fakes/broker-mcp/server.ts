@@ -23,7 +23,8 @@
 // five seconds of early skew, spent once per process). browser_navigate, browser_read (with
 // find and inline), browser_capture and browser_claim answer in the broker's accepted JSON shape.
 // browser_evaluate is gated the same way over an empty reference and name (the grant signs the
-// exact expression), and browser_status answers the tab's address.
+// exact expression), and browser_status answers the lease's state as the real broker does, with no
+// address (only a navigation says where the tab arrived).
 
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
@@ -170,8 +171,11 @@ function gateTool(page: Page, name: string, args: Json): Json | undefined {
       return gateAct(page, args);
     case "browser_evaluate":
       return gateEvaluate(page, args);
-    case "browser_status":
-      return accepted({ url: atNow });
+    case "browser_status": {
+      if (cfg.statuses) fs.appendFileSync(cfg.statuses, `statuses: lease ${String(args.lease_key ?? "")} active
+`);
+      return accepted({ claimId: "c1", state: "active", browserId: "b1", purpose: "test", expiresAt: "2099-01-01T00:00:00.000Z", ttlSeconds: 300, checkBackSeconds: 120, tabId: "t1" });
+    }
     case "browser_read": {
       const find = typeof args.find === "string" ? args.find : "";
       const re = find.startsWith("/") && find.endsWith("/") ? new RegExp(find.slice(1, -1)) : null;

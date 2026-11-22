@@ -334,7 +334,18 @@ fn check_expression(s: &Step) -> Result<(), String> {
         return Err(SECRET.into());
     }
     let odd_control = |c: char| c.is_control() && !matches!(c, '\n' | '\t' | '\r');
-    if code.chars().any(|c| invisible(c) || odd_control(c))
+    // Anything that reads differently from how it runs or draws as nothing: the workspace's list
+    // of hidden characters (line and paragraph separators, isolates, fillers, tags), variation
+    // selectors, the combining grapheme joiner, the blank braille cell, and every space but the
+    // plain one.
+    let unseen = |c: char| {
+        helm_core::hidden::is_hidden_char(c)
+            || matches!(c as u32, 0x034F | 0x2800 | 0xFE00..=0xFE0F | 0xE0100..=0xE01EF)
+            || (c.is_whitespace() && !matches!(c, ' ' | '\n' | '\t' | '\r'))
+    };
+    if code
+        .chars()
+        .any(|c| invisible(c) || unseen(c) || odd_control(c))
         || code.replace("\r\n", "").contains('\r')
     {
         return Err(UNREADABLE_CODE.into());

@@ -150,7 +150,9 @@ function grantFor(t: { leaseKey: string; ref: string; name: string; host: string
 function gateHarness(page: Json) {
   const dir = fs.mkdtempSync(path.join(process.env.TEMP ?? "/tmp", "broker-gate-"));
   const acts = path.join(dir, "acts.txt");
+  const statuses = path.join(dir, "statuses.txt");
   fs.writeFileSync(acts, "");
+  fs.writeFileSync(statuses, "");
   const asks: Ask[] = [];
   let cards = 0;
   const bridge = createMcpBridge(() => {}, {
@@ -158,13 +160,16 @@ function gateHarness(page: Json) {
     browser: { renewMs: 20, capMs: 30_000 },
     hostRequest: async (operation, args) => {
       asks.push({ operation, args });
+      // The host's own refusal of a card it cannot show (code too long for one card, say).
+      if (operation === "app_browser_step" && String(args.value ?? "").includes("refuse-card")) return { ok: false, error: "The code is too long to show whole on one card: ask for a shorter expression." };
       if (operation === "app_browser_step") return { ok: true, result: { requestId: `r${++cards}`, state: "pending", summary: "a step on your browser" } };
       return { ok: true };
     },
   });
-  bridge.configure({ revision: "r1", servers: [broker({ page, acts }, { env: { BROKER_OWNER_GRANT_SECRET: GRANT_SECRET } })] });
+  bridge.configure({ revision: "r1", servers: [broker({ page, acts, statuses }, { env: { BROKER_OWNER_GRANT_SECRET: GRANT_SECRET } })] });
+  const statusCalls = () => fs.readFileSync(statuses, "utf8").split(NL).filter((l) => l !== "").length;
   const rows = () => fs.readFileSync(acts, "utf8").split(NL).filter((l) => l !== "").map((l) => JSON.parse(l) as Json);
-  return { bridge, asks, dir, rows };
+  return { bridge, asks, dir, rows, statusCalls };
 }
 
 async function until(fn: () => boolean, ms = 3_000): Promise<boolean> {
@@ -345,6 +350,9 @@ test("running code: the card carries the exact expression and the site, and the 
     { verb: "evaluate", ref: "", name: "", value: code, host: "shop.example" },
   );
   assert.equal(evals(h).filter((x) => x.outcome === "acted").length, 0, "nothing runs before an Approve");
+  // The real broker's status answer names no address, so the site comes from the navigation and
+  // the card is asked for without a status call first.
+  assert.equal(h.statusCalls(), 0, "no status call to find the site");
   const before = evals(h).length;
   assert.ok((await run(h)).isError && evals(h).length === before, "the same code is held while its card waits");
   // Other code is its own ask; and a grant the agent sends never reaches the broker.
@@ -382,4 +390,26 @@ test("running code: the card carries the exact expression and the site, and the 
   await run(odd, { tab: "t2" });
   assert.equal(odd.asks.find((a) => a.operation === "app_browser_step"), undefined, "a call with other arguments gets no card");
   odd.bridge.close();
+
+  // No card can be made: the agent is told why, and the owner is not asked to do anything at
+  // their browser (no attention flag, no Telegram ask, no renewal of a hold).
+  const noCard = async (page: Json, args: Json, navigate: boolean) => {
+    const g = gateHarness(page);
+    await g.bridge.tools({ server: "browser" });
+    if (navigate) await g.bridge.call(generatedName("browser", "browser_navigate"), { lease_key: "L1", url: "https://anything/" });
+    const r = await run(g, args);
+    await new Promise((x) => setTimeout(x, 80));
+    const out = { text: JSON.stringify(r.content), asked: g.asks.map((a) => a.operation), status: g.statusCalls(), evals: evals(g).length };
+    g.bridge.close();
+    return out;
+  };
+  const hostSaid = await noCard(SHOP_PAGE, { expression: "refuse-card" }, true);
+  assert.match(hostSaid.text, /ask for a shorter expression/);
+  assert.match(hostSaid.text, /Do not call browser_sign_in/);
+  assert.deepEqual(hostSaid.asked, ["app_browser_step"], "no attention flag and no Telegram ask");
+  assert.equal(hostSaid.status, 0, "no hold renews the lease");
+  const noSite = await noCard(SHOP_PAGE, {}, false);
+  assert.match(noSite.text, /browser_navigate/);
+  assert.deepEqual(noSite.asked, [], "nothing is asked of the owner or the host");
 });
+

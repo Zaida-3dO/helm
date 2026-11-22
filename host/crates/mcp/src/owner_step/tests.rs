@@ -488,6 +488,36 @@ fn which_steps_get_a_card() {
             refused: Some("cannot see"),
         },
         Row {
+            case: "code with a line separator that ends a line only in JavaScript",
+            args: run("// note\u{2028}fetch('/x')"),
+            refused: Some("cannot see"),
+        },
+        Row {
+            case: "code with a direction isolate",
+            args: run("a = '\u{2066}x\u{2069}'"),
+            refused: Some("cannot see"),
+        },
+        Row {
+            case: "code with an invisible filler",
+            args: run("const a\u{3164}b = 1"),
+            refused: Some("cannot see"),
+        },
+        Row {
+            case: "code with a tag character",
+            args: run("// note\u{e0041}fetch('/x')"),
+            refused: Some("cannot see"),
+        },
+        Row {
+            case: "code with a variation selector",
+            args: run("a = 1\u{fe0f}"),
+            refused: Some("cannot see"),
+        },
+        Row {
+            case: "code with a non-breaking space",
+            args: run("a =\u{a0}1"),
+            refused: Some("cannot see"),
+        },
+        Row {
             case: "code with a bare carriage return",
             args: run("1\r2"),
             refused: Some("cannot see"),

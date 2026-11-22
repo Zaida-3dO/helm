@@ -420,30 +420,28 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
     const s = e.session;
     if (!s || !opts.hostRequest) return undefined;
     const key = holdKey(e.server.id, lease);
-    // The site as the broker's own status answer last said it, else where the lease last
-    // navigated: a card must not name a tab the page has already left.
-    let where = leaseUrls.get(key);
-    try {
-      const u = acceptedValue(textOf(formatResult(await s.callTool("browser_status", { lease_key: lease }), e.red, limits)))?.url;
-      if (typeof u === "string" && u) where = u;
-    } catch {
-      /* the last known address stands */
-    }
+    // The site the lease last arrived at: the broker answers a navigation with the address the
+    // tab reached, and no other answer names the page. A tab that has since moved on gives a
+    // stale site, and the broker then refuses the grant rather than run the code.
     let host = "";
     try {
-      host = new URL(where ?? "").hostname;
+      host = new URL(leaseUrls.get(key) ?? "").hostname;
     } catch {
       /* the page's site is unknown: no card */
     }
-    if (!host) return undefined;
+    // No card can be made, and the owner has nothing to do at their browser: say so to the agent.
+    if (!host) return note("Helm does not know which site this tab is on, so it could not show the user an Approve card for this code. Navigate the tab with browser_navigate first, then run it again. Do not call browser_sign_in for it.");
     const asked: Json = { serverId: e.server.id, leaseKey: lease, ref: "", verb: "evaluate", name: "", host, value: code };
     const purpose = leasePurposes.get(key);
     if (purpose) asked.purpose = purpose;
     const filed = await opts.hostRequest(STEP_OP, asked, { timeoutMs: 30_000, mutating: true }).catch((err: Error) => ({ ok: false, error: err.message, result: undefined }));
     const result = filed.ok ? (filed.result as Json | undefined) : undefined;
-    // The host refused (code it cannot show whole, a stored secret, too many cards waiting): the
-    // person is told at their browser, as without cards.
-    if (typeof result?.requestId !== "string") return undefined;
+    // The host refused (code it cannot show whole, a stored secret, too many cards waiting). The
+    // owner cannot run code at their browser, so no hold and no ask: the agent gets the reason.
+    if (typeof result?.requestId !== "string") {
+      const why = typeof filed.error === "string" && filed.error ? ` ${filed.error.slice(0, 600)}` : "";
+      return note(`Helm could not show the user an Approve card for this code.${why} Do not call browser_sign_in for it.`);
+    }
     waitingSteps.set(result.requestId, { entry: e, tool, args, leaseKey: lease, ref: "", guard: codeKey(e.server.id, lease, code), at: now() });
     return cardFiled(e, lease, result, note);
   };
