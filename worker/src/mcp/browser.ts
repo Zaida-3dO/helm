@@ -17,9 +17,41 @@
 // whose tools merely share the broker's names never drives Helm's phone path.
 
 import { readFileSync } from "node:fs";
+import type { Json } from "./types.ts";
 
 /** The preset id of the built-in browser server (the host's presets.rs keeps the same string). */
 export const BROKER_PRESET = "browser_broker";
+
+/** The broker's lease-key shape: the broker mints 32 random bytes in base64url (43 characters);
+ * the range leaves a little room for a broker that changes its minting. */
+const LEASE_KEY = /^[A-Za-z0-9_-]{32,128}$/;
+
+/**
+ * The lease keys an accepted broker answer hands out (`value.key`): from the structured content
+ * and from every text block that parses as one. A caller may keep these from shape redaction —
+ * they are handles the server hands out on purpose, not credentials. Never throws; no repeats.
+ */
+export function leaseKeysOf(raw: Json): string[] {
+  const found: string[] = [];
+  const note = (j: unknown): void => {
+    if (!j || typeof j !== "object") return;
+    const v = (j as Record<string, unknown>).value;
+    if ((j as Record<string, unknown>).outcome !== "accepted" || !v || typeof v !== "object") return;
+    const k = (v as Record<string, unknown>).key;
+    if (typeof k === "string" && LEASE_KEY.test(k) && !found.includes(k)) found.push(k);
+  };
+  note(raw.structuredContent);
+  const blocks = Array.isArray(raw.content) ? raw.content : [];
+  for (const b of blocks) {
+    if (!b || typeof b !== "object" || b.type !== "text" || typeof b.text !== "string") continue;
+    try {
+      note(JSON.parse(b.text));
+    } catch {
+      /* not JSON: nothing to keep */
+    }
+  }
+  return found;
+}
 
 /** The broker caps a sign-in wait (default 600 s, maximum 900 s); hold a little past that. */
 export const HOLD_CAP_MS = 15 * 60_000;

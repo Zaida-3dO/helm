@@ -34,12 +34,37 @@ function envMissing(s: McpServer, presets: McpPreset[]): boolean {
   if (!p?.secretEnv?.length || s.transport.type !== 'stdio') return false;
   // A Google accounts server keeps its sign-in client in its own dialog, not in the environment.
   if (p.id === GOOGLE_PRESET) return false;
+  // A broker's connect token is optional — it only skips the connect page on reconnect — so a
+  // server without one is not waiting for anything. What a broker server must have is checked
+  // by brokerMissing, not here.
+  if (p.id === BROKER_PRESET) return false;
   const env = s.transport.env ?? {};
   return p.secretEnv.some((k) => {
     const r = env[k];
     if (!r) return true;
     return r.kind === 'literal' ? !r.secretId && !r.value : !r.value;
   });
+}
+
+/** A saved row the broker can use: an environment or file reference, or a literal with a typed
+ * or already-sealed value. An empty literal row waits. */
+function rowFilled(r: ValueRef | undefined): boolean {
+  if (!r) return false;
+  return r.kind === 'literal' ? !!(r.value || r.secretId) : !!r.value;
+}
+
+/** What a browser-preset server still needs before the broker can run beside your browser:
+ * a browser name, its extension id, and the path of that browser's program (named after the
+ * browser). The connect token is optional — it only skips the connect page on reconnect — so a
+ * missing token is not a missing thing. Null when nothing is missing. */
+export function brokerMissing(s: McpServer): string | null {
+  if (s.transport.type !== 'stdio') return null;
+  const env = s.transport.env ?? {};
+  if (!rowFilled(env.BROKER_ATTACHED_BROWSERS)) return "Needs your browser's name.";
+  if (!rowFilled(env.BROKER_ATTACHED_EXTENSION_ID)) return "Needs your browser's extension id.";
+  const pathRow = Object.keys(env).find((k) => k.startsWith('BROKER_BROWSER_') && k.endsWith('_PATH'));
+  if (!pathRow || !rowFilled(env[pathRow])) return "Needs your browser's program path.";
+  return null;
 }
 
 export function serverReadiness(s: McpServer, status: ServerStatus | undefined, presets: McpPreset[] = [], oauth?: OAuthStatus): Readiness {
@@ -58,11 +83,17 @@ export function serverReadiness(s: McpServer, status: ServerStatus | undefined, 
   if (browserSignIn && !oauth?.connected && status?.state !== 'connecting') {
     return { state: 'inactive', reason: 'Needs you to connect in your browser.', actionLabel: 'Connect', actionTarget: s.id };
   }
+  // The broker runs beside your own browser: it needs the browser named, its extension id and
+  // that browser's program path. The connect token is optional, so it is never asked for here.
+  if (isBrokerServer(s)) {
+    const miss = brokerMissing(s);
+    if (miss) return { state: 'inactive', reason: miss, actionLabel: 'Edit', actionTarget: s.id };
+  }
   if (tokenMissing(s, presets)) return { state: 'inactive', reason: 'Needs its token.', actionLabel: 'Add token', actionTarget: s.id };
   if (envMissing(s, presets))
     return {
       state: 'inactive',
-      reason: s.preset === BROKER_PRESET ? 'Needs its broker token.' : 'Needs its client id and secret.',
+      reason: 'Needs its client id and secret.',
       actionLabel: 'Edit',
       actionTarget: s.id,
     };
@@ -117,7 +148,7 @@ export function draftFromPreset(p: McpPreset, taken: string[]): McpServer {
     const env =
       p.id === GOOGLE_PRESET
         ? {}
-        : Object.fromEntries(names.map((k) => [k, { kind: 'literal' as const, value: '' }]));
+        : Object.fromEntries(names.map((k) => [k, { kind: 'literal' as const, value: p.id === BROKER_PRESET && k === 'BROKER_ATTACHED_BROWSERS' ? 'brave' : '' }]));
     return {
       id,
       name: p.name,

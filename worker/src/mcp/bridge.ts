@@ -21,6 +21,7 @@ import {
   controlFinder,
   holdEvent,
   holdFinished,
+  leaseKeysOf,
   oneControl,
   readControl,
   stepClass,
@@ -669,7 +670,9 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
           noteSignin(e, pe);
           throw pe;
         }
-        let r: { content: Json[]; isError?: boolean } = formatResult(raw, e.red, limits);
+        // The broker hands out its lease key on purpose: only that server's own accepted keys,
+        // in the broker's minting shape, skip the shape rules (see `leaseKeysOf` and `Redactor.text`).
+        let r: { content: Json[]; isError?: boolean } = formatResult(raw, e.red, limits, browser ? leaseKeysOf(raw) : []);
         if (browser) {
           if (l.tool === "browser_claim" && !r.isError && typeof sent.purpose === "string") {
             const leaseKey = acceptedValue(textOf(r))?.key;

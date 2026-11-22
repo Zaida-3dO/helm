@@ -2,12 +2,18 @@
 // result and error, and none of it reaches the model or the UI.
 
 import assert from "node:assert/strict";
+import path from "node:path";
 import { after, test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { startHttpFake } from "../../fakes/mcp-server/server.ts";
 import { generatedName, Redactor } from "../src/mcp/index.ts";
+import type { Json, ResolvedServer } from "../src/mcp/types.ts";
 import { harness, httpServer, stdioServer, text } from "./mcp-helpers.ts";
 
 const SECRET = "sk-fake-S3CRET-value-12345";
+/** 43 characters of the broker's minting shape (32 random bytes in base64url). */
+const LEASE = "a".repeat(32) + "b".repeat(11);
+const BROKER_FAKE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../fakes/broker-mcp/server.ts");
 const open: { close(): void }[] = [];
 after(() => open.forEach((b) => b.close()));
 
@@ -105,7 +111,52 @@ test("secret-looking runs are redacted by shape; git ids and prose are not", () 
     [`sync token: ${sha}`, `sync token: ${sha}`],
     [`access_token: ${sha}`, "access_token: [redacted]"],
     [`x-api-key: ${sha}`, "x-api-key: [redacted]"],
+    // A broker lease key (32 random bytes in base64url is 43 characters) is redacted like any
+    // other keyed run when nothing asks to keep it.
+    [`{"key": "${LEASE}"}`, `{"key": "[redacted]"}`],
+    [`{"api_key": "${"c".repeat(40)}"}`, `{"api_key": "[redacted]"}`],
   ];
   const r = new Redactor([]);
   for (const [input, want] of rows) assert.equal(r.text(input), want, input);
+});
+
+test("the broker's lease key survives redaction; every other server's is redacted as shaped", async () => {
+  const broker = (cfg: Json, extra: Partial<ResolvedServer> = {}): ResolvedServer => ({
+    id: "browser",
+    name: "My browser",
+    preset: "browser_broker",
+    transport: "stdio",
+    command: process.execPath,
+    args: [BROKER_FAKE, "--stdio", JSON.stringify(cfg)],
+    allowPrivateHttp: false,
+    ...extra,
+  });
+
+  const h = harness();
+  open.push(h.bridge);
+  h.bridge.configure({ revision: "r1", servers: [broker({ leaseKey: LEASE }, { secrets: [SECRET] })] });
+  await h.bridge.tools({ server: "browser" });
+  const r = await h.bridge.call(generatedName("browser", "browser_claim"), {});
+  assert.ok(text(r).includes(`"key": "${LEASE}"`), "the broker hands its lease key to the model whole");
+
+  // The same answer from a server that merely names its tools like the broker: no keeping.
+  const plain = broker({ leaseKey: LEASE });
+  delete plain.preset;
+  const p = harness();
+  open.push(p.bridge);
+  p.bridge.configure({ revision: "r1", servers: [plain] });
+  await p.bridge.tools({ server: "browser" });
+  const pr = await p.bridge.call(generatedName("browser", "browser_claim"), {});
+  assert.ok(!text(pr).includes(LEASE), "a non-broker server's key stays shape-redacted");
+
+  // Keeping the key costs nothing else: everything around it is still redacted.
+  const red = new Redactor([SECRET]);
+  const kept = red.text(`lease ${LEASE} token ${"z".repeat(40)} {"api_key": "${"q".repeat(40)}"} ${SECRET}`, [LEASE]);
+  assert.ok(kept.includes(LEASE), "the kept handle passes");
+  for (const gone of [SECRET, "z".repeat(40), "q".repeat(40)]) {
+    assert.ok(!kept.includes(gone), `${gone.slice(0, 8)}… still redacted next to a kept key`);
+  }
+  // A kept string equal to a resolved secret is never kept: the secret list outranks the keeps.
+  const red2 = new Redactor([LEASE]);
+  assert.ok(!red2.text(`lease ${LEASE}`, [LEASE]).includes(LEASE), "a keep that equals a secret is redacted");
 });

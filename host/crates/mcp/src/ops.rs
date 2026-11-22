@@ -13,6 +13,7 @@
 //! | `mcp_servers_status` | blocking | `{}` → [`ServerStatus`](crate::status::ServerStatus)`[]` |
 //! | `mcp_chat_problems` | blocking | `{chatId}` → [`ChatMcpProblem`](crate::chat_problems::ChatMcpProblem)`[]` (the chat's servers it cannot use, with reason words) |
 //! | `mcp_broker_doctor` | blocking | `{serverId}` → [`DoctorOutcome`](crate::doctor::DoctorOutcome) (the browser server's own checks; listed in [`crate::doctor`]) |
+//! | `mcp_find_browsers` | blocking | `{}` → `{label, path}``[]` (the usual browser programs this PC has: plain path checks, nothing runs; empty on non-Windows) |
 //! | `mcp_copy_export` | blocking | `{}` → `{servers}` — this PC's servers with every secret value, saved id and file path blanked, for the same person's other PCs (served to them over the device link, see `helm_devices`) |
 //! | `mcp_copy_import` | maintenance | `{servers, revision?}` → [`McpEditorSnapshot`]; servers copied from another PC: an id this PC has is skipped, and a blanked secret waits to be entered |
 //! | `mcp_repo_servers_list` | blocking | `{}` → [`RepoServer`](crate::repo_gate::RepoServer)`[]` (seen since launch) |
@@ -64,6 +65,12 @@ pub fn register_ops(reg: &mut OpRegistry) {
             let a: crate::doctor::DoctorArgs = parse(args)?;
             let st = ctx.services.need::<McpStore>()?;
             to_value(&crate::doctor::run(&st, &a.server_id))
+        })
+        .blocking("mcp_find_browsers", OpClass::Blocking, |_, args| {
+            if !(args.is_null() || args.as_object().is_some_and(|o| o.is_empty())) {
+                return Err(ApiError::bad_args("mcp_find_browsers takes no arguments."));
+            }
+            to_value(&find_browsers())
         })
         .blocking("mcp_repo_servers_list", OpClass::Blocking, |ctx, _| {
             to_value(&ctx.services.need::<RepoGate>()?.seen())
@@ -210,10 +217,74 @@ fn server_set_enabled(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     to_value(&snap)
 }
 
+/// A browser program installed on this PC: what to call it in the form, and its executable.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserPath {
+    pub label: String,
+    pub path: String,
+}
+
+/// The usual browser install locations, each checked as a plain file. Nothing runs and nothing
+/// is written: the answer is only the paths that exist. On other systems there is no standard
+/// list to offer, so the form takes the path as typed.
+#[cfg(windows)]
+fn find_browsers() -> Vec<BrowserPath> {
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let mut out: Vec<BrowserPath> = Vec::new();
+    let mut first = |label: &str, dirs: Vec<Option<String>>, leaf: &str| {
+        for dir in dirs.into_iter().flatten() {
+            let path = std::path::Path::new(&dir).join(leaf);
+            if path.is_file() {
+                out.push(BrowserPath {
+                    label: label.into(),
+                    path: path.display().to_string(),
+                });
+                return;
+            }
+        }
+    };
+    first(
+        "Brave",
+        vec![env("ProgramFiles"), env("LOCALAPPDATA")],
+        r"BraveSoftware\Brave-Browser\Application\brave.exe",
+    );
+    first(
+        "Chrome",
+        vec![env("ProgramFiles"), env("ProgramFiles(x86)")],
+        r"Google\Chrome\Application\chrome.exe",
+    );
+    first(
+        "Edge",
+        vec![env("ProgramFiles"), env("ProgramFiles(x86)")],
+        r"Microsoft\Edge\Application\msedge.exe",
+    );
+    out
+}
+
+#[cfg(not(windows))]
+fn find_browsers() -> Vec<BrowserPath> {
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::tests::{hub, store};
+
+    #[test]
+    fn find_browsers_only_offers_files_that_exist() {
+        for b in find_browsers() {
+            assert!(
+                ["Brave", "Chrome", "Edge"].contains(&b.label.as_str()),
+                "{}",
+                b.label
+            );
+            assert!(std::path::Path::new(&b.path).is_file(), "{}", b.path);
+        }
+        #[cfg(not(windows))]
+        assert!(find_browsers().is_empty());
+    }
 
     #[test]
     fn the_user_may_set_the_opt_in_and_replace_by_id() {
