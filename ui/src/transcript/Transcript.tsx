@@ -69,7 +69,7 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
     return m;
   }, [items]);
   const queued = useMemo(
-    () => (queue ? inFlightItems(queue.pending, queue.thread, waitReason(rows)) : []),
+    () => (queue ? inFlightItems(queue.pending, queue.thread, waitReason(rows), rows) : []),
     [queue, rows],
   );
   const keys = useMemo(() => [...items.map(itemKey), ...queued.map((q) => `q:${q.submission.id}`)], [items, queued]);

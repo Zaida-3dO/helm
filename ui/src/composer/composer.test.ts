@@ -4,6 +4,7 @@ import { resolveKey, sendTooltip, stopTooltip, type KeyContext, type KeyShape } 
 import { DRAFT_DEBOUNCE_MS, DraftSaver, nextRevision, type Timers } from './drafts.ts';
 import { inFlightView, waitReason } from './inFlight.ts';
 import { row, submission } from '../dev/fixtures.ts';
+import type { MessageRow } from '../api/types.ts';
 import { liveRuns, wrapMarker } from './markup.ts';
 import { permissionLabel } from './permission.ts';
 import { SendHold, holdStep } from './hold.ts';
@@ -142,6 +143,18 @@ test('in flight: order, states, labels, tones and actions in one list', () => {
   // Only an unread message says why it waits.
   assert.deepEqual(v.map((i) => i.reason), [null, 'Claude reads it at its next step', 'Claude reads it at its next step', null, null]);
   assert.equal(inFlightView(pending, { capabilities: caps, reason: 'Waiting for Bash to finish' })[1]!.reason, 'Waiting for Bash to finish');
+
+  // A message whose own row is in the transcript is not listed a second time. A prompt that opens a
+  // turn has its row (saved) from the moment it is handed over, the bubble says Sending and then
+  // Pending until Claude reads it; a steer's row comes when Claude reads it. A message known
+  // unsent keeps its bubble: it carries Recover.
+  const own = (id: string, extra: MessageRow['details'] = {}) => row({ id: Number(id.slice(1)) + 100, role: 'user', status: 'saved', details: { submissionId: id, ...extra } });
+  const listed = (rows: MessageRow[]) => inFlightView(pending, { capabilities: caps, rows }).map((i) => i.submission.id);
+  assert.deepEqual(listed([]), ['u1', 's1', 'g1', 'p1', 'r1']);
+  assert.deepEqual(listed([own('p1')]), ['u1', 's1', 'g1', 'r1'], 'a prompt that opens a turn: its saved row stands for it while it is Sending');
+  assert.deepEqual(listed([own('s1', { mode: 'steer' }), own('g1', { mode: 'steer' })]), ['u1', 'p1', 'r1'], 'a steer read by Claude: its row stands for it, Pending or not yet handed over');
+  assert.deepEqual(listed([own('u1'), own('r1')]), ['u1', 's1', 'g1', 'p1', 'r1'], 'Not sent and Not delivered keep their bubble and their Recover');
+  assert.deepEqual(listed([row({ id: 7, role: 'assistant', details: { submissionId: 'p1' } }), row({ id: 8, role: 'user', details: {} })]), ['u1', 's1', 'g1', 'p1', 'r1'], 'only a user row that names the message stands for it');
 });
 
 test('wait reason: the running tool of this turn, else the next step', () => {

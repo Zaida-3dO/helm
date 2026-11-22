@@ -568,7 +568,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       ))}
       {!chat.sideSourceId && <FlagNote chatId={chatId} ops={ops} devOps={remote ? devOps : undefined} />}
       {/* A transcript that is not at its newest page cannot end with them, so they stack here. */}
-      {view.hasNewer && <QueueList pending={view.pending} thread={thread} ops={ops} chatId={chatId} readOnly={remote ? !remote.state.live : false} devOps={remote ? devOps : undefined} reason={waitReason(view.rows)} />}
+      {view.hasNewer && <QueueList pending={view.pending} thread={thread} ops={ops} chatId={chatId} readOnly={remote ? !remote.state.live : false} devOps={remote ? devOps : undefined} reason={waitReason(view.rows)} rows={view.rows} />}
       </div>
       {/* The activity line sits directly on the box, below the in-flight messages. */}
       {thread && <ActivityDock chat={chat} thread={thread} turnStartedAt={turnStartedAt} onStopTool={stopTool} rows={view.hasNewer ? undefined : view.rows} runEndedAt={view.lastRunEndedAt} />}

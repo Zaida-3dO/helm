@@ -26,6 +26,8 @@ export interface InFlightContext {
   capabilities: Capabilities;
   /** What an unread message is waiting behind (`waitReason`); defaults to the plain sentence. */
   reason?: string;
+  /** The rows the transcript holds. A message whose own row is among them is not listed again. */
+  rows?: readonly MessageRow[];
 }
 
 const NEXT_STEP = 'Claude reads it at its next step';
@@ -82,8 +84,29 @@ function toneOf(state: InFlightState): InFlightTone {
   return state === 'failed' ? 'error' : 'amber';
 }
 
+/**
+ * The messages on their way whose own user row is already in the transcript. A prompt that opens a
+ * turn gets its row the moment it is handed over (status "saved"), and a steer gets its row when
+ * Claude reads it, but the host keeps listing the message until Claude has read it, which for a
+ * cold start is seconds later. From the row on, the row is the message: listing it too shows it
+ * twice. Only messages still on their way drop out; a message known unsent keeps its bubble, which
+ * carries Recover.
+ */
+function shownAsRow(pending: Submission[], rows: readonly MessageRow[] | undefined): Set<string> {
+  const shown = new Set<string>();
+  if (!rows?.length) return shown;
+  const onTheirWay = new Set(pending.filter((s) => ['pending', 'sending'].includes(itemState(s))).map((s) => s.id));
+  if (onTheirWay.size === 0) return shown;
+  for (const r of rows) {
+    const id = r.role === 'user' ? r.details?.submissionId : undefined;
+    if (id && onTheirWay.has(id)) shown.add(id);
+  }
+  return shown;
+}
+
 export function inFlightView(pending: Submission[], ctx: InFlightContext): InFlightView[] {
-  return orderInFlight(pending).map((s) => {
+  const shown = shownAsRow(pending, ctx.rows);
+  return orderInFlight(pending).filter((s) => !shown.has(s.id)).map((s) => {
     const state = itemState(s);
     const actions: InFlightAction[] = [];
     // Withdraw only while Claude holds it unread; Recover only once it is known unsent.

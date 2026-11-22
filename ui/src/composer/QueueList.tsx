@@ -2,12 +2,14 @@
 // the reason it waits) with Withdraw, and messages known unsent (Not sent / Not delivered) with
 // Recover to the composer. Nothing sits here waiting for a turn to end. Each bubble shows the
 // message's pictures and file references, as a sent bubble does: a message's attachments are
-// visible from the moment it is sent to the moment it settles. They are drawn as the last items of
+// visible from the moment it is sent to the moment it settles. A message whose own row is already in
+// the transcript (a prompt that opens a turn is written as saved the moment it is handed over) is not
+// listed a second time: the row is the message. They are drawn as the last items of
 // the transcript (QueueItem); QueueList stacks the same items under it for a transcript that is
 // not at its newest page.
 
 import type { ChatOps } from '../api/ops.ts';
-import type { Submission, ThreadState } from '../api/types.ts';
+import type { MessageRow, Submission, ThreadState } from '../api/types.ts';
 import type { RemoteChatOps } from '../api/devices.ts';
 import { Glyph } from '../transcript/icons.tsx';
 import { MessageImages } from '../transcript/MessageImages.tsx';
@@ -27,6 +29,8 @@ export interface QueueListProps {
   devOps?: RemoteChatOps;
   /** Why an unread message waits (`waitReason`). */
   reason?: string;
+  /** The rows the transcript holds: a message with its own row there is not listed again. */
+  rows?: readonly MessageRow[];
 }
 
 const DEFAULT_CAPS = { withdraw: false, deliverNow: false, stopTool: false, compact: false };
@@ -85,12 +89,12 @@ export function QueueItem({ item, ops, chatId, readOnly = false, devOps }: { ite
 }
 
 /** The in-flight messages of a chat, ready to show; empty when none is. */
-export function inFlightItems(pending: Submission[], thread: ThreadState | null, reason?: string): InFlightView[] {
-  return inFlightView(pending, { capabilities: thread?.capabilities ?? DEFAULT_CAPS, reason });
+export function inFlightItems(pending: Submission[], thread: ThreadState | null, reason?: string, rows?: readonly MessageRow[]): InFlightView[] {
+  return inFlightView(pending, { capabilities: thread?.capabilities ?? DEFAULT_CAPS, reason, rows });
 }
 
-export function QueueList({ pending, thread, ops, chatId, readOnly = false, devOps, reason }: QueueListProps) {
-  const items = inFlightItems(pending, thread, reason);
+export function QueueList({ pending, thread, ops, chatId, readOnly = false, devOps, reason, rows }: QueueListProps) {
+  const items = inFlightItems(pending, thread, reason, rows);
   if (!items.length) return null;
   return (
     <div className="queue" data-testid="queue">

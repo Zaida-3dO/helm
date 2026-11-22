@@ -139,6 +139,54 @@ describe("core scenarios end to end with the fake claude", { timeout: 15 * 60_00
     });
   });
 
+  test("a sent message shows once: its row and its in-flight bubble are never on screen together", async () => {
+    await failShot("sent-once", async () => {
+      const texts = ["[E4] first message of the chat", "also mention bananas", "a later message in the same chat"];
+      // Looks at the page after every change for a user row and an in-flight bubble that carry the
+      // same words, which is what a person sees as the message twice.
+      await page().evaluate((words) => {
+        const w = window as unknown as { __twice: string[]; __bubbles: number };
+        w.__twice = [];
+        w.__bubbles = 0;
+        const look = () => {
+          const rowEls = [...document.querySelectorAll('[data-testid="transcript-row"][data-role="user"]')];
+          for (const q of document.querySelectorAll('[data-testid="queue-item"]')) {
+            w.__bubbles++;
+            for (const t of words) {
+              const row = rowEls.find((r) => (r.textContent ?? "").includes(t));
+              if (row && (q.textContent ?? "").includes(t)) {
+                w.__twice.push(`${t}: row ${row.getAttribute("data-status")}, bubble ${q.getAttribute("data-state")}`);
+              }
+            }
+          }
+        };
+        new MutationObserver(look).observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true });
+      }, texts);
+
+      // The first message of a chat: the worker starts cold, so the message is handed over, and its
+      // row written as saved, a good while before Claude reads it.
+      await newChat(page(), folder());
+      await send(page(), texts[0]!);
+      await page().waitForSelector(tid("tool-card", '[data-status="running"]'), { timeout: 20_000 });
+      // A message sent while the turn runs waits unread, then is read at the tool boundary.
+      await send(page(), texts[1]!);
+      await waitText(page(), "E4 reply after reading: also mention bananas", 30_000);
+      await waitStatus(page(), "idle", 30_000);
+      // A later message in the same chat, to a worker that is already warm.
+      await send(page(), texts[2]!);
+      await waitText(page(), `You said: ${texts[2]}`, 30_000);
+      await waitStatus(page(), "idle", 30_000);
+      await page().waitForFunction(() => !document.querySelector('[data-testid="queue-item"]'), null, { timeout: 10_000 });
+
+      const seen = (await page().evaluate(() => {
+        const w = window as unknown as { __twice: string[]; __bubbles: number };
+        return { twice: w.__twice, bubbles: w.__bubbles };
+      })) as { twice: string[]; bubbles: number };
+      assert.ok(seen.bubbles > 0, "the in-flight list showed the messages while they were on their way");
+      assert.deepEqual([...new Set(seen.twice)], [], "no message was ever shown as a row and as an in-flight bubble at once");
+    });
+  });
+
   test("E5: a classified Bash call is denied once, re-run in the background, and the chip shows 1", async () => {
     await failShot("E5", async () => {
       await newChat(page(), folder());
