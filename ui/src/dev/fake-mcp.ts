@@ -209,7 +209,7 @@ export function mcpFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         googleSigningIn = true;
         setTimeout(() => {
           googleSigningIn = false;
-          accounts.push({ email: `demo.account${accounts.length + 1}@gmail.com` });
+          accounts.push({ email: `demo.account${accounts.length + 1}@gmail.com`, needsSignIn: [] });
         }, 4000);
         return { authUrl: 'https://accounts.google.com/o/oauth2/auth?fake=1' };
       }

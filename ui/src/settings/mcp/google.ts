@@ -4,7 +4,7 @@
 // asks whether one is set and hands over the two values once.
 
 import type { Api } from '../../api/client.ts';
-import type { CalendarPermission, GoogleAccountList, GoogleClientState, GooglePermission, GoogleSignIn, McpEditorSnapshot, McpServer } from '../../api/generated/mcp/index.ts';
+import type { CalendarPermission, GoogleAccount, GoogleAccountList, GoogleClientState, GooglePermission, GoogleSignIn, McpEditorSnapshot, McpServer } from '../../api/generated/mcp/index.ts';
 
 export type { CalendarPermission, GoogleAccount, GoogleAccountList, GoogleClientState, GooglePermission, GoogleSignIn } from '../../api/generated/mcp/index.ts';
 
@@ -50,6 +50,13 @@ export const NEEDS_UV = 'Install uv (docs.astral.sh/uv) to run this server.';
 /** Sign-in asked for the scopes of the level that was picked at the time; changing the level
  * does not re-ask Google, so each account has to sign in again to reach the new one. */
 export const RAISE_NOTE = 'Raising the level: sign each account in again.';
+export const SIGNED_IN_AGAIN = 'Signed in again.';
+export const STILL_MISSING = 'Google still left some permissions off. Sign in again and tick every box.';
+/** The words under an account that has to sign in again: which services lack permissions. */
+export function needsSignInWords(a: GoogleAccount): string {
+  const names = a.needsSignIn.map((s) => (s === 'calendar' ? 'Calendar' : s === 'gmail' ? 'Gmail' : s));
+  return `Needs sign-in again · ${names.join(', ')}`;
+}
 export const UNVERIFIED_NOTE =
   'The “Google hasn’t verified this app” warning at sign-in is expected: the client belongs to you, not to Google. Choose Advanced, then Go to the app.';
 
@@ -62,21 +69,22 @@ export interface ConsoleStep {
 /** The six steps, in the order the Google console wants them. Each link opens in the system browser. */
 export const CONSOLE_STEPS: ConsoleStep[] = [
   { label: 'Create a Google Cloud project.', url: 'https://console.cloud.google.com/projectcreate' },
-  { label: 'Turn on the Gmail API for that project.', url: 'https://console.cloud.google.com/apis/library/gmail.googleapis.com' },
+  { label: 'Turn on the Gmail API for that project (and the Google Calendar API, if chats will use Calendar).', url: 'https://console.cloud.google.com/apis/library/gmail.googleapis.com' },
   { label: 'Fill in the OAuth consent screen: an app name and a support email.', url: 'https://console.cloud.google.com/auth/branding' },
   {
     label: 'Set the audience to External, then publish the app (“In production”). While it is still “Testing”, Google ends each sign-in after 7 days.',
     url: 'https://console.cloud.google.com/auth/audience',
   },
-  { label: 'Under data access, add the scopes for reading, labelling, drafting and modifying mail (and sending too, if you want that level).', url: 'https://console.cloud.google.com/auth/scopes' },
+  { label: 'Under data access, add the scopes for reading, labelling, drafting and modifying mail (and sending too, if you want that level), and the calendar ones if chats will use Calendar.', url: 'https://console.cloud.google.com/auth/scopes' },
   { label: 'Create an OAuth client of type “Desktop app”, and copy its client id and secret into the two fields below.', url: 'https://console.cloud.google.com/auth/clients/create' },
 ];
 
 export function googleOps(api: Api) {
   return {
     accounts: (serverId: string) => api<GoogleAccountList>('mcp_google_accounts', { serverId }),
-    /** Starts the sign-in; Google's page opens in the browser. Without an address Google shows its chooser. */
-    add: (serverId: string) => api<GoogleSignIn>('mcp_google_add', { serverId }),
+    /** Starts the sign-in; Google's page opens in the browser. Without an address Google shows its chooser;
+     * with one (signing an account in again) the page is pre-filled with it. */
+    add: (serverId: string, email?: string) => api<GoogleSignIn>('mcp_google_add', email ? { serverId, email } : { serverId }),
     remove: (serverId: string, email: string) => api<GoogleAccountList>('mcp_google_remove', { serverId, email }),
     label: (serverId: string, email: string, label: string) => api<GoogleAccountList>('mcp_google_label', { serverId, email, label }),
     /** Rewrites the server's permission argument. */
@@ -172,9 +180,11 @@ export interface SignInWatch {
   /** True from the start: the host held its sign-in open the moment `add` returned. A poll that
    * finds it false with no new address was a Cancel or a Deny at Google. */
   sawSigningIn: boolean;
+  /** Set when an account already in the list is being signed in again: the address. */
+  again?: string;
 }
 
-export type WatchState = 'waiting' | 'added' | 'refused' | 'timeout';
+export type WatchState = 'waiting' | 'added' | 'renewed' | 'refused' | 'timeout';
 
 /** One poll of a started sign-in: an address new to the list arrived, the host's listener let
  * go without one (Cancel or Deny at Google — the wait ends there, not at the window), the time
@@ -182,6 +192,12 @@ export type WatchState = 'waiting' | 'added' | 'refused' | 'timeout';
 export function watchState(w: SignInWatch, now: number, list: GoogleAccountList): WatchState {
   if (list.accounts.some((a) => !w.known.includes(a.email.toLowerCase()))) return 'added';
   if (list.signingIn) w.sawSigningIn = true;
-  else if (w.sawSigningIn) return 'refused';
+  else if (w.sawSigningIn) {
+    // Signing an account in again ends with the account no longer marked. If it still is, the
+    // page was cancelled or some boxes were left unticked.
+    const again = w.again?.toLowerCase();
+    const mark = again ? list.accounts.find((a) => a.email.toLowerCase() === again)?.needsSignIn.length : undefined;
+    return again && mark === 0 ? 'renewed' : 'refused';
+  }
   return now - w.startedAt >= SIGN_IN_WINDOW_MS ? 'timeout' : 'waiting';
 }

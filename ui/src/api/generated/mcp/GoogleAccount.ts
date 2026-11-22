@@ -3,4 +3,9 @@
 /**
  * One signed-in address and its optional label.
  */
-export type GoogleAccount = { email: string, label?: string, };
+export type GoogleAccount = { email: string, label?: string, 
+/**
+ * The services (`gmail`, `calendar`) whose permissions this account's sign-in does not
+ * cover at the server's current levels; empty when it is fine. Signing in again fixes it.
+ */
+needsSignIn: Array<string>, };

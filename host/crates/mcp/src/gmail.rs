@@ -170,7 +170,7 @@ fn require_level(server: &crate::types::McpServer, what: &str) -> Result<(), Too
 /// What a call needs the account's sign-in to hold, as Google's permissions: any one of them
 /// is enough (the modify permission covers every kind of change).
 #[derive(Clone, Copy)]
-enum Need {
+pub(crate) enum Need {
     Read,
     Labels,
     Compose,
@@ -179,7 +179,24 @@ enum Need {
 }
 
 impl Need {
-    fn scopes(self) -> &'static [&'static str] {
+    /// Every kind of call a server level allows: a level's calls are the ones before it plus its
+    /// own, so an account is fully signed in for a level when its grant covers each of these.
+    pub(crate) fn allowed_by(level: google::GooglePermission) -> &'static [Need] {
+        use google::GooglePermission as L;
+        match level {
+            L::Readonly => &[Need::Read, Need::Labels],
+            L::Drafts => &[Need::Read, Need::Labels, Need::Compose, Need::Modify],
+            L::Send => &[
+                Need::Read,
+                Need::Labels,
+                Need::Compose,
+                Need::Modify,
+                Need::Send,
+            ],
+        }
+    }
+
+    pub(crate) fn scopes(self) -> &'static [&'static str] {
         use google::{SCOPE_COMPOSE, SCOPE_LABELS, SCOPE_MODIFY, SCOPE_READONLY, SCOPE_SEND};
         match self {
             Need::Read => &[SCOPE_READONLY, SCOPE_MODIFY],

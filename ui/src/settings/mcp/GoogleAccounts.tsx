@@ -17,8 +17,11 @@ import {
   POLL_MS,
   RAISE_NOTE,
   REMOVE_NOTE,
+  SIGNED_IN_AGAIN,
   SIGN_IN_NOTE,
+  STILL_MISSING,
   blockState,
+  needsSignInWords,
   watchState,
   type CalendarPermission,
   type GoogleAccount,
@@ -88,7 +91,8 @@ export function GoogleAccountsDialog({
           setWatch(null);
           setAuthUrl(null);
           if (state === 'added') setNotice('Account added.');
-          else if (state === 'refused') setError('That sign-in was not completed. Try Add account again.');
+          else if (state === 'renewed') setNotice(SIGNED_IN_AGAIN);
+          else if (state === 'refused') setError(watch.again ? STILL_MISSING : 'That sign-in was not completed. Try Add account again.');
           else setError('The sign-in did not finish in 5 minutes. Try Add account again.');
         })
         .catch(() => {});
@@ -125,18 +129,21 @@ export function GoogleAccountsDialog({
     return saved;
   };
 
-  // One button, no address to type: Google shows its own account chooser.
-  const add = () =>
+  // One button, no address to type: Google shows its own account chooser. Signing an account in
+  // again names it, so Google's page is pre-filled with it.
+  const signIn = (again?: string) =>
     void attempt(async () => {
       setAdding(true);
-      const started = await ops.add(server.id);
+      const started = await ops.add(server.id, again);
       setAuthUrl(started.authUrl ?? null);
       setWatch({
         startedAt: Date.now(),
         known: (list?.accounts ?? []).map((a) => a.email.toLowerCase()),
         sawSigningIn: true,
+        ...(again ? { again } : {}),
       });
     });
+  const add = () => signIn();
 
   const relabel = (a: GoogleAccount, value: string) => {
     if ((a.label ?? '') === value.trim()) return;
@@ -183,6 +190,11 @@ export function GoogleAccountsDialog({
               <li key={`${a.email}:${a.label ?? ''}`} className="mcp-server google-account" data-testid={`google-account-${a.email}`}>
                 <div className="mcp-server-main">
                   <span className="mcp-server-name">{a.email}</span>
+                  {a.needsSignIn.length > 0 && (
+                    <span className="mcp-error google-needs" data-testid={`google-needs-signin-${a.email}`}>
+                      <IconWarning size={14} /> {needsSignInWords(a)}
+                    </span>
+                  )}
                 </div>
                 <TextInput
                   className="google-label"
@@ -193,6 +205,11 @@ export function GoogleAccountsDialog({
                   defaultValue={a.label ?? ''}
                   onBlur={(e) => relabel(a, e.target.value)}
                 />
+                {a.needsSignIn.length > 0 && configured === true && (
+                  <Button className="mcp-act" data-testid={`google-signin-again-${a.email}`} disabled={busy || adding || waiting} onClick={() => signIn(a.email)}>
+                    Sign in again
+                  </Button>
+                )}
                 <Button className="mcp-act" data-testid={`google-remove-${a.email}`} disabled={busy} onClick={() => askRemove(a.email)}>
                   Remove
                 </Button>

@@ -8,9 +8,12 @@
 //! server the preset starts is only the bridge for Google's other services, and its package
 //! name is pinned at resolve time so saved servers keep running the version Helm tested.
 //! Calendar is one of those other services: its level joins the bridge's permission arguments,
-//! and setting it starts the bridge even on a Gmail server Helm serves — the bridge asks Google
-//! for calendar scopes at a sign-in of its own, using the profile's saved client when the server
-//! does not carry one of its own.
+//! and setting it starts the bridge even on a Gmail server Helm serves, using the profile's saved
+//! client when the server does not carry one of its own. Helm's own sign-in asks Google for the
+//! Calendar permissions of the server's level too, so one visit to Google's page covers both,
+//! and the bridge is handed that sign-in (see [`seed_bridge`]) instead of opening a page of its
+//! own. An account whose grant falls short of what the server's levels need is marked as needing
+//! a sign-in again.
 //!
 //! | op | class | args → result |
 //! |---|---|---|
@@ -37,6 +40,9 @@
 //!   loopback-or-https Google sign-in can hand it over in the first place.
 //! - A refresh goes only to the token address kept at sign-in (Google's, always), and refreshes
 //!   of the accounts never overlap: Google retires a refresh token that was used twice.
+//! - The one place a refresh token leaves the credential store is the bridge's own private
+//!   folder, in the file format the bridge keeps its sign-ins in ([`seed_bridge`]); it is never
+//!   logged or sent anywhere else.
 //! - Accounts belong to the person: the sealed index keeps the profile that signed each one in,
 //!   and a profile's chats and Settings screen see only their own. A row stored before owners
 //!   existed belongs to the home profile.
@@ -94,8 +100,8 @@ pub(crate) const SCOPE_LABELS: &str = "https://www.googleapis.com/auth/gmail.lab
 /// needs this one.
 pub(crate) const SCOPE_MODIFY: &str = "https://www.googleapis.com/auth/gmail.modify";
 pub(crate) const SCOPE_SEND: &str = "https://www.googleapis.com/auth/gmail.send";
-/// Calendar scopes. Gmail sign-ins never carry these: the bridge program asks for them at its
-/// own sign-in, per the level set in its permission arguments.
+/// Calendar scopes. A sign-in asks for the ones of the server's current Calendar level, and the
+/// bridge is seeded from that sign-in.
 const SCOPE_CAL_READONLY: &str = "https://www.googleapis.com/auth/calendar.readonly";
 const SCOPE_CAL_EVENTS: &str = "https://www.googleapis.com/auth/calendar.events";
 const SCOPE_CAL_FULL: &str = "https://www.googleapis.com/auth/calendar";
@@ -202,6 +208,9 @@ pub struct GoogleAccount {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub label: Option<String>,
+    /// The services (`gmail`, `calendar`) whose permissions this account's sign-in does not
+    /// cover at the server's current levels; empty when it is fine. Signing in again fixes it.
+    pub needs_sign_in: Vec<String>,
 }
 
 /// What the Accounts block shows.
@@ -365,6 +374,7 @@ fn listed_with_owner(creds: &CredentialStore) -> Vec<(GoogleAccount, Option<Stri
                 GoogleAccount {
                     email: e.email.clone(),
                     label: e.label.clone(),
+                    needs_sign_in: Vec::new(),
                 },
                 e.owner.clone(),
             ));
@@ -644,9 +654,24 @@ fn remove_account(creds: &CredentialStore, email: &str) -> Result<(), String> {
     index_remove(creds, email)
 }
 
+/// The levels a server asks of its accounts, for judging whether a sign-in is enough. A level
+/// that is `None` is one the picker does not offer, and nothing is checked for it.
+#[derive(Clone, Copy, Debug)]
+struct Levels {
+    gmail: Option<GooglePermission>,
+    calendar: Option<CalendarPermission>,
+    /// The bridge program runs for this server, so Calendar goes through it.
+    helper_runs: bool,
+}
+
 /// `Accounts: work = a@x, b@y`, for the agent: the accounts the chat's profile may use; none when
-/// there are none.
-fn accounts_line(creds: &CredentialStore, scope: GoogleScope<'_>) -> Option<String> {
+/// there are none. An account that needs a sign-in again says so, so the agent asks for one
+/// instead of retrying.
+fn accounts_line(
+    creds: &CredentialStore,
+    scope: GoogleScope<'_>,
+    levels: Levels,
+) -> Option<String> {
     let home = scope.profile.filter(|_| !scope.not_home);
     let accounts = accounts_for(creds, scope.profile, home);
     if accounts.is_empty() {
@@ -654,9 +679,16 @@ fn accounts_line(creds: &CredentialStore, scope: GoogleScope<'_>) -> Option<Stri
     }
     let parts: Vec<String> = accounts
         .into_iter()
-        .map(|a| match a.label {
-            Some(l) => format!("{l} = {}", a.email),
-            None => a.email,
+        .map(|a| {
+            let stale = if missing_for_account(creds, &a.email, levels).is_empty() {
+                ""
+            } else {
+                " (needs sign-in again)"
+            };
+            match a.label {
+                Some(l) => format!("{l} = {}{stale}", a.email),
+                None => format!("{}{stale}", a.email),
+            }
         })
         .collect();
     Some(format!("Accounts: {}", parts.join(", ")))
@@ -780,8 +812,16 @@ pub fn prepare(
     // profile's saved one, so turning Calendar on does not ask for a second OAuth client; one
     // with no client anywhere cannot use the bridge at all and stays host-served.
     let profile_client = if legacy { None } else { stored_client(creds) };
-    let wants_calendar = calendar_shown(&out.args).is_some_and(|c| c != CalendarPermission::Off);
-    if legacy || (wants_calendar && profile_client.is_some()) {
+    let calendar = calendar_shown(&out.args);
+    let wants_calendar = calendar.is_some_and(|c| c != CalendarPermission::Off);
+    let helper_runs = legacy || (wants_calendar && profile_client.is_some());
+    // Read before the clamp below, which lowers a send level for the bridge's own Gmail side.
+    let levels = Levels {
+        gmail: permission_of(&out.args),
+        calendar,
+        helper_runs,
+    };
+    if helper_runs {
         out.args = clamp_gmail(&out.args);
         if let Some(c) = profile_client {
             out.env
@@ -813,11 +853,27 @@ pub fn prepare(
         out.env
             .entry("OAUTHLIB_INSECURE_TRANSPORT".into())
             .or_insert_with(|| "1".into());
+        // Only Helm's own folder is seeded: a folder the user pointed the bridge at is theirs.
+        let own_dir = out
+            .env
+            .get(CREDENTIALS_ENV)
+            .is_some_and(|v| Path::new(v) == dir.as_path());
+        let helper_client = out.env.get(CLIENT_ID_ENV).cloned().unwrap_or_default();
+        if own_dir && calendar.is_some_and(|c| c != CalendarPermission::Off) {
+            let home = scope.profile.filter(|_| !scope.not_home);
+            seed_bridge(
+                creds,
+                &dir,
+                &accounts_for(creds, scope.profile, home),
+                calendar,
+                &helper_client,
+            );
+        }
     } else {
         // Nothing signs this one in from the outside: Helm serves Gmail itself.
         out.host_served = true;
     }
-    if let Some(line) = accounts_line(creds, scope) {
+    if let Some(line) = accounts_line(creds, scope, levels) {
         out.guidance = Some(match out.guidance.take() {
             Some(g) if !g.is_empty() => format!("{g} {line}"),
             _ => line,
@@ -1163,15 +1219,15 @@ pub(crate) fn account_access(store: &McpStore, email: &str, force: bool) -> Resu
 /// it said. `None` when the account is not signed in or Google's answer carried none, which
 /// means unknown, not missing.
 pub(crate) fn account_scopes(store: &McpStore, email: &str) -> Option<String> {
-    TokenStore::load(
-        store.creds(),
-        &account_entry(email),
-        &account_identity(email),
-    )
-    .ok()
-    .flatten()
-    .and_then(|a| a.tokens.scope)
-    .filter(|s| !s.trim().is_empty())
+    granted_scopes(store.creds(), email)
+}
+
+fn granted_scopes(creds: &CredentialStore, email: &str) -> Option<String> {
+    TokenStore::load(creds, &account_entry(email), &account_identity(email))
+        .ok()
+        .flatten()
+        .and_then(|a| a.tokens.scope)
+        .filter(|s| !s.trim().is_empty())
 }
 
 /// Whether the granted permissions (as Google lists them) hold at least one of `any_of`.
@@ -1180,6 +1236,192 @@ pub(crate) fn scopes_cover(granted: &str, any_of: &[&str]) -> bool {
     granted
         .split_whitespace()
         .any(|g| g == "https://mail.google.com/" || any_of.contains(&g))
+}
+
+/// Whether the granted permissions hold at least one of `any_of`, and nothing else counts (unlike
+/// [`scopes_cover`], Google's full-mailbox permission says nothing about Calendar).
+fn holds_any(granted: &str, any_of: &[&str]) -> bool {
+    granted.split_whitespace().any(|g| any_of.contains(&g))
+}
+
+/// Whether the granted permissions cover a Calendar level. The full calendar permission covers
+/// the read and the events ones, as the bridge treats it.
+fn calendar_covered(granted: &str, level: CalendarPermission) -> bool {
+    match level {
+        CalendarPermission::Off => true,
+        CalendarPermission::Readonly => holds_any(granted, &[SCOPE_CAL_READONLY, SCOPE_CAL_FULL]),
+        CalendarPermission::EditEvents => {
+            holds_any(granted, &[SCOPE_CAL_EVENTS, SCOPE_CAL_FULL])
+                && holds_any(granted, &[SCOPE_CAL_READONLY, SCOPE_CAL_FULL])
+        }
+    }
+}
+
+/// The services (`gmail`, `calendar`) whose permissions an account's grant does not cover at the
+/// given levels. `granted` is what Google listed at sign-in: `None` is unknown, not missing, and
+/// marks nothing (as the Gmail calls themselves treat it). A level the picker does not offer is
+/// not checked, and Calendar is checked only when the bridge runs. Only the Gmail and Calendar
+/// permissions count: the sign-in identity ones (`openid`, `email`) never mark an account.
+pub(crate) fn missing_for(
+    granted: Option<&str>,
+    gmail: Option<GooglePermission>,
+    calendar: Option<CalendarPermission>,
+    helper_runs: bool,
+) -> Vec<String> {
+    let Some(granted) = granted else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Some(level) = gmail {
+        if !crate::gmail::Need::allowed_by(level)
+            .iter()
+            .all(|n| scopes_cover(granted, n.scopes()))
+        {
+            out.push("gmail".to_owned());
+        }
+    }
+    if let (true, Some(level)) = (helper_runs, calendar) {
+        if !calendar_covered(granted, level) {
+            out.push("calendar".to_owned());
+        }
+    }
+    out
+}
+
+fn missing_for_account(creds: &CredentialStore, email: &str, levels: Levels) -> Vec<String> {
+    missing_for(
+        granted_scopes(creds, email).as_deref(),
+        levels.gmail,
+        levels.calendar,
+        levels.helper_runs,
+    )
+}
+
+// ---- the bridge's own sign-in files ---------------------------------------------------------
+
+/// An address as the bridge program names its per-account file: every byte but ASCII letters,
+/// digits and `@._-` percent-encoded (upper-case hex), as Python's `quote(email, safe="@._-")`
+/// does.
+fn quote_email(email: &str) -> String {
+    let mut out = String::with_capacity(email.len());
+    for b in email.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'@' | b'.' | b'_' | b'-') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// The older file name the bridge also reads: every other byte replaced by `_`.
+fn legacy_file_stem(email: &str) -> String {
+    email
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '@' | '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Both file names the bridge may keep one account's sign-in under.
+fn bridge_files(dir: &Path, email: &str) -> [std::path::PathBuf; 2] {
+    [
+        dir.join(format!("{}.json", quote_email(email))),
+        dir.join(format!("{}.json", legacy_file_stem(email))),
+    ]
+}
+
+/// Forget an account's sign-in file in the bridge's folder (both name forms).
+fn forget_seeded(dir: &Path, email: &str) {
+    for f in bridge_files(dir, email) {
+        let _ = std::fs::remove_file(f);
+    }
+}
+
+/// Hand the bridge Helm's own Google sign-in, so Calendar needs no page of its own. The bridge
+/// keeps one JSON file per account in its private folder and refreshes the access token by
+/// itself; it asks Google for a new sign-in only when no usable file exists. For each account
+/// that is signed in with the client the bridge runs on, and whose grant covers the Calendar
+/// level, the file is written with the refresh token (no access token: the bridge renews on first
+/// use). An existing file with the same refresh token and permissions is left alone, so a token
+/// the bridge renewed is not churned. A file that cannot be written is skipped; nothing about
+/// its contents is ever logged.
+fn seed_bridge(
+    creds: &CredentialStore,
+    dir: &Path,
+    accounts: &[GoogleAccount],
+    calendar: Option<CalendarPermission>,
+    helper_client_id: &str,
+) {
+    let Some(level) = calendar.filter(|c| *c != CalendarPermission::Off) else {
+        return;
+    };
+    for a in accounts {
+        let Ok(Some(auth)) =
+            TokenStore::load(creds, &account_entry(&a.email), &account_identity(&a.email))
+        else {
+            continue;
+        };
+        let (Some(refresh), Some(granted), Some(secret)) = (
+            auth.tokens
+                .refresh_token
+                .as_deref()
+                .filter(|t| !t.is_empty()),
+            auth.tokens
+                .scope
+                .as_deref()
+                .filter(|s| !s.trim().is_empty()),
+            auth.client.client_secret.as_deref(),
+        ) else {
+            continue;
+        };
+        if helper_client_id.is_empty()
+            || auth.client.client_id != helper_client_id
+            || !calendar_covered(granted, level)
+        {
+            continue;
+        }
+        let scopes: Vec<&str> = granted.split_whitespace().collect();
+        let [path, _] = bridge_files(dir, &a.email);
+        if let Ok(bytes) = helm_core::privfs::read_capped(&path, 64 * 1024) {
+            if let Ok(have) = serde_json::from_slice::<Value>(&bytes) {
+                let same_scopes = have
+                    .get("scopes")
+                    .and_then(Value::as_array)
+                    .is_some_and(|l| {
+                        let mut a: Vec<&str> = l.iter().filter_map(Value::as_str).collect();
+                        let mut b = scopes.clone();
+                        a.sort_unstable();
+                        b.sort_unstable();
+                        a == b
+                    });
+                if have.get("refresh_token").and_then(Value::as_str) == Some(refresh) && same_scopes
+                {
+                    continue;
+                }
+            }
+        }
+        let file = serde_json::json!({
+            "token": null,
+            "refresh_token": refresh,
+            "token_uri": GOOGLE_TOKEN,
+            "client_id": auth.client.client_id,
+            "client_secret": secret,
+            "scopes": scopes,
+            "expiry": null,
+        });
+        let Ok(bytes) = serde_json::to_vec(&file) else {
+            continue;
+        };
+        if helm_core::privfs::write_atomic(&path, &bytes).is_err() {
+            log::warn!("could not hand an account's sign-in to the calendar bridge");
+        }
+    }
 }
 
 /// Keep a finished sign-in: its token set and its index row, in one turn with the refreshes and
@@ -1265,7 +1507,17 @@ pub(crate) fn begin_sign_in_with(
             permission_of(&server.transport.args).unwrap_or(GooglePermission::Drafts)
         }
     };
-    let scopes: Vec<String> = level.scopes().into_iter().map(str::to_owned).collect();
+    // Calendar too, at the server's current level (nothing when it is off or custom), so one
+    // visit to Google's page covers what the bridge needs as well.
+    let calendar = calendar_shown(&server.transport.args)
+        .map(CalendarPermission::scopes)
+        .unwrap_or_default();
+    let scopes: Vec<String> = level
+        .scopes()
+        .into_iter()
+        .chain(calendar)
+        .map(str::to_owned)
+        .collect();
     let client = oauth::Client::pre_registered(&pair.client_id, Some(&pair.client_secret));
     let mut extra: Vec<(&str, String)> = vec![
         ("access_type", "offline".into()),
@@ -1503,8 +1755,16 @@ pub fn forget_all_accounts(creds: &CredentialStore) {
 fn list_for(
     store: &McpStore,
     server: &McpServer,
-    accounts: Vec<GoogleAccount>,
+    mut accounts: Vec<GoogleAccount>,
 ) -> GoogleAccountList {
+    let levels = Levels {
+        gmail: permission_of(&server.transport.args),
+        calendar: calendar_shown(&server.transport.args),
+        helper_runs: runs_bridge(server, store.creds()),
+    };
+    for a in &mut accounts {
+        a.needs_sign_in = missing_for_account(store.creds(), &a.email, levels);
+    }
     GoogleAccountList {
         accounts,
         permission: permission_of(&server.transport.args),
@@ -1561,6 +1821,14 @@ fn remove_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         return Err(ApiError::bad_args("That account is not signed in."));
     }
     remove_account(st.creds(), a.email.trim()).map_err(ApiError::bad_args)?;
+    // The bridge's copy of the sign-in goes with it, from the folder of the profile that owns it.
+    if let Some(data) = st.data_dir() {
+        let not_home = req.is_some() && req != home;
+        forget_seeded(
+            &credentials_dir(data, req.as_deref().filter(|_| not_home)),
+            a.email.trim(),
+        );
+    }
     let _ = ctx
         .services
         .get::<crate::lines::ServicesCell>()
@@ -2136,7 +2404,12 @@ pub(crate) mod tests {
         // What the agent is told lists only the chat's own profile's accounts, and a profile
         // other than the home one keeps its bridge sign-ins in a folder of its own.
         let line = |profile: Option<&str>, not_home: bool| {
-            accounts_line(creds, GoogleScope { profile, not_home })
+            let levels = Levels {
+                gmail: None,
+                calendar: None,
+                helper_runs: false,
+            };
+            accounts_line(creds, GoogleScope { profile, not_home }, levels)
         };
         assert_eq!(
             line(Some("home"), false).as_deref(),
@@ -2200,6 +2473,333 @@ pub(crate) mod tests {
         })
         .unwrap();
         assert_eq!(active_profile(&db).as_deref(), Some("home"));
+    }
+
+    /// What an account's grant must hold for the server's levels, and nothing more: the identity
+    /// permissions never mark it, an unknown grant is not a missing one, and Calendar counts only
+    /// when the bridge runs.
+    #[test]
+    fn an_account_is_marked_only_for_what_its_grant_lacks_at_the_levels_set() {
+        use CalendarPermission as C;
+        use GooglePermission as G;
+        let who = |l: G| l.scopes().join(" ");
+        let with = |l: G, extra: &[&str]| format!("{} {}", who(l), extra.join(" "));
+        let events = [SCOPE_CAL_READONLY, SCOPE_CAL_EVENTS];
+        let mail_all = "https://mail.google.com/";
+        for (granted, gmail, calendar, runs, want) in [
+            // Each Gmail level against the three grants.
+            (
+                Some(who(G::Readonly)),
+                Some(G::Readonly),
+                None,
+                false,
+                vec![],
+            ),
+            (
+                Some(who(G::Readonly)),
+                Some(G::Drafts),
+                None,
+                false,
+                vec!["gmail"],
+            ),
+            (
+                Some(who(G::Readonly)),
+                Some(G::Send),
+                None,
+                false,
+                vec!["gmail"],
+            ),
+            (Some(who(G::Drafts)), Some(G::Readonly), None, false, vec![]),
+            (Some(who(G::Drafts)), Some(G::Drafts), None, false, vec![]),
+            // Gmail's send call accepts the compose and modify permissions a drafts grant holds,
+            // so the mark agrees with what a call is refused for: not marked.
+            (Some(who(G::Drafts)), Some(G::Send), None, false, vec![]),
+            (Some(who(G::Send)), Some(G::Send), None, false, vec![]),
+            (Some(mail_all.into()), Some(G::Send), None, false, vec![]),
+            // The identity permissions alone are not Gmail ones, and a level the picker does not
+            // offer is not checked.
+            (
+                Some("openid email".into()),
+                Some(G::Readonly),
+                None,
+                false,
+                vec!["gmail"],
+            ),
+            (Some("openid email".into()), None, None, false, vec![]),
+            // Calendar levels against read, events and the full permission.
+            (
+                Some(with(G::Drafts, &[SCOPE_CAL_READONLY])),
+                Some(G::Drafts),
+                Some(C::Readonly),
+                true,
+                vec![],
+            ),
+            (
+                Some(with(G::Drafts, &[SCOPE_CAL_READONLY])),
+                Some(G::Drafts),
+                Some(C::EditEvents),
+                true,
+                vec!["calendar"],
+            ),
+            (
+                Some(with(G::Drafts, &[SCOPE_CAL_EVENTS])),
+                Some(G::Drafts),
+                Some(C::Readonly),
+                true,
+                vec!["calendar"],
+            ),
+            (
+                Some(with(G::Drafts, &events)),
+                Some(G::Drafts),
+                Some(C::EditEvents),
+                true,
+                vec![],
+            ),
+            (
+                Some(with(G::Drafts, &[SCOPE_CAL_FULL])),
+                Some(G::Drafts),
+                Some(C::Readonly),
+                true,
+                vec![],
+            ),
+            (
+                Some(with(G::Drafts, &[SCOPE_CAL_FULL])),
+                Some(G::Drafts),
+                Some(C::EditEvents),
+                true,
+                vec![],
+            ),
+            // Both missing, in the order the mark lists them.
+            (
+                Some(who(G::Readonly)),
+                Some(G::Send),
+                Some(C::EditEvents),
+                true,
+                vec!["gmail", "calendar"],
+            ),
+            // Calendar off, the bridge not running, or an unrecognised calendar level: nothing.
+            (
+                Some(who(G::Drafts)),
+                Some(G::Drafts),
+                Some(C::Off),
+                true,
+                vec![],
+            ),
+            (
+                Some(who(G::Drafts)),
+                Some(G::Drafts),
+                Some(C::EditEvents),
+                false,
+                vec![],
+            ),
+            (Some(who(G::Drafts)), Some(G::Drafts), None, true, vec![]),
+            // No stored grant: unknown, never marked.
+            (None, Some(G::Send), Some(C::EditEvents), true, vec![]),
+        ] {
+            assert_eq!(
+                missing_for(granted.as_deref(), gmail, calendar, runs),
+                want,
+                "{granted:?} {gmail:?} {calendar:?} {runs}"
+            );
+        }
+
+        // What the account list and the agent are told, from the stored grants.
+        let d = tempfile::tempdir().unwrap();
+        let st = store(d.path());
+        seed_account(
+            st.creds(),
+            "ada@x.com",
+            tokens("r-1", &who(G::Drafts)),
+            None,
+            None,
+        );
+        seed_account(
+            st.creds(),
+            "ben@x.com",
+            tokens("r-2", &with(G::Drafts, &[SCOPE_CAL_READONLY])),
+            None,
+            None,
+        );
+        sign_in(st.creds(), "sam@x.com", "tok", None); // no grant recorded
+        seed_client(st.creds());
+        let srv = server(with_calendar(&strings(&DEFAULT_ARGS), C::Readonly));
+        let list = list_for(&st, &srv, listed_accounts(st.creds()));
+        let marks: Vec<(&str, &[String])> = list
+            .accounts
+            .iter()
+            .map(|a| (a.email.as_str(), a.needs_sign_in.as_slice()))
+            .collect();
+        assert_eq!(
+            marks,
+            [
+                ("ada@x.com", &["calendar".to_owned()][..]),
+                ("ben@x.com", &[][..]),
+                ("sam@x.com", &[][..]),
+            ]
+        );
+        let mut r = resolved();
+        r.args = srv.transport.args.clone();
+        prepare(st.creds(), d.path(), GoogleScope::default(), &mut r);
+        assert_eq!(
+            r.guidance.as_deref(),
+            Some("Be careful. Accounts: ada@x.com (needs sign-in again), ben@x.com, sam@x.com")
+        );
+        // Without Calendar the same grants mark nothing.
+        let plain = server(strings(&DEFAULT_ARGS));
+        let list = list_for(&st, &plain, listed_accounts(st.creds()));
+        assert!(list.accounts.iter().all(|a| a.needs_sign_in.is_empty()));
+    }
+
+    /// A token set holding a refresh token and the permissions Google said it granted.
+    fn tokens(refresh: &str, granted: &str) -> TokenSet {
+        TokenSet {
+            access_token: "tok".into(),
+            token_type: "Bearer".into(),
+            expires_at: Some(2_000_000_000),
+            refresh_token: Some(refresh.into()),
+            scope: Some(granted.into()),
+            id_token: None,
+        }
+    }
+
+    /// The bridge is handed Helm's own sign-in in its own private folder, in the shape it reads,
+    /// once per change, and only for an account that can really use it.
+    #[test]
+    fn the_calendar_bridge_is_seeded_from_helms_sign_in() {
+        let cal_args = || {
+            strings(&[
+                "workspace-mcp",
+                "--permissions",
+                "gmail:drafts",
+                "calendar:readonly",
+            ])
+        };
+        let with_cal = [
+            GooglePermission::Drafts.scopes().join(" "),
+            SCOPE_CAL_READONLY.to_owned(),
+        ]
+        .join(" ");
+        let prepared = |creds: &CredentialStore, dir: &Path, scope: GoogleScope<'_>, args| {
+            let mut r = resolved();
+            r.args = args;
+            prepare(creds, dir, scope, &mut r);
+            r
+        };
+        let read = |path: &Path| -> Value {
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+        };
+
+        let d = tempfile::tempdir().unwrap();
+        let st = store(d.path());
+        let creds = st.creds();
+        seed_client(creds);
+        seed_account(creds, "ada@x.com", tokens("r-1", &with_cal), None, None);
+        // Signed in before Calendar existed: nothing to hand over.
+        seed_account(
+            creds,
+            "ben@x.com",
+            tokens("r-b", &GooglePermission::Drafts.scopes().join(" ")),
+            None,
+            None,
+        );
+        // An address the file name has to quote.
+        seed_account(creds, "a+b@x.com", tokens("r-p", &with_cal), None, None);
+        let dir = credentials_dir(d.path(), None);
+        prepared(creds, d.path(), GoogleScope::default(), cal_args());
+        let ada = read(&dir.join("ada@x.com.json"));
+        assert_eq!(
+            ada,
+            json!({
+                "token": null,
+                "refresh_token": "r-1",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "client_id": "g-client",
+                "client_secret": "g-secret",
+                "scopes": with_cal.split(' ').collect::<Vec<_>>(),
+                "expiry": null,
+            })
+        );
+        assert!(
+            !dir.join("ben@x.com.json").exists(),
+            "no calendar permission, no file"
+        );
+        assert!(dir.join("a%2Bb@x.com.json").exists());
+        assert_eq!(quote_email("\u{dc}n+x@y.org"), "%C3%9Cn%2Bx@y.org");
+
+        // Unchanged: left as the bridge may have renewed it. Changed refresh token: rewritten.
+        let path = dir.join("ada@x.com.json");
+        let mut edited = read(&path);
+        edited["token"] = json!("renewed-by-the-bridge");
+        std::fs::write(&path, serde_json::to_vec(&edited).unwrap()).unwrap();
+        prepared(creds, d.path(), GoogleScope::default(), cal_args());
+        assert_eq!(read(&path)["token"], "renewed-by-the-bridge");
+        seed_account(creds, "ada@x.com", tokens("r-2", &with_cal), None, None);
+        prepared(creds, d.path(), GoogleScope::default(), cal_args());
+        let again = read(&path);
+        assert_eq!(
+            (again["refresh_token"].as_str(), again["token"].is_null()),
+            (Some("r-2"), true)
+        );
+
+        // Calendar off: nothing is written. A bridge on another client than the sign-in's: neither.
+        let off = tempfile::tempdir().unwrap();
+        let st2 = store(off.path());
+        seed_client(st2.creds());
+        seed_account(
+            st2.creds(),
+            "ada@x.com",
+            tokens("r-1", &with_cal),
+            None,
+            None,
+        );
+        prepared(
+            st2.creds(),
+            off.path(),
+            GoogleScope::default(),
+            strings(&DEFAULT_ARGS),
+        );
+        let mut other = resolved();
+        other.args = cal_args();
+        other
+            .env
+            .insert(CLIENT_ID_ENV.into(), "another-client".into());
+        other
+            .env
+            .insert(CLIENT_SECRET_ENV.into(), "another-secret".into());
+        prepare(st2.creds(), off.path(), GoogleScope::default(), &mut other);
+        let none = credentials_dir(off.path(), None);
+        assert!(
+            std::fs::read_dir(&none).map_or(true, |mut r| r.next().is_none()),
+            "nothing seeded"
+        );
+
+        // A profile other than the home one writes under its own folder, for its own accounts.
+        seed_account(
+            creds,
+            "sam@x.com",
+            tokens("r-s", &with_cal),
+            None,
+            Some("sam"),
+        );
+        let sam = GoogleScope {
+            profile: Some("sam"),
+            not_home: true,
+        };
+        prepared(creds, d.path(), sam, cal_args());
+        let sam_dir = credentials_dir(d.path(), Some("sam"));
+        assert!(sam_dir.join("sam@x.com.json").exists());
+        assert!(
+            !sam_dir.join("ada@x.com.json").exists(),
+            "another profile's account stays out"
+        );
+        assert!(!dir.join("sam@x.com.json").exists());
+
+        // Removing an account forgets the file, in both name forms.
+        let legacy = dir.join("a_b@x.com.json");
+        std::fs::write(&legacy, b"{}").unwrap();
+        forget_seeded(&dir, "a+b@x.com");
+        assert!(!dir.join("a%2Bb@x.com.json").exists() && !legacy.exists());
+        forget_seeded(&dir, "nobody@x.com"); // nothing there is fine
     }
 
     #[test]
@@ -2939,6 +3539,59 @@ pub(crate) mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(!SIGNING_IN.load(Ordering::SeqCst), "the sign-in finished");
+
+        // One visit to Google's page also asks for the calendar permissions of the server's
+        // level, and for nothing calendar-ish when Calendar is off.
+        for (via, calendar, want) in [
+            (
+                SignInScopes::Level,
+                CalendarPermission::Readonly,
+                [GooglePermission::Drafts.scopes(), vec![SCOPE_CAL_READONLY]].concat(),
+            ),
+            (
+                SignInScopes::AllGmail,
+                CalendarPermission::EditEvents,
+                [
+                    GooglePermission::Send.scopes(),
+                    CalendarPermission::EditEvents.scopes(),
+                ]
+                .concat(),
+            ),
+            (
+                SignInScopes::AllGmail,
+                CalendarPermission::Off,
+                GooglePermission::Send.scopes(),
+            ),
+        ] {
+            let mut with = s.clone();
+            with.transport.args = with_calendar(&s.transport.args, calendar);
+            begin_sign_in_with(
+                &st,
+                None,
+                &FakeBrowser,
+                &with,
+                None,
+                Some("sam".into()),
+                via,
+            )
+            .unwrap();
+            assert_eq!(
+                fake.authorize_params()
+                    .get("scope")
+                    .unwrap()
+                    .split_whitespace()
+                    .collect::<Vec<_>>(),
+                want,
+                "{via:?} with calendar {calendar:?}"
+            );
+            for _ in 0..100 {
+                if !SIGNING_IN.load(Ordering::SeqCst) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert!(!SIGNING_IN.load(Ordering::SeqCst), "the sign-in finished");
+        }
         std::env::remove_var(TEST_AS_ENV);
     }
 
