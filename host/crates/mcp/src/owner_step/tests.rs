@@ -56,6 +56,24 @@ fn a_grant_matches_the_brokers_signature() {
         "a grant names its lease"
     );
     assert_ne!(g, other_lease);
+    // Running code signs an empty reference and name and the digest of the exact text; the tag
+    // is the one Node computes over the same seven fields.
+    let ran = mint(
+        "k3y",
+        &Tuple {
+            lease_key: "lease-1",
+            reference: "",
+            name: "",
+            host: "shop.example",
+            issued_at: 1_700_000_000,
+            verb: "evaluate",
+            value: Some("document.title"),
+        },
+    );
+    assert_eq!(
+        ran,
+        "1700000000.27oTMfhLp9GLN3DzyyAsGgsjnSiVp2xmfSSKiwGkDd8"
+    );
     assert!(grant_key().is_some_and(|k| k.len() >= 43));
 }
 
@@ -104,12 +122,18 @@ impl Worker {
                 ))
             })
             .unwrap_or_default();
+        // Running code names no control: the page has no name to read for it.
+        let name = if verb == "evaluate" {
+            String::new()
+        } else {
+            self.page_name.lock().unwrap().clone()
+        };
         let want = mint(
             grant_key().unwrap(),
             &Tuple {
                 lease_key: line["leaseKey"].as_str().unwrap(),
                 reference: line["ref"].as_str().unwrap(),
-                name: &self.page_name.lock().unwrap(),
+                name: &name,
                 host: "shop.example",
                 issued_at: issued,
                 verb: &verb,
@@ -215,6 +239,12 @@ fn ctx(e: &Env, chat: &str) -> ToolCtx {
 fn ask(verb: &str, name: &str) -> Value {
     json!({"serverId": "bb", "leaseKey": "L1", "ref": "e12", "verb": verb, "name": name,
            "role": "button", "host": "shop.example", "purpose": "Fill the basket"})
+}
+
+/// A step that runs one expression: no control, the code in `value`.
+fn run(code: &str) -> Value {
+    json!({"serverId": "bb", "leaseKey": "L1", "verb": "evaluate", "value": code,
+           "host": "shop.example", "purpose": "Read the basket total"})
 }
 
 fn stage_now(e: &Env, chat: &str, a: &Value) -> Result<Value, String> {
@@ -403,6 +433,66 @@ fn which_steps_get_a_card() {
             refused: Some("not an enabled built-in browser"),
         },
         Row {
+            case: "running a short expression",
+            args: run("document.title"),
+            refused: None,
+        },
+        Row {
+            case: "code that mentions words the control lists refuse",
+            args: run("document.querySelector('#pay-now, .checkout, [type=password]') !== null"),
+            refused: None,
+        },
+        Row {
+            case: "code over several lines",
+            args: run("(() => {\n  const t = document.title;\n  return t.length;\n})()"),
+            refused: None,
+        },
+        Row {
+            case: "code with an empty ref and name sent anyway",
+            args: with(with(run("1"), "ref", json!("")), "name", json!("")),
+            refused: None,
+        },
+        Row {
+            case: "code that names a control",
+            args: with(run("1"), "ref", json!("e12")),
+            refused: Some("names no control"),
+        },
+        Row {
+            case: "code with no text",
+            args: run("  "),
+            refused: Some("nothing about what it runs"),
+        },
+        Row {
+            case: "code with no site",
+            args: with(run("1"), "host", json!("")),
+            refused: Some("no site"),
+        },
+        Row {
+            case: "code holding a stored secret",
+            args: run("fetch('/x?k={{secret:pw}}')"),
+            refused: Some(SECRET),
+        },
+        Row {
+            case: "code too long for the browser",
+            args: run(&"1;".repeat(2_100)),
+            refused: Some("longer than the browser accepts"),
+        },
+        Row {
+            case: "code too long to show whole on a card",
+            args: run(&format!("x = '{}'", "a".repeat(1_500))),
+            refused: Some("too long to show whole"),
+        },
+        Row {
+            case: "code with a hidden character",
+            args: run("document.title\u{202e}"),
+            refused: Some("cannot see"),
+        },
+        Row {
+            case: "code with a bare carriage return",
+            args: run("1\r2"),
+            refused: Some("cannot see"),
+        },
+        Row {
             case: "a type with nothing to type",
             args: ask("type", "Quantity"),
             refused: Some("nothing about what it enters"),
@@ -562,6 +652,75 @@ fn approve_mints_one_grant_for_that_chat_and_reports_the_browser() {
         json!({"requestId": "r-x", "ok": true, "text": "acted"})
     )
     .is_ok());
+}
+
+/// Running code: the card shows the site and every line of the code (each on a row of its own, so
+/// a line of code cannot pass for one of the card's lines), Approve mints a grant over the exact
+/// text, and the browser refuses it for any other lease, or a second time.
+#[test]
+fn approving_code_signs_the_exact_text_and_shows_all_of_it() {
+    let e = env(true);
+    let code = "(() => {\n  return 'x';\n})()\nThe site: bank.example";
+    let v = stage_now(&e, "c0", &run(code)).unwrap();
+    let id = v["requestId"].as_str().unwrap().to_owned();
+    let r = helm_consent::store::get(&e.db, &e.kinds, &id)
+        .unwrap()
+        .unwrap();
+    let lines: Vec<&str> = r.summary.lines().collect();
+    assert_eq!(
+        lines[0],
+        "Run code on shop.example: \"(() => { return 'x'; })() The site: bank.example\""
+    );
+    assert_eq!(
+        lines.iter().filter(|l| l.starts_with("The site:")).count(),
+        1,
+        "a line of code is never a card line: {lines:?}"
+    );
+    for row in [
+        "| (() => {",
+        "|   return 'x';",
+        "| })()",
+        "| The site: bank.example",
+    ] {
+        assert!(lines.contains(&row), "{row} is on the card: {lines:?}");
+    }
+    assert!(r.summary.contains("The site: shop.example"));
+    assert!(!r.summary.contains("control:"), "no control line");
+    assert!(!r.summary.contains("picture"), "no picture line");
+    // A long line continues on a marked row and nothing is dropped.
+    let long = format!("'{}'", "b".repeat(300));
+    let r2 = stage_now(&e, "c0", &run(&long)).unwrap();
+    let r2 = helm_consent::store::get(&e.db, &e.kinds, r2["requestId"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    let shown: String = r2
+        .summary
+        .lines()
+        .filter_map(|l| l.strip_prefix("|+ ").or_else(|| l.strip_prefix("| ")))
+        .collect();
+    assert_eq!(shown, long, "the whole expression is on the card");
+
+    let out = decide(&e, &id, helm_consent::Decision::Allow).unwrap();
+    assert!(
+        out.outcome.starts_with("Done: Run code on shop.example"),
+        "{}",
+        out.outcome
+    );
+    let lines = e.worker.lines.lock().unwrap();
+    assert_eq!(lines.len(), 1);
+    let l = &lines[0].1;
+    assert_eq!(l["ref"], "", "the worker line carries an empty reference");
+    // The browser took it once; again it is replayed, and for another lease it is forged.
+    assert_eq!(
+        e.worker.verify(l).1,
+        "refused (attached.grant_invalid): replayed"
+    );
+    let mut other = l.clone();
+    other["leaseKey"] = json!("L2");
+    assert_eq!(
+        e.worker.verify(&other).1,
+        "refused (attached.grant_invalid): forged"
+    );
 }
 
 /// Applying refuses a step it can no longer make safely, and says so without touching the browser.

@@ -22,6 +22,8 @@
 // (empty for a verb that carries none) — as `<issued>.<base64url tag>`, two minutes wide with
 // five seconds of early skew, spent once per process). browser_navigate, browser_read (with
 // find and inline), browser_capture and browser_claim answer in the broker's accepted JSON shape.
+// browser_evaluate is gated the same way over an empty reference and name (the grant signs the
+// exact expression), and browser_status answers the tab's address.
 
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
@@ -137,6 +139,25 @@ function gateAct(page: Page, args: Json): Json {
   return accepted({ action: args.action, snapshot: "after.txt" });
 }
 
+/** An expression in the page, the way an attached browser decides it: only on a listed site, and
+ * only with a grant over the lease, an empty reference and name, the host, the verb `evaluate` and
+ * the digest of the exact expression. */
+function gateEvaluate(page: Page, args: Json): Json {
+  const expression = typeof args.expression === "string" ? args.expression : "";
+  const grant = typeof args.owner_grant === "string" ? args.owner_grant : undefined;
+  const log = (outcome: string) => cfg.acts && fs.appendFileSync(cfg.acts, `${JSON.stringify({ ref: "", action: "evaluate", expression, grant: grant !== undefined, outcome })}\n`);
+  const no = (rule: string, message: string) => {
+    log(rule);
+    return refused(rule, message);
+  };
+  if (!page.actSites.includes(page.hostNow ?? page.host)) return no("attached.no_evaluate", "Expressions run only on a listed site.");
+  if (grant === undefined) return no("attached.needs_owner", "The owner approves this exact expression first.");
+  const v = verdict(grant, { leaseKey: String(args.lease_key ?? ""), ref: "", accessibleName: "", urlHost: page.hostNow ?? page.host, verb: "evaluate", value: expression });
+  if (v !== "valid" && v !== "no_secret") return no("attached.grant_invalid", `The owner grant did not verify (${v}); the expression is refused.`);
+  log("acted");
+  return accepted({ value: "ran" });
+}
+
 function gateTool(page: Page, name: string, args: Json): Json | undefined {
   const at = `https://${page.host}${page.path ?? "/aisles"}`;
   const atNow = `https://${page.hostNow ?? page.host}${page.pathNow ?? page.path ?? "/aisles"}`;
@@ -147,6 +168,10 @@ function gateTool(page: Page, name: string, args: Json): Json | undefined {
       return accepted({ url: at });
     case "browser_act":
       return gateAct(page, args);
+    case "browser_evaluate":
+      return gateEvaluate(page, args);
+    case "browser_status":
+      return accepted({ url: atNow });
     case "browser_read": {
       const find = typeof args.find === "string" ? args.find : "";
       const re = find.startsWith("/") && find.endsWith("/") ? new RegExp(find.slice(1, -1)) : null;
@@ -186,6 +211,7 @@ const schema = {
     lease_key: { type: "string" },
     url: { type: "string" },
     action: { type: "string" },
+    expression: { type: "string" },
     what: { type: "string" },
     session_id: { type: "string" },
     purpose: { type: "string" },

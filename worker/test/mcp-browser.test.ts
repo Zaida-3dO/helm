@@ -321,3 +321,65 @@ test("the broker accepts a grant once, for its own lease and verb only", async (
   assert.equal(actedCount(), 1, "nothing else acted on this lease");
   h.bridge.close();
 });
+
+test("running code: the card carries the exact expression and the site, and the broker takes the grant once, for that text only", async () => {
+  const code = "document.querySelector('#total').innerText";
+  const evaluate = generatedName("browser", "browser_evaluate");
+  const run = (h: ReturnType<typeof gateHarness>, args: Json = {}) => h.bridge.call(evaluate, { lease_key: "L1", expression: code, ...args });
+  const open = async (page: Json) => {
+    const h = gateHarness(page);
+    await h.bridge.tools({ server: "browser" });
+    await h.bridge.call(generatedName("browser", "browser_navigate"), { lease_key: "L1", url: "https://anything/" });
+    return h;
+  };
+  const evals = (h: ReturnType<typeof gateHarness>) => h.rows().filter((x) => x.action === "evaluate");
+
+  // A listed site: a card for the code, nothing runs, and a repeat of the same code is held.
+  const h = await open(SHOP_PAGE);
+  const first = await run(h);
+  assert.ok(first.isError);
+  const card = h.asks.find((a) => a.operation === "app_browser_step");
+  assert.ok(card, "the refusal asked for an Approve card");
+  assert.deepEqual(
+    { verb: card!.args.verb, ref: card!.args.ref, name: card!.args.name, value: card!.args.value, host: card!.args.host },
+    { verb: "evaluate", ref: "", name: "", value: code, host: "shop.example" },
+  );
+  assert.equal(evals(h).filter((x) => x.outcome === "acted").length, 0, "nothing runs before an Approve");
+  const before = evals(h).length;
+  assert.ok((await run(h)).isError && evals(h).length === before, "the same code is held while its card waits");
+  // Other code is its own ask; and a grant the agent sends never reaches the broker.
+  await run(h, { expression: "1+1", owner_grant: grantFor({ leaseKey: "L1", ref: "", name: "", host: "shop.example", verb: "evaluate", value: "1+1" }) });
+  assert.ok(evals(h).every((x) => x.grant === false), "an agent's grant is dropped");
+  assert.equal(h.asks.filter((a) => a.operation === "app_browser_step").length, 2, "other code asks again");
+
+  // Approve: the retry carries the grant for exactly this text and runs once.
+  const results = () => h.asks.filter((a) => a.operation === "app_browser_step_result");
+  const good = grantFor({ leaseKey: "L1", ref: "", name: "", host: "shop.example", verb: "evaluate", value: code });
+  assert.ok(h.bridge.deliverOwnerGrant({ requestId: "r1", serverId: "browser", leaseKey: "L1", ref: "", grant: good }));
+  assert.ok(await until(() => results().length === 1));
+  assert.equal(results()[0]!.args.ok, true);
+  assert.equal(evals(h).filter((x) => x.outcome === "acted" && x.expression === code).length, 1, "the approved code ran once");
+
+  // The same grant again is replayed; a grant over other text is forged for this call.
+  await run(h);
+  assert.ok(h.bridge.deliverOwnerGrant({ requestId: "r3", serverId: "browser", leaseKey: "L1", ref: "", grant: good }));
+  assert.ok(await until(() => results().length === 2));
+  assert.match(String(results()[1]!.args.text), /replayed/);
+  await run(h);
+  const other = grantFor({ leaseKey: "L1", ref: "", name: "", host: "shop.example", verb: "evaluate", value: code + " " });
+  assert.ok(h.bridge.deliverOwnerGrant({ requestId: "r4", serverId: "browser", leaseKey: "L1", ref: "", grant: other }));
+  assert.ok(await until(() => results().length === 3));
+  assert.match(String(results()[2]!.args.text), /forged/);
+  assert.equal(evals(h).filter((x) => x.outcome === "acted").length, 1, "nothing else ran");
+  h.bridge.close();
+
+  // A site off the list is refused outright: no card. Extra arguments get no card either.
+  const off = await open({ ...SHOP_PAGE, actSites: ["other.example"] });
+  assert.ok((await run(off)).isError);
+  assert.equal(off.asks.find((a) => a.operation === "app_browser_step"), undefined);
+  off.bridge.close();
+  const odd = await open(SHOP_PAGE);
+  await run(odd, { tab: "t2" });
+  assert.equal(odd.asks.find((a) => a.operation === "app_browser_step"), undefined, "a call with other arguments gets no card");
+  odd.bridge.close();
+});

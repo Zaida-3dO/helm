@@ -23,6 +23,7 @@ import {
   isBrokerServer,
   leaseKeysOf,
   oneControl,
+  oneExpression,
   readControl,
   stepClass,
   urlNever,
@@ -229,12 +230,17 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
     tool: string;
     args: Json;
     leaseKey: string;
+    /** The control's reference; empty for a step that runs an expression. */
     ref: string;
+    /** What the agent's repeat of this step is matched on while the card waits. */
+    guard: string;
     at: number;
   }
   const waitingSteps = new Map<string, Waiting>();
   const neverSteps = new Set<string>();
   const stepKey = (serverId: string, leaseKey: string, ref: string) => `${serverId}\u0000${leaseKey}\u0000${ref}`;
+  /** An expression is matched on its exact text; the NUL keeps it apart from any plain reference. */
+  const codeKey = (serverId: string, leaseKey: string, code: string) => stepKey(serverId, leaseKey, `evaluate\u0000${code}`);
   /** A refused-for-good entry belongs to the reference as it was numbered on the page then:
    * a navigation renumbers the references, and a released lease has no page at all. */
   const clearNever = (serverId: string, leaseKey: string) => {
@@ -242,7 +248,7 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
     for (const k of [...neverSteps]) if (k.startsWith(p)) neverSteps.delete(k);
   };
   const waitingFor = (key: string) =>
-    [...waitingSteps.values()].some((w) => stepKey(w.entry.server.id, w.leaseKey, w.ref) === key && now() - w.at <= capMs);
+    [...waitingSteps.values()].some((w) => w.guard === key && now() - w.at <= capMs);
 
   const reportHold = (ev: HoldEvent) => {
     if (!opts.hostRequest) return;
@@ -322,12 +328,15 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
     args: Json,
     r: { content: Json[]; isError?: boolean },
   ): Promise<{ content: Json[]; isError?: boolean } | undefined> => {
-    const step = oneControl(args);
+    const code = tool === "browser_evaluate" ? oneExpression(args) : null;
+    const step = tool === "browser_evaluate" ? null : oneControl(args);
     const lease = typeof args.lease_key === "string" ? args.lease_key : "";
     const s = e.session;
-    if (!step || !lease || !s || s.closed || !opts.hostRequest) return undefined;
+    if ((!step && code === null) || !lease || !s || s.closed || !opts.hostRequest) return undefined;
     const key = holdKey(e.server.id, lease);
     const note = (why: string) => ({ content: [...r.content, { type: "text", text: `[Helm] ${why}` }], isError: true });
+    if (code !== null) return askForCodeCard(e, tool, args, lease, code, note);
+    if (!step) return undefined;
     // What the page says the control is, read the way the broker reads it.
     let control: ReturnType<typeof readControl> = null;
     let pageUrl: string | undefined;
@@ -381,13 +390,62 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
     // The host refused (it checks the same lists, and caps the cards a chat may have waiting):
     // the person does the step at their browser, as without cards.
     if (typeof result?.requestId !== "string") return undefined;
-    waitingSteps.set(result.requestId, { entry: e, tool, args, leaseKey: lease, ref: step.ref, at: now() });
-    // The lease is kept alive while the card waits; the card itself is the person's ask.
+    waitingSteps.set(result.requestId, { entry: e, tool, args, leaseKey: lease, ref: step.ref, guard: stepKey(e.server.id, lease, step.ref), at: now() });
+    return cardFiled(e, lease, result, note);
+  };
+
+  /** The lease is kept alive while the card waits; the card itself is the person's ask. Answers
+   * the result to give the agent. */
+  const cardFiled = (e: Entry, lease: string, result: Json, note: (why: string) => { content: Json[]; isError?: boolean }) => {
     startHold(e, { kind: "needs_owner", serverId: e.server.id, leaseKey: lease, sentence: "" });
     const summary = typeof result.summary === "string" ? ` (${result.summary})` : "";
     return note(
       `Helm showed the user an Approve card for this step${summary}. End your turn now: when they approve, Helm makes this one step itself and the browser's answer reaches you as a note. Do not retry it, and do not call browser_sign_in for it.`,
     );
+  };
+
+  /**
+   * A needs_owner refusal of one expression: ask the host for an Approve card that shows the
+   * whole expression and the page's site. No control is read and no picture is taken; the grant
+   * is for these exact characters, so the retry sends the call the agent made, unchanged.
+   */
+  const askForCodeCard = async (
+    e: Entry,
+    tool: string,
+    args: Json,
+    lease: string,
+    code: string,
+    note: (why: string) => { content: Json[]; isError?: boolean },
+  ): Promise<{ content: Json[]; isError?: boolean } | undefined> => {
+    const s = e.session;
+    if (!s || !opts.hostRequest) return undefined;
+    const key = holdKey(e.server.id, lease);
+    // The site as the broker's own status answer last said it, else where the lease last
+    // navigated: a card must not name a tab the page has already left.
+    let where = leaseUrls.get(key);
+    try {
+      const u = acceptedValue(textOf(formatResult(await s.callTool("browser_status", { lease_key: lease }), e.red, limits)))?.url;
+      if (typeof u === "string" && u) where = u;
+    } catch {
+      /* the last known address stands */
+    }
+    let host = "";
+    try {
+      host = new URL(where ?? "").hostname;
+    } catch {
+      /* the page's site is unknown: no card */
+    }
+    if (!host) return undefined;
+    const asked: Json = { serverId: e.server.id, leaseKey: lease, ref: "", verb: "evaluate", name: "", host, value: code };
+    const purpose = leasePurposes.get(key);
+    if (purpose) asked.purpose = purpose;
+    const filed = await opts.hostRequest(STEP_OP, asked, { timeoutMs: 30_000, mutating: true }).catch((err: Error) => ({ ok: false, error: err.message, result: undefined }));
+    const result = filed.ok ? (filed.result as Json | undefined) : undefined;
+    // The host refused (code it cannot show whole, a stored secret, too many cards waiting): the
+    // person is told at their browser, as without cards.
+    if (typeof result?.requestId !== "string") return undefined;
+    waitingSteps.set(result.requestId, { entry: e, tool, args, leaseKey: lease, ref: "", guard: codeKey(e.server.id, lease, code), at: now() });
+    return cardFiled(e, lease, result, note);
   };
 
   /** Start waiting for the host's header line for `serverId` (register before asking, so a line
@@ -656,6 +714,16 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
         if (k && waitingFor(k))
           return {
             content: [{ type: "text", text: "[Helm] An Approve card for this step is already waiting for the user. End your turn; their answer reaches you as a note." }],
+            isError: true,
+            source,
+          };
+      }
+      if (browser && l.tool === "browser_evaluate") {
+        // The same code, asked again while its card waits, never reaches the browser again.
+        const code = oneExpression(sent);
+        if (code !== null && waitingFor(codeKey(e.server.id, typeof sent.lease_key === "string" ? sent.lease_key : "", code)))
+          return {
+            content: [{ type: "text", text: "[Helm] An Approve card for this code is already waiting for the user. End your turn; their answer reaches you as a note." }],
             isError: true,
             source,
           };

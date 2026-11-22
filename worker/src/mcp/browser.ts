@@ -109,7 +109,7 @@ export function holdEvent(
 ): HoldEvent | null {
   const lease = typeof args.lease_key === "string" ? args.lease_key : "";
   if (!lease) return null;
-  if (tool === "browser_act" && isError && text.includes("needs_owner")) {
+  if ((tool === "browser_act" || tool === "browser_evaluate") && isError && text.includes("needs_owner")) {
     return { kind: "needs_owner", serverId, leaseKey: lease, sentence: sentenceOf(text) };
   }
   if (tool === "browser_sign_in" && args.action === "request" && !isError) {
@@ -128,8 +128,9 @@ export function holdFinished(tool: string, args: Record<string, unknown>, isErro
 // ── Approving one step from a card ─────────────────────────────────────────────────────────────
 //
 // A needs_owner refusal of a step on one named control (press, tick, choose, type) can be
-// approved by the person from wherever they are. The worker reads what the control is and asks
-// the host to show an Approve card; on Approve the host sends back a one-time grant on this
+// approved by the person from wherever they are. So can a needs_owner refusal of one expression
+// run in the page: its card shows the whole expression and the site, and no control is read. The
+// worker reads what the control is and asks the host to show an Approve card; on Approve the host sends back a one-time grant on this
 // worker's stdin, and the worker retries that exact step with it. The grant never reaches the
 // agent: an `owner_grant` an agent sends is removed before the call goes out, and the answer to
 // the retried step is handed to the host, which tells the agent as the card's outcome. Steps that
@@ -198,6 +199,13 @@ export function oneControl(args: Record<string, unknown>): { verb: string; ref: 
   if (!STEP_VERBS.includes(verb) || !plainRef(args.target)) return null;
   const value = typeof args.value === "string" ? args.value : undefined;
   return value === undefined ? { verb, ref: args.target } : { verb, ref: args.target, value };
+}
+
+/** The expression a `browser_evaluate` call runs, when it is one a card can approve: the exact
+ * text, and nothing else on the call that the broker might read differently. */
+export function oneExpression(args: Record<string, unknown>): string | null {
+  if (Object.keys(args).some((k) => k !== "lease_key" && k !== "expression")) return null;
+  return typeof args.expression === "string" && args.expression.trim() !== "" ? args.expression : null;
 }
 
 /** The finder for one read that returns the control's own line and every text box on the page. */

@@ -3,8 +3,10 @@
 //! The built-in browser server refuses a consequential step on the user's own browser with
 //! `attached.needs_owner`. For a step on one control (press, tick, choose, type) the chat's
 //! worker reads what the control is (its accessible name and role, the site's host name, a
-//! picture of it) and asks the host here to show an Approve card. Nothing the agent holds can
-//! approve anything:
+//! picture of it) and asks the host here to show an Approve card. Running one expression in the
+//! page is asked the same way: the card shows the whole expression and the site's host name, and
+//! the grant is signed over an empty control reference and name plus a digest of the exact
+//! expression. Nothing the agent holds can approve anything:
 //!
 //! - **The card** is a consent kind Helm applies itself ([`KIND`]). It is answered in Helm's
 //!   window, from the user's own other devices, or with the Approve button on their own Telegram,
@@ -60,13 +62,25 @@ pub const SECRET_ENV: &str = "BROKER_OWNER_GRANT_SECRET";
 pub const STEP_LIFE_MS: i64 = 15 * 60_000;
 /// How long applying waits for the browser's answer.
 pub const ANSWER_WAIT: Duration = Duration::from_secs(60);
-/// The broker verbs that act on one named control: the only ones a grant can answer for.
-pub const VERBS: &[&str] = &["click", "check", "select", "type", "fill", "press"];
+/// The broker verbs a grant can answer for: those that act on one named control, and `evaluate`,
+/// which runs one expression in the page and names no control.
+pub const VERBS: &[&str] = &[
+    "click", "check", "select", "type", "fill", "press", "evaluate",
+];
+/// The verb that runs one expression in the page.
+const EVALUATE: &str = "evaluate";
+/// The longest expression the broker accepts, in bytes of source.
+const MAX_EXPRESSION_BYTES: usize = 4096;
+/// The longest row of the code on a card: a longer line continues on the next row.
+const CODE_ROW: usize = 220;
 
 /// The refusal for a step that is always the user's own.
 pub const NEVER: &str = "This step is one the user always does themselves: Helm never approves a checkout, an order, a payment, a transfer or closing an account on their behalf, so no card was shown. Leave the browser where it is and tell the user it is ready for them.";
 /// The refusal for a sign-in or a secret field.
 pub const SECRET: &str = "This step signs in or touches a password, one-time code or card field, which stay with the user at their browser, so no card was shown.";
+
+/// The refusal for code a card could not show faithfully.
+const UNREADABLE_CODE: &str = "The code holds characters a person cannot see on a card (control or invisible ones), so no card was shown.";
 
 /// The key grants are signed with: made once per start, kept only in memory. `None` only when
 /// the system gave no randomness, and then no grant is ever made.
@@ -272,11 +286,83 @@ fn host_ok(h: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-')
 }
 
+/// The card's rows for an expression. Every row starts with `| ` (a long line continues on a row
+/// that starts `|+ `), so no line of the code can pass for one of the card's own lines.
+fn code_rows(code: &str) -> Vec<String> {
+    let mut rows = Vec::new();
+    for line in code.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let chars: Vec<char> = line.chars().collect();
+        if chars.is_empty() {
+            rows.push("|".to_owned());
+        }
+        for (i, part) in chars.chunks(CODE_ROW).enumerate() {
+            let mark = if i == 0 { "| " } else { "|+ " };
+            rows.push(format!("{mark}{}", part.iter().collect::<String>()));
+        }
+    }
+    rows
+}
+
+/// The detail lines of a card for an expression, in the order the card shows them.
+fn evaluate_details(s: &Step) -> Vec<String> {
+    let mut details = vec![
+        format!("The site: {}", s.host),
+        "It can read and change whatever this page shows. You will not see what it returns."
+            .to_owned(),
+        "The code, whole:".to_owned(),
+    ];
+    details.extend(code_rows(s.value.as_deref().unwrap_or("")));
+    details.push("Approving runs exactly this, once, within two minutes.".to_owned());
+    details
+}
+
+/// The rules for an expression step: the exact text, shown whole on the card, and no control.
+fn check_expression(s: &Step) -> Result<(), String> {
+    if !s.reference.is_empty() || !s.name.is_empty() {
+        return Err("Running code names no control, so a card for it carries none.".into());
+    }
+    let Some(code) = s.value.as_deref().filter(|v| !v.trim().is_empty()) else {
+        return Err("The step says nothing about what it runs.".into());
+    };
+    if code.len() > MAX_EXPRESSION_BYTES {
+        return Err(format!(
+            "The code is longer than the browser accepts ({MAX_EXPRESSION_BYTES} bytes)."
+        ));
+    }
+    if code.contains("{{secret:") {
+        return Err(SECRET.into());
+    }
+    let odd_control = |c: char| c.is_control() && !matches!(c, '\n' | '\t' | '\r');
+    if code.chars().any(|c| invisible(c) || odd_control(c))
+        || code.replace("\r\n", "").contains('\r')
+    {
+        return Err(UNREADABLE_CODE.into());
+    }
+    // The card keeps each line to 240 characters and the whole to 1,200; code that would be cut
+    // is refused rather than shown in part.
+    let title_len = title(s).chars().count();
+    let rows = evaluate_details(s);
+    let fits = title_len <= helm_consent::kinds::MAX_SUMMARY_LINE
+        && rows
+            .iter()
+            .all(|l| l.chars().count() <= helm_consent::kinds::MAX_SUMMARY_LINE)
+        && title_len + rows.iter().map(|l| l.chars().count() + 1).sum::<usize>()
+            <= helm_consent::kinds::MAX_SUMMARY;
+    if !fits {
+        return Err(format!(
+            "The code is too long to show whole on one card (the card holds {} characters in all): ask for a shorter expression.",
+            helm_consent::kinds::MAX_SUMMARY
+        ));
+    }
+    Ok(())
+}
+
 /// Every rule a step must pass, at staging and again when applying. `Err` is the refusal.
 pub fn check(s: &Step) -> Result<(), String> {
     if !VERBS.contains(&s.verb.as_str()) {
         return Err(format!(
-            "A card can approve only a step on one control ({}).",
+            "A card can approve only a step on one control or one expression ({}).",
             VERBS.join(", ")
         ));
     }
@@ -287,6 +373,13 @@ pub fn check(s: &Step) -> Result<(), String> {
         || s.lease_key.chars().any(char::is_control)
     {
         return Err("The step names no lease.".into());
+    }
+    if s.verb == EVALUATE {
+        if !host_ok(&s.host) {
+            return Err("The step names no site.".into());
+        }
+        // No word lists: the card shows the code itself and the user judges it.
+        return check_expression(s);
     }
     if !(1..=32).contains(&s.reference.len())
         || !s
@@ -327,6 +420,10 @@ pub fn title(s: &Step) -> String {
         "select" => format!("Choose \"{value}\" in \"{name}\" on {host}"),
         "type" | "fill" => format!("Type \"{value}\" into \"{name}\" on {host}"),
         "press" => format!("Press the {value} key in \"{name}\" on {host}"),
+        EVALUATE => format!(
+            "Run code on {host}: \"{}\"",
+            plain_text(s.value.as_deref().unwrap_or(""), 60)
+        ),
         _ => format!("Press \"{name}\" on {host}"),
     }
 }
@@ -335,6 +432,14 @@ fn canonical(_tx: &Transaction<'_>, _chat: &str, t: &Value) -> Result<Canonical,
     let s: Step = serde_json::from_value(t.clone())
         .map_err(|_| "The browser step could not be read.".to_owned())?;
     check(&s)?;
+    if s.verb == EVALUATE {
+        return Ok(Canonical {
+            target: serde_json::to_value(&s).map_err(|e| e.to_string())?,
+            summary: title(&s),
+            fixed_form: String::new(),
+            details: evaluate_details(&s),
+        });
+    }
     let mut details = Vec::new();
     if !s.role.trim().is_empty() {
         details.push(format!(
@@ -648,7 +753,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                     "picture": {"type": "string"},
                     "pageSecret": {"type": "boolean"}
                 },
-                "required": ["serverId", "leaseKey", "ref", "verb", "name", "host"],
+                "required": ["serverId", "leaseKey", "verb", "host"],
                 "additionalProperties": false
             }),
         )
