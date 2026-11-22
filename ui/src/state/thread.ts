@@ -136,14 +136,19 @@ export function applyPage(view: ThreadView, page: TranscriptPage, how: 'replace'
       hasNewer: page.hasNewer,
       olderCursor: page.olderCursor,
       newerCursor: page.newerCursor,
-      pending: page.pending,
-      pendingRevision: 0,
       lastRunEndedAt: endOfLastRun(page.runs),
       sessions: mergeSessions({ ...view, sessions: [page.chatId] }, page),
       sessionMarks: mergeMarks([], page),
     };
-    const next = applyRows(base, page.messages, 'newest');
-    return next === base ? base : next;
+    // The page's in-flight list was read at the same instant as its `revision`, so the two
+    // travel together. A `pending` event stamped newer than the page has already settled a
+    // message the page snapshot still carries — opening a chat right after its first send races
+    // exactly this way. Take the page's list only when it is the fresher one, and stamp its
+    // revision either way, so an older answer arriving late cannot put a settled message's
+    // second bubble back under the saved one.
+    const withPending = applyPending(base, page.pending, page.revision);
+    const next = applyRows(withPending, page.messages, 'newest');
+    return next === withPending ? withPending : next;
   }
   // The session set grows before the rows are applied: a page that runs past a boundary carries
   // rows of a session the view has not seen.

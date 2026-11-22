@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyChat, applyPage, applyRows, applyThread, emptyView, MAX_ROWS } from './thread.ts';
-import { chat, row, thread } from '../dev/fixtures.ts';
+import { applyChat, applyPage, applyPending, applyRows, applyThread, emptyView, MAX_ROWS } from './thread.ts';
+import { chat, row, submission, thread } from '../dev/fixtures.ts';
 
 test('a row is only replaced by a newer revision', () => {
   let v = emptyView('c1');
@@ -146,6 +146,38 @@ test('a stack page brings its sessions along and keeps one boundary mark each', 
   );
   assert.ok(v.sessions.includes('c0'));
   assert.equal(v.sessionMarks.length, 2);
+});
+
+test('a late page never puts a settled message bubble back under the saved row', () => {
+  const text = 'hello from the composer';
+  const sending = submission({ id: 's1', text, state: 'dispatching' });
+  const saved = row({ id: 60, role: 'user', text });
+  const page = (over: Partial<Parameters<typeof applyPage>[1]>): Parameters<typeof applyPage>[1] => ({
+    chatId: 'c1',
+    messages: [saved],
+    hasOlder: false,
+    hasNewer: false,
+    olderCursor: null,
+    newerCursor: null,
+    runs: [],
+    pending: [],
+    sessionMarks: [],
+    revision: 1,
+    ...over,
+  });
+  let v = applyPage(emptyView('c1'), page({}), 'replace');
+  // The host reports the send as on its way (rev 10), then settles it (rev 13).
+  v = applyPending(v, [sending], 10);
+  v = applyPending(v, [], 13);
+  // The transcript opened for the chat's first message resolves late: its snapshot (rev 12)
+  // still carries the send as in flight. The newer, settled list must stand.
+  v = applyPage(v, page({ pending: [sending], revision: 12 }), 'replace');
+  assert.deepEqual(v.pending, [], 'the page does not revive the settled bubble');
+  assert.equal(v.pendingRevision, 13);
+  // A page fresher than every event so far still owns the list.
+  v = applyPage(v, page({ pending: [sending], revision: 14 }), 'replace');
+  assert.deepEqual(v.pending, [sending]);
+  assert.equal(v.pendingRevision, 14);
 });
 
 test('a row outside the accepted sessions stays out', () => {
