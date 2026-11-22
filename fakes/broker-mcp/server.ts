@@ -8,6 +8,9 @@
 //                               browser refusing a consequential step),
 //   statuses: "out path"        append each browser_status line to this file (keep-alive counts),
 //   secret: "..."               echoed into one tool's text, for the redaction checks.
+//   leaseKey: "..."             set => browser_claim answers `accepted({outcome:"granted",
+//                               claimId:"c1", key: leaseKey})` in both modes (the key survives
+//                               redaction checks); unset => the answers stay as they were.
 //   page: {...}                 the gate mode below: the broker's acting rules over one page.
 //   acts: "out path"            append one JSON line per browser_act call (gate mode).
 // }
@@ -56,8 +59,16 @@ interface Cfg {
   act?: "needs_owner" | "ok";
   statuses?: string;
   secret?: string;
+  leaseKey?: string;
   page?: Page;
   acts?: string;
+}
+
+/** The claim answer: a configured lease key is handed back the way the real broker hands back
+ * its minted one; without it the answers stay the plain "L1" forms. */
+function claimAnswer(): Json {
+  if (cfg.leaseKey === undefined) return accepted({ key: "L1" });
+  return accepted({ outcome: "granted", claimId: "c1", key: cfg.leaseKey });
 }
 
 const cfg: Cfg = JSON.parse(process.argv[3] ?? "{}");
@@ -131,7 +142,7 @@ function gateTool(page: Page, name: string, args: Json): Json | undefined {
   const atNow = `https://${page.hostNow ?? page.host}${page.pathNow ?? page.path ?? "/aisles"}`;
   switch (name) {
     case "browser_claim":
-      return accepted({ key: "L1" });
+      return claimAnswer();
     case "browser_navigate":
       return accepted({ url: at });
     case "browser_act":
@@ -187,6 +198,7 @@ function callTool(name: string, args: Json): { result?: Json; error?: Json } {
   if (gated) return { result: gated };
   switch (name) {
     case "browser_claim":
+      if (cfg.leaseKey !== undefined) return { result: claimAnswer() };
       return { result: text("lease L1 is active: one tab of your browser") };
     case "browser_status": {
       const n = (callTool.counts[name] = (callTool.counts[name] ?? 0) + 1);

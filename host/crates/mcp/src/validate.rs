@@ -377,6 +377,9 @@ pub fn validate_server(s: &McpServer) -> Result<(), Invalid> {
                 }
                 validate_ref(v, RefPlace::Env, &format!("Environment {k}"))?;
             }
+            if s.preset.as_deref() == Some(crate::presets::BROKER_PRESET_ID) {
+                validate_broker_env(&t.env)?;
+            }
         }
         TransportKind::Http | TransportKind::Sse => {
             if t.command.is_some() || !t.args.is_empty() || !t.env.is_empty() {
@@ -442,6 +445,84 @@ pub fn validate_server(s: &McpServer) -> Result<(), Invalid> {
                     validate_redirect(r)?;
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// A browser name as the broker reads it: a lowercase letter, then lowercase letters, digits
+/// and dashes, at most 32 — it also names the browser's program variable.
+fn browser_name_ok(s: &str) -> bool {
+    let b = s.as_bytes();
+    !b.is_empty()
+        && b.len() <= 32
+        && b[0].is_ascii_lowercase()
+        && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+}
+
+/// A Chrome extension id: exactly 32 letters from `a` to `p`, the alphabet Chrome assigns.
+fn extension_id_ok(s: &str) -> bool {
+    s.len() == 32 && s.bytes().all(|c| (b'a'..=b'p').contains(&c))
+}
+
+/// One acting-site entry: a host, or a `*.` wildcard in front of one. Hosts are case-insensitive;
+/// a scheme, path or port is not part of a host and is refused.
+fn site_entry_ok(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    let host = lower.strip_prefix("*.").unwrap_or(lower.as_str());
+    !host.is_empty()
+        && host.len() <= 253
+        && host.split('.').all(|label| {
+            let b = label.as_bytes();
+            !b.is_empty()
+                && b.len() <= 63
+                && b[0].is_ascii_alphanumeric()
+                && b[b.len() - 1].is_ascii_alphanumeric()
+                && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'-')
+        })
+}
+
+/// The rows the browser preset's "Your browser" form writes. Only literal values actually typed
+/// in are judged (a reference to an environment variable is the user's own wiring); an empty
+/// value is a blank row, checked nowhere else either. The connect token is never looked at, and
+/// no refusal quotes a value — only the variable's name.
+fn validate_broker_env(env: &BTreeMap<String, ValueRef>) -> Result<(), Invalid> {
+    for (k, v) in env {
+        if v.kind != RefKind::Literal {
+            continue;
+        }
+        let value = v.value.as_deref().unwrap_or("");
+        if value.is_empty() {
+            continue;
+        }
+        match k.as_str() {
+            "BROKER_ATTACHED_BROWSERS" => {
+                if !browser_name_ok(value) {
+                    return Err(bad(
+                        "BROKER_ATTACHED_BROWSERS: a browser name is 1 to 32 lowercase letters, digits and dashes, starting with a letter; the broker builds its browser-program variable from it.",
+                    ));
+                }
+            }
+            "BROKER_ATTACHED_EXTENSION_ID" => {
+                if !extension_id_ok(value) {
+                    return Err(bad(
+                        "BROKER_ATTACHED_EXTENSION_ID: a browser extension id is exactly 32 letters from a to p, the id your browser shows for the broker's extension.",
+                    ));
+                }
+            }
+            "BROKER_ATTACHED_ACT_SITES" => {
+                for entry in value.split(',').map(|e| e.trim()) {
+                    if entry.is_empty() {
+                        continue;
+                    }
+                    if !site_entry_ok(entry) {
+                        return Err(bad(
+                            "BROKER_ATTACHED_ACT_SITES: each comma-separated entry is a host like shop.example or a wildcard like *.shop.example — no scheme, path or port.",
+                        ));
+                    }
+                }
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -636,6 +717,59 @@ mod tests {
         let mut s = stdio("node.exe");
         s.transport.url = Some("https://x/".into());
         assert!(validate_server(&s).is_err());
+    }
+
+    #[test]
+    fn broker_rows_are_checked_by_shape_and_a_bad_value_is_never_echoed() {
+        let broker = |rows: Vec<(&str, ValueRef)>| {
+            let mut s = stdio("node.exe");
+            s.preset = Some("browser_broker".into());
+            for (k, v) in rows {
+                s.transport.env.insert(k.into(), v);
+            }
+            s
+        };
+        let envr = |v: &str| ValueRef {
+            profiles: Default::default(),
+            kind: RefKind::Environment,
+            value: Some(v.into()),
+            secret_id: None,
+            prefix: None,
+        };
+        let good = broker(vec![
+            ("BROKER_ATTACHED_BROWSERS", lit("brave")),
+            ("BROKER_BROWSER_BRAVE_PATH", lit(r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe")),
+            ("BROKER_ATTACHED_EXTENSION_ID", lit(&"a".repeat(32))),
+            ("BROKER_ATTACHED_ACT_SITES", lit("shop.example, *.read.example.org")),
+            ("BROKER_ATTACHED_TOKEN", lit("any token shape at all, never checked")),
+            ("BROKER_OWNER_GRANT_SECRET", envr("GRANT_VAR")),
+        ]);
+        assert!(validate_server(&good).is_ok());
+        // Each rule names its variable in plain words and quotes no value.
+        for (key, bad_value) in [
+            ("BROKER_ATTACHED_BROWSERS", "Brave".to_string()),
+            ("BROKER_ATTACHED_BROWSERS", "1brave".into()),
+            ("BROKER_ATTACHED_BROWSERS", "a brave".into()),
+            ("BROKER_ATTACHED_BROWSERS", "b".repeat(33)),
+            ("BROKER_ATTACHED_EXTENSION_ID", "a".repeat(31)),
+            ("BROKER_ATTACHED_EXTENSION_ID", "a".repeat(33)),
+            ("BROKER_ATTACHED_EXTENSION_ID", "q".repeat(32)),
+            ("BROKER_ATTACHED_ACT_SITES", "https://shop.example/".into()),
+            ("BROKER_ATTACHED_ACT_SITES", "shop.example:8443".into()),
+            ("BROKER_ATTACHED_ACT_SITES", "shop.example/path".into()),
+            ("BROKER_ATTACHED_ACT_SITES", "*shop.example".into()),
+        ] {
+            let e = validate_server(&broker(vec![(key, lit(&bad_value))])).unwrap_err().0;
+            assert!(e.contains(key), "{key}={bad_value}: {e}");
+            assert!(!e.contains(&bad_value), "{key}={bad_value}: the refusal quotes the value");
+        }
+        // An empty row waits like anywhere else; an environment reference is the user's wiring,
+        // shape-checked nowhere; and a non-broker server keeps its env rows as free text.
+        assert!(validate_server(&broker(vec![("BROKER_ATTACHED_BROWSERS", lit(""))])).is_ok());
+        assert!(validate_server(&broker(vec![("BROKER_ATTACHED_BROWSERS", envr("Bad Var!"))])).is_ok());
+        let mut other = stdio("node.exe");
+        other.transport.env.insert("BROKER_ATTACHED_BROWSERS".into(), lit("Not A Name"));
+        assert!(validate_server(&other).is_ok());
     }
 
     #[test]

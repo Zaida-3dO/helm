@@ -1,6 +1,9 @@
 // Redaction of resolved secrets. Every header and env value the host resolved for a
 // server joins that server's set; anything a server sends back (tool names, descriptions,
 // schemas, results, errors) passes through here before it reaches the model or the UI.
+// A caller may keep a handle a server hands out on purpose (a browser lease key), so it
+// passes the shape rules intact — but never a credential Helm resolved: exact secrets are
+// always replaced first, and a kept string equal to one is not kept.
 
 export const REDACTED = "[redacted]";
 
@@ -117,10 +120,30 @@ export class Redactor {
     return this.secrets.some((s) => text.includes(s));
   }
 
-  text(text: string): string {
+  /**
+   * The text with every resolved secret replaced and every secret-shaped run redacted.
+   * `keep` is for handles the server hands out on purpose (a browser lease key): each kept
+   * string of at least 32 characters skips the shape rules only. It never skips the exact
+   * secret pass above, and a kept string that equals a resolved secret is not kept at all.
+   */
+  text(text: string, keep: readonly string[] = []): string {
     let out = text;
     for (const s of this.secrets) if (out.includes(s)) out = out.split(s).join(REDACTED);
-    return redactShapes(out);
+    if (keep.length === 0) return redactShapes(out);
+    // Placeholder each kept run, run the shape rules over the rest, then put them back.
+    // Longest first, so one kept string cannot split another.
+    const marks: { at: string; value: string }[] = [];
+    for (const i of [...keep.keys()].sort((a, b) => keep[b]!.length - keep[a]!.length)) {
+      const k = keep[i]!;
+      if (k.length < 32 || this.reveals(k) || !out.includes(k)) continue;
+      // NUL-bounded markers: no ordinary server output contains them.
+      const at = `\u0000K${i}\u0000`;
+      out = out.split(k).join(at);
+      marks.push({ at, value: k });
+    }
+    out = redactShapes(out);
+    for (const m of marks) out = out.split(m.at).join(m.value);
+    return out;
   }
 
   /**

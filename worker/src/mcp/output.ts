@@ -34,7 +34,9 @@ export function capText(text: string, maxBytes: number, maxLines: number): { tex
   return { text: out, cut };
 }
 
-export function formatResult(raw: Json, red: Redactor, limits: McpLimits): { content: Json[]; isError: boolean } {
+/** `keep` passes through to the redactor: handles the server hands out on purpose (a browser
+ * lease key) ride out of the text intact; nothing else escapes redaction. */
+export function formatResult(raw: Json, red: Redactor, limits: McpLimits, keep: readonly string[] = []): { content: Json[]; isError: boolean } {
   const blocks = Array.isArray(raw.content) ? (raw.content as Json[]) : [];
   const texts: string[] = [];
   const images: Json[] = [];
@@ -80,7 +82,7 @@ export function formatResult(raw: Json, red: Redactor, limits: McpLimits): { con
     texts.push(JSON.stringify(raw.structuredContent));
   }
   if (droppedImages > 0) texts.push(`[${droppedImages} image(s) omitted: only png, jpeg or webp, at most ${limits.maxImages}, 2 MiB each and 4 MiB in all]`);
-  const joined = red.text(texts.join("\n"));
+  const joined = red.text(texts.join("\n"), keep);
   const capped = capText(joined, limits.maxTextBytes, limits.maxLines);
   let text = capped.text;
   if (capped.cut) text += `\n[output truncated to ${limits.maxTextBytes} bytes and ${limits.maxLines} lines]`;

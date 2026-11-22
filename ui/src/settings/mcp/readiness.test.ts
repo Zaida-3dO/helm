@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import type { ChatMcpProblem, McpPreset, McpServer } from '../../api/mcp.ts';
 import { CALENDAR_HELP, CALENDAR_OPTIONS, CONSOLE_STEPS, GOOGLE_PRESET, SIGN_IN_WINDOW_MS, blockState, calendarInArgs, clientLooksSet, watchState, type GoogleAccountList } from './google.ts';
 import { canDisconnect, connectLabel } from './oauth.ts';
-import { BROKER_PRESET, blankServer, chatMcpNoticeText, copyImportable, draftFromPreset, isBrokerServer, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable, withProfileValue } from './readiness.ts';
+import { BROKER_PRESET, blankServer, brokerMissing, chatMcpNoticeText, copyImportable, draftFromPreset, isBrokerServer, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable, withProfileValue } from './readiness.ts';
 
 const hub: McpPreset = {
   id: 'helm_hub',
@@ -74,7 +74,7 @@ test('the browser preset starts at the broker entry with its variables filled in
     command: 'node.exe',
     args: ['C:\\bb\\dist\\src\\bin\\broker-tool.js'],
     secretEnv: ['BROKER_ATTACHED_TOKEN'],
-    draftEnv: ['BROKER_ATTACHED_BROWSERS', 'BROKER_ATTACHED_EXTENSION_ID', 'BROKER_ATTACHED_ACT_SITES', 'BROKER_ATTACHED_TOKEN'],
+    draftEnv: ['BROKER_ATTACHED_BROWSERS', 'BROKER_BROWSER_BRAVE_PATH', 'BROKER_ATTACHED_EXTENSION_ID', 'BROKER_ATTACHED_ACT_SITES', 'BROKER_ATTACHED_TOKEN'],
   };
   const d = draftFromPreset(broker, []);
   assert.equal(d.id, BROKER_PRESET);
@@ -83,11 +83,28 @@ test('the browser preset starts at the broker entry with its variables filled in
   assert.ok(d.transport.args?.[0]?.endsWith('broker-tool.js'));
   assert.deepEqual(
     Object.keys(d.transport.env ?? {}).sort(),
-    ['BROKER_ATTACHED_ACT_SITES', 'BROKER_ATTACHED_BROWSERS', 'BROKER_ATTACHED_EXTENSION_ID', 'BROKER_ATTACHED_TOKEN'],
-    'each variable the broker reads starts as an empty row (the token once, not twice)',
+    ['BROKER_ATTACHED_ACT_SITES', 'BROKER_ATTACHED_BROWSERS', 'BROKER_ATTACHED_EXTENSION_ID', 'BROKER_ATTACHED_TOKEN', 'BROKER_BROWSER_BRAVE_PATH'],
+    'each variable the broker reads starts as a row (the token once, not twice)',
   );
+  assert.equal(d.transport.env?.BROKER_ATTACHED_BROWSERS?.value, 'brave', 'the browser name is filled in with the default from the start');
   const r = serverReadiness(d, undefined, [broker]);
-  assert.deepEqual([r.state, r.reason, r.actionLabel], ['inactive', 'Needs its broker token.', 'Edit']);
+  assert.deepEqual([r.state, r.reason, r.actionLabel], ['inactive', "Needs your browser's extension id.", 'Edit']);
+  // Everything a broker server must have, and no token: the token is optional (it only skips
+  // the connect page on reconnect), so a server without one reads as ready.
+  const env = (over: Record<string, { kind: 'literal'; value: string }> = {}): McpServer['transport']['env'] => ({
+    BROKER_ATTACHED_BROWSERS: { kind: 'literal', value: 'brave' },
+    BROKER_BROWSER_BRAVE_PATH: { kind: 'literal', value: 'C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe' },
+    BROKER_ATTACHED_EXTENSION_ID: { kind: 'literal', value: 'a'.repeat(32) },
+    BROKER_ATTACHED_ACT_SITES: { kind: 'literal', value: 'shop.example' },
+    ...over,
+  });
+  const filled: McpServer = { ...d, transport: { ...d.transport, env: env() } };
+  assert.equal(brokerMissing(filled), null);
+  assert.equal(serverReadiness(filled, undefined, [broker]).state, 'ready', 'only the optional token is missing');
+  // The reason line names whichever of the three the form has left empty.
+  assert.equal(brokerMissing({ ...filled, transport: { ...filled.transport, env: env({ BROKER_ATTACHED_BROWSERS: { kind: 'literal', value: '' } }) } }), "Needs your browser's name.");
+  assert.equal(brokerMissing({ ...filled, transport: { ...filled.transport, env: env({ BROKER_ATTACHED_EXTENSION_ID: { kind: 'literal', value: '' } }) } }), "Needs your browser's extension id.");
+  assert.equal(brokerMissing({ ...filled, transport: { ...filled.transport, env: env({ BROKER_BROWSER_BRAVE_PATH: { kind: 'literal', value: '' } }) } }), "Needs your browser's program path.");
   // The doctor row belongs to the browser server only.
   assert.ok(isBrokerServer(d));
   assert.ok(!isBrokerServer(draftFromPreset(hub, [])));

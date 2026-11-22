@@ -110,7 +110,10 @@ fn google_accounts() -> McpPreset {
 /// The user's own browser, through the broker program installed on this PC. The form starts at
 /// `node.exe` plus the broker tool's entry file — never a package runner, which would download a
 /// copy instead of running the one the user set up. The attached-browser variables are prefilled
-/// as empty rows; the token is entered as a secret and kept in the credential store.
+/// as rows (the browser name starts at `brave`, and its program row is named after it — the form
+/// renames that row when the name changes); the token is entered as a secret and kept in the
+/// credential store, and it is optional: it only skips the connect page when the broker
+/// reconnects.
 fn browser_broker() -> McpPreset {
     let (program, entry) = if cfg!(windows) {
         (
@@ -126,7 +129,7 @@ fn browser_broker() -> McpPreset {
     McpPreset {
         id: BROKER_PRESET_ID.into(),
         name: "My browser".into(),
-        description: "Your own browser for chats, through the broker program installed on this PC: chats read pages and act on the sites you allow, in the browser you use. Set the broker's entry file, its token and your sites here; chats never change them.".into(),
+        description: "Your own browser for chats, through the broker program installed on this PC: chats read pages and act on the sites you allow, in the browser you use. Set the broker's entry file, your browser and your sites here; its connect token is optional. Chats never change any of these.".into(),
         transport: crate::types::TransportKind::Stdio,
         url_placeholder: String::new(),
         token_header: String::new(),
@@ -142,6 +145,9 @@ fn browser_broker() -> McpPreset {
         secret_env: vec!["BROKER_ATTACHED_TOKEN".into()],
         draft_env: [
             "BROKER_ATTACHED_BROWSERS",
+            // The default browser is brave, so its program row starts named for it; the
+            // Settings form renames this row when the user renames the browser.
+            "BROKER_BROWSER_BRAVE_PATH",
             "BROKER_ATTACHED_EXTENSION_ID",
             "BROKER_ATTACHED_ACT_SITES",
             "BROKER_ATTACHED_TOKEN",
@@ -282,6 +288,15 @@ mod tests {
         assert!(b
             .draft_env
             .contains(&"BROKER_ATTACHED_EXTENSION_ID".to_string()));
+        assert!(
+            b.draft_env
+                .contains(&"BROKER_BROWSER_BRAVE_PATH".to_string()),
+            "the form starts with a program row for the default browser, and renames it with the name"
+        );
+        assert!(
+            b.description.contains("connect token is optional"),
+            "the token only skips the connect page: the row must not read as mandatory"
+        );
         assert!(b.args[0].ends_with("broker-tool.js"));
         assert!(b.expect_tools.contains(&"browser_act".to_string()));
         let bg = guidance_for(Some(BROKER_PRESET_ID)).unwrap();

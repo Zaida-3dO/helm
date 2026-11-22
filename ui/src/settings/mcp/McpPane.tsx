@@ -3,7 +3,7 @@
 // only ever sees a saved secret's id, never its value.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { mcpOps, type DoctorOutcome, type McpOps, type McpPreset, type McpServer, type RefKind, type RepoServer, type ServerStatus, type TestOutcome, type ValueRef } from '../../api/mcp.ts';
+import { mcpOps, type BrowserInstall, type DoctorOutcome, type McpOps, type McpPreset, type McpServer, type RefKind, type RepoServer, type ServerStatus, type TestOutcome, type ValueRef } from '../../api/mcp.ts';
 import { shellOps } from '../../api/shell.ts';
 import { deviceOps, type DeviceInfo, type DeviceOps } from '../../devices/api.ts';
 import { useShell } from '../../shell/context.ts';
@@ -88,6 +88,112 @@ function RefRows({ refs, onChange, kindLabel, headers = false }: { refs: Refs; o
   );
 }
 
+// ── The browser preset's "Your browser" block ──────────────────────────────────────────────
+//
+// The rows the broker reads are the whole of the server's point, so the editor shows them as
+// fields instead of raw environment rows. They save as the same refs as always: the name,
+// extension id and sites as plain literal values the store keeps sealed, the connect token as a
+// secret. The browser's program row is named after the browser (upper-cased, dashes written as
+// underscores, the way the broker builds it), and renaming the browser renames that row.
+
+const BROWSER_NAME_KEY = 'BROKER_ATTACHED_BROWSERS';
+const EXTENSION_KEY = 'BROKER_ATTACHED_EXTENSION_ID';
+const SITES_KEY = 'BROKER_ATTACHED_ACT_SITES';
+const TOKEN_KEY = 'BROKER_ATTACHED_TOKEN';
+const NAME_SHAPE = /^[a-z][a-z0-9-]{0,31}$/;
+
+function brokerPathKey(name: string): string {
+  return `BROKER_BROWSER_${name.trim().toUpperCase().replace(/-/g, '_')}_PATH`;
+}
+
+function isBrokerPathRow(k: string): boolean {
+  return k.startsWith('BROKER_BROWSER_') && k.endsWith('_PATH');
+}
+
+/** The rows the block below already edits, left out of the generic environment list so the
+ * same value never has two boxes. The connect token stays a generic row: there is where its
+ * per-profile values live. */
+function isBrokerFormRow(k: string): boolean {
+  return k === BROWSER_NAME_KEY || k === EXTENSION_KEY || k === SITES_KEY || isBrokerPathRow(k);
+}
+
+function BrokerBlock({ env, onChange, onFindBrowsers }: { env: Refs; onChange: (env: Refs) => void; onFindBrowsers?: () => Promise<BrowserInstall[]> }) {
+  const [found, setFound] = useState<BrowserInstall[] | 'loading' | null>(null);
+  const name = env[BROWSER_NAME_KEY]?.value ?? '';
+  const exact = brokerPathKey(name || 'brave');
+  const pathKey = env[exact] || !Object.keys(env).some(isBrokerPathRow) ? exact : Object.keys(env).find(isBrokerPathRow)!;
+  const put = (key: string, value: string) => onChange({ ...env, [key]: { kind: 'literal', value } });
+  const setName = (raw: string) => {
+    const next: Refs = { ...env, [BROWSER_NAME_KEY]: { kind: 'literal', value: raw } };
+    const from = brokerPathKey(name);
+    const to = brokerPathKey(raw);
+    // Renaming the browser renames its program row, so the path the user set follows the name.
+    if (NAME_SHAPE.test(raw.trim()) && from !== to && next[from]) {
+      next[to] = next[from];
+      delete next[from];
+    }
+    onChange(next);
+  };
+  const find = () => {
+    if (!onFindBrowsers) return;
+    setFound('loading');
+    onFindBrowsers()
+      .then(setFound)
+      .catch(() => setFound([]));
+  };
+  const token = env[TOKEN_KEY];
+  return (
+    <div className="mcp-browser">
+      <label className="mcp-field">
+        <span>Browser name</span>
+        <TextInput data-testid="mcp-browser-name" spellCheck={false} value={name} placeholder="brave" onChange={(e) => setName(e.target.value)} />
+      </label>
+      <label className="mcp-field">
+        <span>Browser program</span>
+        <TextInput data-testid="mcp-browser-program" spellCheck={false} value={env[pathKey]?.value ?? ''} placeholder="C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe" onChange={(e) => put(pathKey, e.target.value)} />
+      </label>
+      <p className="mcp-help">
+        Saved as <code>{pathKey}</code>; renaming the browser renames that variable.
+      </p>
+      <div className="mcp-actions">
+        <Button data-testid="mcp-browser-find" variant="text" disabled={found === 'loading' || !onFindBrowsers} onClick={find}>
+          {found === 'loading' ? 'Looking…' : 'Find installed browsers'}
+        </Button>
+      </div>
+      {Array.isArray(found) && found.length === 0 && <p className="mcp-help">No installed browser in the usual places; type the path.</p>}
+      {Array.isArray(found) && found.length > 0 && (
+        <div className="mcp-actions">
+          {found.map((b) => (
+            <Button key={b.path} variant="text" onClick={() => put(pathKey, b.path)}>
+              {b.label}
+            </Button>
+          ))}
+        </div>
+      )}
+      <label className="mcp-field">
+        <span>Extension id</span>
+        <TextInput data-testid="mcp-browser-extension" spellCheck={false} autoComplete="off" value={env[EXTENSION_KEY]?.value ?? ''} placeholder="32 letters from a to p, from your browser's extension page" onChange={(e) => put(EXTENSION_KEY, e.target.value)} />
+      </label>
+      <label className="mcp-field">
+        <span>Sites chats may act on</span>
+        <TextInput data-testid="mcp-browser-sites" spellCheck={false} value={env[SITES_KEY]?.value ?? ''} placeholder="shop.example, *.read.example.org" onChange={(e) => put(SITES_KEY, e.target.value)} />
+      </label>
+      <p className="mcp-help">Empty means chats only read pages; they never act anywhere. Reading is allowed on any site.</p>
+      <label className="mcp-field">
+        <span>Connect token</span>
+        <TextInput
+          type="password"
+          spellCheck={false}
+          autoComplete="off"
+          value={token?.kind === 'literal' ? token.value ?? '' : ''}
+          placeholder={token?.kind === 'literal' && token.secretId ? 'Saved; type to replace' : 'Optional — only skips the connect page when the broker reconnects'}
+          onChange={(e) => onChange({ ...env, [TOKEN_KEY]: { kind: 'literal', value: e.target.value } })}
+        />
+      </label>
+    </div>
+  );
+}
+
 function Editor({
   draft,
   isNew,
@@ -98,6 +204,7 @@ function Editor({
   onTest,
   preset,
   signIn,
+  onFindBrowsers,
 }: {
   draft: McpServer;
   isNew: boolean;
@@ -110,10 +217,22 @@ function Editor({
   preset?: McpPreset;
   /** For a saved server that signs in through the browser: the button beside Test connection. */
   signIn?: { label: string; waiting: boolean; connect: () => void };
+  /** The browser preset's Find button: what the host op sees installed on this PC. */
+  onFindBrowsers?: () => Promise<BrowserInstall[]>;
 }) {
   const t = draft.transport;
   const setT = (patch: Partial<McpServer['transport']>) => onChange({ ...draft, transport: { ...t, ...patch } });
   const remote = t.type !== 'stdio';
+  // The browser preset gets the "Your browser" block; the generic environment list then hides
+  // exactly the rows it writes (the connect token excepted: its per-profile values live there).
+  const isBrokerDraft = draft.preset === BROKER_PRESET && t.type === 'stdio';
+  const allEnv = t.env ?? {};
+  const hiddenByBlock = (k: string) => isBrokerDraft && isBrokerFormRow(k);
+  const shownEnv = Object.fromEntries(Object.entries(allEnv).filter(([k]) => !hiddenByBlock(k)));
+  const setShownEnv = (visible: Refs) => {
+    const kept = Object.fromEntries(Object.entries(allEnv).filter(([k]) => hiddenByBlock(k)));
+    setT({ env: { ...kept, ...visible } });
+  };
   // Opening the editor must be visible: scroll it into view and put the caret in its first field.
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -147,9 +266,8 @@ function Editor({
         </p>
       ) : preset?.id === BROKER_PRESET ? (
         <p className="mcp-help">
-          Under Environment: BROKER_ATTACHED_BROWSERS names your browser, BROKER_ATTACHED_EXTENSION_ID is the id your browser shows for the broker's
-          extension, BROKER_ATTACHED_ACT_SITES lists the sites chats may act on, and BROKER_ATTACHED_TOKEN goes in as a secret. Chats never change any of
-          these, and never act on a site that is not listed.
+          The Your browser block sets which browser chats use, the broker extension's id in it, the sites chats may act on, and its optional connect
+          token. Chats never change any of these, and never act on a site that is not listed.
         </p>
       ) : preset?.secretEnv?.length ? (
         <p className="mcp-help">Under Environment, enter {preset.secretEnv.join(' and ')} as secrets.</p>
@@ -273,9 +391,10 @@ function Editor({
               onChange={(e) => setT({ args: e.target.value === '' ? [] : e.target.value.split('\n') })}
             />
           </label>
+          {isBrokerDraft && <BrokerBlock env={allEnv} onChange={(env) => setT({ env })} onFindBrowsers={onFindBrowsers} />}
           <div className="mcp-field mcp-field-top">
             <span>Environment</span>
-            <RefRows refs={t.env ?? {}} kindLabel="Variable" onChange={(env) => setT({ env })} />
+            <RefRows refs={shownEnv} kindLabel="Variable" onChange={setShownEnv} />
           </div>
         </>
       )}
@@ -758,6 +877,7 @@ export function McpPane() {
             onSave={() => void save()}
             onCancel={() => setDraft(null)}
             onTest={ops.test}
+            onFindBrowsers={ops.findBrowsers}
             signIn={
               !draft.isNew && isOAuthServer(draft.server)
                 ? {
