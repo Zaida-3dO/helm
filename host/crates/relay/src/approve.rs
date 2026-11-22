@@ -7,13 +7,16 @@
 //! - **Only a tap counts.** Telegram tells the hub which account tapped; the hub passes on a tap
 //!   only from the allowed user in a private chat; Helm accepts it only for an ask id it issued,
 //!   once, and only while that request still waits. Text from Telegram never approves anything.
-//! - **What is sent.** Permission prompts and plan approvals. Folder-trust prompts and secret
-//!   inputs never are; questions are answered by replying in the Telegram chat.
+//! - **What is sent.** Permission prompts, plan approvals and Allow cards. Folder-trust prompts
+//!   and secret inputs never are; questions are answered by replying in the Telegram chat.
 //! - **Nothing allowed unseen.** When the details are too long to show in full on the phone, the
 //!   ask offers only the options that allow nothing (Deny, Stop turn, Keep planning) and says to
 //!   open Helm to allow it.
 //! - **Kept in step.** A request answered in Helm, withdrawn or ended has its buttons taken down.
 //!   The asks live in memory: after a restart a tap on an old one says it is no longer waiting.
+//! - **Every Allow card.** A card that only grants a chat permission (it changes nothing itself)
+//!   is asked the same way, with Allow and Deny. Allow grants for the minutes the agent asked
+//!   for, as the card in Helm does by default.
 //! - **Staged settings changes too.** A request a chat staged for Helm to apply (the card that
 //!   says Approve and lists every change) is asked with Approve and Deny when approving from
 //!   Telegram is on and the user is away or talking to Helm over Telegram or voice. The tap goes
@@ -54,13 +57,14 @@ pub struct Ask {
     pub expires_at: Option<i64>,
 }
 
-/// The two buttons of a staged settings change.
+/// The buttons of a card: Approve for a change Helm applies, Allow for a permission only.
 pub const APPROVE: &str = "Approve";
+pub const ALLOW: &str = "Allow";
 pub const DENY: &str = "Deny";
 /// The most characters of a staged change shown in full; a longer one offers only Deny.
 const CONSENT_FIT: usize = 3000;
 
-/// A staged settings change waiting for Approve, as the watcher found it.
+/// An Allow card waiting for an answer, as the watcher found it.
 #[derive(Clone, Debug)]
 pub struct ConsentWaiting {
     pub chat_id: String,
@@ -239,11 +243,12 @@ pub fn offer(w: &Waiting) -> Option<Offer> {
     Some(Offer { ask, text, full })
 }
 
-/// The offer for a staged settings change: every line of what changes, then Approve and Deny.
-/// Nothing is allowed unseen: when the lines do not fit in one message only Deny is offered.
+/// The offer for an Allow card. A change Helm applies on Approve lists every line of what
+/// changes, then offers Approve and Deny; a plain permission offers Allow and Deny. Nothing is
+/// allowed unseen: when the lines do not fit in one message only Deny is offered.
 pub fn consent_offer(w: &ConsentWaiting) -> Option<Offer> {
     let r = &w.request;
-    if !r.applies_on_allow || r.state != RequestState::Pending {
+    if r.state != RequestState::Pending {
         return None;
     }
     let title = cut(w.chat_title.trim(), 60);
@@ -253,16 +258,38 @@ pub fn consent_offer(w: &ConsentWaiting) -> Option<Offer> {
     } else {
         format!("The chat \"{}\"", title.replace('"', "'"))
     };
-    let mut text = format!(
-        "{who} asks for this change and needs your approval:\n{}",
-        r.summary.trim()
-    );
+    let (mut text, yes, open) = if r.applies_on_allow {
+        (
+            format!(
+                "{who} asks for this change and needs your approval:
+{}",
+                r.summary.trim()
+            ),
+            APPROVE,
+            "approve",
+        )
+    } else {
+        (
+            format!(
+                "{who} asks for your Allow: {}
+{}",
+                r.label.trim(),
+                r.summary.trim()
+            ),
+            ALLOW,
+            "allow",
+        )
+    };
     let full = text.chars().count() <= CONSENT_FIT;
     let options = if full {
-        vec![APPROVE.to_owned(), DENY.to_owned()]
+        vec![yes.to_owned(), DENY.to_owned()]
     } else {
         text = cut(&text, CONSENT_FIT);
-        text.push_str("\n\nToo long to show in full here: open Helm to approve it.");
+        text.push_str(&format!(
+            "
+
+Too long to show in full here: open Helm to {open} it."
+        ));
         vec![DENY.to_owned()]
     };
     let ask = Ask {
@@ -272,7 +299,7 @@ pub fn consent_offer(w: &ConsentWaiting) -> Option<Offer> {
         method: InteractionMethod::Select,
         plan: false,
         options,
-        yes: full.then(|| APPROVE.to_owned()),
+        yes: full.then(|| yes.to_owned()),
         question: None,
         consent: true,
         expires_at: Some(r.expires_at),
@@ -533,7 +560,9 @@ pub fn decide_consent(
             "Only this PC's owner can approve a change to it.",
         ));
     }
-    let decision = if ask.options.get(index).map(String::as_str) == Some(APPROVE) {
+    let decision = if ask.options.get(index).map(String::as_str) == Some(APPROVE)
+        || ask.options.get(index).map(String::as_str) == Some(ALLOW)
+    {
         helm_consent::Decision::Allow
     } else {
         helm_consent::Decision::Deny

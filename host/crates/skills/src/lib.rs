@@ -16,6 +16,7 @@
 pub mod agents;
 pub mod bindings;
 pub mod examples;
+pub mod for_person;
 pub mod help;
 pub mod launch;
 pub mod layers;
@@ -29,6 +30,11 @@ pub mod tools;
 pub mod undo;
 pub use ops::register_ops;
 pub use tools::register_host_tools;
+
+/// Add this crate's allow kinds (the card for knowledge saved into another person's profile).
+pub fn register_allow_kinds(k: &mut helm_consent::AllowKinds) {
+    for_person::register_allow_kinds(k);
+}
 
 use serde::Serialize;
 use std::fs;

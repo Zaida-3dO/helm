@@ -11,11 +11,14 @@ helm-core.workspace = true
 helm-ipc.workspace = true
 helm-platform.workspace = true
 helm-workers.workspace = true
+helm-consent = { path = "../consent" }
 helm-hosttools = { path = "../hosttools" }
 helm-mcp = { path = "../mcp" }
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
 uuid.workspace = true
 log.workspace = true
 ts-rs = { version = "10.1", features = ["serde-json-impl", "no-serde-warnings"] }
