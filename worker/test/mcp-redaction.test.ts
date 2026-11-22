@@ -149,6 +149,17 @@ test("the broker's lease key survives redaction; every other server's is redacte
   const pr = await p.bridge.call(generatedName("browser", "browser_claim"), {});
   assert.ok(!text(pr).includes(LEASE), "a non-broker server's key stays shape-redacted");
 
+  // A hand-saved broker entry: the broker's own id, stdio, no preset field. The host fills the
+  // preset in when it reads the config; this is the worker's second net for an older line.
+  const hand = broker({ leaseKey: LEASE }, { id: "browser_broker" });
+  delete hand.preset;
+  const b = harness();
+  open.push(b.bridge);
+  b.bridge.configure({ revision: "r1", servers: [hand] });
+  await b.bridge.tools({ server: "browser_broker" });
+  const br = await b.bridge.call(generatedName("browser_broker", "browser_claim"), {});
+  assert.ok(text(br).includes(`"key": "${LEASE}"`), "a broker-id entry without a preset keeps its lease key whole");
+
   // Keeping the key costs nothing else: everything around it is still redacted.
   const red = new Redactor([SECRET]);
   const kept = red.text(`lease ${LEASE} token ${"z".repeat(40)} {"api_key": "${"q".repeat(40)}"} ${SECRET}`, [LEASE]);

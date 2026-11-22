@@ -14,13 +14,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import {
-  BROKER_PRESET,
   HOLD_CAP_MS,
   RENEW_EVERY_MS,
   acceptedValue,
   controlFinder,
   holdEvent,
   holdFinished,
+  isBrokerServer,
   leaseKeysOf,
   oneControl,
   readControl,
@@ -643,7 +643,7 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
         loaded.delete(name);
         throw new McpError(`${name} is no longer available because its server changed. Discover it again with app_mcp_tools.`);
       }
-      const browser = e.server.preset === BROKER_PRESET;
+      const browser = isBrokerServer(e.server);
       const source = { kind: "mcp" as const, server: e.red.text(e.server.name), tool: e.red.text(l.tool) };
       // Only Helm's own retry may carry an owner grant: whatever an agent sends is dropped.
       const sent = (browser ? withoutGrant(args ?? {}) : (args ?? {})) as Json;

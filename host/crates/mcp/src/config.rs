@@ -129,11 +129,12 @@ impl McpStore {
             return Err(self.invalid_file());
         }
         let f: FileShape = serde_json::from_slice(&bytes).map_err(|_| self.invalid_file())?;
-        if f.version != FILE_VERSION || validate_list(&f.servers).is_err() {
+        let mut servers = f.servers;
+        if f.version != FILE_VERSION || validate_list(&servers).is_err() {
             return Err(self.invalid_file());
         }
         // A stored file never holds a literal value, shared or a profile's own.
-        if f.servers.iter().any(|s| {
+        if servers.iter().any(|s| {
             refs(s).any(|r| {
                 (r.value.is_some() && r.kind == RefKind::Literal)
                     || r.profiles.values().any(|p| p.value.is_some())
@@ -141,7 +142,14 @@ impl McpStore {
         }) {
             return Err(self.invalid_file());
         }
-        Ok(f.servers)
+        // An entry that carries the broker's own id but no preset field is the user's own
+        // browser all the same: the preset is filled in here, on every read, so the grant key,
+        // the guidance and the broker rules engage for it as they do for one made from the
+        // preset; the next save stores what was filled in.
+        for s in servers.iter_mut() {
+            adopt_broker_preset(s);
+        }
+        Ok(servers)
     }
 
     pub fn snapshot(&self) -> Result<McpEditorSnapshot, StoreError> {
@@ -775,6 +783,19 @@ pub const PERSON_HEADER: &str = "X-Helm-Person";
 /// Written beside the config once existing hub servers have been given [`PERSON_HEADER`].
 const PERSON_MARKER: &str = ".mcp-person-header";
 
+/// A saved entry that carries the built-in browser's own id over a program on this PC but no
+/// preset (written by hand or by an older Helm) is the user's own browser: it is given the
+/// broker preset when the list is read. A server that merely names its tools like the broker
+/// keeps another id and stays out.
+fn adopt_broker_preset(s: &mut McpServer) {
+    if s.preset.is_none()
+        && s.id == crate::presets::BROKER_PRESET_ID
+        && s.transport.kind == TransportKind::Stdio
+    {
+        s.preset = Some(crate::presets::BROKER_PRESET_ID.into());
+    }
+}
+
 /// A server that reaches the home person's own things — the signed-in browser — and so goes to
 /// the chats of the home profile only, never to a household person's or a guest's.
 fn is_home_only(s: &McpServer) -> bool {
@@ -956,6 +977,65 @@ pub(crate) mod tests {
             .env
             .contains_key(crate::owner_step::SECRET_ENV));
         assert_eq!(st.resolve_draft(&hub("t")).preset, None);
+    }
+
+    #[test]
+    fn a_saved_entry_with_the_broker_id_but_no_preset_is_adopted_on_read() {
+        let d = tempfile::tempdir().unwrap();
+        let st = store(d.path());
+        st.mutate(None, |l| {
+            // As if written by hand or by an older Helm: the broker's id and the broker's
+            // shape, but no preset field. And a look-alike: the same shape, another id.
+            let mut hand = browser_server(crate::presets::BROKER_PRESET_ID);
+            hand.preset = None;
+            let mut other = browser_server("lookalike");
+            other.preset = None;
+            l.push(hand);
+            l.push(other);
+            Ok(())
+        })
+        .unwrap();
+        let (_, r) = st.resolve_enabled(&no_env).unwrap();
+        let hand = r
+            .iter()
+            .find(|s| s.id == crate::presets::BROKER_PRESET_ID)
+            .unwrap();
+        assert_eq!(
+            hand.preset.as_deref(),
+            Some(crate::presets::BROKER_PRESET_ID),
+            "the broker's own id carries the broker rules even without the preset field"
+        );
+        assert!(hand.guidance.is_some(), "and the preset's guidance with it");
+        let key = crate::owner_step::grant_key().unwrap();
+        assert_eq!(
+            hand.env
+                .get(crate::owner_step::SECRET_ENV)
+                .map(String::as_str),
+            Some(key),
+            "the broker process gets its grant key"
+        );
+        assert!(
+            hand.secrets.iter().any(|s| s == key),
+            "and the key is scrubbed from what it says"
+        );
+        let other = r.iter().find(|s| s.id == "lookalike").unwrap();
+        assert_eq!(
+            other.preset, None,
+            "another id with no preset stays an ordinary server"
+        );
+        assert!(
+            !other.env.contains_key(crate::owner_step::SECRET_ENV),
+            "no grant key for it"
+        );
+        // The adoption is not only at read: the next write stores what was filled in.
+        st.mutate(None, |_| Ok(())).unwrap();
+        let written = std::fs::read(d.path().join(FILE_NAME)).unwrap();
+        assert!(
+            String::from_utf8(written)
+                .unwrap()
+                .contains("\"preset\": \"browser_broker\""),
+            "the adopted preset is saved"
+        );
     }
 
     #[test]

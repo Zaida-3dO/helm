@@ -13,14 +13,26 @@
 //   ends when that lease is marked done or released, when the cap passes, or when the worker
 //   exits; the cap sits above the broker's longest sign-in wait, so a real wait is always held.
 //
-// The rules engage only for servers created from Helm's browser preset: a configured server
-// whose tools merely share the broker's names never drives Helm's phone path.
+// The rules engage only for Helm's own broker: a server created from the browser preset, or
+// one carrying the broker's own id (see `isBrokerServer`). A configured server whose tools
+// merely share the broker's names never drives Helm's phone path.
 
 import { readFileSync } from "node:fs";
 import type { Json } from "./types.ts";
 
 /** The preset id of the built-in browser server (the host's presets.rs keeps the same string). */
 export const BROKER_PRESET = "browser_broker";
+
+/**
+ * Whether a resolved server is Helm's own broker: created from the browser preset, or a
+ * hand-saved stdio entry that carries the broker's own id with no preset filled in (the host
+ * fills it in when it reads the stored config; this is the second net for an older line). A
+ * server that merely names its tools like the broker keeps another id and never drives the
+ * phone path or the lease-key keeping.
+ */
+export function isBrokerServer(s: { id: string; preset?: string; transport: string }): boolean {
+  return s.preset === BROKER_PRESET || (!s.preset && s.id === BROKER_PRESET && s.transport === "stdio");
+}
 
 /** The broker's lease-key shape: the broker mints 32 random bytes in base64url (43 characters);
  * the range leaves a little room for a broker that changes its minting. */
