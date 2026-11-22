@@ -85,6 +85,7 @@ const MCP_CARD_TOOLS = [
   'app_set_mcp_level',
   'app_google_sign_in',
   'app_save_rule',
+  'app_save_memory',
   'app_add_skill',
 ];
 

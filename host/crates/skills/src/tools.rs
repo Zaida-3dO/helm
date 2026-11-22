@@ -248,6 +248,18 @@ fn save_rule(ctx: &ToolCtx, mut a: Value) -> ToolResult {
     Ok(out)
 }
 
+/// A memory for another person: always an Approve card, never written here.
+fn save_memory(ctx: &ToolCtx, a: Value) -> ToolResult {
+    let who = launch::who(&ctx.caller_chat_id);
+    let person = str_arg(&a, "person").ok_or_else(|| ToolError::refused("person is required."))?;
+    match for_person::resolve(ctx, &who, person)? {
+        Named::Own => Err(ToolError::refused(
+            "For this chat's own person use memory_write.",
+        )),
+        Named::Other(p) => for_person::stage_memory(ctx, &who, p, &a),
+    }
+}
+
 fn remove_rule(ctx: &ToolCtx, a: Value) -> ToolResult {
     let path = str_arg(&a, "path").ok_or_else(|| ToolError::refused("path is required."))?;
     let data = profile_dir(ctx)?;
@@ -361,6 +373,25 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
             }),
         ),
         save_rule,
+    )
+    .blocking(
+        ToolSpec::write(
+            "app_save_memory",
+            "Save a memory for another person in the household. Only for someone else: this chat's own person uses memory_write. Nothing is saved until the user approves a card that shows whose memory it becomes and the exact text; the memory is then shared with the household. Write the text in the third person and name the person, because it is saved under their name. Act only on the user's explicit request.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "person": person_schema(),
+                    "title": {"type": "string", "minLength": 1, "maxLength": 120},
+                    "body": {"type": "string", "minLength": 1, "maxLength": 2000},
+                    "tags": {"type": "array", "items": {"type": "string", "maxLength": 40}, "maxItems": 8},
+                    "reason": reason_schema()
+                },
+                "required": ["person", "title", "body"],
+                "additionalProperties": false
+            }),
+        ),
+        save_memory,
     )
     .blocking(
         ToolSpec::write(
@@ -711,11 +742,67 @@ mod tests {
         tx.execute_batch(
             "CREATE TABLE profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL, hub_person_id TEXT,
                                     is_home INTEGER NOT NULL DEFAULT 0);
+             ALTER TABLE chats ADD COLUMN profile_id TEXT;
              INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 1);
              INSERT INTO chats(id, project_id, created_at, updated_at) VALUES ('alex-chat', 'p', 1, 1);
              INSERT INTO profiles(id, name, hub_person_id, is_home) VALUES
-                 ('alex', 'Alex', NULL, 1), ('sam', 'Sam', 'hub-sam', 0), ('pat', 'Pat', NULL, 0);",
+                 ('alex', 'Alex', 'hub-alex', 1), ('sam', 'Sam', 'hub-sam', 0), ('pat', 'Pat', NULL, 0);",
         )
+    }
+
+    /// A stand-in hub for the memory tool: whether it can save for someone else, what it was asked
+    /// to write, and the names it already holds (a name is kept once, like on the real hub).
+    /// A write the hub was asked for: who acted, the tool, its arguments and who was approved.
+    type Write = (Option<String>, String, Value, String);
+
+    #[derive(Default)]
+    struct FakeHub {
+        old: std::sync::atomic::AtomicBool,
+        asked: std::sync::Mutex<usize>,
+        writes: std::sync::Mutex<Vec<Write>>,
+        names: std::sync::Mutex<std::collections::HashSet<String>>,
+    }
+
+    impl crate::memories::MemoryHub for FakeHub {
+        fn call(
+            &self,
+            _: Option<&str>,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, crate::memories::MemError> {
+            Err(crate::memories::MemError::Refused("not used".into()))
+        }
+
+        fn supports_save_for(&self, _: Option<&str>) -> Result<bool, crate::memories::MemError> {
+            *self.asked.lock().unwrap() += 1;
+            Ok(!self.old.load(std::sync::atomic::Ordering::SeqCst))
+        }
+
+        fn call_approved(
+            &self,
+            person: Option<&str>,
+            tool: &str,
+            args: Value,
+            approved_for: &str,
+        ) -> Result<Value, crate::memories::MemError> {
+            use crate::memories::MemError;
+            if self.old.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(MemError::Refused("The hub is older than this Helm.".into()));
+            }
+            let name = args["name"].as_str().unwrap_or("").to_owned();
+            if !self.names.lock().unwrap().insert(name.clone()) {
+                return Err(MemError::Refused(format!(
+                    "you already have a memory named {name:?}"
+                )));
+            }
+            self.writes.lock().unwrap().push((
+                person.map(str::to_owned),
+                tool.to_owned(),
+                args,
+                approved_for.to_owned(),
+            ));
+            Ok(json!({ "id": 41 }))
+        }
     }
 
     /// Another person's rule or skill is never written by the tool: it files one card that names
@@ -742,6 +829,8 @@ mod tests {
             dir: data.clone(),
             hash: String::new(),
         }));
+        let hub = Arc::new(FakeHub::default());
+        services.insert(Arc::new(crate::memories::MemoryHubHandle(hub.clone())));
         let services = Arc::new(services);
         launch::set_lookup(Arc::new(Alex));
         let mut reg = HostToolRegistry::new();
@@ -930,5 +1019,124 @@ mod tests {
             .outcome
             .unwrap()
             .starts_with("Applied. Added the skill note-skill to Sam's skills"));
+
+        // A memory for Sam: a card with the name, the exact text and the tags, and no write.
+        let memory = json!({
+            "person": "sam",
+            "title": "Sam's passport",
+            "body": "Sam's passport is in the blue folder.",
+            "tags": ["documents"]
+        });
+        let staged = run("app_save_memory", memory.clone()).unwrap();
+        assert_eq!(staged["state"], "pending");
+        let mid = staged["requestId"].as_str().unwrap().to_owned();
+        let shown = card(&mid).summary;
+        for line in [
+            "Save a memory for Sam",
+            "It becomes Sam's memory, shared with the household. Asked by Alex.",
+            "Title: Sam's passport",
+            "Tags: documents",
+            "Text:",
+            "Sam's passport is in the blue folder.",
+        ] {
+            assert!(shown.lines().any(|l| l == line), "{line}: {shown}");
+        }
+        assert!(!shown.contains("own words"), "{shown}");
+        assert_eq!(
+            (hub.writes.lock().unwrap().len(), *hub.asked.lock().unwrap()),
+            (0, 1),
+            "staging only asks whether the hub can save for someone else"
+        );
+
+        // First-person words are flagged on the card; Deny writes nothing.
+        let mut mine = memory.clone();
+        mine["body"] = json!("My passport is in the blue folder.");
+        let first = run("app_save_memory", mine).unwrap();
+        let fid = first["requestId"].as_str().unwrap().to_owned();
+        assert!(card(&fid)
+            .summary
+            .contains("The text says my, me or I: it will read as Sam's own words."));
+        decide(&fid, helm_consent::Decision::Deny);
+        assert!(hub.writes.lock().unwrap().is_empty());
+
+        // Approve: exactly one write, as the asker, for Sam, with the approval and the request's key.
+        decide(&mid, helm_consent::Decision::Allow);
+        {
+            let writes = hub.writes.lock().unwrap();
+            assert_eq!(writes.len(), 1);
+            let (person, tool, args, approved) = &writes[0];
+            assert_eq!(
+                (person.as_deref(), tool.as_str(), approved.as_str()),
+                (Some("hub-alex"), "memory_write", "hub-sam")
+            );
+            assert_eq!(
+                (
+                    args["for"].as_str(),
+                    args["scope"].as_str(),
+                    args["title"].as_str()
+                ),
+                (Some("hub-sam"), Some("everyone"), Some("Sam's passport"))
+            );
+            assert_eq!(args["name"], format!("saved-for-{mid}"));
+            assert_eq!(args["body"], "Sam's passport is in the blue folder.");
+        }
+        assert!(card(&mid)
+            .outcome
+            .unwrap()
+            .starts_with("Applied. Saved the memory Sam's passport for Sam (asked by Alex)."));
+
+        // A retry of the same request (an answer lost on the way back) writes nothing twice.
+        let events: Arc<dyn helm_ipc::EventSink> = Arc::new(helm_ipc::NullSink);
+        let target = json!({
+            "profileId": "sam", "profileName": "Sam", "linked": true, "askedBy": "Alex",
+            "rule": null, "skill": null,
+            "memory": { "title": "Sam's passport", "body": "Sam's passport is in the blue folder.",
+                        "tags": ["documents"], "forPerson": "hub-sam", "askerPerson": "hub-alex" }
+        });
+        let retried = helm_consent::Applier::apply(
+            &crate::for_person::KnowledgeApplier,
+            &helm_consent::ApplyJob {
+                services: &services,
+                events: &events,
+                request_id: &mid,
+                chat_id: "alex-chat",
+                target: &target,
+            },
+        );
+        assert!(retried.starts_with("Applied. Already saved"), "{retried}");
+        assert_eq!(hub.writes.lock().unwrap().len(), 1);
+
+        // Refusals file nothing: someone not on the hub, the chat's own person, a text too long
+        // for a card, hidden characters, and an older hub (also when it is downgraded after the
+        // card was filed: the write is then refused, not saved as the asker's own).
+        let before = *hub.asked.lock().unwrap();
+        let mut long = memory.clone();
+        long["body"] = json!("x".repeat(2000));
+        let mut hidden = memory.clone();
+        hidden["body"] = json!("a\u{202e}b");
+        let mut pat = memory.clone();
+        pat["person"] = json!("pat");
+        let mut own = memory.clone();
+        own["person"] = json!("alex");
+        for (args, why) in [
+            (pat, "not linked to the hub"),
+            (own, "use memory_write"),
+            (long, "too long to show whole"),
+            (hidden, "invisible"),
+        ] {
+            let msg = run("app_save_memory", args.clone()).unwrap_err().public;
+            assert!(msg.contains(why), "{args}: {msg}");
+        }
+        assert_eq!(*hub.asked.lock().unwrap(), before);
+        let mut again = memory.clone();
+        again["title"] = json!("Sam's passport again");
+        let staged = run("app_save_memory", again.clone()).unwrap();
+        let did = staged["requestId"].as_str().unwrap().to_owned();
+        hub.old.store(true, std::sync::atomic::Ordering::SeqCst);
+        decide(&did, helm_consent::Decision::Allow);
+        assert!(card(&did).outcome.unwrap().starts_with("Nothing saved:"));
+        assert_eq!(hub.writes.lock().unwrap().len(), 1);
+        let msg = run("app_save_memory", again).unwrap_err().public;
+        assert!(msg.contains("Update the hub first"), "{msg}");
     }
 }

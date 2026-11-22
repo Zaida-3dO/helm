@@ -48,15 +48,35 @@ impl From<CallError> for MemError {
 /// Calls a memory tool on the hub, acting as `person` (a hub person id) when given.
 pub trait MemoryHub: Send + Sync {
     fn call(&self, person: Option<&str>, tool: &str, args: Value) -> Result<Value, MemError>;
+
+    /// Whether the hub can save a memory for another person (an older one would ignore the
+    /// request's target and save it as the caller's own). Asks `initialize` only.
+    fn supports_save_for(&self, person: Option<&str>) -> Result<bool, MemError>;
+
+    /// [`MemoryHub::call`] with the user's approval for `approved_for` (a hub person id) sent
+    /// along. The hub's capability is checked on the same session before the tool is called.
+    fn call_approved(
+        &self,
+        person: Option<&str>,
+        tool: &str,
+        args: Value,
+        approved_for: &str,
+    ) -> Result<Value, MemError>;
 }
+
+/// A memory hub put in [`helm_ipc::Services`] by a test, standing in for the connected one.
+pub struct MemoryHubHandle(pub Arc<dyn MemoryHub>);
+
+/// What a hub says in `initialize` when it saves a memory for another person.
+pub const SAVE_FOR: &str = "saveFor";
 
 /// The connected `helm_hub` server.
 pub struct HubMemory {
     pub store: Arc<McpStore>,
 }
 
-impl MemoryHub for HubMemory {
-    fn call(&self, person: Option<&str>, tool: &str, args: Value) -> Result<Value, MemError> {
+impl HubMemory {
+    fn server(&self, person: Option<&str>) -> Result<helm_mcp::types::ResolvedServer, MemError> {
         let unavailable = |m: &str| MemError::Unavailable(m.to_owned());
         let servers = self
             .store
@@ -64,12 +84,46 @@ impl MemoryHub for HubMemory {
             .map_err(|e| MemError::Unavailable(e.to_string()))?;
         let id = connected_memory_server(&servers)
             .ok_or_else(|| unavailable("Shared memory isn't connected."))?;
-        let server = self
-            .store
+        self.store
             .resolve_server(&id, person)
             .map_err(|e| MemError::Unavailable(e.to_string()))?
-            .ok_or_else(|| unavailable("Shared memory isn't connected."))?;
-        Ok(helm_mcp::memory::call_tool(&server, tool, args)?)
+            .ok_or_else(|| unavailable("Shared memory isn't connected."))
+    }
+}
+
+impl MemoryHub for HubMemory {
+    fn call(&self, person: Option<&str>, tool: &str, args: Value) -> Result<Value, MemError> {
+        Ok(helm_mcp::memory::call_tool(
+            &self.server(person)?,
+            tool,
+            args,
+        )?)
+    }
+
+    fn supports_save_for(&self, person: Option<&str>) -> Result<bool, MemError> {
+        Ok(helm_mcp::memory::hub_capability(
+            &self.server(person)?,
+            SAVE_FOR,
+        )?)
+    }
+
+    fn call_approved(
+        &self,
+        person: Option<&str>,
+        tool: &str,
+        args: Value,
+        approved_for: &str,
+    ) -> Result<Value, MemError> {
+        Ok(helm_mcp::memory::call_tool_with(
+            &self.server(person)?,
+            tool,
+            args,
+            &[(
+                helm_mcp::memory::APPROVED_FOR_HEADER,
+                approved_for.to_owned(),
+            )],
+            Some(SAVE_FOR),
+        )?)
     }
 }
 
@@ -224,6 +278,20 @@ mod tests {
                 }
                 _ => Err(MemError::Refused("no such tool".into())),
             }
+        }
+
+        fn supports_save_for(&self, _: Option<&str>) -> Result<bool, MemError> {
+            Ok(false)
+        }
+
+        fn call_approved(
+            &self,
+            _: Option<&str>,
+            _: &str,
+            _: Value,
+            _: &str,
+        ) -> Result<Value, MemError> {
+            Err(MemError::Refused("no such tool".into()))
         }
     }
 

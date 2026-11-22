@@ -10,6 +10,10 @@ use crate::probe::{agent, init_request, initialized_note, pin_target, post, rpc_
 use crate::types::{ResolvedServer, TransportKind};
 use serde_json::{json, Value};
 
+/// The request header that says the user approved saving a memory for a person. Helm's approve
+/// path sends it; a chat's own connection never carries it.
+pub const APPROVED_FOR_HEADER: &str = "X-Helm-Approved-For";
+
 /// Why a call produced no answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallError {
@@ -29,47 +33,51 @@ impl CallError {
 
 /// Call `tool` on `server` with `args` and give back its structured answer.
 pub fn call_tool(server: &ResolvedServer, tool: &str, args: Value) -> Result<Value, CallError> {
+    call_tool_with(server, tool, args, &[], None)
+}
+
+/// What the hub told `initialize` it can do, under `capabilities.experimental.helmHub`.
+fn has_capability(init: &Value, capability: &str) -> bool {
+    init["capabilities"]["experimental"]["helmHub"][capability].as_bool() == Some(true)
+}
+
+/// Whether the hub advertises `capability` (an older hub does not). Runs `initialize` only.
+pub fn hub_capability(server: &ResolvedServer, capability: &str) -> Result<bool, CallError> {
+    let (_, _, _, init) = open_session(server, &server.headers)?;
+    Ok(has_capability(&init, capability))
+}
+
+/// [`call_tool`] with `extra_headers` added to every request of the call (a header of the same
+/// name that the server already had is replaced). With `require_capability`, the hub must advertise
+/// it in its `initialize` answer or nothing is called: an older hub ignores an argument it does not
+/// know, and would save the memory as the caller's own.
+pub fn call_tool_with(
+    server: &ResolvedServer,
+    tool: &str,
+    args: Value,
+    extra_headers: &[(&str, String)],
+    require_capability: Option<&str>,
+) -> Result<Value, CallError> {
+    let mut headers = server.headers.clone();
+    for (name, value) in extra_headers {
+        headers.retain(|k, _| !k.eq_ignore_ascii_case(name));
+        headers.insert((*name).to_owned(), value.clone());
+    }
+    let (agent, target, session, init) = open_session(server, &headers)?;
     let unreachable = |why: &str| CallError::Unreachable(scrub(why, &server.secrets));
-    if let Some(why) = &server.error {
-        return Err(unreachable(why));
+    if let Some(capability) = require_capability {
+        if !has_capability(&init, capability) {
+            return Err(CallError::Failed(
+                "The hub is older than this Helm and cannot save a memory for another person. Update the hub first."
+                    .to_owned(),
+            ));
+        }
     }
-    if server.transport != TransportKind::Http {
-        return Err(unreachable("The memory server is not a URL server."));
-    }
-    let url = server
-        .url
-        .as_deref()
-        .and_then(|u| url::Url::parse(u).ok())
-        .ok_or_else(|| unreachable("The memory server's address is not valid."))?;
-    let target = pin_target(&url, server.allow_private_http).map_err(|why| unreachable(&why))?;
-    let agent = agent();
-    let first = post(&agent, &target, &server.headers, None, &init_request())
-        .map_err(|_| unreachable("The hub could not be reached."))?;
-    if matches!(first.status, 401 | 403) {
-        return Err(unreachable(
-            "The hub refused Helm's token, or this machine's token may not act for a person.",
-        ));
-    }
-    if !(200..300).contains(&first.status) {
-        return Err(unreachable(&format!(
-            "The hub answered {} to the first request.",
-            first.status
-        )));
-    }
-    rpc_result(&first.body, 1).map_err(|why| unreachable(&why))?;
-    let session = first.session.as_deref();
-    let _ = post(
-        &agent,
-        &target,
-        &server.headers,
-        session,
-        &initialized_note(),
-    );
     let request = json!({
         "jsonrpc": "2.0", "id": 3, "method": "tools/call",
         "params": { "name": tool, "arguments": args }
     });
-    let reply = post(&agent, &target, &server.headers, session, &request)
+    let reply = post(&agent, &target, &headers, session.as_deref(), &request)
         .map_err(|_| unreachable("The hub could not be reached."))?;
     if !(200..300).contains(&reply.status) {
         return Err(CallError::Failed(format!(
@@ -95,6 +103,51 @@ pub fn call_tool(server: &ResolvedServer, tool: &str, args: Value) -> Result<Val
         .map_err(|_| CallError::Failed("The hub's answer was not understood.".to_owned()))
 }
 
+/// Reach the hub and run `initialize`, then tell it we are ready. Gives back the agent, the pinned
+/// target, the session id and the `initialize` result.
+fn open_session(
+    server: &ResolvedServer,
+    headers: &std::collections::BTreeMap<String, String>,
+) -> Result<(ureq::Agent, crate::probe::Target, Option<String>, Value), CallError> {
+    let unreachable = |why: &str| CallError::Unreachable(scrub(why, &server.secrets));
+    if let Some(why) = &server.error {
+        return Err(unreachable(why));
+    }
+    if server.transport != TransportKind::Http {
+        return Err(unreachable("The memory server is not a URL server."));
+    }
+    let url = server
+        .url
+        .as_deref()
+        .and_then(|u| url::Url::parse(u).ok())
+        .ok_or_else(|| unreachable("The memory server's address is not valid."))?;
+    let target = pin_target(&url, server.allow_private_http).map_err(|why| unreachable(&why))?;
+    let agent = agent();
+    let first = post(&agent, &target, headers, None, &init_request())
+        .map_err(|_| unreachable("The hub could not be reached."))?;
+    if matches!(first.status, 401 | 403) {
+        return Err(unreachable(
+            "The hub refused Helm's token, or this machine's token may not act for a person.",
+        ));
+    }
+    if !(200..300).contains(&first.status) {
+        return Err(unreachable(&format!(
+            "The hub answered {} to the first request.",
+            first.status
+        )));
+    }
+    let init = rpc_result(&first.body, 1).map_err(|why| unreachable(&why))?;
+    let session = first.session.clone();
+    let _ = post(
+        &agent,
+        &target,
+        headers,
+        session.as_deref(),
+        &initialized_note(),
+    );
+    Ok((agent, target, session, init))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,10 +156,11 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
 
-    type Seen = Arc<Mutex<Vec<(Option<String>, Value)>>>;
+    /// What a request carried: the person header, the approved-for header and the body.
+    type Seen = Arc<Mutex<Vec<(Option<String>, Option<String>, Value)>>>;
 
     /// A stand-in hub on a loopback port that answers `requests` requests, one connection each.
-    fn serve(requests: usize) -> (String, Seen, std::thread::JoinHandle<()>) {
+    fn serve(requests: usize, save_for: bool) -> (String, Seen, std::thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/mcp", listener.local_addr().unwrap());
         let seen: Seen = Arc::default();
@@ -144,15 +198,24 @@ mod tests {
                     .lines()
                     .find_map(|l| l.strip_prefix("x-helm-person:"))
                     .map(|v| v.trim().to_owned());
+                let approved = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("x-helm-approved-for:"))
+                    .map(|v| v.trim().to_owned());
                 let body: Value = serde_json::from_slice(&buf[head_end..head_end + len]).unwrap();
-                log.lock().unwrap().push((person, body.clone()));
+                log.lock().unwrap().push((person, approved, body.clone()));
                 let id = body["id"].clone();
                 let (status, extra, text) = match body["method"].as_str() {
                     Some("initialize") => (
                         "200 OK",
                         "Mcp-Session-Id: s1\r\n",
                         json!({ "jsonrpc": "2.0", "id": id, "result": {
-                            "protocolVersion": "2025-03-26", "serverInfo": { "name": "helm-hub" } } })
+                            "protocolVersion": "2025-03-26", "serverInfo": { "name": "helm-hub" },
+                            "capabilities": if save_for {
+                                json!({ "experimental": { "helmHub": { "saveFor": true } } })
+                            } else {
+                                json!({})
+                            } } })
                         .to_string(),
                     ),
                     Some("tools/call") => {
@@ -209,7 +272,7 @@ mod tests {
 
     #[test]
     fn a_tool_call_acts_as_the_person_and_failures_are_told_apart() {
-        let (url, seen, handle) = serve(6);
+        let (url, seen, handle) = serve(6, false);
         let ok = call_tool(
             &server(&url, Some("7")),
             "memory_list",
@@ -229,9 +292,56 @@ mod tests {
         handle.join().unwrap();
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 6);
-        assert!(seen.iter().all(|(p, _)| p.as_deref() == Some("7")));
-        assert_eq!(seen[2].1["params"]["name"], "memory_list");
-        assert_eq!(seen[2].1["params"]["arguments"]["limit"], 5);
+        assert!(seen.iter().all(|(p, _, _)| p.as_deref() == Some("7")));
+        assert_eq!(seen[2].2["params"]["name"], "memory_list");
+        assert_eq!(seen[2].2["params"]["arguments"]["limit"], 5);
+        assert!(seen.iter().all(|(_, a, _)| a.is_none()));
+        drop(seen);
+
+        // An extra header goes on every request of the call and replaces one of the same name; a
+        // hub that does not advertise the capability is refused before the tool is called, and
+        // one that does is called. `hub_capability` runs `initialize` alone.
+        let (url, seen, handle) = serve(3 + 2 + 2, true);
+        let mut with_old = server(&url, Some("7"));
+        with_old
+            .headers
+            .insert("x-helm-approved-for".into(), "stale".into());
+        let extra = [(APPROVED_FOR_HEADER, "9".to_owned())];
+        let saved = call_tool_with(
+            &with_old,
+            "memory_write",
+            json!({}),
+            &extra,
+            Some("saveFor"),
+        );
+        assert_eq!(saved.unwrap()["count"], 1);
+        assert_eq!(hub_capability(&server(&url, None), "saveFor"), Ok(true));
+        assert_eq!(hub_capability(&server(&url, None), "other"), Ok(false));
+        handle.join().unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 7);
+        assert!(seen[..3].iter().all(|(_, a, _)| a.as_deref() == Some("9")));
+        assert!(seen[3..].iter().all(|(_, a, _)| a.is_none()));
+        drop(seen);
+        let (url, seen, handle) = serve(2, false);
+        let old = call_tool_with(
+            &server(&url, None),
+            "memory_write",
+            json!({}),
+            &extra,
+            Some("saveFor"),
+        );
+        assert!(
+            matches!(old, Err(CallError::Failed(ref m)) if m.contains("Update the hub first")),
+            "{old:?}"
+        );
+        handle.join().unwrap();
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen.iter().all(|(_, _, b)| b["method"] != "tools/call"),
+            "nothing is called on a hub without the capability"
+        );
+        drop(seen);
 
         // A hub that is not there, a server with a resolve error, and one that is not a URL.
         let gone = TcpListener::bind("127.0.0.1:0").unwrap();

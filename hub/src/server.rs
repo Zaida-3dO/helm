@@ -259,6 +259,12 @@ async fn post_mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: 
         }
     };
     let acted = acted.as_ref();
+    // Set only by Helm's approve path; a chat's own connection never carries it.
+    let approved_for = headers
+        .get(mcp::APPROVED_FOR_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
     let started = Instant::now();
     let is_init = msg.get("method").and_then(Value::as_str) == Some("initialize");
     let label = describe(&msg);
@@ -267,7 +273,7 @@ async fn post_mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: 
         Value::Array(batch) => {
             let mut replies = vec![];
             for m in batch {
-                match answer(&state, &client, acted, m).await {
+                match answer(&state, &client, acted, approved_for, m).await {
                     Ok(Some(r)) => replies.push(r),
                     Ok(None) => {}
                     Err(code) => return code.into_response(),
@@ -275,7 +281,7 @@ async fn post_mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: 
             }
             (!replies.is_empty()).then_some(Value::Array(replies))
         }
-        m => match answer(&state, &client, acted, m).await {
+        m => match answer(&state, &client, acted, approved_for, m).await {
             Ok(r) => r,
             Err(code) => return code.into_response(),
         },
@@ -304,6 +310,7 @@ async fn answer(
     state: &Arc<AppState>,
     client: &Client,
     acted: Option<&Client>,
+    approved_for: Option<&str>,
     m: &Value,
 ) -> Result<Option<Value>, StatusCode> {
     let method = m.get("method").and_then(Value::as_str);
@@ -379,6 +386,7 @@ async fn answer(
             &state.options,
             m,
             &people,
+            approved_for,
         )
     };
     let mut reply = reply;

@@ -102,6 +102,9 @@ pub struct NewMemory {
     /// The person it belongs to; `None` takes the store's default owner.
     pub owner: Option<i64>,
     pub visibility: Visibility,
+    /// The person who saved this for its owner (an approved memory written for someone else);
+    /// `None` for a memory its owner wrote. Kept in a side table, as an audit and nothing more.
+    pub saved_by: Option<i64>,
 }
 
 /// Fields a `memory_update` may change; `None` leaves a field alone.
@@ -412,6 +415,14 @@ impl Store {
             "CREATE INDEX IF NOT EXISTS memories_owner ON memories(owner_person, visibility);
              CREATE UNIQUE INDEX IF NOT EXISTS memories_owner_name ON memories(owner_person, name);",
         )?;
+        // Who saved a memory for someone else (an audit; the owner stays the person it is about).
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS memory_saved_for (
+                 memory_id INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+                 saved_by  INTEGER NOT NULL,
+                 saved_at  TEXT NOT NULL
+             );",
+        )?;
         // The household's knowledge files share this database (see `knowledge.rs`).
         crate::knowledge::init(&conn)?;
         // The search index mirrors the memories (see `index.rs`).
@@ -522,10 +533,31 @@ impl Store {
         )?;
         let id = tx.last_insert_rowid();
         write_tags(&tx, id, &tags)?;
+        if let Some(saver) = m.saved_by {
+            tx.execute(
+                &format!(
+                    "INSERT INTO memory_saved_for (memory_id, saved_by, saved_at)
+                     VALUES (?1, ?2, {NOW})"
+                ),
+                params![id, saver],
+            )?;
+        }
         let delta = crate::index::mirror_memory(&tx, id)?;
         tx.commit()?;
         self.codes.apply(delta);
         Ok(id)
+    }
+
+    /// The person who saved memory `id` for its owner, when someone did.
+    pub fn saved_by(&self, id: i64) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT saved_by FROM memory_saved_for WHERE memory_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
 
     pub fn get(&self, id: i64) -> Result<Memory> {
@@ -1695,5 +1727,28 @@ mod tests {
             crate::index::init(&s.conn).unwrap();
             assert_eq!((hits(&s, 1, "ancient"), docs(&s)), (1, 2));
         }
+    }
+
+    #[test]
+    fn who_saved_a_memory_for_someone_is_kept_beside_it_and_goes_with_it() {
+        let mut s = Store::open_in_memory().unwrap();
+        let for_two = NewMemory {
+            owner: Some(2),
+            saved_by: Some(1),
+            ..mem("Passport", "in the safe", &[])
+        };
+        let theirs = s.insert(for_two).unwrap();
+        let own = s.insert(mem("Own", "plain", &[])).unwrap();
+        assert_eq!(
+            (s.saved_by(theirs).unwrap(), s.saved_by(own).unwrap()),
+            (Some(1), None)
+        );
+        s.delete(theirs).unwrap();
+        assert_eq!(s.saved_by(theirs).unwrap(), None);
+        let rows: i64 = s
+            .conn
+            .query_row("SELECT count(*) FROM memory_saved_for", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
     }
 }

@@ -80,6 +80,7 @@
     "app_resume_saved_agent",
     "app_roll_over",
     "app_save_item",
+    "app_save_memory",
     "app_save_rule",
     "app_saved",
     "app_schedule",
