@@ -128,10 +128,11 @@ fn chat_rename(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
 async fn title_suggest(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ChatIdArgs = parse_args(args)?;
     let rt = runtime(&ctx)?;
-    let titles = crate::titles::suggest(&rt, &a.chat_id).await?;
+    let found = crate::titles::suggest(&rt, &a.chat_id).await?;
     to_value(&TitleSuggestResult {
-        title: titles.first().cloned().unwrap_or_default(),
-        titles,
+        title: found.titles.first().cloned().unwrap_or_default(),
+        titles: found.titles,
+        message: found.note,
     })
 }
 
