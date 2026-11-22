@@ -47,13 +47,8 @@ pub fn job(first_request: &str, latest: Option<&str>, forked: bool) -> Value {
 pub fn unframed(text: &str) -> &str {
     match text
         .strip_prefix("[Message from another chat:")
-        .and_then(|rest| {
-            rest.split_once(
-                "
-
-",
-            )
-        }) {
+        .and_then(|rest| rest.split_once("\n\n"))
+    {
         Some((_, body)) if !body.trim().is_empty() => body,
         _ => text,
     }
