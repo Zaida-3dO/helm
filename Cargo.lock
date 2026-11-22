@@ -2384,16 +2384,19 @@ dependencies = [
 name = "helm-skills"
 version = "2.4.0"
 dependencies = [
+ "helm-consent",
  "helm-core",
  "helm-hosttools",
  "helm-ipc",
  "helm-mcp",
  "helm-platform",
  "helm-workers",
+ "hex",
  "log",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "ts-rs",

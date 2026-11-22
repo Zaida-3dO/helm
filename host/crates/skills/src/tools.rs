@@ -3,8 +3,10 @@
 //! They are for the user's explicit asks ("always do this", "remember that rule") and every one
 //! that changes something is filed in the change ring, so the user sees a notice with Undo
 //! ([`crate::undo`]). `scope` says whose layer: `me` (the default) is the calling chat's person,
-//! `everyone` is the layer every chat loads. Another person's layer is out of reach from here.
+//! `everyone` is the layer every chat loads. Another person's layer is reached only with `person`,
+//! which files an Approve card instead of writing ([`crate::for_person`]).
 
+use crate::for_person::{self, Named};
 use crate::launch::{self, ChatKnowledge};
 use crate::layers::{Kind, Layer};
 use crate::undo::{self, Restore};
@@ -19,9 +21,10 @@ use std::path::{Path, PathBuf};
 
 const EXPLICIT: &str = " Act only on the user's explicit request, and say in one short line where you saved it. The user is shown a notice with Undo.";
 const SCOPE_NOTE: &str = "`scope` is `me` (this chat's person, the default) or `everyone` (only when it clearly holds whoever is asking, or the user says it is for everyone).";
+const PERSON_NOTE: &str = "`person` is a profile name or id on this PC, for a rule or skill that belongs to another person: nothing is saved until the user approves a card that shows whose profile it is and the exact text. Do not combine it with `scope`; naming this chat's own person is the same as scope `me`.";
 const UNDO_NOTE: &str = "The user was shown a notice with Undo for this change.";
 
-fn profile_dir(ctx: &ToolCtx) -> Result<PathBuf, ToolError> {
+pub(crate) fn profile_dir(ctx: &ToolCtx) -> Result<PathBuf, ToolError> {
     ctx.services
         .get::<Profile>()
         .map(|p| p.dir.clone())
@@ -53,6 +56,32 @@ fn layer_of(who: &ChatKnowledge, scope: Option<&str>) -> Result<(Layer, &'static
             )),
         },
         _ => Err(ToolError::refused("scope is \"me\" or \"everyone\".")),
+    }
+}
+
+/// What a `person` argument asks for. `Ok(None)` means carry on as the call stands (no `person`, or
+/// the chat's own person, which becomes `scope: me`); `Ok(Some(p))` is another person's profile,
+/// which only an Approve card may change. The call's arguments lose `person` either way.
+fn person_of(
+    ctx: &ToolCtx,
+    who: &ChatKnowledge,
+    a: &mut Value,
+) -> Result<Option<for_person::Person>, ToolError> {
+    let Some(person) = a.as_object_mut().and_then(|o| o.remove("person")) else {
+        return Ok(None);
+    };
+    if a.get("scope").is_some() {
+        return Err(ToolError::refused("Give person or scope, not both."));
+    }
+    let person = person
+        .as_str()
+        .ok_or_else(|| ToolError::refused("person is a profile name or id."))?;
+    match for_person::resolve(ctx, who, person)? {
+        Named::Own => {
+            a["scope"] = json!("me");
+            Ok(None)
+        }
+        Named::Other(p) => Ok(Some(p)),
     }
 }
 
@@ -92,7 +121,7 @@ fn changed(ctx: &ToolCtx, layer: &Layer) {
 
 /// File a finished change in the change ring. Answers the Undo note, or `None` when it could not
 /// be filed (the change stands either way).
-fn file_change(
+pub(crate) fn file_change(
     ctx: &ToolCtx,
     data: &Path,
     before_digest: &str,
@@ -167,11 +196,14 @@ fn list_knowledge(ctx: &ToolCtx, a: Value) -> ToolResult {
     }))
 }
 
-fn save_rule(ctx: &ToolCtx, a: Value) -> ToolResult {
+fn save_rule(ctx: &ToolCtx, mut a: Value) -> ToolResult {
+    let who = launch::who(&ctx.caller_chat_id);
+    if let Some(other) = person_of(ctx, &who, &mut a)? {
+        return for_person::stage_rule(ctx, &who, other, &a);
+    }
     let title = str_arg(&a, "title").ok_or_else(|| ToolError::refused("title is required."))?;
     let text = str_arg(&a, "text").ok_or_else(|| ToolError::refused("text is required."))?;
     let data = profile_dir(ctx)?;
-    let who = launch::who(&ctx.caller_chat_id);
     let replace = str_arg(&a, "replace");
     // A replaced rule is looked for in the named layer, else the chat's own, then Everyone's.
     let (layer, label) = match replace {
@@ -234,10 +266,13 @@ fn remove_rule(ctx: &ToolCtx, a: Value) -> ToolResult {
     Ok(out)
 }
 
-fn add_skill(ctx: &ToolCtx, a: Value) -> ToolResult {
+fn add_skill(ctx: &ToolCtx, mut a: Value) -> ToolResult {
+    let who = launch::who(&ctx.caller_chat_id);
+    if let Some(other) = person_of(ctx, &who, &mut a)? {
+        return for_person::stage_skill(ctx, &who, other, &a);
+    }
     let path = str_arg(&a, "path").ok_or_else(|| ToolError::refused("path is required."))?;
     let data = profile_dir(ctx)?;
-    let who = launch::who(&ctx.caller_chat_id);
     let (layer, label) = layer_of(&who, str_arg(&a, "scope"))?;
     let source =
         helm_platform::pathgate::check(path).map_err(|r| ToolError::refused(r.message()))?;
@@ -283,6 +318,14 @@ fn scope_schema(extra: &str) -> Value {
     json!({"type": "string", "enum": ["me", "everyone"], "description": format!("{SCOPE_NOTE}{extra}")})
 }
 
+fn person_schema() -> Value {
+    json!({"type": "string", "minLength": 1, "maxLength": 64, "description": "Another person's profile name or id on this PC. Files an Approve card; nothing is saved until the user approves."})
+}
+
+fn reason_schema() -> Value {
+    json!({"type": "string", "minLength": 1, "maxLength": 1000, "description": "Why, in a sentence, shown with the card when `person` names another person."})
+}
+
 pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::read(
@@ -300,7 +343,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
         ToolSpec::write(
             "app_save_rule",
             format!(
-                "Save a rule: an instruction about how to work that this chat's person (or everyone) wants every later chat to follow. Use it when the user asks you to always or never do something. A fact or lesson belongs in memory_write instead. {SCOPE_NOTE} `replace` is the path of an existing rule to rewrite (from app_list_knowledge). `always` keeps a rule whole in every chat's prompt.{EXPLICIT}"
+                "Save a rule: an instruction about how to work that this chat's person (or everyone) wants every later chat to follow. Use it when the user asks you to always or never do something. A fact or lesson belongs in memory_write instead. {SCOPE_NOTE} `replace` is the path of an existing rule to rewrite (from app_list_knowledge). `always` keeps a rule whole in every chat's prompt. {PERSON_NOTE}{EXPLICIT}"
             ),
             json!({
                 "type": "object",
@@ -308,6 +351,8 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                     "title": {"type": "string", "minLength": 1, "maxLength": 120},
                     "text": {"type": "string", "minLength": 1, "maxLength": 16384},
                     "scope": scope_schema(""),
+                    "person": person_schema(),
+                    "reason": reason_schema(),
                     "replace": {"type": "string", "maxLength": 128, "description": "The path of the rule to rewrite, such as rules/git-habits.md."},
                     "always": {"type": "boolean", "description": "true keeps a long rule whole in every chat's prompt instead of listing it by a line; use for short, essential rules. Omit to keep the rule's current setting."}
                 },
@@ -339,13 +384,15 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
         ToolSpec::write(
             "app_add_skill",
             format!(
-                "Add a skill by copying a folder that holds a SKILL.md (an absolute path on this PC; the folder's name becomes the skill's name). {SCOPE_NOTE}{EXPLICIT}"
+                "Add a skill by copying a folder that holds a SKILL.md (an absolute path on this PC; the folder's name becomes the skill's name). {SCOPE_NOTE} {PERSON_NOTE}{EXPLICIT}"
             ),
             json!({
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "minLength": 1, "maxLength": 4096},
-                    "scope": scope_schema("")
+                    "scope": scope_schema(""),
+                    "person": person_schema(),
+                    "reason": reason_schema()
                 },
                 "required": ["path"],
                 "additionalProperties": false
@@ -658,5 +705,230 @@ mod tests {
             .find(|r| r["path"] == "rules/pinned-rule.md")
             .unwrap();
         assert_eq!(row["always"], false);
+    }
+
+    fn people_tables(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+        tx.execute_batch(
+            "CREATE TABLE profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL, hub_person_id TEXT,
+                                    is_home INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 1);
+             INSERT INTO chats(id, project_id, created_at, updated_at) VALUES ('alex-chat', 'p', 1, 1);
+             INSERT INTO profiles(id, name, hub_person_id, is_home) VALUES
+                 ('alex', 'Alex', NULL, 1), ('sam', 'Sam', 'hub-sam', 0), ('pat', 'Pat', NULL, 0);",
+        )
+    }
+
+    /// Another person's rule or skill is never written by the tool: it files one card that names
+    /// their profile and shows the exact text, and only an approval writes it, if what the card
+    /// showed is still what is there.
+    #[test]
+    fn another_persons_knowledge_waits_for_an_approved_card() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        fs::create_dir_all(&data).unwrap();
+        let mut dbreg = MigrationRegistry::new();
+        dbreg.initializer("settings-changes", helm_hosttools::settings::init);
+        dbreg.initializer("people-test", people_tables);
+        helm_consent::register_migrations(&mut dbreg);
+        let db = Arc::new(Database::open(&data.join("t.db"), &dbreg).unwrap());
+        let mut kinds = helm_consent::AllowKinds::new();
+        crate::register_allow_kinds(&mut kinds);
+        let kinds = Arc::new(kinds);
+        let mut services = helm_ipc::Services::new();
+        services.insert(db.clone());
+        services.insert(kinds.clone());
+        services.insert(Arc::new(helm_consent::MaintenanceLock::default()));
+        services.insert(Arc::new(Profile {
+            dir: data.clone(),
+            hash: String::new(),
+        }));
+        let services = Arc::new(services);
+        launch::set_lookup(Arc::new(Alex));
+        let mut reg = HostToolRegistry::new();
+        register_host_tools(&mut reg);
+        let run = |tool: &str, args: Value| call(&reg, &services, "alex-chat", tool, args);
+        let events: Arc<dyn helm_ipc::EventSink> = Arc::new(helm_ipc::NullSink);
+        let decide = |id: &str, decision| {
+            let d = helm_consent::decide_and_apply(
+                &services,
+                &events,
+                &helm_consent::ConsentDecideArgs {
+                    request_id: id.to_owned(),
+                    decision,
+                    grant_minutes: None,
+                    note: None,
+                },
+                "app",
+            )
+            .unwrap();
+            if let Some(h) = d.applying {
+                h.join().unwrap();
+            }
+        };
+        let card = |id: &str| helm_consent::store::get(&db, &kinds, id).unwrap().unwrap();
+        let sam_rule = data.join("knowledge/people/sam/rules/team-style.md");
+        let rule = json!({
+            "title": "Team style",
+            "text": "Keep notes short.\nUse plain words.",
+            "person": "sam"
+        });
+
+        // The chat's own person (by name, any case) is the same as `scope: me`: written at once.
+        let own = run(
+            "app_save_rule",
+            json!({"title": "Mine", "text": "x", "person": "ALEX"}),
+        )
+        .unwrap();
+        assert_eq!(own["scope"], "me");
+        // Refusals stage nothing: both person and scope, an unknown person, a card too long to
+        // show, hidden characters.
+        for (args, why) in [
+            (
+                json!({"title": "T", "text": "x", "person": "sam", "scope": "me"}),
+                "not both",
+            ),
+            (
+                json!({"title": "T", "text": "x", "person": "nobody"}),
+                "No person",
+            ),
+            (
+                json!({"title": "T", "text": "x".repeat(2000), "person": "sam"}),
+                "too long to show whole",
+            ),
+            (
+                json!({"title": "T", "text": "a\u{202e}b", "person": "sam"}),
+                "invisible",
+            ),
+        ] {
+            let msg = run("app_save_rule", args.clone()).unwrap_err().public;
+            assert!(msg.contains(why), "{args}: {msg}");
+        }
+        assert!(!sam_rule.exists());
+
+        // Another person's rule: a card naming their profile with the exact text; nothing written.
+        let staged = run("app_save_rule", rule.clone()).unwrap();
+        assert_eq!(staged["state"], "pending");
+        let id = staged["requestId"].as_str().unwrap().to_owned();
+        let shown = card(&id).summary;
+        for line in [
+            "Save a rule for Sam",
+            "This goes into Sam's own profile, not yours.",
+            "Title: Team style",
+            "Keep notes short.",
+            "Use plain words.",
+        ] {
+            assert!(shown.lines().any(|l| l == line), "{line}: {shown}");
+        }
+        assert!(!shown.contains("not linked"), "Sam is linked: {shown}");
+        assert!(!sam_rule.exists(), "staging writes nothing");
+
+        // Approve: written into Sam's layer, with the asking person named.
+        decide(&id, helm_consent::Decision::Allow);
+        assert!(fs::read_to_string(&sam_rule)
+            .unwrap()
+            .contains("Use plain words."));
+        let outcome = card(&id).outcome.unwrap();
+        assert!(
+            outcome
+                .starts_with("Applied. Saved the rule Team style to Sam's rules (asked by Alex)"),
+            "{outcome}"
+        );
+        assert!(!data
+            .join("knowledge/people/alex/rules/team-style.md")
+            .exists());
+
+        // Deny writes nothing; a person not linked to the hub says so on the card.
+        let pat = run(
+            "app_save_rule",
+            json!({"title": "Pat rule", "text": "Hello.", "person": "pat"}),
+        )
+        .unwrap();
+        let pid = pat["requestId"].as_str().unwrap().to_owned();
+        assert!(card(&pid)
+            .summary
+            .contains("Pat is not linked to the hub, so this applies on this PC only."));
+        decide(&pid, helm_consent::Decision::Deny);
+        assert!(!data.join("knowledge/people/pat").exists());
+
+        // A replaced rule edited after the card was filed is refused, not overwritten.
+        let rewrite = run(
+            "app_save_rule",
+            json!({
+                "title": "Team style",
+                "text": "Be brief.",
+                "person": "sam",
+                "replace": "rules/team-style.md"
+            }),
+        )
+        .unwrap();
+        let rid = rewrite["requestId"].as_str().unwrap().to_owned();
+        assert!(card(&rid)
+            .summary
+            .contains("Replaces the rule \"Team style\" (rules/team-style.md)"));
+        rules::write(
+            &Layer::Profile("sam".into()).root(&data),
+            Some("rules/team-style.md"),
+            "Team style",
+            "Edited by Sam.",
+            None,
+            None,
+            rules::MAX_AGENT_RULE_TEXT,
+        )
+        .unwrap();
+        decide(&rid, helm_consent::Decision::Allow);
+        assert!(card(&rid)
+            .outcome
+            .unwrap()
+            .starts_with("Nothing saved: the rule rules/team-style.md changed"));
+        assert!(fs::read_to_string(&sam_rule)
+            .unwrap()
+            .contains("Edited by Sam."));
+
+        // A skill: the card shows the folder, description and file count; a folder changed in
+        // between is refused, an untouched one is copied in.
+        let src = tmp.path().join("picked/note-skill");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join("SKILL.md"),
+            "---\ndescription: Takes notes\n---\nSteps.\n",
+        )
+        .unwrap();
+        let skill = run(
+            "app_add_skill",
+            json!({"path": src.to_string_lossy(), "person": "sam"}),
+        )
+        .unwrap();
+        let kid = skill["requestId"].as_str().unwrap().to_owned();
+        let shown = card(&kid).summary;
+        for line in [
+            "Add the skill note-skill for Sam",
+            "Description:",
+            "Takes notes",
+            "Files: 1",
+        ] {
+            assert!(shown.lines().any(|l| l == line), "{line}: {shown}");
+        }
+        fs::write(src.join("extra.md"), "added later").unwrap();
+        decide(&kid, helm_consent::Decision::Allow);
+        assert!(card(&kid)
+            .outcome
+            .unwrap()
+            .starts_with("Nothing saved: the folder"));
+        assert!(!data.join("knowledge/people/sam/skills").exists());
+        let skill = run(
+            "app_add_skill",
+            json!({"path": src.to_string_lossy(), "person": "sam"}),
+        )
+        .unwrap();
+        let kid = skill["requestId"].as_str().unwrap().to_owned();
+        assert!(card(&kid).summary.lines().any(|l| l == "Files: 2"));
+        decide(&kid, helm_consent::Decision::Allow);
+        assert!(data
+            .join("knowledge/people/sam/skills/note-skill/extra.md")
+            .is_file());
+        assert!(card(&kid)
+            .outcome
+            .unwrap()
+            .starts_with("Applied. Added the skill note-skill to Sam's skills"));
     }
 }

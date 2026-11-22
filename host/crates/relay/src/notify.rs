@@ -459,7 +459,7 @@ struct Look {
     rows: Option<Vec<AttentionRow>>,
     /// Requests an ask could answer (`None`: approving is off for every profile).
     waiting: Option<Vec<approve::Waiting>>,
-    /// Staged settings changes an ask could answer (`None`: approving is off, or the read failed).
+    /// Allow cards (staged changes and plain permissions) an ask could answer (`None`: approving is off, or the read failed).
     consent: Option<Vec<approve::ConsentWaiting>>,
     /// Why each open ask of a staged change that no longer waits was taken down.
     settled: HashMap<String, String>,
@@ -544,7 +544,7 @@ fn look(
         .then(|| {
             let pending = helm_consent::store::pending_all(db, kinds?, now).ok()?;
             let mut out = vec![];
-            for r in pending.into_iter().filter(|r| r.applies_on_allow) {
+            for r in pending {
                 let Some(ch) = chans
                     .iter()
                     .find(|c| owner.get(&r.chat_id).is_some_and(|p| p == &c.profile_id))
