@@ -1,7 +1,7 @@
 {
   "name": "helm",
   "private": true,
-  "version": "2.4.1",
+  "version": "2.4.2",
   "description": "Helm: npm workspaces for the renderer, worker, helpers, fakes and checks.",
   "workspaces": [
     "ui",
