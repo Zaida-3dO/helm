@@ -22,8 +22,8 @@
 //! A layer is `everyone` or `profile:<profileId>`. Every change emits `knowledge-changed {layer}`
 //! (and the older `skills-changed` or `agents-changed` for the older ops).
 
-use crate::layers::{Kind, Layer};
 use crate::launch::{self, ChatKnowledge, ProfileRef};
+use crate::layers::{Kind, Layer};
 use crate::memories::{self, HubMemory, MemError};
 use crate::sources::{self, SkillSource};
 use crate::undo::item_path;

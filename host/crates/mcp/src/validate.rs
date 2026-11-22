@@ -4,7 +4,7 @@
 //! of them quotes a value.
 
 use crate::types::*;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// Header names the client sets itself.
@@ -457,7 +457,8 @@ fn browser_name_ok(s: &str) -> bool {
     !b.is_empty()
         && b.len() <= 32
         && b[0].is_ascii_lowercase()
-        && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+        && b.iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
 }
 
 /// A Chrome extension id: exactly 32 letters from `a` to `p`, the alphabet Chrome assigns.
@@ -738,10 +739,19 @@ mod tests {
         };
         let good = broker(vec![
             ("BROKER_ATTACHED_BROWSERS", lit("brave")),
-            ("BROKER_BROWSER_BRAVE_PATH", lit(r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe")),
+            (
+                "BROKER_BROWSER_BRAVE_PATH",
+                lit(r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"),
+            ),
             ("BROKER_ATTACHED_EXTENSION_ID", lit(&"a".repeat(32))),
-            ("BROKER_ATTACHED_ACT_SITES", lit("shop.example, *.read.example.org")),
-            ("BROKER_ATTACHED_TOKEN", lit("any token shape at all, never checked")),
+            (
+                "BROKER_ATTACHED_ACT_SITES",
+                lit("shop.example, *.read.example.org"),
+            ),
+            (
+                "BROKER_ATTACHED_TOKEN",
+                lit("any token shape at all, never checked"),
+            ),
             ("BROKER_OWNER_GRANT_SECRET", envr("GRANT_VAR")),
         ]);
         assert!(validate_server(&good).is_ok());
@@ -759,16 +769,28 @@ mod tests {
             ("BROKER_ATTACHED_ACT_SITES", "shop.example/path".into()),
             ("BROKER_ATTACHED_ACT_SITES", "*shop.example".into()),
         ] {
-            let e = validate_server(&broker(vec![(key, lit(&bad_value))])).unwrap_err().0;
+            let e = validate_server(&broker(vec![(key, lit(&bad_value))]))
+                .unwrap_err()
+                .0;
             assert!(e.contains(key), "{key}={bad_value}: {e}");
-            assert!(!e.contains(&bad_value), "{key}={bad_value}: the refusal quotes the value");
+            assert!(
+                !e.contains(&bad_value),
+                "{key}={bad_value}: the refusal quotes the value"
+            );
         }
         // An empty row waits like anywhere else; an environment reference is the user's wiring,
         // shape-checked nowhere; and a non-broker server keeps its env rows as free text.
         assert!(validate_server(&broker(vec![("BROKER_ATTACHED_BROWSERS", lit(""))])).is_ok());
-        assert!(validate_server(&broker(vec![("BROKER_ATTACHED_BROWSERS", envr("Bad Var!"))])).is_ok());
+        assert!(validate_server(&broker(vec![(
+            "BROKER_ATTACHED_BROWSERS",
+            envr("Bad Var!")
+        )]))
+        .is_ok());
         let mut other = stdio("node.exe");
-        other.transport.env.insert("BROKER_ATTACHED_BROWSERS".into(), lit("Not A Name"));
+        other
+            .transport
+            .env
+            .insert("BROKER_ATTACHED_BROWSERS".into(), lit("Not A Name"));
         assert!(validate_server(&other).is_ok());
     }
 
