@@ -1244,3 +1244,161 @@ async fn a_helm_acts_as_the_person_it_names_and_memories_say_who_wrote_them() {
     let (s, _) = tool_as(&hub, &ann, Some("Ann"), "memory_list", json!({})).await;
     assert_eq!(s, 200, "a machine may always name its own person");
 }
+
+/// One memory call as `token` with the given extra request headers.
+async fn tool_headers(
+    hub: &Hub,
+    token: &str,
+    headers: &[(&str, &str)],
+    name: &str,
+    args: Value,
+) -> Value {
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                       "params": { "name": name, "arguments": args } });
+    let (status, v) = post_with(hub, "/mcp", Some(token), headers, body).await;
+    assert_eq!(status, 200, "{v}");
+    v["result"].clone()
+}
+
+#[tokio::test]
+async fn a_memory_saved_for_someone_else_is_theirs_shared_and_needs_the_approved_header() {
+    let hub = start().await;
+    let ann = add(&hub, "Ann", "desk", "memory:rw,peer");
+    let kit = add(&hub, "Kit", "pc", "memory:rw");
+    let bea_id = hub
+        .registry
+        .lock()
+        .unwrap()
+        .ensure_person("Bea")
+        .unwrap()
+        .id;
+    let bea = bea_id.to_string();
+    let text = |r: &Value| r["content"][0]["text"].as_str().unwrap_or("").to_owned();
+
+    // The hub says it honours `for`, and does not list it among the tool's arguments.
+    let (_, init) = post(
+        &hub,
+        "/mcp",
+        Some(&ann),
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
+    )
+    .await;
+    assert_eq!(
+        init["result"]["capabilities"]["experimental"]["helmHub"]["saveFor"],
+        true
+    );
+    let (_, listed) = post(
+        &hub,
+        "/mcp",
+        Some(&ann),
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+    )
+    .await;
+    assert!(!listed.to_string().contains("\"for\""), "{listed}");
+
+    // Ann's own passport memory, so ranking has something of hers to prefer.
+    let own = json!({ "title": "Ann passport", "body": "the passport is in the drawer" });
+    tool_headers(&hub, &ann, &[], "memory_write", own).await;
+
+    // Refused: `for` alone, a header naming someone else, a private scope, an unknown person,
+    // and a token without the peer scope.
+    let save = json!({ "title": "Bea passport", "body": "the passport is in the safe",
+                       "for": "Bea", "name": "saved-for-1" });
+    let other = [("x-helm-approved-for", "Ann")];
+    let named_other = [("x-helm-approved-for", "Kit")];
+    let mut private = save.clone();
+    private["scope"] = json!("me");
+    let mut stranger = save.clone();
+    stranger["for"] = json!("Nobody");
+    for (token, headers, args, why) in [
+        (&ann, &[][..], &save, "needs the user's approval"),
+        (&ann, &other[..], &save, "needs the user's approval"),
+        (&ann, &named_other[..], &save, "needs the user's approval"),
+        (
+            &ann,
+            &[("x-helm-approved-for", "Bea")][..],
+            &private,
+            "shared with the household",
+        ),
+        (
+            &ann,
+            &[("x-helm-approved-for", "Bea")][..],
+            &stranger,
+            "no person called",
+        ),
+        (
+            &kit,
+            &[("x-helm-approved-for", "Bea")][..],
+            &save,
+            "peer scope",
+        ),
+    ] {
+        let r = tool_headers(&hub, token, headers, "memory_write", args.clone()).await;
+        assert_eq!(r["isError"], true, "{r}");
+        assert!(text(&r).contains(why), "{why}: {}", text(&r));
+    }
+
+    // Approved by name or by id: Bea's, shared, saved by Ann.
+    let by_id = [("x-helm-approved-for", bea.as_str())];
+    let r = tool_headers(&hub, &ann, &by_id, "memory_write", save.clone()).await;
+    assert_eq!(r["isError"], false, "{r}");
+    let saved = &r["structuredContent"];
+    assert_eq!(
+        (saved["owner"].as_str(), saved["saved_by"].as_str()),
+        (Some("Bea"), Some("Ann"))
+    );
+    let id = saved["id"].as_i64().unwrap();
+    let read = tool_headers(&hub, &kit, &[], "memory_read", json!({ "id": id })).await;
+    let m = &read["structuredContent"];
+    assert_eq!(
+        (
+            m["owner"].as_str(),
+            m["visibility"].as_str(),
+            m["saved_by"].as_str()
+        ),
+        (Some("Bea"), Some("shared"), Some("Ann"))
+    );
+    // A memory its owner wrote has no saver.
+    let own_read = tool_headers(&hub, &ann, &[], "memory_read", json!({ "id": 1 })).await;
+    assert!(own_read["structuredContent"].get("saved_by").is_none());
+
+    // The same name again for Bea is a retry: the hub says so, and nothing is written twice.
+    let r = tool_headers(&hub, &ann, &by_id, "memory_write", save.clone()).await;
+    assert_eq!(r["isError"], true);
+    assert!(
+        text(&r).contains("already have a memory named"),
+        "{}",
+        text(&r)
+    );
+
+    // `for` the caller's own person is a plain write, with no header and no saver.
+    let mine = json!({ "title": "Own", "body": "plain", "for": "Ann" });
+    let r = tool_headers(&hub, &ann, &[], "memory_write", mine).await;
+    assert_eq!(r["isError"], false, "{r}");
+    assert!(r["structuredContent"].get("saved_by").is_none());
+
+    // Ranking follows the owner: "Bea's passport" finds Bea's, "my passport" finds Ann's.
+    let top = |r: &Value| {
+        r["structuredContent"]["results"][0]["owner"]
+            .as_str()
+            .map(str::to_owned)
+    };
+    let r = tool_headers(
+        &hub,
+        &ann,
+        &[],
+        "memory_search",
+        json!({ "query": "Bea's passport" }),
+    )
+    .await;
+    assert_eq!(top(&r).as_deref(), Some("Bea"), "{r}");
+    let r = tool_headers(
+        &hub,
+        &ann,
+        &[],
+        "memory_search",
+        json!({ "query": "my passport" }),
+    )
+    .await;
+    assert_eq!(top(&r).as_deref(), Some("Ann"), "{r}");
+}

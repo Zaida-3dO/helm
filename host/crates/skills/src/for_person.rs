@@ -1,4 +1,4 @@
-//! A rule or a skill saved into another person's own profile, on the user's Approve.
+//! A rule, a skill or a memory saved for another person, on the user's Approve.
 //!
 //! An agent may save its own person's knowledge on that person's say-so ([`crate::tools`]), but
 //! never another person's. When it names another profile (`person`), nothing is written: one
@@ -9,11 +9,19 @@
 //! that person's other PCs through the ordinary knowledge sync when their profile is linked to
 //! the hub.
 //!
+//! A memory for another person lives on the hub, not in a profile folder. The card names whose
+//! memory it becomes and shows its exact text; on Approve Helm saves it on the hub as that
+//! person's memory (shared with the household), sending the hub a header that says the user
+//! approved saving for that person. The hub keeps who saved it. A hub too old to honour that is
+//! refused before anything is filed, and again before the write, because an old hub would save
+//! the text as the asker's own.
+//!
 //! The card shows the whole text or is not filed: a text too long for a card is refused, and the
 //! agent is told so.
 
 use crate::launch::ChatKnowledge;
 use crate::layers::{self, Kind, Layer};
+use crate::memories::{HubMemory, MemError, MemoryHub, MemoryHubHandle};
 use crate::undo::{self, Restore};
 use crate::{rules, tools};
 use helm_consent::kinds::{MAX_SUMMARY, MAX_SUMMARY_LINE};
@@ -30,7 +38,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 const KIND: &str = "knowledge_for_person";
-const STAGED_WITH: &str = "app_save_rule or app_add_skill with person";
+const STAGED_WITH: &str = "app_save_rule or app_add_skill with person, or app_save_memory";
+/// Tags on a memory saved for someone else.
+const MAX_TAGS: usize = 8;
+const MAX_TAG_CHARS: usize = 40;
+const MAX_MEMORY_TITLE: usize = 120;
+/// Words that mean the one speaking, which a memory for someone else should not use.
+const FIRST_PERSON: &[&str] = &[
+    "my", "mine", "me", "i", "i'm", "im", "i've", "ive", "i'd", "i'll", "myself",
+];
 /// Rule text is shown in lines of at most this many characters (a card line holds 240).
 const TEXT_LINE: usize = 230;
 
@@ -41,6 +57,8 @@ pub(crate) struct Person {
     name: String,
     /// Linked to a person on the hub, so their layer syncs to their other PCs.
     linked: bool,
+    /// Their person on the hub, when linked.
+    hub_person: Option<String>,
 }
 
 /// Who a `person` argument names.
@@ -81,6 +99,18 @@ struct SkillChange {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MemoryChange {
+    title: String,
+    body: String,
+    tags: Vec<String>,
+    /// The hub person the memory becomes the property of.
+    for_person: String,
+    /// The hub person the asking chat acts as when it writes.
+    asker_person: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Staged {
     profile_id: String,
     profile_name: String,
@@ -89,6 +119,9 @@ struct Staged {
     asked_by: String,
     rule: Option<RuleChange>,
     skill: Option<SkillChange>,
+    /// Absent in a card filed before memories could be saved for someone else.
+    #[serde(default)]
+    memory: Option<MemoryChange>,
 }
 
 // ---- the card -----------------------------------------------------------------------------
@@ -111,6 +144,13 @@ fn wrap(s: &str, max: usize) -> Vec<String> {
     out
 }
 
+/// Whether `text` uses a first-person word, so that saved under another person's name it would be
+/// taken for their own words.
+fn speaks_as_the_asker(text: &str) -> bool {
+    text.split(|c: char| !(c.is_alphanumeric() || c == '\'' || c == '\u{2019}'))
+        .any(|w| FIRST_PERSON.contains(&w.replace('\u{2019}', "'").to_lowercase().as_str()))
+}
+
 fn yes_no(b: bool) -> &'static str {
     if b {
         "yes"
@@ -123,8 +163,8 @@ fn yes_no(b: bool) -> &'static str {
 fn card_lines(s: &Staged) -> Result<Vec<String>, String> {
     let name = &s.profile_name;
     let mut lines = Vec::new();
-    match (&s.rule, &s.skill) {
-        (Some(r), None) => {
+    match (&s.rule, &s.skill, &s.memory) {
+        (Some(r), None, None) => {
             lines.push(format!("Save a rule for {name}"));
             lines.push(format!("This goes into {name}'s own profile, not yours."));
             if !s.linked {
@@ -145,7 +185,25 @@ fn card_lines(s: &Staged) -> Result<Vec<String>, String> {
             lines.push("Text:".into());
             lines.extend(wrap(&r.text, TEXT_LINE));
         }
-        (None, Some(k)) => {
+        (None, None, Some(m)) => {
+            lines.push(format!("Save a memory for {name}"));
+            lines.push(format!(
+                "It becomes {name}'s memory, shared with the household. Asked by {}.",
+                s.asked_by
+            ));
+            lines.push(format!("Title: {}", m.title));
+            if !m.tags.is_empty() {
+                lines.push(format!("Tags: {}", m.tags.join(", ")));
+            }
+            if speaks_as_the_asker(&m.body) {
+                lines.push(format!(
+                    "The text says my, me or I: it will read as {name}'s own words."
+                ));
+            }
+            lines.push("Text:".into());
+            lines.extend(wrap(&m.body, TEXT_LINE));
+        }
+        (None, Some(k), None) => {
             lines.push(format!("Add the skill {} for {name}", k.name));
             lines.push(format!("This goes into {name}'s own profile, not yours."));
             if !s.linked {
@@ -158,7 +216,7 @@ fn card_lines(s: &Staged) -> Result<Vec<String>, String> {
             lines.extend(wrap(&k.description, TEXT_LINE));
             lines.push(format!("Files: {}", k.files));
         }
-        _ => return Err("Stage a rule or a skill, not both or neither.".into()),
+        _ => return Err("Stage a rule, a skill or a memory, not several or none.".into()),
     }
     if lines.iter().any(|l| l.chars().count() > MAX_SUMMARY_LINE) {
         return Err(format!(
@@ -169,15 +227,16 @@ fn card_lines(s: &Staged) -> Result<Vec<String>, String> {
     let total = lines.join("\n").chars().count();
     if total > MAX_SUMMARY {
         return Err(format!(
-            "too long to show whole ({total} characters): save a shorter rule, or {name} adds it in Settings."
+            "too long to show whole ({total} characters): save a shorter one, or {name} adds it from their own Helm."
         ));
     }
     Ok(lines)
 }
 
 fn canonical(_tx: &Transaction<'_>, _chat: &str, target: &Value) -> Result<Canonical, String> {
-    let staged: Staged = serde_json::from_value(target.clone())
-        .map_err(|_| "Stage this with app_save_rule or app_add_skill and a person.".to_owned())?;
+    let staged: Staged = serde_json::from_value(target.clone()).map_err(|_| {
+        "Stage this with app_save_rule, app_add_skill or app_save_memory and a person.".to_owned()
+    })?;
     let lines = card_lines(&staged)?;
     Ok(Canonical {
         target: serde_json::to_value(&staged).map_err(|e| e.to_string())?,
@@ -226,12 +285,12 @@ pub(crate) fn resolve(
         .snapshot(|tx| {
             // The id first, then the name (names are unique without regard to case).
             let row = |r: &rusqlite::Row<'_>| {
+                let hub_person = r.get::<_, Option<String>>(2)?.filter(|p| !p.is_empty());
                 Ok::<_, rusqlite::Error>(Person {
                     id: r.get(0)?,
                     name: r.get(1)?,
-                    linked: r
-                        .get::<_, Option<String>>(2)?
-                        .is_some_and(|p| !p.is_empty()),
+                    linked: hub_person.is_some(),
+                    hub_person,
                 })
             };
             let by_id = tx
@@ -363,6 +422,7 @@ pub(crate) fn stage_rule(
             replace,
         }),
         skill: None,
+        memory: None,
     };
     file(ctx, &staged, &reason_of(a))
 }
@@ -434,7 +494,120 @@ pub(crate) fn stage_skill(
             files,
             digest,
         }),
+        memory: None,
     };
+    file(ctx, &staged, &reason_of(a))
+}
+
+/// The hub that memories are saved on: a test's stand-in, else the connected `helm_hub`.
+fn hub_of(services: &helm_ipc::Services) -> Option<Arc<dyn MemoryHub>> {
+    if let Some(h) = services.get::<MemoryHubHandle>() {
+        return Some(h.0.clone());
+    }
+    let store = services.get::<helm_mcp::McpStore>()?;
+    Some(Arc::new(HubMemory { store }))
+}
+
+fn hub_error(e: MemError) -> ToolError {
+    match e {
+        MemError::Unavailable(m) => ToolError::refused(format!(
+            "[Helm] Nothing was saved or staged: shared memory cannot be reached ({m})"
+        )),
+        MemError::Refused(m) => {
+            ToolError::refused(format!("[Helm] Nothing was saved or staged: {m}"))
+        }
+    }
+}
+
+const OLD_HUB: &str = "[Helm] Nothing was saved or staged: the hub is older than this Helm and cannot save a memory for another person. Update the hub first.";
+
+/// Stage a memory for `person`: file the card, write nothing. The hub is asked only whether it
+/// can honour the save (an old one cannot); no card is filed against one that cannot.
+pub(crate) fn stage_memory(
+    ctx: &ToolCtx,
+    who: &ChatKnowledge,
+    person: Person,
+    a: &Value,
+) -> ToolResult {
+    let text_of = |key: &str| {
+        a.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| ToolError::refused(format!("{key} is required.")))
+    };
+    let title = text_of("title")?.to_owned();
+    let body = text_of("body")?.to_owned();
+    if title.chars().count() > MAX_MEMORY_TITLE {
+        return Err(ToolError::refused(
+            "A memory's title is 1 to 120 characters.",
+        ));
+    }
+    let tags: Vec<String> = match a.get("tags") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(t)) => t
+            .iter()
+            .map(|t| t.as_str().map(|t| t.trim().to_owned()))
+            .collect::<Option<_>>()
+            .ok_or_else(|| ToolError::refused("tags is a list of words."))?,
+        Some(_) => return Err(ToolError::refused("tags is a list of words.")),
+    };
+    if tags.len() > MAX_TAGS
+        || tags
+            .iter()
+            .any(|t| t.is_empty() || t.chars().count() > MAX_TAG_CHARS)
+    {
+        return Err(ToolError::refused(
+            "A memory takes up to 8 tags of up to 40 characters.",
+        ));
+    }
+    if helm_core::hidden::has_hidden(&title)
+        || hidden_in(&body)
+        || tags.iter().any(|t| helm_core::hidden::has_hidden(t))
+    {
+        return Err(ToolError::refused(
+            "The memory cannot hold control, invisible or direction-changing characters.",
+        ));
+    }
+    let Some(for_person) = person.hub_person.clone() else {
+        return Err(ToolError::refused(format!(
+            "{} is not linked to the hub, and memories live there.",
+            person.name
+        )));
+    };
+    let Some(asker_person) =
+        helm_mcp::lines::chat_person(&ctx.services, &ctx.caller_chat_id).person
+    else {
+        return Err(ToolError::refused(
+            "This chat's person is not linked to the hub, so it cannot save a memory there.",
+        ));
+    };
+    let staged = Staged {
+        profile_id: person.id.clone(),
+        profile_name: person.name.clone(),
+        linked: person.linked,
+        asked_by: asked_by(who),
+        rule: None,
+        skill: None,
+        memory: Some(MemoryChange {
+            title,
+            body,
+            tags,
+            for_person,
+            asker_person: asker_person.clone(),
+        }),
+    };
+    // A card that cannot show the whole text is refused before the hub is asked anything.
+    card_lines(&staged)
+        .map_err(|m| ToolError::refused(format!("[Helm] Nothing was saved or staged: {m}")))?;
+    let hub = hub_of(&ctx.services)
+        .ok_or_else(|| ToolError::refused("Shared memory isn't connected."))?;
+    if !hub
+        .supports_save_for(Some(&asker_person))
+        .map_err(hub_error)?
+    {
+        return Err(ToolError::refused(OLD_HUB));
+    }
     file(ctx, &staged, &reason_of(a))
 }
 
@@ -491,9 +664,78 @@ impl Applier for KnowledgeApplier {
 
     fn apply(&self, job: &ApplyJob<'_>) -> String {
         match serde_json::from_value::<Staged>(job.target.clone()) {
-            Ok(s) => apply_staged(job.services, job.events, job.chat_id, &s),
+            Ok(s) => match &s.memory {
+                Some(m) => apply_memory(job.services, job.chat_id, job.request_id, &s, m),
+                None => apply_staged(job.services, job.events, job.chat_id, &s),
+            },
             Err(_) => "Nothing saved: the request could not be read.".into(),
         }
+    }
+}
+
+/// Save an approved memory on the hub as the other person's. The write is keyed by the request,
+/// so a retry after a lost answer finds it already there.
+fn apply_memory(
+    services: &Arc<Services>,
+    chat_id: &str,
+    request_id: &str,
+    s: &Staged,
+    m: &MemoryChange,
+) -> String {
+    let nothing = |why: &str| format!("Nothing saved: {why}");
+    // The profile must still be the one the card named, linked to the same person on the hub.
+    let same = services.get::<Database>().is_some_and(|db| {
+        db.snapshot(|tx| {
+            tx.query_row(
+                "SELECT name, hub_person_id FROM profiles WHERE id = ?1",
+                [&s.profile_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+            .optional()
+        })
+        .ok()
+        .flatten()
+        .is_some_and(|(n, p)| n == s.profile_name && p.as_deref() == Some(m.for_person.as_str()))
+    });
+    if !same {
+        return nothing(&format!(
+            "{} is no longer a profile on this PC under that name and hub person. Ask again.",
+            s.profile_name
+        ));
+    }
+    let Some(hub) = hub_of(services) else {
+        return nothing("shared memory isn't connected. Ask again.");
+    };
+    let args = json!({
+        "title": m.title,
+        "body": m.body,
+        "tags": m.tags,
+        "source": "helm",
+        "name": format!("saved-for-{request_id}"),
+        "for": m.for_person,
+        "scope": "everyone",
+    });
+    match hub.call_approved(Some(&m.asker_person), "memory_write", args, &m.for_person) {
+        Ok(saved) => {
+            // The text is never logged: the chat, the profile and the hub's number.
+            log::info!(
+                "memory for another person: chat {chat_id} saved memory {} for profile {}",
+                saved["id"],
+                s.profile_id
+            );
+            format!(
+                "Applied. Saved the memory {} for {} (asked by {}).",
+                m.title, s.profile_name, s.asked_by
+            )
+        }
+        Err(MemError::Refused(why)) if why.contains("already have a memory named") => {
+            format!(
+                "Applied. Already saved: the memory {} for {} was saved before.",
+                m.title, s.profile_name
+            )
+        }
+        Err(MemError::Unavailable(_)) => nothing("the hub could not be reached. Ask again."),
+        Err(MemError::Refused(why)) => nothing(&why),
     }
 }
 

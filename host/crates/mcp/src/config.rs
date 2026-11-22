@@ -404,7 +404,14 @@ impl McpStore {
                     && !(without_chat_person && sends_chat_person(s))
                     && !(not_home && is_home_only(s))
             })
-            .map(|s| self.resolve_one(s, env, person, profile, not_home))
+            .map(|s| {
+                let mut r = self.resolve_one(s, env, person, profile, not_home);
+                // Only Helm's own approve path may send this header; a chat's connection never
+                // carries one, whatever a user saved on the server by hand.
+                r.headers
+                    .retain(|k, _| !k.eq_ignore_ascii_case(crate::memory::APPROVED_FOR_HEADER));
+                r
+            })
             .collect();
         Ok((revision, resolved))
     }
@@ -1415,6 +1422,30 @@ pub(crate) mod tests {
         let one = st.resolve_server("memories", Some("9")).unwrap().unwrap();
         assert_eq!(one.headers[PERSON_HEADER], "9");
         assert!(st.resolve_server("nope", None).unwrap().is_none());
+
+        // A header that says the user approved a save is Helm's own to send: one saved by hand
+        // never reaches a chat's connection, whatever its case, but the host's own path keeps it.
+        st.mutate(None, |l| {
+            l[2].transport.headers.insert(
+                "x-helm-approved-for".to_owned(),
+                ValueRef {
+                    profiles: Default::default(),
+                    kind: RefKind::Literal,
+                    value: Some("7".into()),
+                    secret_id: None,
+                    prefix: None,
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+        let (_, chat) = st.resolve_enabled_for(&no_env, Some("7")).unwrap();
+        assert!(!chat[2]
+            .headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("x-helm-approved-for")));
+        let host = st.resolve_server("memories", Some("7")).unwrap().unwrap();
+        assert!(host.headers.contains_key("x-helm-approved-for"));
     }
 
     /// Seed one server of each secret kind: a literal header, an env header, a credential-file

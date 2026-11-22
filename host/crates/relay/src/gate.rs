@@ -123,6 +123,7 @@ pub const TABLE: &[(&str, Class)] = &[
     ("app_roll_over", Class::Denied(CHANGES)),
     ("app_save_item", Class::Denied(LOCAL)),
     ("app_save_rule", Class::Denied(LOCAL)),
+    ("app_save_memory", Class::Denied(LOCAL)),
     ("app_saved", Class::Denied(LOCAL)),
     ("app_schedule", Class::Denied(SCHEDULES)),
     ("app_send_message", Class::Allowed),

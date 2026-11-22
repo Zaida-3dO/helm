@@ -15,6 +15,12 @@
 //! `memory_write` takes `scope`: `everyone` (the default: the whole household sees it, because the
 //! household shares one memory) or `me` (only the person sees it, chosen on purpose); `shared` and
 //! `private`, and the older `visibility`, mean the same.
+//! A memory about someone else is saved only through Helm's approved path: `memory_write` takes
+//! `for` (a person's name or id), honoured only when the request also carries
+//! `X-Helm-Approved-For` naming the same person, which only the host's Approve path sends. The
+//! memory is then owned by that person and shared, and who saved it is kept in an audit row.
+//! `initialize` says so under `capabilities.experimental.helmHub.saveFor`, so a Helm can tell a
+//! hub that would ignore `for` (and save the memory as the caller's own) from one that honours it.
 //! `memory_search` and `memory_list` take `person`: `me` (the default) and `any` both mean the
 //! memories the person may see, their own and the shared ones; a name or id narrows that to what
 //! one person wrote. Someone else's private memories are never returned. Results carry `owner`,
@@ -41,6 +47,9 @@ pub const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05
 
 /// The request header that names the person a memory call acts as.
 pub const ACT_AS_HEADER: &str = "x-helm-person";
+
+/// The request header that says the user approved saving a memory for this person.
+pub const APPROVED_FOR_HEADER: &str = "x-helm-approved-for";
 
 pub struct Options {
     /// Offer `memory_update` and `memory_delete`.
@@ -92,7 +101,7 @@ pub fn act_as(
 
 /// Answers one JSON-RPC message. `None` for a notification.
 pub fn handle(store: &mut Store, client: &Client, opts: &Options, msg: &Value) -> Option<Value> {
-    handle_with(store, client, opts, msg, &[])
+    handle_with(store, client, opts, msg, &[], None)
 }
 
 /// [`handle`], knowing who the people are: results then carry `owner` as a name, and `person`
@@ -103,6 +112,7 @@ pub fn handle_with(
     opts: &Options,
     msg: &Value,
     people: &[Person],
+    approved_for: Option<&str>,
 ) -> Option<Value> {
     let id = msg.get("id").cloned();
     let method = msg.get("method").and_then(Value::as_str);
@@ -124,7 +134,10 @@ pub fn handle_with(
                 .unwrap_or(PROTOCOL_VERSIONS[0]);
             Ok(json!({
                 "protocolVersion": version,
-                "capabilities": { "tools": { "listChanged": false } },
+                "capabilities": {
+                    "tools": { "listChanged": false },
+                    "experimental": { "helmHub": { "saveFor": true } }
+                },
                 "serverInfo": { "name": "helm-hub", "version": env!("CARGO_PKG_VERSION") },
                 "instructions": "Memory for the household: curated memories, notes and chat history. \
                     You see the household's shared memory and your own private ones. Search memory_search before non-trivial \
@@ -144,7 +157,15 @@ pub fn handle_with(
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            Ok(call_tool(store, client, opts, people, name, &args))
+            Ok(call_tool(
+                store,
+                client,
+                opts,
+                people,
+                approved_for,
+                name,
+                &args,
+            ))
         }
         _ => Err((-32601, format!("method {method:?} not found"))),
     };
@@ -287,6 +308,7 @@ fn call_tool(
     client: &Client,
     opts: &Options,
     people: &[Person],
+    approved_for: Option<&str>,
     name: &str,
     args: &Value,
 ) -> Value {
@@ -305,7 +327,7 @@ fn call_tool(
         "memory_search" => search_blocking(store, client, people, args),
         "memory_read" => read(store, client, people, args),
         "memory_list" => list(store, client, people, args),
-        "memory_write" => write(store, client, args),
+        "memory_write" => write(store, client, people, approved_for, args),
         "memory_update" | "memory_delete" if !opts.allow_mutate => {
             return tool_error(format!("{name} is turned off on this hub"));
         }
@@ -898,8 +920,14 @@ fn read(store: &mut Store, client: &Client, people: &[Person], args: &Value) -> 
         },
         _ => return Err("id or ref is required".into()),
     };
-    m.map(|m| with_owner(json!(m), m.owner_person, people))
-        .map_err(store_err)
+    let m = m.map_err(store_err)?;
+    let mut v = with_owner(json!(m), m.owner_person, people);
+    if let Some(saver) = store.saved_by(m.id).map_err(store_err)? {
+        if let Some(p) = people.iter().find(|p| p.id == saver) {
+            v["saved_by"] = Value::String(p.name.clone());
+        }
+    }
+    Ok(v)
 }
 
 fn list(store: &mut Store, client: &Client, people: &[Person], args: &Value) -> ToolResult {
@@ -936,7 +964,57 @@ fn refuse_secret(args: &Value, keys: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-fn write(store: &mut Store, client: &Client, args: &Value) -> ToolResult {
+/// A person by id or name.
+fn find_person<'a>(who: &str, people: &'a [Person]) -> Option<&'a Person> {
+    let who = who.trim();
+    who.parse::<i64>()
+        .ok()
+        .and_then(|id| people.iter().find(|p| p.id == id))
+        .or_else(|| people.iter().find(|p| p.name.eq_ignore_ascii_case(who)))
+}
+
+/// The person a `memory_write` saves for (`for`), when it is someone other than the caller. It is
+/// honoured only on Helm's approved path: the request must also carry `X-Helm-Approved-For` naming
+/// the same person, and the token must hold the `peer` scope. The memory is then shared with the
+/// household, never private, because the saver could not see a private one any more.
+fn save_for<'a>(
+    client: &Client,
+    people: &'a [Person],
+    approved_for: Option<&str>,
+    args: &Value,
+) -> Result<Option<&'a Person>, String> {
+    let Some(who) = str_arg(args, "for")?.filter(|w| !w.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let target = find_person(&who, people).ok_or_else(|| format!("no person called {who:?}"))?;
+    if target.id == client.person_id {
+        return Ok(None);
+    }
+    let approved = approved_for
+        .and_then(|a| find_person(a, people))
+        .is_some_and(|a| a.id == target.id);
+    if !approved {
+        return Err("saving a memory for another person needs the user's approval: use Helm's app_save_memory"
+            .into());
+    }
+    if !client.has(Scope::Peer) {
+        return Err("saving a memory for another person needs a token with the peer scope".into());
+    }
+    if visibility_arg(args)?.is_some_and(|v| v != Visibility::Shared) {
+        return Err("a memory saved for someone else is shared with the household; they can make it private from their own Helm"
+            .into());
+    }
+    Ok(Some(target))
+}
+
+fn write(
+    store: &mut Store,
+    client: &Client,
+    people: &[Person],
+    approved_for: Option<&str>,
+    args: &Value,
+) -> ToolResult {
+    let target = save_for(client, people, approved_for, args)?;
     refuse_secret(args, &["name", "title", "body", "description"])?;
     let m = NewMemory {
         name: str_arg(args, "name")?,
@@ -948,12 +1026,25 @@ fn write(store: &mut Store, client: &Client, args: &Value) -> ToolResult {
         source: str_arg(args, "source")?,
         links: crate::import::wiki_links(args.get("body").and_then(Value::as_str).unwrap_or("")),
         embedding: embedding_arg(args)?,
-        // The owner is the caller's person, never something the caller can claim.
-        owner: Some(client.person_id),
+        // The owner is the caller's person, or the person an approved memory is for: never
+        // something the caller can claim alone.
+        owner: Some(target.map_or(client.person_id, |t| t.id)),
         visibility: visibility_arg(args)?.unwrap_or_default(),
+        saved_by: target.map(|_| client.person_id),
     };
     let id = store.insert(m).map_err(store_err)?;
-    Ok(json!({ "id": id, "has_vector": store.has_vector(id).map_err(store_err)? }))
+    let has_vector = store.has_vector(id).map_err(store_err)?;
+    let Some(target) = target else {
+        return Ok(json!({ "id": id, "has_vector": has_vector }));
+    };
+    eprintln!(
+        "mcp: {} saved memory {id} for {}",
+        client.person, target.name
+    );
+    Ok(json!({
+        "id": id, "has_vector": has_vector,
+        "owner": target.name, "saved_by": client.person,
+    }))
 }
 
 fn update(store: &mut Store, client: &Client, args: &Value) -> ToolResult {

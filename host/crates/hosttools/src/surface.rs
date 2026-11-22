@@ -157,6 +157,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "app_remove_skill",
             "app_remove_rule",
             "app_save_rule",
+            "app_save_memory",
             "app_memory_index",
         ],
     ),
@@ -319,7 +320,7 @@ pub const FACADES: &[FacadeSpec] = &[
     FacadeSpec {
         name: "app_knowledge",
         group: "knowledge",
-        description: "The rules, skills and agents that apply to this chat: list them (list), add a skill from a folder (add_skill), remove a skill (remove_skill) or a rule (remove_rule). Save a rule with app_save_rule. Only on the user's explicit request.",
+        description: "The rules, skills and agents that apply to this chat: list them (list), add a skill from a folder (add_skill), remove a skill (remove_skill) or a rule (remove_rule). Save a rule with app_save_rule and a memory for someone else with app_save_memory. Only on the user's explicit request.",
         guidelines: "list: scope me, everyone or all. Skills show how they load.\nadd_skill: path to a folder holding a SKILL.md; scope me (default) or everyone.\nremove_skill: name, optional scope. remove_rule: path from list, optional scope.\nThe user is shown a notice with Undo. Say in one line where you saved it.",
         core: false,
         actions: &[

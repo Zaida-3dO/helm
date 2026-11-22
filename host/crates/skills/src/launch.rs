@@ -25,7 +25,7 @@ pub const RULES_PROMPT_CAP: usize = 32 * 1024;
 pub const GUEST_SETTING_SOURCES: [&str; 2] = ["project", "local"];
 
 /// The guidance that goes with the rules, so an agent files "always do this" in the right place.
-pub const GUIDANCE: &str = "When the user asks you to always or never do something, or to remember something: a rule about how to work goes in `app_save_rule`; a fact or lesson goes in `memory_write` if shared memory is connected. Use `scope: \"me\"` (this chat's person) by default. Use `scope: \"everyone\"` only when the rule clearly holds whoever is asking (a convention of a tool, codebase or process) or the user says it is for everyone. Say in one short line where you saved it.";
+pub const GUIDANCE: &str = "When the user asks you to always or never do something, or to remember something: a rule about how to work goes in `app_save_rule`; a fact or lesson goes in `memory_write` if shared memory is connected, and a memory for someone else in the household goes in `app_save_memory`. Use `scope: \"me\"` (this chat's person) by default. Use `scope: \"everyone\"` only when the rule clearly holds whoever is asking (a convention of a tool, codebase or process) or the user says it is for everyone. Say in one short line where you saved it.";
 
 /// The profile a chat belongs to.
 #[derive(Clone, Debug, PartialEq, Eq)]

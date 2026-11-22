@@ -61,6 +61,19 @@ with 400; without the header nothing changes. Every call made for another person
 machine and the person (never the arguments). The forwarded Helm tools (`app_*`) never act as
 anyone else: they still go down the caller's own lines.
 
+**Saving a memory for someone else.** `memory_write` also takes `for` (a person's name or id),
+which is not listed among the tool's arguments. The hub honours it only when the request also
+carries `X-Helm-Approved-For: <the same person>` and the token has the `peer` scope; Helm sends that
+header only after the user approved a card showing the exact text and whose memory it becomes. The
+memory is then owned by that person and shared with the household (`scope` me is refused), and
+`memory_read` shows `saved_by`, the person who saved it. The audit is the `memory_saved_for` table,
+written in the same transaction as the memory and removed with it. The header is consent, not
+security: any holder of a `peer` token can send it. `for` naming the caller's own person is a plain
+write. A hub that honours `for` says so in `initialize`, under
+`capabilities.experimental.helmHub.saveFor`; Helm checks that before it writes, because an older hub
+ignores `for` and would save the text as the caller's own. Only the owner changes or deletes a
+memory, as for any memory.
+
 **The hub never computes an embedding.** Callers that have one (Helm on the PC) pass it; callers
 that do not (another assistant, or anyone while the PC is asleep) get keyword search.
 
