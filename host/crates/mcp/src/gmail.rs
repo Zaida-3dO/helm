@@ -2023,8 +2023,8 @@ pub fn register_gmail_tools(r: &mut HostToolRegistry) {
             DRAFTS,
             "List, read or delete the drafts of one signed-in Gmail account. action list gives \
              each draft's id, subject, recipients, date and snippet (details for the first ten); \
-             get reads one whole; delete removes one for good (it needs the Drafts level). To \
-             change a draft, send app_gmail_draft with its draftId.",
+             get reads one whole; delete removes one for good: it is not moved to the bin and \
+             cannot be got back (it needs the Drafts level). To change a draft, send app_gmail_draft with its draftId.",
             json!({
                 "type": "object",
                 "properties": {

@@ -20,6 +20,36 @@ export function isBrokerServer(s: McpServer): boolean {
   return s.preset === BROKER_PRESET;
 }
 
+export const BROKER_NAME_KEY = 'BROKER_ATTACHED_BROWSERS';
+const BROWSER_NAME_SHAPE = /^[a-z][a-z0-9-]{0,31}$/;
+
+/** The environment row holding a browser's program path, named after the browser the way the
+ * broker builds it: upper-cased, dashes written as underscores. */
+export function brokerPathKey(name: string): string {
+  return `BROKER_BROWSER_${name.trim().toUpperCase().replace(/-/g, '_')}_PATH`;
+}
+
+export function isBrokerPathRow(k: string): boolean {
+  return k.startsWith('BROKER_BROWSER_') && k.endsWith('_PATH');
+}
+
+/** Typing a new browser name: sets the name row and moves the program row to the new name's
+ * key. The row to move is the one the old name points at, or, when a saved row's name came
+ * back sealed (so the old name is not known), the one program row there is. */
+export function renameBrokerBrowser(env: { [key in string]?: ValueRef }, oldName: string, raw: string): { [key in string]?: ValueRef } {
+  const next: { [key in string]?: ValueRef } = { ...env, [BROKER_NAME_KEY]: { kind: 'literal', value: raw } };
+  if (!BROWSER_NAME_SHAPE.test(raw.trim())) return next;
+  const to = brokerPathKey(raw);
+  const rows = Object.keys(env).filter(isBrokerPathRow);
+  const exact = brokerPathKey(oldName);
+  const from = env[exact] ? exact : rows.length === 1 ? rows[0]! : undefined;
+  if (from && from !== to && !env[to]) {
+    next[to] = next[from];
+    delete next[from];
+  }
+  return next;
+}
+
 function tokenMissing(s: McpServer, presets: McpPreset[]): boolean {
   const p = presets.find((x) => x.id === s.preset);
   if (!p || s.transport.type === 'stdio') return false;

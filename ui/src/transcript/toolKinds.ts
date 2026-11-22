@@ -74,7 +74,7 @@ export function toolTarget(row: MessageRow): string | null {
   );
 }
 
-/** The MCP server tools that file an Approve card instead of changing something, when asked to (`askUser`) or by their nature; the others only file one when their result says pending. */
+/** The tools that file an Approve card instead of changing something, when asked to (`askUser`), by their nature, or (a rule or skill for another person) when the result says pending; the others only file one when their result says pending. */
 const MCP_CARD_TOOLS = [
   'app_mcp_servers',
   'app_add_mcp_server',
@@ -84,6 +84,8 @@ const MCP_CARD_TOOLS = [
   'app_set_mcp_secret',
   'app_set_mcp_level',
   'app_google_sign_in',
+  'app_save_rule',
+  'app_add_skill',
 ];
 
 /** The Allow request an `app_request_allow`, `app_stage_settings`, `app_project_startup` or MCP server change call filed: the id its result names, or null. */

@@ -39,7 +39,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 /// The allow kind of an MCP server change.
@@ -117,13 +117,19 @@ fn shown_refs(m: &BTreeMap<String, ValueRef>) -> Vec<ShownRef> {
     m.iter()
         .map(|(k, r)| ShownRef {
             name: k.clone(),
-            from: match r.kind {
-                RefKind::Environment => "a variable on this PC",
-                RefKind::File => "a file on this PC",
-                RefKind::Literal => "a saved value",
-                RefKind::ChatPerson => "the chat's person",
-            }
-            .to_owned(),
+            // Where a value comes from is shown whole: a variable's name or a file's path is
+            // not a secret, and the user cannot judge a wiring they cannot see.
+            from: match (
+                r.kind,
+                r.value.as_deref().map(str::trim).filter(|v| !v.is_empty()),
+            ) {
+                (RefKind::Environment, Some(v)) => format!("from the variable {v}"),
+                (RefKind::Environment, None) => "a variable on this PC".to_owned(),
+                (RefKind::File, Some(v)) => format!("from the file {v}"),
+                (RefKind::File, None) => "a file on this PC".to_owned(),
+                (RefKind::Literal, _) => "a saved value".to_owned(),
+                (RefKind::ChatPerson, _) => "the chat's person".to_owned(),
+            },
             // The reference without its saved id: a saved value kept as it was is no change.
             digest: digest_of(&(
                 r.kind,
@@ -242,12 +248,12 @@ fn describe(s: &ServerShown) -> Vec<String> {
             out.push(format!("Argument {}: {a}", i + 1));
         }
         if !s.env.is_empty() {
-            out.push(format!("Variables (names only): {}", names(&s.env)));
+            out.push(format!("Variables: {}", names(&s.env)));
         }
     } else {
         out.push(format!("Address: {}", s.url.as_deref().unwrap_or("")));
         if !s.headers.is_empty() {
-            out.push(format!("Headers (names only): {}", names(&s.headers)));
+            out.push(format!("Headers: {}", names(&s.headers)));
         }
         if s.oauth.is_some() {
             out.push("Signs in through the browser (OAuth).".into());
@@ -526,6 +532,28 @@ fn carries_value(list: &[McpServer]) -> bool {
     })
 }
 
+/// Whether the call's own arguments hold a typed value anywhere: the card keeps them as given,
+/// so a value that the same call takes out again (a variable set and then removed) would still
+/// be stored in plain text if only the resulting list were checked.
+fn args_carry_value(v: &Value) -> bool {
+    match v {
+        Value::Object(o) => {
+            let literal = o.get("kind").and_then(Value::as_str) == Some("literal")
+                && o.get("value").is_some_and(|x| !x.is_null());
+            let person = o
+                .get("profiles")
+                .and_then(Value::as_object)
+                .is_some_and(|m| {
+                    m.values()
+                        .any(|p| p.get("value").is_some_and(|x| !x.is_null()))
+                });
+            literal || person || o.values().any(args_carry_value)
+        }
+        Value::Array(a) => a.iter().any(args_carry_value),
+        _ => false,
+    }
+}
+
 /// The tool a stored op was made with.
 fn tool_of(op: &str) -> Option<&'static str> {
     Some(match op {
@@ -560,7 +588,7 @@ pub(crate) fn stage_admin(ctx: &ToolCtx, tool: &str, args: Value) -> ToolResult 
     let (before, after) = store
         .preview(Some(&revision), |list| change.apply_to(list, Who::Approved))
         .map_err(|e| refuse(e.to_string()))?;
-    if carries_value(&after) {
+    if carries_value(&after) || args_carry_value(&args) {
         return Err(refuse(
             "a card never carries a secret value. Leave the value out: the user types it in Settings > MCP, or a person's own value is saved with app_set_mcp_secret from a file.",
         ));
@@ -703,8 +731,23 @@ fn set_profile_value(
     Ok(())
 }
 
-/// A path a chat may name: absolute on this PC, no `.` or `..` part, short enough to show whole.
-fn plain_path(raw: &str) -> Result<String, String> {
+/// Claude Code's own config folder: `CLAUDE_CONFIG_DIR` when it is set, else `~/.claude`.
+fn claude_config_dir() -> Option<PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+                .filter(|h| !h.is_empty())
+                .map(|h| PathBuf::from(h).join(".claude"))
+        })
+}
+
+/// A path a chat may name: absolute on this PC, no `.` or `..` part, short enough to show whole,
+/// and not inside Helm's own data folder or Claude Code's config folder. The file is read and
+/// then deleted, so neither folder's files may be named: one holds Claude Code's sign-in, the
+/// other Helm's own state.
+fn plain_path(raw: &str, data: Option<&Path>, claude: Option<&Path>) -> Result<String, String> {
     let s = raw.trim();
     let bad = || "valueFile must be an absolute path on this PC, with no '..' part.".to_owned();
     if s.is_empty() || s.chars().count() > MAX_PATH {
@@ -719,6 +762,16 @@ fn plain_path(raw: &str) -> Result<String, String> {
         || p.components().any(|c| matches!(c, Component::ParentDir))
     {
         return Err(bad());
+    }
+    for (root, whose) in [
+        (data, "Helm's own data folder"),
+        (claude, "Claude Code's own folder"),
+    ] {
+        if let Some(root) = root {
+            if helm_platform::private::PrivateRoots::new(&[root.to_path_buf()]).contains(p) {
+                return Err(format!("valueFile cannot be inside {whose}."));
+            }
+        }
     }
     Ok(s.to_owned())
 }
@@ -788,7 +841,12 @@ fn stage_secret(ctx: &ToolCtx, args: Value) -> ToolResult {
             "a per-person value needs a typed secret: this one is read from a variable or file, so ask the user to change it in Settings > MCP.",
         ));
     }
-    let file = plain_path(text_arg(&args, "valueFile")?).map_err(refuse)?;
+    let file = plain_path(
+        text_arg(&args, "valueFile")?,
+        store.data_dir(),
+        claude_config_dir().as_deref(),
+    )
+    .map_err(refuse)?;
     value_file_looks_right(&file).map_err(refuse)?;
     let sc = SecretChange {
         server: server.id.clone(),

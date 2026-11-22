@@ -1673,7 +1673,7 @@ pub(crate) fn register_ops(reg: &mut OpRegistry) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::config::tests::store;
     use crate::oauth::fake::{Cfg, Fake};
@@ -1684,7 +1684,7 @@ mod tests {
 
     /// Only one test at a time may point the sign-in at its own fake server: the hook is a
     /// process-wide environment variable.
-    static AS_LOCK: Mutex<()> = Mutex::new(());
+    pub(crate) static AS_LOCK: Mutex<()> = Mutex::new(());
 
     fn strings(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()

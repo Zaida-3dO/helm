@@ -14,7 +14,7 @@ import { GoogleAccountsDialog } from './GoogleAccounts.tsx';
 import { ProfileValues } from './ProfileValues.tsx';
 import { GOOGLE_PRESET, googleOps, isGoogleServer } from './google.ts';
 import { WAITING_NOTE, canDisconnect, connectLabel, isOAuthServer, oauthOps, type OAuthStatus } from './oauth.ts';
-import { BROKER_PRESET, blankServer, copyImportable, draftFromPreset, isBrokerServer, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable } from './readiness.ts';
+import { BROKER_NAME_KEY, BROKER_PRESET, blankServer, brokerPathKey, isBrokerPathRow, renameBrokerBrowser, copyImportable, draftFromPreset, isBrokerServer, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable } from './readiness.ts';
 
 type Refs = { [key in string]?: ValueRef };
 
@@ -96,44 +96,26 @@ function RefRows({ refs, onChange, kindLabel, headers = false }: { refs: Refs; o
 // secret. The browser's program row is named after the browser (upper-cased, dashes written as
 // underscores, the way the broker builds it), and renaming the browser renames that row.
 
-const BROWSER_NAME_KEY = 'BROKER_ATTACHED_BROWSERS';
 const EXTENSION_KEY = 'BROKER_ATTACHED_EXTENSION_ID';
 const SITES_KEY = 'BROKER_ATTACHED_ACT_SITES';
 const TOKEN_KEY = 'BROKER_ATTACHED_TOKEN';
-const NAME_SHAPE = /^[a-z][a-z0-9-]{0,31}$/;
-
-function brokerPathKey(name: string): string {
-  return `BROKER_BROWSER_${name.trim().toUpperCase().replace(/-/g, '_')}_PATH`;
-}
-
-function isBrokerPathRow(k: string): boolean {
-  return k.startsWith('BROKER_BROWSER_') && k.endsWith('_PATH');
-}
 
 /** The rows the block below already edits, left out of the generic environment list so the
  * same value never has two boxes. The connect token stays a generic row: there is where its
  * per-profile values live. */
 function isBrokerFormRow(k: string): boolean {
-  return k === BROWSER_NAME_KEY || k === EXTENSION_KEY || k === SITES_KEY || isBrokerPathRow(k);
+  return k === BROKER_NAME_KEY || k === EXTENSION_KEY || k === SITES_KEY || isBrokerPathRow(k);
 }
 
 function BrokerBlock({ env, onChange, onFindBrowsers }: { env: Refs; onChange: (env: Refs) => void; onFindBrowsers?: () => Promise<BrowserInstall[]> }) {
   const [found, setFound] = useState<BrowserInstall[] | 'loading' | null>(null);
-  const name = env[BROWSER_NAME_KEY]?.value ?? '';
+  const name = env[BROKER_NAME_KEY]?.value ?? '';
   const exact = brokerPathKey(name || 'brave');
   const pathKey = env[exact] || !Object.keys(env).some(isBrokerPathRow) ? exact : Object.keys(env).find(isBrokerPathRow)!;
   const put = (key: string, value: string) => onChange({ ...env, [key]: { kind: 'literal', value } });
-  const setName = (raw: string) => {
-    const next: Refs = { ...env, [BROWSER_NAME_KEY]: { kind: 'literal', value: raw } };
-    const from = brokerPathKey(name);
-    const to = brokerPathKey(raw);
-    // Renaming the browser renames its program row, so the path the user set follows the name.
-    if (NAME_SHAPE.test(raw.trim()) && from !== to && next[from]) {
-      next[to] = next[from];
-      delete next[from];
-    }
-    onChange(next);
-  };
+  const setName = (raw: string) => onChange(renameBrokerBrowser(env, name, raw));
+  // A saved value comes back sealed: the field is empty, so say it is kept, as the token field does.
+  const kept = (key: string, fallback: string) => (env[key]?.kind === 'literal' && env[key]?.secretId && !env[key]?.value ? 'Saved; type to replace' : fallback);
   const find = () => {
     if (!onFindBrowsers) return;
     setFound('loading');
@@ -146,11 +128,11 @@ function BrokerBlock({ env, onChange, onFindBrowsers }: { env: Refs; onChange: (
     <div className="mcp-browser">
       <label className="mcp-field">
         <span>Browser name</span>
-        <TextInput data-testid="mcp-browser-name" spellCheck={false} value={name} placeholder="brave" onChange={(e) => setName(e.target.value)} />
+        <TextInput data-testid="mcp-browser-name" spellCheck={false} value={name} placeholder={kept(BROKER_NAME_KEY, 'brave')} onChange={(e) => setName(e.target.value)} />
       </label>
       <label className="mcp-field">
         <span>Browser program</span>
-        <TextInput data-testid="mcp-browser-program" spellCheck={false} value={env[pathKey]?.value ?? ''} placeholder="C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe" onChange={(e) => put(pathKey, e.target.value)} />
+        <TextInput data-testid="mcp-browser-program" spellCheck={false} value={env[pathKey]?.value ?? ''} placeholder={kept(pathKey, 'C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe')} onChange={(e) => put(pathKey, e.target.value)} />
       </label>
       <p className="mcp-help">
         Saved as <code>{pathKey}</code>; renaming the browser renames that variable.
@@ -172,11 +154,11 @@ function BrokerBlock({ env, onChange, onFindBrowsers }: { env: Refs; onChange: (
       )}
       <label className="mcp-field">
         <span>Extension id</span>
-        <TextInput data-testid="mcp-browser-extension" spellCheck={false} autoComplete="off" value={env[EXTENSION_KEY]?.value ?? ''} placeholder="32 letters from a to p, from your browser's extension page" onChange={(e) => put(EXTENSION_KEY, e.target.value)} />
+        <TextInput data-testid="mcp-browser-extension" spellCheck={false} autoComplete="off" value={env[EXTENSION_KEY]?.value ?? ''} placeholder={kept(EXTENSION_KEY, "32 letters from a to p, from your browser's extension page")} onChange={(e) => put(EXTENSION_KEY, e.target.value)} />
       </label>
       <label className="mcp-field">
         <span>Sites chats may act on</span>
-        <TextInput data-testid="mcp-browser-sites" spellCheck={false} value={env[SITES_KEY]?.value ?? ''} placeholder="shop.example, *.read.example.org" onChange={(e) => put(SITES_KEY, e.target.value)} />
+        <TextInput data-testid="mcp-browser-sites" spellCheck={false} value={env[SITES_KEY]?.value ?? ''} placeholder={kept(SITES_KEY, 'shop.example, *.read.example.org')} onChange={(e) => put(SITES_KEY, e.target.value)} />
       </label>
       <p className="mcp-help">Empty means chats only read pages; they never act anywhere. Reading is allowed on any site.</p>
       <label className="mcp-field">

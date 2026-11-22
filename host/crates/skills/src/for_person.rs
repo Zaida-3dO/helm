@@ -285,8 +285,12 @@ fn folder_digest(dir: &Path) -> std::io::Result<(usize, String)> {
     Ok((files.len(), digest_hex(parts)))
 }
 
+/// Text for another person's rule or skill: line breaks and tabs pass, every other control
+/// character and every invisible or direction-changing one is refused.
 fn hidden_in(s: &str) -> bool {
-    helm_core::hidden::find_hidden(&Value::String(s.to_owned())).is_some()
+    s.chars()
+        .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+        || helm_core::hidden::find_hidden(&Value::String(s.to_owned())).is_some()
 }
 
 fn reason_of(a: &Value) -> String {
@@ -633,4 +637,23 @@ fn apply_staged(
         " It applies on this PC only."
     };
     format!("Applied. {said} (asked by {}).{sync}{undo}", s.asked_by)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hidden_in;
+
+    #[test]
+    fn rule_text_refuses_control_and_invisible_characters_but_not_line_breaks_or_tabs() {
+        for (text, refused) in [
+            ("Always\nuse\r\ntabs\there", false),
+            ("bell\u{7}", true),
+            ("escape\u{1b}[31m", true),
+            ("null\u{0}", true),
+            ("direction\u{202e}", true),
+            ("zero\u{200b}width", true),
+        ] {
+            assert_eq!(hidden_in(text), refused, "{text:?}");
+        }
+    }
 }

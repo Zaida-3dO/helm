@@ -369,7 +369,7 @@ test("the appended prompt rides a file, not the command line; an older CLI stays
     const inline = buildClaudeArgs({ appendSystemPrompt: "short rule" }, { promptRule: "also short" });
     assert.equal(flag(inline, "--append-system-prompt"), "short rule\n\nalso short");
     assert.equal(inline.includes("--append-system-prompt-file"), false);
-    assert.throws(() => appendFileFor("L".repeat(24_001), "2.0.5", "C:/bin/claude.exe", dir), /C:\/bin\/claude\.exe.*too long.*update claude/);
+    assert.throws(() => appendFileFor("L".repeat(24_001), "2.0.5", "C:/bin/claude.exe", dir), /too long for claude 2\.0\.5 at C:\/bin\/claude\.exe: update claude/);
     // No folder to write into (nothing starts the worker through a launch.json): the same cap applies.
     assert.throws(() => appendFileFor("L".repeat(24_001), undefined, "C:/bin/claude.exe", undefined), /too long/);
   } finally {

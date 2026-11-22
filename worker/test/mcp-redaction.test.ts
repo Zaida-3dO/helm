@@ -159,4 +159,7 @@ test("the broker's lease key survives redaction; every other server's is redacte
   // A kept string equal to a resolved secret is never kept: the secret list outranks the keeps.
   const red2 = new Redactor([LEASE]);
   assert.ok(!red2.text(`lease ${LEASE}`, [LEASE]).includes(LEASE), "a keep that equals a secret is redacted");
+  // Nor is a kept string that is only part of a secret.
+  const red3 = new Redactor([`prefix-${LEASE}-suffix`]);
+  assert.ok(!red3.text(`token ${LEASE}`, [LEASE]).includes(LEASE), "a keep inside a secret is shape-redacted like any other run");
 });

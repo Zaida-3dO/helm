@@ -72,7 +72,7 @@ test('layers: the rules budget note appears at 80% of the cap and names both fig
   // 80% of 32 KiB is 26,214.4 bytes: just under stays quiet, just over reads in KB.
   assert.equal(rulesBudgetNote({ usedBytes: 26_213, capBytes: 32_768 }), null);
   assert.equal(
-    rulesBudgetNote({ usedBytes: 26_214, capBytes: 32_768 }),
+    rulesBudgetNote({ usedBytes: 26_215, capBytes: 32_768 }),
     'Rules kept whole use 26 KB of the 32 KB chats get; past that the rest are only listed by name.',
   );
   assert.equal(

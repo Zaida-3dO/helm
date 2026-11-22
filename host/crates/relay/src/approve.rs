@@ -261,8 +261,7 @@ pub fn consent_offer(w: &ConsentWaiting) -> Option<Offer> {
     let (mut text, yes, open) = if r.applies_on_allow {
         (
             format!(
-                "{who} asks for this change and needs your approval:
-{}",
+                "{who} asks for this change and needs your approval:\n{}",
                 r.summary.trim()
             ),
             APPROVE,
@@ -271,8 +270,7 @@ pub fn consent_offer(w: &ConsentWaiting) -> Option<Offer> {
     } else {
         (
             format!(
-                "{who} asks for your Allow: {}
-{}",
+                "{who} asks for your Allow: {}\n{}",
                 r.label.trim(),
                 r.summary.trim()
             ),
@@ -286,9 +284,7 @@ pub fn consent_offer(w: &ConsentWaiting) -> Option<Offer> {
     } else {
         text = cut(&text, CONSENT_FIT);
         text.push_str(&format!(
-            "
-
-Too long to show in full here: open Helm to {open} it."
+            "\n\nToo long to show in full here: open Helm to {open} it."
         ));
         vec![DENY.to_owned()]
     };
@@ -1079,6 +1075,125 @@ mod tests {
                 assert_eq!(s.done.len(), 1, "{c}");
                 assert_eq!(s.done[0].2, row.note, "{c}");
             }
+        }
+    }
+
+    /// A plain permission card (Helm applies nothing) goes to Telegram too: Allow and Deny with
+    /// the whole text, a tap on Allow answers as the request's own grant, a text past the limit
+    /// offers Deny only, and a household member's chat is refused at the decision.
+    #[test]
+    fn a_plain_allow_card_is_offered_whole_and_allowed_once_for_its_own_grant() {
+        struct Row {
+            case: &'static str,
+            long: bool,
+            member: bool,
+        }
+        let rows = [
+            Row {
+                case: "the owner's chat",
+                long: false,
+                member: false,
+            },
+            Row {
+                case: "too long to show: only Deny",
+                long: true,
+                member: false,
+            },
+            Row {
+                case: "a household member's chat",
+                long: false,
+                member: true,
+            },
+        ];
+        for row in rows {
+            let c = row.case;
+            let dir = tempfile::tempdir().unwrap();
+            let mut reg = helm_core::db::MigrationRegistry::new();
+            helm_chats::register_migrations(&mut reg);
+            helm_consent::register_migrations(&mut reg);
+            helm_profiles::register_migrations(&mut reg);
+            let db = std::sync::Arc::new(
+                helm_core::db::Database::open(&dir.path().join("t.db"), &reg).unwrap(),
+            );
+            db.write::<_, helm_profiles::store::ProfileError>(|tx| {
+                tx.execute(
+                    "INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 1)",
+                    [],
+                )?;
+                tx.execute(
+                    "INSERT INTO chats(id, project_id, created_at, updated_at) VALUES ('c1', 'p', 1, 1)",
+                    [],
+                )?;
+                helm_profiles::store::ensure_home(tx, 1)?;
+                if row.member {
+                    let alex = helm_profiles::store::create(tx, "Alex", None, Some("9"), 2)?;
+                    helm_profiles::store::assign(tx, &["c1".into()], &alex.id)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+            let mut kinds = helm_consent::AllowKinds::new();
+            kinds.register(helm_consent::kinds::test_kind());
+            let kinds = std::sync::Arc::new(kinds);
+            let mut services = helm_ipc::Services::new();
+            services.insert(db.clone());
+            services.insert(kinds.clone());
+            let services = std::sync::Arc::new(services);
+            let events: std::sync::Arc<dyn helm_ipc::EventSink> =
+                std::sync::Arc::new(helm_ipc::RecordingSink::default());
+            let target = json!({ "name": "alpha" });
+            let request = helm_consent::store::request(
+                &db,
+                &kinds,
+                helm_consent::NewRequest {
+                    chat_id: "c1",
+                    kind: "test_action",
+                    target: &target,
+                    reason: "The user asked.",
+                    evidence: "",
+                    grant_minutes: Some(45),
+                    tool_use_id: None,
+                },
+                helm_core::now_ms(),
+            )
+            .unwrap();
+            assert!(!request.applies_on_allow, "{c}");
+            let mut shown = request.clone();
+            if row.long {
+                shown.summary = "x".repeat(4000);
+            }
+            let waiting = ConsentWaiting {
+                chat_id: "c1".into(),
+                chat_title: "Docs".into(),
+                person: "p7".into(),
+                request: shown,
+            };
+            let offer = consent_offer(&waiting).unwrap();
+            assert_eq!(offer.full, !row.long, "{c}");
+            if row.long {
+                assert_eq!(offer.ask.options, vec!["Deny"], "{c}");
+                assert!(offer.text.ends_with("open Helm to allow it."), "{c}");
+                continue;
+            }
+            assert_eq!(offer.ask.options, vec!["Allow", "Deny"], "{c}");
+            assert_eq!(
+                offer.text,
+                "The chat \"Docs\" asks for your Allow: Run a test action\nRun the test action alpha",
+                "{c}"
+            );
+            let r = decide_consent(&services, &events, &offer.ask, 0);
+            let after = helm_consent::store::get(&db, &kinds, &request.id)
+                .unwrap()
+                .unwrap();
+            if row.member {
+                assert_eq!(r.err().map(|e| e.code), Some("forbidden".into()), "{c}");
+                assert_eq!(after.state, RequestState::Pending, "{c}");
+                continue;
+            }
+            assert!(r.unwrap().applying.is_none(), "{c}: nothing to apply");
+            assert_eq!(after.state, RequestState::Allowed, "{c}");
+            assert_eq!(after.decided_via.as_deref(), Some("telegram"), "{c}");
+            assert_eq!(after.grant_minutes, 45, "{c}");
         }
     }
 }

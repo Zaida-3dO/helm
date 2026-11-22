@@ -783,7 +783,7 @@ mod tests {
         assert!(validate_server(&broker(vec![("BROKER_ATTACHED_BROWSERS", lit(""))])).is_ok());
         assert!(validate_server(&broker(vec![(
             "BROKER_ATTACHED_BROWSERS",
-            envr("Bad Var!")
+            envr("MY_BROWSER")
         )]))
         .is_ok());
         let mut other = stdio("node.exe");

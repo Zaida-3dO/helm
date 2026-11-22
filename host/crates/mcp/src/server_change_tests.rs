@@ -199,8 +199,8 @@ fn a_change_the_user_approves_is_saved_as_the_card_showed_it() {
     e.put(stdio("fake", "Fake", vec![]));
 
     // An agent's own call to run the browser broker is refused with how to ask, and changes
-    // nothing; the same call with askUser files a card showing every line and no variable's
-    // source name.
+    // nothing; the same call with askUser files a card showing every line and where each
+    // variable comes from.
     let add = |rev: &str, env: Value, extra: Value| {
         let mut a = json!({"revision": rev, "server": {"id": "bk", "name": "Browser copy", "enabled": true,
             "transport": {"type": "stdio", "command": "node.exe",
@@ -224,12 +224,11 @@ fn a_change_the_user_approves_is_saved_as_the_card_showed_it() {
             "Argument 1: broker-tool.js",
             "Argument 2: --port",
             "Argument 3: 9",
-            "Variables (names only): BROKER_TOKEN (a variable on this PC)",
+            "Variables: BROKER_TOKEN (from the variable X_HOST_VAR)",
             "Approving saves this once. The program runs when a chat next uses this server.",
         ]
         .join("\n")
     );
-    assert!(!e.column(&id, "summary").contains("X_HOST_VAR"));
     assert_eq!(
         e.store.load().unwrap().len(),
         1,
@@ -313,6 +312,18 @@ fn a_change_the_user_approves_is_saved_as_the_card_showed_it() {
         assert!(err.contains(says), "{what}: {err}");
         assert!(!err.contains("hunter2"), "{what}: {err}");
     }
+    // A typed value the same call takes out again would still be kept on the card's target.
+    let err = e
+        .call(
+            admin::EDIT,
+            json!({"revision": e.revision(), "serverId": "fake", "askUser": true, "reason": "x",
+                "env": {"TOKEN": {"kind": "literal", "value": "hunter2"}}, "removeEnv": ["TOKEN"]}),
+        )
+        .unwrap_err();
+    assert!(
+        err.contains("never carries a secret value") && !err.contains("hunter2"),
+        "{err}"
+    );
     let err = e
         .call(
             admin::UPDATE,
@@ -341,8 +352,10 @@ fn a_person_gets_their_own_secret_from_a_file_and_the_level_of_a_google_server_c
             ),
         ],
     ));
+    // The value files live outside the profile folder, which a file may not be named from.
+    let files = tempfile::tempdir().unwrap();
     let file = |name: &str, text: &str| {
-        let p = e.dir.path().join(name);
+        let p = files.path().join(name);
         std::fs::write(&p, text).unwrap();
         p.to_string_lossy().into_owned()
     };
@@ -394,13 +407,35 @@ fn a_person_gets_their_own_secret_from_a_file_and_the_level_of_a_google_server_c
             "absolute path",
         ),
         (
-            secret("sam", "TOKEN", &e.dir.path().to_string_lossy(), false),
+            secret("sam", "TOKEN", &files.path().to_string_lossy(), false),
             "plain file",
+        ),
+        (
+            secret(
+                "sam",
+                "TOKEN",
+                &e.dir.path().join("t.db").to_string_lossy(),
+                false,
+            ),
+            "Helm's own data folder",
         ),
     ] {
         let err = e.call(SECRET_TOOL, args).unwrap_err();
         assert!(err.contains(says), "{says}: {err}");
     }
+
+    // Claude Code's config folder is refused by the path check itself (its place comes from the
+    // environment, so the folder is passed in here).
+    let claude = tempfile::tempdir().unwrap();
+    let creds = claude.path().join(".credentials.json");
+    std::fs::write(&creds, "x").unwrap();
+    let creds = creds.to_string_lossy().into_owned();
+    let err = plain_path(&creds, e.store.data_dir(), Some(claude.path())).unwrap_err();
+    assert!(err.contains("Claude Code's own folder"), "{err}");
+    assert_eq!(
+        plain_path(&creds, e.store.data_dir(), None).as_deref(),
+        Ok(creds.as_str())
+    );
 
     // The Google server's level belongs to every account on it; any other server has none.
     let mut g = stdio("google", "Google accounts", vec![]);

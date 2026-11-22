@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import type { ChatMcpProblem, McpPreset, McpServer } from '../../api/mcp.ts';
 import { CALENDAR_HELP, CALENDAR_OPTIONS, CONSOLE_STEPS, GOOGLE_PRESET, SIGN_IN_WINDOW_MS, blockState, calendarInArgs, clientLooksSet, watchState, type GoogleAccountList } from './google.ts';
 import { canDisconnect, connectLabel } from './oauth.ts';
-import { BROKER_PRESET, blankServer, brokerMissing, chatMcpNoticeText, copyImportable, draftFromPreset, isBrokerServer, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable, withProfileValue } from './readiness.ts';
+import { BROKER_PRESET, blankServer, brokerMissing, chatMcpNoticeText, copyImportable, draftFromPreset, isBrokerServer, isPlainRemoteHttp, pageReadiness, renameBrokerBrowser, serverReadiness, toSaveable, withProfileValue } from './readiness.ts';
 
 const hub: McpPreset = {
   id: 'helm_hub',
@@ -105,6 +105,15 @@ test('the browser preset starts at the broker entry with its variables filled in
   assert.equal(brokerMissing({ ...filled, transport: { ...filled.transport, env: env({ BROKER_ATTACHED_BROWSERS: { kind: 'literal', value: '' } }) } }), "Needs your browser's name.");
   assert.equal(brokerMissing({ ...filled, transport: { ...filled.transport, env: env({ BROKER_ATTACHED_EXTENSION_ID: { kind: 'literal', value: '' } }) } }), "Needs your browser's extension id.");
   assert.equal(brokerMissing({ ...filled, transport: { ...filled.transport, env: env({ BROKER_BROWSER_BRAVE_PATH: { kind: 'literal', value: '' } }) } }), "Needs your browser's program path.");
+  // Renaming after a reload: the saved name came back sealed (no value), so the one program row
+  // is the one that follows the new name; a typed name moves its own row; a half-typed bad name
+  // moves nothing.
+  const sealed = { BROKER_ATTACHED_BROWSERS: { kind: 'literal', secretId: 's1' }, BROKER_BROWSER_OLD_PATH: { kind: 'literal', secretId: 's2' } } as McpServer['transport']['env'];
+  const moved = renameBrokerBrowser(sealed!, '', 'b');
+  assert.deepEqual(Object.keys(moved).sort(), ['BROKER_ATTACHED_BROWSERS', 'BROKER_BROWSER_B_PATH']);
+  assert.equal(moved.BROKER_BROWSER_B_PATH?.secretId, 's2', 'the saved path value travels with the row');
+  assert.deepEqual(Object.keys(renameBrokerBrowser(env()!, 'brave', 'my-edge')).sort(), ['BROKER_ATTACHED_ACT_SITES', 'BROKER_ATTACHED_BROWSERS', 'BROKER_ATTACHED_EXTENSION_ID', 'BROKER_BROWSER_MY_EDGE_PATH']);
+  assert.ok('BROKER_BROWSER_BRAVE_PATH' in renameBrokerBrowser(env()!, 'brave', 'Not A Name'), 'a name that is not a browser name moves no row');
   // The doctor row belongs to the browser server only.
   assert.ok(isBrokerServer(d));
   assert.ok(!isBrokerServer(draftFromPreset(hub, [])));

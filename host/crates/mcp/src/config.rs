@@ -81,6 +81,11 @@ impl McpStore {
         }
     }
 
+    /// The folder holding this profile's own data (the config file lives in it).
+    pub fn data_dir(&self) -> Option<&Path> {
+        self.path.parent()
+    }
+
     /// The lock a server's sign-in refreshes and saves take, so two callers never spend the
     /// same refresh token.
     pub(crate) fn refresh_lock(&self, server_id: &str) -> Arc<Mutex<()>> {

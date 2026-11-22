@@ -126,18 +126,30 @@ fn process_dirs() -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-/// The file `name` names in the first of `dirs` that has it: `name` itself, or `name.exe`.
-/// Real executables only; a `.cmd` or `.bat` shim is never started.
+/// The file `name` names in the first of `dirs` that has it: `name.exe` or `name` itself.
+/// Real executables only; a `.cmd` or `.bat` shim is never started. On Windows the `.exe` comes
+/// first and a file with no extension is not taken at all: npm leaves a shell script of that
+/// kind beside its `.cmd` shim, and it cannot be started.
 fn find_in(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
-    let with_exe = if name.to_ascii_lowercase().ends_with(".exe") {
-        None
-    } else {
-        Some(format!("{name}.exe"))
-    };
+    let has_exe = name.to_ascii_lowercase().ends_with(".exe");
+    let with_exe = (!has_exe).then(|| format!("{name}.exe"));
+    let extensionless_ok = !cfg!(windows) || std::path::Path::new(name).extension().is_some();
     dirs.iter().find_map(|d| {
+        if cfg!(windows) {
+            if let Some(p) = with_exe
+                .as_deref()
+                .map(|n| d.join(n))
+                .filter(|p| p.is_file())
+            {
+                return Some(p);
+            }
+        }
         let plain = d.join(name);
-        if plain.is_file() {
+        if extensionless_ok && plain.is_file() {
             return Some(plain);
+        }
+        if cfg!(windows) {
+            return None;
         }
         with_exe
             .as_deref()
@@ -219,6 +231,18 @@ mod tests {
                 "{left_alone}"
             );
         }
+        // npm leaves an extensionless shell script beside its `.cmd` shim: on Windows the
+        // `.exe` wins and a script on its own is not a program.
+        std::fs::write(new.path().join("npmtool"), b"x").unwrap();
+        assert_eq!(
+            find_in(&[new.path().to_path_buf()], "npmtool").is_none(),
+            cfg!(windows)
+        );
+        std::fs::write(new.path().join("npmtool.exe"), b"x").unwrap();
+        assert_eq!(
+            find_in(&[new.path().to_path_buf()], "npmtool"),
+            Some(new.path().join("npmtool.exe"))
+        );
         let by_path = new.path().join("uvx.exe").to_string_lossy().into_owned();
         assert_eq!(resolve_with(&by_path, &process, &system), None);
     }

@@ -426,6 +426,10 @@ mod tests {
         use helm_core::db::MigrationRegistry;
         use helm_hosttools::CallOrigin;
         use helm_ipc::{NullSink, Services};
+        // The sign-in flag is process-wide: wait for any sign-in test that holds it open.
+        let _turn = crate::google::tests::AS_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(crate::config::tests::store(dir.path()));
         store

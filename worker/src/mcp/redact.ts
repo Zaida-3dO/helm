@@ -135,7 +135,7 @@ export class Redactor {
     const marks: { at: string; value: string }[] = [];
     for (const i of [...keep.keys()].sort((a, b) => keep[b]!.length - keep[a]!.length)) {
       const k = keep[i]!;
-      if (k.length < 32 || this.reveals(k) || !out.includes(k)) continue;
+      if (k.length < 32 || this.reveals(k) || this.secrets.some((s) => s.includes(k)) || !out.includes(k)) continue;
       // NUL-bounded markers: no ordinary server output contains them.
       const at = `\u0000K${i}\u0000`;
       out = out.split(k).join(at);
