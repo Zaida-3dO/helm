@@ -15,9 +15,10 @@
 // - A Claude job may carry the person's saved Claude token in HELM_CLAUDE_TOKEN; it is set on the
 //   claude child as its own sign-in (never for a local job, never on the command line) and the
 //   hand-over name itself never reaches the child.
-// - Thinking is off for the child (`MAX_THINKING_TOKENS=0`, also on a local route, where the budget
-//   would otherwise be the chat effort's). These are quick looks: Haiku left to think on a naming
-//   prompt takes 15 to 30 seconds instead of one or two.
+// - Thinking is off for the child by default (`MAX_THINKING_TOKENS=0`, also on a local route, where
+//   the budget would otherwise be the chat effort's). These are quick looks: Haiku left to think on
+//   a naming prompt takes 15 to 30 seconds instead of one or two. A judging caller passes
+//   `think: true` and the variable is left as the environment has it.
 // - The child is stopped gently: its input is already closed, so it is given a moment to exit on
 //   its own before it is killed. A claude killed in the middle of refreshing its sign-in can leave
 //   its lock behind.
@@ -185,8 +186,11 @@ export function jobLaunch(job: TitleJob): { model: string; local?: LocalLaunch }
   return { model, local };
 }
 
-/** One print-mode call: send the prompt as one stream-json user message, read the result text. */
-export function askClaude(job: TitleJob, prompt: string): Promise<string> {
+/**
+ * One print-mode call: send the prompt as one stream-json user message, read the result text.
+ * Thinking is off unless `opts.think` is set.
+ */
+export function askClaude(job: TitleJob, prompt: string, opts: { think?: boolean } = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     let launch: { model: string; local?: LocalLaunch };
     try {
@@ -241,7 +245,7 @@ export function askClaude(job: TitleJob, prompt: string): Promise<string> {
         ? { local: launch.local, localKey: takeLocalKey({ ...process.env } as Record<string, string | undefined>) }
         : { claudeToken: takeClaudeToken({ ...process.env } as Record<string, string | undefined>) },
     );
-    env.MAX_THINKING_TOKENS = "0";
+    if (!opts.think) env.MAX_THINKING_TOKENS = "0";
     const child = spawn(command, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     let out = "";
     let done = false;

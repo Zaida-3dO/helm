@@ -169,6 +169,7 @@ export async function triage(job: TriageJob): Promise<Verdict | { error: string 
           localMaxOutputTokens: job.localMaxOutputTokens,
         },
         buildPrompt(job, strict),
+        { think: true },
       );
       const v = parseVerdict(raw);
       if (v) return longWait(v, job);

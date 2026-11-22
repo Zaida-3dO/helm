@@ -270,6 +270,7 @@ export async function gatekeeper(job: GateJob): Promise<GateVerdict | { error: s
       const raw = await askClaude(
         { firstRequest: "", command: job.command, commandArgs: job.commandArgs, timeoutMs: left, model },
         buildPrompt(job, strict),
+        { think: true },
       );
       const v = parseVerdict(raw, job.card);
       if (v) return v;

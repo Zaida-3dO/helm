@@ -313,13 +313,13 @@ function ChatPane() {
         </div>
       </SettingRow>
       <SettingRow
-        title="Titles for local chats may use Claude Haiku (only the first message is sent)"
-        description="A chat on a local model server gets its automatic title and its Rename suggestions from Claude's small model when no local background model is named above. Only that chat's first message is sent. Turn it off to keep those words on this PC: such a chat is then named from the start of its first message."
+        title="Titles for local chats may use Claude's background model (Haiku unless one is named in Background model)"
+        description="A chat on a local model server gets its automatic title and its Rename suggestions from Claude's background model (Haiku unless one is named in Background model) when no local background model is named above. Only the one message the title is made from (the first, or the first after a greeting) is sent. Turn it off to keep those words on this PC: such a chat is then named from the start of that message."
         testId="setting-local-titles"
       >
         <Checkbox
           checked={localTitles}
-          aria-label="Titles for local chats may use Claude Haiku (only the first message is sent)"
+          aria-label="Titles for local chats may use Claude's background model (Haiku unless one is named in Background model)"
           data-testid="settings-local-titles"
           onChange={(on) => {
             setLocalTitles(on);

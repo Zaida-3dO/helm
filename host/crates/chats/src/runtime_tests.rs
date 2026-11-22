@@ -4471,6 +4471,12 @@ async fn a_configured_background_model_rides_on_the_helper_job() {
         )
     })
     .unwrap();
+    h.call(
+        "chat_rename",
+        json!({"chatId": unset_local, "title": "Typed by hand, private"}),
+    )
+    .await
+    .unwrap();
     *h.spawner.title.lock().unwrap() = Ok("Private words for a local model".into());
     let s = h
         .call("title_suggest", json!({"chatId": unset_local}))
@@ -4480,13 +4486,20 @@ async fn a_configured_background_model_rides_on_the_helper_job() {
     let suggest = h.spawner.title_jobs.lock().unwrap().last().unwrap().clone();
     assert_eq!(suggest["suggest"], 3);
     assert_eq!(suggest["model"], "haiku");
-    for k in ["latest", "siblingTitles", "profileTitles", "recent"] {
+    for k in [
+        "latest",
+        "siblingTitles",
+        "profileTitles",
+        "recent",
+        "currentTitle",
+    ] {
         assert!(
             suggest.get(k).is_none(),
             "{k} stays off a local chat's job: {suggest}"
         );
     }
     assert!(!suggest.to_string().contains("a second, later request"));
+    assert!(!suggest.to_string().contains("Typed by hand"));
     assert!(!suggest.to_string().contains("q3 spend"));
 
     *h.spawner.title.lock().unwrap() = Ok("Fix the login redirect".into());

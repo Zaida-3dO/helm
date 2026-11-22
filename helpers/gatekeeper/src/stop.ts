@@ -194,6 +194,7 @@ export async function judgeStop(job: StopJob): Promise<StopAnswer | { error: str
       const raw = await askClaude(
         { firstRequest: "", command: job.command, commandArgs: job.commandArgs, timeoutMs: left, model },
         buildStopPrompt(job, strict),
+        { think: true },
       );
       const v = parseStopAnswer(raw);
       if (v) return v;

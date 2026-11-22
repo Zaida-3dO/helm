@@ -12,8 +12,8 @@
 //! - A local chat's draft is not run at all when no `local` name is chosen
 //!   ([`decorate_checked`]); the idle check skips local chats entirely. A local chat's title takes
 //!   the `local` name when one is chosen, and otherwise goes to Claude's small model with that
-//!   chat's first message alone, unless the `titlesLocalViaClaude` preference is off
-//!   ([`decorate_title`]).
+//!   chat's one title message alone (the first, or the first after a greeting), unless the
+//!   `titlesLocalViaClaude` preference is off ([`decorate_title`]).
 //! - A missing field or a chat with no name chosen leaves the job untouched, and the job runs on
 //!   the default it would have used. A name that is chosen but cannot be used (a server that does
 //!   not resolve) is reported to the caller: [`decorate_checked`] answers the reason, and a job
@@ -133,20 +133,28 @@ fn titles_via_claude(sh: &Shared) -> bool {
         .unwrap_or(true)
 }
 
-/// A title job holds one message only: no later request, no recent excerpts, and none of the
-/// person's other titles. Used when a local chat's words go to Claude for a name.
+/// A title job holds one message only: no later request, no recent excerpts, none of the
+/// person's other titles and not the chat's current title (which may be one the person typed).
+/// Used when a local chat's words go to Claude for a name.
 pub(crate) fn first_message_only(job: &mut Value) {
     if let Some(o) = job.as_object_mut() {
-        for k in ["latest", "recent", "siblingTitles", "profileTitles"] {
+        for k in [
+            "latest",
+            "recent",
+            "siblingTitles",
+            "profileTitles",
+            "currentTitle",
+        ] {
             o.remove(k);
         }
     }
 }
 
 /// [`decorate_checked`] for a title job. A local chat with a local background model chosen is
-/// named by it; with none chosen it is named by Claude's small model from its first message alone
-/// while the `titlesLocalViaClaude` preference allows (on by default), and otherwise not at all:
-/// a local chat's words never go to Claude unless the person has allowed it.
+/// named by it; with none chosen it is named by Claude's small model from the one message the
+/// title is made from (the first, or the first after a greeting) alone while the
+/// `titlesLocalViaClaude` preference allows (on by default), and otherwise not at all: a local
+/// chat's words never go to Claude unless the person has allowed it.
 pub(crate) fn decorate_title(sh: &Shared, chat_id: &str, job: &mut Value) -> Result<(), String> {
     decorate_checked(sh, chat_id, job)?;
     if !is_local_chat(sh, chat_id)? || job.get("localBaseUrl").is_some() {

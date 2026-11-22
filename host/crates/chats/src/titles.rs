@@ -4,8 +4,9 @@
 //!   by a host send (another chat's message, a schedule, the phone); a message from another chat is
 //!   read without its header.
 //! - A chat on a local model server is named by its own local background model when one is chosen,
-//!   else by Claude's small model from its first message alone, unless the person turned that off
-//!   (the `titlesLocalViaClaude` preference, on by default); with neither, the fallback stays.
+//!   else by Claude's small model from the one message the title is made from (the first, or the
+//!   first after a greeting) alone, unless the person turned that off (the `titlesLocalViaClaude`
+//!   preference, on by default); with neither, the fallback stays.
 //! - A title job starts with the first submission of a fresh chat (still "New chat", no messages)
 //!   or of a fork, from either path. At most [`MAX_CONCURRENT`] helper runs at once and [`MAX_JOBS`] jobs in all; a
 //!   job past that fails at once and the fallback stays. The helper (`helpers/titles`) has its own
@@ -192,7 +193,8 @@ pub fn start(rt: &ChatRuntime, chat_id: &str, job_body: Value) {
     }
     let mut job_body = job_body;
     // A local chat is named by its own local background model, else by Claude's small model from
-    // its first message alone (the person can switch that off); with neither the fallback stays.
+    // the one message the title is made from, the first or the first after a greeting (the person can
+    // switch that off); with neither the fallback stays.
     if let Err(why) = crate::background::decorate_title(&rt.sh, chat_id, &mut job_body) {
         log::warn!("chat {chat_id}: no automatic title ({why}); the fallback stays");
         set_job(rt, chat_id, Some("failed"));

@@ -6,7 +6,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
-import { buildPrompt, buildSuggestPrompt, cleanSuggestions, cleanTitle, EXIT_GRACE_MS, headTail, makeSuggestions, makeTitle } from "../src/title.ts";
+import { askClaude, buildPrompt, buildSuggestPrompt, cleanSuggestions, cleanTitle, EXIT_GRACE_MS, headTail, makeSuggestions, makeTitle } from "../src/title.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -172,6 +172,17 @@ process.stdin.on("end", () => {
   }
   assert.equal(modelFlag(read().argv), "haiku");
   assert.equal(read().env.MAX_THINKING_TOKENS, "0", "a Claude job never thinks");
+  // A judging caller asks to think: the variable is then left as the environment has it.
+  for (const [think, env, want] of [[true, "31999", "31999"], [true, undefined, null], [false, "31999", "0"], [undefined, undefined, "0"]] as const) {
+    if (env === undefined) delete process.env.MAX_THINKING_TOKENS;
+    else process.env.MAX_THINKING_TOKENS = env;
+    try {
+      await askClaude({ firstRequest: "", command: process.execPath, commandArgs: [script] }, "judge it", think === undefined ? undefined : { think });
+    } finally {
+      delete process.env.MAX_THINKING_TOKENS;
+    }
+    assert.equal(read().env.MAX_THINKING_TOKENS, want, `think=${think} env=${env}`);
+  }
   assert.deepEqual(await makeTitle({ firstRequest: "plan it", command: process.execPath, commandArgs: [script], model: "qwen-turbo" }), { title: "Plan the release" });
   let seen = read();
   assert.equal(modelFlag(seen.argv), "qwen-turbo");

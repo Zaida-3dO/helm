@@ -578,7 +578,7 @@ fn table() -> Vec<Entry> {
             key: "titlesLocalViaClaude",
             kind: Kind::Bool,
             default: || json!(true),
-            about: "Whether the title of a chat on a local model server may be made by Claude's small model. Only that chat's first message is sent. Off, such a chat is named only by the local background model, or keeps the start of its first message.",
+            about: "Whether the title of a chat on a local model server may be made by Claude's background model (Haiku unless one is named in Background model). Only the one message the title is made from (the first, or the first after a greeting) is sent. Off, such a chat is named only by the local background model, or keeps the start of that message.",
         },
         Entry {
             key: "ideContext",
