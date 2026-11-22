@@ -593,6 +593,17 @@ impl McpStore {
                 crate::google::prepare(&self.creds, profile_dir, scope, &mut out);
             }
         }
+        // A program installed after Helm started is not on the PATH Helm began with: when the
+        // system's PATH has it, the server runs it by its full path, so nothing needs a restart.
+        if t.kind == TransportKind::Stdio && out.error.is_none() {
+            if let Some(found) = out
+                .command
+                .as_deref()
+                .and_then(crate::fresh_path::resolved_command)
+            {
+                out.command = Some(found);
+            }
+        }
         // The built-in browser checks the grants Helm mints when the user approves one of its
         // steps (see crate::owner_step) with a key only Helm and that process hold. It joins the
         // secrets, so the worker scrubs it from everything the server says.

@@ -12,7 +12,9 @@
 //! | [`probe`] | Settings → MCP's Test connection: one handshake and a tool count |
 //! | [`presets`] | Agent Standup, Home Assistant, hub, Google accounts and built-in browser presets |
 //! | [`doctor`] | the browser server's own checks, shown as its status row in Settings → MCP |
+//! | [`fresh_path`] | finding a program installed after Helm started, on the system's PATH as it is now |
 //! | [`google`] | several Google accounts through `workspace-mcp`: the account list, sign-in and the permission level |
+//! | [`google_sign_in`] | the Approve card an agent files to start a Google sign-in in the user's browser |
 //! | [`oauth`] | a reusable OAuth 2.x client: metadata discovery, dynamic registration, PKCE sign-in over a loopback redirect, tokens kept in the credential store |
 //! | [`oauth_ops`] | the Settings → MCP sign-in ops built on it: Connect, its status, Disconnect, and the worker's one-time ask for a fresh header |
 //! | [`owner_step`] | approving one step in the user's own browser from a card: the card, the one-time grant Helm mints on Approve, and the retry through the chat's worker |
@@ -31,8 +33,10 @@ pub mod bindings;
 pub mod chat_problems;
 pub mod config;
 pub mod doctor;
+pub mod fresh_path;
 pub mod gmail;
 pub mod google;
+pub mod google_sign_in;
 pub mod lines;
 pub mod memory;
 pub mod oauth;

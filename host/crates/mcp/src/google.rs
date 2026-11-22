@@ -87,13 +87,13 @@ pub const TEST_AS_ENV: &str = "HELM_TEST_GOOGLE_AS_URL";
 /// Gmail scopes: one per permission level, plus the OpenID ones that identify the account.
 const SCOPE_OPENID: &str = "openid";
 const SCOPE_EMAIL: &str = "email";
-const SCOPE_READONLY: &str = "https://www.googleapis.com/auth/gmail.readonly";
-const SCOPE_COMPOSE: &str = "https://www.googleapis.com/auth/gmail.compose";
-const SCOPE_LABELS: &str = "https://www.googleapis.com/auth/gmail.labels";
+pub(crate) const SCOPE_READONLY: &str = "https://www.googleapis.com/auth/gmail.readonly";
+pub(crate) const SCOPE_COMPOSE: &str = "https://www.googleapis.com/auth/gmail.compose";
+pub(crate) const SCOPE_LABELS: &str = "https://www.googleapis.com/auth/gmail.labels";
 /// Labels on messages. `gmail.labels` only manages label definitions, so labelling a message
 /// needs this one.
-const SCOPE_MODIFY: &str = "https://www.googleapis.com/auth/gmail.modify";
-const SCOPE_SEND: &str = "https://www.googleapis.com/auth/gmail.send";
+pub(crate) const SCOPE_MODIFY: &str = "https://www.googleapis.com/auth/gmail.modify";
+pub(crate) const SCOPE_SEND: &str = "https://www.googleapis.com/auth/gmail.send";
 /// Calendar scopes. Gmail sign-ins never carry these: the bridge program asks for them at its
 /// own sign-in, per the level set in its permission arguments.
 const SCOPE_CAL_READONLY: &str = "https://www.googleapis.com/auth/calendar.readonly";
@@ -1011,6 +1011,21 @@ pub fn runs_bridge(server: &McpServer, creds: &CredentialStore) -> bool {
 // ---- the sign-in ----------------------------------------------------------------------------
 
 static SIGNING_IN: AtomicBool = AtomicBool::new(false);
+/// The words for a sign-in that cannot start because Helm has no Google sign-in client.
+pub(crate) const NO_CLIENT: &str = "Set the Google sign-in client in Settings → MCP first.";
+/// The words for a second sign-in asked for while one is still waiting for the browser.
+pub(crate) const SIGN_IN_OPEN: &str =
+    "A sign-in is already open. Finish it in your browser, or try again in a few minutes.";
+
+/// Whether the profile's sign-in client is saved, or the server carries one of its own.
+pub(crate) fn client_available(st: &McpStore, server: &McpServer) -> bool {
+    stored_client(st.creds()).is_some() || keeps_bridge(server)
+}
+
+/// Whether a sign-in Helm started is still waiting for the browser.
+pub(crate) fn sign_in_open() -> bool {
+    SIGNING_IN.load(Ordering::SeqCst)
+}
 /// Refreshes of the accounts never overlap: Google retires a refresh token once it has been
 /// spent, so two callers asking at once must not both use it.
 static REFRESH_LOCK: Mutex<()> = Mutex::new(());
@@ -1118,8 +1133,11 @@ pub(crate) fn account_access(store: &McpStore, email: &str, force: bool) -> Resu
     };
     let tokens = oauth::refresh(&oauth::http_agent(), &as_info, &auth.client, &spent, None)
         .map_err(|e| e.to_string())?;
+    // A refresh answer may leave the granted scopes out: the earlier sign-in's stay known.
+    let granted = tokens.scope.clone().or_else(|| auth.tokens.scope.clone());
     auth.tokens = TokenSet {
         id_token: None,
+        scope: granted,
         ..tokens
     };
     // Kept only while the stored sign-in still holds the refresh token that was spent: an
@@ -1141,6 +1159,29 @@ pub(crate) fn account_access(store: &McpStore, email: &str, force: bool) -> Resu
     Ok(auth.tokens.access_token.clone())
 }
 
+/// The permissions Google said it granted an account at sign-in (a space-separated list), when
+/// it said. `None` when the account is not signed in or Google's answer carried none, which
+/// means unknown, not missing.
+pub(crate) fn account_scopes(store: &McpStore, email: &str) -> Option<String> {
+    TokenStore::load(
+        store.creds(),
+        &account_entry(email),
+        &account_identity(email),
+    )
+    .ok()
+    .flatten()
+    .and_then(|a| a.tokens.scope)
+    .filter(|s| !s.trim().is_empty())
+}
+
+/// Whether the granted permissions (as Google lists them) hold at least one of `any_of`.
+/// Google's full-mailbox permission covers every Gmail call.
+pub(crate) fn scopes_cover(granted: &str, any_of: &[&str]) -> bool {
+    granted
+        .split_whitespace()
+        .any(|g| g == "https://mail.google.com/" || any_of.contains(&g))
+}
+
 /// Keep a finished sign-in: its token set and its index row, in one turn with the refreshes and
 /// removals so none of them can land between the two writes or over this one. `owner` is the
 /// profile that started the sign-in; the account will only answer to that profile.
@@ -1155,6 +1196,17 @@ fn keep_sign_in(
     index_upsert(creds, email, None, owner).map_err(|_| oauth::OauthError::Storage)
 }
 
+/// Which permissions a sign-in asks Google for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SignInScopes {
+    /// What the server's current Gmail level needs (the Settings sign-in).
+    Level,
+    /// Every Gmail permission, whatever the level is now: a sign-in an agent asked for, so a
+    /// later raise of the level never needs another trip to Google's page. The level setting
+    /// and the Allow card stay what decide what chats may do.
+    AllGmail,
+}
+
 /// Begin a browser sign-in for one account: build Google's sign-in address, hand it to the
 /// system browser, and finish the sign-in on a thread of its own (which keeps the tokens and
 /// tells the running chats). `hint` pre-fills Google's address box; without one Google shows
@@ -1167,6 +1219,19 @@ fn begin_sign_in(
     server: &McpServer,
     hint: Option<&str>,
     owner: Option<String>,
+) -> Result<GoogleSignIn, String> {
+    begin_sign_in_with(st, cell, open, server, hint, owner, SignInScopes::Level)
+}
+
+/// [`begin_sign_in`] with a choice of permissions.
+pub(crate) fn begin_sign_in_with(
+    st: &Arc<McpStore>,
+    cell: Option<Arc<crate::lines::ServicesCell>>,
+    open: &dyn helm_platform::OpenExternal,
+    server: &McpServer,
+    hint: Option<&str>,
+    owner: Option<String>,
+    which: SignInScopes,
 ) -> Result<GoogleSignIn, String> {
     let resolved = st.resolve_draft(server);
     if let Some(why) = resolved.error {
@@ -1192,9 +1257,14 @@ fn begin_sign_in(
         None => None,
     }
     .or_else(|| stored_client(st.creds()))
-    .ok_or("Set the Google sign-in client in Settings → MCP first.")?;
+    .ok_or(NO_CLIENT)?;
     let as_info = google_as()?;
-    let level = permission_of(&server.transport.args).unwrap_or(GooglePermission::Drafts);
+    let level = match which {
+        SignInScopes::AllGmail => GooglePermission::Send,
+        SignInScopes::Level => {
+            permission_of(&server.transport.args).unwrap_or(GooglePermission::Drafts)
+        }
+    };
     let scopes: Vec<String> = level.scopes().into_iter().map(str::to_owned).collect();
     let client = oauth::Client::pre_registered(&pair.client_id, Some(&pair.client_secret));
     let mut extra: Vec<(&str, String)> = vec![
@@ -1218,10 +1288,7 @@ fn begin_sign_in(
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
-        return Err(
-            "A sign-in is already open. Finish it in your browser, or try again in a few minutes."
-                .into(),
-        );
+        return Err(SIGN_IN_OPEN.into());
     }
     let auth_url = pending.auth_url.clone();
     if let Err(e) = open.open_url(&auth_url) {
@@ -1292,11 +1359,21 @@ pub(crate) fn seed_account(
     index_upsert(creds, email, None, owner.map(str::to_owned)).unwrap();
 }
 
-/// `uvx` is on `PATH`.
+/// Test only: keep a sign-in client for the profile, as Settings would.
+#[cfg(test)]
+pub(crate) fn seed_client(creds: &CredentialStore) {
+    let json = serde_json::to_vec(&ClientPair {
+        client_id: "g-client".into(),
+        client_secret: "g-secret".into(),
+    })
+    .unwrap();
+    creds.write(CLIENT_ENTRY, CLIENT_IDENTITY, &json).unwrap();
+}
+
+/// `uvx` is on `PATH`, Helm's own or the system's as it is now (so a `uv` installed while Helm
+/// runs counts without a restart).
 pub fn uvx_found() -> bool {
-    let name = if cfg!(windows) { "uvx.exe" } else { "uvx" };
-    std::env::var_os("PATH")
-        .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(name).is_file()))
+    crate::fresh_path::on_path(if cfg!(windows) { "uvx.exe" } else { "uvx" })
 }
 
 // ---- ops ------------------------------------------------------------------------------------
@@ -1907,6 +1984,13 @@ mod tests {
             .scopes()
             .iter()
             .all(|s| !s.contains("calendar")));
+        // What an account was granted covers a call when it holds any one of the permissions
+        // the call accepts, or Google's full-mailbox permission.
+        let read_only = GooglePermission::Readonly.scopes().join(" ");
+        assert!(scopes_cover(&read_only, &[SCOPE_READONLY, SCOPE_MODIFY]));
+        assert!(!scopes_cover(&read_only, &[SCOPE_COMPOSE, SCOPE_MODIFY]));
+        assert!(scopes_cover("https://mail.google.com/", &[SCOPE_MODIFY]));
+        assert!(!scopes_cover("", &[SCOPE_READONLY]));
     }
 
     /// The Calendar level joins the Gmail value beside `--permissions`, replaces an existing
@@ -2822,6 +2906,39 @@ mod tests {
         for leak in ["fake-access", "fake-refresh", "g-secret", "fakesignature"] {
             assert!(!said.contains(leak), "{leak} in {said}");
         }
+
+        // A sign-in an agent asked for wants every Gmail permission, whatever the level is now.
+        for _ in 0..100 {
+            if !SIGNING_IN.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        begin_sign_in_with(
+            &st,
+            None,
+            &FakeBrowser,
+            &s,
+            None,
+            Some("sam".into()),
+            SignInScopes::AllGmail,
+        )
+        .unwrap();
+        assert_eq!(
+            fake.authorize_params()
+                .get("scope")
+                .unwrap()
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            GooglePermission::Send.scopes()
+        );
+        for _ in 0..100 {
+            if !SIGNING_IN.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!SIGNING_IN.load(Ordering::SeqCst), "the sign-in finished");
         std::env::remove_var(TEST_AS_ENV);
     }
 

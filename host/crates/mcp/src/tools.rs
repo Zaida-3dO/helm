@@ -96,6 +96,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     // After the admin tools, so the list reads list, add, edit, update, remove, then the two
     // that always ask.
     crate::server_change::register_host_tools(r);
+    crate::google_sign_in::register_host_tools(r);
 }
 
 /// Answer the worker's header request. Every refusal happens before anything is sent, and no
@@ -175,10 +176,10 @@ mod tests {
         );
         assert!(!r.get(admin::LIST).unwrap().spec.mutating);
         assert!(r.get(admin::REMOVE).unwrap().spec.mutating);
-        // Listed with every feature off: the admin tools are ALWAYS, and so are the two that
-        // always ask the user (a person's own secret, the Google level).
+        // Listed with every feature off: the admin tools are ALWAYS, and so are the three that
+        // always ask the user (a person's own secret, the Google level, a Google sign-in).
         let listed = r.for_launch(&LaunchKeys::default());
-        assert_eq!(listed.len(), 7);
+        assert_eq!(listed.len(), 8);
         // The worker's browser-sign-in header question is registered but never listed.
         assert!(r.contains(crate::oauth_ops::HEADER_TOOL));
         assert!(
