@@ -38,6 +38,7 @@ const LOCAL: &str = "it works on Helm's own local records";
 const TOOLS: &str = "it lists or runs the PC's own tools";
 const EDITOR: &str = "it reads the user's code editor on the PC";
 const SEARCH: &str = "it spends the user's own web search allowance";
+const UPDATES: &str = "it updates Helm itself on this PC; ask the user to do it in Helm";
 
 /// Every reserved name, classified. Kept in the order of `reserved.json`.
 pub const TABLE: &[(&str, Class)] = &[
@@ -139,6 +140,7 @@ pub const TABLE: &[(&str, Class)] = &[
     ("app_telegram_ask", Class::Denied(LOCAL)),
     ("app_telegram_send", Class::Denied(LOCAL)),
     ("app_this_chat", Class::Denied(LOCAL)),
+    ("app_update", Class::Denied(UPDATES)),
     ("app_update_attention", Class::Denied(LOCAL)),
     ("app_update_chat", Class::Denied(CHANGES)),
     ("app_update_feedback", Class::Denied(LOCAL)),

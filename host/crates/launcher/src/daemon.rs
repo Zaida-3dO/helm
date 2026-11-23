@@ -4,7 +4,9 @@
 //!
 //! - **The watch.** While Helm runs it waits on the process's handle (no polling); when that process
 //!   ends it looks again after [`watch::RESTART_DELAY`] and restarts Helm if [`watch::decide`] says
-//!   it crashed. While Helm is not running it reads `run.json` every [`watch::LOOK_EVERY`].
+//!   it crashed. While Helm is not running it reads `run.json` every [`watch::LOOK_EVERY`], and
+//!   tends an update that left its marker behind: once the update's setup process has ended,
+//!   whatever it did, Helm is started again ([`watch::decide_update`]).
 //! - **The hub line.** One outbound WebSocket to the hub's `/launcher` (the saved relay
 //!   addresses, LAN first, with the relay token), with backoff from 1 s up to 60 s, and 10 minutes
 //!   for an older hub that has no such line. It says whether Helm runs, and starts Helm when the
@@ -162,6 +164,49 @@ impl Daemon {
         }
     }
 
+    /// Tend a pending update marker while Helm is down. True means a relaunch for the
+    /// update was just attempted and the loop should look again at once.
+    fn tend_update(&self, helm_exe: &Path) -> bool {
+        let diag = self.profile_dir.join("diagnostics");
+        let Some(marker) = helm_core::trail::read_update_pending(&diag) else {
+            return false;
+        };
+        match watch::decide_update(sys::process_alive(marker.setup_pid), false) {
+            // The setup is still working: its files are half-written and Helm must wait.
+            watch::UpdateDecision::Wait => false,
+            watch::UpdateDecision::Done => {
+                helm_core::trail::clear_update_pending(&diag);
+                false
+            }
+            watch::UpdateDecision::Relaunch => match self.start_helm(helm_exe) {
+                Ok(pid) => {
+                    log::warn!(
+                        "launcher: the update ended (setup pid {}); starting the installed Helm (pid {pid})",
+                        marker.setup_pid
+                    );
+                    helm_core::trail::clear_update_pending(&diag);
+                    true
+                }
+                Err(why) => {
+                    log::error!(
+                        "launcher: the update is over but Helm could not be started: {why}"
+                    );
+                    false
+                }
+            },
+        }
+    }
+
+    /// A pending update marker goes once Helm runs again: the update's promise is kept,
+    /// whether the setup, this launcher or a person brought Helm back.
+    fn finish_update_if_helm_up(&self) {
+        let diag = self.profile_dir.join("diagnostics");
+        if helm_core::trail::read_update_pending(&diag).is_some() {
+            helm_core::trail::clear_update_pending(&diag);
+            log::info!("launcher: Helm runs again after an update; the pending marker is gone");
+        }
+    }
+
     /// A Helm this launcher started a moment ago that is still coming up.
     fn starting(&self) -> bool {
         self.last_start
@@ -204,6 +249,11 @@ impl Daemon {
             }
             let Some(pid) = pid else {
                 self.set_state(|s| s.helm_running = false);
+                // An update that quit Helm left its marker: once its setup has ended, bring
+                // Helm back — even if the setup failed, the installed Helm starts either way.
+                if self.tend_update(&exe) {
+                    continue;
+                }
                 let next = if self.starting() {
                     Duration::from_secs(1)
                 } else {
@@ -225,6 +275,7 @@ impl Daemon {
             if self.state.borrow().crash_loop {
                 restarts.clear();
             }
+            self.finish_update_if_helm_up();
             self.set_state(|s| {
                 s.helm_running = true;
                 s.crash_loop = false;

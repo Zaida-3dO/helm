@@ -45,6 +45,7 @@ pub mod show_images;
 pub mod spec;
 pub mod surface;
 pub mod tools;
+pub mod update_helm;
 
 pub use addendum::{Addendum, AddendumSection, KnowledgeSection, StaticSection};
 pub use dispatch::{Caller, CallerBinding, ChatRequest, HostTools};
@@ -79,6 +80,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     pages::register_host_tools(r);
     panel_open::register_host_tools(r);
     forwards::register_host_tools(r);
+    update_helm::register_host_tools(r);
 }
 
 /// The settings change ring (`settings_changes`).

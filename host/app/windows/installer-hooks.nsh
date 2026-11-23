@@ -9,6 +9,11 @@
 ; ends without closing. The template ends a running Helm before it writes the new files, which
 ; looks exactly like that, so the launcher is ended first: otherwise it could start Helm again in
 ; the middle of the install. Helm starts it again (from a fresh copy) when it next starts.
+; The one exception: when the profile holds diagnostics\update-pending.json, this setup was started
+; by Helm's own "restart to update" (or the app_update agent tool) — Helm has already closed
+; itself, and the launcher is what brings the new Helm up when this setup ends, so it is left
+; running. The marker lives in the default profile only; a setup aimed at another profile's Helm
+; finds no marker and ends its launcher as always.
 
 ; End the default profile's launcher: the one whose process id it noted in its profile. Other
 ; profiles' launchers are left alone. An id that now belongs to some other program is passed over
@@ -63,7 +68,12 @@
     SetOutPath $INSTDIR
     ; The template already created the old default; drop it if it is empty (never touches data).
     RMDir "$LOCALAPPDATA\${PRODUCTNAME}"
-  !insertmacro HELM_END_LAUNCHER
+  ; A run that quit to run this setup left its pending-update marker: the launcher is that
+  ; update's relauncher, so it stays alive and starts the new Helm when this setup ends.
+  ; Without the marker (a normal run or install) the launcher must not restart Helm mid-update.
+  IfFileExists "$LOCALAPPDATA\${PRODUCTNAME}\diagnostics\update-pending.json" helm_keep_launcher 0
+    !insertmacro HELM_END_LAUNCHER
+  helm_keep_launcher:
 !macroend
 
 ; Uninstalling ends the launcher and removes every profile's logon entry for it; its copy stays

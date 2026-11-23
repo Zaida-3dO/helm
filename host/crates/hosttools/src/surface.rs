@@ -172,6 +172,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "app_reload_configuration",
         ],
     ),
+    ("updates", &["app_update"]),
     (
         "workflow",
         &[

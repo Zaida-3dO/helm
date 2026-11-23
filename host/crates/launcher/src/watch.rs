@@ -8,6 +8,12 @@
 //! record it finds when it starts itself: the restart rule never opens Helm on its own. Opening
 //! Helm at sign-in is the separate switch in [`crate::daemon::opens_helm_at_logon`]. [`decide`]
 //! is the whole restart rule.
+//!
+//! An update is the exception, and [`decide_update`] its whole rule: a run that quit to run a
+//! setup file leaves `diagnostics/update-pending.json` behind (written by the app through
+//! [`helm_core::trail::note_update_pending`]), so the launcher can still bring Helm back once
+//! that setup has ended — whatever the setup did, even fail. Without the marker the rule never
+//! opens Helm on its own, exactly as before.
 
 use serde::Deserialize;
 use std::collections::VecDeque;
@@ -105,6 +111,32 @@ pub fn decide(
     }
 }
 
+/// What the update marker asks for, with nothing else in the way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateDecision {
+    /// The setup is still running: its files are being replaced, and starting anything now
+    /// would get in its way.
+    Wait,
+    /// The setup has ended and Helm is down: start whatever Helm this profile points at now.
+    Relaunch,
+    /// Helm runs again: the update's promise is kept and the marker can go.
+    Done,
+}
+
+/// The update rule. The marker is present, Helm is not running as far as `run.json` says, and
+/// `setup_alive` is whether the marker's setup process is still running. A dead pid that was
+/// reused reads as alive, which is the safe way to be wrong: a setup is only ever minutes long,
+/// and a person watching an update would notice one that never ends.
+pub fn decide_update(setup_alive: bool, helm_running: bool) -> UpdateDecision {
+    if helm_running {
+        return UpdateDecision::Done;
+    }
+    if setup_alive {
+        return UpdateDecision::Wait;
+    }
+    UpdateDecision::Relaunch
+}
+
 /// When the launcher restarted Helm lately.
 #[derive(Default)]
 pub struct Restarts {
@@ -191,6 +223,44 @@ mod tests {
         for (why, rec, alive, restarts, age, want) in rows {
             assert_eq!(decide(rec, alive, restarts, age), want, "{why}");
         }
+    }
+
+    #[test]
+    fn an_update_is_watched_until_its_setup_ends_then_helm_returns() {
+        use UpdateDecision::*;
+        // (why, the setup process, Helm, the decision)
+        let rows: &[(&str, bool, bool, UpdateDecision)] = &[
+            ("the setup is still replacing files", true, false, Wait),
+            ("the setup ended and Helm is down", false, false, Relaunch),
+            (
+                "Helm runs again while the setup winds down",
+                true,
+                true,
+                Done,
+            ),
+            ("Helm runs again after the setup", false, true, Done),
+        ];
+        for (why, setup_alive, helm_running, want) in rows {
+            assert_eq!(decide_update(*setup_alive, *helm_running), *want, "{why}");
+        }
+        // The marker round-trips exactly as the app writes it; gone means gone.
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().join("diagnostics");
+        assert_eq!(
+            helm_core::trail::read_update_pending(&d),
+            None,
+            "no marker yet"
+        );
+        helm_core::trail::note_update_pending(&d, 4242, 6_000);
+        assert_eq!(
+            helm_core::trail::read_update_pending(&d),
+            Some(helm_core::trail::UpdatePending {
+                setup_pid: 4242,
+                at_ms: 6_000
+            })
+        );
+        helm_core::trail::clear_update_pending(&d);
+        assert_eq!(helm_core::trail::read_update_pending(&d), None);
     }
 
     #[test]

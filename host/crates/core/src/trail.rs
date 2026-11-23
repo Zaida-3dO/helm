@@ -14,6 +14,10 @@
 //!   death to about a minute, and a count climbing before it shows a pile-up.
 //! - `unclean.json` — written at a start that follows a cut-short run: the previous run's
 //!   record and its last heartbeat, kept so the story survives the host log's rolling.
+//! - `update-pending.json` — written when an update quits Helm to run a setup file: the setup's
+//!   process id and the time. It stays until the launcher has seen the setup end and started
+//!   Helm again (or a run proves the update is over): its absence is what closes the promise that
+//!   an update, even a failed one, never leaves Helm down.
 
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -33,6 +37,10 @@ fn heartbeat_path(diagnostics: &Path) -> PathBuf {
 
 fn unclean_path(diagnostics: &Path) -> PathBuf {
     diagnostics.join("unclean.json")
+}
+
+fn update_pending_path(diagnostics: &Path) -> PathBuf {
+    diagnostics.join("update-pending.json")
 }
 
 /// What the run before this one left behind when it never said it had finished.
@@ -132,6 +140,41 @@ pub fn record_exit(diagnostics: &Path, now_ms: i64) {
         "reason": exit_reason().lock().unwrap_or_else(|p| p.into_inner()).clone(),
     });
     write_json(&run_path(diagnostics), &rec);
+}
+
+/// An update that quit Helm to run a setup file, as the launcher needs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UpdatePending {
+    /// The setup process: while it runs the files are being replaced; once it is gone the
+    /// installed Helm (old or new) can be started.
+    pub setup_pid: u32,
+    pub at_ms: i64,
+}
+
+/// Note that an update has started: the setup file's process id, so the launcher can tell when
+/// it has ended. The marker outlives the run that wrote it — that is its whole point.
+pub fn note_update_pending(diagnostics: &Path, setup_pid: u32, at_ms: i64) {
+    if let Err(e) = crate::privfs::create_private_dir_all(diagnostics) {
+        log::warn!("diagnostics folder not ready: {e}");
+    }
+    write_json(
+        &update_pending_path(diagnostics),
+        &json!({"setupPid": setup_pid, "at": at_ms}),
+    );
+}
+
+/// The pending-update marker, or `None` when there is none or it reads as nothing.
+pub fn read_update_pending(diagnostics: &Path) -> Option<UpdatePending> {
+    let v = read_json(&update_pending_path(diagnostics))?;
+    Some(UpdatePending {
+        setup_pid: v.get("setupPid")?.as_u64()? as u32,
+        at_ms: v.get("at")?.as_i64()?,
+    })
+}
+
+/// The update is over: Helm runs again, or a relaunch for it was attempted.
+pub fn clear_update_pending(diagnostics: &Path) {
+    let _ = std::fs::remove_file(update_pending_path(diagnostics));
 }
 
 /// One trail time as text a person can read, e.g. `2001-09-09T01:46:40Z`.

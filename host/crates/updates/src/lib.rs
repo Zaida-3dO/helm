@@ -12,7 +12,12 @@
 //! | `update_check` | blocking | look in the folder now, then the same as `update_status` |
 //! | `update_source_set` | maintenance | `{path}`: choose the folder (`null` clears it), then check |
 //! | `update_prepare` | blocking | re-check the setup file; the running chats the restart would stop |
-//! | `update_install` | async | quit with drafts saved, then start the setup file and exit |
+//! | `update_install` | async | quit with drafts saved, note the pending update, start the setup file and exit |
+//!
+//! An update always leaves a marker (`diagnostics/update-pending.json`, see `helm_core::trail`)
+//! naming the setup's process id. The always-on launcher watches it: when that process ends, it
+//! starts the installed Helm — a failed update included — so a restart to update can never leave
+//! the PC without Helm. An agent does the same thing with the `app_update` host tool.
 //!
 //! The renderer never names the file to run: the host re-checks its own folder setting and picks
 //! the file itself, so a compromised page cannot make Helm run an arbitrary program.
@@ -37,12 +42,16 @@ const CHECK_EVERY: Duration = Duration::from_secs(10 * 60);
 /// The restart dialog lists this many running chats and counts the rest.
 const BUSY_SHOWN: usize = 4;
 /// The flags that make the per-user setup run without questions, replace the running app and
-/// open it again. Never the silent flag: the user watches it happen.
+/// open it again. Never the silent flag: the user watches it happen. The setup's own relaunch is
+/// one layer, not the promise: Helm also leaves a note in its profile that an update is
+/// underway, and the always-on launcher starts the installed Helm once the setup's process has
+/// ended — even if the setup failed — so an update never leaves Helm down.
 #[cfg_attr(not(windows), allow(dead_code))]
 const SETUP_ARGS: [&str; 3] = ["/P", "/UPDATE", "/R"];
 
-/// Starts a setup file. The app uses the real launcher; tests swap it so no program ever runs.
-pub type LaunchFn = dyn Fn(&Path) -> std::io::Result<()> + Send + Sync;
+/// Starts a setup file and answers with its process id. The app uses the real launcher; tests
+/// swap it so no program ever runs.
+pub type LaunchFn = dyn Fn(&Path) -> std::io::Result<u32> + Send + Sync;
 
 #[derive(Clone)]
 pub struct SetupLauncher(pub Arc<LaunchFn>);
@@ -54,7 +63,7 @@ impl SetupLauncher {
 }
 
 #[cfg(windows)]
-fn launch_detached(path: &Path) -> std::io::Result<()> {
+fn launch_detached(path: &Path) -> std::io::Result<u32> {
     use std::os::windows::process::CommandExt;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
@@ -65,7 +74,7 @@ fn launch_detached(path: &Path) -> std::io::Result<()> {
         .stderr(std::process::Stdio::null())
         .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
         .spawn()
-        .map(|_| ())
+        .map(|child| child.id())
 }
 
 #[cfg(not(windows))]
@@ -282,7 +291,21 @@ async fn update_install(ctx: OpCtx, _args: Value) -> Result<Value, ApiError> {
                 (launcher.0)(&path).map_err(|e| ApiError::internal(e.to_string()))
             });
             match started {
-                Ok(()) => {
+                Ok(setup_pid) => {
+                    // The promise outlives us: leave the note the always-on launcher watches, so
+                    // the installed Helm starts again once the setup's process ends — whatever
+                    // the setup did.
+                    match ctx.services.get::<helm_core::profile::Profile>() {
+                        Some(profile) => helm_core::trail::note_update_pending(
+                            &profile.path("diagnostics"),
+                            setup_pid,
+                            now_ms() as i64,
+                        ),
+                        None => {
+                            log::warn!("update: no profile; the relaunch note was not left")
+                        }
+                    }
+                    log::info!("restarting to update (setup pid {setup_pid})");
                     shell.exit(0);
                     Ok(json!({"outcome": "restarting"}))
                 }
@@ -331,7 +354,7 @@ mod tests {
     #[tokio::test]
     async fn choose_a_folder_see_the_pill_data_and_restart_into_the_setup() {
         let dir = tempfile::tempdir().unwrap();
-        let profile = Profile::open(&dir.path().join("prof")).unwrap();
+        let profile = Arc::new(Profile::open(&dir.path().join("prof")).unwrap());
         let db = Arc::new(Database::open(&profile.db_path(), &MigrationRegistry::new()).unwrap());
         let sink = Arc::new(RecordingSink::default());
         let shell = Arc::new(FakeShell(AtomicI32::new(0)));
@@ -345,13 +368,14 @@ mod tests {
         ));
         let mut s = Services::new();
         s.insert(db);
+        s.insert(profile.clone());
         s.insert(svc.clone());
         s.insert(quit.clone());
         s.insert(Arc::new(Workers(Arc::new(Busy(6)))));
         s.insert(Arc::new(Shell(shell.clone())));
         s.insert(Arc::new(SetupLauncher(Arc::new(move |p| {
             l2.lock().unwrap().push(p.to_path_buf());
-            Ok(())
+            Ok(4242)
         }))));
         let ctx = OpCtx {
             services: Arc::new(s),
@@ -419,5 +443,11 @@ mod tests {
             vec![setups.join("Helm_0.3.1_x64-setup.exe")]
         );
         assert_eq!(shell.0.load(Ordering::SeqCst), 100);
+        // The relaunch note is left behind with the setup's process id: the launcher's update
+        // rule brings Helm back once that process is gone, even if the setup failed.
+        let pending = helm_core::trail::read_update_pending(&profile.path("diagnostics"))
+            .expect("the pending-update note");
+        assert_eq!(pending.setup_pid, 4242);
+        assert!(pending.at_ms > 0);
     }
 }
