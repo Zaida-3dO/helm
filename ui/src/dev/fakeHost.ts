@@ -1021,7 +1021,11 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         // the queue's Start anyway (or the hold lifting) releases it into a turn.
         c.pending = [...c.pending, s];
         emitPending(c);
+        // A parked send is accepted, so the composer's draft clears here too; setStatus
+        // emits the chat, and the turn waits for the queue to release it, so this exits.
+        if ((a.origin ?? 'composer') === 'composer') c.chat = { ...c.chat, draft: '' };
         setStatus(c, 'starting');
+        return { submission: s, chat: c.chat };
       } else if (!busy && isLocal(c) && /\[fit\]/i.test(text)) {
         // The host's fit check refusing a turn: no turn runs, a notice says why, and the text
         // and attachments come back to the composer.
