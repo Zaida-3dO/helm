@@ -6,7 +6,9 @@
 //!   ends it looks again after [`watch::RESTART_DELAY`] and restarts Helm if [`watch::decide`] says
 //!   it crashed. While Helm is not running it reads `run.json` every [`watch::LOOK_EVERY`], and
 //!   tends an update that left its marker behind: once the update's setup process has ended,
-//!   whatever it did, Helm is started again ([`watch::decide_update`]).
+//!   whatever it did, Helm is started again ([`watch::decide_update`]) — this time with its
+//!   window showing, since the person clicked "Restart to update" and expects to see it. While
+//!   that setup is still at work the crash rule keeps off the restart ([`watch::update_waits`]).
 //! - **The hub line.** One outbound WebSocket to the hub's `/launcher` (the saved relay
 //!   addresses, LAN first, with the relay token), with backoff from 1 s up to 60 s, and 10 minutes
 //!   for an older hub that has no such line. It says whether Helm runs, and starts Helm when the
@@ -134,8 +136,10 @@ impl Daemon {
         });
     }
 
-    /// Start Helm hidden in the tray, in this launcher's profile.
-    fn start_helm(&self, helm_exe: &Path) -> Result<u32, &'static str> {
+    /// Start Helm in this launcher's profile. `background` keeps the window in the tray (the
+    /// hub's launch, sign-in and a crash restart); an update's relaunch passes it false, so the
+    /// person who clicked "Restart to update" actually sees the window come back.
+    fn start_helm(&self, helm_exe: &Path, background: bool) -> Result<u32, &'static str> {
         if !helm_exe.is_file() {
             return Err("Helm's program file is missing on this PC; it may have been uninstalled.");
         }
@@ -146,9 +150,14 @@ impl Daemon {
         } else {
             Some(OsStr::new(&dir))
         };
+        let args: &[&OsStr] = if background {
+            &[OsStr::new("--background")]
+        } else {
+            &[]
+        };
         match sys::spawn_detached(
             helm_exe,
-            &[OsStr::new("--background")],
+            args,
             &[(helm_core::profile::PROFILE_ENV, profile_env)],
         ) {
             Ok(pid) => {
@@ -178,7 +187,8 @@ impl Daemon {
                 helm_core::trail::clear_update_pending(&diag);
                 false
             }
-            watch::UpdateDecision::Relaunch => match self.start_helm(helm_exe) {
+            // Not hidden: whoever clicked "Restart to update" expects to see Helm come back.
+            watch::UpdateDecision::Relaunch => match self.start_helm(helm_exe, false) {
                 Ok(pid) => {
                     log::warn!(
                         "launcher: the update ended (setup pid {}); starting the installed Helm (pid {pid})",
@@ -222,7 +232,7 @@ impl Daemon {
         if self.helm_pid(&exe).is_some() || self.starting() {
             return frames::launched(id, true, true, None);
         }
-        match self.start_helm(&exe) {
+        match self.start_helm(&exe, true) {
             Ok(pid) => {
                 log::info!("launcher: started Helm for the hub (pid {pid})");
                 frames::launched(id, true, false, None)
@@ -244,7 +254,7 @@ impl Daemon {
                 looked_at_start = true;
                 if opens_helm_at_logon(self.at_logon, handoff.start_at_sign_in, pid.is_some()) {
                     log::info!("launcher: opening Helm for sign-in");
-                    let _ = self.start_helm(&exe);
+                    let _ = self.start_helm(&exe, true);
                 }
             }
             let Some(pid) = pid else {
@@ -288,6 +298,13 @@ impl Daemon {
             }
             let handoff = self.handoff_or_exit();
             let exe = PathBuf::from(&handoff.helm_exe);
+            // An update is mid-flight: its setup is still replacing files, and it (or the
+            // update rule once it ends) owns the restart. The crash rule must not start Helm
+            // over the setup's shoulder — that is the locked-file failure this avoids.
+            if watch::update_waits(&self.profile_dir.join("diagnostics"), sys::process_alive) {
+                log::info!("launcher: Helm ended while the update's setup works; the update restarts it");
+                continue;
+            }
             let rec = watch::read_run(&self.profile_dir);
             let alive = rec
                 .as_ref()
@@ -304,7 +321,7 @@ impl Daemon {
                 watch::Decision::Relaunch => {
                     log::warn!("launcher: Helm (pid {pid}) ended without closing; restarting it");
                     restarts.record(now);
-                    let _ = self.start_helm(&exe);
+                    let _ = self.start_helm(&exe, true);
                 }
                 watch::Decision::GiveUp => {
                     log::error!(

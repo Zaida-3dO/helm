@@ -123,6 +123,14 @@ pub enum UpdateDecision {
     Done,
 }
 
+/// A watched Helm just ended: is an update mid-flight? True when the marker is present and its
+/// setup process is still running. Then the update rule owns the restart and the crash rule must
+/// keep its hands off — starting Helm now would collide with the setup replacing its files,
+/// which is the locked-file failure the update rule exists to avoid.
+pub fn update_waits(diag: &Path, setup_alive: impl FnOnce(u32) -> bool) -> bool {
+    helm_core::trail::read_update_pending(diag).is_some_and(|m| setup_alive(m.setup_pid))
+}
+
 /// The update rule. The marker is present, Helm is not running as far as `run.json` says, and
 /// `setup_alive` is whether the marker's setup process is still running. A dead pid that was
 /// reused reads as alive, which is the safe way to be wrong: a setup is only ever minutes long,
@@ -259,8 +267,13 @@ mod tests {
                 at_ms: 6_000
             })
         );
+        // The crash rule's guard: while the marker's setup is at work the restart belongs to
+        // the update rule, and only once that process has ended may the crash rule relaunch.
+        assert!(update_waits(&d, |_| true), "the setup is still at work");
+        assert!(!update_waits(&d, |_| false), "the setup has ended");
         helm_core::trail::clear_update_pending(&d);
         assert_eq!(helm_core::trail::read_update_pending(&d), None);
+        assert!(!update_waits(&d, |_| true), "no marker, no guard");
     }
 
     #[test]
