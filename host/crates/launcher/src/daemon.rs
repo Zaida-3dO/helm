@@ -302,7 +302,9 @@ impl Daemon {
             // update rule once it ends) owns the restart. The crash rule must not start Helm
             // over the setup's shoulder — that is the locked-file failure this avoids.
             if watch::update_waits(&self.profile_dir.join("diagnostics"), sys::process_alive) {
-                log::info!("launcher: Helm ended while the update's setup works; the update restarts it");
+                log::info!(
+                    "launcher: Helm ended while the update's setup works; the update restarts it"
+                );
                 continue;
             }
             let rec = watch::read_run(&self.profile_dir);

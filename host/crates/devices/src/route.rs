@@ -1693,7 +1693,8 @@ impl RemoteChats for Mirror {
             let page_title = clip(&a.page_title, 240);
             let page_overview = clip(&a.page_overview, 2000);
             if a.origin.unwrap_or_default() == SendOrigin::Page {
-                args["page"] = json!({ "title": page_title.clone(), "overview": page_overview.clone() });
+                args["page"] =
+                    json!({ "title": page_title.clone(), "overview": page_overview.clone() });
             }
             m.ask_as(&device, "send", args, "this message", &act)
                 .await?;

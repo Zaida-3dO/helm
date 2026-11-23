@@ -429,7 +429,8 @@ pub fn pass_stop(
 
 /// The kinds of message that are the user's own side of a conversation: they end a run of
 /// nudges. Notes Helm or another chat sent do not.
-const USER_SIDE: &str = "'typed', 'answer', 'remote', 'telegram', 'voice', 'speaker', 'action', 'page', 'notification'";
+const USER_SIDE: &str =
+    "'typed', 'answer', 'remote', 'telegram', 'voice', 'speaker', 'action', 'page', 'notification'";
 
 /// A run of nudges older than this starts again.
 pub const CHAIN_MAX_AGE_MS: i64 = 6 * 3_600_000;

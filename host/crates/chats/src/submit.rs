@@ -360,8 +360,10 @@ pub fn chat_send(
                 // send's words: the send after a failure is usually a short reply, and the
                 // failure was Helm's, not the chat's.
                 let request = match parked {
-                    crate::titles::Parked::Failed => crate::titles::first_substantive(rt, &a.chat_id)
-                        .unwrap_or_else(|| s.text.clone()),
+                    crate::titles::Parked::Failed => {
+                        crate::titles::first_substantive(rt, &a.chat_id)
+                            .unwrap_or_else(|| s.text.clone())
+                    }
                     _ => s.text.clone(),
                 };
                 crate::titles::start(
@@ -758,9 +760,8 @@ fn host_send_inner(
             // As in a typed send: a failed job is retried from the chat's first real request,
             // not from this host-made message's words.
             let request = match parked {
-                crate::titles::Parked::Failed => {
-                    crate::titles::first_substantive(rt, s.chat_id).unwrap_or_else(|| s.text.to_owned())
-                }
+                crate::titles::Parked::Failed => crate::titles::first_substantive(rt, s.chat_id)
+                    .unwrap_or_else(|| s.text.to_owned()),
                 _ => s.text.to_owned(),
             };
             crate::titles::start(

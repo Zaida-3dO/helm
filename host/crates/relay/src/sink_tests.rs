@@ -3221,7 +3221,10 @@ async fn one_talk_one_speaker_chat_whose_answer_goes_up_once_and_the_hub_s_word_
     )
     .unwrap();
     let blank = crate::speaker_sink::speaker_view(&e.db, &dir, &e.ctx.profile_id);
-    assert_eq!(blank.model, "", "blank stays a string the form can send back");
+    assert_eq!(
+        blank.model, "",
+        "blank stays a string the form can send back"
+    );
     assert_eq!(blank.effort, "");
     let mut back = crate::speaker::load_file(&paths.policy);
     back.take_speaker = Some(false);
@@ -3265,12 +3268,13 @@ async fn a_chat_left_interrupted_speaks_the_new_turn_answer_not_the_old_stop() {
         &[&chat],
     );
     // The next turn of the same talk goes to the same chat, which still carries the old stop.
-    s.deliver(sturn("t9", "what time is it now", "s-1")).await.unwrap();
+    s.deliver(sturn("t9", "what time is it now", "s-1"))
+        .await
+        .unwrap();
     // Nothing is spoken for it while only the old stop is in the chat.
     tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
     assert!(
-        wire
-            .sent
+        wire.sent
             .lock()
             .unwrap()
             .iter()
@@ -3294,8 +3298,7 @@ async fn a_chat_left_interrupted_speaks_the_new_turn_answer_not_the_old_stop() {
         })
         .unwrap();
     let spoken = || {
-        wire
-            .sent
+        wire.sent
             .lock()
             .unwrap()
             .iter()
@@ -3316,8 +3319,7 @@ async fn a_chat_left_interrupted_speaks_the_new_turn_answer_not_the_old_stop() {
             .lock()
             .unwrap()
             .iter()
-            .all(|f| f["turn"].as_str() != Some("t9")
-                || f.get("status").is_none()),
+            .all(|f| f["turn"].as_str() != Some("t9") || f.get("status").is_none()),
         "the old error is never spoken for this turn"
     );
 }

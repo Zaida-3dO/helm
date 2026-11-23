@@ -731,8 +731,7 @@ pub(crate) fn wants_job(
         bool,
         bool,
         Option<String>,
-    ) = tx
-        .query_row(
+    ) = tx.query_row(
         "SELECT c.title,
                 (SELECT count(*) FROM submissions s WHERE s.chat_id = c.id),
                 (SELECT count(*) FROM messages m WHERE m.chat_id = c.id AND m.role != 'context'),

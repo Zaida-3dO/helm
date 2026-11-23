@@ -274,8 +274,12 @@ mod tests {
         for (why, origins, allowed) in say_so {
             let (_dir, services) = owner_db(origins);
             let gate_fake = Arc::new(Fake(Mutex::new(vec![])));
-            let out = call_with(&gate_fake, json!({"action": "install", "confirm": true}), services)
-                .await;
+            let out = call_with(
+                &gate_fake,
+                json!({"action": "install", "confirm": true}),
+                services,
+            )
+            .await;
             if *allowed {
                 assert!(out.is_ok(), "{why}: {:?}", out.err().map(|e| e.public));
             } else {
@@ -296,9 +300,13 @@ mod tests {
         // install with confirm over the person's own last words: the folder is re-checked, then
         // the app quits into the setup.
         let (_dir, services) = owner_db(&["typed"]);
-        let r = call_with(&fake, json!({"action": "install", "confirm": true}), services)
-            .await
-            .unwrap();
+        let r = call_with(
+            &fake,
+            json!({"action": "install", "confirm": true}),
+            services,
+        )
+        .await
+        .unwrap();
         assert_eq!(r["outcome"], "restarting");
         assert_eq!(r["version"], "2.4.5");
         assert_eq!(r["busyTotal"], 1);
