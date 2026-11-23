@@ -101,9 +101,19 @@ export function localThinkingTokens(local: Pick<LocalLaunch, "thinkingTokens">, 
   return LOCAL_THINKING_TOKENS[DEFAULT_EFFORT];
 }
 
+/**
+ * The JSON for `CLAUDE_CODE_EXTRA_BODY` on a local chat: tool names the local server is told
+ * about for parsing only, so a reply that writes a call for a tool outside the chat's short list
+ * can still be understood rather than printed. It is additive: a server that does not know the
+ * field ignores it. Never set for a Claude chat.
+ */
+export function localExtraBody(names: string[]): string {
+  return JSON.stringify({ parse_only_tool_names: names });
+}
+
 export function buildClaudeEnv(
   base: Record<string, string | undefined>,
-  opts: { apiKeyMode?: boolean; chatId?: string; local?: LocalLaunch; localKey?: string; claudeToken?: string; effort?: string },
+  opts: { apiKeyMode?: boolean; chatId?: string; local?: LocalLaunch; localKey?: string; claudeToken?: string; effort?: string; localExtraBody?: string },
 ): Record<string, string> {
   const local = opts.local;
   const strip = new Set<string>(ALWAYS_STRIPPED.map((k) => k.toUpperCase()));
@@ -121,7 +131,7 @@ export function buildClaudeEnv(
   }
   for (const [k, v] of Object.entries(FORCED)) out[k] = v;
   if (opts.chatId) out.HELM_CHAT_ID = opts.chatId;
-  if (local) applyLocal(out, local, opts.localKey, opts.effort);
+  if (local) applyLocal(out, local, opts.localKey, opts.effort, opts.localExtraBody);
   // The saved token is set after the stripping above, and only where it is the sign-in to use: not
   // for a local chat, and not when API-key mode has chosen a key.
   else if (opts.claudeToken && !opts.apiKeyMode) out.CLAUDE_CODE_OAUTH_TOKEN = opts.claudeToken;
@@ -190,7 +200,7 @@ export function contextRefusalNote(error: string, contextTokens: number | undefi
   return ` — the model's window is ${Math.floor(contextTokens).toLocaleString("en-US")} tokens. Roll over to a fresh chat to continue the work.`;
 }
 
-function applyLocal(out: Record<string, string>, local: LocalLaunch, key: string | undefined, effort: string | undefined): void {
+function applyLocal(out: Record<string, string>, local: LocalLaunch, key: string | undefined, effort: string | undefined, extraBody: string | undefined): void {
   // The process environment carries the address and models; the switches for other providers are
   // simply absent there (the user's own are stripped above) and only pinned off in the settings.
   for (const [k, v] of Object.entries(localPinnedEnv(local))) if (!(OTHER_PROVIDERS as readonly string[]).includes(k)) out[k] = v;
@@ -206,6 +216,9 @@ function applyLocal(out: Record<string, string>, local: LocalLaunch, key: string
   // Claude Code defers some of its own tools (WebFetch among them) behind a search tool whose
   // results a local server cannot expand; with it off, every tool is offered up front.
   out.ENABLE_TOOL_SEARCH = "false";
+  // The parse-only tool names (see `localExtraBody`), merged into every request body by Claude
+  // Code. The local server ignores the field until it learns it; the chat loses nothing either way.
+  if (extraBody) out.CLAUDE_CODE_EXTRA_BODY = extraBody;
   // A proxy variable in the user's environment must not carry loopback traffic (and the key) to a proxy.
   const loopback = ["127.0.0.1", "localhost", "::1"];
   const existing = Object.keys(out).find((k) => k.toUpperCase() === "NO_PROXY");
