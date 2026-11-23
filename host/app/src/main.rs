@@ -141,6 +141,14 @@ fn main() -> ExitCode {
         );
     }
 
+    // An update marker left over from an update that ended some other way has served its
+    // promise: Helm runs again, so it goes. Without this a PC whose launcher is off kept the
+    // marker for good, and every later setup skipped ending the launcher over it.
+    if helm_core::trail::read_update_pending(&profile.path("diagnostics")).is_some() {
+        helm_core::trail::clear_update_pending(&profile.path("diagnostics"));
+        log::info!("an update marker from a past run is gone now that Helm runs again");
+    }
+
     // A restore the user staged last session applies now: the profile is ours (locked) and nothing
     // has opened its database yet.
     match helm_backup::apply_pending(&profile.dir) {
