@@ -240,7 +240,10 @@ pub fn chat_send(
             let block = match (payload, context) {
                 (Some(p), Some(b)) => match b.0.build(tx, &a.chat_id, p, gen) {
                     Ok(block) => Some(block),
-                    Err(r) => return Ok(Err(ApiError::from(r))),
+                    Err(r) => {
+                        crate::titles::release_claim(tx, &a.chat_id)?;
+                        return Ok(Err(ApiError::from(r)));
+                    }
                 },
                 _ => None,
             };
@@ -281,6 +284,7 @@ pub fn chat_send(
                 if let Err(r) = crate::attachments::link(tx, &a.chat_id, &sid, &attachments)? {
                     // Undo the submission: nothing of this send is kept but the draft.
                     tx.execute("DELETE FROM submissions WHERE id = ?1", [&sid])?;
+                    crate::titles::release_claim(tx, &a.chat_id)?;
                     return Ok(Err(ApiError::from(r)));
                 }
             }
@@ -343,6 +347,9 @@ pub fn chat_send(
                                 crate::attachments::unlink(tx, &id)?;
                                 text_to_draft(tx, &chat, &text)?;
                             }
+                            // A naming run this send claimed but never started goes back to
+                            // waiting, for the next send to run.
+                            crate::titles::release_claim(tx, &chat)?;
                             Ok::<_, rusqlite::Error>(())
                         });
                         emit_chat(&rt, &chat);
@@ -737,6 +744,7 @@ fn host_send_inner(
         if !ids.is_empty() {
             if let Err(r) = crate::attachments::link(tx, s.chat_id, s.submission_id, &ids)? {
                 tx.execute("DELETE FROM submissions WHERE id = ?1", [s.submission_id])?;
+                crate::titles::release_claim(tx, s.chat_id)?;
                 drop_stored(tx, &dir, &ids)?;
                 let code = if refs.is_empty() {
                     IMAGE_REFUSED

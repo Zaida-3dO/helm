@@ -13,7 +13,12 @@
 //!   the first-line fallback is only a stand-in and a naming job waits parked (`greeting` or
 //!   `failed`). A chat that needs a title retries on each of its sends until a real title lands,
 //!   at most [`MAX_TITLE_ATTEMPTS`] helper runs in all; past the cap the stand-in stays and
-//!   Helm stops asking. A manual rename always means has-a-title and ends every retry.
+//!   Helm stops asking. A manual rename always means has-a-title and ends every retry. The
+//!   parked job is claimed to `claimed` inside the retrying send's own transaction, so two sends
+//!   at once never both run it; a claimed or generating job starts no second one, and a claim
+//!   or run the app quitting caught is parked `failed` again at start-up ([`crate::schema`]).
+//!   Profiles that once saved a label ("Title", "Conversation title") as a generated title are
+//!   repaired once at start-up, back to needing a title with the stand-in restored.
 //! - A title job starts with the first submission of a fresh chat (still "New chat", no messages)
 //!   or of a fork, from either path, and on every later send while the chat still needs a title:
 //!   after a greeting that was parked, after a run that failed or timed out, and after a run
@@ -302,8 +307,12 @@ pub fn start(rt: &ChatRuntime, chat_id: &str, job_body: Value) {
     // the one message the title is made from, the first or the first after a greeting (the person can
     // switch that off); with neither the fallback stays.
     if let Err(why) = crate::background::decorate_title(&rt.sh, chat_id, &mut job_body) {
+        // Nothing asked for this chat can name it (a local chat with no background model while
+        // the Claude route is switched off): leave no job parked at all. Parking `failed` would
+        // warn again on every send forever and charge the chat for something no retry can fix
+        // while the setting stands.
         log::warn!("chat {chat_id}: no automatic title ({why}); the fallback stays");
-        set_job(rt, chat_id, Some("failed"));
+        set_job(rt, chat_id, None);
         return;
     }
     set_job(rt, chat_id, Some("generating"));
@@ -425,15 +434,17 @@ fn finish(rt: &ChatRuntime, chat_id: &str, title: &str) {
     let wrote = rt
         .db()
         .write(|tx| {
-            let manual: bool = tx
+            // A manual title always wins; and a chat that already carries a generated title
+            // (a second run that raced in) is not overwritten by another.
+            let done: bool = tx
                 .query_row(
-                    "SELECT state = 'manual' FROM chat_titles WHERE chat_id = ?1",
+                    "SELECT state IN ('manual', 'generated') FROM chat_titles WHERE chat_id = ?1",
                     [chat_id],
                     |r| r.get(0),
                 )
                 .optional()?
                 .unwrap_or(false);
-            if manual {
+            if done {
                 return Ok(false);
             }
             tx.execute(
@@ -786,12 +797,14 @@ pub(crate) enum Parked {
 /// Whether this send should start a naming run, answering one clear question: does the chat have
 /// a real title yet? `generated` or `manual` says it has, and no run ever starts again (a rename
 /// by hand ends the automatic naming for good). Otherwise the chat needs a title: a job parked
-/// `greeting` or `failed` waits for this send, a fresh chat's first submission (still "New chat",
-/// no messages) or a fork's starts one, and the run that started at most [`MAX_TITLE_ATTEMPTS`]
-/// times is the last one — past the cap the first-line stand-in stays. A job still `generating`
-/// starts no second one. It also answers which job is parked, so a retry reads the conversation
-/// so far instead of only this send's words ([`retry_job`]). Called inside the send's
-/// transaction, before the submission is written.
+/// `greeting` or `failed` waits for this send — and is claimed to `claimed` right here, in this
+/// transaction, so two sends at once cannot both run it — a fresh chat's first submission (still
+/// "New chat", no messages) or a fork's starts one, and the run that started at most
+/// [`MAX_TITLE_ATTEMPTS`] times is the last one: past the cap the first-line stand-in stays. A
+/// job `claimed` or `generating` starts no second one. It also answers which job is parked, so a
+/// retry reads the conversation so far instead of only this send's words ([`retry_job`]). Called
+/// inside the send's transaction, before the submission is written; a send that commits but never
+/// starts its claimed run hands it back with [`release_claim`].
 pub(crate) fn wants_job(
     tx: &rusqlite::Transaction<'_>,
     chat_id: &str,
@@ -812,7 +825,8 @@ pub(crate) fn wants_job(
                 EXISTS(SELECT 1 FROM chat_titles t
                         WHERE t.chat_id = c.id AND t.state IN ('manual', 'generated')),
                 (SELECT t.job FROM chat_titles t
-                   WHERE t.chat_id = c.id AND t.job IN ('greeting', 'failed', 'generating') LIMIT 1),
+                   WHERE t.chat_id = c.id
+                     AND t.job IN ('greeting', 'failed', 'generating', 'claimed') LIMIT 1),
                 COALESCE((SELECT t.attempts FROM chat_titles t WHERE t.chat_id = c.id), 0)
          FROM chats c WHERE c.id = ?1",
         [chat_id],
@@ -832,13 +846,18 @@ pub(crate) fn wants_job(
         return Ok(None);
     }
     let parked = match parked.as_deref() {
-        Some("generating") => return Ok(None),
+        Some("claimed") | Some("generating") => return Ok(None),
         Some("failed") => Parked::Failed,
         Some("greeting") => Parked::Greeting,
         _ => Parked::None,
     };
     if parked != Parked::None {
-        return Ok(Some((forked, parked)));
+        let claimed = tx.execute(
+            "UPDATE chat_titles SET job = 'claimed', updated_at = ?2
+             WHERE chat_id = ?1 AND job IN ('greeting', 'failed')",
+            params![chat_id, helm_core::now_ms()],
+        )?;
+        return Ok((claimed == 1).then_some((forked, parked)));
     }
     if subs > 0 {
         return Ok(None);
@@ -847,6 +866,17 @@ pub(crate) fn wants_job(
         return Ok(Some((true, Parked::None)));
     }
     Ok((title == store::DEFAULT_TITLE && users == 0).then_some((false, Parked::None)))
+}
+
+/// Hand back a job this send claimed but never got to run: a send whose transaction committed
+/// anyway (a refused attachment, a refused context block) must not leave the chat parked in
+/// `claimed` until the next start-up.
+pub(crate) fn release_claim(tx: &rusqlite::Transaction<'_>, chat_id: &str) -> rusqlite::Result<()> {
+    tx.execute(
+        "UPDATE chat_titles SET job = 'failed' WHERE chat_id = ?1 AND job = 'claimed'",
+        [chat_id],
+    )?;
+    Ok(())
 }
 
 /// The job for a retry: the naming missed on an earlier turn, so this run reads the conversation
@@ -862,12 +892,51 @@ pub(crate) fn retry_job(
     fallback_text: &str,
     forked: bool,
 ) -> Value {
-    let texts: Vec<String> = rt
+    let oldest = substantive_texts(rt, chat_id, false);
+    let Some(first) = oldest.first() else {
+        return job(unframed(fallback_text), None, forked);
+    };
+    // The newest turns are read from the back of the queue, so a chat longer than one window
+    // is still named after its latest request, not after its fortieth.
+    let newest = substantive_texts(rt, chat_id, true);
+    let latest = newest
+        .last()
+        .filter(|t| newest.len() > 1 || *t != first)
+        .map(String::as_str);
+    let mut body = job(first, latest, forked);
+    let before = || {
+        newest[..newest.len().saturating_sub(1)]
+            .iter()
+            .filter(|t| **t != *first)
+    };
+    let recent: Vec<String> = {
+        let mut all: Vec<String> = before().map(|t| excerpt(t)).collect();
+        if all.len() > RECENT_EXCERPTS {
+            all.drain(..all.len() - RECENT_EXCERPTS);
+        }
+        all
+    };
+    if !recent.is_empty() {
+        body["recent"] = json!(recent);
+    }
+    body
+}
+
+/// The chat's requests that are more than greetings, in date order: `newest_first` reads from
+/// the back of the queue (and answers oldest-first all the same). Withdrawn sends never name
+/// anything.
+fn substantive_texts(rt: &ChatRuntime, chat_id: &str, newest_first: bool) -> Vec<String> {
+    let order = if newest_first {
+        "created_at DESC, id DESC"
+    } else {
+        "created_at, id"
+    };
+    let mut out: Vec<String> = rt
         .db()
         .snapshot(|tx| {
-            let mut st = tx.prepare(
-                "SELECT text FROM submissions WHERE chat_id = ?1 ORDER BY created_at, id LIMIT 40",
-            )?;
+            let mut st = tx.prepare(&format!(
+                "SELECT text FROM submissions WHERE chat_id = ?1 AND state <> 'rejected' ORDER BY {order} LIMIT 40",
+            ))?;
             let rows = st.query_map([chat_id], |r| r.get::<_, String>(0))?;
             Ok::<_, rusqlite::Error>(
                 rows.filter_map(|r| r.ok())
@@ -877,19 +946,10 @@ pub(crate) fn retry_job(
             )
         })
         .unwrap_or_default();
-    let Some(first) = texts.first() else {
-        return job(unframed(fallback_text), None, forked);
-    };
-    let latest = texts.last().filter(|_| texts.len() > 1).map(String::as_str);
-    let mut body = job(first, latest, forked);
-    if texts.len() > 2 {
-        let middle = &texts[1..texts.len() - 1];
-        let middle = middle
-            .get(middle.len().saturating_sub(RECENT_EXCERPTS)..)
-            .unwrap_or(middle);
-        body["recent"] = json!(middle.iter().map(|t| excerpt(t)).collect::<Vec<_>>());
+    if newest_first {
+        out.reverse();
     }
-    body
+    out
 }
 
 /// One excerpt of a request for the helper's `recent` list: the helper joins these as they

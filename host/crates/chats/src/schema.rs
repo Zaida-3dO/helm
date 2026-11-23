@@ -60,6 +60,7 @@ pub fn register(reg: &mut MigrationRegistry) {
         .initializer("chats-rollover-stack", rollover_stack)
         .initializer("chats-build-queue", build_queue)
         .one_time("chats-origin-user-is-typed", origin_user_is_typed)
+        .one_time("chats-titles-label-repair", repair_label_titles)
         .recovery_capture("chats-restart-capture", capture_continuations)
         .recovery_step("chats-retry-leftovers", cancel_retry_leftovers)
         .recovery_step("chats-stall-reset", reset_stalls)
@@ -301,14 +302,55 @@ fn clear_auto_holds(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// A naming job that was still running when the app stopped leaves its `generating` mark behind.
-/// Park it as `failed` at start-up, like any other failed naming job, so the chat's next send
-/// tries again. The run it had started already counted against the cap.
+/// A naming job that was still running (`generating`) or claimed by a send that never got to
+/// run it (`claimed`) when the app stopped is parked as `failed` at start-up, like any other
+/// failed naming job, so the chat's next send tries again. A `generating` run already counted
+/// against the cap; a bare claim did not.
 fn park_stale_title_jobs(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     tx.execute(
-        "UPDATE chat_titles SET job = 'failed' WHERE job = 'generating'",
+        "UPDATE chat_titles SET job = 'failed' WHERE job IN ('generating', 'claimed')",
         [],
     )?;
+    Ok(())
+}
+
+/// Titles an older titles helper could write even though they were only labels ("Title",
+/// "Conversation title") are not titles. Once per profile: such a chat goes back to needing a
+/// name — `fallback`/`failed` with a clean attempt count — and its first-line stand-in is
+/// restored, or "New chat" when the chat has no submission to stand in for. A real generated
+/// title is left exactly as it is.
+fn repair_label_titles(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    let rows: Vec<(String, String, Option<String>)> = {
+        let mut st = tx.prepare(
+            "SELECT c.id, c.title,
+                    (SELECT s.text FROM submissions s WHERE s.chat_id = c.id
+                      ORDER BY s.created_at, s.id LIMIT 1)
+             FROM chats c JOIN chat_titles t ON t.chat_id = c.id
+             WHERE t.state = 'generated'",
+        )?;
+        let mapped = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (chat_id, title, first) in rows {
+        if !crate::titles::is_placeholder_label(&title) {
+            continue;
+        }
+        let stand_in = first.as_deref().and_then(crate::titles::fallback_title);
+        match stand_in {
+            Some(text) => tx.execute(
+                "UPDATE chats SET title = ?2 WHERE id = ?1",
+                rusqlite::params![chat_id, text],
+            )?,
+            None => tx.execute(
+                "UPDATE chats SET title = ?2 WHERE id = ?1",
+                rusqlite::params![chat_id, crate::store::DEFAULT_TITLE],
+            )?,
+        };
+        tx.execute(
+            "UPDATE chat_titles SET state = 'fallback', job = 'failed', attempts = 0 WHERE chat_id = ?1",
+            [&chat_id],
+        )?;
+    }
     Ok(())
 }
 
@@ -682,6 +724,43 @@ pub(crate) mod tests {
                 "SELECT source_key || '=' || json_extract(details, '$.retry.state') FROM messages ORDER BY source_key"
             ),
             ["m1=cancelled", "m2=failed"]
+        );
+    }
+
+    /// A label saved as a `generated` title by an older helper goes back to needing a title;
+    /// a real one is untouched.
+    #[test]
+    fn label_generated_titles_go_back_to_needing_a_title() {
+        let (_d, db) = temp_db();
+        db.write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 0);
+                 INSERT INTO chats(id, project_id, title, created_at, updated_at) VALUES
+                   ('labelled', 'p', 'Title', 0, 0),
+                   ('real', 'p', 'Fix the login redirect', 0, 0),
+                   ('bare', 'p', 'Conversation title', 0, 0);
+                 INSERT INTO chat_titles(chat_id, state, job, attempts, updated_at) VALUES
+                   ('labelled', 'generated', NULL, 1, 0),
+                   ('real', 'generated', NULL, 1, 0),
+                   ('bare', 'generated', NULL, 1, 0);
+                 INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES
+                   ('s-l', 'labelled', 'the login page bounces twice\nmore detail', 'delivered', 0);",
+            )
+        })
+        .unwrap();
+        db.write(repair_label_titles).unwrap();
+        assert_eq!(
+            col(
+                &db,
+                "SELECT c.title || '|' || t.state || '/' || COALESCE(t.job, '') || '/' || t.attempts
+                 FROM chats c JOIN chat_titles t ON t.chat_id = c.id ORDER BY c.id"
+            ),
+            [
+                "New chat|fallback/failed/0",
+                "the login page bounces twice|fallback/failed/0",
+                "Fix the login redirect|generated//1",
+            ],
+            "labels go back to needing a title with the stand-in restored; the real one stays"
         );
     }
 

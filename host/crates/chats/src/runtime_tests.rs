@@ -5035,6 +5035,20 @@ fn attempts_of(h: &H, chat: &str) -> i64 {
     .unwrap_or(0)
 }
 
+/// A naming run this chat has in hand right now (`claimed` in the send's transaction,
+/// `generating` once it runs). Both are written synchronously while the send is handled, so a
+/// check straight after `send` cannot race a late starter.
+fn job_running(h: &H, chat: &str) -> bool {
+    matches!(
+        h.col(&format!(
+            "SELECT COALESCE(job, '') FROM chat_titles WHERE chat_id = '{chat}'"
+        ))
+        .pop()
+        .as_deref(),
+        Some("claimed") | Some("generating")
+    )
+}
+
 /// One state: a chat either has a real title or needs one, and it needs one until a real one
 /// lands. A label answer, a helper failure and a timeout all mean "not yet": the first-line
 /// stand-in is the shown title but is never marked done, each next send runs the naming again
@@ -5091,11 +5105,12 @@ async fn the_naming_keeps_trying_until_a_real_title_lands() {
         json!(["dig into why it failed"]),
         "the retry reads the conversation so far"
     );
-    // A good title ends it: later sends start no run.
-    let after = jobs.len();
+    // A good title ends it: a later send starts no run. The claim and the attempt counter are
+    // written synchronously while the send is handled, so this checks cannot race: a send that
+    // started a run would already have spent a fourth attempt.
     h.send(&chat, "one more thing", "steer").await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(h.spawner.title_jobs.lock().unwrap().len(), after);
+    assert_eq!(attempts_of(&h, &chat), 3, "a titled chat spends no attempt");
+    assert!(!job_running(&h, &chat), "a titled chat claims no job");
 
     // The cap: with the helper never answering, five sends at five points of one conversation
     // get five runs; a sixth send asks no more, and the stand-in was never marked done.
@@ -5111,13 +5126,59 @@ async fn the_naming_keeps_trying_until_a_real_title_lands() {
             .await;
         }
     }
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // The sixth send is checked straight away: it could only have started a run by spending a
+    // sixth attempt or claiming a job, both of which the send itself would have written.
     assert_eq!(attempts_of(&h, &dull), 5, "the cap stops the runs");
+    assert!(!job_running(&h, &dull), "a capped chat claims no job");
     assert_eq!(title_of(&h, &dull).1, "fallback/failed");
     assert_eq!(
         title_of(&h, &dull).0,
         "weather report line 1",
         "the stand-in stays the shown title when the tries run out"
+    );
+
+    // A chat longer than the retry window: 45 backlogged submissions must not push `latest`
+    // back to the 40th message — the retry reads the newest turns from the back of the queue.
+    let long = h.create().await;
+    h.send(&long, "the oldest real request", "default").await;
+    h.until("long run 1 parked", |h| attempts_of(h, &long) == 1)
+        .await;
+    let base = helm_core::now_ms() + 10_000_000;
+    h.db.write(|tx| {
+        for n in 1..=45 {
+            tx.execute(
+                "INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES (?1, ?2, ?3, 'delivered', ?4)",
+                rusqlite::params![format!("bg-{n}"), long, format!("backlog line {n}"), base + n],
+            )?;
+        }
+        Ok::<_, rusqlite::Error>(())
+    })
+    .unwrap();
+    h.send(&long, "and a final message", "steer").await;
+    h.until("long run 2 parked", |h| attempts_of(h, &long) == 2)
+        .await;
+    let long_job = h
+        .spawner
+        .title_jobs
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .unwrap();
+    assert_eq!(long_job["firstRequest"], "the oldest real request");
+    assert_eq!(
+        long_job["latest"], "backlog line 45",
+        "the latest turn names the chat, not the fortieth message: {long_job}"
+    );
+    assert_eq!(
+        long_job["recent"],
+        json!([
+            "backlog line 41",
+            "backlog line 42",
+            "backlog line 43",
+            "backlog line 44"
+        ]),
+        "the recent excerpts come from the back of the chat too"
     );
 
     // A rename by hand is has-a-title from then on: no run starts again, whatever the helper
@@ -5139,12 +5200,16 @@ async fn the_naming_keeps_trying_until_a_real_title_lands() {
     )
     .await
     .unwrap();
-    let before = h.spawner.title_jobs.lock().unwrap().len();
+    // Checked straight after the send, where no race is possible: a run it started would
+    // already have spent an attempt or taken a claim.
     h.send(&typed, "and another message", "steer").await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(
-        h.spawner.title_jobs.lock().unwrap().len(),
-        before,
+        attempts_of(&h, &typed),
+        1,
+        "a hand-named chat spends no attempt"
+    );
+    assert!(
+        !job_running(&h, &typed),
         "a manual rename ends the automatic naming"
     );
     assert_eq!(
@@ -5301,8 +5366,10 @@ async fn a_configured_background_model_rides_on_the_helper_job() {
         .unwrap();
     let kept_local = made["id"].as_str().unwrap().to_owned();
     h.send(&kept_local, "more private words", "default").await;
+    // The refusal leaves no job parked at all: this chat cannot be named while the setting
+    // stands, so every later send must not warn or retry.
     h.until("local fallback", |h| {
-        title_of(h, &kept_local).1 == "fallback/failed"
+        title_of(h, &kept_local).1 == "fallback/"
     })
     .await;
     assert_eq!(
