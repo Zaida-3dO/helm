@@ -55,8 +55,8 @@ token is refused at once. Only one entry per hub is allowed.
 
 Settings → Voice assistants → add an **Assist pipeline**:
 
-- **Speech-to-text**: `Helm Speaker`
-- **Conversation agent**: the `Helm speaker` agent entity
+- **Speech-to-text**: the `Helm speaker` entity (`stt.helm_speaker`)
+- **Conversation agent**: the `Helm speaker` entity (`conversation.helm_speaker`)
 - **Text-to-speech**: any local voice you already have
 
 Assign the pipeline to your speaker. Keeping a separate pipeline with Home
@@ -64,6 +64,10 @@ Assistant's own agent as a fallback is a good idea: if Helm is off, the
 speaker can still use it.
 
 ## How it behaves
+
+- Each stage logs how long it took at info level (`helm_speaker timing: ...`), so a slow answer can be pinned on the
+  speech call, the agent call (the model's time) or Home Assistant's own text-to-speech. Turn on info logs for
+  `custom_components.helm_speaker` to see them.
 
 - Each question gets a fresh random id, so a retry can never run the same
   request twice on the hub.
