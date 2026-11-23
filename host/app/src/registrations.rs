@@ -409,6 +409,7 @@ fn consent_tick(
                 submission_id: &d.submission_id,
                 text: &d.text,
                 origin: helm_chats::types::SubmissionOrigin::App,
+                page: None,
             },
         );
         match sent {
