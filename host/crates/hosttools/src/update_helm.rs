@@ -180,16 +180,15 @@ mod tests {
     }
 
     /// A chat "me" whose sends, oldest first, carry these origins; the caller keeps the folder
-    /// alive while the database is used. Only the columns the gate reads are built here.
+    /// alive while the database is used. The core migrations carry the chats and submissions
+    /// tables; the origin column lives in the chats crate's table, made here in the shape the
+    /// gate reads.
     fn owner_db(origins: &[&str]) -> (tempfile::TempDir, Arc<helm_ipc::Services>) {
         let dir = tempfile::tempdir().unwrap();
         let mut reg = helm_core::db::MigrationRegistry::new();
         reg.initializer("test-update-owner", |tx| {
             tx.execute_batch(
-                "CREATE TABLE submissions (
-                     id TEXT PRIMARY KEY, chat_id TEXT NOT NULL,
-                     text TEXT NOT NULL, created_at INTEGER NOT NULL);
-                 CREATE TABLE submission_meta (
+                "CREATE TABLE submission_meta (
                      submission_id TEXT PRIMARY KEY REFERENCES submissions(id) ON DELETE CASCADE,
                      origin TEXT NOT NULL);",
             )
@@ -201,7 +200,15 @@ mod tests {
             let id = format!("s{n}");
             db.write(|tx| {
                 tx.execute(
-                    "INSERT INTO submissions(id, chat_id, text, created_at) VALUES (?1, 'me', 'words', ?2)",
+                    "INSERT OR IGNORE INTO projects (id, name, path, created_at) VALUES ('p', 'p', 'C:/p', 0)",
+                    [],
+                )?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO chats (id, project_id, created_at, updated_at) VALUES ('me', 'p', 0, 0)",
+                    [],
+                )?;
+                tx.execute(
+                    "INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES (?1, 'me', 'words', 'sent', ?2)",
                     rusqlite::params![id, n as i64],
                 )?;
                 tx.execute(
