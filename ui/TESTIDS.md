@@ -239,7 +239,9 @@ Send now `Ctrl+Alt+Enter`, Stop and send waiting messages `Esc`.
 | `page-reload` / `page-more` / `page-menu` | The page bar's Reload button, its "…" button, and the menu it opens (Add to / Remove from Pages; Send its messages to this chat, only when the page is linked elsewhere; Show in File Explorer, for a page on this PC; Reset page storage) | |
 | `page-network-hint` / `page-runtime-error` | The quiet hint after an offline page tried the network (pinning it is what lets it), and the dismissible script-error strip | |
 | `page-scripts-off` | The notice on an offline page shown without scripts (a web view that cannot keep them off the network); adding the page to Pages is what lets it run them | |
-| `page-handoff` / `page-handoff-text` / `page-handoff-send` / `page-handoff-add` / `page-handoff-cancel` / `page-handoff-open` / `page-handoff-url` | Helm's confirmation for a page's message or link: the dialog, the editable text, Send to agent, Add to message, Cancel, Open link and the address | |
+| `page-handoff` / `page-handoff-cancel` / `page-handoff-open` / `page-handoff-url` | Helm's confirmation for a page's link (its messages go straight to the chat): the dialog, Cancel, Open link and the address | |
+| `page-card` / `page-card-overview` / `page-card-toggle` | A page's message in the transcript: the card naming the page, its overview (only while the card is folded), and the button that folds and opens it | `page-card`: `data-page` (the page's name) |
+| `queue-page-card` | A page's message waiting in the queue list, its head naming the page | |
 | `run-page` | The file tab's "Run page" button, shown for an HTML file | |
 
 ## Profiles and the household
