@@ -210,6 +210,7 @@ impl AppExecutor {
                 submission_id: &sid,
                 text: &text,
                 origin: SubmissionOrigin::OtherChat,
+                page: None,
             },
         )
         .map_err(|e| refused(e.message))?;
@@ -302,6 +303,8 @@ impl AppExecutor {
                     origin: Some(helm_chats::types::SendOrigin::Action),
                     attachments: None,
                     context: None,
+                    page_title: None,
+                    page_overview: None,
                 },
                 person.map(str::to_owned),
             )

@@ -324,6 +324,8 @@ impl Starter for ChatStarter {
                 origin: Some(SendOrigin::Action),
                 attachments: None,
                 context: None,
+                page_title: None,
+                page_overview: None,
             },
             None,
         );

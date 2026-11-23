@@ -8,6 +8,9 @@ export const MAX_PENDING = 8;
 export const MAX_PAYLOAD = 300 * 1024;
 export const MAX_TEXT = 16_000;
 export const MAX_TITLE = 240;
+export const MAX_OVERVIEW = 2_000;
+/** How long a card's derived overview may be when the page did not give one. */
+export const MAX_OVERVIEW_FALLBACK = 300;
 /** Largest `data` of a message, pretty-printed. */
 export const MAX_DATA = 64_000;
 export const MAX_LINK = 4096;
@@ -53,10 +56,13 @@ export type Checked<T> = { ok: true; value: T } | { ok: false; error: string };
 export interface Handoff {
   text: string;
   title?: string;
+  overview?: string;
   data?: unknown;
 }
 
-/** A `sendMessage` request: text 1 to 16,000 characters, a title of at most 240, JSON data of at most 64,000. */
+/** A `sendMessage` request: text 1 to 16,000 characters, a title of at most 240, an overview of
+ * at most 2,000, JSON data of at most 64,000. The title and overview are what the chat's card
+ * shows; the text is what the agent receives. */
 export function checkHandoff(payload: unknown): Checked<Handoff> {
   if (!payload || typeof payload !== 'object') return { ok: false, error: 'Unsupported app request.' };
   const p = payload as Record<string, unknown>;
@@ -66,6 +72,10 @@ export function checkHandoff(payload: unknown): Checked<Handoff> {
   if (p.title !== undefined) {
     if (typeof p.title !== 'string' || p.title.length > MAX_TITLE) return { ok: false, error: 'The message title is not valid.' };
     if (p.title.trim()) out.title = p.title.trim();
+  }
+  if (p.overview !== undefined) {
+    if (typeof p.overview !== 'string' || p.overview.length > MAX_OVERVIEW) return { ok: false, error: 'The message overview is not valid.' };
+    if (p.overview.trim()) out.overview = p.overview.trim();
   }
   if (p.data !== undefined) {
     let pretty: string | undefined;
@@ -80,9 +90,20 @@ export function checkHandoff(payload: unknown): Checked<Handoff> {
   return { ok: true, value: out };
 }
 
-/** What the confirmation dialog is titled. */
-export function handoffTitle(h: Handoff, pageTitle: string): string {
-  return h.title ?? `From ${pageTitle}`;
+/** The first lines of a message, for a card whose page gave no overview: at most three
+ * non-blank lines, capped so a wall of text cannot fill the card. */
+export function overviewFallback(text: string): string {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim() !== '');
+  const picked: string[] = [];
+  let count = 0;
+  for (const line of lines) {
+    if (picked.length >= 3) break;
+    picked.push(line.trim());
+    count += line.trim().length;
+    if (count >= MAX_OVERVIEW_FALLBACK) break;
+  }
+  const joined = picked.join('\n');
+  return joined.length > MAX_OVERVIEW_FALLBACK ? `${joined.slice(0, MAX_OVERVIEW_FALLBACK)}…` : joined;
 }
 
 /**

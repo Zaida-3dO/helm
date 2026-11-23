@@ -253,6 +253,25 @@ pub fn chat_send(
                     now,
                 },
             )?;
+            if origin == SendOrigin::Page {
+                // A page's send keeps the words it wants on its card beside the origin, so the
+                // transcript can name the page again after a reload. Long ones are cut short
+                // rather than refused: the card is a label, not the message.
+                if let Some(t) = a.page_title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+                    let t: String = t.chars().take(240).collect();
+                    tx.execute(
+                        "UPDATE submission_meta SET page_title = ?2 WHERE submission_id = ?1",
+                        params![sid, t],
+                    )?;
+                }
+                if let Some(o) = a.page_overview.as_deref().map(str::trim).filter(|o| !o.is_empty()) {
+                    let o: String = o.chars().take(2000).collect();
+                    tx.execute(
+                        "UPDATE submission_meta SET page_overview = ?2 WHERE submission_id = ?1",
+                        params![sid, o],
+                    )?;
+                }
+            }
             if !attachments.is_empty() {
                 if let Err(r) = crate::attachments::link(tx, &a.chat_id, &sid, &attachments)? {
                     // Undo the submission: nothing of this send is kept but the draft.
@@ -360,6 +379,14 @@ pub struct HostSend<'a> {
     pub submission_id: &'a str,
     pub text: &'a str,
     pub origin: SubmissionOrigin,
+    /// For origin `page` brought in from another PC: the page's name and short summary, kept
+    /// with the message so its card shows there too.
+    pub page: Option<(&'a str, &'a str)>,
+}
+
+/// Cut a display label to at most `chars` characters (a card label, not the message).
+fn clip(s: &str, chars: usize) -> String {
+    s.chars().take(chars).collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -668,6 +695,12 @@ fn host_send_inner(
             tx.execute(
                 "UPDATE submission_meta SET afk_note = 1 WHERE submission_id = ?1",
                 [s.submission_id],
+            )?;
+        }
+        if let Some((title, overview)) = s.page {
+            tx.execute(
+                "UPDATE submission_meta SET page_title = ?2, page_overview = ?3 WHERE submission_id = ?1",
+                params![s.submission_id, clip(title, 240), clip(overview, 2000)],
             )?;
         }
         if !ids.is_empty() {

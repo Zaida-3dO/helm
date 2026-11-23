@@ -993,6 +993,7 @@ async fn a_message_starts_the_telegram_chat_with_origin_telegram_and_is_stored_o
             submission_id: &later,
             text: "one more",
             origin: helm_chats::types::SubmissionOrigin::App,
+            page: None,
         },
         &[],
         &[HostFile {

@@ -370,6 +370,21 @@ pub struct SendArgs {
     /// calls under these ids, and wait on this PC for the message that names them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<AttachmentRef>,
+    /// Set when a page on the sending PC wrote the message: the card words the receiving chat
+    /// stores with it, so the transcript shows the same page card there. Absent for the person's
+    /// own typing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<PageOrigin>,
+}
+
+/// The display words of a page's message, as the page named them: its name and a short summary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PageOrigin {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overview: Option<String>,
 }
 
 /// One file's place in a send: the id its bytes came under.

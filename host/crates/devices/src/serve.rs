@@ -23,7 +23,7 @@ use crate::wire::{
     BoardCancelArgs, BoardReadArgs, Caller, ChatIdArgs, CheckpointArgs, ConsentDecideArgs,
     CreateArgs, DefaultsArgs, DeviceFrame, DeviceInfo, DevicePerson, EditOpenArgs, ForkArgs,
     ForwardCloseArgs, ForwardOpenArgs, Frame, Hello, MoveProfileArgs, MuteArgs, Op, OrganizeArgs,
-    PageArgs, PageIdArgs, PagesReadArgs, PanelStageArgs, PeerDevice, ProjectCreateArgs,
+    PageArgs, PageIdArgs, PageOrigin, PagesReadArgs, PanelStageArgs, PeerDevice, ProjectCreateArgs,
     ProjectSetArgs, Push, QuickOpenArgs, RemoteChat, RenameArgs, ResendArgs, RollOverArgs,
     SendArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SideResolveArgs, SnoozeArgs,
     SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError, MAX_CHUNK_BYTES, MAX_PAGE_ROWS,
@@ -207,6 +207,8 @@ pub trait ChatPort: Send + Sync {
     /// message from them, never as the owner's words. `device` is the PC it was typed on, as the
     /// hub stamped the sender, its name already cleaned with [`pc_name`]; the agent is told.
     /// `files` are the attachments carried with it, exactly as a local send hands them over.
+    /// `page` says a page on the sending PC wrote it: the card words are stored with the message
+    /// and the PC line is not put in front — the page names itself inside the text.
     fn send(
         &self,
         chat_id: String,
@@ -215,6 +217,7 @@ pub trait ChatPort: Send + Sync {
         from: Option<String>,
         device: DeviceInfo,
         files: Vec<SentFile>,
+        page: Option<PageOrigin>,
     ) -> BoxFut<'_, PortResult<()>>;
     /// Stop the chat's turn; with `no_resend`, what the agent had not read is not sent again.
     fn stop(&self, chat_id: String, no_resend: bool) -> BoxFut<'_, PortResult<()>>;
@@ -1575,6 +1578,14 @@ impl Inner {
         if uuid::Uuid::parse_str(&a.client_id).is_err() {
             return Err(WireError::bad_args("clientId must be a UUID."));
         }
+        if let Some(p) = &a.page {
+            let too_long = |s: &Option<String>, max: usize| {
+                s.as_deref().is_some_and(|s| s.chars().count() > max)
+            };
+            if too_long(&p.title, 240) || too_long(&p.overview, 2000) {
+                return Err(WireError::bad_args("The page's card words are too long."));
+            }
+        }
         let files = self.take_files(owner, &a.chat_id, &a.attachments)?;
         if !self.port.claim_send(&a.client_id, &a.chat_id)? {
             // A repeat spends nothing, so the uploads it named are let go at once.
@@ -1600,6 +1611,7 @@ impl Inner {
                 from,
                 device.clone(),
                 files,
+                a.page,
             )
             .await;
         match sent {

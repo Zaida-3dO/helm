@@ -83,3 +83,23 @@ export function peerMessage(row: MessageRow): PeerMessage | null {
   const m = PEER_FRAME.exec(row.text);
   return m ? { title: (m[1] as string).trim() || 'Untitled', chatId: m[2] as string, body: m[3] as string } : null;
 }
+
+export interface PageMessage {
+  /** The page's name, as the send stored it; empty when it did not. */
+  title: string;
+  /** The short summary shown while the card is collapsed; empty when there is none. */
+  overview: string;
+}
+
+/**
+ * A message a page wrote, for the card: the transcript shows the page's name and its overview
+ * collapsed, not the raw prompt, and expands to the whole text the agent received. Null for any
+ * other message.
+ */
+export function pageMessage(row: MessageRow): PageMessage | null {
+  if (row.role !== 'user' || row.details?.origin !== 'page') return null;
+  return {
+    title: (row.details?.pageTitle ?? '').trim(),
+    overview: (row.details?.pageOverview ?? '').trim(),
+  };
+}

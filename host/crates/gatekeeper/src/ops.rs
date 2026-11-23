@@ -136,6 +136,7 @@ fn set_mode(ctx: &OpCtx, a: &ModeSetArgs) -> Result<(), ApiError> {
                         submission_id: &uuid::Uuid::new_v4().to_string(),
                         text: &workmode::switch_line(now_mode),
                         origin: helm_chats::types::SubmissionOrigin::App,
+                        page: None,
                     },
                 );
             }

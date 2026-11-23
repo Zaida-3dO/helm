@@ -1232,7 +1232,7 @@ fn parse_mode(s: &str) -> SubmissionMode {
 /// A submission with no origin row reads as `unknown`, which parses to `app`: never the user's own
 /// typing, so it cannot pass for consent.
 const SUBMISSION_SELECT: &str = "SELECT s.id, s.chat_id, s.text, s.mode, s.state, \
-     COALESCE(m.origin, 'unknown'), s.created_at, m.priority \
+     COALESCE(m.origin, 'unknown'), s.created_at, m.priority, m.page_title, m.page_overview \
      FROM submissions s LEFT JOIN submission_meta m ON m.submission_id = s.id";
 
 fn submission_from_row(r: &Row<'_>) -> rusqlite::Result<Submission> {
@@ -1246,6 +1246,8 @@ fn submission_from_row(r: &Row<'_>) -> rusqlite::Result<Submission> {
         created_at: r.get(6)?,
         images: None,
         refs: None,
+        page_title: r.get(8)?,
+        page_overview: r.get(9)?,
     })
 }
 

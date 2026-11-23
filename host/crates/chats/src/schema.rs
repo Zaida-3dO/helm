@@ -480,6 +480,11 @@ fn late_columns(tx: &Transaction<'_>) -> rusqlite::Result<()> {
         // Why this chat's turn start waits, while it does (a queue reason code; see
         // [`crate::queue`]). `chat_activity.local_ahead` already says how many stand ahead.
         ("chat_activity", "queue_reason", "TEXT"),
+        // A message written by a page (origin `page`) carries the page's name and its short
+        // summary beside its origin, so the transcript's card can name the page again after a
+        // reload. Both stay null for every other send.
+        ("submission_meta", "page_title", "TEXT"),
+        ("submission_meta", "page_overview", "TEXT"),
     ] {
         let has: bool = tx.query_row(
             "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",

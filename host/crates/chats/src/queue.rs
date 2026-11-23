@@ -958,6 +958,7 @@ mod tests {
             "notification",
             "answer",
             "remote",
+            "page",
             "other_chat",
             "harness",
         ] {

@@ -103,6 +103,7 @@ pub fn deliver(rt: &helm_chats::ChatRuntime, chat_id: &str, d: Delivery) {
                     submission_id: &sid,
                     text: &text,
                     origin: helm_chats::types::SubmissionOrigin::App,
+                    page: None,
                 },
             );
             if let Err(e) = sent {

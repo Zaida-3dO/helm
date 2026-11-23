@@ -897,6 +897,7 @@ async fn afk_policy_answers_questions_and_defers_cards() {
             submission_id: &uuid::Uuid::new_v4().to_string(),
             text: "AFK just turned on.",
             origin: crate::types::SubmissionOrigin::App,
+            page: None,
         },
     )
     .unwrap();
@@ -2075,6 +2076,7 @@ async fn a_used_up_plan_allowance_holds_a_start_and_the_reset_releases_it() {
             submission_id: "tg-1",
             text: "get the shopping list",
             origin: crate::types::SubmissionOrigin::Telegram,
+            page: None,
         },
     )
     .unwrap();
@@ -2897,6 +2899,11 @@ async fn an_action_send_leaves_the_draft_untouched() {
     );
     let r = send("notification").await;
     assert_eq!(r["chat"]["draft"], "half typed");
+    let r = send("page").await;
+    assert_eq!(
+        r["chat"]["draft"], "half typed",
+        "a page send never touches the draft"
+    );
     let r = send("composer").await;
     assert_eq!(
         r["chat"]["draft"], "",
@@ -2911,6 +2918,64 @@ async fn an_action_send_leaves_the_draft_untouched() {
         .await
         .unwrap_err();
     assert_eq!(bad.code, "bad_args");
+}
+
+/// A page's send stores the origin and its card words, so the transcript's page card survives a
+/// reload; a plain send stores neither, and a page's metadata on another origin is ignored.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_page_send_keeps_its_origin_and_card_words() {
+    let h = harness();
+    let page = h.create().await;
+    h.call(
+        "chat_send",
+        json!({"chatId": page, "submissionId": uuid::Uuid::new_v4().to_string(),
+               "text": "Approve these five elements", "action": "default", "draftRevision": 0,
+               "origin": "page", "pageTitle": "Approvals", "pageOverview": "- header\n- footer"}),
+    )
+    .await
+    .unwrap();
+    let other = h.create().await;
+    h.call(
+        "chat_send",
+        json!({"chatId": other, "submissionId": uuid::Uuid::new_v4().to_string(),
+               "text": "ignored card words", "action": "default", "draftRevision": 0,
+               "origin": "action", "pageTitle": "No card here"}),
+    )
+    .await
+    .unwrap();
+    h.until("both sends wrote their user row", |h| {
+        h.col("SELECT count(*) FROM messages WHERE role = 'user'")[0] == "2"
+    })
+    .await;
+    let rows = h.col(
+        "SELECT m.chat_id || '=' || COALESCE(json_extract(m.details, '$.origin'), 'typed')
+           || '=' || COALESCE(json_extract(m.details, '$.pageTitle'), '-')
+           || '=' || COALESCE(json_extract(m.details, '$.pageOverview'), '-')
+         FROM messages m WHERE m.role = 'user' ORDER BY m.timestamp",
+    );
+    // The page row shows its card words, the action row shows none, and an unknown origin never
+    // impersonates a page.
+    let want = format!("{page}=page=Approvals=- header\n- footer");
+    assert!(rows.iter().any(|r| *r == want), "page card words: {rows:?}");
+    assert!(
+        rows.iter().any(|r| r == &format!("{other}=action=-=-")),
+        "an action send keeps no card words: {rows:?}"
+    );
+    // The waiting list carries the same words while a send has no row yet.
+    let held = h.create().await;
+    h.call(
+        "chat_send",
+        json!({"chatId": held, "submissionId": "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f",
+               "text": "queued page note", "action": "default", "draftRevision": 0,
+               "origin": "page", "pageTitle": "Tracker", "pageOverview": "one line"}),
+    )
+    .await
+    .unwrap();
+    let stored = h.col(
+        "SELECT COALESCE(page_title, '-') || '/' || COALESCE(page_overview, '-')
+           FROM submission_meta WHERE submission_id = '0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f'",
+    );
+    assert_eq!(stored, ["Tracker/one line"]);
 }
 
 struct Ctx(Mutex<Vec<(String, u64)>>);
@@ -2949,6 +3014,8 @@ fn send_args(
         origin: Some(origin),
         attachments: None,
         context: Some(ctx),
+        page_title: None,
+        page_overview: None,
     }
 }
 
@@ -4766,6 +4833,7 @@ async fn a_host_sent_first_message_names_the_chat() {
             submission_id: "first",
             text: &framed,
             origin: SubmissionOrigin::OtherChat,
+            page: None,
         },
     )
     .unwrap();
@@ -4787,6 +4855,7 @@ async fn a_host_sent_first_message_names_the_chat() {
             submission_id: "second",
             text: "Another note",
             origin: SubmissionOrigin::OtherChat,
+            page: None,
         },
     )
     .unwrap();
@@ -4802,6 +4871,7 @@ async fn a_host_sent_first_message_names_the_chat() {
             submission_id: "typed",
             text: "[Typed on Laptop]\nwhat is the dog page called",
             origin: SubmissionOrigin::Remote,
+            page: None,
         },
     )
     .unwrap();
@@ -4825,6 +4895,7 @@ async fn a_host_sent_first_message_names_the_chat() {
             submission_id: "phone",
             text: "[Voice · conversation: speak it, short, no markup]\n[Not heard by the user: your reply \"Sure.\" was never played]\n(sent 5 min ago, queued while Helm was offline)\nsummarise the notes on backups",
             origin: SubmissionOrigin::Voice,
+            page: None,
         },
     )
     .unwrap();
@@ -6152,6 +6223,7 @@ async fn a_host_send_repeated_under_one_submission_id_is_delivered_once() {
                 submission_id: "decision-1",
                 text: "[Helm] The user allowed it.",
                 origin: crate::types::SubmissionOrigin::App,
+                page: None,
             },
         )
     };
@@ -6199,6 +6271,7 @@ async fn a_host_send_retry_hands_over_a_saved_row_the_first_hand_off_missed() {
             submission_id: "heal-1",
             text: "[Helm] A wait finished.",
             origin: crate::types::SubmissionOrigin::App,
+            page: None,
         },
     )
     .unwrap();
@@ -6220,6 +6293,7 @@ async fn a_host_send_retry_hands_over_a_saved_row_the_first_hand_off_missed() {
             submission_id: "heal-1",
             text: "[Helm] A wait finished.",
             origin: crate::types::SubmissionOrigin::App,
+            page: None,
         },
     )
     .unwrap();
@@ -6257,6 +6331,7 @@ async fn a_retry_answers_like_a_new_send_when_the_chat_cannot_take_it() {
                 submission_id: id,
                 text: "[Helm] The user allowed it.",
                 origin: crate::types::SubmissionOrigin::App,
+                page: None,
             },
         )
     };
@@ -7536,6 +7611,7 @@ async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
             submission_id: &app_sid,
             text: "a wait fired",
             origin: crate::types::SubmissionOrigin::App,
+            page: None,
         },
     )
     .unwrap();

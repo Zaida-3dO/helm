@@ -79,8 +79,13 @@ export function QueueItem({ item, ops, chatId, readOnly = false, devOps }: { ite
           </button>
         )}
       </div>
-      <div className="queue-bubble">
-        <span className="queue-text">{s.text}</span>
+      <div className="queue-bubble" data-page={s.pageTitle || undefined}>
+        {s.pageTitle && (
+          <div className="queue-page-head" data-testid="queue-page-card">
+            From page: {s.pageTitle}
+          </div>
+        )}
+        <span className="queue-text">{s.pageTitle ? s.pageOverview || s.text : s.text}</span>
         <MessageImages chatId={chatId} images={s.images} />
         <MessageRefs refs={s.refs} />
       </div>

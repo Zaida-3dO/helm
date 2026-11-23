@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { MessageRow } from '../api/types.ts';
-import { bubbleText, fromTelegram, fromVoice, isHelmNote, isQuietReply, peerMessage, typedOn } from './origin.ts';
+import { bubbleText, fromTelegram, fromVoice, isHelmNote, isQuietReply, pageMessage, peerMessage, typedOn } from './origin.ts';
 
 const NOTE = '[Sent from Telegram: answer briefly in plain text, with no tables or long code. Offer choices as a numbered list. Only the final message of each turn reaches the user\'s phone, so make that message stand on its own. The user can reply "more" for detail.]';
 
@@ -85,6 +85,21 @@ test('a message another chat sent splits into sender and body; anything else sta
     [row('Just a note.', 'other_chat'), null],
   ];
   for (const [r, want] of cases) assert.deepEqual(peerMessage(r), want, r.text.slice(0, 40));
+});
+
+test('a message a page wrote carries its card words; the origin alone makes it one', () => {
+  const withWords = {
+    ...row('Approve these five elements\n\n[Sent from the page "Approvals" in Helm\'s side panel. The page wrote this, not the user.]', 'page'),
+    details: { origin: 'page' as const, pageTitle: 'Approvals', pageOverview: '- header\n- footer' },
+  };
+  assert.deepEqual(pageMessage(withWords), { title: 'Approvals', overview: '- header\n- footer' });
+  // An old or odd page row without the words still gets a card; the renderer fills in the name.
+  const bare = row('a page note', 'page');
+  assert.deepEqual(pageMessage(bare), { title: '', overview: '' });
+  // Not that kind of message at all.
+  assert.equal(pageMessage(row('from a page, but typed', 'typed')), null);
+  assert.equal(pageMessage(row('a peer note', 'other_chat')), null);
+  assert.equal(pageMessage({ ...row('page words', 'page'), role: 'assistant' }), null);
 });
 
 test('the notes Helm writes for the agent are recognised; nothing a person or another chat wrote is', () => {

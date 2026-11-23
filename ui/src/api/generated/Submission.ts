@@ -15,4 +15,9 @@ images?: Array<MessageImage>,
  * Only in the waiting list (`pending`): the files, folders and chats attached to this send
  * by reference. Absent when it carried none.
  */
-refs?: Array<MessageRef>, };
+refs?: Array<MessageRef>, 
+/**
+ * For a page's send: the page's name and its short summary, so a waiting bubble can draw
+ * the same card the sent row does. Absent for any other send.
+ */
+pageTitle?: string, pageOverview?: string, };

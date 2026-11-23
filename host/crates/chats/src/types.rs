@@ -939,6 +939,14 @@ pub struct MessageDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub origin: Option<SubmissionOrigin>,
+    /// For a user row written by a page (`origin: page`): the page's name and the short summary
+    /// the collapsed card shows, kept here so the card survives reloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub page_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub page_overview: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub retry: Option<RetryInfo>,
@@ -1081,6 +1089,11 @@ pub enum SubmissionOrigin {
     /// Typed on another device of the household for a chat that runs here. The person at that
     /// device owns the chat, so it counts as their own words.
     Remote,
+    /// Written by a page running in the side panel (or an app integration speaking for one). It
+    /// follows the user's send behaviour like an action, but it is not the user's own words and
+    /// never answers a question or approves anything on their behalf. The transcript shows it as
+    /// a card naming the page, not as a typed bubble.
+    Page,
 }
 
 impl SubmissionOrigin {
@@ -1096,6 +1109,7 @@ impl SubmissionOrigin {
             Self::Telegram => "telegram",
             Self::Voice => "voice",
             Self::Remote => "remote",
+            Self::Page => "page",
         }
     }
 
@@ -1112,15 +1126,24 @@ impl SubmissionOrigin {
             "telegram" => Self::Telegram,
             "voice" => Self::Voice,
             "remote" => Self::Remote,
+            "page" => Self::Page,
             _ => Self::App,
         }
     }
 
-    /// The user's own send from this window: it follows the send mode and the wait limit.
+    /// The user's own send from this window: it follows the send mode and the wait limit. A
+    /// page's send counts here (the user started it from a page they are running), though it is
+    /// never the user's words and never counts as consent — consent reads the stored origin for
+    /// that, and only `typed` qualifies.
     pub fn is_users_own(self) -> bool {
         matches!(
             self,
-            Self::Typed | Self::Action | Self::Notification | Self::Answer | Self::Remote
+            Self::Typed
+                | Self::Action
+                | Self::Notification
+                | Self::Answer
+                | Self::Remote
+                | Self::Page
         )
     }
 }
@@ -1131,6 +1154,7 @@ impl From<SendOrigin> for SubmissionOrigin {
             SendOrigin::Composer => Self::Typed,
             SendOrigin::Action => Self::Action,
             SendOrigin::Notification => Self::Notification,
+            SendOrigin::Page => Self::Page,
         }
     }
 }
@@ -1156,6 +1180,14 @@ pub struct Submission {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub refs: Option<Vec<MessageRef>>,
+    /// For a page's send: the page's name and its short summary, so a waiting bubble can draw
+    /// the same card the sent row does. Absent for any other send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub page_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub page_overview: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
@@ -1464,6 +1496,16 @@ pub struct ChatSendArgs {
     #[serde(default)]
     #[ts(optional, type = "unknown")]
     pub context: Option<Value>,
+    /// For a send whose origin is `page`: the page's name, shown on the card the transcript
+    /// draws instead of a typed bubble. Kept in the message's details so the card survives a
+    /// reload. Ignored for any other origin.
+    #[serde(default)]
+    #[ts(optional)]
+    pub page_title: Option<String>,
+    /// For a send whose origin is `page`: a short summary the card shows while collapsed.
+    #[serde(default)]
+    #[ts(optional)]
+    pub page_overview: Option<String>,
 }
 
 /// Where a user's send came from. Every origin is still the user's own send
@@ -1475,6 +1517,8 @@ pub enum SendOrigin {
     Composer,
     Action,
     Notification,
+    /// A page running in the side panel wrote the message; it shows as a card naming the page.
+    Page,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]

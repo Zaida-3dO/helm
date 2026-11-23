@@ -7,10 +7,10 @@ use crate::wire::{
     code, AnswerArgs, ArchiveArgs, AttachmentGetArgs, BlobReadArgs, BlobRef, BoardCancelArgs,
     BoardReadArgs, CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo,
     DevicePerson, EditOpenArgs, ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs,
-    PageIdArgs, PagesReadArgs, PanelStageArgs, PersonInfo, ProfileInfo, ProjectCreateArgs,
-    ProjectInfo, ProjectSetArgs, QuickOpenArgs, RemoteChat, RenameArgs, ResendArgs, RollOverArgs,
-    SetModelArgs, SetPermissionArgs, ShareArgs, SideResolveArgs, SnoozeArgs, SubmissionArgs,
-    ToolStopArgs, VerbositySetArgs, WireError,
+    PageIdArgs, PageOrigin, PagesReadArgs, PanelStageArgs, PersonInfo, ProfileInfo,
+    ProjectCreateArgs, ProjectInfo, ProjectSetArgs, QuickOpenArgs, RemoteChat, RenameArgs,
+    ResendArgs, RollOverArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SideResolveArgs,
+    SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError,
 };
 use base64::Engine as _;
 use helm_chats::types::{
@@ -139,6 +139,8 @@ pub struct FakeState {
     pub sent_files: Vec<Vec<SentFile>>,
     /// For each send, the PC it was typed on, as the port was told.
     pub sent_on: Vec<DeviceInfo>,
+    /// For each send, the page's card words when a page wrote it.
+    pub sent_page: Vec<Option<PageOrigin>>,
     pub stopped: Vec<String>,
     /// The chats stopped without resending what the agent had not read.
     pub stopped_no_resend: Vec<String>,
@@ -502,6 +504,7 @@ impl ChatPort for FakePort {
         from: Option<String>,
         device: DeviceInfo,
         files: Vec<SentFile>,
+        page: Option<PageOrigin>,
     ) -> BoxFut<'_, PortResult<()>> {
         let mut st = self.st();
         let r = if st.chats.iter().any(|c| c.id() == chat_id) {
@@ -509,6 +512,7 @@ impl ChatPort for FakePort {
             st.sent_from.push(from);
             st.sent_files.push(files);
             st.sent_on.push(device);
+            st.sent_page.push(page);
             Ok(())
         } else {
             Err(WireError::not_found())

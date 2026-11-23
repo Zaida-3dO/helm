@@ -281,6 +281,7 @@ fn start(
             submission_id: &request_id,
             text: REQUEST,
             origin: SubmissionOrigin::App,
+            page: None,
         },
     ) {
         IN_FLIGHT.lock().unwrap().remove(&chat.id);
@@ -562,6 +563,8 @@ async fn carry_on(
             origin: Some(SendOrigin::Action),
             attachments: None,
             context: None,
+            page_title: None,
+            page_overview: None,
         },
         None,
     );
@@ -796,6 +799,7 @@ mod tests {
                 submission_id: "ro-1",
                 text: "write the hand-off",
                 origin: SubmissionOrigin::Schedule,
+                page: None,
             },
         )
         .unwrap();

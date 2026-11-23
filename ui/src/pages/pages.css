@@ -91,12 +91,6 @@
   overflow-wrap: anywhere;
 }
 
-.pg-handoff-text {
-  width: 100%;
-  resize: vertical;
-  font-family: inherit;
-}
-
 .pg-handoff-error {
   margin: 8px 0 0;
   font-size: 12px;

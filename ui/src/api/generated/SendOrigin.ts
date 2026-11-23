@@ -4,4 +4,4 @@
  * Where a user's send came from. Every origin is still the user's own send
  * and follows `sendBehavior`; only the composer's clears the draft.
  */
-export type SendOrigin = "composer" | "action" | "notification";
+export type SendOrigin = "composer" | "action" | "notification" | "page";

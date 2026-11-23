@@ -7,7 +7,7 @@ It gets a `helm` object:
 - `await helm.ready`
 - `helm.state` and `await helm.setState(json)`: up to 256 KiB, kept across restarts; use it instead of localStorage
 - `helm.theme`, `helm.on('themechange', fn)` and the CSS variables --helm-bg, --helm-text, --helm-surface, --helm-muted, --helm-accent, --helm-border
-- `await helm.sendMessage({text, data?, title?})`: asks the user to confirm, then posts the text into this chat as a message from the page, never as the user's own words
+- `await helm.sendMessage({text, overview?, title?, data?})`: posts the text straight into this chat, no confirmation. The chat shows a card naming the page with `title` and summarising with `overview` (without them the card uses the page's title and the text's first lines); the agent receives `text` with a line naming the page as its author, never the user's own words.
 - `helm.openLink(url)`
 
 To change a page, rewrite its file: the open tab reloads and keeps its saved state. A page cannot start work by itself. Pin one with app_pages {action: "pin", path, title?}; show it to the user with app_open_panel {pageId}. Each page has a link, helm://pages/<id>, that opens it from a reply.

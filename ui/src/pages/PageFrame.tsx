@@ -22,8 +22,6 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { ApiError } from '../api/client.ts';
 import type { Api } from '../api/client.ts';
 import type { ChatRecord } from '../api/types.ts';
-import { composerApi } from '../composer/slots.ts';
-import { sendActionText } from '../actions/send.ts';
 import { Button, ConfirmDialog, ContextMenu, toast } from '../ui/index.ts';
 import type { ConfirmSpec, MenuItem } from '../ui/index.ts';
 import { IconMore, IconRefresh, IconX } from '../ui/icons.tsx';
@@ -32,8 +30,8 @@ import type { PageSession, PinnedPage } from './api.ts';
 import type { PageRemote } from './open.ts';
 import { PageBridge } from './bridge.ts';
 import { HandoffDialog } from './HandoffDialog.tsx';
-import type { HandoffChoice, HandoffRequest } from './HandoffDialog.tsx';
-import { checkHandoff, checkLink, checkState, composeHandoff, handoffTitle, pageSandbox } from './protocol.ts';
+import type { HandoffRequest } from './HandoffDialog.tsx';
+import { checkHandoff, checkLink, checkState, composeHandoff, overviewFallback, pageSandbox } from './protocol.ts';
 import { pageTheme } from './theme.ts';
 import './pages.css';
 
@@ -41,9 +39,24 @@ import './pages.css';
 export const WATCH_MS = 1500;
 const BUSY = 'This app cannot request that action right now.';
 
+/** A page's send: straight into the chat, stored with origin `page` and the card words, so the
+ * transcript draws it as a page card and never touches the composer's draft. */
+async function sendPageMessage(api: Api, chatId: string, text: string, title: string, overview: string): Promise<void> {
+  await api('chat_send', {
+    chatId,
+    submissionId: globalThis.crypto.randomUUID(),
+    text,
+    action: 'default',
+    draftRevision: -1,
+    origin: 'page',
+    pageTitle: title,
+    pageOverview: overview,
+  });
+}
+
 interface Pending {
   request: HandoffRequest;
-  run: (choice: HandoffChoice | 'open', text: string) => Promise<void>;
+  run: () => Promise<void>;
   cancel: () => void;
 }
 
@@ -175,8 +188,9 @@ export function PageFrame({ api, path, remote, chatId, visible, onTitle }: PageF
   const nameRef = useRef<string | null>(null);
   nameRef.current = linkedName;
 
+  // The only confirmation left for a page is the link one: a message goes straight to the chat.
   const ask = useCallback(
-    (request: HandoffRequest, perform: (choice: HandoffChoice | 'open', text: string) => Promise<unknown>) =>
+    (request: HandoffRequest, perform: () => Promise<unknown>) =>
       new Promise<unknown>((resolve, reject) => {
         if (pendingRef.current) return reject(new Error(BUSY));
         const done = () => {
@@ -185,8 +199,8 @@ export function PageFrame({ api, path, remote, chatId, visible, onTitle }: PageF
         };
         const p: Pending = {
           request,
-          run: async (choice, text) => {
-            const r = await perform(choice, text);
+          run: async () => {
+            const r = await perform();
             done();
             resolve(r);
           },
@@ -215,20 +229,13 @@ export function PageFrame({ api, path, remote, chatId, visible, onTitle }: PageF
       if (method === 'sendMessage') {
         const c = checkHandoff(payload);
         if (!c.ok) throw new Error(c.error);
-        const text = composeHandoff(c.value, s.title);
         const target = pinRef.current?.chatId ?? chatRef.current;
         if (!target || !nameRef.current) throw new Error(BUSY);
-        return ask(
-          { kind: 'message', title: handoffTitle(c.value, s.title), text, chatName: nameRef.current },
-          async (choice, edited) => {
-            if (choice === 'add') {
-              if (!composerApi(target).insert(edited)) throw new Error('Open the chat first, then add the message to it.');
-              return { action: 'add' };
-            }
-            await sendActionText(api, target, edited);
-            return { action: 'send' };
-          },
-        );
+        // Straight into the chat: the card names the page and the agent is told the page wrote
+        // it, so there is nothing to confirm first.
+        const text = composeHandoff(c.value, s.title);
+        await sendPageMessage(api, target, text, c.value.title ?? s.title, c.value.overview ?? overviewFallback(text));
+        return { action: 'sent' };
       }
       if (method === 'openLink') {
         const c = checkLink(payload);

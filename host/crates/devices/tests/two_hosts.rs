@@ -2241,6 +2241,36 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         port.st().sent,
         [("c1".to_owned(), id.to_owned(), "hi".to_owned())]
     );
+    // A page's send crosses unchanged: the origin and the card words ride along, so the chat on
+    // the PC that runs it shows the page's card and knows the page wrote the message.
+    let page = api
+        .call_host(
+            "chat_send",
+            json!({"chatId": "c1", "submissionId": "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b6a",
+                   "text": "Approve these", "action": "default", "draftRevision": 0,
+                   "origin": "page", "pageTitle": "Approvals", "pageOverview": "five elements"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page["submission"]["origin"], "page");
+    {
+        let st = port.st();
+        let words = st
+            .sent_page
+            .last()
+            .unwrap()
+            .as_ref()
+            .expect("the page words cross");
+        assert_eq!(
+            (words.title.as_deref(), words.overview.as_deref()),
+            (Some("Approvals"), Some("five elements"))
+        );
+        assert_eq!(
+            st.sent_page.first(),
+            Some(&None),
+            "the plain send carried no page"
+        );
+    }
 
     // A picture and a file ride with a message: staged on this PC, they cross in ordered
     // chunks and reach the chat on the PC that runs it just as a local attachment would.
@@ -2347,7 +2377,8 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         .await
         .unwrap_err();
     assert_eq!(e.code, "refused");
-    assert_eq!(port.st().sent.len(), 2);
+    // Still the three that got through (hi, the attached one, the page's), no fourth.
+    assert_eq!(port.st().sent.len(), 3);
 
     // Its switch off: read-only, said in words, nothing sent.
     port.set_run(false);
@@ -2375,7 +2406,7 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         e.message.starts_with("Desk is offline (last seen "),
         "{e:?}"
     );
-    assert_eq!(port.st().sent.len(), 2);
+    assert_eq!(port.st().sent.len(), 3);
     let page = api
         .call_host("transcript_page", json!({"chatId": "c1"}))
         .await
@@ -2399,7 +2430,7 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         .await
         .unwrap();
     assert_eq!(got["chat"]["draft"], "note");
-    assert_eq!(port.st().sent.len(), 2);
+    assert_eq!(port.st().sent.len(), 3);
     // This PC's own line down reads differently.
     b.mirror.line_down();
     b.link.set_up(false);

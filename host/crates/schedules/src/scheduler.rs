@@ -49,6 +49,7 @@ pub(crate) fn request<'a>(chat_id: &'a str, submission_id: &'a str, text: &'a st
         // The chat was idle when the run was claimed; if the user started a turn in the gap, the
         // prompt goes to Claude at its next tool boundary.
         origin: SubmissionOrigin::Schedule,
+        page: None,
     }
 }
 

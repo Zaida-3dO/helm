@@ -409,6 +409,7 @@ impl RuntimeSink {
                 submission_id,
                 text,
                 origin: helm_chats::types::SubmissionOrigin::App,
+                page: None,
             },
         );
         match sent {

@@ -799,6 +799,7 @@ pub(crate) fn open_repair_chat(c: &Ctx, o: &ServiceOutage, now: i64) -> Result<S
             submission_id: &sid,
             text: &text,
             origin: helm_chats::types::SubmissionOrigin::App,
+            page: None,
         },
     ) {
         Ok(_) => Ok(id),
@@ -956,6 +957,7 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
                 submission_id: &sid,
                 text: &shown,
                 origin: TELEGRAM_ORIGIN,
+                page: None,
             },
             &attach,
             &saved,
@@ -1235,6 +1237,7 @@ pub async fn mirror(
                             submission_id: &sid,
                             text: note,
                             origin: helm_chats::types::SubmissionOrigin::App,
+                            page: None,
                         },
                     );
                 }
@@ -1773,6 +1776,7 @@ impl TelegramSink for ChatSink {
                         submission_id: &sid,
                         text: &note,
                         origin: helm_chats::types::SubmissionOrigin::App,
+                        page: None,
                     },
                 );
                 match sent {

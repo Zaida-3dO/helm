@@ -23,4 +23,14 @@ attachments?: Array<string>,
 /**
  * The panel-context payload, handed to the registered context builder (composer sends only).
  */
-context?: unknown, };
+context?: unknown, 
+/**
+ * For a send whose origin is `page`: the page's name, shown on the card the transcript
+ * draws instead of a typed bubble. Kept in the message's details so the card survives a
+ * reload. Ignored for any other origin.
+ */
+pageTitle?: string, 
+/**
+ * For a send whose origin is `page`: a short summary the card shows while collapsed.
+ */
+pageOverview?: string, };

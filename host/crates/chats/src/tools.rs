@@ -1311,6 +1311,7 @@ fn send_framed(ctx: &ToolCtx, to: &str, body: &str) -> Result<crate::submit::Hos
             submission_id: &sid,
             text: &text,
             origin: SubmissionOrigin::OtherChat,
+            page: None,
         },
     )
     .map_err(|e| ToolError::refused(e.message))
@@ -1466,6 +1467,8 @@ async fn send_to_mirror_chat(
                 origin: Some(crate::types::SendOrigin::Action),
                 attachments: None,
                 context: None,
+                page_title: None,
+                page_overview: None,
             },
             acting,
         )
@@ -4528,6 +4531,7 @@ mod tests {
                     submission_id: &uuid::Uuid::new_v4().to_string(),
                     text: "ok",
                     origin,
+                    page: None,
                 },
             )
             .unwrap();

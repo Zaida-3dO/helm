@@ -6,9 +6,10 @@ import {
   checkLink,
   checkState,
   composeHandoff,
-  handoffTitle,
   MARK,
+  MAX_OVERVIEW_FALLBACK,
   MAX_PENDING,
+  overviewFallback,
   PAGE_SANDBOX,
   pageSandbox,
   parseMessage,
@@ -50,21 +51,31 @@ test('a message from a page is checked, worded with the page named, and its data
     { text: 'x'.repeat(16_001) },
     { text: 'hi', title: 7 },
     { text: 'hi', title: 'x'.repeat(241) },
+    { text: 'hi', overview: 7 },
+    { text: 'hi', overview: 'x'.repeat(2_001) },
     { text: 'hi', data: { big: 'x'.repeat(70_000) } },
     { text: 'hi', data: 1n },
   ];
   for (const p of bad) assert.equal(checkHandoff(p).ok, false, JSON.stringify(p, (_, v) => (typeof v === 'bigint' ? 'big' : v))?.slice(0, 60));
 
-  const ok = checkHandoff({ text: '  Approve step 2  ', title: ' Review ', data: { step: 2 } });
+  const ok = checkHandoff({ text: '  Approve step 2  ', title: ' Review ', overview: '  five parts  ', data: { step: 2 } });
   assert.ok(ok.ok);
-  assert.deepEqual(ok.ok && ok.value, { text: 'Approve step 2', title: 'Review', data: { step: 2 } });
+  assert.deepEqual(ok.ok && ok.value, { text: 'Approve step 2', title: 'Review', overview: 'five parts', data: { step: 2 } });
   const text = composeHandoff(ok.ok ? ok.value : { text: '' }, 'Tracker');
   assert.ok(text.startsWith('Approve step 2\n\n[Sent from the page "Tracker" in Helm'));
   assert.ok(text.includes('not the user'), 'it never reads as the user’s own words');
   assert.ok(text.endsWith('```json\n{\n  "step": 2\n}\n```'));
   assert.equal(composeHandoff({ text: 'x' }, 'a "quoted"\nname').split('\n').length, 3, 'a page cannot break the marker line');
-  assert.equal(handoffTitle({ text: 'x' }, 'Tracker'), 'From Tracker');
-  assert.equal(handoffTitle({ text: 'x', title: 'Mine' }, 'Tracker'), 'Mine');
+});
+
+test('a card overview the page did not give falls back to the first lines, blank lines skipped and length capped', () => {
+  assert.equal(overviewFallback('line one\n\nline two\nline three\nline four kept but unused'), 'line one\nline two\nline three');
+  assert.equal(overviewFallback('only line'), 'only line');
+  assert.equal(overviewFallback('   \n\n \n'), '');
+  // A single long line is cut at the cap with an ellipsis, never past it.
+  const long = 'x'.repeat(320);
+  const cut = overviewFallback(long);
+  assert.ok(cut.length <= MAX_OVERVIEW_FALLBACK + 1 && cut.endsWith('…'), cut.slice(-4));
 });
 
 test('links and saved state from a page: web links only, never Helm’s own hosts, state within its limit', () => {

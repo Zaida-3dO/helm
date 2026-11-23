@@ -2047,6 +2047,7 @@ impl Actor {
                     submission_id: &sid,
                     text: &text,
                     origin: crate::types::SubmissionOrigin::App,
+                    page: None,
                 },
             );
             if let Err(e) = sent {
@@ -2107,6 +2108,7 @@ impl Actor {
                     submission_id: &sid,
                     text: &text,
                     origin: crate::types::SubmissionOrigin::App,
+                    page: None,
                 },
             );
             if let Err(e) = sent {
@@ -2861,6 +2863,13 @@ impl Actor {
             let mut details = json!({"submissionId": sid, "mode": sub.mode});
             if sub.origin != SubmissionOrigin::Typed {
                 details["origin"] = json!(sub.origin);
+            }
+            // A page's send carries its card words so the card survives reloads.
+            if let Some(t) = &sub.page_title {
+                details["pageTitle"] = json!(t);
+            }
+            if let Some(o) = &sub.page_overview {
+                details["pageOverview"] = json!(o);
             }
             let images = crate::message_images::for_submission(&self.sh.db, sid);
             if !images.is_empty() {
@@ -4677,6 +4686,8 @@ impl Actor {
                         .as_ref()
                         .map(|s| s.origin)
                         .filter(|o| *o != SubmissionOrigin::Typed),
+                    page_title: sub.as_ref().and_then(|s| s.page_title.clone()),
+                    page_overview: sub.as_ref().and_then(|s| s.page_overview.clone()),
                     images: (!images.is_empty()).then_some(images),
                     refs: (!refs.is_empty()).then_some(refs),
                     ..Default::default()

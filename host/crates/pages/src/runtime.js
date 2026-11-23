@@ -242,6 +242,12 @@
         }
         out.title = message.title;
       }
+      if (message.overview !== undefined) {
+        if (typeof message.overview !== 'string' || message.overview.length > 2000) {
+          return Promise.reject(new Error('The message overview is not valid.'));
+        }
+        out.overview = message.overview;
+      }
       if (message.data !== undefined) out.data = message.data;
       return request('sendMessage', out, USER_TIMEOUT);
     },

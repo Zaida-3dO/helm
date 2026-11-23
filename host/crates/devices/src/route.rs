@@ -1683,6 +1683,11 @@ impl RemoteChats for Mirror {
             if !uploads.is_empty() {
                 args["attachments"] = json!(uploads);
             }
+            // A page's send carries its card words across; the chat that runs it shows the same
+            // card and knows the page wrote the message, not the person.
+            if a.origin.unwrap_or_default() == SendOrigin::Page {
+                args["page"] = json!({ "title": a.page_title, "overview": a.page_overview });
+            }
             m.ask_as(&device, "send", args, "this message", &act)
                 .await?;
             // The message arrived: this PC has no further use for the staged files.
@@ -1705,7 +1710,7 @@ impl RemoteChats for Mirror {
                     "text": a.text,
                     "mode": if steer { "steer" } else { "prompt" },
                     "state": "accepted",
-                    "origin": "typed",
+                    "origin": if a.origin.unwrap_or_default() == SendOrigin::Page { "page" } else { "typed" },
                     "createdAt": helm_core::now_ms(),
                 },
                 "chat": m.chat_json(&a.chat_id)?,

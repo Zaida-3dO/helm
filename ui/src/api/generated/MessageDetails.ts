@@ -22,7 +22,12 @@ toolArgs?: string, isError?: boolean, submissionId?: string, mode?: SubmissionMo
  * For a user row whose message was not typed in Helm's composer: where it came from (a
  * Telegram message, a schedule, another chat...). Absent for typed messages.
  */
-origin?: SubmissionOrigin, retry?: RetryInfo, contextKind?: ContextKind, textTruncated?: boolean, stoppable?: boolean, 
+origin?: SubmissionOrigin, 
+/**
+ * For a user row written by a page (`origin: page`): the page's name and the short summary
+ * the collapsed card shows, kept here so the card survives reloads.
+ */
+pageTitle?: string, pageOverview?: string, retry?: RetryInfo, contextKind?: ContextKind, textTruncated?: boolean, stoppable?: boolean, 
 /**
  * For a tool row: which server the tool came from.
  */

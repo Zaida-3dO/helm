@@ -94,6 +94,7 @@ impl Host for ChatRuntime {
                 text,
                 // Helm's own note, never the user's words: it cannot count as consent.
                 origin: SubmissionOrigin::App,
+                page: None,
             },
         )
         .map(|_| ())

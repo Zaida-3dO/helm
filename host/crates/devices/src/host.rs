@@ -14,10 +14,10 @@ use crate::wire::{
     code, AnswerArgs, ArchiveArgs, AttachmentGetArgs, BlobReadArgs, BlobRef, BoardCancelArgs,
     BoardReadArgs, CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo,
     DevicePerson, EditOpenArgs, ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs,
-    PageIdArgs, PagesReadArgs, PanelStageArgs, PersonInfo, ProfileInfo, ProjectCreateArgs,
-    ProjectInfo, ProjectSetArgs, QuickOpenArgs, RemoteChat, RenameArgs, ResendArgs, RollOverArgs,
-    SetModelArgs, SetPermissionArgs, ShareArgs, SideResolveArgs, SnoozeArgs, SubmissionArgs,
-    ToolStopArgs, VerbositySetArgs, WireError, MAX_BLOB_BYTES,
+    PageIdArgs, PageOrigin, PagesReadArgs, PanelStageArgs, PersonInfo, ProfileInfo,
+    ProjectCreateArgs, ProjectInfo, ProjectSetArgs, QuickOpenArgs, RemoteChat, RenameArgs,
+    ResendArgs, RollOverArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SideResolveArgs,
+    SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError, MAX_BLOB_BYTES,
 };
 use base64::Engine as _;
 use helm_chats::submit::{self, HostFile, HostImage, HostSend};
@@ -1178,6 +1178,7 @@ impl ChatPort for HostPort {
         from: Option<String>,
         device: DeviceInfo,
         files: Vec<SentFile>,
+        page: Option<PageOrigin>,
     ) -> BoxFut<'_, PortResult<()>> {
         Box::pin(async move {
             self.here(&chat_id)?;
@@ -1187,15 +1188,32 @@ impl ChatPort for HostPort {
             let submission_id = client_id;
             // The owner's own words count as typed by them; a household member's words on a chat
             // that is not theirs arrive as a message from them, never as approval. Either way the
-            // agent is told which PC the person is at.
-            let (text, origin) = match from {
-                None => (
-                    typed_on_message(&device.name, &text),
-                    SubmissionOrigin::Remote,
-                ),
+            // agent is told which PC the person is at. A page's words are the page's own: the
+            // page marker is already inside the text, no PC line goes in front, and the card
+            // words travel with it.
+            let (text, origin, page_meta) = match from {
+                None => match page {
+                    Some(p) => {
+                        let title = p.title.unwrap_or_default();
+                        let overview = p.overview.unwrap_or_default();
+                        if title.trim().is_empty() && overview.trim().is_empty() {
+                            (text, SubmissionOrigin::Page, None)
+                        } else {
+                            let title = title.trim().to_owned();
+                            let overview = overview.trim().to_owned();
+                            (text, SubmissionOrigin::Page, Some((title, overview)))
+                        }
+                    }
+                    None => (
+                        typed_on_message(&device.name, &text),
+                        SubmissionOrigin::Remote,
+                        None,
+                    ),
+                },
                 Some(name) => (
                     household_message(&name, &device.name, &text),
                     SubmissionOrigin::OtherChat,
+                    None,
                 ),
             };
             tokio::task::spawn_blocking(move || {
@@ -1225,6 +1243,7 @@ impl ChatPort for HostPort {
                         submission_id: &submission_id,
                         text: &text,
                         origin,
+                        page: page_meta.as_ref().map(|(t, o)| (t.as_str(), o.as_str())),
                     },
                     &images,
                     &attached,

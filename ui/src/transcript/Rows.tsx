@@ -12,7 +12,7 @@ import { MessageImages } from './MessageImages.tsx';
 import { MessageRefs } from './MessageRefs.tsx';
 import { OptionBoardCard } from './OptionBoard.tsx';
 import { RecapCard } from './RecapCard.tsx';
-import { bubbleText, fromTelegram, peerMessage, typedOn } from './origin.ts';
+import { bubbleText, fromTelegram, pageMessage, peerMessage, typedOn } from './origin.ts';
 import { messageTimeLabel } from './rowMeta.ts';
 import { IconMonitor, IconPaperPlane } from '../ui/icons.tsx';
 import { ReplyActions, UserActions } from './MessageActions.tsx';
@@ -146,6 +146,26 @@ function Thinking({ text, streaming, onLink }: { text: string; streaming: boolea
   );
 }
 
+/** A message a page wrote: a neat card naming its page and summarising it, collapsed by
+ * default, expanding to the whole text the agent received. */
+function PageCard({ page, row, ctx }: { page: NonNullable<ReturnType<typeof pageMessage>>; row: MessageRow; ctx: RowContext }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={`bubble page-card${open ? ' open' : ''}`} data-testid="page-card" data-page={page.title || undefined}>
+      <div className="page-card-head">
+        <IconMonitor size={12} /> From page: {page.title || 'a page'}
+      </div>
+      {page.overview && !open && <div className="page-card-overview" data-testid="page-card-overview">{page.overview}</div>}
+      {open && <Markdown text={row.text} onLink={ctx.onLink} />}
+      <button type="button" className="page-card-toggle" onClick={() => setOpen((o) => !o)} aria-expanded={open} data-testid="page-card-toggle">
+        <Glyph name="chevron" size={12} className="page-card-chevron" />
+        {open ? 'Hide what the agent received' : 'Show what the agent received'}
+      </button>
+      <div className="page-card-note muted">The page wrote this, not the user.</div>
+    </div>
+  );
+}
+
 function AssistantBody({ row, ctx, hideThinking, hideText }: { row: MessageRow; ctx: RowContext; hideThinking?: boolean; hideText?: boolean }) {
   const streaming = row.status === 'streaming';
   const text = usePacedText(row.text, streaming);
@@ -163,6 +183,7 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
   const place = `${afterTool ? ' after-tool' : ''}${final ? ' final-answer' : ''}${indent ? ' indented' : ''}${afterFold ? ' after-fold' : ''}${beforeTool ? ' before-tool' : ''}`;
   if (row.role === 'user') {
     const peer = peerMessage(row);
+    const page = pageMessage(row);
     const pc = typedOn(row);
     return (
       <div className={`row row-user status-${row.status}`} {...common}>
@@ -178,6 +199,8 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
         )}
         {ctx.editing?.rowId === row.id && ctx.onResend && ctx.onCancelEdit ? (
           <EditMessage edit={ctx.editing} onResend={ctx.onResend} onCancel={ctx.onCancelEdit} />
+        ) : page ? (
+          <PageCard page={page} row={row} ctx={ctx} />
         ) : peer ? (
           <div className="bubble peer-card" data-testid="peer-card" data-from={peer.chatId}>
             <div className="peer-card-head">
@@ -201,7 +224,7 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
           <UserActions
             row={row}
             sctx={slotContext(row, ctx)}
-            onEdit={row.status === 'complete' && !ctx.running && !peer && ctx.onEdit ? () => ctx.onEdit?.(row) : undefined}
+            onEdit={row.status === 'complete' && !ctx.running && !peer && !page && ctx.onEdit ? () => ctx.onEdit?.(row) : undefined}
           />
         )}
         <Footers row={row} ctx={ctx} />
