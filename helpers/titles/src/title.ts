@@ -103,6 +103,8 @@ export function buildPrompt(job: TitleJob, strict: boolean): string {
   parts.push(`<first_request>\n${headTail(job.firstRequest, FIRST_REQUEST_CHARS)}\n</first_request>`);
   if (job.recent?.length) parts.push(`<recent>\n${job.recent.join("\n---\n")}\n</recent>`);
   if (job.latest) parts.push(`<latest_request>\n${headTail(job.latest, FIRST_REQUEST_CHARS)}\n</latest_request>`);
+  // A long brief can bury the instruction at the top, so the ask is said again after the data.
+  parts.push('Now reply with only the title itself, in the real words of this conversation\'s subject. Never the word "Title" or any label.');
   return parts.join("\n\n");
 }
 
@@ -157,6 +159,10 @@ export async function makeSuggestions(job: TitleJob): Promise<{ titles: string[]
   }
 }
 
+/** What a model sometimes answers instead of a title: the label itself. Not a title, so the stricter
+ * retry runs and then the fallback stays. */
+const PLACEHOLDER_TITLE = /^(?:(?:a |the |new |conversation |chat |untitled )?(?:title|chat|conversation|name|summary)|untitled|untitled (?:chat|conversation)|no title)$/i;
+
 /** Clean a model answer into a title: one line, labels, quotes and Markdown out, no trailing
  * full stop. A real answer is never thrown away for its length: a too-long one is cut to a
  * shorter title at the last word break that still leaves a real phrase, and a short one is kept
@@ -170,7 +176,7 @@ export function cleanTitle(raw: string): string | null {
   t = t.trim().replace(/^["'“”‘’]+|["'“”‘’]+$/g, "");
   t = t.replace(/[\u0000-\u001f\u007f]/g, "");
   t = t.replace(/\.+$/, "").trim();
-  if (!t) return null;
+  if (!t || PLACEHOLDER_TITLE.test(t.replace(/\s*:$/, ""))) return null;
   if (t.length > MAX_TITLE_CHARS) {
     const cut = t.slice(0, MAX_TITLE_CHARS);
     const space = cut.lastIndexOf(" ");

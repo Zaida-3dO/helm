@@ -77,6 +77,12 @@ test("one retry with the stricter prompt, then a clear failure", async () => {
   const long = fakeClaude(["This is far too long to be a title for anything at all"]);
   assert.deepEqual(await makeTitle({ firstRequest: "the login page redirects twice", ...long }), { title: "This is far too long to be a title for anything" });
   assert.equal(long.calls(), 1, "a long answer is never retried");
+  // A label is not a title: it takes the stricter retry, and then the fallback stays.
+  for (const label of ["Title", "**Conversation title**", "Untitled", "New chat", "Title:"]) assert.equal(cleanTitle(label), null, label);
+  const label = fakeClaude(["Title", "Fix login redirect"]);
+  assert.deepEqual(await makeTitle({ firstRequest: "the login page redirects twice", ...label }), { title: "Fix login redirect" });
+  assert.equal(label.calls(), 2);
+  assert.match(buildPrompt({ firstRequest: "x", command: "x" }, false), /Never the word "Title"/);
   const bad = fakeClaude(["", ""]);
   const r = await makeTitle({ firstRequest: "x", ...bad });
   assert.ok("error" in r);
