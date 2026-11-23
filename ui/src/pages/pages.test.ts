@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { PageBridge } from './bridge.ts';
 import {
+  allowSend,
   checkHandoff,
   checkLink,
   checkState,
@@ -76,6 +77,41 @@ test('a card overview the page did not give falls back to the first lines, blank
   const long = 'x'.repeat(320);
   const cut = overviewFallback(long);
   assert.ok(cut.length <= MAX_OVERVIEW_FALLBACK + 1 && cut.endsWith('…'), cut.slice(-4));
+});
+
+test('a page may not send faster than once in two seconds or ten in ten minutes', () => {
+  // (why, recent sends as ms offsets from the moment checked, allowed?)
+  const rows: Array<[string, number[], boolean]> = [
+    ['first send ever', [], true],
+    ['2.5 s after the last', [0], true],
+    ['1.9 s after the last', [800], false],
+    ['a burst of 9, this is the 10th', [9_000, 8_000, 7_000, 6_000, 5_000, 4_000, 3_000, 2_000, 1_000], true],
+    [
+      'the window is full of ten',
+      [9_000, 8_000, 7_000, 6_000, 5_000, 4_000, 3_000, 2_000, 1_000, 0],
+      false,
+    ],
+    // Old sends leave the 10-minute window and no longer count.
+    [
+      'ten, the oldest 11 minutes ago',
+      [660_000, 9_000, 8_000, 7_000, 6_000, 5_000, 4_000, 3_000, 2_000, 1_000],
+      true,
+    ],
+  ];
+  const now = 1_000_000;
+  for (const [why, offsets, allowed] of rows) {
+    const sent = offsets.map((o) => now - o);
+    const r = allowSend(sent, now);
+    assert.equal(r.ok, allowed, why);
+    // The kept list drops what left the window and, on an allowed send, adds this one.
+    const expected = sent.filter((t) => now - t < 10 * 60_000);
+    assert.ok(
+      allowed
+        ? r.kept.length === expected.length + 1 && r.kept[r.kept.length - 1] === now
+        : r.kept.length === expected.length,
+      `${why}: kept=${r.kept.length}`,
+    );
+  }
 });
 
 test('links and saved state from a page: web links only, never Helm’s own hosts, state within its limit', () => {

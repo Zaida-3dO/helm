@@ -10,4 +10,4 @@ It gets a `helm` object:
 - `await helm.sendMessage({text, overview?, title?, data?})`: posts the text straight into this chat, no confirmation. The chat shows a card naming the page with `title` and summarising with `overview` (without them the card uses the page's title and the text's first lines); the agent receives `text` with a line naming the page as its author, never the user's own words.
 - `helm.openLink(url)`
 
-To change a page, rewrite its file: the open tab reloads and keeps its saved state. A page cannot start work by itself. Pin one with app_pages {action: "pin", path, title?}; show it to the user with app_open_panel {pageId}. Each page has a link, helm://pages/<id>, that opens it from a reply.
+To change a page, rewrite its file: the open tab reloads and keeps its saved state. A page posts into its chat only when its own script calls helm.sendMessage; write pages so that happens on the user's click. Pin one with app_pages {action: "pin", path, title?}; show it to the user with app_open_panel {pageId}. Each page has a link, helm://pages/<id>, that opens it from a reply.

@@ -4,6 +4,21 @@
 export const MARK = 'helm-page-v1';
 /** Requests a page may have waiting at once. */
 export const MAX_PENDING = 8;
+/** Page sends are throttled per frame: at most one every two seconds, and ten in ten minutes at
+ * most. A runaway script (an interval, a reload loop, a bug) must not start turn after turn. */
+export const SEND_MIN_GAP_MS = 2_000;
+export const SEND_BURST = 10;
+export const SEND_BURST_WINDOW_MS = 10 * 60_000;
+
+/** One more send from a frame: given its recent send times (ms, oldest first) and now, whether
+ * this one is allowed, and the times a frame should keep for the next check (older ones drop
+ * out of the window). */
+export function allowSend(sent: number[], now: number): { ok: boolean; kept: number[] } {
+  const kept = sent.filter((t) => now - t < SEND_BURST_WINDOW_MS);
+  if (kept.length > 0 && now - kept[kept.length - 1] < SEND_MIN_GAP_MS) return { ok: false, kept };
+  if (kept.length >= SEND_BURST) return { ok: false, kept };
+  return { ok: true, kept: [...kept, now] };
+}
 /** Largest request, serialised. */
 export const MAX_PAYLOAD = 300 * 1024;
 export const MAX_TEXT = 16_000;

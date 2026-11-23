@@ -31,7 +31,7 @@ import type { PageRemote } from './open.ts';
 import { PageBridge } from './bridge.ts';
 import { HandoffDialog } from './HandoffDialog.tsx';
 import type { HandoffRequest } from './HandoffDialog.tsx';
-import { checkHandoff, checkLink, checkState, composeHandoff, overviewFallback, pageSandbox } from './protocol.ts';
+import { allowSend, checkHandoff, checkLink, checkState, composeHandoff, overviewFallback, pageSandbox } from './protocol.ts';
 import { pageTheme } from './theme.ts';
 import './pages.css';
 
@@ -187,6 +187,8 @@ export function PageFrame({ api, path, remote, chatId, visible, onTitle }: PageF
   }, [api, targetChat]);
   const nameRef = useRef<string | null>(null);
   nameRef.current = linkedName;
+  // This frame's recent sendMessage times, for the throttle; the clock, not a stateful count.
+  const sendTimes = useRef<number[]>([]);
 
   // The only confirmation left for a page is the link one: a message goes straight to the chat.
   const ask = useCallback(
@@ -231,10 +233,16 @@ export function PageFrame({ api, path, remote, chatId, visible, onTitle }: PageF
         if (!c.ok) throw new Error(c.error);
         const target = pinRef.current?.chatId ?? chatRef.current;
         if (!target || !nameRef.current) throw new Error(BUSY);
+        // A page starts a turn with every send, so a runaway script must not: this frame's send
+        // times are kept and a send that comes too fast or too often is refused.
+        const gate = allowSend(sendTimes.current, Date.now());
+        sendTimes.current = gate.kept;
+        if (!gate.ok) throw new Error('This page is sending too fast.');
         // Straight into the chat: the card names the page and the agent is told the page wrote
-        // it, so there is nothing to confirm first.
+        // it, so there is nothing to confirm first. The overview summarises the page's own
+        // words, not the line naming the page.
         const text = composeHandoff(c.value, s.title);
-        await sendPageMessage(api, target, text, c.value.title ?? s.title, c.value.overview ?? overviewFallback(text));
+        await sendPageMessage(api, target, text, c.value.title ?? s.title, c.value.overview ?? overviewFallback(c.value.text));
         return { action: 'sent' };
       }
       if (method === 'openLink') {
