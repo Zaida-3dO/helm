@@ -8,18 +8,33 @@
 //!   else by Claude's small model from the one message the title is made from (the first, or the
 //!   first after a greeting) alone, unless the person turned that off (the `titlesLocalViaClaude`
 //!   preference, on by default); with neither, the fallback stays.
+//! - One state decides everything: a chat either *has a real title* (`generated`, or `manual`
+//!   after a rename by hand — both end the automatic naming for good) or *needs a title*, where
+//!   the first-line fallback is only a stand-in and a naming job waits parked (`greeting` or
+//!   `failed`). A chat that needs a title retries on each of its sends until a real title lands,
+//!   at most [`MAX_TITLE_ATTEMPTS`] helper runs in all; past the cap the stand-in stays and
+//!   Helm stops asking. A manual rename always means has-a-title and ends every retry.
 //! - A title job starts with the first submission of a fresh chat (still "New chat", no messages)
-//!   or of a fork, from either path. At most [`MAX_CONCURRENT`] helper runs at once and [`MAX_JOBS`] jobs in all; a
-//!   job past that fails at once and the fallback stays. The helper (`helpers/titles`) has its own
-//!   45 s timeout and one stricter retry; the host also gives up after [`HOST_TIMEOUT`].
+//!   or of a fork, from either path, and on every later send while the chat still needs a title:
+//!   after a greeting that was parked, after a run that failed or timed out, and after a run
+//!   whose answer was a label rather than a name. A retry reads the conversation so far, not one
+//!   message: the first request that is more than a greeting, the latest one, and short excerpts
+//!   of the requests in between ([`retry_job`]). At most [`MAX_CONCURRENT`] helper runs at once
+//!   and [`MAX_JOBS`] jobs in all; a job past that fails at once and the fallback stays. The
+//!   helper (`helpers/titles`) has its own 45 s timeout and one stricter retry; the host also
+//!   gives up after [`HOST_TIMEOUT`]. A run the app quitting caught mid-flight is parked
+//!   `failed` again at start-up (see [`crate::schema`]), so the chat's next send retries it.
 //! - Success writes the title as `generated` unless the user renamed the chat meanwhile: a manual
-//!   rename always wins. Failure marks the job `failed` and the fallback stays; a failed job is
-//!   parked just like a greeting one, so the chat's next send starts a fresh job — one bad helper
-//!   run never leaves a chat unnamed for good.
+//!   rename always wins. An answer that is only a label ("Title", "Conversation title") names
+//!   nothing: the helper rejects its own and the host checks again ([`is_placeholder_label`]), so
+//!   a label never reaches the database. Failure marks the job `failed` and the fallback stays;
+//!   a failed job is parked just like a greeting one, so the chat's next send starts a fresh
+//!   job — one bad helper run never leaves a chat unnamed for good, until the cap.
 //! - the job waits until the chat's turn has settled (at most
 //!   [`crate::runtime::Limits::title_wait`]), so the helper's claude never competes with the
-//!   chat's own cold start. A greeting ("Hello", "hi there") is never titled: the job is parked as
-//!   `greeting` and the chat's next send starts a fresh one from that message.
+//!   chat's own cold start. A greeting ("Hello", "hi there") is never titled: the job is parked
+//!   as `greeting` and the chat's next send starts a fresh one from the conversation as it then
+//!   stands — the same wait-and-retry path as a failed run, not a special case.
 //! - `chat_rename {chatId, title}` (1–512 bytes) sets the title and marks it manual.
 //!   `title_suggest {chatId}` runs the helper and answers up to three suggestions without writing
 //!   any; the helper also sees the titles (only) of the chat's siblings and of its profile's recent
@@ -39,6 +54,14 @@ pub const MAX_JOBS: usize = 8;
 pub const MAX_TITLE_BYTES: usize = 512;
 /// Two helper attempts of 45 s each, plus start-up.
 pub const HOST_TIMEOUT: Duration = Duration::from_secs(100);
+/// How many helper runs one chat may spend on a name in all. A label answer, a helper failure
+/// and a timeout each cost one; a greeting that waits for a real request costs nothing. Five
+/// looks, at five points of the conversation, are enough to know a name is not coming: past the
+/// cap the first-line stand-in stays and no further run starts.
+pub const MAX_TITLE_ATTEMPTS: i64 = 5;
+/// How many of the chat's later requests a retry shows the helper, and how long each excerpt is.
+pub const RECENT_EXCERPTS: usize = 4;
+const RECENT_EXCERPT_CHARS: usize = 800;
 
 /// What a title job sends the helper (its `TitleJob`, minus the command the spawner adds).
 pub fn job(first_request: &str, latest: Option<&str>, forked: bool) -> Value {
@@ -155,12 +178,19 @@ pub(crate) fn write_fallback(
     Ok(())
 }
 
+/// Record what this send left parked or running. Only starting a helper run (`generating`) costs
+/// the chat one of its [`MAX_TITLE_ATTEMPTS`]; parking a greeting or a failure costs nothing.
 fn set_job(rt: &ChatRuntime, chat_id: &str, job: Option<&str>) {
+    let run = i64::from(job == Some("generating"));
     let _ = rt.db().write(|tx| {
         tx.execute(
-            "INSERT INTO chat_titles(chat_id, state, job, updated_at) VALUES (?1, 'fallback', ?2, ?3)
-             ON CONFLICT(chat_id) DO UPDATE SET job = excluded.job, updated_at = excluded.updated_at",
-            params![chat_id, job, helm_core::now_ms()],
+            "INSERT INTO chat_titles(chat_id, state, job, attempts, updated_at)
+             VALUES (?1, 'fallback', ?2, ?4, ?3)
+             ON CONFLICT(chat_id) DO UPDATE SET
+                 job = excluded.job,
+                 attempts = attempts + ?4,
+                 updated_at = excluded.updated_at",
+            params![chat_id, job, helm_core::now_ms(), run],
         )
     });
 }
@@ -302,7 +332,20 @@ pub fn start(rt: &ChatRuntime, chat_id: &str, job_body: Value) {
         drop(permit);
         rt.sh.titles.jobs.fetch_sub(1, Ordering::SeqCst);
         match out {
-            Ok(Ok(Ok(title))) => {
+            Ok(Ok(Ok(answer))) => {
+                let title = screened(&answer);
+                if title.is_empty() || is_placeholder_label(&title) {
+                    // An answer that is only a label ("Title", "Conversation title") names
+                    // nothing: park the run as failed like any other miss and let the next
+                    // send try again. The helper rejects its own labels; this also covers an
+                    // older helper whose answer slipped through.
+                    log::warn!(
+                        "chat {chat}: no automatic title (the answer was a label, not a name, after {} ms, {route}); the fallback stays",
+                        started.elapsed().as_millis()
+                    );
+                    set_job(&rt, &chat, Some("failed"));
+                    return;
+                }
                 log::info!(
                     "chat {chat}: title made in {} ms ({route})",
                     started.elapsed().as_millis()
@@ -334,6 +377,31 @@ fn route_note(job: &Value) -> String {
     } else {
         format!("Claude {model}")
     }
+}
+
+/// A title that is only the word for "title", with maybe an article or a prefix in front of it
+/// ("Title", "The conversation", "Untitled chat"), is not a name. The titles helper rejects
+/// these itself; the host checks the answer again so a label can never reach the database, even
+/// from a helper build that predates its own check or an answer that slipped through it.
+pub(crate) fn is_placeholder_label(title: &str) -> bool {
+    let t = title.trim().to_lowercase();
+    let t = t.trim_end_matches([':', '.', '!', '?']).trim();
+    let core = ["a ", "the ", "new ", "conversation ", "chat ", "untitled "]
+        .into_iter()
+        .find_map(|p| t.strip_prefix(p))
+        .unwrap_or(t);
+    matches!(
+        core.trim_end_matches([':', '.', '!', '?']),
+        "title"
+            | "chat"
+            | "conversation"
+            | "name"
+            | "summary"
+            | "untitled"
+            | "no title"
+            | "untitled chat"
+            | "untitled conversation"
+    )
 }
 
 /// A title with the characters that change how it reads without showing (direction overrides,
@@ -706,8 +774,8 @@ pub fn run_helper_until(
     serde_json::from_str(out.trim()).map_err(|_| "the helper's answer was not JSON".to_owned())
 }
 
-/// What an earlier send left parked: a greeting that waits for a real request, or a title helper
-/// that failed. `None` when nothing waits.
+/// What an earlier send left parked: a greeting that waits for a real request, or a naming run
+/// that failed, timed out or answered with a label. `None` when nothing waits.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Parked {
     None,
@@ -715,30 +783,37 @@ pub(crate) enum Parked {
     Failed,
 }
 
-/// Whether this send should start a title job: the chat's first submission while it is still
-/// "New chat" with no messages, a fork's first submission, or the first send after a greeting or
-/// after a title job that failed (a parked `greeting` or `failed` job). It also answers which job
-/// is parked, so a failed one can be retried from the chat's real request instead of from this
-/// send's words. Called inside the send's transaction, before the submission is written.
+/// Whether this send should start a naming run, answering one clear question: does the chat have
+/// a real title yet? `generated` or `manual` says it has, and no run ever starts again (a rename
+/// by hand ends the automatic naming for good). Otherwise the chat needs a title: a job parked
+/// `greeting` or `failed` waits for this send, a fresh chat's first submission (still "New chat",
+/// no messages) or a fork's starts one, and the run that started at most [`MAX_TITLE_ATTEMPTS`]
+/// times is the last one — past the cap the first-line stand-in stays. A job still `generating`
+/// starts no second one. It also answers which job is parked, so a retry reads the conversation
+/// so far instead of only this send's words ([`retry_job`]). Called inside the send's
+/// transaction, before the submission is written.
 pub(crate) fn wants_job(
     tx: &rusqlite::Transaction<'_>,
     chat_id: &str,
 ) -> rusqlite::Result<Option<(bool, Parked)>> {
-    let (title, subs, users, forked, manual, parked): (
+    let (title, subs, users, forked, titled, parked, attempts): (
         String,
         i64,
         i64,
         bool,
         bool,
         Option<String>,
+        i64,
     ) = tx.query_row(
         "SELECT c.title,
                 (SELECT count(*) FROM submissions s WHERE s.chat_id = c.id),
                 (SELECT count(*) FROM messages m WHERE m.chat_id = c.id AND m.role != 'context'),
                 EXISTS(SELECT 1 FROM chat_forks f WHERE f.chat_id = c.id),
-                EXISTS(SELECT 1 FROM chat_titles t WHERE t.chat_id = c.id AND t.state = 'manual'),
+                EXISTS(SELECT 1 FROM chat_titles t
+                        WHERE t.chat_id = c.id AND t.state IN ('manual', 'generated')),
                 (SELECT t.job FROM chat_titles t
-                   WHERE t.chat_id = c.id AND t.job IN ('greeting', 'failed') LIMIT 1)
+                   WHERE t.chat_id = c.id AND t.job IN ('greeting', 'failed', 'generating') LIMIT 1),
+                COALESCE((SELECT t.attempts FROM chat_titles t WHERE t.chat_id = c.id), 0)
          FROM chats c WHERE c.id = ?1",
         [chat_id],
         |r| {
@@ -749,13 +824,15 @@ pub(crate) fn wants_job(
                 r.get(3)?,
                 r.get(4)?,
                 r.get(5)?,
+                r.get(6)?,
             ))
         },
     )?;
-    if manual {
+    if titled || attempts >= MAX_TITLE_ATTEMPTS {
         return Ok(None);
     }
     let parked = match parked.as_deref() {
+        Some("generating") => return Ok(None),
         Some("failed") => Parked::Failed,
         Some("greeting") => Parked::Greeting,
         _ => Parked::None,
@@ -772,21 +849,56 @@ pub(crate) fn wants_job(
     Ok((title == store::DEFAULT_TITLE && users == 0).then_some((false, Parked::None)))
 }
 
-/// The chat's own first request that is more than a greeting: a failed title job is retried from
-/// it, because the send that triggers the retry is usually a short reply ("ok") that would
-/// otherwise name the chat after itself. None when every stored request is only a greeting.
-pub(crate) fn first_substantive(rt: &ChatRuntime, chat_id: &str) -> Option<String> {
-    let texts = rt
+/// The job for a retry: the naming missed on an earlier turn, so this run reads the conversation
+/// as it now stands, not one message — the chat's first request that is more than a greeting, its
+/// latest request, and the requests in between as short excerpts, oldest first. Naming from this
+/// send's own words alone would let a short follow-up ("ok") name the chat; the first real
+/// request stays the heart of the name, and the later turns show what the chat went on to be
+/// about. `fallback_text` is this send's message, used only when every stored request is a
+/// greeting or empty — then this send's words are all the chat has.
+pub(crate) fn retry_job(
+    rt: &ChatRuntime,
+    chat_id: &str,
+    fallback_text: &str,
+    forked: bool,
+) -> Value {
+    let texts: Vec<String> = rt
         .db()
         .snapshot(|tx| {
             let mut st = tx.prepare(
-                "SELECT text FROM submissions WHERE chat_id = ?1 ORDER BY created_at, id LIMIT 20",
+                "SELECT text FROM submissions WHERE chat_id = ?1 ORDER BY created_at, id LIMIT 40",
             )?;
-            let rows = st
-                .query_map([chat_id], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<String>>>()?;
-            Ok::<_, rusqlite::Error>(rows)
+            let rows = st.query_map([chat_id], |r| r.get::<_, String>(0))?;
+            Ok::<_, rusqlite::Error>(
+                rows.filter_map(|r| r.ok())
+                    .map(|t| unframed(&t).trim().to_owned())
+                    .filter(|t| !t.is_empty() && !is_greeting(t))
+                    .collect(),
+            )
         })
-        .ok()?;
-    texts.into_iter().find(|t| !is_greeting(unframed(t)))
+        .unwrap_or_default();
+    let Some(first) = texts.first() else {
+        return job(unframed(fallback_text), None, forked);
+    };
+    let latest = texts.last().filter(|_| texts.len() > 1).map(String::as_str);
+    let mut body = job(first, latest, forked);
+    if texts.len() > 2 {
+        let middle = &texts[1..texts.len() - 1];
+        let middle = middle
+            .get(middle.len().saturating_sub(RECENT_EXCERPTS)..)
+            .unwrap_or(middle);
+        body["recent"] = json!(middle.iter().map(|t| excerpt(t)).collect::<Vec<_>>());
+    }
+    body
+}
+
+/// One excerpt of a request for the helper's `recent` list: the helper joins these as they
+/// arrive, so the host clips each one here.
+fn excerpt(text: &str) -> String {
+    let cut: String = text.chars().take(RECENT_EXCERPT_CHARS).collect();
+    if cut.chars().count() < text.chars().count() {
+        format!("{cut}…")
+    } else {
+        cut
+    }
 }

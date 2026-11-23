@@ -4,7 +4,7 @@
 //! |---|---|
 //! | `submission_meta` | per submission: origin (`user`/`harness`), send priority (`now` or null), the run it was dispatched in |
 //! | `restart_continuations` | chats owed one restart-continuation prompt (at most 100 rows) |
-//! | `chat_titles` | per chat: where the title came from (`fallback`/`generated`/`manual`) |
+//! | `chat_titles` | per chat: where the title came from (`fallback`/`generated`/`manual`), which naming job waits there (`greeting`/`failed`/`generating`), and how many naming runs it has spent (`attempts`) |
 //! | `unread_marks` | manual unread marks with their token |
 //! | `chat_completions` | the current completion per chat |
 //! | `chat_summary` | per chat: the hover card's two-sentence summary, when it was made, and the activity it covers ([`crate::summary`]) |
@@ -64,7 +64,8 @@ pub fn register(reg: &mut MigrationRegistry) {
         .recovery_step("chats-retry-leftovers", cancel_retry_leftovers)
         .recovery_step("chats-stall-reset", reset_stalls)
         .recovery_step("chats-stop-holds-clear", clear_stop_holds)
-        .recovery_step("chats-auto-holds-clear", clear_auto_holds);
+        .recovery_step("chats-auto-holds-clear", clear_auto_holds)
+        .recovery_step("chats-title-jobs-parked", park_stale_title_jobs);
 }
 
 fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
@@ -104,6 +105,7 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              chat_id  TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
              state    TEXT NOT NULL CHECK (state IN ('fallback', 'generated', 'manual')),
              job      TEXT,
+             attempts INTEGER NOT NULL DEFAULT 0,
              updated_at INTEGER NOT NULL
          );
          CREATE TABLE IF NOT EXISTS unread_marks (
@@ -294,6 +296,17 @@ fn reset_stalls(tx: &Transaction<'_>) -> rusqlite::Result<()> {
 fn clear_auto_holds(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     tx.execute(
         "DELETE FROM chat_dispatch_holds WHERE reason <> 'manual'",
+        [],
+    )?;
+    Ok(())
+}
+
+/// A naming job that was still running when the app stopped leaves its `generating` mark behind.
+/// Park it as `failed` at start-up, like any other failed naming job, so the chat's next send
+/// tries again. The run it had started already counted against the cap.
+fn park_stale_title_jobs(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute(
+        "UPDATE chat_titles SET job = 'failed' WHERE job = 'generating'",
         [],
     )?;
     Ok(())
@@ -508,6 +521,9 @@ fn late_columns(tx: &Transaction<'_>) -> rusqlite::Result<()> {
         // sidebar row is expanded), so every PC viewing the chat shows the same. JSON as
         // written by `chat_set_sidebar_state`; null means all folded.
         ("chats", "sidebar_state", "TEXT"),
+        // How many naming runs a chat has spent: the automatic title keeps retrying on the chat's
+        // later sends until a real one lands, and this counts the tries (see [`crate::titles`]).
+        ("chat_titles", "attempts", "INTEGER NOT NULL DEFAULT 0"),
     ] {
         let has: bool = tx.query_row(
             "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",

@@ -152,6 +152,9 @@ pub struct FakeSpawner {
     pub fail: Mutex<Option<String>>,
     /// The titles helper's answer, after `title_delay`.
     pub title: Mutex<Result<String, String>>,
+    /// Answers for tests that walk a chat through several naming runs: consumed front to back,
+    /// and once empty the fixed `title` answer takes over.
+    pub title_script: Mutex<std::collections::VecDeque<Result<String, String>>>,
     pub title_delay: Mutex<Duration>,
     pub title_jobs: Mutex<Vec<Value>>,
     /// The triage helper's answer.
@@ -188,6 +191,9 @@ impl Spawner for FakeSpawner {
     fn run_title(&self, job: &Value) -> Result<String, String> {
         self.title_jobs.lock().unwrap().push(job.clone());
         std::thread::sleep(*self.title_delay.lock().unwrap());
+        if let Some(next) = self.title_script.lock().unwrap().pop_front() {
+            return next;
+        }
         self.title.lock().unwrap().clone()
     }
 
@@ -275,6 +281,7 @@ pub fn harness_with_services(limits: Limits, extra: impl FnOnce(&mut Services)) 
         tx,
         fail: Mutex::new(None),
         title: Mutex::new(Err("no titles in this test".into())),
+        title_script: Mutex::new(std::collections::VecDeque::new()),
         title_delay: Mutex::new(Duration::ZERO),
         title_jobs: Mutex::new(Vec::new()),
         triage: Mutex::new(Err("no triage in this test".into())),
@@ -5017,6 +5024,133 @@ fn title_of(h: &H, chat: &str) -> (String, String) {
         .pop()
         .unwrap_or_default();
     (t, s)
+}
+
+fn attempts_of(h: &H, chat: &str) -> i64 {
+    h.col(&format!(
+        "SELECT attempts FROM chat_titles WHERE chat_id = '{chat}'"
+    ))
+    .pop()
+    .and_then(|v| v.parse().ok())
+    .unwrap_or(0)
+}
+
+/// One state: a chat either has a real title or needs one, and it needs one until a real one
+/// lands. A label answer, a helper failure and a timeout all mean "not yet": the first-line
+/// stand-in is the shown title but is never marked done, each next send runs the naming again
+/// on the conversation so far, the cap stops the runs, and neither a good title nor a rename by
+/// hand lets a run start once more.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_naming_keeps_trying_until_a_real_title_lands() {
+    let h = harness();
+    // Once the script runs out the helper fails, for every chat after the first.
+    *h.spawner.title.lock().unwrap() = Err("no title from this helper".into());
+    let standin = "the nightly backup failed again last night";
+    // Walk one chat through its turns: the table is (this send, then what the job row reads
+    // like), over these scripted answers — a label, a failure, then a real title.
+    *h.spawner.title_script.lock().unwrap() = std::collections::VecDeque::from([
+        Ok("Title".to_owned()),
+        Err("the helper died".to_owned()),
+        Ok("Fixing the nightly backup".to_owned()),
+    ]);
+    let steps: [(&str, &str); 3] = [
+        (standin, "fallback/failed"),
+        ("dig into why it failed", "fallback/failed"),
+        ("and tell me what you find", "generated/"),
+    ];
+    let chat = h.create().await;
+    for (n, (text, want_state)) in steps.iter().enumerate() {
+        h.send(&chat, text, if n == 0 { "default" } else { "steer" })
+            .await;
+        h.until(&format!("run {} settles", n + 1), |h| {
+            title_of(h, &chat).1 == *want_state && attempts_of(h, &chat) == (n + 1) as i64
+        })
+        .await;
+    }
+    let (title, state) = title_of(&h, &chat);
+    assert_eq!(state, "generated/");
+    assert_eq!(title, "Fixing the nightly backup");
+    // The state flipped on the real answer and only on it: the label and the failure each
+    // parked a failed job with the stand-in still the shown title and never marked done.
+    let jobs = h.spawner.title_jobs.lock().unwrap().clone();
+    assert_eq!(jobs.len(), 3, "one run per turn");
+    assert_eq!(
+        jobs[0].get("latest"),
+        None,
+        "the first run only has the first message: {jobs:?}"
+    );
+    assert_eq!(
+        jobs[1]["firstRequest"], standin,
+        "a retry names after the first real request, not the short send that triggered it"
+    );
+    assert_eq!(jobs[1]["latest"], "dig into why it failed");
+    assert_eq!(jobs[2]["firstRequest"], standin);
+    assert_eq!(jobs[2]["latest"], "and tell me what you find");
+    assert_eq!(
+        jobs[2]["recent"],
+        json!(["dig into why it failed"]),
+        "the retry reads the conversation so far"
+    );
+    // A good title ends it: later sends start no run.
+    let after = jobs.len();
+    h.send(&chat, "one more thing", "steer").await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(h.spawner.title_jobs.lock().unwrap().len(), after);
+
+    // The cap: with the helper never answering, five sends at five points of one conversation
+    // get five runs; a sixth send asks no more, and the stand-in was never marked done.
+    let dull = h.create().await;
+    for n in 0..6 {
+        let text = format!("weather report line {}", n + 1);
+        h.send(&dull, &text, if n == 0 { "default" } else { "steer" })
+            .await;
+        if n < 5 {
+            h.until(&format!("dull run {}", n + 1), |h| {
+                attempts_of(h, &dull) == (n + 1) as i64
+            })
+            .await;
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(attempts_of(&h, &dull), 5, "the cap stops the runs");
+    assert_eq!(title_of(&h, &dull).1, "fallback/failed");
+    assert_eq!(
+        title_of(&h, &dull).0,
+        "weather report line 1",
+        "the stand-in stays the shown title when the tries run out"
+    );
+
+    // A rename by hand is has-a-title from then on: no run starts again, whatever the helper
+    // would answer.
+    let typed = h.create().await;
+    h.send(
+        &typed,
+        "rename me later, this is only a stand-in",
+        "default",
+    )
+    .await;
+    h.until("typed chat's first run", |h| {
+        attempts_of(h, &typed) == 1 && title_of(h, &typed).1 == "fallback/failed"
+    })
+    .await;
+    h.call(
+        "chat_rename",
+        json!({"chatId": typed, "title": "Named by hand, kept"}),
+    )
+    .await
+    .unwrap();
+    let before = h.spawner.title_jobs.lock().unwrap().len();
+    h.send(&typed, "and another message", "steer").await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        h.spawner.title_jobs.lock().unwrap().len(),
+        before,
+        "a manual rename ends the automatic naming"
+    );
+    assert_eq!(
+        title_of(&h, &typed),
+        ("Named by hand, kept".into(), "manual/".into())
+    );
 }
 
 /// The first send writes the fallback at once, then the automatic title replaces it.

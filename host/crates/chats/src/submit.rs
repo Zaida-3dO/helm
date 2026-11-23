@@ -360,22 +360,17 @@ pub fn chat_send(
             emit_pending(rt, &a.chat_id);
             if let Some((forked, parked)) = title_job {
                 // The job is made from the person's own words: lines Helm put in front of the
-                // message (the PC it was typed on, the phone's notes) never name the chat.
-                // A failed job is retried from the chat's first real request, not from this
-                // send's words: the send after a failure is usually a short reply, and the
-                // failure was Helm's, not the chat's.
-                let request = match parked {
-                    crate::titles::Parked::Failed => {
-                        crate::titles::first_substantive(rt, &a.chat_id)
-                            .unwrap_or_else(|| s.text.clone())
+                // message (the PC it was typed on, the phone's notes) never name the chat. A
+                // retry reads the conversation so far, not this send's words: the send after a
+                // naming that missed is usually a short reply, and the miss was Helm's, not
+                // the chat's.
+                let body = match parked {
+                    crate::titles::Parked::None => {
+                        crate::titles::job(crate::titles::unframed(&s.text), None, forked)
                     }
-                    _ => s.text.clone(),
+                    _ => crate::titles::retry_job(rt, &a.chat_id, &s.text, forked),
                 };
-                crate::titles::start(
-                    rt,
-                    &a.chat_id,
-                    crate::titles::job(crate::titles::unframed(&request), None, forked),
-                );
+                crate::titles::start(rt, &a.chat_id, body);
             }
             s
         }
@@ -783,18 +778,15 @@ fn host_send_inner(
         emit_pending(rt, s.chat_id);
         emit_chat(rt, s.chat_id);
         if let (Some((forked, parked)), true) = (title_job.get(), stored_by_this_send.get()) {
-            // As in a typed send: a failed job is retried from the chat's first real request,
-            // not from this host-made message's words.
-            let request = match parked {
-                crate::titles::Parked::Failed => crate::titles::first_substantive(rt, s.chat_id)
-                    .unwrap_or_else(|| s.text.to_owned()),
-                _ => s.text.to_owned(),
+            // As in a typed send: a retry reads the conversation so far, not this host-made
+            // message's words alone.
+            let body = match parked {
+                crate::titles::Parked::None => {
+                    crate::titles::job(crate::titles::unframed(s.text), None, forked)
+                }
+                _ => crate::titles::retry_job(rt, s.chat_id, s.text, forked),
             };
-            crate::titles::start(
-                rt,
-                s.chat_id,
-                crate::titles::job(crate::titles::unframed(&request), None, forked),
-            );
+            crate::titles::start(rt, s.chat_id, body);
         }
     }
     Ok(HostSent {
