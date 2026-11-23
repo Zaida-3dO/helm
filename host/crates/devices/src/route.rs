@@ -1684,9 +1684,16 @@ impl RemoteChats for Mirror {
                 args["attachments"] = json!(uploads);
             }
             // A page's send carries its card words across; the chat that runs it shows the same
-            // card and knows the page wrote the message, not the person.
+            // card and knows the page wrote the message, not the person. The far side refuses
+            // over-long card words, so clip them here the way a local send does: the fallback
+            // title is the pinned page's own title, which carries no cap of its own.
+            let clip = |s: &Option<String>, n: usize| -> Option<String> {
+                s.as_ref().map(|t| t.chars().take(n).collect::<String>())
+            };
+            let page_title = clip(&a.page_title, 240);
+            let page_overview = clip(&a.page_overview, 2000);
             if a.origin.unwrap_or_default() == SendOrigin::Page {
-                args["page"] = json!({ "title": a.page_title, "overview": a.page_overview });
+                args["page"] = json!({ "title": page_title.clone(), "overview": page_overview.clone() });
             }
             m.ask_as(&device, "send", args, "this message", &act)
                 .await?;
@@ -1703,16 +1710,27 @@ impl RemoteChats for Mirror {
                     )
                 });
             }
+            let mut submission = json!({
+                "id": a.submission_id,
+                "chatId": a.chat_id,
+                "text": a.text,
+                "mode": if steer { "steer" } else { "prompt" },
+                "state": "accepted",
+                "origin": if a.origin.unwrap_or_default() == SendOrigin::Page { "page" } else { "typed" },
+                "createdAt": helm_core::now_ms(),
+            });
+            // The page's card words ride the echo too: the queue card names the page at once,
+            // before the mirror's own sync brings the stored row back.
+            if a.origin.unwrap_or_default() == SendOrigin::Page {
+                if let Some(t) = page_title {
+                    submission["pageTitle"] = json!(t);
+                }
+                if let Some(o) = page_overview {
+                    submission["pageOverview"] = json!(o);
+                }
+            }
             Ok(json!({
-                "submission": {
-                    "id": a.submission_id,
-                    "chatId": a.chat_id,
-                    "text": a.text,
-                    "mode": if steer { "steer" } else { "prompt" },
-                    "state": "accepted",
-                    "origin": if a.origin.unwrap_or_default() == SendOrigin::Page { "page" } else { "typed" },
-                    "createdAt": helm_core::now_ms(),
-                },
+                "submission": submission,
                 "chat": m.chat_json(&a.chat_id)?,
             }))
         })
