@@ -3256,33 +3256,33 @@ async fn a_chat_left_interrupted_speaks_the_new_turn_answer_not_the_old_stop() {
     let wire = Arc::new(SpWire::default());
     s.attach_line(wire.clone());
     wire.up.store(true, AtomicOrdering::SeqCst);
-    // The first turn never ran: the chat is left interrupted with the old error, and it stays.
+    // The first turn never ran: its failed worker leaves the chat stopped, and that stop stays.
     s.deliver(sturn("old", "old turn", "s-1")).await.unwrap();
+    wait_quiet(&e.db, &crate::speaker::submission_id("old")).await;
     let paths = crate::speaker::paths(&dir, &e.ctx.profile_id);
     let chat = crate::speaker::load_talks(&paths.chats).talks[0]
         .chat_id
         .clone();
-    sql(
-        &e.db,
-        "UPDATE chats SET status = 'interrupted', error = 'the local model is down' WHERE id = ?1",
-        &[&chat],
+    // The failed start shows up on the chat itself: wait for that write rather than a fixed
+    // pause, so a loaded test binary cannot read the chat mid-reaction.
+    let stop_left = || {
+        e.db.snapshot(|tx| {
+            tx.query_row("SELECT error FROM chats WHERE id = ?1", [&chat], |r| {
+                r.get::<_, Option<String>>(0)
+            })
+        })
+        .unwrap_or(None)
+    };
+    assert!(
+        waits(|| stop_left().as_deref() == Some("no worker in this test")).await,
+        "the old turn left its stop on the chat: {:?}",
+        stop_left()
     );
-    // The next turn of the same talk goes to the same chat, which still carries the old stop.
+    // The next turn of the same talk goes to the same chat. Its worker runs and answers at once:
+    // idle and the end-turn row, as a real run leaves them.
     s.deliver(sturn("t9", "what time is it now", "s-1"))
         .await
         .unwrap();
-    // Nothing is spoken for it while only the old stop is in the chat.
-    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
-    assert!(
-        wire.sent
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|f| f["turn"].as_str() != Some("t9")),
-        "the old stop is not this turn's answer: {:?}",
-        wire.sent.lock().unwrap().clone()
-    );
-    // The answer arrives later, and that is what gets spoken.
     sql(
         &e.db,
         "UPDATE chats SET status = 'idle', error = NULL WHERE id = ?1",
@@ -3310,17 +3310,26 @@ async fn a_chat_left_interrupted_speaks_the_new_turn_answer_not_the_old_stop() {
     };
     assert!(
         waits(|| !spoken().is_empty()).await,
-        "the late answer reaches the speaker: {:?}",
+        "the answer reaches the speaker: {:?}",
+        wire.sent.lock().unwrap().clone()
+    );
+    // What is spoken is this turn's answer — never the stop the old turn left behind.
+    assert!(
+        waits(|| spoken().len() == 1).await,
+        "the answer goes up once: {:?}",
         wire.sent.lock().unwrap().clone()
     );
     assert_eq!(spoken()[0]["text"], "It is twenty past nine.");
+    // The old turn's own mirror may say its own stop; nothing spoken for t9 ever carries it.
     assert!(
         wire.sent
             .lock()
             .unwrap()
             .iter()
-            .all(|f| f["turn"].as_str() != Some("t9") || f.get("status").is_none()),
-        "the old error is never spoken for this turn"
+            .filter(|f| f["turn"].as_str() == Some("t9"))
+            .all(|f| !f.to_string().contains("no worker")),
+        "the old stop is never spoken for this turn: {:?}",
+        wire.sent.lock().unwrap().clone()
     );
 }
 
