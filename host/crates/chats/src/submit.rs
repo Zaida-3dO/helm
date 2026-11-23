@@ -335,7 +335,13 @@ pub fn chat_send(
             }
             emit_pending(rt, &a.chat_id);
             if let Some(forked) = title_job {
-                crate::titles::start(rt, &a.chat_id, crate::titles::job(&s.text, None, forked));
+                // The job is made from the person's own words: lines Helm put in front of the
+                // message (the PC it was typed on, the phone's notes) never name the chat.
+                crate::titles::start(
+                    rt,
+                    &a.chat_id,
+                    crate::titles::job(crate::titles::unframed(&s.text), None, forked),
+                );
             }
             s
         }

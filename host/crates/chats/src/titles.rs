@@ -1,8 +1,9 @@
 //! Automatic titles and renames.
 //!
 //! - The fallback title (first non-blank line, at most 72 characters) is written by `chat_send` and
-//!   by a host send (another chat's message, a schedule, the phone); a message from another chat is
-//!   read without its header.
+//!   by a host send (another chat's message, a schedule, the phone); the lines Helm puts in front of
+//!   such a message — another chat's frame, the PC it was typed on, the Telegram and voice notes —
+//!   are skipped, so a title comes from the person's own words.
 //! - A chat on a local model server is named by its own local background model when one is chosen,
 //!   else by Claude's small model from the one message the title is made from (the first, or the
 //!   first after a greeting) alone, unless the person turned that off (the `titlesLocalViaClaude`
@@ -12,7 +13,9 @@
 //!   job past that fails at once and the fallback stays. The helper (`helpers/titles`) has its own
 //!   45 s timeout and one stricter retry; the host also gives up after [`HOST_TIMEOUT`].
 //! - Success writes the title as `generated` unless the user renamed the chat meanwhile: a manual
-//!   rename always wins. Failure marks the job `failed`; the fallback stays.
+//!   rename always wins. Failure marks the job `failed` and the fallback stays; a failed job is
+//!   parked just like a greeting one, so the chat's next send starts a fresh job — one bad helper
+//!   run never leaves a chat unnamed for good.
 //! - the job waits until the chat's turn has settled (at most
 //!   [`crate::runtime::Limits::title_wait`]), so the helper's claude never competes with the
 //!   chat's own cold start. A greeting ("Hello", "hi there") is never titled: the job is parked as
@@ -46,16 +49,84 @@ pub fn job(first_request: &str, latest: Option<&str>, forked: bool) -> Value {
     j
 }
 
-/// What a message from another chat is about: the host's header and fixed paragraph in front of
-/// it are not the chat's subject, so a title is made from the body that follows them.
+/// What a message is about: whatever Helm puts in front of it is not the chat's subject, so a
+/// title is made from the person's own words that follow. Three kinds of front matter exist and
+/// one message can carry several (a note relayed onward still keeps its own): the frame of a
+/// message from another chat or another household member (a header line, the host's fixed
+/// paragraph, a blank line, then the body); one bracketed line naming where or how the message
+/// arrived — the PC it was typed on, the Telegram notes, the voice mode and unheard-reply lines;
+/// and the age line of a message queued while Helm was down. The voice primer older builds put
+/// in the first message is in the system prompt now and never heads a new one, so it needs no
+/// strip here.
 pub fn unframed(text: &str) -> &str {
-    match text
-        .strip_prefix("[Message from another chat:")
-        .and_then(|rest| rest.split_once("\n\n"))
-    {
-        Some((_, body)) if !body.trim().is_empty() => body,
-        _ => text,
+    let mut t = text;
+    loop {
+        match strip_front_matter(t) {
+            Some(n) if n != t => t = n,
+            _ => return t,
+        }
     }
+}
+
+/// One piece of front matter; answers the text after it, or None when the text already starts
+/// with the message's own words.
+fn strip_front_matter(t: &str) -> Option<&str> {
+    // A message from another chat: header line, the host's paragraph, a blank line, the body.
+    if let Some(rest) = t.strip_prefix("[Message from another chat:") {
+        let body = rest.split_once("\n\n")?.1;
+        return (!body.trim().is_empty()).then_some(body);
+    }
+    // A household member's message: the same shape, the header naming the person and their PC.
+    if let Some(rest) = t.strip_prefix("[Message from ") {
+        let (head, body) = rest.split_once("\n\n")?;
+        let header_ends = head.lines().next().unwrap_or_default().ends_with(']');
+        if header_ends && head.contains("(household)") && !body.trim().is_empty() {
+            return Some(body);
+        }
+        return None;
+    }
+    // The PC the message was typed on: one bracketed line, the name 1 to 40 characters without
+    // brackets, control characters or a line break — exactly as the transcript reads it.
+    if let Some(rest) = t.strip_prefix("[Typed on ") {
+        let (inner, tail) = bracket_line(rest)?;
+        let ok = (1..=40).contains(&inner.chars().count())
+            && !inner
+                .chars()
+                .any(|c| c == '[' || (c as u32) < 0x20 || c == '\u{7f}');
+        return ok.then_some(tail);
+    }
+    // The Telegram notes and the voice lines: one bracketed line each, closed on the same line.
+    for p in [
+        "[Sent from Telegram:",
+        "[Sent to the user on Telegram by other chats",
+        "[Voice · ",
+        "[Not heard by the user: ",
+    ] {
+        if let Some(rest) = t.strip_prefix(p) {
+            let (_, tail) = bracket_line(rest)?;
+            return Some(tail);
+        }
+    }
+    // The age line of a message queued while Helm was down.
+    const AGE_TAIL: &str = " min ago, queued while Helm was offline)\n";
+    if let Some(rest) = t.strip_prefix("(sent ") {
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        if digits > 0 && rest[digits..].starts_with(AGE_TAIL) {
+            return Some(&rest[digits + AGE_TAIL.len()..]);
+        }
+    }
+    None
+}
+
+/// `rest` followed a `[` prefix: the bracketed line ends at the first `]\n` on that line; the
+/// inside holds no bracket and no line break. Answers the inside and the text after the break.
+fn bracket_line(rest: &str) -> Option<(&str, &str)> {
+    let end = rest.find("]\n")?;
+    let inner = &rest[..end];
+    if inner.contains('\n') || inner.contains(']') {
+        return None;
+    }
+    Some((inner, &rest[end + 2..]))
 }
 
 /// The fallback title for a first message: its first non-blank line, at most
@@ -104,6 +175,11 @@ const GREETING_WORDS: &[&str] = &[
     "heya",
     "hiya",
     "howdy",
+    "heyo",
+    "hai",
+    "helo",
+    "hii",
+    "hej",
     "yo",
     "sup",
     "hola",
@@ -631,21 +707,21 @@ pub fn run_helper_until(
 }
 
 /// Whether this send should start a title job: the chat's first submission while it is still
-/// "New chat" with no messages, a fork's first submission, or the first send after a greeting
-/// (a parked `greeting` job). Called inside the send's transaction, before the submission is
-/// written.
+/// "New chat" with no messages, a fork's first submission, or the first send after a greeting or
+/// after a title job that failed (a parked `greeting` or `failed` job). Called inside the send's
+/// transaction, before the submission is written.
 pub(crate) fn wants_job(
     tx: &rusqlite::Transaction<'_>,
     chat_id: &str,
 ) -> rusqlite::Result<Option<bool>> {
-    let (title, subs, users, forked, manual, greeting): (String, i64, i64, bool, bool, bool) = tx
+    let (title, subs, users, forked, manual, parked): (String, i64, i64, bool, bool, bool) = tx
         .query_row(
         "SELECT c.title,
                 (SELECT count(*) FROM submissions s WHERE s.chat_id = c.id),
                 (SELECT count(*) FROM messages m WHERE m.chat_id = c.id AND m.role != 'context'),
                 EXISTS(SELECT 1 FROM chat_forks f WHERE f.chat_id = c.id),
                 EXISTS(SELECT 1 FROM chat_titles t WHERE t.chat_id = c.id AND t.state = 'manual'),
-                EXISTS(SELECT 1 FROM chat_titles t WHERE t.chat_id = c.id AND t.job = 'greeting')
+                EXISTS(SELECT 1 FROM chat_titles t WHERE t.chat_id = c.id AND t.job IN ('greeting', 'failed'))
          FROM chats c WHERE c.id = ?1",
         [chat_id],
         |r| {
@@ -662,7 +738,7 @@ pub(crate) fn wants_job(
     if manual {
         return Ok(None);
     }
-    if greeting {
+    if parked {
         return Ok(Some(forked));
     }
     if subs > 0 {

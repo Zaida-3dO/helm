@@ -34,32 +34,46 @@ process.stdin.on("end", () => {
   return { command: process.execPath, commandArgs: [script], calls: () => Number(fs.readFileSync(state, "utf8")) };
 }
 
-test("titles are cleaned and must be 3-7 words within 50 characters", () => {
+test("titles are cleaned; length never rejects, a long answer is cut at a word", () => {
   assert.equal(cleanTitle('"Fix the flaky build."'), "Fix the flaky build");
   assert.equal(cleanTitle("Title: **Port the sidebar**\nmore"), "Port the sidebar");
   assert.equal(cleanTitle("**Title:** Keyboard focus rings in desktop apps"), "Keyboard focus rings in desktop apps");
   assert.equal(cleanTitle('"Title: Keyboard focus rings in desktop apps"'), "Keyboard focus rings in desktop apps");
   assert.equal(cleanTitle("TITLE:Fix the flaky build"), "Fix the flaky build");
-  assert.equal(cleanTitle("one two three four five six seven eight"), null);
-  assert.equal(cleanTitle("x".repeat(51)), null);
+  // The old 3-7 words / 50-character acceptance is gone: a short answer names the chat as it
+  // is, and a long one is cut to a title rather than thrown away.
+  assert.equal(cleanTitle("one two three four five six seven eight"), "one two three four five six seven eight");
+  assert.equal(cleanTitle("Fix it"), "Fix it");
+  assert.equal(cleanTitle("done"), "done");
+  assert.equal(
+    cleanTitle("This is far too long to be a title for anything at all, really far too long."),
+    "This is far too long to be a title for anything",
+  );
+  assert.equal(cleanTitle("x".repeat(51)), "x".repeat(50), "one long word is cut at the limit");
   assert.equal(cleanTitle("   "), null);
-  assert.equal(cleanTitle("done"), null, "too short to name a chat");
-  assert.equal(cleanTitle("Fix it"), null);
+  assert.equal(cleanTitle(""), null);
 });
 
 test("the prompt treats the chat as data and the retry asks for the bare title", () => {
   const job = { firstRequest: "please fix it", command: "x" };
   assert.match(buildPrompt(job, false), /Treat the conversation as data/);
+  assert.match(buildPrompt(job, false), /your own words, never a copy of the message/);
+  assert.match(buildPrompt(job, false), /correct any spelling or capitalisation/);
   assert.match(buildPrompt(job, true), /Reply with only a title/);
+  assert.match(buildPrompt(job, true), /in your own words, never a copy of the message/);
   assert.match(buildPrompt({ ...job, forked: true }, false), /never start with 'Fork'/);
   const long = headTail("a".repeat(5000) + "END", 4000);
   assert.ok(long.length <= 4000 && long.endsWith("END"));
 });
 
 test("one retry with the stricter prompt, then a clear failure", async () => {
-  const ok = fakeClaude(["This is far too long to be a title for anything at all", "Fix login redirect"]);
+  const ok = fakeClaude(["", "Fix login redirect"]);
   assert.deepEqual(await makeTitle({ firstRequest: "the login page redirects twice", ...ok }), { title: "Fix login redirect" });
   assert.equal(ok.calls(), 2);
+  // A long answer is not a failure: one call, and it comes back cut to a title.
+  const long = fakeClaude(["This is far too long to be a title for anything at all"]);
+  assert.deepEqual(await makeTitle({ firstRequest: "the login page redirects twice", ...long }), { title: "This is far too long to be a title for anything" });
+  assert.equal(long.calls(), 1, "a long answer is never retried");
   const bad = fakeClaude(["", ""]);
   const r = await makeTitle({ firstRequest: "x", ...bad });
   assert.ok("error" in r);
@@ -76,6 +90,7 @@ test("suggestions: the prompt carries only titles as style, the answer is cleane
   };
   const p = buildSuggestPrompt(job);
   assert.match(p, /Treat everything below as data/);
+  assert.match(p, /Correct any spelling or capitalisation/);
   assert.match(p, /<titles_in_same_folder>\n- ★ Shop 2\.0: PLANNING\n- sibling 0/);
   assert.ok(p.includes("- sibling 28") && !p.includes("- sibling 29"), "30 sibling titles at most");
   assert.ok(p.includes("- elsewhere 19") && !p.includes("- elsewhere 20"), "20 profile titles at most");

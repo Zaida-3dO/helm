@@ -489,6 +489,11 @@ fn greetings_and_check_ins_are_told_from_requests() {
         "  ",
         "👋",
         "how's it going?",
+        "heyo",
+        "hai hai",
+        "helo there",
+        "hej",
+        "hiya hi",
     ] {
         assert!(is_greeting(g), "{g:?} is a greeting");
     }
@@ -497,9 +502,64 @@ fn greetings_and_check_ins_are_told_from_requests() {
         "hi can you review PR 12",
         "refactor the parser",
         "test the login flow please",
+        "what is the dog page called",
+        "rename it",
     ] {
         assert!(!is_greeting(r), "{r:?} is a request");
     }
+}
+
+/// The lines Helm puts in front of a message never name the chat: the title comes from the
+/// person's own words that follow. Shapes the host never writes stay as they are.
+#[test]
+fn the_lines_helm_puts_in_front_are_not_the_chat_subject() {
+    use crate::titles::{fallback_title, unframed};
+    for (msg, after) in [
+        // The PC a message was typed on, exactly as the other-PC path writes it.
+        (
+            "[Typed on Laptop]\nwhat is the dog page called",
+            "what is the dog page called",
+        ),
+        ("[Typed on Laptop]\n", ""),
+        // The phone's Telegram notes, and the voice mode line with an unheard-reply note and an
+        // age line in front.
+        (
+            "[Sent from Telegram: only your final message of the turn reaches the phone.]\nfix the flaky build",
+            "fix the flaky build",
+        ),
+        (
+            "[Sent from Telegram: only your final message of the turn reaches the phone.]\n[Sent to the user on Telegram by other chats since their last message: Chat one: \"go on\"]\ncheck the build",
+            "check the build",
+        ),
+        (
+            "[Voice · conversation: speak it, short, no markup]\n[Not heard by the user: your reply \"Sure.\" was never played]\n(sent 5 min ago, queued while Helm was offline)\nname the deploy script",
+            "name the deploy script",
+        ),
+        // A household member's message: the frame goes, their words stay.
+        (
+            "[Message from Sam (household), sent from their own device, typed on Desk]\nThis message was sent by another person in the user's household, not by the user; the user did not write it.\n\nrename the deploy script",
+            "rename the deploy script",
+        ),
+        // Shapes the host never writes stay the person's own words.
+        ("[Typed on Laptop] no line break", "[Typed on Laptop] no line break"),
+        ("[Typed on ]\nx", "[Typed on ]\nx"),
+        ("[Typed on La[p]top]\nx", "[Typed on La[p]top]\nx"),
+        ("hello [Typed on Laptop]\nworld", "hello [Typed on Laptop]\nworld"),
+    ] {
+        assert_eq!(unframed(msg), after, "{msg:?}");
+    }
+    let long = format!("[Typed on {}]\nlong name", "x".repeat(41));
+    assert_eq!(
+        unframed(&long),
+        long,
+        "a PC name over 40 characters is not the marker"
+    );
+    assert_eq!(
+        fallback_title("[Typed on Laptop]\nwhat is the dog page called"),
+        Some("what is the dog page called".to_owned()),
+        "the fallback skips the PC line too"
+    );
+    assert_eq!(fallback_title("[Typed on Laptop]\n"), None);
 }
 
 /// Starts a background Agent call `id` on a running turn (its call returns at once).
