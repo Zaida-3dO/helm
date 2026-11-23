@@ -50,6 +50,9 @@ test("titles are cleaned; length never rejects, a long answer is cut at a word",
     "This is far too long to be a title for anything",
   );
   assert.equal(cleanTitle("x".repeat(51)), "x".repeat(50), "one long word is cut at the limit");
+  // The cut itself never leaves a dangling mark at the end of the title.
+  assert.equal(cleanTitle(`${"x".repeat(46)} - tail of the sentence`), "x".repeat(46), "no dangling dash");
+  assert.equal(cleanTitle(`${"x".repeat(46)} . tail of the sentence`), "x".repeat(46), "no dangling full stop");
   assert.equal(cleanTitle("   "), null);
   assert.equal(cleanTitle(""), null);
 });

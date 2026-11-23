@@ -174,7 +174,10 @@ export function cleanTitle(raw: string): string | null {
   if (t.length > MAX_TITLE_CHARS) {
     const cut = t.slice(0, MAX_TITLE_CHARS);
     const space = cut.lastIndexOf(" ");
-    t = (space >= 12 ? cut.slice(0, space) : cut).trimEnd().replace(/[,;:]$/, "");
+    t = (space >= 12 ? cut.slice(0, space) : cut).trimEnd();
+    // The cut itself must not leave the title ending on a dangling mark either: a comma, a
+    // full stop or a dash at the cut edge goes too.
+    t = t.replace(/[,;:]$/, "").replace(/\.+$/, "").replace(/[-–—]$/, "").trimEnd();
   }
   return t || null;
 }
