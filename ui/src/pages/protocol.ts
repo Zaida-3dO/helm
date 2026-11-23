@@ -15,7 +15,7 @@ export const SEND_BURST_WINDOW_MS = 10 * 60_000;
  * out of the window). */
 export function allowSend(sent: number[], now: number): { ok: boolean; kept: number[] } {
   const kept = sent.filter((t) => now - t < SEND_BURST_WINDOW_MS);
-  if (kept.length > 0 && now - kept[kept.length - 1] < SEND_MIN_GAP_MS) return { ok: false, kept };
+  if (kept.length > 0 && now - kept[kept.length - 1]! < SEND_MIN_GAP_MS) return { ok: false, kept };
   if (kept.length >= SEND_BURST) return { ok: false, kept };
   return { ok: true, kept: [...kept, now] };
 }

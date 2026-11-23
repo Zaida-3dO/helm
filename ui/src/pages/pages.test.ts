@@ -83,18 +83,19 @@ test('a page may not send faster than once in two seconds or ten in ten minutes'
   // (why, recent sends as ms offsets from the moment checked, allowed?)
   const rows: Array<[string, number[], boolean]> = [
     ['first send ever', [], true],
-    ['2.5 s after the last', [0], true],
-    ['1.9 s after the last', [800], false],
-    ['a burst of 9, this is the 10th', [9_000, 8_000, 7_000, 6_000, 5_000, 4_000, 3_000, 2_000, 1_000], true],
+    ['2.5 s after the last', [2_500], true],
+    ['1.9 s after the last', [1_900], false],
+    // (sends two seconds apart, the longest the gap rule permits)
+    ['a burst of 9, this is the 10th', [18_000, 16_000, 14_000, 12_000, 10_000, 8_000, 6_000, 4_000, 2_000], true],
     [
       'the window is full of ten',
-      [9_000, 8_000, 7_000, 6_000, 5_000, 4_000, 3_000, 2_000, 1_000, 0],
+      [20_000, 18_000, 16_000, 14_000, 12_000, 10_000, 8_000, 6_000, 4_000, 2_000],
       false,
     ],
     // Old sends leave the 10-minute window and no longer count.
     [
       'ten, the oldest 11 minutes ago',
-      [660_000, 9_000, 8_000, 7_000, 6_000, 5_000, 4_000, 3_000, 2_000, 1_000],
+      [660_000, 20_000, 18_000, 16_000, 14_000, 12_000, 10_000, 8_000, 6_000, 4_000],
       true,
     ],
   ];
