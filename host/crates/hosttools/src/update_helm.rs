@@ -9,6 +9,7 @@
 
 use crate::registry::{HostToolRegistry, ToolCtx, ToolError, ToolResult};
 use crate::spec::ToolSpec;
+use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
 async fn update(ctx: ToolCtx, a: Value) -> ToolResult {
@@ -31,6 +32,10 @@ async fn update(ctx: ToolCtx, a: Value) -> ToolResult {
                      pass confirm true only when the user asked for the update.",
                 ));
             }
+            // `confirm` is only the agent's word that the user asked. The say-so itself must be
+            // the owner's own send in this chat: a page, another chat, a schedule or a speaker
+            // can talk an agent into passing confirm, and must not restart Helm by proxy.
+            owner_say_so(&ctx)?;
             // Re-check the folder as late as possible and see what the restart would stop; an
             // absent or unreadable setup refuses here, before anything is drained.
             let prep = ctx.op("update_prepare", json!({})).await?;
@@ -46,6 +51,37 @@ async fn update(ctx: ToolCtx, a: Value) -> ToolResult {
             }))
         }
         _ => Err(ToolError::refused("action is check or install.")),
+    }
+}
+
+/// Whether the newest thing put into the calling chat is the owner's own words: typed here, typed
+/// on another of their PCs, an answer, or a send from a notification. Helm's own `app` notes are
+/// skipped, so a later system note never hides what the person (or a page) last said. Anything
+/// else — a page, another chat, Telegram, voice, a speaker, a schedule, an action — or nothing at
+/// all, is no say-so to restart the app.
+fn owner_say_so(ctx: &ToolCtx) -> Result<(), ToolError> {
+    const REFUSE: &str = "Ask the user to type that they want Helm updated in this chat, \
+                          then call install again.";
+    let Ok(db) = ctx.services.need::<helm_core::db::Database>() else {
+        return Err(ToolError::refused(REFUSE));
+    };
+    let origin = db
+        .snapshot(|tx| {
+            tx.query_row(
+                "SELECT m.origin FROM submissions s
+                   JOIN submission_meta m ON m.submission_id = s.id
+                  WHERE s.chat_id = ?1 AND m.origin != 'app'
+                  ORDER BY s.created_at DESC, s.id DESC LIMIT 1",
+                [&ctx.caller_chat_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+        })
+        .ok()
+        .flatten();
+    match origin.as_deref() {
+        Some("typed") | Some("remote") | Some("answer") | Some("notification") => Ok(()),
+        _ => Err(ToolError::refused(REFUSE)),
     }
 }
 
@@ -72,7 +108,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
         .guidelines(
             "check: no arguments; the update folder, the running version, the newer setup found (if any) and any scan error.\n\
              install: Helm quits with drafts saved, the setup file runs, and Helm starts again by itself once that process ends — even if the setup failed. Your own turn ends with the app, so a lost reply is expected: never retry the install, run check afterwards instead.\n\
-             Only when the user explicitly asked for the update. Never run a setup file yourself: this tool is the only path that drains the chats and leaves the note that brings Helm back.",
+             Only when the user explicitly asked for the update. The chat's newest non-system message must be your person's own words (typed, remote, an answer or a notification): if install is refused, ask them to type the request in this chat, then call it again. Never run a setup file yourself: this tool is the only path that drains the chats and leaves the note that brings Helm back.",
         ),
         update,
     );
@@ -114,7 +150,11 @@ mod tests {
         }
     }
 
-    async fn call(fake: &Arc<Fake>, args: Value) -> ToolResult {
+    async fn call_with(
+        fake: &Arc<Fake>,
+        args: Value,
+        services: Arc<helm_ipc::Services>,
+    ) -> ToolResult {
         let mut r = HostToolRegistry::new();
         register_host_tools(&mut r);
         let ToolHandler::Async(f) = r.get("app_update").unwrap().handler.clone() else {
@@ -126,7 +166,7 @@ mod tests {
                 is_child: false,
                 tool_call_id: Some("tc1".into()),
                 origin: CallOrigin::Agent,
-                services: Arc::new(helm_ipc::Services::new()),
+                services,
                 events: Arc::new(helm_ipc::NullSink),
                 ops: Some(fake.clone()),
             },
@@ -135,12 +175,55 @@ mod tests {
         .await
     }
 
+    fn plain() -> Arc<helm_ipc::Services> {
+        Arc::new(helm_ipc::Services::new())
+    }
+
+    /// A chat "me" whose sends, oldest first, carry these origins; the caller keeps the folder
+    /// alive while the database is used. Only the columns the gate reads are built here.
+    fn owner_db(origins: &[&str]) -> (tempfile::TempDir, Arc<helm_ipc::Services>) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = helm_core::db::MigrationRegistry::new();
+        reg.initializer("test-update-owner", |tx| {
+            tx.execute_batch(
+                "CREATE TABLE submissions (
+                     id TEXT PRIMARY KEY, chat_id TEXT NOT NULL,
+                     text TEXT NOT NULL, created_at INTEGER NOT NULL);
+                 CREATE TABLE submission_meta (
+                     submission_id TEXT PRIMARY KEY REFERENCES submissions(id) ON DELETE CASCADE,
+                     origin TEXT NOT NULL);",
+            )
+        });
+        let db = std::sync::Arc::new(
+            helm_core::db::Database::open(&dir.path().join("t.db"), &reg).unwrap(),
+        );
+        for (n, origin) in origins.iter().enumerate() {
+            let id = format!("s{n}");
+            db.write(|tx| {
+                tx.execute(
+                    "INSERT INTO submissions(id, chat_id, text, created_at) VALUES (?1, 'me', 'words', ?2)",
+                    rusqlite::params![id, n as i64],
+                )?;
+                tx.execute(
+                    "INSERT INTO submission_meta(submission_id, origin) VALUES (?1, ?2)",
+                    rusqlite::params![id, *origin],
+                )
+            })
+            .unwrap();
+        }
+        let mut services = helm_ipc::Services::new();
+        services.insert(db);
+        (dir, Arc::new(services))
+    }
+
     #[tokio::test]
     async fn check_reports_the_folder_and_install_needs_confirm_and_goes_through_the_ops() {
         let fake = Arc::new(Fake(Mutex::new(vec![])));
 
         // check: the folder's answer reaches the agent whole.
-        let r = call(&fake, json!({"action": "check"})).await.unwrap();
+        let r = call_with(&fake, json!({"action": "check"}), plain())
+            .await
+            .unwrap();
         assert_eq!(r["current"], "2.4.4");
         assert_eq!(r["available"]["version"], "2.4.5");
         assert_eq!(fake.0.lock().unwrap().last().unwrap().0, "update_check");
@@ -153,7 +236,7 @@ mod tests {
             json!({"action": "restart"}),
             json!({}),
         ] {
-            let e = call(&fake, args.clone()).await.unwrap_err();
+            let e = call_with(&fake, args.clone(), plain()).await.unwrap_err();
             assert!(
                 e.public.contains("confirm") || e.public.contains("check or install"),
                 "{args}: {}",
@@ -163,8 +246,57 @@ mod tests {
         }
         assert_eq!(fake.0.lock().unwrap().len(), calls_before, "nothing ran");
 
-        // install with confirm: the folder is re-checked, then the app quits into the setup.
-        let r = call(&fake, json!({"action": "install", "confirm": true}))
+        // confirm is the agent's word; the owner's own send is what the restart needs. Only the
+        // last word in the chat counts (Helm's own notes are skipped), and an empty chat with no
+        // person's words behind it is refused as firmly as a page's or another bot's.
+        // (why, origins oldest..newest, allowed?)
+        let say_so: &[(&str, &[&str], bool)] = &[
+            ("the person typed the ask", &["typed"], true),
+            ("typed on another of their PCs", &["page", "remote"], true),
+            ("an Allow-card answer was last", &["typed", "answer"], true),
+            ("a quick reply from a toast", &["notification"], true),
+            ("a page wrote last", &["typed", "page"], false),
+            (
+                "the person asked, then another chat wrote",
+                &["typed", "other_chat"],
+                false,
+            ),
+            ("a speaker turn came in last", &["typed", "speaker"], false),
+            ("a schedule wrote last", &["schedule"], false),
+            ("only a Telegram relay wrote", &["telegram"], false),
+            (
+                "a Helm note after a page's words does not hide them",
+                &["page", "app"],
+                false,
+            ),
+            ("no words in the chat at all", &[], false),
+        ];
+        for (why, origins, allowed) in say_so {
+            let (_dir, services) = owner_db(origins);
+            let gate_fake = Arc::new(Fake(Mutex::new(vec![])));
+            let out = call_with(&gate_fake, json!({"action": "install", "confirm": true}), services)
+                .await;
+            if *allowed {
+                assert!(out.is_ok(), "{why}: {:?}", out.err().map(|e| e.public));
+            } else {
+                let e = out.unwrap_err();
+                assert!(
+                    e.public.contains("Ask the user to type"),
+                    "{why}: {}",
+                    e.public
+                );
+                assert_eq!(e.changed, crate::Changed::No);
+                assert!(
+                    gate_fake.0.lock().unwrap().is_empty(),
+                    "{why}: nothing may run without the person's words"
+                );
+            }
+        }
+
+        // install with confirm over the person's own last words: the folder is re-checked, then
+        // the app quits into the setup.
+        let (_dir, services) = owner_db(&["typed"]);
+        let r = call_with(&fake, json!({"action": "install", "confirm": true}), services)
             .await
             .unwrap();
         assert_eq!(r["outcome"], "restarting");
@@ -183,6 +315,7 @@ mod tests {
         // The ops' own refusal (no newer setup) reaches the agent: install never ran, because
         // the prepare refused first.
         let empty = Arc::new(NoUpdate(Mutex::new(vec![])));
+        let (_dir, services) = owner_db(&["typed"]);
         let e = {
             let mut reg = HostToolRegistry::new();
             register_host_tools(&mut reg);
@@ -195,7 +328,7 @@ mod tests {
                     is_child: false,
                     tool_call_id: None,
                     origin: CallOrigin::Agent,
-                    services: Arc::new(helm_ipc::Services::new()),
+                    services,
                     events: Arc::new(helm_ipc::NullSink),
                     ops: Some(empty.clone()),
                 },
