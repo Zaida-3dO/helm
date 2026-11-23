@@ -168,8 +168,9 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const [remoteShut, setRemoteShut] = useState<ReadonlySet<string>>(() => new Set());
   const remoteProjectIds = useMemo(() => new Set(other.projects.map((p) => p.id)), [other.projects]);
   const shutRemote = (list: ProjectNode[]) => list.map((p) => (remoteShut.has(p.id) ? { ...p, collapsed: true } : p));
-  // A group of another PC is drawn only when it holds a chat in the current view (or the open
-  // chat): a project pinned over there orders groups there, but its pin shows no empty group here.
+  // A group of another PC is drawn by the same rule as one here: it holds a chat in the current
+  // view (or the open chat), or it is a pinned board — a board pinned over there keeps its place
+  // here while empty, exactly as it does on its own PC.
   const shownProjects = useMemo(() => {
     if (remote) return shutRemote(shownRemoteGroups(other.projects, other.rows, selected));
     if (allDevices) {
@@ -346,7 +347,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
 
   // The nav's New chat: the new-chat page, in the open chat's project when one is open.
   const navNewChat = () => {
-    const projectId = remote ? undefined : selectedRow?.groupProjectId;
+    const projectId = remote ? undefined : selectedLocalRow?.groupProjectId;
     openNewChat(projectId ? { projectId } : {});
   };
 
@@ -422,11 +423,12 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     // A chat on another device: the same menu, carried across the wire. The ops route through
     // the mirror, which answers with the device's own words.
     const device = deviceOfRow(row.chatId);
+    let items: MenuItem[];
     if (device) {
       const record = other.chats.get(row.chatId);
       if (!record) return withChatIcons([{ id: 'rename', label: 'Rename chat…', onSelect: () => promptRename(row) }]);
       const { siblings, depthOf, heightOf } = nesting(other.rows, row);
-      return withChatIcons(chatMenuItems(
+      items = withChatIcons(chatMenuItems(
         { row, projects: other.projects, siblings, heightOf, depthOf, expanded: expanded.has(row.chatId), view: archived ? 'archived' : currentView, profiles: remoteProfileChoices(device, record), shares: remoteShareChoices(device, record) },
         {
           fork: () => void act.fork(row),
@@ -453,37 +455,40 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           remove: () => setConfirm(deleteChatConfirm(row, () => act.remove(row), device.name)),
         },
       ));
-    }
-    const { siblings, depthOf, heightOf } = nesting(snap.rows, row);
-    const items = withChatIcons(chatMenuItems(
-      { row, projects: snap.projects, hidden: hiddenBoards, siblings, heightOf, depthOf, expanded: expanded.has(row.chatId), view: archived ? 'archived' : currentView, profiles: profileChoices(prof, row.chatId, snap.rows), shares: shareChoices(prof, row.chatId, snap.rows) },
-      {
-        fork: () => void act.fork(row),
-        rename: () => promptRename(row),
-        compact: () => void compactChat(ops, row.chatId, setError),
-        rollOver: () => setConfirm(rollOverConfirm(row.title, () => rollOverChat(ops, row.chatId, setError))),
-        cost: () => setCost({ chatId: row.chatId }),
-        exportMarkdown: () => void exportChatMarkdown(api, row.chatId, setError),
-        moveTo: (id) => void act.moveTo(row, id),
-        moveToProfile: (id) => moveChatToProfile(profileStore, row.chatId, id, setError),
-        shareWith: (id) => shareChatWith(profileStore, row.chatId, shareChoices(prof, row.chatId, snap.rows), id, setError),
-        nestUnder: (id) => {
-          userCollapsed.current.delete(id);
-          setExpanded((s) => new Set(s).add(id));
-          void act.nestUnder(row, id);
+    } else {
+      const { siblings, depthOf, heightOf } = nesting(snap.rows, row);
+      items = withChatIcons(chatMenuItems(
+        { row, projects: snap.projects, hidden: hiddenBoards, siblings, heightOf, depthOf, expanded: expanded.has(row.chatId), view: archived ? 'archived' : currentView, profiles: profileChoices(prof, row.chatId, snap.rows), shares: shareChoices(prof, row.chatId, snap.rows) },
+        {
+          fork: () => void act.fork(row),
+          rename: () => promptRename(row),
+          compact: () => void compactChat(ops, row.chatId, setError),
+          rollOver: () => setConfirm(rollOverConfirm(row.title, () => rollOverChat(ops, row.chatId, setError))),
+          cost: () => setCost({ chatId: row.chatId }),
+          exportMarkdown: () => void exportChatMarkdown(api, row.chatId, setError),
+          moveTo: (id) => void act.moveTo(row, id),
+          moveToProfile: (id) => moveChatToProfile(profileStore, row.chatId, id, setError),
+          shareWith: (id) => shareChatWith(profileStore, row.chatId, shareChoices(prof, row.chatId, snap.rows), id, setError),
+          nestUnder: (id) => {
+            userCollapsed.current.delete(id);
+            setExpanded((s) => new Set(s).add(id));
+            void act.nestUnder(row, id);
+          },
+          topLevel: () => void act.topLevel(row),
+          toggleChildren: () => toggleChat(row.chatId),
+          markUnread: () => void act.markUnread(row),
+          pin: (p) => void act.pin(row, p),
+          mute: (m) => void act.mute(row, m),
+          archive: () => archiveRow(row),
+          restore: () => void act.restore(row),
+          remove: () => setConfirm(deleteChatConfirm(row, () => act.remove(row))),
         },
-        topLevel: () => void act.topLevel(row),
-        toggleChildren: () => toggleChat(row.chatId),
-        markUnread: () => void act.markUnread(row),
-        pin: (p) => void act.pin(row, p),
-        mute: (m) => void act.mute(row, m),
-        archive: () => archiveRow(row),
-        restore: () => void act.restore(row),
-        remove: () => setConfirm(deleteChatConfirm(row, () => act.remove(row))),
-      },
-    ));
-    // On a hovered row the chip gives way to an "open" button; the menu keeps the entry for the keyboard.
-    const linked = itemRefs.get(row.chatId);
+      ));
+    }
+    // On a hovered row the chip gives way to an "open" button; the menu keeps the entry for the
+    // keyboard. A chat on another PC links to its board item over there: its links were read from
+    // the PC that runs the chat, so the entry appears for it too.
+    const linked = allItemRefs.get(row.chatId);
     if (linked) items.splice(1, 0, { id: 'open-item', label: linked.named ? `Open item: ${linked.title}` : 'Open linked item', onSelect: () => openItem(linked.itemId) });
     return items;
   };
@@ -535,7 +540,11 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   };
 
   // ---- shortcuts (registered with the shell's key registry, never a keydown handler) ----
-  const selectedRow = selected ? snap.rows.find((r) => r.chatId === selected) : undefined;
+  // The open chat's row on this PC, and its row wherever it runs: a chat that runs on another PC
+  // gets the same shortcuts, since the mirror carries its pin/unread/archive ops there. A project
+  // id from the other PC is never a local one, so new-chat and queue placement read this PC's row.
+  const selectedLocalRow = selected ? snap.rows.find((r) => r.chatId === selected) : undefined;
+  const selectedRow = selectedLocalRow ?? (selected ? other.rows.find((r) => r.chatId === selected) : undefined);
   useBinding({ id: 'sidebar.undo', title: 'Undo archive or move', defaultKeys: 'Mod+Z', inInputs: false, run: () => void act.undo() });
   useBinding({ id: 'sidebar.redo', title: 'Redo archive or move', defaultKeys: 'Mod+Shift+Z', inInputs: false, run: () => void act.redo() });
   useBinding({ id: 'chat.pin', title: 'Pin or unpin chat', defaultKeys: 'Mod+Alt+P', enabled: () => !!selectedRow, run: () => selectedRow && void act.pin(selectedRow, !selectedRow.pinned) });
@@ -898,7 +907,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       {confirm && <ConfirmDialog spec={confirm} onClose={() => setConfirm(null)} />}
       {cost && <CostDialog api={api} target={cost} onClose={() => setCost(null)} />}
       {inboxOpen && <AttentionInbox summary={scopedAttention} ops={ops} onOpen={onSelect} onClose={() => setInboxOpen(false)} />}
-      {queueOpen && <QueuePanel store={queueStore} api={api} bus={bus} projects={snap.projects} currentProjectId={selectedRow?.groupProjectId ?? null} onOpen={onSelect} onClose={() => setQueueOpen(false)} />}
+      {queueOpen && <QueuePanel store={queueStore} api={api} bus={bus} projects={snap.projects} currentProjectId={selectedLocalRow?.groupProjectId ?? null} onOpen={onSelect} onClose={() => setQueueOpen(false)} />}
       <ItemPickerHost />
       {preview && !menu && !drag && (
         <PreviewCard
@@ -956,7 +965,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         <GroupHeader
           item={it}
           dragging={drag?.active === true && drag.src.kind === 'project' && drag.src.projectId === p.id}
-          current={selected ? data.row(selected)?.groupProjectId === p.id : false}
+          current={selected ? (rowById(selected)?.groupProjectId ?? '') === p.id : false}
           onToggle={() => {
             if (suppressClick.current) return;
             const collapse = !it.collapsed;
@@ -1265,7 +1274,8 @@ function ChatRow({
   needsLabel: string;
   /** Why the idle check thinks this quiet chat still needs you. */
   flagReason: string | undefined;
-  /** The chat runs on another device: dimmed while that device is offline, and it cannot be archived here. */
+  /** The chat runs on another device: dimmed while that device is offline. Archive, restore and
+   *  the rest travel to the PC that runs the chat through the mirror, exactly as the menu's do. */
   remote: { name: string; online: boolean } | null;
   /** Who shared this chat with the active profile, when it is not the active profile's own. */
   sharedBy: { name: string; colour: string } | null;
@@ -1433,17 +1443,15 @@ function ChatRow({
         >
           <IconMore />
         </button>
-        {!remote && (
-          <button
-            type="button"
-            className="sb-act"
-            aria-label={r.archived ? `Restore ${r.title}` : `Archive ${r.title}`}
-            title={r.archived ? 'Restore chat' : 'Archive chat'}
-            onClick={onArchive}
-          >
-            {r.archived ? <IconRestore /> : <IconArchive />}
-          </button>
-        )}
+        <button
+          type="button"
+          className="sb-act"
+          aria-label={r.archived ? `Restore ${r.title}` : `Archive ${r.title}`}
+          title={r.archived ? 'Restore chat' : 'Archive chat'}
+          onClick={onArchive}
+        >
+          {r.archived ? <IconRestore /> : <IconArchive />}
+        </button>
       </span>
     </div>
   );

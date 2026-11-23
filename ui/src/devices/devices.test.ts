@@ -131,17 +131,18 @@ function host(initial: { stored: string | null; devices: DevicesList | null; sav
 }
 const settle = () => new Promise((r) => setTimeout(r, 0));
 
-test("another PC's groups: only those holding a chat in the view show; its pin orders groups, it shows no empty one", () => {
+test("another PC's groups: those holding a chat in the view plus pinned boards, as for this PC's own groups", () => {
   const rp = (id: string, over: Partial<RemoteProject> = {}, chatCount = 0) => remoteProject({ id, name: id, colour: null, kind: 'board', ...over }, chatCount);
-  const projects = [rp('p1', { pinned: true }, 2), rp('empty-there', { pinned: true }), rp('beyond-pages', {}, 3), rp('p2')];
+  const projects = [rp('p1', { pinned: true }, 2), rp('empty-board', { pinned: true }), rp('empty-folder', { pinned: true, kind: 'folder' }), rp('beyond-pages', {}, 3), rp('p2')];
   const rows = [remoteRow(record('c1', { projectId: 'p1' }), false), remoteRow(record('c9', { projectId: 'p2' }), false)];
   const kept = shownRemoteGroups(projects, rows, null);
-  assert.deepEqual(kept.map((p) => p.id), ['p1', 'beyond-pages', 'p2'], 'held chats, a count from over there, and the open chat group; a pin that holds nothing here drops out');
+  assert.deepEqual(kept.map((p) => p.id), ['p1', 'empty-board', 'beyond-pages', 'p2'], 'held chats, a count from over there, a pinned board that holds nothing here (it stays while empty, as a local pinned board does); a pinned folder does not');
   // A pin on a group that does show is kept as it was, so it still orders groups.
   assert.equal(kept.find((p) => p.id === 'p1')?.pinned, true);
-  // An archived-only group shows in the archived view because its archived rows are in the view.
+  // An archived-only group shows in the archived view because its archived rows are in the view;
+  // the other PC's pinned empty board joins too — the sidebar's own rules then hide it there.
   const arc = [remoteRow(record('c4', { projectId: 'pa', archived: true }), false)];
-  assert.deepEqual(shownRemoteGroups([rp('pa', { pinned: true }), rp('pb', { pinned: true })], arc, 'c4').map((p) => p.id), ['pa']);
+  assert.deepEqual(shownRemoteGroups([rp('pa', { pinned: true }), rp('pb', { pinned: true })], arc, 'c4').map((p) => p.id), ['pa', 'pb']);
 });
 
 test('the devices store follows the choice, falls back to this PC when that device leaves the hub, and puts the choice back if it is not saved', async () => {

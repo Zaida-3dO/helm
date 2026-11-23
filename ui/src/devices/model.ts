@@ -133,13 +133,15 @@ export function remoteShareChoices(device: DeviceInfo, chat: RemoteChatRecord): 
     .map((p) => ({ id: p.personId, name: p.person, shared: shared.has(p.personId) }));
 }
 
-/** The other computer's groups to draw: only those that hold a chat in the current view, or hold
- *  the open chat. A project pinned on that computer orders its groups there, but its pin never
- *  shows an empty group here. */
+/** The other computer's groups to draw: those that hold a chat in the current view, hold the open
+ *  chat, or are pinned boards — the same rule as for this PC's own groups: a board pinned over
+ *  there keeps its place here while empty (a pinned folder does not; a folder is only ever where
+ *  chats run). What finally shows is still the sidebar's own decision, so an empty pinned board
+ *  hides itself in the archived view just as a local one does. */
 export function shownRemoteGroups(projects: readonly ProjectNode[], rows: readonly SidebarRow[], selectedChatId: string | null): ProjectNode[] {
   const groups = new Set(rows.map((r) => r.groupProjectId));
   const selectedGroup = selectedChatId ? rows.find((r) => r.chatId === selectedChatId)?.groupProjectId : undefined;
-  return projects.filter((p) => p.chatCount > 0 || groups.has(p.id) || p.id === selectedGroup);
+  return projects.filter((p) => p.chatCount > 0 || groups.has(p.id) || p.id === selectedGroup || (p.pinned && p.kind === 'board'));
 }
 
 /**
