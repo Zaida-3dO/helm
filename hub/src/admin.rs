@@ -39,19 +39,33 @@ pub const USAGE: &str = "  helm-hub person add <name> | person list
                                        cut an account off; a running bot needs a restart to stop
                                        answering it, and an id listed in the hub's settings must
                                        be taken out of those as well
+  helm-hub speaker list
+                                       every room speaker the hub has heard of: what it called
+                                       itself, its token, and when it last spoke
   helm-hub pair --person P --machine M [--scopes S] [--acts-for A]
                                        print a one-time pairing code (8 characters, 15 minutes)
 
-  Scopes: memory:ro, memory:rw, relay, app, peer, telegram, voice, remote (comma separated;
-  telegram, voice and remote stand alone).
+  Scopes: memory:ro, memory:rw, relay, app, peer, telegram, voice, speaker, remote (comma
+  separated; telegram, voice, speaker and remote stand alone).
   Default for a machine: memory:rw,relay,app,peer. A person that does not exist yet is made.
   --acts-for takes people who exist, comma separated; a machine always acts for its own person.
   `client list` shows each acts-for with its source: admin (set here) or device (announced by
   the machine's own Helm, and refreshed every time it says so).";
 
+/// How long ago a millisecond timestamp is, in the coarsest whole unit that fits.
+fn ago(since_ms: i64) -> String {
+    let mins = (since_ms.max(0)) / 60_000;
+    match mins {
+        0 => "under a minute ago".into(),
+        1..=59 => format!("{mins} min ago"),
+        60..=1439 => format!("{} h ago", mins / 60),
+        _ => format!("{} d ago", mins / 1440),
+    }
+}
+
 /// Whether `first` begins an admin command.
 pub fn is_admin_command(first: &str) -> bool {
-    matches!(first, "person" | "client" | "telegram" | "pair")
+    matches!(first, "person" | "client" | "telegram" | "speaker" | "pair")
 }
 
 /// Run one admin command and return what to print.
@@ -242,6 +256,29 @@ pub fn run(registry: &mut Registry, args: &[String], now_ms: i64) -> Result<Stri
                  stop answering it; if the id is listed in the hub's settings, take it out of \
                  those as well or the link comes back on the next start."
             ))
+        }
+        ["speaker", "list"] => {
+            let rows = registry.speakers().map_err(|e| e.to_string())?;
+            let mut out = String::new();
+            for s in &rows {
+                let where_ = match (s.room.as_deref(), s.area.as_deref()) {
+                    (Some(room), Some(area)) if room != area => format!("{room} / {area}"),
+                    (Some(one), _) | (_, Some(one)) => one.to_owned(),
+                    (None, None) => "no room named".to_owned(),
+                };
+                let turn = match s.last_turn_ms {
+                    Some(at) => ago(now_ms - at),
+                    None => "never".to_owned(),
+                };
+                out.push_str(&format!(
+                    "{:<24} {:<20} token {}  person {}  last turn {turn}\n",
+                    s.device, where_, s.token_id, s.person,
+                ));
+            }
+            if rows.is_empty() {
+                out.push_str("no room speaker has spoken to this hub\n");
+            }
+            Ok(out)
         }
         ["pair", rest @ ..] => {
             let (_, f) = flags(rest, &["person", "machine", "scopes", "acts-for"])?;

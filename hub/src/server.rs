@@ -3,8 +3,9 @@
 //! the same scope; see `launcher.rs`), `/pair` (a one-time code) and `/telegram/update` (Telegram updates posted
 //! by another service that already runs the bot, a `telegram`-scope token). The household
 //! questions travel over the relay lines (`peer.rs`), not over HTTP. The phone's `/voice/*`
-//! routes (a `voice`-scope token) are in `voice_http.rs`, and the Remote page and its one call
-//! (`/remote`, a `remote`-scope token for the call) are in `remote.rs`.
+//! routes (a `voice`-scope token) are in `voice_http.rs`, the room speaker's `/speaker/*`
+//! routes (a `speaker`-scope token) are in `speaker_http.rs`, and the Remote page and its one
+//! call (`/remote`, a `remote`-scope token for the call) are in `remote.rs`.
 
 use crate::apptools;
 use crate::auth::{Client, Scope};
@@ -14,6 +15,8 @@ use crate::mcp::{self, Options};
 use crate::registry::{Registry, RegistryError};
 use crate::relay::{Line, MAX_FRAME};
 use crate::remote;
+use crate::speaker::SpeakerBridge;
+use crate::speaker_http;
 use crate::store::Store;
 use crate::telegram::{self, Telegram};
 use crate::voice::VoiceBridge;
@@ -44,6 +47,8 @@ pub struct AppState {
     pub telegram: Option<Arc<Telegram>>,
     /// The phone's voice line, or `None` when it is off.
     pub voice: Option<Arc<VoiceBridge>>,
+    /// The room speaker line, or `None` when it is off.
+    pub speaker: Option<Arc<SpeakerBridge>>,
     pub pair_limit: PairLimit,
     /// How many calls each Remote-page token has made lately.
     pub remote: remote::Limiter,
@@ -69,6 +74,7 @@ impl AppState {
             lines,
             telegram,
             voice: None,
+            speaker: None,
             pair_limit: PairLimit::default(),
             remote: remote::Limiter::default(),
         }
@@ -83,6 +89,12 @@ impl AppState {
     /// The same state with the voice line on.
     pub fn with_voice(mut self, voice: Arc<VoiceBridge>) -> Self {
         self.voice = Some(voice);
+        self
+    }
+
+    /// The same state with the speaker line on.
+    pub fn with_speaker(mut self, speaker: Arc<SpeakerBridge>) -> Self {
+        self.speaker = Some(speaker);
         self
     }
 }
@@ -141,9 +153,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/remote/app.css", get(remote::style))
         .route("/remote/api/call", post(remote::call))
         .layer(DefaultBodyLimit::max(MAX_REQUEST))
-        // The voice routes read their own bodies to their own limits (a recording may be 8 MiB),
-        // so they are merged in after the 4 MiB limit and stay outside it.
+        // The voice and speaker routes read their own bodies to their own limits (a recording
+        // may be 8 MiB, a speaker clip 1.5 MiB), so they are merged in after the 4 MiB limit and
+        // stay outside it.
         .merge(voice_http::routes())
+        .merge(speaker_http::routes())
         .with_state(state)
 }
 

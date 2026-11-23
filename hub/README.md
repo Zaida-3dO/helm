@@ -92,12 +92,14 @@ is read on every request, so a revoke takes effect at once.
 | `peer` | the household questions a machine's line may ask (below) |
 | `telegram` | `POST /telegram/update` only: a forwarder for a shared bot (below). It stands alone |
 | `voice` | `/voice/*` only: a phone's voice line (below). It stands alone |
+| `speaker` | `/speaker/*` only: a room speaker's line (below). It stands alone |
 | `remote` | `POST /remote/api/call` only: the Remote page's calls (below). It stands alone |
 
 A paired machine gets `memory:rw,relay,app,peer`. `/mcp` needs a memory or `app` scope, `/relay`
 needs `relay`, and a token with neither cannot reach what it has no scope for. A `voice` token
-reaches nothing but `/voice/*`, and a `remote` token nothing but the Remote page's call: `/mcp`,
-`/relay`, `/telegram/update` and the other scopes' routes answer them with 403. A new kind of
+reaches nothing but `/voice/*`, a `speaker` token nothing but `/speaker/*`, and a `remote` token
+nothing but the Remote page's call: `/mcp`, `/relay`, `/telegram/update` and the other scopes'
+routes answer them with 403. A new kind of
 caller is a new scope in `src/auth.rs` that its route checks with `Client::has`.
 
 Tokens are held only as SHA-256 digests and compared in constant time. `GET /health` is the one
@@ -116,6 +118,7 @@ helm-hub client list
 helm-hub client revoke <machine or id> [--person P]
 helm-hub client acts-for <machine or id> <person> [--person P]
 helm-hub client stop-acting-for <machine or id> <person> [--person P]
+helm-hub speaker list                                      # the room speakers the hub has heard of
 helm-hub pair --person P --machine M [--scopes S] [--acts-for A]         # prints a one-time code
 ```
 
@@ -563,6 +566,56 @@ so one picture of 1 MiB fits easily.
 **Upgrading:** install the matching Helm on the PC first, then redeploy the hub; an older Helm
 ignores the voice frames and never acknowledges a turn. Put the `voice` token in the phone's
 settings, never in the repo or the chat.
+
+## The speaker line
+
+A room speaker — a Home Assistant voice satellite — reaches a person's Helm the way a phone's
+voice line does, but over four short HTTP calls instead of a socket: Home Assistant sends the
+audio, the hub turns the words into a turn down the person's relay line, and the answer comes back
+as one sentence to be spoken. Each speaker has a token of the `speaker` scope
+(`helm-hub client add --person Sam --machine speaker-kitchen --scopes speaker`, or a `HUB_TOKENS`
+entry `speaker-kitchen:<token>:speaker`); it reaches `/speaker/*` and nothing else, and it speaks
+for its token's person only. The Home Assistant side is the integration in `tools/ha-speaker`,
+which speaks exactly these routes.
+
+| Variable | |
+|---|---|
+| `HUB_SPEAKER` | `on` (the default) or `off`. On, the routes exist whether or not any speaker token does; with none every call answers 401 or 403 like any route without its token. Off: every `/speaker/*` route answers 404, and the relay line drops the speaker's frames. Anything else: the hub refuses to start |
+| `HUB_SPEAKER_IDLE_MINUTES` | How long one talk on one speaker stays one conversation after its last turn, 3-30 (default 10). Past it the hub tells Helm the talk closed, and the next utterance starts a new one |
+
+| Route | |
+|---|---|
+| `GET /speaker/status` | `200 {"ok": true, "version": 1, "helm": "online"\|"offline", "stt": true\|false, "session": {…}\|null}`. `helm` is `online` only while a line of that person both is up and has announced that it takes speaker turns. `session` is the newest talk this speaker had, with `id`, `startedAt`, `lastActiveAt` (milliseconds) and `assurance`, `person`, `elevated`, `elevatedUntil` (`"none"`, `null`, `false`, `null` today). Proves the address and the token; never touches speech-to-text |
+| `POST /speaker/stt[?device=…&room=…&hint=…]` | One capture in as `audio/wav`, 1.5 MiB and 30 s at most: `200 {"text": "…"}`, or `{"state": "empty"}` for a clip under 0.3 s or one heard as blank, `{"state": "error"}` when the speech server failed and `{"state": "offline"}` when the hub has no speech server (no `HUB_TELEGRAM_STT_URL`). 413 for a bigger or longer clip, before the server is asked; 429 past the rate limit. The speaker's clip is asked at the speech server with `X-Priority: interactive`, so a spoken word waits behind bulk transcription but not long |
+| `POST /speaker/turn` | `{"turn_id", "text", "wait", "device"?, "room"?, "area"?, "hint"?, "presence"?}`, at most 32 KiB. `turn_id` is the speaker's own (8-64 of `A-Za-z0-9_-`), so a retry is safe: the same id from the same token is answered from its record and never run twice; from another token it is 409. The call waits `wait` seconds (clamped 0-25, default 20) and answers `200 {"state": "answer", "text", "session"}`, `200 {"state": "offline"}`, `200 {"state": "error"}` or `202 {"state": "working"}`. 400 for a bad id or text, 413 over the cap, 429 when this speaker already has four turns live or has made thirty past minute |
+| `GET /speaker/turn/<id>?wait=N` | The same answer, for a caller following a 202. An id the hub does not know is 404, and a hub that forgot a turn never runs it again |
+
+**Who takes the turn.** A turn goes down a line only while that PC's last `device` frame said it
+takes this person's speaker turns (`people[].speaker: true`, see "Devices"). A person whose PCs are
+up but none of which claimed the speaker is answered within 3 s with "Helm needs updating before I
+can answer by voice." — the lane needs a Helm new enough to know it, and a reconnecting PC regains
+its claims with its next `device` frame, so a short wait there is normal. A person with no line up
+at all waits 30 s and is answered `offline`. Turns go in upload order, one at a time: only the head
+of the queue is sent, it is sent again every 10 s until Helm answers with a speaker-tagged
+`voice_ack`, and one Helm never takes is finished off as an error 120 s after it first went out.
+The frames are the phone's voice frames with `"lane": "speaker"` on them, both ways, so the two
+lines never see each other's traffic (`voice_ack`, `voice_status` and `voice_final` up carry it).
+Each turn frame carries the speaker's `device`, `room`, `area` and its `session`, plus the identity
+fields — `assurance`, `person`, `tier`, `until` — at their starting values (`"none"`, `null`,
+`"do"`, `null`), written in one place so the hub can start deciding them later. Nothing the
+speaker records (`room`, `area`, `presence`) routes anything yet: `helm-hub speaker list` shows
+what the hub has heard of, and the last time each spoke.
+
+**Talks.** One per (speaker token, device named by its calls). A talk ends
+`HUB_SPEAKER_IDLE_MINUTES` after its last turn (a turn still running holds it open), and every line
+that carried one of its turns is sent `speaker_session_closed {sessionId, closedAt}` so Helm can
+close and archive the chat it was working in; `closedAt` is when the talk ran out, not when the hub
+noticed. The next utterance starts a new one with a fresh id. Everything here is in memory: a
+hub restart drops the turns and the talks, and the speaker's next call is told so.
+
+**Upgrading:** install the matching Helm on the PC first, then redeploy the hub — an older Helm
+never claims the speaker lane, and its person's turns are answered with the sentence above. The
+speaker's token goes in Home Assistant's integration settings, never in the repo or a chat.
 
 ## The Remote page
 

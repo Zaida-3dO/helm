@@ -84,14 +84,14 @@ fn gate(
     }
 }
 
-enum ReadError {
+pub(crate) enum ReadError {
     TooBig,
     Broken,
 }
 
 /// The body, up to `max` bytes, within [`UPLOAD_WAIT`]. See [`DRAIN_EXTRA`] for what happens to
 /// one that is longer; one that takes longer counts as cut off.
-async fn read_capped(body: Body, max: usize) -> Result<Vec<u8>, ReadError> {
+pub(crate) async fn read_capped(body: Body, max: usize) -> Result<Vec<u8>, ReadError> {
     tokio::time::timeout(UPLOAD_WAIT, read_body(body, max))
         .await
         .unwrap_or(Err(ReadError::Broken))
@@ -125,7 +125,7 @@ async fn read_body(body: Body, max: usize) -> Result<Vec<u8>, ReadError> {
 }
 
 /// The value of `key` in a query string. Ids and modes need no percent-decoding.
-fn query_value<'a>(query: Option<&'a str>, key: &str) -> Option<&'a str> {
+pub(crate) fn query_value<'a>(query: Option<&'a str>, key: &str) -> Option<&'a str> {
     query?
         .split('&')
         .filter_map(|pair| pair.split_once('='))

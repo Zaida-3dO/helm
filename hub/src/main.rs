@@ -7,6 +7,7 @@ use helm_hub::lines::Lines;
 use helm_hub::mcp::Options;
 use helm_hub::registry::Registry;
 use helm_hub::server::{router, AppState};
+use helm_hub::speaker::{SpeakerBridge, SpeakerConfig};
 use helm_hub::store::Store;
 use helm_hub::stt::{self, Stt, SttHealth};
 use helm_hub::telegram::{
@@ -45,8 +46,8 @@ ENVIRONMENT:
   HUB_BIND          listen address for serve (default 0.0.0.0:8000)
   HUB_TOKENS        client:token[:scope],... Optional now that machines are paired with
                     `helm-hub pair`; the entries here are clients of HUB_LEGACY_PERSON.
-                    scope: ro|rw|relay|app|peer|telegram|voice|remote, several joined with +
-                    (rw+app); telegram, voice and remote stand alone
+                    scope: ro|rw|relay|app|peer|telegram|voice|speaker|remote, several joined
+                    with + (rw+app); telegram, voice, speaker and remote stand alone
   HUB_LEGACY_PERSON the person who owns the HUB_TOKENS clients, the memories stored before
                     people existed, and Telegram users with no person (default owner); set
                     it to the name your own PC is paired under before the first start
@@ -79,6 +80,11 @@ ENVIRONMENT:
                               default 30)
   HUB_VOICE_QUEUE_MAX         how many turns wait for Helm (1-200, default 20)
   HUB_VOICE_OUTBOX_MINUTES    how long a reply waits for the phone (1-10080, default 120)
+  HUB_SPEAKER                 on (default) or off: the room speaker line, for a speaker
+                              whose Home Assistant holds a speaker-scope token
+                              (`client add --scopes speaker`)
+  HUB_SPEAKER_IDLE_MINUTES    how long one talk on a speaker stays one conversation after
+                              its last turn (3-30, default 10)
   HUB_WAKE                    off (default), udp or ha: how the hub wakes a PC that is off or
                               asleep (only when a person taps Wake or sends /wake). udp sends
                               a magic packet by broadcast; ha asks Home Assistant to
@@ -445,6 +451,13 @@ fn serve() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let speaker_cfg = match SpeakerConfig::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}; refusing to start");
+            return ExitCode::FAILURE;
+        }
+    };
     let allow_mutate = std::env::var("HUB_ALLOW_MUTATE").is_ok_and(|v| v == "1" || v == "true");
     let bind = std::env::var("HUB_BIND").unwrap_or_else(|_| "0.0.0.0:8000".into());
     let registry = Arc::new(Mutex::new(registry));
@@ -539,6 +552,18 @@ fn serve() -> ExitCode {
         bridge
     });
     let voice_upstream = voice.as_ref().map(|_| lines.voice_receiver());
+    // The speaker line shares the same speech-to-text server, but asks for its place at the
+    // front of that server's queue: a spoken word should not wait behind bulk transcription.
+    let speaker = speaker_cfg.map(|cfg| {
+        let mut bridge = SpeakerBridge::new(lines.clone(), cfg);
+        if let Some(stt) = &telegram_cfg.stt {
+            bridge = bridge.with_stt(Arc::new(
+                Stt::new(stt).with_headers(&[("X-Priority", "interactive")]),
+            ));
+        }
+        Arc::new(bridge)
+    });
+    let speaker_upstream = speaker.as_ref().map(|_| lines.speaker_receiver());
     let mut state = AppState::new(
         store,
         registry.clone(),
@@ -547,6 +572,7 @@ fn serve() -> ExitCode {
         telegram.clone(),
     );
     state.voice = voice.clone();
+    state.speaker = speaker.clone();
     // Queries are embedded by the asker's PC first, then by this server, else not at all.
     let embed_url = std::env::var("HUB_EMBED_URL").ok();
     let embed_model =
@@ -624,6 +650,16 @@ fn serve() -> ExitCode {
             tokio::spawn(bridge.run(frames));
         } else {
             eprintln!("voice: off (HUB_VOICE=off)");
+        }
+        if let (Some(bridge), Some(frames)) = (speaker, speaker_upstream) {
+            eprintln!(
+                "speaker: on, idle {} min, transcription {}",
+                bridge.config().idle.as_secs() / 60,
+                if bridge.has_stt() { "on" } else { "off" }
+            );
+            tokio::spawn(bridge.run(frames));
+        } else {
+            eprintln!("speaker: off (HUB_SPEAKER=off)");
         }
         eprintln!(
             "helm-hub {} listening on {bind}; clients: {}; update/delete {}",

@@ -337,6 +337,9 @@ pub struct Stt {
     cfg: SttConfig,
     /// With the server's own, longer timeout.
     agent: ureq::Agent,
+    /// Sent on every request, e.g. `X-Priority: interactive` so a spoken word is taken ahead of
+    /// queued bulk work at a server that understands it.
+    headers: Vec<(&'static str, String)>,
 }
 
 impl Stt {
@@ -344,7 +347,14 @@ impl Stt {
         Stt {
             cfg: cfg.clone(),
             agent: agent_with(cfg.timeout),
+            headers: Vec::new(),
         }
+    }
+
+    /// A copy that sends these extra headers on every request.
+    pub fn with_headers(mut self, headers: &[(&'static str, &str)]) -> Self {
+        self.headers = headers.iter().map(|(k, v)| (*k, (*v).to_owned())).collect();
+        self
     }
 
     pub fn url(&self) -> &str {
@@ -481,18 +491,22 @@ impl Transcribe for Stt {
                 ("response_format", "text"),
             ],
         );
-        let (agent, url) = (self.agent.clone(), self.cfg.url.clone());
+        let (agent, url, headers) = (
+            self.agent.clone(),
+            self.cfg.url.clone(),
+            self.headers.clone(),
+        );
         let minutes = self.cfg.timeout.as_secs().div_ceil(60);
         Box::pin(blocking_typed(
             move || {
-                let mut resp = agent
-                    .post(&url)
-                    .header(
-                        "Content-Type",
-                        format!("multipart/form-data; boundary={boundary}"),
-                    )
-                    .send(&body[..])
-                    .map_err(|e| stt_failed(e, minutes))?;
+                let mut req = agent.post(&url).header(
+                    "Content-Type",
+                    format!("multipart/form-data; boundary={boundary}"),
+                );
+                for (k, v) in &headers {
+                    req = req.header(*k, v.as_str());
+                }
+                let mut resp = req.send(&body[..]).map_err(|e| stt_failed(e, minutes))?;
                 let status = resp.status().as_u16();
                 let text = resp
                     .body_mut()

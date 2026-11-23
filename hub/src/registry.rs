@@ -154,6 +154,17 @@ CREATE TABLE IF NOT EXISTS telegram_users (
     -- themselves. The first is rewritten from the settings on every start; the second stays.
     source      TEXT NOT NULL DEFAULT 'link'
 );
+CREATE TABLE IF NOT EXISTS speakers (
+    token_id      INTEGER NOT NULL REFERENCES clients(id),
+    device        TEXT NOT NULL,
+    room          TEXT,
+    area          TEXT,
+    presence_json TEXT,
+    first_seen_ms INTEGER NOT NULL,
+    last_seen_ms  INTEGER NOT NULL,
+    last_turn_ms  INTEGER,
+    PRIMARY KEY (token_id, device)
+);
 "#;
 
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
@@ -165,6 +176,21 @@ const CLIENT_COLS: &str = "c.id, c.person_id, p.name, c.machine_name, c.scopes, 
 pub const MAX_DEVICE_NAME: usize = 40;
 /// A device uid is what the Helm made for itself: letters, digits and dashes, 8 to 64 of them.
 pub const MAX_DEVICE_UID: usize = 64;
+
+/// One room speaker the hub has heard of: what its calls named it, and when it last spoke.
+#[derive(Debug, Clone)]
+pub struct SpeakerRow {
+    pub token_id: i64,
+    pub device: String,
+    pub room: Option<String>,
+    pub area: Option<String>,
+    pub presence_json: Option<String>,
+    pub first_seen_ms: i64,
+    pub last_seen_ms: i64,
+    pub last_turn_ms: Option<i64>,
+    /// The person whose token the speaker speaks through.
+    pub person: String,
+}
 
 /// Pairing codes avoid look-alike characters (no 0, 1, I or O).
 const CODE_ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -569,6 +595,61 @@ impl Registry {
                 client_from_row,
             )
             .optional()?)
+    }
+
+    /// Note a speaker that a speaker-line call named. A speaker already known keeps its first
+    /// sighting; a room, area or presence report the call left out leaves what is known alone.
+    /// The times are epoch milliseconds, from the call.
+    pub fn upsert_speaker(
+        &self,
+        token_id: i64,
+        device: &str,
+        room: Option<&str>,
+        area: Option<&str>,
+        presence_json: Option<&str>,
+        now_ms: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO speakers
+                 (token_id, device, room, area, presence_json, first_seen_ms, last_seen_ms, last_turn_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6)
+             ON CONFLICT (token_id, device) DO UPDATE SET
+                 room = COALESCE(excluded.room, room),
+                 area = COALESCE(excluded.area, area),
+                 presence_json = COALESCE(excluded.presence_json, presence_json),
+                 last_seen_ms = excluded.last_seen_ms,
+                 last_turn_ms = excluded.last_turn_ms",
+            params![token_id, device, room, area, presence_json, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// The speakers the hub has heard of, most recently seen first.
+    pub fn speakers(&self) -> Result<Vec<SpeakerRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.token_id, s.device, s.room, s.area, s.presence_json,
+                        s.first_seen_ms, s.last_seen_ms, s.last_turn_ms, p.name
+                 FROM speakers s JOIN clients c ON c.id = s.token_id
+                 JOIN people p ON p.id = c.person_id
+                 WHERE c.revoked_at IS NULL
+                 ORDER BY s.last_seen_ms DESC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(SpeakerRow {
+                    token_id: r.get(0)?,
+                    device: r.get(1)?,
+                    room: r.get(2)?,
+                    area: r.get(3)?,
+                    presence_json: r.get(4)?,
+                    first_seen_ms: r.get(5)?,
+                    last_seen_ms: r.get(6)?,
+                    last_turn_ms: r.get(7)?,
+                    person: r.get(8)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, rusqlite::Error>>()?;
+        Ok(rows)
     }
 
     /// Whether the client may still be used: it exists and is not revoked.
