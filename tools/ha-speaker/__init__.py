@@ -15,6 +15,7 @@ import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_interval
 
 from .const import CONF_LED, DOMAIN, LED_POLL_SECONDS, LED_RGB
@@ -46,7 +47,7 @@ class AiohttpTransport:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up from the config UI. No YAML for this integration."""
-    session = aiohttp.ClientSession()
+    session = async_get_clientsession(hass)
     api = HubApi(entry.data["url"], entry.data["token"], AiohttpTransport(session))
 
     devices = dr.async_get(hass)
@@ -71,7 +72,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok:
         data = entry.runtime_data
         data["led"].stop()
-        await data["session"].close()
     return unload_ok
 
 

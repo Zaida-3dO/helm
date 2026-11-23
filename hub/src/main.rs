@@ -558,7 +558,12 @@ fn serve() -> ExitCode {
         let mut bridge = SpeakerBridge::new(lines.clone(), cfg);
         if let Some(stt) = &telegram_cfg.stt {
             bridge = bridge.with_stt(Arc::new(
-                Stt::new(stt).with_headers(&[("X-Priority", "interactive")]),
+                // A dropped speaker call must not leave a transcription running for minutes.
+                Stt::new(&stt_config_with_timeout(
+                    stt,
+                    std::time::Duration::from_secs(15),
+                ))
+                .with_headers(&[("X-Priority", "interactive")]),
             ));
         }
         Arc::new(bridge)
@@ -716,5 +721,13 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// The same speech server, with a shorter wait for one call.
+fn stt_config_with_timeout(stt: &stt::SttConfig, timeout: std::time::Duration) -> stt::SttConfig {
+    stt::SttConfig {
+        timeout,
+        ..stt.clone()
     }
 }

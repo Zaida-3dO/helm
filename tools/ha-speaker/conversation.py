@@ -11,15 +11,12 @@ may do, and the answers themselves. This side only:
 """
 
 import logging
+import time
 import uuid
 
 from homeassistant.components.conversation import (
-    ConversationAgentEntity,
-    ConversationAgentEntityDescription,
-)
-from homeassistant.components.conversation.const import TYPE_ANSWER
-from homeassistant.components.conversation.models import (
-    ConversationResponse,
+    ConversationEntity,
+    ConversationInput,
     ConversationResult,
 )
 from homeassistant.config_entries import ConfigEntry
@@ -27,8 +24,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import intent
+from homeassistant.helpers.device_registry import DeviceInfo
 
-from .const import CONF_HINT, CONF_ROOM
+from .const import CONF_HINT, CONF_ROOM, DOMAIN
 from .hubapi import (
     ERROR_TEXT,
     KIND_ANSWER,
@@ -43,11 +42,6 @@ from .hubapi import (
 
 _LOGGER = logging.getLogger(__name__)
 
-AGENT_DESCRIPTION = ConversationAgentEntityDescription(
-    key="helm_speaker",
-    name="Helm speaker",
-)
-
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -57,17 +51,27 @@ async def async_setup_entry(
     async_add_entities([HelmSpeakerAgent(hass, config_entry)])
 
 
-class HelmSpeakerAgent(ConversationAgentEntity):
+class HelmSpeakerAgent(ConversationEntity):
     """One agent entity per hub entry."""
 
+    _attr_has_entity_name = False
+    _attr_name = "Helm speaker"
+
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry):
-        super().__init__(AGENT_DESCRIPTION)
         self.hass = hass
         self.entry = entry
-        self._attr_has_entity_name = False
+        self._attr_unique_id = f"{entry.entry_id}-agent"
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry.entry_id)})
 
-    async def async_generate(self, conversation_input) -> ConversationResult:
+    @property
+    def supported_languages(self):
+        # The hub's model answers in whatever language it was asked in.
+        return "*"
+
+    async def async_process(self, user_input: ConversationInput) -> ConversationResult:
+        started = time.monotonic()
         api: HubApi = self.entry.runtime_data["api"]
+        conversation_input = user_input
         device_id = getattr(conversation_input, "device_id", None)
         area_name, presence = self._room_facts(device_id)
         result = await api.run_turn(
@@ -80,6 +84,11 @@ class HelmSpeakerAgent(ConversationAgentEntity):
             presence=presence,
         )
         kind = result.get("kind")
+        # The model step is inside this call: the hub queues the turn, Helm's chat answers it.
+        _LOGGER.info(
+            "helm_speaker timing: agent turn answered in %.2f s (%s)",
+            time.monotonic() - started, kind,
+        )
         if kind == KIND_ANSWER:
             text = result["text"]
         elif kind == KIND_OFFLINE:
@@ -91,13 +100,12 @@ class HelmSpeakerAgent(ConversationAgentEntity):
             text = ERROR_TEXT
         # HA reopens the microphone exactly when continue_conversation is
         # true; we do that only for replies that plainly ask something back.
+        response = intent.IntentResponse(language=user_input.language)
+        response.async_set_speech(text)
         return ConversationResult(
-            conversation_response=ConversationResponse(
-                text=text,
-                response_type=TYPE_ANSWER,
-                continue_conversation=ends_with_question(text),
-            ),
-            conversation_id=None,
+            response=response,
+            conversation_id=user_input.conversation_id,
+            continue_conversation=ends_with_question(text),
         )
 
     def _room_facts(self, device_id):

@@ -116,6 +116,8 @@ pub enum TurnOutcome {
     Error,
     /// The queue is full, or the token made too many turns in the last minute.
     Rejected,
+    /// The turn id or text is not usable: a bad id, or empty or over-long text.
+    Invalid,
     /// The turn id belongs to another speaker token's turn.
     Conflict,
     /// No turn of this token has that id.
@@ -436,11 +438,11 @@ impl SpeakerBridge {
     /// for is kept by `speaker_http`, which polls [`SpeakerBridge::outcome`].
     pub fn begin_turn(&self, token: i64, person: i64, t: SpeakerTurn, now: i64) -> TurnOutcome {
         if !crate::voice::valid_id(&t.id) {
-            return TurnOutcome::Rejected;
+            return TurnOutcome::Invalid;
         }
         let text = t.text.trim().to_owned();
         if text.is_empty() || text.chars().count() > MAX_TEXT_CHARS {
-            return TurnOutcome::Rejected;
+            return TurnOutcome::Invalid;
         }
         let device = t.device.clone().unwrap_or_default();
         // A turn this token already has is answered from its record, never re-run.
@@ -583,10 +585,25 @@ impl SpeakerBridge {
         if !t.state.live() {
             return;
         }
+        // Timings only (never the words), so a slow spoken answer can be pinned on a stage:
+        // how long the turn waited for a line, how long Helm took to accept it, and how long
+        // its model took to answer.
+        let tag = &id[..id.len().min(8)];
+        let sent = t.first_sent.unwrap_or(t.at);
         if done {
+            eprintln!(
+                "speaker: turn {tag} answered {} ms after it came in ({} ms after it was first sent)",
+                now - t.at,
+                now - sent
+            );
             t.state = TurnState::Done;
             t.answer = Some(text.unwrap_or_default());
         } else if t.state == TurnState::Sent {
+            eprintln!(
+                "speaker: turn {tag} taken by Helm {} ms after it was first sent ({} ms after it came in)",
+                now - sent,
+                now - t.at
+            );
             t.state = TurnState::Working;
         }
         t.changed = now;
@@ -654,7 +671,8 @@ impl SpeakerBridge {
                                 let client = line_client(&line).unwrap_or(0);
                                 t.state = TurnState::Sent;
                                 t.changed = now;
-                                t.first_sent = Some(now);
+                                // The abandon clock starts at the first send and is never restarted by a resend.
+                                t.first_sent.get_or_insert(now);
                                 t.went = Some((client, gen, now));
                                 if let Some(s) =
                                     st.sessions.values_mut().find(|s| s.id == t.session)

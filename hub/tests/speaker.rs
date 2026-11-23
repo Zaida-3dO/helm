@@ -879,6 +879,24 @@ async fn the_queue_holds_four_and_an_unanswered_turn_ends() {
     assert_eq!((r.status, r.body["state"].as_str()), (200, Some("error")));
 }
 
+/// A turn with no words, or a bad id, is the speaker's mistake (400), not a full queue (429).
+#[tokio::test]
+async fn an_empty_turn_or_a_bad_id_is_a_400_not_a_429() {
+    let hub = start(Opts::default()).await;
+    for (id, text) in [("turn-0001", "   "), ("x", "Hello there.")] {
+        let r = http(
+            &hub,
+            "POST",
+            "/speaker/turn",
+            Some(BEDROOM),
+            "application/json",
+            &turn_body(id, text, 0, None),
+        )
+        .await;
+        assert_eq!((id, r.status), (id, 400));
+    }
+}
+
 /// A wav the hub will not take is refused before the speech server sees it, and a server that
 /// is not configured answers `offline` rather than guessing.
 #[tokio::test]

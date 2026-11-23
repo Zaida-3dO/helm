@@ -104,6 +104,9 @@ pub struct TelegramLink {
 /// How long a pairing code works.
 pub const PAIR_CODE_MINUTES: i64 = 15;
 pub const MAX_NAME: usize = 64;
+/// How many room speakers one token keeps in the registry, and how long an unseen one is kept.
+pub const MAX_SPEAKERS_PER_TOKEN: i64 = 16;
+pub const SPEAKER_KEEP_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS people (
@@ -620,6 +623,18 @@ impl Registry {
                  last_seen_ms = excluded.last_seen_ms,
                  last_turn_ms = excluded.last_turn_ms",
             params![token_id, device, room, area, presence_json, now_ms],
+        )?;
+        // Names are the client's own, so the table is kept small: a token keeps its most recent
+        // `MAX_SPEAKERS_PER_TOKEN` devices, and a device not seen for `SPEAKER_KEEP_MS` goes.
+        self.conn.execute(
+            "DELETE FROM speakers WHERE token_id = ?1 AND device NOT IN
+                 (SELECT device FROM speakers WHERE token_id = ?1
+                  ORDER BY last_seen_ms DESC, device LIMIT ?2)",
+            params![token_id, MAX_SPEAKERS_PER_TOKEN],
+        )?;
+        self.conn.execute(
+            "DELETE FROM speakers WHERE last_seen_ms < ?1",
+            params![now_ms - SPEAKER_KEEP_MS],
         )?;
         Ok(())
     }
@@ -1337,6 +1352,31 @@ mod tests {
     use super::*;
 
     const NOW: i64 = 1_000_000;
+
+    #[test]
+    fn the_speakers_table_keeps_a_token_to_its_recent_devices_and_drops_the_long_unseen() {
+        let mut r = Registry::open_in_memory().unwrap();
+        let scopes = Scopes::parse_list("speaker").unwrap();
+        let id = r
+            .add_client("Sam", "ha-speaker", &scopes)
+            .unwrap()
+            .client
+            .id;
+        let old = NOW;
+        r.upsert_speaker(id, "gone", None, None, None, old).unwrap();
+        // Twenty new devices arrive well after the first one is past its 30 days.
+        let later = old + SPEAKER_KEEP_MS + 1_000;
+        for n in 0..20 {
+            r.upsert_speaker(id, &format!("d{n:02}"), None, None, None, later + n)
+                .unwrap();
+        }
+        let rows = r.speakers().unwrap();
+        assert_eq!(rows.len(), MAX_SPEAKERS_PER_TOKEN as usize);
+        assert!(rows.iter().all(|s| s.device != "gone"));
+        // The most recently seen are the ones kept.
+        assert!(rows.iter().any(|s| s.device == "d19"));
+        assert!(rows.iter().all(|s| s.device != "d00"));
+    }
 
     #[test]
     fn pairing_is_single_use_timed_and_uniform_in_its_refusals() {

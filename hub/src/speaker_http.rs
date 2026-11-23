@@ -232,6 +232,9 @@ async fn post_turn(
             StatusCode::TOO_MANY_REQUESTS,
             "this speaker has more turns than the hub takes",
         ),
+        TurnOutcome::Invalid => {
+            refused(StatusCode::BAD_REQUEST, "the turn id or text is not usable")
+        }
         other => wait_for(bridge, token, &turn_id, other, parsed.wait).await,
     }
 }
@@ -294,6 +297,9 @@ async fn wait_for(
             StatusCode::TOO_MANY_REQUESTS,
             "this speaker has more turns than the hub takes",
         ),
+        TurnOutcome::Invalid => {
+            refused(StatusCode::BAD_REQUEST, "the turn id or text is not usable")
+        }
         TurnOutcome::Conflict => refused(StatusCode::CONFLICT, "that turn id is in use"),
         TurnOutcome::Unknown => refused(StatusCode::NOT_FOUND, "no such turn"),
     }
