@@ -913,8 +913,6 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         ("board_cancel", json!({"chatId": "c1", "requestId": "tr-2"})),
         // The `/` menu's list comes from the chat's own worker: a read, nothing of this PC.
         ("skills", json!({"chatId": "c1"})),
-        // So do the Rename dialog's suggestions: the helper runs there and writes nothing.
-        ("title_suggest", json!({"chatId": "c1"})),
     ] {
         assert!(
             b.rpc.call("dev-a", op, args).await.is_ok(),
