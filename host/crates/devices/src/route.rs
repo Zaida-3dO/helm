@@ -1414,6 +1414,9 @@ fn read_op(op: &str) -> Option<&'static str> {
         // The `/` menu lists what the chat's own worker reported: a read there, nothing of
         // this PC's skills folders is involved.
         "skills_list" => "skills",
+        // The Rename dialog's suggestions are made where the chat's words are, and write
+        // nothing: a read there, like the transcript itself.
+        "title_suggest" => "title_suggest",
         "chat_folder" => "chat_folder",
         "attachment_get" => "attachment_get",
         "file_read" | "dir_list" => "file_view",

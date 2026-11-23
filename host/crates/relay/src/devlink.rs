@@ -373,6 +373,9 @@ impl ChatPort for ChannelPort {
     fn checkpoint(&self, a: helm_devices::wire::CheckpointArgs) -> BoxFut<'_, PortResult<Value>> {
         self.port.checkpoint(a)
     }
+    fn title_suggest(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        self.port.title_suggest(chat_id)
+    }
     fn attention_rows(&self, chat_ids: Vec<String>) -> BoxFut<'_, PortResult<Value>> {
         self.port.attention_rows(chat_ids)
     }

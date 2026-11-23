@@ -14,9 +14,10 @@
 // `changes_unstage`, `quick_open`) answer on the PC that runs the chat, kept inside that chat's
 // project folder there (a picture too big for one answer crosses in chunks, invisibly).
 // Everything else that names such a chat is refused with "This chat runs on
-// {device}. Do that there." (`title_suggest` and `autocomplete_suggest` answer empty instead;
-// `chat_warm`, the composer's `/`-menu list, and the chat-view actions — including promoting
-// or discarding a side chat — travel to the PC that runs the chat.)
+// {device}. Do that there." (`autocomplete_suggest` answers empty instead; the Rename dialog's
+// `title_suggest`, `chat_warm`, the composer's `/`-menu list, and the chat-view actions —
+// including promoting or discarding a side chat — travel to the PC that runs the chat, where
+// the chat's own words are.)
 
 import type { Api } from './client.ts';
 import type { AttentionKind } from './generated/AttentionKind.ts';

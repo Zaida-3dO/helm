@@ -913,6 +913,8 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         ("board_cancel", json!({"chatId": "c1", "requestId": "tr-2"})),
         // The `/` menu's list comes from the chat's own worker: a read, nothing of this PC.
         ("skills", json!({"chatId": "c1"})),
+        // So do the Rename dialog's suggestions: the helper runs there and writes nothing.
+        ("title_suggest", json!({"chatId": "c1"})),
     ] {
         assert!(
             b.rpc.call("dev-a", op, args).await.is_ok(),
@@ -1652,10 +1654,14 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
                 { "name": "pdf-extract", "description": "Read a PDF", "scope": "helm-skill" },
             ])),
         ),
+        // The Rename dialog asks the PC that runs the chat, where the chat's words live, and
+        // the options come back whole.
         (
             "title_suggest",
             json!({"chatId": "c1"}),
-            Ok(json!({"title": "", "titles": []})),
+            Ok(
+                json!({"title": "Name made where the chat runs", "titles": ["Name made where the chat runs"]}),
+            ),
         ),
         (
             "model_catalogue",
@@ -1892,6 +1898,8 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
             Err(m) => assert_eq!(got.unwrap_err().message, m, "{op}"),
         }
     }
+    // The Rename dialog's ask reached the PC that runs the chat.
+    assert_eq!(port.st().titles_asked, ["c1"]);
     // The pages pinned on the other PC list here, and one opens from a copy brought across: the
     // document and the files it names, served in a sealed session of this PC. Its messages go to
     // the chat the pin names, and nothing else of the other PC is reachable.

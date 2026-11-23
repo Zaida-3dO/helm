@@ -344,6 +344,16 @@ pub trait ChatPort: Send + Sync {
             ))
         })
     }
+    /// Suggested names for the Rename dialog of a chat here, made by this install's own title
+    /// helper from the chat's own words. A read: it writes nothing.
+    fn title_suggest(&self, _chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async {
+            Err(WireError::new(
+                code::REFUSED,
+                "This chat's names aren't suggested on this PC.",
+            ))
+        })
+    }
     /// The needs-you and flag rows of this install's chats among `chat_ids`.
     fn attention_rows(&self, chat_ids: Vec<String>) -> BoxFut<'_, PortResult<Value>>;
     /// This install's board-item links for `chat_ids`.
@@ -1228,6 +1238,7 @@ impl Inner {
                 done(self.port.side_resolve(a).await?)
             }
             Op::Skills(a) => done(self.port.skills(a.chat_id).await?),
+            Op::TitleSuggest(a) => done(self.port.title_suggest(a.chat_id).await?),
             Op::Attention(a) => done(self.port.attention_rows(a.chat_ids).await?),
             Op::ItemLinks(a) => done(self.port.item_links(a.chat_ids).await?),
             Op::Snooze(a) => {

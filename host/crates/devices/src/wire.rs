@@ -969,6 +969,9 @@ pub enum Op {
     SideResolve(SideResolveArgs),
     /// The commands and skills of a chat's worker here, for the `/` menu of its window. A read.
     Skills(ChatIdArgs),
+    /// Suggested names for the Rename dialog of a chat here, made by this install's own title
+    /// helper from the chat's own words. A read: it writes nothing.
+    TitleSuggest(ChatIdArgs),
     /// Needs-you and idle-check flag rows for named chats. A read.
     Attention(ChatIdsArgs),
     /// Board-item links for named chats, as the PC that runs them lists them. A read.
@@ -1099,6 +1102,7 @@ impl Op {
             "delete" => Op::Delete(args(a)?),
             "side_resolve" => Op::SideResolve(args(a)?),
             "skills" => Op::Skills(args(a)?),
+            "title_suggest" => Op::TitleSuggest(args(a)?),
             "attention" => Op::Attention(args(a)?),
             "item_links" => Op::ItemLinks(args(a)?),
             "snooze" => Op::Snooze(args(a)?),

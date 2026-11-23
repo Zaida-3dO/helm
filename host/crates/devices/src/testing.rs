@@ -198,6 +198,8 @@ pub struct FakeState {
     pub side_resolved: Vec<SideResolveArgs>,
     /// Each chat whose command and skill list was asked.
     pub skills_asked: Vec<String>,
+    /// Each chat whose Rename dialog asked for suggested names.
+    pub titles_asked: Vec<String>,
     pub attention_for: Vec<Vec<String>>,
     pub item_links_for: Vec<Vec<String>>,
     pub snoozed: Vec<SnoozeArgs>,
@@ -1021,6 +1023,14 @@ impl ChatPort for FakePort {
             { "name": "review", "description": "Review the current branch" },
             { "name": "pdf-extract", "description": "Read a PDF", "scope": "helm-skill" },
         ])))
+    }
+
+    fn title_suggest(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        self.st().titles_asked.push(chat_id);
+        ready(Ok(json!({
+            "title": "Name made where the chat runs",
+            "titles": ["Name made where the chat runs"],
+        })))
     }
 
     fn attention_rows(&self, chat_ids: Vec<String>) -> BoxFut<'_, PortResult<Value>> {

@@ -2044,6 +2044,15 @@ impl ChatPort for HostPort {
         })
     }
 
+    fn title_suggest(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        Box::pin(async move {
+            self.here(&chat_id)?;
+            // The Rename dialog's suggestions: the chat's words live here, so this PC's own
+            // title helper answers and the options ride back whole.
+            self.op("title_suggest", json!({ "chatId": chat_id })).await
+        })
+    }
+
     fn attention_rows(&self, chat_ids: Vec<String>) -> BoxFut<'_, PortResult<Value>> {
         Box::pin(async move {
             if chat_ids.len() > 500 {
