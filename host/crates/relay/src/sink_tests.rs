@@ -1938,7 +1938,7 @@ fn the_chat_is_told_of_an_undelivered_answer_only_after_the_line_stays_down() {
 
 // ------------------------------------------------------------------ the voice chat
 
-use crate::client::{VoiceSink, VoiceTurn};
+use crate::client::{SpeakerSink, VoiceSink, VoiceTurn};
 use crate::voice;
 use crate::voice_heard::{self, HeardStore};
 use crate::voice_sink as vs;
@@ -2155,7 +2155,7 @@ async fn voice_turns_enter_one_chat_with_origin_voice_its_mode_note_and_a_new_ch
     let c = vctx(&e, voice::PolicyFile::default());
     let t0 = helm_core::now_ms();
 
-    // The first turn starts "Voice <profile name> <date>" on the saved model and effort.
+    // The first turn starts "Phone voice <profile name> <date>" on the saved model and effort.
     let p = vplace(
         &c,
         vturn("t1", "Synthetic question one.", "conversation"),
@@ -2184,7 +2184,7 @@ async fn voice_turns_enter_one_chat_with_origin_voice_its_mode_note_and_a_new_ch
             .unwrap()
             .unwrap()
             .name;
-    assert!(title.starts_with(&format!("Voice {who} ")), "{title}");
+    assert!(title.starts_with(&format!("Phone voice {who} ")), "{title}");
     let s = subs(&e.db, &chat);
     assert_eq!(s.len(), 1);
     assert_eq!(s[0].0, voice::submission_id("t1"));
@@ -2987,4 +2987,271 @@ async fn each_person_has_their_own_channel_from_frame_to_alert() {
     crate::telegram_save(&ctx, args.clone()).unwrap();
     crate::telegram_save(&ctx, args).unwrap();
     assert_eq!(events.kinds(), ["device_changed"]);
+}
+
+// -------------------------------------------------------------- the room speaker's sink
+
+/// A line that records what the speaker lane is told, and can be down.
+#[derive(Default)]
+struct SpWire {
+    sent: Mutex<Vec<Value>>,
+    up: AtomicBool,
+}
+
+impl crate::speaker_sink::SpeakerUpstream for SpWire {
+    fn status(&self, _person: &str, turn: &str, text: &str) {
+        self.sent
+            .lock()
+            .unwrap()
+            .push(json!({ "status": text, "turn": turn }));
+    }
+    fn reply(&self, _person: &str, reply: &voice::Reply) -> bool {
+        let up = self.up.load(AtomicOrdering::SeqCst);
+        if up {
+            self.sent.lock().unwrap().push(reply.frame());
+        }
+        up
+    }
+}
+
+fn sturn(id: &str, text: &str, session: &str) -> crate::client::SpeakerTurn {
+    crate::client::SpeakerTurn {
+        id: id.into(),
+        text: text.into(),
+        device: None,
+        room: Some("kitchen".into()),
+        area: None,
+        session: session.into(),
+        sent_at: 0,
+        person: None,
+    }
+}
+
+fn wired_speaker(e: &Env) -> crate::speaker_sink::HouseSpeaker {
+    let mut services = helm_ipc::Services::new();
+    services.insert(e.db.clone());
+    services.insert(Arc::new(e.ctx.rt.clone()));
+    let exec = Arc::new(AppExecutor::default());
+    exec.wire(crate::exec::Wiring {
+        services: Arc::new(services),
+        events: Arc::new(helm_ipc::NullSink),
+        tools: Arc::new(helm_hosttools::HostTools::new(Arc::new(
+            helm_hosttools::HostToolRegistry::new(),
+        ))),
+    });
+    crate::speaker_sink::HouseSpeaker::new(exec, e.dir.path().join("prof"))
+}
+
+/// Waits for the mirror's look cycle to settle, up to about ten seconds.
+async fn waits(until: impl Fn() -> bool) -> bool {
+    for _ in 0..40 {
+        if until() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    until()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_talk_one_speaker_chat_whose_answer_goes_up_once_and_the_hub_s_word_ends_it() {
+    let e = env();
+    let dir = e.dir.path().join("prof");
+    let paths = crate::speaker::paths(&dir, &e.ctx.profile_id);
+    // The saved settings name the model and effort a new speaker chat opens with.
+    crate::speaker::save_policy(
+        &paths.policy,
+        &crate::speaker::PolicyFile {
+            model: "sonnet".into(),
+            effort: "low".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    // Unwired: a delivery is refused, so the hub keeps the turn.
+    let bare =
+        crate::speaker_sink::HouseSpeaker::new(Arc::new(AppExecutor::default()), dir.clone());
+    assert!(bare.deliver(sturn("x", "y", "s-1")).await.is_err());
+    let s = wired_speaker(&e);
+    assert!(
+        s.deliver(sturn("x", "y", "s-1")).await.is_err(),
+        "no ops yet"
+    );
+
+    s.attach_ops(e.ops.clone());
+    let wire = Arc::new(SpWire::default());
+    s.attach_line(wire.clone());
+    s.deliver(sturn("t1", "What time is it?", "s-1"))
+        .await
+        .unwrap();
+
+    // One talk, one chat, named for the room it was spoken in; the words carry the channel note
+    // and are stored with the speaker origin, never as typed.
+    let talks = crate::speaker::load_talks(&paths.chats);
+    assert_eq!(talks.talks.len(), 1);
+    let chat = talks.talks[0].chat_id.clone();
+    let title: String =
+        e.db.snapshot(|tx| {
+            tx.query_row("SELECT title FROM chats WHERE id = ?1", [&chat], |r| {
+                r.get(0)
+            })
+        })
+        .unwrap();
+    assert!(title.starts_with("HA speaker kitchen voice "), "{title}");
+    let made = e
+        .ops
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .rfind(|(o, _)| o == "chat_create")
+        .unwrap()
+        .1
+        .clone();
+    assert_eq!(made["model"], "sonnet", "the saved model opens the chat");
+    assert_eq!(made["effort"], "low");
+    let rows = subs(&e.db, &chat);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1, "speaker", "never the user's typed words");
+    assert!(rows[0].4.starts_with("[Speaker · kitchen · "), "{rows:?}");
+
+    // The answer goes up once the transcript has an end-of-turn row: one `voice_final` for the
+    // turn, its words, in the mode that is spoken.
+    wire.up.store(true, AtomicOrdering::SeqCst);
+    sql(
+        &e.db,
+        "UPDATE chats SET status = 'idle', error = NULL WHERE id = ?1",
+        &[&chat],
+    );
+    e.db
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO messages(chat_id, source_key, role, text, status, timestamp, details)
+                 VALUES (?1, 'm:a', 'assistant', 'It is twenty past seven.', 'complete', 2000, '{\"stopReason\":\"end_turn\"}')",
+                rusqlite::params![&chat],
+            )
+        })
+        .unwrap();
+    let spoken = |turn: &str| {
+        wire.sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|f| {
+                f["type"].as_str() == Some("voice_final") && f["turn"].as_str() == Some(turn)
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        waits(|| !spoken("t1").is_empty()).await,
+        "the answer reaches the speaker: {:?}",
+        wire.sent.lock().unwrap().clone()
+    );
+    // A turn the hub sends again while its answer is on its way stores nothing new and answers
+    // nothing twice.
+    s.deliver(sturn("t1", "What time is it?", "s-1"))
+        .await
+        .unwrap();
+    let settled = |n: usize| {
+        Box::pin(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+            spoken("t1").len() == n
+        })
+    };
+    assert!(settled(1).await, "one answer per turn: {:?}", spoken("t1"));
+    let final_frame = &spoken("t1")[0];
+    assert_eq!(final_frame["text"], "It is twenty past seven.");
+    assert_eq!(final_frame["mode"], "conversation");
+    assert_eq!(final_frame["id"], crate::speaker::submission_id("t1"));
+
+    // The next turn of the same talk goes to the same chat; another speaker's talk gets a chat of
+    // its own, and its turn is answered there.
+    s.deliver(sturn("t2", "And the weather?", "s-1"))
+        .await
+        .unwrap();
+    s.deliver(sturn("t3", "Lights off.", "s-2")).await.unwrap();
+    let talks = crate::speaker::load_talks(&paths.chats);
+    assert_eq!(talks.talks.len(), 2);
+    let other = talks
+        .talks
+        .iter()
+        .find(|t| t.session == "s-2")
+        .unwrap()
+        .chat_id
+        .clone();
+    assert_ne!(other, chat);
+    assert_eq!(subs(&e.db, &chat).len(), 2, "the resend stored nothing new");
+    assert_eq!(subs(&e.db, &other).len(), 1);
+
+    // The hub says the talk is over: the chat is put away, and what was last said there may be
+    // named to the next talk on that speaker.
+    s.talk_closed(None, "s-1".to_owned()).await;
+    let talks = crate::speaker::load_talks(&paths.chats);
+    assert_eq!(talks.talks.len(), 1);
+    assert_eq!(
+        talks.previous.as_ref().unwrap().gist,
+        "It is twenty past seven."
+    );
+    assert!(e
+        .ops
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(o, a)| o == "chat_archive" && a["chatId"] == chat.as_str()));
+    // A talk this PC never had changes nothing.
+    s.talk_closed(None, "never-seen".to_owned()).await;
+    assert_eq!(crate::speaker::load_talks(&paths.chats).talks.len(), 1);
+
+    // Settings shows the open talk and what is saved; Start over ends them all.
+    let view = crate::speaker_sink::speaker_view(&e.db, &dir, &e.ctx.profile_id);
+    assert_eq!(view.talks.len(), 1);
+    assert_eq!(view.model.as_deref(), Some("sonnet"));
+    assert!(view.take_speaker, "the home profile takes it by default");
+    assert_eq!(view.previous_hours, 12);
+    assert_eq!(s.reset(&e.ctx.profile_id).await.unwrap(), 1);
+    assert!(
+        crate::speaker_sink::speaker_view(&e.db, &dir, &e.ctx.profile_id)
+            .talks
+            .is_empty()
+    );
+}
+
+#[test]
+fn what_a_speaker_turn_settles_on_is_said_in_words() {
+    // An error row is never the answer: the stop's own sentence is.
+    let s = Snap {
+        stopped: Some(Stop::Error("The model server stopped.".into())),
+        turn_done: Some((9, "Half an answer.".into())),
+        final_text: Some("Half an answer.".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        crate::speaker_sink::answer_of(&s),
+        Stop::Error("The model server stopped.".into()).last_word()
+    );
+    let s = Snap {
+        turn_done: Some((9, "The kitchen lights are off.".into())),
+        final_text: Some("The kitchen lights are off.".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        crate::speaker_sink::answer_of(&s),
+        "The kitchen lights are off."
+    );
+    let s = Snap {
+        final_text: Some("  ".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        crate::speaker_sink::answer_of(&s),
+        crate::voice_sink::NOTHING_TO_SAY
+    );
+    let s = Snap::default();
+    assert_eq!(
+        crate::speaker_sink::answer_of(&s),
+        crate::voice_sink::NOTHING_TO_SAY
+    );
 }

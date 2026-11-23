@@ -16,6 +16,7 @@ import { defaultProfileId, linkLine, linkable, profileChoices } from './channelS
 import { HubPairing } from './HubPairing.tsx';
 import { LauncherBlock } from './LauncherBlock.tsx';
 import { PromptsBlock } from './PromptsBlock.tsx';
+import { SpeakerBlock } from './SpeakerBlock.tsx';
 import { VoiceBlock } from './VoiceBlock.tsx';
 import './hub.css';
 
@@ -513,6 +514,7 @@ export function HubPane() {
         </SettingRow>
       )}
       <VoiceBlock profileId={profileId} />
+      <SpeakerBlock profileId={profileId} />
       <PromptsBlock profileId={profileId} />
       {error && (
         <div className="ui-field-error" role="alert" data-testid="hub-error">

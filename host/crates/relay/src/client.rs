@@ -190,6 +190,38 @@ pub trait VoiceSink: Send + Sync {
     }
 }
 
+/// One turn heard on a room speaker, as the hub forwarded it. It arrives as a `voice` frame
+/// carrying `"lane": "speaker"`, and its answers go back the same way, so one line carries both
+/// lanes and each sink only ever sees its own.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpeakerTurn {
+    /// The speaker's id for the turn; the hub keeps it until this PC answers.
+    pub id: String,
+    pub text: String,
+    /// What the speaker called itself and its room, for the chat's title and each message's note.
+    pub device: Option<String>,
+    pub room: Option<String>,
+    pub area: Option<String>,
+    /// The hub's id for one talk on this speaker: the same for every turn of one talk, new when
+    /// the talk idles out. It decides which chat the turn goes to.
+    pub session: String,
+    pub sent_at: i64,
+    /// The hub person this turn is for, verified by the hub. `None`: an older hub, which means
+    /// the PC's own (home) person.
+    pub person: Option<String>,
+}
+
+/// Where the house's room speaker sends its turns.
+pub trait SpeakerSink: Send + Sync {
+    /// `Ok` once the turn is safely in Helm (it is then acknowledged to the hub).
+    fn deliver<'a>(&'a self, turn: SpeakerTurn) -> BoxFut<'a, Result<(), String>>;
+    /// The hub says one talk on a speaker has ended: the chat it worked in is closed, and the
+    /// next talk starts a new one.
+    fn talk_closed<'a>(&'a self, _person: Option<String>, _session: String) -> BoxFut<'a, ()> {
+        Box::pin(async {})
+    }
+}
+
 /// Where the household's device frames go on the PC (`crate::devlink`).
 pub trait DeviceSink: Send + Sync {
     /// A `devices`, `dev_call`, `dev_result` or `dev_push` frame, as the hub sent it.
@@ -504,6 +536,28 @@ impl LineHandle {
     pub fn voice_attachment(&self, person: &str, frame: Value) -> bool {
         self.push_voice(named_from(person, frame))
     }
+
+    /// The speaker lane's working line: the same frame as the phone's, marked so the hub gives
+    /// it to the speaker that asked and not to a phone.
+    pub fn speaker_status(&self, person: &str, turn: &str, text: &str) {
+        if self.state() == LineState::Online {
+            let _ = self.push(
+                self.this_line(),
+                named(
+                    "voice_status",
+                    person,
+                    json!({ "turn": turn, "text": text, "lane": "speaker" }),
+                ),
+            );
+        }
+    }
+    /// The speaker lane's answer (`voice_final` with `"lane": "speaker"`). Like the phone's, it
+    /// is offered again on the next line when the line dropped with it on the way.
+    pub fn speaker_reply(&self, person: &str, reply: &crate::voice::Reply) -> bool {
+        let mut frame = reply.frame();
+        frame["lane"] = json!("speaker");
+        self.push_voice(named_from(person, frame))
+    }
 }
 
 /// A frame of `kind` with `fields`, naming the hub person `person` it acts for. An empty
@@ -528,6 +582,9 @@ pub struct Client {
     sink: Arc<dyn TelegramSink>,
     /// Where voice turns go; frames for it are ignored until it is attached.
     voice: std::sync::OnceLock<Arc<dyn VoiceSink>>,
+    /// Where the room speaker's turns go (the `speaker` lane of the same frames); ignored until
+    /// it is attached.
+    speaker: std::sync::OnceLock<Arc<dyn SpeakerSink>>,
     /// Where the household's device frames go; they are ignored until it is attached.
     devices: std::sync::OnceLock<Arc<dyn DeviceSink>>,
     /// Where the hub's knowledge frames go; they are ignored until it is attached.
@@ -605,6 +662,7 @@ impl Client {
             executor,
             sink,
             voice: std::sync::OnceLock::new(),
+            speaker: std::sync::OnceLock::new(),
             devices: std::sync::OnceLock::new(),
             knowledge: std::sync::OnceLock::new(),
             index: std::sync::OnceLock::new(),
@@ -655,6 +713,11 @@ impl Client {
         let _ = self.voice.set(sink);
     }
 
+    /// Give the line the sink for the room speaker's turns (its own lane of the same frames).
+    pub fn attach_speaker(&self, sink: Arc<dyn SpeakerSink>) {
+        let _ = self.speaker.set(sink);
+    }
+
     /// Give the line the sink for the household's device frames.
     pub fn attach_devices(&self, sink: Arc<dyn DeviceSink>) {
         let _ = self.devices.set(sink);
@@ -686,6 +749,81 @@ impl Client {
     /// The hub person a down frame acts for. `Ok(None)`: it names none (an older hub, or a
     /// person not yet linked) — the home profile's, as before. `Ok(Some)`: that person's.
     /// `Err`: it names a person this PC does not act for, so nobody here could take it.
+    /// A room speaker's turn: check it is this PC's business, take it once, and acknowledge it
+    /// only once the sink has it stored. The hub keeps an unacknowledged turn and sends it again,
+    /// so the same id must not be delivered twice.
+    fn take_speaker_turn(
+        &self,
+        v: &Value,
+        id: String,
+        text: String,
+        out: mpsc::UnboundedSender<Value>,
+    ) {
+        let Some(speaker) = self.speaker.get().cloned() else {
+            return;
+        };
+        // Without a talk id there is no chat to answer in: the hub always names one.
+        let Some(session) = v
+            .get("session")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+        else {
+            log::info!("relay: a speaker turn arrived with no talk id");
+            return;
+        };
+        let Ok(person) = self.frame_person(v) else {
+            log::info!("relay: a speaker turn named a person this PC does not act for");
+            return;
+        };
+        let r_person = person.clone().unwrap_or_default();
+        let key = format!("speaker/{r_person}/{id}");
+        let delivering = self.delivering.clone();
+        if !delivering
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(key.clone())
+        {
+            return;
+        }
+        let small = |k: &str| {
+            v.get(k)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        };
+        let turn = SpeakerTurn {
+            id: id.clone(),
+            text,
+            device: small("device"),
+            room: small("room"),
+            area: small("area"),
+            session,
+            sent_at: v.get("sentAt").and_then(Value::as_i64).unwrap_or(0),
+            person,
+        };
+        tokio::spawn(async move {
+            let r = speaker.deliver(turn).await;
+            delivering
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&key);
+            match r {
+                Ok(()) => {
+                    let _ = out.send(named(
+                        "voice_ack",
+                        &r_person,
+                        json!({ "id": id, "lane": "speaker" }),
+                    ));
+                }
+                // Not acknowledged: the hub keeps it and sends it again.
+                Err(e) => log::warn!("relay: a speaker turn was not delivered: {e}"),
+            }
+        });
+    }
+
     fn frame_person(&self, v: &Value) -> Result<Option<String>, ()> {
         let named = v
             .get("personId")
@@ -1122,6 +1260,13 @@ impl Client {
                 let (Some(id), Some(text)) = (s("id"), s("text")) else {
                     return;
                 };
+                // One line carries both voice lanes: the phone's screen, and the house's room
+                // speakers. A turn marked for the speaker goes to its own sink and is answered
+                // with the mark back, so a phone is never read an answer meant for a room.
+                if s("lane").as_deref() == Some("speaker") {
+                    self.take_speaker_turn(&v, id, text, out.clone());
+                    return;
+                }
                 let Some(voice) = self.voice.get().cloned() else {
                     return;
                 };
@@ -1165,6 +1310,19 @@ impl Client {
                         Err(e) => log::warn!("relay: a voice turn was not delivered: {e}"),
                     }
                 });
+            }
+            Some("speaker_session_closed") => {
+                let (Some(session), Some(speaker)) = (s("sessionId"), self.speaker.get().cloned())
+                else {
+                    return;
+                };
+                let Ok(person) = self.frame_person(&v) else {
+                    log::info!(
+                        "relay: a speaker_session_closed frame named a person this PC does not act for"
+                    );
+                    return;
+                };
+                tokio::spawn(async move { speaker.talk_closed(person, session).await });
             }
             Some("voice_stop") => {
                 let (Some(turn), Some(voice)) = (s("turn"), self.voice.get().cloned()) else {

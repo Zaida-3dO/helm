@@ -1138,7 +1138,7 @@ fn side(
     people: Option<Arc<PeopleSync>>,
     person: &str,
     person_name: &str,
-    act_for: &[(&str, bool, bool)],
+    act_for: &[(&str, bool, bool, bool)],
 ) -> Side {
     let dir = tempfile::tempdir().unwrap();
     let mut reg = MigrationRegistry::new();
@@ -1149,7 +1149,7 @@ fn side(
         .unwrap();
     let link = router.connect(uid, Some(person), Some(person_name), true);
     if !act_for.is_empty() {
-        link.set_people(act_for.iter().map(|(p, _, _)| (*p).to_owned()).collect());
+        link.set_people(act_for.iter().map(|(p, _, _, _)| (*p).to_owned()).collect());
     }
     let sink = Arc::new(RecordingSink::default());
     let mirror = Mirror::new(
@@ -1165,10 +1165,11 @@ fn side(
         run: true,
         people: act_for
             .iter()
-            .map(|(p, telegram, voice)| DevicePerson {
+            .map(|(p, telegram, voice, speaker)| DevicePerson {
                 person_id: (*p).to_owned(),
                 telegram: *telegram,
                 voice: *voice,
+                speaker: *speaker,
             })
             .collect(),
     }));
@@ -3554,7 +3555,10 @@ async fn one_pc_acts_as_each_of_its_profiles() {
     let router = MemRouter::new();
     let port = Arc::new(FakePort::new("dev-d", "Desk"));
     port.st().people = vec!["person-p".to_owned(), "person-s".to_owned()];
-    port.announce_people(&[("person-p", true, true), ("person-s", false, false)]);
+    port.announce_people(&[
+        ("person-p", true, true, true),
+        ("person-s", false, false, false),
+    ]);
     port.add_chat_of("own-p", "Pat's chat", 10, "person-p", &[]);
     port.add_chat_of("own-s", "Sam's chat on the desk", 11, "person-s", &[]);
     port.put_interaction(fake_interaction(
@@ -3576,7 +3580,10 @@ async fn one_pc_acts_as_each_of_its_profiles() {
         None,
         "person-s",
         "Sam",
-        &[("person-s", true, true), ("person-p", false, false)],
+        &[
+            ("person-s", true, true, true),
+            ("person-p", false, false, false),
+        ],
     );
     b.db.write(|tx| {
         tx.execute_batch(
@@ -3837,7 +3844,7 @@ async fn the_copy_holds_every_chat_of_the_pc_whoever_the_laptop_acts_for() {
         None,
         "person-s",
         "Sam",
-        &[("person-s", true, true)],
+        &[("person-s", true, true, true)],
     );
     until(|| b.mirror.owner("own-s").is_some() && b.mirror.owner("own-t").is_some()).await;
 
@@ -3855,6 +3862,7 @@ async fn the_copy_holds_every_chat_of_the_pc_whoever_the_laptop_acts_for() {
                 person_id: (*p).to_owned(),
                 telegram: false,
                 voice: false,
+                speaker: false,
             })
             .collect(),
     }));

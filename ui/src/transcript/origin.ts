@@ -17,6 +17,12 @@ const TELEGRAM_NOTE = /^\[Sent from Telegram:[^\]\n]*\]\n(\[Sent to the user on 
 const VOICE_NOTE = /^(\[Voice chat: you are[\s\S]*?If not, answer exactly \[quiet\]\.\]\n)?\[Voice · [^\]\n]*\]\n(\[Not heard by the user:[^\]\n]*\]\n)*/;
 
 /**
+ * The notes the host puts in front of a room speaker's message: the line naming the speaker and
+ * its room, and a pointer to the talk that ended just before this one.
+ */
+const SPEAKER_NOTE = /^\[Speaker · [^\]\n]*\]\n(\[Previous conversation ended:[^\]\n]*\]\n)?/;
+
+/**
  * A note Helm itself put in the chat for the agent, not something the user wrote or an agent sent:
  * the voice chat's `[Attention]` and `[Wait finished]` news. It is for the agent, so the
  * transcript does not draw it (the turn it starts still folds and settles as any other).
@@ -41,6 +47,11 @@ export function fromVoice(row: MessageRow): boolean {
   return row.details?.origin === 'voice';
 }
 
+/** A message heard on a room speaker in the house. */
+export function fromSpeaker(row: MessageRow): boolean {
+  return row.details?.origin === 'speaker';
+}
+
 /**
  * The line the PC a chat runs on puts in front of the user's own words when they were typed on
  * another PC, so the agent knows where the person is: exactly `[Typed on <name>]` and a newline,
@@ -59,6 +70,7 @@ export function typedOn(row: MessageRow): string | null {
 /** The text the bubble shows. */
 export function bubbleText(row: MessageRow): string {
   if (fromVoice(row)) return row.text.replace(VOICE_NOTE, '');
+  if (fromSpeaker(row)) return row.text.replace(SPEAKER_NOTE, '');
   if (typedOn(row)) return row.text.replace(TYPED_ON, '');
   return fromTelegram(row) ? row.text.replace(TELEGRAM_NOTE, '') : row.text;
 }

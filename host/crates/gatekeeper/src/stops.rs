@@ -802,13 +802,16 @@ fn live_conversation(tx: &rusqlite::Connection, chat_id: &str) -> rusqlite::Resu
             "SELECT s.origin FROM messages m
              JOIN submission_meta s ON m.source_key = 'u:' || s.submission_id
              WHERE m.chat_id = ?1 AND m.role = 'user' AND m.active = 1
-               AND s.origin IN ('typed', 'answer', 'remote', 'telegram', 'voice', 'action', 'notification')
+               AND s.origin IN ('typed', 'answer', 'remote', 'telegram', 'voice', 'speaker', 'action', 'notification')
              ORDER BY m.timestamp DESC, m.id DESC LIMIT 1",
             [chat_id],
             |r| r.get(0),
         )
         .optional()?;
-    Ok(matches!(origin.as_deref(), Some("telegram" | "voice")))
+    Ok(matches!(
+        origin.as_deref(),
+        Some("telegram" | "voice" | "speaker")
+    ))
 }
 
 /// Local-model chats working, or with a message waiting to start. Read from the database only:

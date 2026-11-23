@@ -297,13 +297,14 @@ impl FakePort {
     }
 
     /// Announce the hub people this install acts for (the home person's channel flags first).
-    pub fn announce_people(&self, people: &[(&str, bool, bool)]) {
+    pub fn announce_people(&self, people: &[(&str, bool, bool, bool)]) {
         self.st().announce = people
             .iter()
-            .map(|(p, telegram, voice)| DevicePerson {
+            .map(|(p, telegram, voice, speaker)| DevicePerson {
                 person_id: (*p).to_owned(),
                 telegram: *telegram,
                 voice: *voice,
+                speaker: *speaker,
             })
             .collect();
     }

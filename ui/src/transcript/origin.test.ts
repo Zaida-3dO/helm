@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { MessageRow } from '../api/types.ts';
-import { bubbleText, fromTelegram, fromVoice, isHelmNote, isQuietReply, pageMessage, peerMessage, typedOn } from './origin.ts';
+import { bubbleText, fromSpeaker, fromTelegram, fromVoice, isHelmNote, isQuietReply, pageMessage, peerMessage, typedOn } from './origin.ts';
 
 const NOTE = '[Sent from Telegram: answer briefly in plain text, with no tables or long code. Offer choices as a numbered list. Only the final message of each turn reaches the user\'s phone, so make that message stand on its own. The user can reply "more" for detail.]';
 
@@ -43,6 +43,20 @@ test('a voice message shows without the primer and notes for the agent; other me
   for (const [r, shown] of cases) {
     assert.equal(bubbleText(r), shown, r.text);
     assert.equal(fromVoice(r), r.details?.origin === 'voice');
+  }
+});
+
+test('a room speaker message shows without its channel line and the pointer to the talk before', () => {
+  const where = '[Speaker · study / Study · speak it, short, no markup]\n';
+  const cases: [MessageRow, string][] = [
+    [row(`${where}what time is it`, 'speaker'), 'what time is it'],
+    [row(`${where}[Previous conversation ended: HA speaker kitchen voice 2027-01-15 — It is 7:20.]\ngo on`, 'speaker'), 'go on'],
+    [row('[Speaker · the house · speak it, short, no markup]\nhi', 'typed'), '[Speaker · the house · speak it, short, no markup]\nhi'],
+    [row('a plain speaker message', 'speaker'), 'a plain speaker message'],
+  ];
+  for (const [r, shown] of cases) {
+    assert.equal(bubbleText(r), shown, r.text);
+    assert.equal(fromSpeaker(r), r.details?.origin === 'speaker');
   }
 });
 

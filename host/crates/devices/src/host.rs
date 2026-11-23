@@ -890,6 +890,7 @@ impl ChatPort for HostPort {
             out.push(DevicePerson {
                 telegram: home,
                 voice: home,
+                speaker: home,
                 person_id,
             });
         }

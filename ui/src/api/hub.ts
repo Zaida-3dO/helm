@@ -120,6 +120,30 @@ export interface VoiceSettings {
   takeVoice: boolean;
 }
 
+/** One talk open on a room speaker: the chat its turns go to, and when the talk started. */
+export interface SpeakerTalk {
+  /** The hub's id for the talk; a new one starts a new chat. */
+  session: string;
+  chatId: string;
+  title: string;
+  startedAt: number;
+  /** What the speaker called its room, when it named one. */
+  room: string | null;
+}
+
+export interface SpeakerSettings {
+  /** The talks open on this PC, oldest first. */
+  talks: SpeakerTalk[];
+  /** The model a new room-speaker chat starts with; blank: the same as any other new chat. */
+  model: string;
+  /** The effort a new room-speaker chat starts with; blank: the same as any other new chat. */
+  effort: string;
+  /** Whether this PC takes this profile's person's room speakers (default: on for the home profile). */
+  takeSpeaker: boolean;
+  /** How long a talk that just ended may be named to the next one; 0 never names it. */
+  previousHours: number;
+}
+
 /** One channel's prompt for one profile, as the host holds it. */
 export interface ChannelPrompt {
   channel: 'speaker' | 'household' | 'voice' | 'telegram';
@@ -190,6 +214,17 @@ export function hubOps(api: Api) {
         ...scope(s),
       }),
     resetVoice: (s: ChannelScope = {}) => api<VoiceSettings>('relay_voice_reset', scope(s)),
+    speaker: (s: ChannelScope = {}) => api<SpeakerSettings>('relay_speaker_get', scope(s)),
+    saveSpeaker: (s: SpeakerSettings & ChannelScope) =>
+      api<SpeakerSettings>('relay_speaker_save', {
+        model: s.model,
+        effort: s.effort,
+        takeSpeaker: s.takeSpeaker,
+        previousHours: s.previousHours,
+        ...scope(s),
+      }),
+    /** End every talk this PC holds: each of its chats is put away, and the next word on a speaker starts a new one. */
+    resetSpeaker: (s: ChannelScope = {}) => api<SpeakerSettings & { ended: number }>('relay_speaker_reset', scope(s)),
     prompts: (s: ChannelScope = {}) => api<ChannelPrompts>('relay_prompts_get', scope(s)),
     /** Replace one channel's prompt; blank puts the default back. Applies to new conversations. */
     savePrompt: (s: ChannelScope & { channel: ChannelPrompt['channel']; text: string }) =>

@@ -1086,6 +1086,9 @@ pub enum SubmissionOrigin {
     /// Spoken or typed on the phone's voice screen and forwarded by the hub. Like `telegram`, it
     /// never counts as consent, and approvals, plans and trust prompts are never answered by it.
     Voice,
+    /// Heard on a room speaker (a Home Assistant voice satellite) and forwarded by the hub.
+    /// Like `voice` and `telegram`: never consent, and never answers a prompt.
+    Speaker,
     /// Typed on another device of the household for a chat that runs here. The person at that
     /// device owns the chat, so it counts as their own words.
     Remote,
@@ -1108,6 +1111,7 @@ impl SubmissionOrigin {
             Self::Schedule => "schedule",
             Self::Telegram => "telegram",
             Self::Voice => "voice",
+            Self::Speaker => "speaker",
             Self::Remote => "remote",
             Self::Page => "page",
         }
@@ -1125,6 +1129,7 @@ impl SubmissionOrigin {
             "schedule" => Self::Schedule,
             "telegram" => Self::Telegram,
             "voice" => Self::Voice,
+            "speaker" => Self::Speaker,
             "remote" => Self::Remote,
             "page" => Self::Page,
             _ => Self::App,

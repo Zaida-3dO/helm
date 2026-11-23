@@ -99,6 +99,8 @@ pub mod remote;
 pub mod setup;
 pub mod sink;
 pub mod speakable;
+pub mod speaker;
+pub mod speaker_sink;
 pub mod telegram;
 pub mod voice;
 pub mod voice_heard;
@@ -150,6 +152,10 @@ pub fn register_services(services: &mut Services, events: &Arc<dyn EventSink>) {
         executor.clone(),
         profile.dir.clone(),
     ));
+    let speaker = Arc::new(speaker_sink::HouseSpeaker::new(
+        executor.clone(),
+        profile.dir.clone(),
+    ));
     let client = client::Client::new(
         Arc::new(move || config::effective(&creds)),
         executor.clone(),
@@ -157,7 +163,9 @@ pub fn register_services(services: &mut Services, events: &Arc<dyn EventSink>) {
     );
     sink.attach_line(client.handle());
     voice.attach_line(client.handle());
+    speaker.attach_line(client.handle());
     client.attach_voice(voice.clone());
+    client.attach_speaker(speaker.clone());
     // A frame naming a hub person is only this PC's business when a profile of theirs is
     // linked here (the home profile's person always is).
     if let Some(db) = services.get::<helm_core::db::Database>() {
@@ -189,6 +197,7 @@ pub fn register_services(services: &mut Services, events: &Arc<dyn EventSink>) {
     services.insert(sink);
     services.insert(voice.shown());
     services.insert(voice);
+    services.insert(speaker);
     services.insert(Arc::new(voice_watch::VoiceWatch::default()));
     services.insert(client.handle());
     services.insert(executor);
@@ -260,6 +269,13 @@ pub fn attach_ops(dispatcher: &Arc<helm_ipc::Dispatcher>) {
     if let Some(v) = dispatcher.ctx().services.get::<voice_sink::ChatVoice>() {
         v.attach_ops(dispatcher.clone());
     }
+    if let Some(s) = dispatcher
+        .ctx()
+        .services
+        .get::<speaker_sink::HouseSpeaker>()
+    {
+        s.attach_ops(dispatcher.clone());
+    }
     // Other devices of the household read and drive this PC's chats through the same dispatcher.
     devlink::attach(dispatcher);
 }
@@ -278,6 +294,9 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("relay_voice_get", OpClass::Blocking, voice_get)
         .blocking("relay_voice_save", OpClass::Blocking, voice_save)
         .blocking("relay_voice_reset", OpClass::Blocking, voice_reset)
+        .blocking("relay_speaker_get", OpClass::Blocking, speaker_get)
+        .blocking("relay_speaker_save", OpClass::Blocking, speaker_save)
+        .async_op("relay_speaker_reset", speaker_reset)
         .blocking("relay_prompts_get", OpClass::Blocking, prompts_get)
         .blocking("relay_prompts_save", OpClass::Blocking, prompts_save)
         .async_op("relay_tg_link", tg_link)
@@ -573,4 +592,45 @@ fn voice_reset(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     voice::save_tag(&paths.tag, None)
         .map_err(|_| ApiError::internal("The voice chat tag could not be removed."))?;
     voice_view(ctx, &args)
+}
+
+fn speaker_view(ctx: &OpCtx, args: &Value) -> Result<Value, ApiError> {
+    let profile = ctx.services.need::<Profile>()?;
+    let db = ctx.services.need::<helm_core::db::Database>()?;
+    let pid = channel_profile(ctx, args)?;
+    to_value(&speaker_sink::speaker_view(&db, &profile.dir, &pid))
+}
+
+fn speaker_get(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    speaker_view(ctx, &args)
+}
+
+fn speaker_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let f: speaker::PolicyFile = serde_json::from_value(without_profile(&args)).map_err(|_| {
+        ApiError::bad_args("Expected model, effort, takeSpeaker and previousHours (0 to 72).")
+    })?;
+    f.check().map_err(ApiError::bad_args)?;
+    let profile = ctx.services.need::<Profile>()?;
+    let pid = channel_profile(ctx, &args)?;
+    let took = speaker::load_file(&speaker::paths(&profile.dir, &pid).policy).take_speaker;
+    let takes = f.take_speaker;
+    speaker_sink::save(&profile.dir, &pid, &f).map_err(ApiError::internal)?;
+    if took != takes {
+        ctx.events.emit(helm_ipc::AppEvent::new("device_changed"));
+    }
+    speaker_view(ctx, &args)
+}
+
+/// `relay_speaker_reset {profileId?}`: end every talk this PC holds for that profile, putting
+/// each of its chats away. The next utterance on a speaker starts a new chat.
+async fn speaker_reset(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let pid = channel_profile(&ctx, &args)?;
+    let speaker = ctx
+        .services
+        .get::<speaker_sink::HouseSpeaker>()
+        .ok_or_else(|| ApiError::new("unavailable", "Helm's speaker chats are not available."))?;
+    let n = speaker.reset(&pid).await.map_err(ApiError::internal)?;
+    let mut v = speaker_view(&ctx, &args)?;
+    v["ended"] = json!(n);
+    Ok(v)
 }

@@ -39,6 +39,7 @@ pub const NAMED: &[(&str, Risk, &str)] = &[
     ("webSearchInClaudeChats", Risk::Low, ""),
     ("telegram", Risk::Low, ""),
     ("voice", Risk::Low, ""),
+    ("speaker", Risk::Low, ""),
     ("localOllamaContext", Risk::Low, ""),
     ("localKeepAliveMinutes", Risk::Low, ""),
     ("localServersEnabled", Risk::Low, ""),
@@ -143,6 +144,11 @@ pub const USER_PARTS: &[(&str, &str, &str)] = &[
         "voice",
         "everything but the model and effort a new chat opens with",
         "They decide what the phone's voice line may do and approve.",
+    ),
+    (
+        "speaker",
+        "everything but the model and effort a new chat opens with",
+        "They decide which PC answers the rooms' speakers, and how long a finished talk may be named to the next one.",
     ),
     (
         "localServersEnabled",

@@ -1564,7 +1564,10 @@ fn must_name_board(tx: &Transaction<'_>, boards: &Boards, caller: &str) -> rusql
             |r| r.get(0),
         )
         .optional()?;
-    Ok(matches!(origin.as_deref(), Some("telegram" | "voice")))
+    Ok(matches!(
+        origin.as_deref(),
+        Some("telegram" | "voice" | "speaker")
+    ))
 }
 
 /// The open boards as "name (id): description" lines, at most 20, for the refusal that asks an

@@ -45,8 +45,8 @@ pub struct TelegramPolicy {
     dir: PathBuf,
 }
 
-/// The extension to register as a [`helm_hosttools::SettingsExtensions`] entry. It owns both
-/// keys, `telegram` and `voice`.
+/// The extension to register as a [`helm_hosttools::SettingsExtensions`] entry. It owns the three
+/// channel keys: `telegram`, `voice` and `speaker`.
 pub fn settings_extension(profile_dir: &std::path::Path) -> std::sync::Arc<dyn SettingsExtension> {
     std::sync::Arc::new(Both {
         telegram: TelegramPolicy {
@@ -55,28 +55,32 @@ pub fn settings_extension(profile_dir: &std::path::Path) -> std::sync::Arc<dyn S
         voice: VoicePolicy {
             dir: profile_dir.to_path_buf(),
         },
+        speaker: SpeakerPolicy {
+            dir: profile_dir.to_path_buf(),
+        },
     })
 }
 
-/// Both keys behind one registration: each call goes to the policy that owns the key.
+/// The channel keys behind one registration: each call goes to the policy that owns the key.
 struct Both {
     telegram: TelegramPolicy,
     voice: VoicePolicy,
+    speaker: SpeakerPolicy,
 }
 
 impl Both {
     fn owner(&self, key: &str) -> &dyn SettingsExtension {
-        if key == VOICE_KEY {
-            &self.voice
-        } else {
-            &self.telegram
+        match key {
+            VOICE_KEY => &self.voice,
+            SPEAKER_KEY => &self.speaker,
+            _ => &self.telegram,
         }
     }
 }
 
 impl SettingsExtension for Both {
     fn keys(&self) -> Vec<&'static str> {
-        vec![KEY, VOICE_KEY]
+        vec![KEY, VOICE_KEY, SPEAKER_KEY]
     }
     fn describe(&self, key: &str) -> Option<Value> {
         self.owner(key).describe(key)
@@ -478,6 +482,159 @@ fn voice_io_err(e: std::io::Error) -> String {
     format!("The voice policy could not be saved: {e}")
 }
 
+// ---- the room speaker's policy -------------------------------------------------------------
+
+pub const SPEAKER_KEY: &str = "speaker";
+const SPEAKER_EVENT: &str = "relay_speaker";
+
+pub struct SpeakerPolicy {
+    dir: PathBuf,
+}
+
+fn speaker_json(f: &crate::speaker::PolicyFile) -> Value {
+    serde_json::to_value(f).expect("the policy serialises")
+}
+
+/// The speaker policy as a value, or a sentence naming what is wrong with it.
+fn speaker_from_json(v: &Value) -> Result<crate::speaker::PolicyFile, String> {
+    serde_json::from_value(v.clone())
+        .map_err(|e| format!("Expected model, effort, takeSpeaker and previousHours: {e}"))
+}
+
+/// The two fields a chat may set, checked; a sentence naming the problem, if any.
+fn check_speaker_changeable(patch: &Value) -> Result<(), String> {
+    if let Some(m) = patch.get("model") {
+        if !m.is_null() {
+            let s = m.as_str().ok_or_else(|| {
+                format!(
+                    "{SPEAKER_KEY}.model must be a model id or null (null puts back the default)."
+                )
+            })?;
+            if s.chars().count() > MAX_MODEL_CHARS || s.chars().any(char::is_control) {
+                return Err(format!(
+                    "{SPEAKER_KEY}.model must be a model id from the model picker (one line, at most {MAX_MODEL_CHARS} characters), or null."
+                ));
+            }
+        }
+    }
+    if let Some(e) = patch.get("effort") {
+        if !e.is_null() {
+            let s = e.as_str().ok_or_else(|| {
+                format!("{SPEAKER_KEY}.effort must be one of {EFFORT_LIST} or null.")
+            })?;
+            if !s.trim().is_empty() && !helm_chats::catalogue::is_effort(s.trim()) {
+                return Err(format!(
+                    "{SPEAKER_KEY}.effort must be one of {EFFORT_LIST} or null."
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn speaker_options() -> Value {
+    json!({
+        "type": "object",
+        "about": "Settings > Hub: what a new room-speaker chat opens with, and how the house's speakers are taken. Read all of it. You may change only model and effort; which PC takes the speaker and how long a finished talk is remembered are the user's, and an update that touches them is refused. Send only the fields to change: the rest must repeat at their current value or stay out. null puts model and effort back to the defaults.",
+        "default": speaker_json(&crate::speaker::PolicyFile::default()),
+        "merge": true,
+        "fields": {
+            "model": {"type": "string", "rule": "a model id from the model picker (a Claude model, or local/<server>/<model>), at most 120 characters; blank: the app's usual new-chat model; null: the default", "about": "The model a new room-speaker chat opens with. A spoken answer has to come back in seconds, so the default is a small local model."},
+            "effort": {"type": "enum", "allowed": helm_chats::catalogue::EFFORTS, "blankAllowed": true, "nullable": true, "about": "The effort a new room-speaker chat opens with; blank: the app's usual new-chat effort; null: the default."},
+            "takeSpeaker": {"type": "boolean", "nullable": true, "about": "Whether this PC takes its person's room speakers. null: the default, on for the home profile and off for the others."},
+            "previousHours": {"type": "integer", "min": 0, "max": 72, "about": "How long a talk that just ended may be named to the next one on that speaker; 0 never names it."},
+        },
+    })
+}
+
+impl SpeakerPolicy {
+    /// Settings shows one speaker policy — the home person's, whose file lives in that profile's
+    /// folder under `relay/people/`.
+    fn policy_path(&self, tx: &Transaction<'_>) -> Option<PathBuf> {
+        helm_profiles::store::home(tx)
+            .ok()
+            .flatten()
+            .map(|h| crate::speaker::paths(&self.dir, &h.id).policy)
+    }
+}
+
+impl SettingsExtension for SpeakerPolicy {
+    fn keys(&self) -> Vec<&'static str> {
+        vec![SPEAKER_KEY]
+    }
+
+    fn describe(&self, key: &str) -> Option<Value> {
+        (key == SPEAKER_KEY).then(speaker_options)
+    }
+
+    fn read(&self, tx: &Transaction<'_>, _key: &str) -> Value {
+        match self.policy_path(tx) {
+            Some(p) => speaker_json(&crate::speaker::load_file(&p)),
+            None => speaker_json(&crate::speaker::PolicyFile::default()),
+        }
+    }
+
+    fn apply(
+        &self,
+        tx: &Transaction<'_>,
+        _key: &str,
+        value: &Value,
+    ) -> Result<(Value, Value), String> {
+        let file = self
+            .policy_path(tx)
+            .ok_or("Helm has no home profile yet.")?;
+        let before = speaker_json(&crate::speaker::load_file(&file));
+        let mut wanted = if value.is_null() {
+            reset_changeable(&before)
+        } else if value.is_object() {
+            check_speaker_changeable(value)?;
+            let mut m = before.clone();
+            merge(&mut m, value);
+            m
+        } else {
+            return Err(format!(
+                "{SPEAKER_KEY} must be an object with only the fields to change (see options.{SPEAKER_KEY}), or null."
+            ));
+        };
+        // A null model or effort is the default again.
+        let defaults = speaker_json(&crate::speaker::PolicyFile::default());
+        if let Some(o) = wanted.as_object_mut() {
+            for k in ["model", "effort"] {
+                if o.get(k).is_none_or(|v| v.is_null()) {
+                    o.insert(k.to_owned(), defaults[k].clone());
+                }
+            }
+        }
+        let merged = speaker_from_json(&wanted)?;
+        merged.check()?;
+        let after = speaker_json(&merged);
+        if let Some(path) = first_diff(&locked(&before), &locked(&after), "") {
+            return Err(format!(
+                "{SPEAKER_KEY}.{path} is yours to change only: ask the user to change it in {PAGE}. You may change model and effort."
+            ));
+        }
+        crate::speaker::save_policy(&file, &merged).map_err(speaker_io_err)?;
+        Ok((before, after))
+    }
+
+    fn restore(&self, tx: &Transaction<'_>, _key: &str, value: &Value) -> Result<(), String> {
+        let f = speaker_from_json(value)?;
+        f.check()?;
+        let file = self
+            .policy_path(tx)
+            .ok_or("Helm has no home profile yet.")?;
+        crate::speaker::save_policy(&file, &f).map_err(speaker_io_err)
+    }
+
+    fn changed_event(&self, _key: &str) -> AppEvent {
+        AppEvent::new(SPEAKER_EVENT)
+    }
+}
+
+fn speaker_io_err(e: std::io::Error) -> String {
+    format!("The speaker policy could not be saved: {e}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -695,8 +852,9 @@ mod tests {
         };
         // One registration owns both keys, and each goes to its own policy.
         let both = settings_extension(&e.dir.path().join("prof"));
-        assert_eq!(both.keys(), vec![KEY, VOICE_KEY]);
+        assert_eq!(both.keys(), vec![KEY, VOICE_KEY, SPEAKER_KEY]);
         assert!(both.describe(VOICE_KEY).is_some() && both.describe(KEY).is_some());
+        assert!(both.describe(SPEAKER_KEY).is_some());
         assert!(both.describe("theme").is_none());
         assert_eq!(both.changed_event(VOICE_KEY).kind, VOICE_EVENT);
         assert_eq!(both.changed_event(KEY).kind, EVENT);

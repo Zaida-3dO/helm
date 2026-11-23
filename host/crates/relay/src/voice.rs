@@ -325,13 +325,15 @@ pub fn active_chat(
     Ok((tag, created))
 }
 
-/// `Voice <profile name> <YYYY-MM-DD>` (UTC date); no name part when the name is unknown.
+/// `Phone voice <profile name> <YYYY-MM-DD>` (UTC date); no name part when the name is unknown.
+/// The first word names the channel the words came in on, the same shape the other channels use
+/// (`Telegram …`, `HA speaker …`), so a chat list shows at once where a talk happened.
 pub fn chat_title(profile: Option<&str>, now: i64) -> String {
     let name = clean_title_name(profile);
     let (y, m, d) = civil_date(now.div_euclid(86_400_000));
     match name.as_deref() {
-        Some(n) => format!("Voice {n} {y:04}-{m:02}-{d:02}"),
-        None => format!("Voice {y:04}-{m:02}-{d:02}"),
+        Some(n) => format!("Phone voice {n} {y:04}-{m:02}-{d:02}"),
+        None => format!("Phone voice {y:04}-{m:02}-{d:02}"),
     }
 }
 
@@ -536,7 +538,7 @@ mod tests {
 
         let (tag, created) = active_chat(&path, &port, &policy, Some("Alex"), T0).unwrap();
         assert!(created && !tag.primed && tag.conversation.len() == 16);
-        assert_eq!(port.created.borrow()[0], "Voice Alex 2027-01-15");
+        assert_eq!(port.created.borrow()[0], "Phone voice Alex 2027-01-15");
 
         // (minutes since the last message, tokens now, archived, expected new chat)
         let rows = [
@@ -564,7 +566,7 @@ mod tests {
         }
 
         // A chat started without a name carries none: chat 2 came from the idle row, passed None.
-        assert_eq!(port.created.borrow()[1], "Voice 2027-01-15");
+        assert_eq!(port.created.borrow()[1], "Phone voice 2027-01-15");
         // Age: a chat in steady use still ends at the age limit.
         let policy = PolicyFile {
             max_age_hours: 1,
@@ -586,9 +588,9 @@ mod tests {
     fn the_title_names_the_person() {
         // (name, expected title)
         let rows = [
-            (Some("Alex"), "Voice Alex 2027-01-15"),
-            (None, "Voice 2027-01-15"),
-            (Some("   "), "Voice 2027-01-15"),
+            (Some("Alex"), "Phone voice Alex 2027-01-15"),
+            (None, "Phone voice 2027-01-15"),
+            (Some("   "), "Phone voice 2027-01-15"),
         ];
         for (name, want) in rows {
             assert_eq!(chat_title(name, T0), want, "name {name:?}");

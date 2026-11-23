@@ -116,6 +116,8 @@ pub struct DevicePerson {
     pub telegram: bool,
     /// Whether this PC takes that person's voice.
     pub voice: bool,
+    /// Whether this PC takes that person's room speaker (a Home Assistant voice satellite).
+    pub speaker: bool,
 }
 
 /// A hub person as the hub names them: the id and the stored name.

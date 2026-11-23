@@ -163,10 +163,15 @@ impl ChatPort for ChannelPort {
             .map(|(profile_id, person_id, is_home)| {
                 let tg = crate::people::telegram_paths(&self.profile_dir, &profile_id);
                 let vo = crate::people::voice_paths(&self.profile_dir, &profile_id);
+                let sp = crate::speaker::paths(&self.profile_dir, &profile_id);
                 DevicePerson {
                     person_id,
                     telegram: telegram::takes_telegram(&telegram::load_file(&tg.policy), is_home),
                     voice: voice::takes_voice(&voice::load_file(&vo.policy), is_home),
+                    speaker: crate::speaker::takes_speaker(
+                        &crate::speaker::load_file(&sp.policy),
+                        is_home,
+                    ),
                 }
             })
             .collect()

@@ -74,7 +74,7 @@ impl QueueClass {
 /// The class a submission of `origin` belongs to. An unknown origin is normal.
 pub fn class_for_origin(origin: &str) -> QueueClass {
     match origin {
-        "telegram" | "voice" => QueueClass::Interactive,
+        "telegram" | "voice" | "speaker" => QueueClass::Interactive,
         "schedule" | "app" => QueueClass::Background,
         _ => QueueClass::Normal,
     }

@@ -3,7 +3,7 @@
 // voice chat with the default limits. Pairing with the code ABCD2345 works. Dev builds only.
 
 import { ApiError } from '../api/client.ts';
-import type { HubConnection, TelegramSettings, VoiceSettings } from '../api/hub.ts';
+import type { HubConnection, SpeakerSettings, TelegramSettings, VoiceSettings } from '../api/hub.ts';
 import type { FakeOpHandler } from './fakeHost.ts';
 
 /** `?household=` in the page URL starts the fake already paired to a hub (see fake-profiles.ts). */
@@ -23,6 +23,7 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
   interface ProfileState {
     tg: TelegramSettings;
     voice: VoiceSettings;
+    speaker: SpeakerSettings;
     linked: boolean;
     pinned: string[];
     prompts: Record<string, string>;
@@ -34,6 +35,7 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
       p = {
         tg: { chat: null, maxAgeHours: 24, maxTokens: 400_000, awayAlerts: true, approvals: false, remoteAnswers: false, model: null, effort: null, takeTelegram: id === 'home' },
         voice: { chat: null, model: 'claude-sonnet-5-5', effort: 'low', idleMinutes: 240, maxAgeHours: 24, maxTokens: 300_000, watch: 'flags', takeVoice: id === 'home' },
+        speaker: { talks: [], model: 'local/strata/qwen3.8-flash-next-iq3_s', effort: 'low', takeSpeaker: id === 'home', previousHours: 12 },
         linked: false,
         pinned: [],
         prompts: {},
@@ -136,6 +138,22 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         v.watch = a.watch === 'off' || a.watch === 'flags+done' ? a.watch : 'flags';
         if (typeof a.takeVoice === 'boolean') v.takeVoice = a.takeVoice;
         return v;
+      }
+      case 'relay_speaker_get':
+        return state(scope(a)).speaker;
+      case 'relay_speaker_save': {
+        const sp = state(scope(a)).speaker;
+        sp.model = typeof a.model === 'string' ? a.model.trim() : '';
+        sp.effort = typeof a.effort === 'string' ? a.effort.trim() : '';
+        if (typeof a.takeSpeaker === 'boolean') sp.takeSpeaker = a.takeSpeaker;
+        sp.previousHours = Number(a.previousHours) || 0;
+        return sp;
+      }
+      case 'relay_speaker_reset': {
+        const sp = state(scope(a)).speaker;
+        const ended = sp.talks.length;
+        sp.talks = [];
+        return { ...sp, ended };
       }
       case 'relay_prompts_get':
       case 'relay_prompts_save': {
