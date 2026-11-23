@@ -987,7 +987,8 @@ pub enum Op {
     /// The commands and skills of a chat's worker here, for the `/` menu of its window. A read.
     Skills(ChatIdArgs),
     /// Suggested names for the Rename dialog of a chat here, made by this install's own title
-    /// helper from the chat's own words. A read: it writes nothing.
+    /// helper from the chat's own words. It writes nothing, but it runs a model on that PC, so
+    /// it counts as a run: the PC's switch must be on.
     TitleSuggest(ChatIdArgs),
     /// Needs-you and idle-check flag rows for named chats. A read.
     Attention(ChatIdsArgs),
@@ -1188,6 +1189,7 @@ impl Op {
                 | Op::Resend(_)
                 | Op::Delete(_)
                 | Op::SideResolve(_)
+                | Op::TitleSuggest(_)
                 | Op::Snooze(_)
                 | Op::Address(_)
                 | Op::DefaultsSet(_)
