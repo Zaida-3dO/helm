@@ -209,6 +209,7 @@ pub trait ChatPort: Send + Sync {
     /// `files` are the attachments carried with it, exactly as a local send hands them over.
     /// `page` says a page on the sending PC wrote it: the card words are stored with the message
     /// and the PC line is not put in front — the page names itself inside the text.
+    #[allow(clippy::too_many_arguments)]
     fn send(
         &self,
         chat_id: String,

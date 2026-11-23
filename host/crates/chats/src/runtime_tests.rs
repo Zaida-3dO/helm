@@ -2956,7 +2956,7 @@ async fn a_page_send_keeps_its_origin_and_card_words() {
     // The page row shows its card words, the action row shows none, and an unknown origin never
     // impersonates a page.
     let want = format!("{page}=page=Approvals=- header\n- footer");
-    assert!(rows.iter().any(|r| *r == want), "page card words: {rows:?}");
+    assert!(rows.contains(&want), "page card words: {rows:?}");
     assert!(
         rows.iter().any(|r| r == &format!("{other}=action=-=-")),
         "an action send keeps no card words: {rows:?}"
