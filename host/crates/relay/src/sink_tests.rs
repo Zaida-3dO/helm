@@ -3208,7 +3208,29 @@ async fn one_talk_one_speaker_chat_whose_answer_goes_up_once_and_the_hub_s_word_
     // Settings shows the open talk and what is saved; Start over ends them all.
     let view = crate::speaker_sink::speaker_view(&e.db, &dir, &e.ctx.profile_id);
     assert_eq!(view.talks.len(), 1);
-    assert_eq!(view.model.as_deref(), Some("sonnet"));
+    assert_eq!(view.model, "sonnet");
+    // A blank picker choice (App default) stays a plain string, never null, and the next save
+    // that hands it straight back is still accepted.
+    crate::speaker::save_policy(
+        &paths.policy,
+        &crate::speaker::PolicyFile {
+            model: "".into(),
+            effort: "".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let blank = crate::speaker_sink::speaker_view(&e.db, &dir, &e.ctx.profile_id);
+    assert_eq!(blank.model, "", "blank stays a string the form can send back");
+    assert_eq!(blank.effort, "");
+    let mut back = crate::speaker::load_file(&paths.policy);
+    back.take_speaker = Some(false);
+    crate::speaker_sink::save(&dir, &e.ctx.profile_id, &back).unwrap();
+    assert_eq!(
+        crate::speaker::load_file(&paths.policy).take_speaker,
+        Some(false),
+        "saving after App default still works"
+    );
     assert!(view.take_speaker, "the home profile takes it by default");
     assert_eq!(view.previous_hours, 12);
     assert_eq!(s.reset(&e.ctx.profile_id).await.unwrap(), 1);
@@ -3219,18 +3241,109 @@ async fn one_talk_one_speaker_chat_whose_answer_goes_up_once_and_the_hub_s_word_
     );
 }
 
+/// A chat left `interrupted` by a previous turn does not have that old stop spoken as the next
+/// turn's answer: the mirror waits for the new turn's own rows, and speaks its answer when it
+/// arrives.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_left_interrupted_speaks_the_new_turn_answer_not_the_old_stop() {
+    let e = env();
+    let dir = e.dir.path().join("prof");
+    let s = wired_speaker(&e);
+    s.attach_ops(e.ops.clone());
+    let wire = Arc::new(SpWire::default());
+    s.attach_line(wire.clone());
+    wire.up.store(true, AtomicOrdering::SeqCst);
+    // The first turn never ran: the chat is left interrupted with the old error, and it stays.
+    s.deliver(sturn("old", "old turn", "s-1")).await.unwrap();
+    let paths = crate::speaker::paths(&dir, &e.ctx.profile_id);
+    let chat = crate::speaker::load_talks(&paths.chats).talks[0]
+        .chat_id
+        .clone();
+    sql(
+        &e.db,
+        "UPDATE chats SET status = 'interrupted', error = 'the local model is down' WHERE id = ?1",
+        &[&chat],
+    );
+    // The next turn of the same talk goes to the same chat, which still carries the old stop.
+    s.deliver(sturn("t9", "what time is it now", "s-1")).await.unwrap();
+    // Nothing is spoken for it while only the old stop is in the chat.
+    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+    assert!(
+        wire
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|f| f["turn"].as_str() != Some("t9")),
+        "the old stop is not this turn's answer: {:?}",
+        wire.sent.lock().unwrap().clone()
+    );
+    // The answer arrives later, and that is what gets spoken.
+    sql(
+        &e.db,
+        "UPDATE chats SET status = 'idle', error = NULL WHERE id = ?1",
+        &[&chat],
+    );
+    e.db
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO messages(chat_id, source_key, role, text, status, timestamp, details)
+                 VALUES (?1, 'm:a2', 'assistant', 'It is twenty past nine.', 'complete', 3000, '{\"stopReason\":\"end_turn\"}')",
+                rusqlite::params![&chat],
+            )
+        })
+        .unwrap();
+    let spoken = || {
+        wire
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|f| {
+                f["type"].as_str() == Some("voice_final") && f["turn"].as_str() == Some("t9")
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        waits(|| !spoken().is_empty()).await,
+        "the late answer reaches the speaker: {:?}",
+        wire.sent.lock().unwrap().clone()
+    );
+    assert_eq!(spoken()[0]["text"], "It is twenty past nine.");
+    assert!(
+        wire.sent
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|f| f["turn"].as_str() != Some("t9")
+                || f.get("status").is_none()),
+        "the old error is never spoken for this turn"
+    );
+}
+
 #[test]
 fn what_a_speaker_turn_settles_on_is_said_in_words() {
-    // An error row is never the answer: the stop's own sentence is.
+    // A stop with no answer in the transcript is said in its own words; an error row never is.
     let s = Snap {
         stopped: Some(Stop::Error("The model server stopped.".into())),
-        turn_done: Some((9, "Half an answer.".into())),
-        final_text: Some("Half an answer.".into()),
         ..Default::default()
     };
     assert_eq!(
         crate::speaker_sink::answer_of(&s),
         Stop::Error("The model server stopped.".into()).last_word()
+    );
+    // A stop sitting next to an answer already written to the transcript loses: the answer goes
+    // up first, as the phone mirror sends its unsent answers before a stop.
+    let s = Snap {
+        stopped: Some(Stop::Error("The model server stopped.".into())),
+        turn_done: Some((9, "The kitchen lights are off.".into())),
+        final_text: Some("The kitchen lights are off.".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        crate::speaker_sink::answer_of(&s),
+        "The kitchen lights are off."
     );
     let s = Snap {
         turn_done: Some((9, "The kitchen lights are off.".into())),

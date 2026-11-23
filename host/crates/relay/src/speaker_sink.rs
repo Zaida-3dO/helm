@@ -26,7 +26,7 @@
 
 use crate::client::{BoxFut, LineHandle, SpeakerSink, SpeakerTurn};
 use crate::exec::AppExecutor;
-use crate::sink::{max_row, plain_path, profile_name, snapshot, RealPort, Snap};
+use crate::sink::{max_row, plain_path, profile_name, snapshot, RealPort, RetryHold, Snap};
 use crate::speaker::{self, Paths, PolicyFile, Talk, SPEAKER_ORIGIN};
 use crate::telegram::cut_chars;
 use crate::voice::{Mode, Reply};
@@ -211,9 +211,10 @@ pub fn place(c: &Ctx, turn: &SpeakerTurn, now: i64) -> Result<Placed, String> {
 pub struct SpeakerView {
     /// The talks open on this PC, oldest first.
     pub talks: Vec<TalkView>,
-    /// The model and effort a new speaker chat opens with; `None`: the same as any other new chat.
-    pub model: Option<String>,
-    pub effort: Option<String>,
+    /// The model and effort a new speaker chat opens with; blank: the same as any other new
+    /// chat. Plain strings so the settings form can hand them straight back on the next save.
+    pub model: String,
+    pub effort: String,
     /// Whether this PC takes its person's room speaker (the switch, or its default: on for the
     /// home profile, off for the others).
     pub take_speaker: bool,
@@ -261,7 +262,6 @@ pub fn speaker_view(db: &Database, profile_dir: &std::path::Path, profile_id: &s
             )
         })
         .unwrap_or_default();
-    let (model, effort) = file.new_chat();
     let is_home = db
         .snapshot(|tx| helm_profiles::store::home(tx))
         .ok()
@@ -269,8 +269,8 @@ pub fn speaker_view(db: &Database, profile_dir: &std::path::Path, profile_id: &s
         .is_some_and(|h| h.id == profile_id);
     SpeakerView {
         talks,
-        model: model.map(str::to_owned),
-        effort: effort.map(str::to_owned),
+        model: file.model.trim().to_owned(),
+        effort: file.effort.trim().to_owned(),
         take_speaker: speaker::takes_speaker(&file, is_home),
         previous_hours: file.previous_hours,
     }
@@ -546,8 +546,20 @@ async fn mirror(
     let mut said_thinking = false;
     let mut said_waiting = false;
     let mut idle_seen = 0;
+    // Only this exchange's own rows prove the turn is under way. A chat left `interrupted` by
+    // its previous turn (the local server down, say) carries that stop until the new turn
+    // starts: counting it as this turn's would speak the old error and never the answer.
+    let mut started = false;
+    let mut retry = RetryHold::default();
+    let mut said_retrying = false;
     while began.elapsed() < ANSWER_WAIT {
         let s = snapshot(&rt, &db, &chat, baseline, true);
+        if s.busy {
+            started = true;
+            retry.reset();
+            said_retrying = false;
+        }
+        let begun_turn = started || s.max_id > baseline;
         if s.blocked.is_some() {
             // Only Helm's window can answer an approval, a plan or a trust prompt: the speaker
             // is told that once, and the answer follows when the turn ends.
@@ -559,7 +571,22 @@ async fn mirror(
             up.status(&person, &turn, THINKING);
             said_thinking = true;
         }
-        let settled = s.turn_done.is_some() || s.stopped.is_some() || s.final_text.is_some();
+        if !s.busy && begun_turn && retry.holds(&s, true, helm_core::now_ms()) {
+            // Helm carries a stopped turn on by itself: say the retry line once and keep
+            // waiting for the continued turn's answer, instead of speaking the stop as final.
+            if !said_retrying {
+                if let Some(line) = s.stopped.as_ref().and_then(|st| st.status()) {
+                    up.status(&person, &turn, line);
+                }
+                said_retrying = true;
+            }
+            tokio::time::sleep(POLL).await;
+            continue;
+        }
+        // Settled once this exchange has something to say: its answer, or — once its own rows
+        // are in — its stop.
+        let settled =
+            s.turn_done.is_some() || s.final_text.is_some() || (begun_turn && s.stopped.is_some());
         if settled {
             // The chat stays busy while a message the user queued opens the next turn, and its
             // last streamed row is only in the transcript a moment after it stopped: two idle
@@ -581,12 +608,11 @@ async fn mirror(
     send(&up, &person, &turn, NOT_STARTED).await;
 }
 
-/// What to speak for a settled exchange: where it stopped on an error, that in words — never the
-/// half-answer the error cut short, and never the error row itself.
+/// What to speak for a settled exchange: the turn's answer if its transcript row already has
+/// one, then the last streamed words, and only then where it stopped on an error — an answer
+/// already written goes up before a stop, as the phone mirror sends its unsent answers first.
+/// Never the half-answer the error cut short, and never the error row itself.
 pub fn answer_of(s: &Snap) -> String {
-    if let Some(stop) = &s.stopped {
-        return stop.last_word();
-    }
     if let Some((_, text)) = &s.turn_done {
         if !text.trim().is_empty() {
             return text.clone();
@@ -596,6 +622,9 @@ pub fn answer_of(s: &Snap) -> String {
         if !text.trim().is_empty() {
             return text.clone();
         }
+    }
+    if let Some(stop) = &s.stopped {
+        return stop.last_word();
     }
     NOTHING_TO_SAY.to_owned()
 }
