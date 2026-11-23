@@ -8,7 +8,8 @@
 //!   tends an update that left its marker behind: once the update's setup process has ended,
 //!   whatever it did, Helm is started again ([`watch::decide_update`]) — this time with its
 //!   window showing, since the person clicked "Restart to update" and expects to see it. While
-//!   that setup is still at work the crash rule keeps off the restart ([`watch::update_waits`]).
+//!   that setup is still replacing files the crash rule keeps off the restart
+//!   ([`watch::update_waits`]).
 //! - **The hub line.** One outbound WebSocket to the hub's `/launcher` (the saved relay
 //!   addresses, LAN first, with the relay token), with backoff from 1 s up to 60 s, and 10 minutes
 //!   for an older hub that has no such line. It says whether Helm runs, and starts Helm when the

@@ -267,9 +267,9 @@ mod tests {
                 at_ms: 6_000
             })
         );
-        // The crash rule's guard: while the marker's setup is at work the restart belongs to
-        // the update rule, and only once that process has ended may the crash rule relaunch.
-        assert!(update_waits(&d, |_| true), "the setup is still at work");
+        // The crash rule's guard: while the marker's setup is still running the restart belongs
+        // to the update rule, and only once that process has ended may the crash rule relaunch.
+        assert!(update_waits(&d, |_| true), "the setup is still replacing files");
         assert!(!update_waits(&d, |_| false), "the setup has ended");
         helm_core::trail::clear_update_pending(&d);
         assert_eq!(helm_core::trail::read_update_pending(&d), None);
