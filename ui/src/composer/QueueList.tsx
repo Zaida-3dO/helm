@@ -1,6 +1,7 @@
 // In-flight messages: messages on their way (Sending), messages Claude holds unread (Pending, with
-// the reason it waits) with Withdraw, and messages known unsent (Not sent / Not delivered) with
-// Recover to the composer. Nothing sits here waiting for a turn to end. Each bubble shows the
+// the reason it waits — a queue hold's own line when there is one) with Withdraw, or with Start
+// anyway while the start waits on Claude's plan usage, and messages known unsent (Not sent / Not
+// delivered) with Recover to the composer. Nothing sits here waiting for a turn to end. Each bubble shows the
 // message's pictures and file references, as a sent bubble does: a message's attachments are
 // visible from the moment it is sent to the moment it settles. A message whose own row is already in
 // the transcript (a prompt that opens a turn is written as saved the moment it is handed over) is not
@@ -27,8 +28,10 @@ export interface QueueListProps {
   readOnly?: boolean;
   /** A chat on another device, and its live host answers: Withdraw and Recover travel there. */
   devOps?: RemoteChatOps;
-  /** Why an unread message waits (`waitReason`). */
+  /** Why an unread message waits (`waitReason`, or a queue hold's `holdLine`). */
   reason?: string;
+  /** The chat's start is held by Claude's plan windows: the waiting rows offer Start anyway. */
+  claudeHold?: boolean;
   /** The rows the transcript holds: a message with its own row there is not listed again. */
   rows?: readonly MessageRow[];
 }
@@ -78,6 +81,15 @@ export function QueueItem({ item, ops, chatId, readOnly = false, devOps }: { ite
             Recover
           </button>
         )}
+        {/* The chat's start is held by Claude's plan usage: the user's override opens this
+            waiting send once. It rides the chat's own ops, so on a chat that runs on another
+            PC (live devOps) the button stays back — that hold can only be forced from the
+            chat's own PC, where its queue lives. */}
+        {!readOnly && !devOps && actions.includes('startAnyway') && (
+          <button type="button" className="pill-btn" data-testid="queue-start-anyway" title="Start this chat now, even while Claude's plan limit holds it" onMouseDown={(e) => e.preventDefault()} onClick={() => void ops.startAnyway(chatId).catch(() => undefined)}>
+            Start anyway
+          </button>
+        )}
       </div>
       <div className="queue-bubble" data-page={s.pageTitle || undefined}>
         {s.pageTitle && (
@@ -94,12 +106,12 @@ export function QueueItem({ item, ops, chatId, readOnly = false, devOps }: { ite
 }
 
 /** The in-flight messages of a chat, ready to show; empty when none is. */
-export function inFlightItems(pending: Submission[], thread: ThreadState | null, reason?: string, rows?: readonly MessageRow[]): InFlightView[] {
-  return inFlightView(pending, { capabilities: thread?.capabilities ?? DEFAULT_CAPS, reason, rows });
+export function inFlightItems(pending: Submission[], thread: ThreadState | null, reason?: string | null, rows?: readonly MessageRow[], claudeHold?: boolean): InFlightView[] {
+  return inFlightView(pending, { capabilities: thread?.capabilities ?? DEFAULT_CAPS, reason: reason ?? undefined, claudeHold, rows });
 }
 
-export function QueueList({ pending, thread, ops, chatId, readOnly = false, devOps, reason, rows }: QueueListProps) {
-  const items = inFlightItems(pending, thread, reason, rows);
+export function QueueList({ pending, thread, ops, chatId, readOnly = false, devOps, reason, claudeHold, rows }: QueueListProps) {
+  const items = inFlightItems(pending, thread, reason, rows, claudeHold);
   if (!items.length) return null;
   return (
     <div className="queue" data-testid="queue">

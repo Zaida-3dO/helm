@@ -74,9 +74,10 @@ breaks those checks, so change them only together with the checks. Everything el
 | `plan-button` | Plan approval option | `data-option` = `Approve plan` or `Keep planning` |
 | `queue-item` | One in-flight message, drawn as the last item of the transcript (stacked above the composer when the transcript is not at its newest page) | `data-state` (`pending` `sending` `uncertain` `failed`), `data-tone` (`amber` `muted` `error`), `data-submission` |
 | `queue-pending` | The "Pending" label of an unread asap steer | |
-| `queue-reason` | Why a pending message waits ("Waiting for Bash to finish", else "Claude reads it at its next step") | |
+| `queue-reason` | Why a pending message waits: the queue hold's own line when the chat's start waits (Claude's plan allowance with its opening time, or the chat limit), else "Waiting for Bash to finish", else "Claude reads it at its next step" | |
 | `queue-withdraw` | Withdraw on a pending steer (only when the worker can withdraw) | |
 | `queue-recover` | Recover an unsent message back to the composer | |
+| `queue-start-anyway` | Start anyway on a message waiting while Claude's plan usage holds the chat's start: force-starts the chat's held send exactly once | |
 | `background-chip` | Background-tasks chip in the activity dock | `data-count` = number of tasks |
 | `activity-dock` | The live activity dock | |
 | `dock-loading` | The activity dock's second line while a local model is being loaded (its first line is the host's "Loading <model>…"); `data-phase` is `loading` | |

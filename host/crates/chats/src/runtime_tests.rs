@@ -2022,8 +2022,13 @@ async fn sends_beyond_the_active_cap_wait_in_the_queue_and_open_when_one_frees()
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_used_up_plan_allowance_holds_a_start_and_the_reset_releases_it() {
     use crate::submit::{host_send, HostSend};
-    let mut h = harness();
-    let seed = |h: &H, pct: f64, reset_in: i64| {
+    // The state mirror is written on the maintenance tick, and the queued hold must be seen
+    // before the window's four-second reset lifts it: run the tick fast.
+    let mut h = harness_with(Limits {
+        tick: Duration::from_millis(50),
+        ..limits()
+    });
+    let seed = |h: &H, pct: f64, reset_in: i64| -> i64 {
         let now = helm_core::now_ms();
         let body = json!({ "fiveHour": { "pct": pct, "at": now, "resetsAt": now + reset_in } });
         h.db.write(move |tx| {
@@ -2039,9 +2044,10 @@ async fn a_used_up_plan_allowance_holds_a_start_and_the_reset_releases_it() {
             Ok::<_, rusqlite::Error>(())
         })
         .unwrap();
+        now
     };
     // A window that resets in four seconds: the wait is real but short.
-    seed(&h, 96.0, 4_000);
+    let seed_at = seed(&h, 96.0, 4_000);
     let chat = h.create().await;
     let (sid, _) = h.send(&chat, "hold me", "default").await;
     h.until("the start waits with the allowance as its reason", |h| {
@@ -2050,6 +2056,21 @@ async fn a_used_up_plan_allowance_holds_a_start_and_the_reset_releases_it() {
             && h.col(&format!(
                 "SELECT reason FROM chat_dispatch_holds WHERE chat_id = '{chat}'"
             )) == ["claude_capacity"]
+    })
+    .await;
+    // The queued state the UI reads carries the hold's words with it: why, how full, and when
+    // the gating window reopens.
+    h.until("the queued state names the hold and its opening time", |h| {
+        let s = serde_json::from_str::<Value>(
+            &h.col(&format!(
+                "SELECT COALESCE(state, 'null') FROM chat_activity WHERE chat_id = '{chat}'"
+            ))[0],
+        )
+        .unwrap();
+        s["kind"] == "queued"
+            && s["reason"] == "claude_capacity"
+            && s["pct"] == 96.0
+            && s["until"] == json!(seed_at + 4_000)
     })
     .await;
     h.until("the reset clears the hold", |h| {
@@ -2091,6 +2112,95 @@ async fn a_used_up_plan_allowance_holds_a_start_and_the_reset_releases_it() {
         ["0"],
         "an interactive start is never parked"
     );
+}
+
+/// Start anyway forces exactly one held send through a full Claude window: the same saved send
+/// opens its turn while the windows still read full, the next send after it waits again, and a
+/// chat that does not wait on the windows is refused in words.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_anyway_opens_one_held_send_and_the_next_start_waits_again() {
+    let mut h = harness();
+    let now = helm_core::now_ms();
+    // A window that will not reopen for an hour: nothing releases on its own in this test.
+    let body = json!({ "weekly": { "pct": 95.0, "at": now, "resetsAt": now + 3_600_000 } });
+    h.db.write(move |tx| {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS plan_usage (\
+                 id INTEGER PRIMARY KEY CHECK (id = 1), body TEXT NOT NULL, \
+                 updated_at INTEGER NOT NULL);",
+        )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO plan_usage(id, body, updated_at) VALUES (1, ?1, ?2)",
+            rusqlite::params![body.to_string(), now],
+        )?;
+        Ok::<_, rusqlite::Error>(())
+    })
+    .unwrap();
+    let chat = h.create().await;
+    // A chat that waits on nothing cannot be forced through it.
+    let idle = h.create().await;
+    let refused = h
+        .call("queue_action", json!({"chatId": idle, "action": "start_anyway"}))
+        .await
+        .unwrap_err();
+    assert!(
+        refused.message.contains("not waiting"),
+        "refusal names the reason: {}",
+        refused.message
+    );
+    // A hand park is the user's to end, not to force through.
+    crate::queue::manual_hold(&h.db, &idle, "normal", now);
+    let refused = h
+        .call("queue_action", json!({"chatId": idle, "action": "start_anyway"}))
+        .await
+        .unwrap_err();
+    assert!(
+        refused.message.contains("hand-held"),
+        "refusal names the reason: {}",
+        refused.message
+    );
+    crate::queue::clear_hold(&h.db, &idle);
+
+    let (sid, _) = h.send(&chat, "force me", "default").await;
+    h.until("the send waits on the windows", |h| {
+        h.status(&chat) == "starting"
+            && h.state(&sid) == "saved"
+            && h.col(&format!(
+                "SELECT reason FROM chat_dispatch_holds WHERE chat_id = '{chat}'"
+            )) == ["claude_capacity"]
+    })
+    .await;
+    // Start anyway: the held send goes through the gate at once, windows and all.
+    h.call("queue_action", json!({"chatId": chat, "action": "start_anyway"}))
+        .await
+        .unwrap();
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    assert_eq!(p["submissionId"], sid.as_str(), "the same send opens the turn");
+    h.until("the hold and its reason go once it opens", |h| {
+        h.col(&format!(
+            "SELECT count(*) FROM chat_dispatch_holds WHERE chat_id = '{chat}'"
+        )) == ["0"]
+            && h.col(&format!(
+                "SELECT COALESCE(queue_reason, 'x') FROM chat_activity WHERE chat_id = '{chat}'"
+            )) == ["x"]
+    })
+    .await;
+    // The one-shot is spent: with the windows still full, the next start waits like anyone's.
+    w.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-force"}))
+        .await;
+    h.until("the forced turn ends", |h| h.status(&chat) == "idle")
+        .await;
+    let (sid2, _) = h.send(&chat, "again", "default").await;
+    h.until("the next start waits again", |h| {
+        h.status(&chat) == "starting"
+            && h.state(&sid2) == "saved"
+            && h.col(&format!(
+                "SELECT reason FROM chat_dispatch_holds WHERE chat_id = '{chat}'"
+            )) == ["claude_capacity"]
+    })
+    .await;
 }
 
 /// The queue line, moved by hand: to the front, parked until released, and sent back. Against a

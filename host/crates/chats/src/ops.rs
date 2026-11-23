@@ -159,9 +159,10 @@ fn queue_list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
 }
 
 /// `queue_action`: one move on one waiting start — `top`, `up`, `down`, `move`, `hold`,
-/// `release` or `cancel` — answering with the fresh summary. `move` takes a `beforeChatId`
-/// (or none, for the end of the line). `cancel` gives a waiting send back to its owner
-/// (typed text to the draft, as a refusal would); nothing is ever deleted.
+/// `release`, `cancel` or `start_anyway` (let a Claude-held start through the plan windows
+/// once) — answering with the fresh summary. `move` takes a `beforeChatId` (or none, for the
+/// end of the line). `cancel` gives a waiting send back to its owner (typed text to the draft,
+/// as a refusal would); nothing is ever deleted.
 fn queue_action(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: QueueActionArgs = parse_args(args)?;
     let rt = runtime(ctx)?;

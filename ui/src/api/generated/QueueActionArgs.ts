@@ -5,7 +5,7 @@
  */
 export type QueueActionArgs = { chatId: string, 
 /**
- * `top`, `up`, `down`, `move`, `hold`, `release` or `cancel`.
+ * `top`, `up`, `down`, `move`, `hold`, `release`, `cancel` or `start_anyway`.
  */
 action: string, 
 /**

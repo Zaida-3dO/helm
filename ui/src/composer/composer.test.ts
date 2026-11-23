@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveKey, sendTooltip, stopTooltip, type KeyContext, type KeyShape } from './keymap.ts';
 import { DRAFT_DEBOUNCE_MS, DraftSaver, nextRevision, type Timers } from './drafts.ts';
-import { inFlightView, waitReason } from './inFlight.ts';
+import { claudeHold, holdLine, inFlightView, waitReason } from './inFlight.ts';
 import { row, submission } from '../dev/fixtures.ts';
 import type { MessageRow } from '../api/types.ts';
 import { liveRuns, wrapMarker } from './markup.ts';
@@ -172,6 +172,38 @@ test('wait reason: the running tool of this turn, else the next step', () => {
     [[user, running('Bash', 2), steer, row({ id: 5, role: 'assistant', text: 'ok' })], 'Waiting for Bash to finish'],
     [[row({ id: 0, role: 'toolResult', toolName: 'Bash', status: 'streaming' }), user], 'Claude reads it at its next step'],
   ] as const) assert.equal(waitReason(rows as never), want, JSON.stringify(rows.map((r) => r.id)));
+});
+
+test('a Claude usage hold names the allowance and its opening time', () => {
+  const now = 1_763_000_000_000;
+  assert.equal(
+    holdLine({ kind: 'queued', reason: 'claude_capacity', pct: 95, until: now + 20 * 60_000 }, now),
+    "Waiting for Claude's plan allowance (95% used) — opens again in 20 min",
+  );
+  // A missing part says nothing about itself; the line still names the limit.
+  assert.equal(holdLine({ kind: 'queued', reason: 'claude_capacity' }, now), "Waiting for Claude's plan allowance");
+  assert.equal(
+    holdLine({ kind: 'queued', reason: 'at_limit', ahead: 1 }, now),
+    'Waiting for a chat place — Helm is running all its chats at once',
+  );
+  // Every other wait — and a chat that is not queued — keeps the generic line.
+  assert.equal(holdLine({ kind: 'queued', reason: 'local_cap', ahead: 2 }, now), null);
+  assert.equal(holdLine({ kind: 'queued' }, now), null);
+  assert.equal(holdLine({ kind: 'generating', since: now }, now), null);
+  assert.equal(holdLine(null, now), null);
+  // Only the Claude hold arms the override; the chat limit has no button, only its words.
+  assert.ok(claudeHold({ kind: 'queued', reason: 'claude_capacity' }));
+  assert.ok(!claudeHold({ kind: 'queued', reason: 'at_limit' }));
+  assert.ok(!claudeHold({ kind: 'queued' }));
+  assert.ok(!claudeHold(undefined));
+});
+
+test('a waiting message on a Claude hold offers Start anyway', () => {
+  const caps = { withdraw: true, deliverNow: true, stopTool: false, compact: false };
+  const v = inFlightView([submission({ id: 'p1', mode: 'prompt', state: 'saved' })], { capabilities: caps, claudeHold: true });
+  assert.deepEqual(v.map((i) => [i.submission.id, i.label, i.actions]), [['p1', 'Pending', ['startAnyway']]]);
+  // No hold: the same row offers nothing it did before.
+  assert.deepEqual(inFlightView([submission({ id: 'p2', mode: 'prompt', state: 'saved' })], { capabilities: caps })[0]!.actions, []);
 });
 
 test('a send to a device that is away waits and is handed over exactly once, keeping its submission id', () => {

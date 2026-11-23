@@ -5,4 +5,4 @@
  * the chat list and the agent tools, and the base of the silent check. `null` while no turn is
  * open. Only `silent` raises a flag; a queue wait is never one.
  */
-export type ChatState = { "kind": "queued", ahead?: number, } | { "kind": "generating", since: number, } | { "kind": "tool", name: string, since: number, } | { "kind": "waitingUser" } | { "kind": "silent", since: number, };
+export type ChatState = { "kind": "queued", ahead?: number, reason?: string, pct?: number, until?: number, } | { "kind": "generating", since: number, } | { "kind": "tool", name: string, since: number, } | { "kind": "waitingUser" } | { "kind": "silent", since: number, };

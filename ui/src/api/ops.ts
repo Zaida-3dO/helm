@@ -2,7 +2,7 @@
 
 import type { Api } from './client.ts';
 import { buildActionSend } from '../actions/send.ts';
-import type { ChatFindResult, ChatStack, StackFindResult } from './generated/index.ts';
+import type { ChatFindResult, ChatStack, QueueSummary, StackFindResult } from './generated/index.ts';
 import type {
   AttentionSummary,
   ChatRecord,
@@ -174,6 +174,9 @@ export function chatOps(api: Api) {
     /** Try this chat's waiting sign-in retry at the next look instead of after its backoff.
      *  The host refuses plainly when nothing is pending. */
     retryNow: (chatId: string) => api<{ scheduled: boolean }>('chat_retry_now', { chatId }),
+    /** Start anyway: force this chat's one waiting send past the Claude plan hold (a per-chat
+     *  one-shot on the host; it refuses a chat that does not wait on the plan windows). */
+    startAnyway: (chatId: string) => api<QueueSummary>('queue_action', { chatId, action: 'start_anyway' }),
     /** Whether the idle check is on (it is until switched off). */
     triageEnabled: async () => (await api<{ enabled?: boolean } | null>('preference_get', { key: 'taskTriage' }))?.enabled !== false,
     /** The idle check's switch, alert delay (minutes) and custom prompt ('' for the built-in one). */

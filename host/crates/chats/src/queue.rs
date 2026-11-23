@@ -693,11 +693,39 @@ pub fn action(
                 clear_hold(db, chat_id);
             }
         }
+        "start_anyway" => {
+            let Some(row) = row else {
+                return Err(ApiError::new(
+                    "refused",
+                    "That chat is not waiting in the queue.",
+                ));
+            };
+            if row.reason == MANUAL {
+                return Err(ApiError::new(
+                    "refused",
+                    "A hand-held chat waits until you release it.",
+                ));
+            }
+            if row.reason != CLAUDE_CAPACITY {
+                return Err(ApiError::new(
+                    "refused",
+                    "That chat does not wait on Claude's plan windows; Start anyway would not change its wait.",
+                ));
+            }
+            // The actor re-asks its gate at once with the windows answered open; the one-shot
+            // lives with the actor and the start that goes spends it.
+            if rt.command(chat_id, crate::actor::Cmd::QueueStartAnyway).is_err() {
+                return Err(ApiError::new(
+                    "refused",
+                    "That chat is not waiting to start right now.",
+                ));
+            }
+        }
         other => {
             return Err(ApiError::new(
                 "bad_args",
                 format!(
-                    "The queue knows no action \"{other}\" (top, up, down, move, hold, release, cancel)."
+                    "The queue knows no action \"{other}\" (top, up, down, move, hold, release, cancel, start_anyway)."
                 ),
             ))
         }

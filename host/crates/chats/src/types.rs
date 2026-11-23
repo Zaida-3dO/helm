@@ -66,13 +66,25 @@ pub enum Harness {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum ChatState {
-    /// A local chat whose turn is open while the model server answers something else: how many
-    /// of Helm's own local chats would be answered first (`null` when the count is not known).
+    /// A turn start that waits at its chat's start: how many of Helm's own chats would be
+    /// answered first (`null` when the count is not known); why it waits, the same reason the
+    /// queue keeps ([`crate::queue`]); and for a Claude hold the gating plan window's percent
+    /// used and when it reopens, so the copy can name both.
     Queued {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         #[ts(optional)]
         #[ts(type = "number")]
         ahead: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        #[ts(optional)]
+        reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        #[ts(optional)]
+        pct: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        #[ts(optional)]
+        #[ts(type = "number")]
+        until: Option<i64>,
     },
     /// The model is answering: `since` is the last output, Unix ms.
     Generating {
@@ -249,7 +261,7 @@ pub struct QueueSummary {
 #[serde(rename_all = "camelCase")]
 pub struct QueueActionArgs {
     pub chat_id: String,
-    /// `top`, `up`, `down`, `move`, `hold`, `release` or `cancel`.
+    /// `top`, `up`, `down`, `move`, `hold`, `release`, `cancel` or `start_anyway`.
     pub action: String,
     /// For `move`: stand just before this waiting chat (at the end when given as none).
     #[serde(default)]

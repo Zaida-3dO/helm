@@ -4,8 +4,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatOps } from '../api/ops.ts';
 import type { RemoteChatOps } from '../api/devices.ts';
-import type { MessageRow, SessionMark, Submission, ThreadState } from '../api/types.ts';
-import { waitReason } from '../composer/inFlight.ts';
+import type { ChatState, MessageRow, SessionMark, Submission, ThreadState } from '../api/types.ts';
+import { claudeHold, holdLine, waitReason } from '../composer/inFlight.ts';
 import { QueueItem, inFlightItems } from '../composer/QueueList.tsx';
 import { FoldRow, Row, type RowContext } from './Rows.tsx';
 import { VirtualList } from './VirtualList.tsx';
@@ -30,7 +30,7 @@ export interface TranscriptProps {
    * Messages in flight, shown as the last items of the flow (their keys start `q:`). Leave out for
    * a transcript that is not at its newest page: they could not sit at the end of it.
    */
-  queue?: { pending: Submission[]; thread: ThreadState | null; ops: ChatOps; readOnly: boolean; devOps?: RemoteChatOps };
+  queue?: { pending: Submission[]; thread: ThreadState | null; ops: ChatOps; readOnly: boolean; devOps?: RemoteChatOps; chatState?: ChatState | null };
 }
 
 /** A queued message's height before it is measured: a pill and a short bubble. */
@@ -68,8 +68,10 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
     }
     return m;
   }, [items]);
+  // A held start names itself: the queue hold's line beats what the rows say, and a Claude
+  // hold arms the waiting messages' Start anyway button.
   const queued = useMemo(
-    () => (queue ? inFlightItems(queue.pending, queue.thread, waitReason(rows), rows) : []),
+    () => (queue ? inFlightItems(queue.pending, queue.thread, holdLine(queue.chatState, Date.now()) ?? waitReason(rows), rows, claudeHold(queue.chatState)) : []),
     [queue, rows],
   );
   const keys = useMemo(() => [...items.map(itemKey), ...queued.map((q) => `q:${q.submission.id}`)], [items, queued]);

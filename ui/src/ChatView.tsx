@@ -14,7 +14,7 @@ import { deviceOps } from './devices/api.ts';
 import { forwardLine } from './settings/devices/model.ts';
 import { autoOpenPicks, type ForwardRef } from './transcript/cards.ts';
 import type { SendShortcut } from './composer/keymap.ts';
-import { waitReason } from './composer/inFlight.ts';
+import { claudeHold, holdLine, waitReason } from './composer/inFlight.ts';
 import { QueueList } from './composer/QueueList.tsx';
 import { LOCAL_WORKING_LABEL, isLocalModelId, localWaitLabel } from './state/localModel.ts';
 import type { Flushers } from './shell/quit.ts';
@@ -275,14 +275,16 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
   const latestAssistantId = useMemo(() => [...view.rows].reverse().find((r) => r.role === 'assistant')?.id ?? null, [view.rows]);
   const interactionOpen = (thread?.interactions.length ?? 0) > 0;
   const mentionRepo = useMentionRepo(shell.api, remote ? undefined : chat?.cwd);
+  // chatState rides along so the waiting lines can show the queue hold's own copy (and arm its
+  // Start anyway button) instead of only what the live rows say.
   const queue = useMemo(
     () =>
       view.hasNewer
         ? undefined
         : remote
-          ? { pending: view.pending, thread, ops, devOps, readOnly: !remote.state.live }
-          : { pending: view.pending, thread, ops, readOnly: false },
-    [view.hasNewer, view.pending, thread, ops, devOps, remote],
+          ? { pending: view.pending, thread, ops, devOps, readOnly: !remote.state.live, chatState: chat?.state ?? null }
+          : { pending: view.pending, thread, ops, readOnly: false, chatState: chat?.state ?? null },
+    [view.hasNewer, view.pending, thread, ops, devOps, remote, chat],
   );
   const ctx: RowContext = useMemo(
     () => ({
@@ -568,7 +570,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       ))}
       {!chat.sideSourceId && <FlagNote chatId={chatId} ops={ops} devOps={remote ? devOps : undefined} />}
       {/* A transcript that is not at its newest page cannot end with them, so they stack here. */}
-      {view.hasNewer && <QueueList pending={view.pending} thread={thread} ops={ops} chatId={chatId} readOnly={remote ? !remote.state.live : false} devOps={remote ? devOps : undefined} reason={waitReason(view.rows)} rows={view.rows} />}
+      {view.hasNewer && <QueueList pending={view.pending} thread={thread} ops={ops} chatId={chatId} readOnly={remote ? !remote.state.live : false} devOps={remote ? devOps : undefined} reason={holdLine(chat?.state, Date.now()) ?? waitReason(view.rows)} claudeHold={claudeHold(chat?.state)} rows={view.rows} />}
       </div>
       {/* The activity line sits directly on the box, below the in-flight messages. */}
       {thread && <ActivityDock chat={chat} thread={thread} turnStartedAt={turnStartedAt} onStopTool={stopTool} rows={view.hasNewer ? undefined : view.rows} runEndedAt={view.lastRunEndedAt} />}

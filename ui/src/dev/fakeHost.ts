@@ -132,16 +132,18 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     { chatId: 'dev-queue-chat', title: 'Waiting chat', reason: 'local_cap', class: 'normal', serverId: 'strata', since: 0, top: false },
     { chatId: 'dev-queue-chat-2', title: 'Another waiting chat', reason: 'local_cap', class: 'normal', serverId: 'strata', since: 0, top: false },
     { chatId: 'dev-queue-chat-3', title: 'A parked chat', reason: 'manual', class: 'normal', serverId: null, since: 0, top: false },
+    { chatId: 'dev-queue-chat-4', title: 'Held by the plan limit', reason: 'claude_capacity', class: 'normal', serverId: null, since: 0, top: false },
   ];
   const fakeQueueList = () => ({
     entries: fakeHolds.map((h) => ({ ...h, since: Date.now() - 60_000 })),
     servers: [{ serverId: 'strata', working: 3, queued: fakeHolds.filter((h) => h.serverId === 'strata').length }],
-    claudeQueued: 0,
-    claudeFull: false,
-    claudeUntil: null,
+    claudeQueued: fakeHolds.filter((h) => h.reason === 'claude_capacity').length,
+    claudeFull: true,
+    claudeUntil: Date.now() + 40 * 60_000,
   });
   const fakeQueueAct = (chatId: string, action: string, beforeChatId?: string) => {
     if (action === 'cancel' || action === 'release') fakeHolds = fakeHolds.filter((h) => h.chatId !== chatId);
+    else if (action === 'start_anyway') fakeHolds = fakeHolds.filter((h) => !(h.chatId === chatId && h.reason === 'claude_capacity'));
     else if (action === 'hold') fakeHolds = fakeHolds.map((h) => (h.chatId === chatId ? { ...h, reason: 'manual', serverId: null } : h));
     else if (action === 'release') fakeHolds = fakeHolds.map((h) => (h.chatId === chatId ? { ...h, reason: 'local_cap' } : h));
     else if (action === 'top') fakeHolds = fakeHolds.map((h) => (h.chatId === chatId ? { ...h, top: true } : h));

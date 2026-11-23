@@ -82,6 +82,10 @@ pub(crate) enum Cmd {
         /// The chat stands parked by hand: what waits goes back, the park stays.
         keep_park: bool,
     },
+    /// The queue's Start anyway: this chat's waiting send goes ahead even while the Claude plan
+    /// windows read full. A per-chat one-shot — the start it opens consumes it, so the next
+    /// send is held again like anyone else's.
+    QueueStartAnyway,
     /// The maintenance tick: refresh the chat's live state, and mark it stalled if it has had
     /// no output for `after` (longer for a chat on a local model server, which answers one
     /// request at a time and gaps between outputs in between).
@@ -334,6 +338,10 @@ struct Actor {
     /// of working chats: the opening submission and those held behind it. The maintenance tick
     /// reopens it when a place frees.
     start_wait: Option<(String, Vec<String>)>,
+    /// The queue's Start anyway, waiting to be spent: the next gate look for this chat answers
+    /// the Claude plan windows as open, and the start that goes consumes it. Only this chat,
+    /// only that one send.
+    start_anyway: bool,
     prepare_count: u64,
     /// The submission that is opening its turn now that its preparation is done.
     opening: Option<String>,
@@ -506,6 +514,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         me: tx.downgrade(),
         prepare: None,
         start_wait: None,
+        start_anyway: false,
         prepare_count: 0,
         opening: None,
         prepared: None,
@@ -1929,9 +1938,19 @@ impl Actor {
             // A turn start held at the chat's start — by the server's cap, the plan windows or
             // the app's limit — is queued whoever counts the line.
             let live = self.live.lock().unwrap();
-            if live.hold_reason.is_some() || live.local_ahead.is_some() {
+            let reason = live.hold_reason;
+            if reason.is_some() || live.local_ahead.is_some() {
+                // A Claude hold carries the gating window's own words: how full it reads and
+                // when it reopens. The reading is the gate's (`capacity`); unknown answers
+                // nothing, exactly as in the gate.
+                let cap = (reason == Some(crate::queue::CLAUDE_CAPACITY))
+                    .then(|| helm_core::usage_windows::capacity(&self.sh.db, now()))
+                    .flatten();
                 return Some(ChatState::Queued {
                     ahead: live.local_ahead.filter(|a| *a >= 0),
+                    reason: reason.map(str::to_owned),
+                    pct: cap.map(|c| c.pct),
+                    until: cap.and_then(|c| c.until),
                 });
             }
         }
@@ -2668,6 +2687,8 @@ impl Actor {
                 self.set_local_ahead(None);
                 self.set_held_at_start(false);
                 self.set_queue_reason(None);
+                // With the wait gone there is nothing for a Start anyway to force.
+                self.start_anyway = false;
                 self.live.lock().unwrap().hold_class = None;
                 if !keep_park {
                     crate::queue::clear_hold(&self.sh.db, &self.chat_id);
@@ -2679,6 +2700,21 @@ impl Actor {
                     self.end_run(ChatStatus::Idle, None, "cancelled");
                 }
                 self.emit_pending();
+            }
+            Cmd::QueueStartAnyway => {
+                // The user overrode the Claude hold for this chat's waiting send: ask the gate
+                // again at once, with the windows answered open. The Go path consumes the
+                // one-shot; a start that still waits for another reason keeps it for its start.
+                // The flag arms only while the chat really is held by the Claude windows with a
+                // send waiting at its start: a hold row left by a worker crash has no send to
+                // open, and an armed flag with nothing to spend it would drift onto the chat's
+                // next send.
+                if self.live.lock().unwrap().hold_reason == Some(crate::queue::CLAUDE_CAPACITY) {
+                    if let Some((sid, held)) = self.start_wait.take() {
+                        self.start_anyway = true;
+                        self.restart_prepare(sid, held);
+                    }
+                }
             }
             Cmd::Retire => {
                 if self.link.is_none() {
@@ -3340,9 +3376,12 @@ impl Actor {
             None => (0, self.plan_line(), usize::MAX),
         };
         // The plan windows answer only for chats that run on Claude; local chats cost the plan
-        // nothing.
-        let claude_full =
-            local.is_none() && helm_core::usage_windows::claude_full(&self.sh.db, now()).is_some();
+        // nothing. A Start anyway lets exactly its own chat's one start through while they read
+        // full (the Go path spends it); it never reaches an interactive start, which the
+        // windows answer in words instead of queueing.
+        let claude_full = local.is_none()
+            && !(self.start_anyway && class != queue::QueueClass::Interactive)
+            && helm_core::usage_windows::claude_full(&self.sh.db, now()).is_some();
         let at_limit = self.working_chats() >= self.sh.cfg.limits.max_active;
         (
             class,
@@ -3451,6 +3490,8 @@ impl Actor {
             crate::queue::Verdict::Go => {
                 crate::queue::clear_auto_hold(&self.sh.db, &self.chat_id);
                 self.set_queue_reason(None);
+                // A Start anyway has done its one job, whatever else decided this start.
+                self.start_anyway = false;
                 self.live.lock().unwrap().hold_class = None;
                 // A chat that waited is a working chat from here on, Claude or local, so the
                 // cap counts it.

@@ -2,7 +2,8 @@
 // each one is shown and which actions it offers. Nothing here waits for a turn to end: a
 // message is in flight until Claude has read it or it has been put back to the composer.
 
-import type { Capabilities, MessageRow, Submission } from '../api/types.ts';
+import type { Capabilities, ChatState, MessageRow, Submission } from '../api/types.ts';
+import { untilText } from '../queue/model.ts';
 import { toolArgs, toolIdentity, toolLabel, toolStatus } from '../transcript/toolKinds.ts';
 
 export type InFlightState = 'pending' | 'sending' | 'uncertain' | 'failed';
@@ -20,17 +21,40 @@ export interface InFlightView {
 
 export type InFlightTone = 'muted' | 'amber' | 'error';
 
-export type InFlightAction = 'withdraw' | 'recover';
+export type InFlightAction = 'withdraw' | 'recover' | 'startAnyway';
 
 export interface InFlightContext {
   capabilities: Capabilities;
-  /** What an unread message is waiting behind (`waitReason`); defaults to the plain sentence. */
+  /** What an unread message is waiting behind (`waitReason`, or a queue hold's line from
+   * `holdLine`); defaults to the plain sentence. */
   reason?: string;
+  /** The chat's start is held by Claude's plan windows (`claudeHold`): each waiting message
+   * offers Start anyway. */
+  claudeHold?: boolean;
   /** The rows the transcript holds. A message whose own row is among them is not listed again. */
   rows?: readonly MessageRow[];
 }
 
 const NEXT_STEP = 'Claude reads it at its next step';
+
+/** The live state of a start the Claude plan windows hold: the one case Start anyway answers. */
+export function claudeHold(state: ChatState | null | undefined): boolean {
+  return state?.kind === 'queued' && state.reason === 'claude_capacity';
+}
+
+/** The queued state's own waiting line, in plain English: a Claude hold names the allowance,
+ *  how full it reads and when it opens; the app's chat limit says what it is. Any other wait
+ *  (and a chat that is not queued) answers null and keeps the generic line. */
+export function holdLine(state: ChatState | null | undefined, now: number): string | null {
+  if (state?.kind !== 'queued') return null;
+  if (state.reason === 'claude_capacity') {
+    const used = state.pct != null ? ` (${Math.round(state.pct)}% used)` : '';
+    const opens = state.until != null ? ` — opens again ${untilText(state.until, now)}` : '';
+    return `Waiting for Claude's plan allowance${used}${opens}`;
+  }
+  if (state.reason === 'at_limit') return 'Waiting for a chat place — Helm is running all its chats at once';
+  return null;
+}
 
 /**
  * Why a message Claude holds unread has not been read yet. Claude reads a message between steps,
@@ -112,6 +136,8 @@ export function inFlightView(pending: Submission[], ctx: InFlightContext): InFli
     // Withdraw only while Claude holds it unread; Recover only once it is known unsent.
     if (state === 'pending' && s.state === 'accepted' && ctx.capabilities.withdraw) actions.push('withdraw');
     if (state === 'uncertain' || state === 'failed') actions.push('recover');
+    // A start the plan windows hold: the user may force this one send through.
+    if (state === 'pending' && ctx.claudeHold) actions.push('startAnyway');
     return { submission: s, state, label: LABELS[state], reason: state === 'pending' ? (ctx.reason ?? NEXT_STEP) : null, tone: toneOf(state), actions };
   });
 }
