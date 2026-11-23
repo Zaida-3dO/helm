@@ -54,11 +54,12 @@ async fn update(ctx: ToolCtx, a: Value) -> ToolResult {
     }
 }
 
-/// Whether the newest thing put into the calling chat is the owner's own words: typed here, typed
-/// on another of their PCs, an answer, or a send from a notification. Helm's own `app` notes are
-/// skipped, so a later system note never hides what the person (or a page) last said. Anything
-/// else — a page, another chat, Telegram, voice, a speaker, a schedule, an action — or nothing at
-/// all, is no say-so to restart the app.
+/// Whether the newest thing put into the calling chat is the owner's own say-so: typed here, typed
+/// on another of their PCs, an answer, a send from a notification, their own Telegram or phone
+/// voice (so they can update Helm while away from the PC), or another of their chats (an agent
+/// chain they started, which could run the setup by hand anyway). Helm's own `app` notes are
+/// skipped, so a later system note never hides what last came in. A page, a room speaker anyone
+/// can talk to, a schedule, an action, or nothing at all, is no say-so to restart the app.
 fn owner_say_so(ctx: &ToolCtx) -> Result<(), ToolError> {
     const REFUSE: &str = "Ask the user to type that they want Helm updated in this chat, \
                           then call install again.";
@@ -80,7 +81,8 @@ fn owner_say_so(ctx: &ToolCtx) -> Result<(), ToolError> {
         .ok()
         .flatten();
     match origin.as_deref() {
-        Some("typed") | Some("remote") | Some("answer") | Some("notification") => Ok(()),
+        Some("typed") | Some("remote") | Some("answer") | Some("notification")
+        | Some("telegram") | Some("voice") | Some("other_chat") => Ok(()),
         _ => Err(ToolError::refused(REFUSE)),
     }
 }
@@ -108,7 +110,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
         .guidelines(
             "check: no arguments; the update folder, the running version, the newer setup found (if any) and any scan error.\n\
              install: Helm quits with drafts saved, the setup file runs, and Helm starts again by itself once that process ends — even if the setup failed. Your own turn ends with the app, so a lost reply is expected: never retry the install, run check afterwards instead.\n\
-             Only when the user explicitly asked for the update. The chat's newest non-system message must be your person's own words (typed, remote, an answer or a notification): if install is refused, ask them to type the request in this chat, then call it again. Never run a setup file yourself: this tool is the only path that drains the chats and leaves the note that brings Helm back.",
+             Only when the user explicitly asked for the update. The chat's newest non-system message must be your person's own say-so (typed here or on another of their PCs, an answer, a notification, their Telegram or phone voice, or another of their chats; a page, a room speaker or a schedule is refused): if install is refused, ask them to type the request in this chat, then call it again. Never run a setup file yourself: this tool is the only path that drains the chats and leaves the note that brings Helm back.",
         ),
         update,
     );
@@ -264,13 +266,19 @@ mod tests {
             ("a quick reply from a toast", &["notification"], true),
             ("a page wrote last", &["typed", "page"], false),
             (
-                "the person asked, then another chat wrote",
+                "another of their chats asked",
                 &["typed", "other_chat"],
-                false,
+                true,
             ),
             ("a speaker turn came in last", &["typed", "speaker"], false),
             ("a schedule wrote last", &["schedule"], false),
-            ("only a Telegram relay wrote", &["telegram"], false),
+            (
+                "they asked on Telegram, away from the PC",
+                &["telegram"],
+                true,
+            ),
+            ("they asked by phone voice", &["voice"], true),
+            ("an action button wrote last", &["typed", "action"], false),
             (
                 "a Helm note after a page's words does not hide them",
                 &["page", "app"],
