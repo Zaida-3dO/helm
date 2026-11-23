@@ -296,10 +296,19 @@ pub fn submission_id(turn: &str) -> String {
     uuid::Uuid::new_v8(b).to_string()
 }
 
+/// The room/area a speaker device names itself by, fit for the one-line note: cleaned like a
+/// chat title (control characters out, capped short) and with the bracket characters out too —
+/// the note is one line inside its own brackets, and a `]` from a device would close it early.
+fn clean_place(raw: Option<&str>) -> Option<String> {
+    let bare = raw?.replace(['[', ']'], "");
+    clean_title_name(Some(&bare))
+}
+
 /// The note on every speaker message: which speaker and room it came from, and how the answer is
 /// used. One bracketed line, hidden from the transcript.
 pub fn channel_note(room: Option<&str>, area: Option<&str>) -> String {
-    let where_ = match (room, area) {
+    let (room, area) = (clean_place(room), clean_place(area));
+    let where_ = match (room.as_deref(), area.as_deref()) {
         (Some(room), Some(area)) if room != area => format!("{room} / {area}"),
         (Some(one), _) | (_, Some(one)) => one.to_owned(),
         (None, None) => "the house".to_owned(),
@@ -385,6 +394,17 @@ mod tests {
         assert_eq!(
             channel_note(None, None),
             "[Speaker · the house · speak it, short, no markup]"
+        );
+        // Room and area arrive from the speaker device: brackets and line breaks in them never
+        // break the one-line note.
+        assert_eq!(
+            channel_note(Some("bed]\nroom [x"), Some("bed]")),
+            "[Speaker · bedroom x / bed · speak it, short, no markup]"
+        );
+        assert_eq!(
+            channel_note(Some("] ]"), None),
+            "[Speaker · the house · speak it, short, no markup]",
+            "a name left empty after cleaning falls back to the house"
         );
         assert_eq!(
             delivered_text(Some("study"), None, None, "  What time is it?  "),

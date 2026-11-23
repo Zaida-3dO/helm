@@ -746,9 +746,6 @@ impl Client {
         let _ = self.home_link.set(f);
     }
 
-    /// The hub person a down frame acts for. `Ok(None)`: it names none (an older hub, or a
-    /// person not yet linked) — the home profile's, as before. `Ok(Some)`: that person's.
-    /// `Err`: it names a person this PC does not act for, so nobody here could take it.
     /// A room speaker's turn: check it is this PC's business, take it once, and acknowledge it
     /// only once the sink has it stored. The hub keeps an unacknowledged turn and sends it again,
     /// so the same id must not be delivered twice.
@@ -824,6 +821,9 @@ impl Client {
         });
     }
 
+    /// The hub person a down frame acts for. `Ok(None)`: it names none (an older hub, or a
+    /// person not yet linked) — the home profile's, as before. `Ok(Some)`: that person's.
+    /// `Err`: it names a person this PC does not act for, so nobody here could take it.
     fn frame_person(&self, v: &Value) -> Result<Option<String>, ()> {
         let named = v
             .get("personId")
