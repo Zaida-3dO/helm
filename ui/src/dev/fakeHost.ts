@@ -850,25 +850,27 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     };
   }
 
+  // The Claude hold names a real chat, so the queue row's Open reaches a chat that carries
+  // the same hold: its waiting line (holdLine, Start anyway) and the host's parking of a
+  // send (chat_send) are then reachable in the dev fake. The chat sits idle like any seeded
+  // chat — arm_hold only shows it "starting" once a send is actually parked there.
   if (opts.seedRows) {
     const c = newChat('C:/Users/me/Documents/Coding/demo');
     c.chat.title = 'Seeded chat';
     seed(c, opts.seedRows);
-    // The Claude hold names this chat, so the queue row's Open reaches it and its own
-    // waiting line (holdLine, Start anyway) is reachable in the composer: the record carries
-    // the same hold as the queue row, the way the host's arm_hold leaves it.
+    c.chat = { ...c.chat, queueReason: 'claude_capacity', state: { kind: 'queued', reason: 'claude_capacity', pct: 96, until: Date.now() + 40 * 60_000 } };
     const held = fakeHolds.find((h) => h.reason === 'claude_capacity');
     if (held) {
       held.chatId = c.chat.id;
       held.title = c.chat.title;
     }
-    c.chat = {
-      ...c.chat,
-      status: 'starting',
-      queueReason: 'claude_capacity',
-      state: { kind: 'queued', reason: 'claude_capacity', pct: 96, until: Date.now() + 40 * 60_000 },
-    };
-    c.thread = { ...c.thread, status: 'starting' };
+  } else {
+    const c = newChat('C:/Users/me/Documents/Coding/plan-limit');
+    c.chat.title = 'Held by the plan limit';
+    seed(c, 3);
+    c.chat = { ...c.chat, queueReason: 'claude_capacity', state: { kind: 'queued', reason: 'claude_capacity', pct: 96, until: Date.now() + 40 * 60_000 } };
+    const held = fakeHolds.find((h) => h.reason === 'claude_capacity');
+    if (held) held.chatId = c.chat.id; // the same title already names it
   }
 
   // Settings → Usage governor: a calm stand-in. Save updates the settings and echoes them back.
@@ -1013,7 +1015,14 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         ...(sentRefs.length ? { refs: sentRefs } : {}),
       };
       if (c.chat.title === 'New chat') c.chat = { ...c.chat, title: text.slice(0, 40) };
-      if (!busy && isLocal(c) && /\[fit\]/i.test(text)) {
+      if (c.chat.state?.kind === 'queued') {
+        // The host's arm_hold: a queued chat keeps the send instead of opening a turn — it
+        // waits as a pending row, the chat shows starting with its queued state kept, and
+        // the queue's Start anyway (or the hold lifting) releases it into a turn.
+        c.pending = [...c.pending, s];
+        emitPending(c);
+        setStatus(c, 'starting');
+      } else if (!busy && isLocal(c) && /\[fit\]/i.test(text)) {
         // The host's fit check refusing a turn: no turn runs, a notice says why, and the text
         // and attachments come back to the composer.
         const unstage = () => {
