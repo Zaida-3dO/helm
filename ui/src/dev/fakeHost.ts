@@ -143,7 +143,22 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
   });
   const fakeQueueAct = (chatId: string, action: string, beforeChatId?: string) => {
     if (action === 'cancel' || action === 'release') fakeHolds = fakeHolds.filter((h) => h.chatId !== chatId);
-    else if (action === 'start_anyway') fakeHolds = fakeHolds.filter((h) => !(h.chatId === chatId && h.reason === 'claude_capacity'));
+    else if (action === 'start_anyway') {
+      fakeHolds = fakeHolds.filter((h) => !(h.chatId === chatId && h.reason === 'claude_capacity'));
+      // The chat's own hold lifts with its queue row, and one waiting send opens the turn.
+      const c = chats.get(chatId);
+      if (c) {
+        c.chat = { ...c.chat, state: null, queueReason: null };
+        setStatus(c, 'idle');
+        const next = c.pending.find((s) => s.state === 'accepted');
+        if (next) {
+          c.pending = c.pending.filter((s) => s !== next);
+          emitPending(c);
+          addRow(c, { role: 'user', text: next.text, sourceKey: next.id, details: { submissionId: next.id, ...sentExtras.get(next.id) } });
+          void runTurn(c, next.text);
+        }
+      }
+    }
     else if (action === 'hold') fakeHolds = fakeHolds.map((h) => (h.chatId === chatId ? { ...h, reason: 'manual', serverId: null } : h));
     else if (action === 'release') fakeHolds = fakeHolds.map((h) => (h.chatId === chatId ? { ...h, reason: 'local_cap' } : h));
     else if (action === 'top') fakeHolds = fakeHolds.map((h) => (h.chatId === chatId ? { ...h, top: true } : h));
@@ -839,6 +854,21 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     const c = newChat('C:/Users/me/Documents/Coding/demo');
     c.chat.title = 'Seeded chat';
     seed(c, opts.seedRows);
+    // The Claude hold names this chat, so the queue row's Open reaches it and its own
+    // waiting line (holdLine, Start anyway) is reachable in the composer: the record carries
+    // the same hold as the queue row, the way the host's arm_hold leaves it.
+    const held = fakeHolds.find((h) => h.reason === 'claude_capacity');
+    if (held) {
+      held.chatId = c.chat.id;
+      held.title = c.chat.title;
+    }
+    c.chat = {
+      ...c.chat,
+      status: 'starting',
+      queueReason: 'claude_capacity',
+      state: { kind: 'queued', reason: 'claude_capacity', pct: 96, until: Date.now() + 40 * 60_000 },
+    };
+    c.thread = { ...c.thread, status: 'starting' };
   }
 
   // Settings → Usage governor: a calm stand-in. Save updates the settings and echoes them back.

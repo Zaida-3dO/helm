@@ -83,7 +83,7 @@ export function serverLine(working: number, queued: number): string {
 export function claudeLine(summary: QueueSummary, now: number): string {
   if (summary.claudeFull) {
     const until = summary.claudeUntil != null ? untilText(summary.claudeUntil, now) : null;
-    return until ? `Claude's allowance is used up; starts wait until ${until}.` : "Claude's allowance is used up; starts wait for it to reopen.";
+    return until ? `Claude's allowance is used up — new chats start again ${until}.` : "Claude's allowance is used up — new chats start again when the window reopens.";
   }
   if (summary.claudeQueued > 0) {
     return `${summary.claudeQueued} waiting for a place to open.`;

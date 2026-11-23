@@ -81,7 +81,9 @@ test('the summary lines read in plain words', () => {
   assert.equal(serverLine(3, 1), '3 working, 1 waiting');
   assert.equal(serverLine(0, 4), '0 working, 4 waiting');
   const now = 1_000_000_000_000;
-  assert.match(claudeLine(s({ claudeFull: true, claudeUntil: now + 30 * 60_000 }), now), /used up; starts wait until in 30 min/);
+  assert.match(claudeLine(s({ claudeFull: true, claudeUntil: now + 30 * 60_000 }), now), /used up — new chats start again in 30 min/);
+  assert.match(claudeLine(s({ claudeFull: true, claudeUntil: now + 120 * 60_000 }), now), /used up — new chats start again at \d\d:\d\d/);
+  assert.equal(claudeLine(s({ claudeFull: true }), now), "Claude's allowance is used up — new chats start again when the window reopens.");
   assert.match(claudeLine(s({ claudeQueued: 2 }), now), /2 waiting for a place to open/);
   assert.equal(claudeLine(s({}), now), 'Nothing is waiting on Claude.');
   assert.equal(queueCount(null), 0);
