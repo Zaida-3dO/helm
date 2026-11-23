@@ -191,7 +191,7 @@ pub fn chat_send(
     }
     enum Out {
         Repeat(Submission),
-        New(Submission, bool, Option<bool>),
+        New(Submission, bool, Option<(bool, crate::titles::Parked)>),
     }
     let out = rt
         .db()
@@ -353,13 +353,21 @@ pub fn chat_send(
                 }
             }
             emit_pending(rt, &a.chat_id);
-            if let Some(forked) = title_job {
+            if let Some((forked, parked)) = title_job {
                 // The job is made from the person's own words: lines Helm put in front of the
                 // message (the PC it was typed on, the phone's notes) never name the chat.
+                // A failed job is retried from the chat's first real request, not from this
+                // send's words: the send after a failure is usually a short reply, and the
+                // failure was Helm's, not the chat's.
+                let request = match parked {
+                    crate::titles::Parked::Failed => crate::titles::first_substantive(rt, &a.chat_id)
+                        .unwrap_or_else(|| s.text.clone()),
+                    _ => s.text.clone(),
+                };
                 crate::titles::start(
                     rt,
                     &a.chat_id,
-                    crate::titles::job(crate::titles::unframed(&s.text), None, forked),
+                    crate::titles::job(crate::titles::unframed(&request), None, forked),
                 );
             }
             s
@@ -746,11 +754,19 @@ fn host_send_inner(
         rt.command(s.chat_id, Cmd::Dispatch(s.submission_id.to_owned()))?;
         emit_pending(rt, s.chat_id);
         emit_chat(rt, s.chat_id);
-        if let (Some(forked), true) = (title_job.get(), stored_by_this_send.get()) {
+        if let (Some((forked, parked)), true) = (title_job.get(), stored_by_this_send.get()) {
+            // As in a typed send: a failed job is retried from the chat's first real request,
+            // not from this host-made message's words.
+            let request = match parked {
+                crate::titles::Parked::Failed => {
+                    crate::titles::first_substantive(rt, s.chat_id).unwrap_or_else(|| s.text.to_owned())
+                }
+                _ => s.text.to_owned(),
+            };
             crate::titles::start(
                 rt,
                 s.chat_id,
-                crate::titles::job(crate::titles::unframed(s.text), None, forked),
+                crate::titles::job(crate::titles::unframed(&request), None, forked),
             );
         }
     }

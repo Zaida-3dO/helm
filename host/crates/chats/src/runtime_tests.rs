@@ -4790,11 +4790,11 @@ async fn a_manual_rename_wins_and_a_failure_keeps_the_fallback() {
         .unwrap_err();
     assert_eq!(same.code, "unavailable");
     assert!(same.message.contains("timed out"), "{}", same.message);
-    // A failed title job is parked, not dead: the chat's next send starts a fresh job from that
-    // send's words, and the chat gets a name at last.
+    // A failed title job is parked, not dead: the chat's next send starts a fresh job, but the
+    // retry names the chat from its first real request, not from this send's words — the next
+    // send after a failure is usually a short reply like "ok", which must not become the name.
     *h.spawner.title.lock().unwrap() = Ok("Named after the retry".into());
-    h.send(&other, "and now name this chat properly", "steer")
-        .await;
+    h.send(&other, "ok", "steer").await;
     h.until("the retry names the chat", |h| {
         title_of(h, &other) == ("Named after the retry".into(), "generated/".into())
     })
@@ -4807,7 +4807,10 @@ async fn a_manual_rename_wins_and_a_failure_keeps_the_fallback() {
         .last()
         .cloned()
         .unwrap();
-    assert_eq!(retried["firstRequest"], "and now name this chat properly");
+    assert_eq!(
+        retried["firstRequest"], "second chat",
+        "the retry names the chat after its first request, not after \"ok\""
+    );
 }
 
 /// A message the host sends into a fresh chat (another chat's, a schedule's) names the chat as a

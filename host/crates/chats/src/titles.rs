@@ -706,22 +706,40 @@ pub fn run_helper_until(
     serde_json::from_str(out.trim()).map_err(|_| "the helper's answer was not JSON".to_owned())
 }
 
+/// What an earlier send left parked: a greeting that waits for a real request, or a title helper
+/// that failed. `None` when nothing waits.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Parked {
+    None,
+    Greeting,
+    Failed,
+}
+
 /// Whether this send should start a title job: the chat's first submission while it is still
 /// "New chat" with no messages, a fork's first submission, or the first send after a greeting or
-/// after a title job that failed (a parked `greeting` or `failed` job). Called inside the send's
-/// transaction, before the submission is written.
+/// after a title job that failed (a parked `greeting` or `failed` job). It also answers which job
+/// is parked, so a failed one can be retried from the chat's real request instead of from this
+/// send's words. Called inside the send's transaction, before the submission is written.
 pub(crate) fn wants_job(
     tx: &rusqlite::Transaction<'_>,
     chat_id: &str,
-) -> rusqlite::Result<Option<bool>> {
-    let (title, subs, users, forked, manual, parked): (String, i64, i64, bool, bool, bool) = tx
+) -> rusqlite::Result<Option<(bool, Parked)>> {
+    let (title, subs, users, forked, manual, parked): (
+        String,
+        i64,
+        i64,
+        bool,
+        bool,
+        Option<String>,
+    ) = tx
         .query_row(
         "SELECT c.title,
                 (SELECT count(*) FROM submissions s WHERE s.chat_id = c.id),
                 (SELECT count(*) FROM messages m WHERE m.chat_id = c.id AND m.role != 'context'),
                 EXISTS(SELECT 1 FROM chat_forks f WHERE f.chat_id = c.id),
                 EXISTS(SELECT 1 FROM chat_titles t WHERE t.chat_id = c.id AND t.state = 'manual'),
-                EXISTS(SELECT 1 FROM chat_titles t WHERE t.chat_id = c.id AND t.job IN ('greeting', 'failed'))
+                (SELECT t.job FROM chat_titles t
+                   WHERE t.chat_id = c.id AND t.job IN ('greeting', 'failed') LIMIT 1)
          FROM chats c WHERE c.id = ?1",
         [chat_id],
         |r| {
@@ -738,14 +756,38 @@ pub(crate) fn wants_job(
     if manual {
         return Ok(None);
     }
-    if parked {
-        return Ok(Some(forked));
+    let parked = match parked.as_deref() {
+        Some("failed") => Parked::Failed,
+        Some("greeting") => Parked::Greeting,
+        _ => Parked::None,
+    };
+    if parked != Parked::None {
+        return Ok(Some((forked, parked)));
     }
     if subs > 0 {
         return Ok(None);
     }
     if forked {
-        return Ok(Some(true));
+        return Ok(Some((true, Parked::None)));
     }
-    Ok((title == store::DEFAULT_TITLE && users == 0).then_some(false))
+    Ok((title == store::DEFAULT_TITLE && users == 0).then_some((false, Parked::None)))
+}
+
+/// The chat's own first request that is more than a greeting: a failed title job is retried from
+/// it, because the send that triggers the retry is usually a short reply ("ok") that would
+/// otherwise name the chat after itself. None when every stored request is only a greeting.
+pub(crate) fn first_substantive(rt: &ChatRuntime, chat_id: &str) -> Option<String> {
+    let texts = rt
+        .db()
+        .snapshot(|tx| {
+            let mut st = tx.prepare(
+                "SELECT text FROM submissions WHERE chat_id = ?1 ORDER BY created_at, id LIMIT 20",
+            )?;
+            let rows = st
+                .query_map([chat_id], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            Ok::<_, rusqlite::Error>(rows)
+        })
+        .ok()?;
+    texts.into_iter().find(|t| !is_greeting(unframed(t)))
 }
