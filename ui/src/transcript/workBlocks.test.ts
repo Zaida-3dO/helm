@@ -531,3 +531,60 @@ test('a page read across a roll-over stack gets one divider naming the older ses
   assert.equal(layout(turn(), false).some((i) => i.kind === 'divider'), false);
   assert.equal(layout(stack, false).some((i) => i.kind === 'divider'), true, 'a session change alone draws it, unnamed');
 });
+
+test('turns without a typed opener, helm notes, replaced progress lines and settled progress lines', () => {
+  const prog = (id: number, text: string, ts: number) =>
+    row({ id, role: 'toolResult', toolName: 'mcp__helm__app_progress', details: { toolArgs: JSON.stringify({ text }) }, timestamp: ts });
+  const peer = (id: number) =>
+    row({ id, role: 'user', text: '[Message from another chat: "Boss" (chat-9)]\nSent by another Helm chat.\n\nGo.', details: { origin: 'other_chat', kind: 'initial-prompt' } });
+  const call = (id: number, ts: number) => row({ id, role: 'toolResult', toolName: 'Read', timestamp: ts });
+  const blank = (id: number, ts: number) => row({ id, role: 'assistant', text: '', timestamp: ts });
+  const note = (id: number, text: string, ts: number) => row({ id, role: 'assistant', text, timestamp: ts });
+  const helmNote = (id: number) => row({ id, role: 'user', text: '[Attention] something finished', details: { origin: 'app' } });
+  const pageSend = (id: number) => row({ id, role: 'user', text: 'Run it', details: { origin: 'page', pageTitle: 'Board' } });
+  const cases: { name: string; rows: MessageRow[]; live?: boolean; want: (string | number)[] }[] = [
+    {
+      name: 'a chat started by another chat has no typed message: its leading rows are one turn with one group',
+      rows: [peer(1), blank(2, 1000), call(3, 2000), blank(4, 3000), call(5, 4000), note(6, 'All done.', 5000)],
+      want: [6, 'fold[1,2,3,4,5]'],
+    },
+    {
+      name: 'a page that starts mid-turn folds that turn too, and the next typed message opens the next turn',
+      rows: [call(1, 0), blank(2, 1000), call(3, 2000), note(4, 'Finished.', 3000), row({ id: 5, role: 'user', text: 'thanks', timestamp: 4000 }), note(6, 'Welcome.', 5000)],
+      want: [4, 'fold[1,2,3]', 5, 6],
+    },
+    {
+      name: 'a click on a page button is the person speaking: it opens a turn',
+      rows: [row({ id: 1, role: 'user', timestamp: 0 }), call(2, 1000), note(3, 'one', 2000), pageSend(4), call(5, 3000), note(6, 'two', 4000)],
+      want: [1, 3, 'fold[2]', 4, 6, 'fold[5]'],
+    },
+    {
+      name: 'a note for the agent alone is never drawn, and does not pin the progress line',
+      rows: [row({ id: 1, role: 'user', timestamp: 0 }), prog(2, 'Working', 1000), helmNote(3), call(4, 2000), note(5, 'done', 3000)],
+      want: [1, 5, 'fold[2,4]'],
+    },
+    {
+      name: 'a progress line a real agent message already replaced is not pinned above a later steer',
+      rows: [
+        row({ id: 1, role: 'user', timestamp: 0 }),
+        prog(2, 'Working', 1000),
+        note(3, 'Halfway there, looking good.', 2000),
+        row({ id: 4, role: 'user', text: 'and this', details: { mode: 'steer' }, timestamp: 3000 }),
+        note(5, 'done', 4000),
+      ],
+      want: [1, 3, 4, 5, 'fold[2]'],
+    },
+    {
+      name: 'a settled turn that ended without a reply folds its last progress line into the group',
+      rows: [row({ id: 1, role: 'user', timestamp: 0 }), call(2, 1000), prog(3, 'Running the tests', 2000)],
+      want: [1, 'fold[2,3]'],
+    },
+    {
+      name: 'a running turn keeps its newest progress line under the group',
+      rows: [row({ id: 1, role: 'user', timestamp: 0 }), call(2, 1000), prog(3, 'Running the tests', 2000)],
+      live: true,
+      want: [1, 'fold[2]', 'progress'],
+    },
+  ];
+  for (const c of cases) assert.deepEqual(shape(layout(c.rows, c.live ?? false)), c.want, c.name);
+});

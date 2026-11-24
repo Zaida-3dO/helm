@@ -313,18 +313,18 @@ export function MicButton({
     liveStart.current = Date.now();
     setElapsed(0);
     setStatus('listening');
+    // The claim is taken before the host answers: the host starts sending the new session's
+    // words as soon as it opens, and until this button owns them they would show in (or be
+    // dropped by) the composer that held the microphone before. Taking it also sends that
+    // other composer's button back to idle.
+    const claim = Symbol('live');
+    liveClaim.current = claim;
+    setLiveOwner(claim);
     ready.current = ops.live('start').then(
-      () => {
-        // The session is ours from the moment it opened: the host has just taken the microphone
-        // from whatever session ran before (in the other composer that falls back to idle), and
-        // from here the host's words are this composer's.
-        if (alive.current && mine === generation.current && liveMode.current) {
-          liveClaim.current = Symbol('live');
-          setLiveOwner(liveClaim.current);
-        }
-      },
+      () => undefined,
       (e: unknown) => {
-        // The session never opened: let the pill go back to the microphone.
+        // The session never opened: let go of the claim, and the pill goes back to the microphone.
+        giveUpLive(claim);
         if (alive.current && mine === generation.current && liveMode.current) {
           liveMode.current = false;
           keyState.current = IDLE;
@@ -332,7 +332,7 @@ export function MicButton({
         }
       },
     );
-  }, [ops, showProblem, setStatus]);
+  }, [ops, showProblem, setStatus, giveUpLive]);
 
   const start = useCallback(async () => {
     if (statusRef.current === 'transcribing') {

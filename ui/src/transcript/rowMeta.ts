@@ -1,7 +1,7 @@
 // The quiet facts at the end of a reply's action row: the turn time and the token chip.
 
 import type { MessageRow } from '../api/types.ts';
-import type { Item } from './workBlocks.ts';
+import { opensTurn, type Item } from './workBlocks.ts';
 import { toolArgs } from './toolKinds.ts';
 
 type Usage = NonNullable<MessageRow['details']['usage']>;
@@ -190,7 +190,7 @@ export function turnTimes(items: Item[]): Map<number, number> {
       continue;
     }
     const r = it.row;
-    if (r.role === 'user' && r.details?.mode !== 'steer') close();
+    if (opensTurn(r)) close();
     else {
       note(r.timestamp);
       if (r.role === 'assistant' && r.text.trim()) reply = r.id;
@@ -203,7 +203,7 @@ export function turnTimes(items: Item[]): Map<number, number> {
 /**
  * The skills a turn used, on the turn's last reply: `personal:`, `project:` and `helm:` skills
  * alike, as the names the Skill tool was called with, one per line. Only a reply with text carries
- * them, and a steering message does not start a new turn.
+ * them, and only a message from the person starts a new turn (see `opensTurn`).
  */
 export function skillsByReply(rows: readonly MessageRow[]): Map<number, string> {
   const out = new Map<number, string>();
@@ -215,7 +215,7 @@ export function skillsByReply(rows: readonly MessageRow[]): Map<number, string> 
     reply = null;
   };
   for (const r of rows) {
-    if (r.role === 'user' && r.details?.mode !== 'steer') close();
+    if (opensTurn(r)) close();
     else if (r.role === 'toolResult' && r.toolName === 'Skill') {
       const name = toolArgs(r).skill;
       if (typeof name === 'string' && name.trim() && !used.includes(name.trim())) used.push(name.trim());

@@ -40,6 +40,10 @@ test('the turn time sits on the last reply of a turn whose work folded', async (
   ];
   const times = turnTimes(layout(rows, false));
   assert.deepEqual([...times], [[4, 15_000]]);
+  // A message from another chat in the middle of a turn does not end it: the span runs to the reply.
+  const peer = row({ id: 3, role: 'user', text: '[Message from another chat: "Boss" (chat-9)]\nSent by another Helm chat.\n\nHi.', details: { origin: 'other_chat' }, timestamp: 8_000 });
+  const mid = [rows[0]!, rows[1]!, peer, row({ id: 4, role: 'toolResult', toolName: 'Read', timestamp: 9_000 }), row({ id: 5, role: 'assistant', text: 'done', timestamp: 40_000 })];
+  assert.deepEqual([...turnTimes(layout(mid, false))], [[5, 35_000]]);
 });
 
 test('the context size is the newest reply that reports usage: input plus cache reads and writes', async () => {
@@ -173,6 +177,9 @@ test('the skills of a turn sit on its last reply, once each; chat chips open onl
     row({ id: 12, role: 'assistant', text: '' }),
   ];
   assert.deepEqual([...skillsByReply(rows)], [[6, 'personal:spanish-trainer\nhelm:review']]);
+  // A message from another chat mid-turn keeps the turn's skills together on its reply.
+  const peer = row({ id: 3, role: 'user', text: '[Message from another chat: "Boss" (chat-9)]\nSent by another Helm chat.\n\nHi.', details: { origin: 'other_chat' } });
+  assert.deepEqual([...skillsByReply([rows[0]!, rows[1]!, peer, skill(4, 'helm:review'), row({ id: 5, role: 'assistant', text: 'ok' })])], [[5, 'personal:spanish-trainer\nhelm:review']]);
   assert.equal(chatRefOpens([], 'x'), true, 'a list that has not loaded says nothing');
   assert.equal(chatRefOpens([{ id: 'a' }], 'a'), true);
   assert.equal(chatRefOpens([{ id: 'a' }], 'gone'), false);
