@@ -171,6 +171,10 @@ export class SidebarData {
       lastActivityAt: c.lastActivityAt,
       // The chat's own open item, so expanding it here shows expanded on every PC.
       expanded: c.sidebarState?.expanded === true,
+      // The hover card's summary rides along with the record, so a card opened after the
+      // host made one shows it at once instead of asking the host again.
+      summary: c.summary,
+      summaryAt: c.summaryAt,
     };
     next.attention = rowAttention({ status: c.status, unread, lingering: false, pinned: c.pinned });
     if (JSON.stringify(next) === JSON.stringify(prev)) return;

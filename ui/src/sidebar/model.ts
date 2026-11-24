@@ -42,6 +42,20 @@ export function effectiveExpanded(rows: readonly SidebarRow[], ephemeral: Readon
   return out;
 }
 
+/** Drop the window's local toggle bridges once the chat's own record carries the state this
+ *  window asked for: an open in `ephemeral` rides on until its row says open, a shut in `shut`
+ *  until its row says shut. After that the bridge is dead weight, and keeping it would ignore
+ *  the same toggle from another PC forever. `aid` is the open chat's ancestors: a shut one
+ *  stays shut while that chat is open (the person's collapse outranks the auto-expansion), and
+ *  rows this window does not hold say nothing either way — both bridges ride on. Returns the
+ *  new sets and whether anything was dropped. */
+export function pruneToggled(rows: readonly SidebarRow[], ephemeral: ReadonlySet<string>, shut: ReadonlySet<string>, aid: ReadonlySet<string>): { ephemeral: Set<string>; shut: Set<string>; changed: boolean } {
+  const openOf = new Map(rows.map((r) => [r.chatId, r.expanded === true]));
+  const e = new Set([...ephemeral].filter((id) => openOf.get(id) !== true));
+  const s = new Set([...shut].filter((id) => !(openOf.get(id) === false && !aid.has(id))));
+  return { ephemeral: e, shut: s, changed: e.size !== ephemeral.size || s.size !== shut.size };
+}
+
 /** What a collapsed group still has going on inside it: chats running, chats with an unread
  *  result, chats waiting on you or flagged as possibly needing you, chats holding an unsent
  *  draft, chats that finished a reply nobody has opened, and chats idle apart from background

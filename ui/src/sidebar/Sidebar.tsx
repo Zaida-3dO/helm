@@ -32,7 +32,7 @@ import { SidebarActions, compactChat, exportChatMarkdown, rollOverChat, rollOver
 import { SidebarData, errorText } from './data.ts';
 import { canSitUnder, dropAction, passedThreshold, type DragSource, type DropTarget } from './drag.ts';
 import { chatMenuItems, projectMenuItems } from './menus.ts';
-import { buildList, chatAncestors, effectiveExpanded, groupStatus, projectsHolding, rightCluster, titleCluster, visibleChatOrder, type GroupMarks, type ListView, type ListItem } from './model.ts';
+import { buildList, chatAncestors, effectiveExpanded, groupStatus, projectsHolding, pruneToggled, rightCluster, titleCluster, visibleChatOrder, type GroupMarks, type ListView, type ListItem } from './model.ts';
 import { patchExpanded } from './state.ts';
 import { setVisibleOrder } from './rowOrder.ts';
 import { SidebarTop } from './SidebarTop.tsx';
@@ -301,13 +301,25 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     [runSync, data],
   );
 
-  // The open chat's ancestors expand so it is visible, unless the user collapsed them this session.
+  // The open chat's ancestors expand so it is visible, unless the user collapsed them this
+  // session; one whose own record already says open draws open without the aid.
   const userCollapsed = useRef(new Set<string>());
+  const autoAids = useMemo(() => new Set(selected ? chatAncestors(snap.rows, selected) : []), [selected, snap.rows]);
   useEffect(() => {
     if (!selected) return;
-    const up = chatAncestors(snap.rows, selected).filter((id) => !userCollapsed.current.has(id));
+    const openOf = new Map(snap.rows.map((r) => [r.chatId, r.expanded === true]));
+    const up = chatAncestors(snap.rows, selected).filter((id) => !userCollapsed.current.has(id) && openOf.get(id) !== true);
     if (up.some((id) => !expanded.has(id))) setExpanded((s) => new Set([...s, ...up]));
   }, [selected, snap.rows, expanded]);
+  // A local toggle rides on the window's own sets only until the chat's record carries the
+  // state it asked for; then the bridge is dropped, so the next change from another PC —
+  // whose record arrives as a row refresh — is followed instead of ignored. See pruneToggled.
+  useEffect(() => {
+    const p = pruneToggled(snap.rows, expanded, userCollapsed.current, autoAids);
+    if (!p.changed) return;
+    userCollapsed.current = p.shut;
+    setExpanded(p.ephemeral);
+  }, [snap.rows, expanded, autoAids]);
 
   // The open chat's project, and the projects it sits in, draw expanded even where they were left
   // collapsed, so a chat opened from search, a link or a notification can be seen. A project the

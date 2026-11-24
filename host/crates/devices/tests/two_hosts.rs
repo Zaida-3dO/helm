@@ -1950,6 +1950,43 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         .unwrap();
     assert_eq!(got["chat"]["sidebarState"]["expanded"], json!(true));
     assert_eq!(got["chat"]["sidebarState"]["openCards"], json!([7]));
+    // A partial update replaces only the field it carries, the way the PC that runs the chat
+    // stores it: a card change keeps the row open, and a row fold keeps the opened cards.
+    api.call_host(
+        "chat_set_sidebar_state",
+        json!({"chatId": "c1", "state": {"v": 1, "openCards": [8, 9]}}),
+    )
+    .await
+    .unwrap();
+    let got = api
+        .call_host("chat_get", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        got["chat"]["sidebarState"]["expanded"],
+        json!(true),
+        "a card change says nothing about the row"
+    );
+    assert_eq!(got["chat"]["sidebarState"]["openCards"], json!([8, 9]));
+    api.call_host(
+        "chat_set_sidebar_state",
+        json!({"chatId": "c1", "state": {"v": 1, "expanded": false}}),
+    )
+    .await
+    .unwrap();
+    let got = api
+        .call_host("chat_get", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    assert!(
+        got["chat"]["sidebarState"]["expanded"].is_null(),
+        "a folded row leaves expanded out, as it is stored"
+    );
+    assert_eq!(
+        got["chat"]["sidebarState"]["openCards"],
+        json!([8, 9]),
+        "and the fold says nothing about the cards"
+    );
     api.call_host(
         "chat_set_sidebar_state",
         json!({"chatId": "c1", "state": null}),
@@ -1970,6 +2007,14 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
             helm_devices::wire::SidebarStateArgs {
                 chat_id: "c1".to_owned(),
                 state: json!({"v": 1, "expanded": true, "openCards": [7]}),
+            },
+            helm_devices::wire::SidebarStateArgs {
+                chat_id: "c1".to_owned(),
+                state: json!({"v": 1, "openCards": [8, 9]}),
+            },
+            helm_devices::wire::SidebarStateArgs {
+                chat_id: "c1".to_owned(),
+                state: json!({"v": 1, "expanded": false}),
             },
             helm_devices::wire::SidebarStateArgs {
                 chat_id: "c1".to_owned(),

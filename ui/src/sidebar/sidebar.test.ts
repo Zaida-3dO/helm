@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import type { ProjectNode, ProjectOps, SidebarRow } from '../api/projects.ts';
-import type { AttentionSummary } from '../api/types.ts';
+import type { AttentionSummary, ChatRecord } from '../api/types.ts';
 import { SidebarData } from './data.ts';
 import { toast } from '../ui/toasts.ts';
 import { SidebarActions, type ActionDeps } from './actions.ts';
@@ -232,6 +232,17 @@ test('the sidebar data drops a closed project rows, brings them back on reopen a
   data.attention(summary('unheld'));
   data.attention(summary('unheld'));
   assert.deepEqual(read, [['unheld']]);
+  // A chat event carries the hover card's summary: it patches into the row, so a card opened
+  // after the host made one shows it at once instead of asking the host again.
+  data.chat({
+    id: 'y', title: 'y', status: 'idle', updatedAt: 9, pinned: false,
+    unread: { markToken: null, completionId: null }, muted: false, stalled: false,
+    model: 'sonnet', localAhead: null, state: null, draft: '', lastActivityAt: 9,
+    archived: false, parentChatId: null, sideSourceId: null,
+    summary: 'About the plan. It waits on review.', summaryAt: 9,
+  } as unknown as ChatRecord);
+  assert.equal(data.row('y')?.summary, 'About the plan. It waits on review.');
+  assert.equal(data.row('y')?.summaryAt, 9);
 });
 
 test('a missing parent draws at the top level and a collapsed group hides its contents, even the open chat', () => {

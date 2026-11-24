@@ -282,14 +282,19 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
   // answers with the fresh record, which lands in the store at once; the chat's refresh
   // event carries it to the other PCs.
   const openCards = useMemo(() => new Set(chat?.sidebarState?.openCards ?? []), [chat?.sidebarState]);
+  // Card writes ride one after another: each builds its list from the record the previous
+  // write answered with, not from the last record this view happened to hold — otherwise two
+  // quick opens send two lists, each missing the other's card, and the later write erases the
+  // first. The chain only delays the send by the round trip a single write already pays.
+  const cardWrites = useRef(Promise.resolve());
   const setCardOpen = useCallback(
     (rowId: number, open: boolean) => {
-      void ops
-        .setSidebarState(chatId, patchCardOpen(chat?.sidebarState, rowId, open))
+      cardWrites.current = cardWrites.current
+        .then(() => ops.setSidebarState(chatId, patchCardOpen(store.view(chatId).chat?.sidebarState, rowId, open)))
         .then((rec) => store.chat(rec))
         .catch(() => undefined);
     },
-    [chat?.sidebarState, chatId, ops, store],
+    [chatId, ops, store],
   );
   const interactionOpen = (thread?.interactions.length ?? 0) > 0;
   const mentionRepo = useMentionRepo(shell.api, remote ? undefined : chat?.cwd);
