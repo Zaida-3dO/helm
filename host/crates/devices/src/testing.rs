@@ -6,8 +6,8 @@ use crate::serve::{ChatPort, ChatState, PageScope, PanelRead, PortResult, SentFi
 use crate::wire::{
     code, AnswerArgs, ArchiveArgs, AttachmentGetArgs, BlobReadArgs, BlobRef, BoardCancelArgs,
     BoardReadArgs, CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo,
-    DevicePerson, EditOpenArgs, ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs,
-    PageIdArgs, PageOrigin, PagesReadArgs, PanelStageArgs, PersonInfo, ProfileInfo,
+    DevicePerson, EditOpenArgs, FastModeArgs, ForkArgs, Hello, MoveProfileArgs, MuteArgs,
+    OrganizeArgs, PageIdArgs, PageOrigin, PagesReadArgs, PanelStageArgs, PersonInfo, ProfileInfo,
     ProjectCreateArgs, ProjectInfo, ProjectSetArgs, QuickOpenArgs, RemoteChat, RenameArgs,
     ResendArgs, RollOverArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SideResolveArgs,
     SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError,
@@ -70,6 +70,7 @@ pub fn fake_record(id: &str, title: &str, revision: i64) -> ChatRecord {
         stack_id: None,
         prev_session_id: None,
         next_session_id: None,
+        fast_mode: None,
     }
 }
 
@@ -160,6 +161,7 @@ pub struct FakeState {
     pub created: Vec<CreateArgs>,
     pub renamed: Vec<RenameArgs>,
     pub model_changes: Vec<SetModelArgs>,
+    pub fast_mode_set: Vec<FastModeArgs>,
     pub archived: Vec<ArchiveArgs>,
     pub shared: Vec<ShareArgs>,
     /// For each fork: (chat id, fork id).
@@ -666,6 +668,11 @@ impl ChatPort for FakePort {
 
     fn set_model(&self, a: SetModelArgs) -> BoxFut<'_, PortResult<()>> {
         self.st().model_changes.push(a);
+        ready(Ok(()))
+    }
+
+    fn set_fast_mode(&self, a: FastModeArgs) -> BoxFut<'_, PortResult<()>> {
+        self.st().fast_mode_set.push(a);
         ready(Ok(()))
     }
 

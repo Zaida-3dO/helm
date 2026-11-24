@@ -196,8 +196,8 @@ export function RuntimePane() {
             onChange={(v: string) => save({ skipPermissions: v === 'bypass' })}
           />
         </SettingRow>
-        <SettingRow title="Fast mode" description="Quicker replies on models that support it, at a higher token price.">
-          <Checkbox checked={s?.fastMode ?? true} disabled={!s} onChange={(on) => save({ fastMode: on })} data-testid="runtime-fast-mode" aria-label="Fast mode" />
+        <SettingRow title="Fast mode for new chats" description="Quicker replies from the same model, at a higher token price. This is what new chats start with; each chat can set its own pick with the composer's lightning bolt.">
+          <Checkbox checked={s?.fastMode ?? false} disabled={!s} onChange={(on) => save({ fastMode: on })} data-testid="runtime-fast-mode" aria-label="Fast mode for new chats" />
         </SettingRow>
         <SettingRow
           title="Use Claude Code's worktree tools"

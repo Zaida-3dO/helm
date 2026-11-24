@@ -1160,6 +1160,40 @@ pub fn chat_set_model(rt: &ChatRuntime, a: ChatSetModelArgs) -> Result<ChatRecor
     emit_chat(rt, &a.chat_id).ok_or_else(crate::ops::not_found)
 }
 
+/// `chat_set_fast_mode`: store the chat's own pick for Claude Code's fast mode; `None` drops
+/// the pick so the chat follows the new-chat default (Settings → Runtime) again. The value
+/// reaches the chat's agent when its worker next starts — the launch writes it into the CLI's
+/// settings — so a chat that is working keeps what it started with.
+pub fn chat_set_fast_mode(
+    rt: &ChatRuntime,
+    a: ChatSetFastModeArgs,
+) -> Result<ChatRecord, ApiError> {
+    let before = rt
+        .db()
+        .snapshot(|t| store::get_chat(t, &a.chat_id, 0))
+        .map_err(sql)?
+        .ok_or_else(crate::ops::not_found)?;
+    if before.fast_mode == a.on {
+        return Ok(before);
+    }
+    let now = helm_core::now_ms();
+    rt.db()
+        .write(|tx| {
+            tx.execute(
+                "UPDATE chats SET fast_mode = ?1, updated_at = ?2 WHERE id = ?3",
+                params![a.on, now, a.chat_id],
+            )
+        })
+        .map_err(sql)?;
+    rt.sh.events.emit(
+        ChatEvent::Refresh {
+            chat_id: a.chat_id.clone(),
+        }
+        .to_app_event(),
+    );
+    emit_chat(rt, &a.chat_id).ok_or_else(crate::ops::not_found)
+}
+
 /// Permission modes the composer's mode picker offers: the chip picks the mode for the next turn.
 pub const PERMISSION_MODES: &[&str] = &["bypassPermissions", "default", "acceptEdits", "plan"];
 

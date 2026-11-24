@@ -1405,6 +1405,9 @@ impl Actor {
             effort: chat.effort.clone(),
             resume_session_id: resume,
             fork_session,
+            // The chat's own fast-mode pick, if it has one; the spawner falls back to the
+            // runtime file's default.
+            fast_mode: chat.fast_mode,
             send_behavior: sb,
             host: crate::hostcalls::launch(
                 &self.sh,

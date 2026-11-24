@@ -36,6 +36,7 @@ export function chat(p: Partial<ChatRecord> = {}): ChatRecord {
     stackId: null,
     prevSessionId: null,
     nextSessionId: null,
+    fastMode: null,
     error: null,
     harness: 'claude',
     model: null,

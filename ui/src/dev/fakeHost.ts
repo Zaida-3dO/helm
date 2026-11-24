@@ -323,6 +323,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         stackId: null,
         prevSessionId: null,
         nextSessionId: null,
+        fastMode: null,
         error: null,
         harness: 'claude',
         model,
@@ -761,7 +762,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
 
   // Settings → Runtime's stored settings.
   const chatVerbosity = new Map<string, string>();
-  const runtimeSettings: Record<string, unknown> = { executable: '', skipPermissions: true, fastMode: true, worktreeTools: false, scheduleTools: false, shellChanges: true, lowPriority: true, subagentLimits: 'orchestrator', subagentHardStop: false, subagentSoftTurns: 100, toolOutputCap: true, model: null, effort: 'xhigh', responseVerbosity: 'low', problem: null };
+  const runtimeSettings: Record<string, unknown> = { executable: '', skipPermissions: true, fastMode: false, worktreeTools: false, scheduleTools: false, shellChanges: true, lowPriority: true, subagentLimits: 'orchestrator', subagentHardStop: false, subagentSoftTurns: 100, toolOutputCap: true, model: null, effort: 'xhigh', responseVerbosity: 'low', problem: null };
 
   // Settings → Runtime's repositories.
   const repos: { repoId: string; remoteUrl?: string; worktreesAllowed: boolean; locations: { id: string; path: string }[] }[] = [
@@ -1117,6 +1118,13 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       c.chat = { ...c.chat, model: (a.model as string) ?? c.chat.model, effort: (a.effort as string) ?? c.chat.effort };
       emitChat(c);
       addRow(c, { role: 'context', text: `Model set to ${c.chat.model} · ${c.chat.effort}`, details: { contextKind: 'modelChange' } });
+      return c.chat;
+    },
+    // the fast-mode bolt sets the chat's own pick; null drops it back to the new-chat default.
+    chat_set_fast_mode: (a) => {
+      const c = find(a.chatId);
+      c.chat = { ...c.chat, fastMode: (a.on as boolean | null) ?? null, revision: rev() };
+      emitChat(c);
       return c.chat;
     },
     // the permission-mode pick lands as the live mode, as a worker would report it.

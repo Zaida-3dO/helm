@@ -491,6 +491,8 @@ fn late_columns(tx: &Transaction<'_>) -> rusqlite::Result<()> {
         // the watched chat as JSON {chatId,title}, so the compact line can name it.
         ("submission_meta", "kind", "TEXT"),
         ("submission_meta", "wait_chat", "TEXT"),
+        // The chat's own fast-mode pick: 1 on, 0 off, null follows the new-chat default.
+        ("chats", "fast_mode", "INTEGER"),
     ] {
         let has: bool = tx.query_row(
             "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",

@@ -12,7 +12,9 @@ import { DraftSaver } from './drafts.ts';
 import { Editor, type EditorHandle } from './Editor.tsx';
 import { resolveKey, sendLabel, sendTooltip, stopTooltip, type KeyContext, type SendShortcut } from './keymap.ts';
 import { Button } from '../ui/controls.tsx';
-import { IconAttach, IconChat, IconFileText as IconFile, IconFolder, IconFolderPlus, IconSparkles, IconX } from '../ui/icons.tsx';
+import { IconAttach, IconBolt, IconChat, IconFileText as IconFile, IconFolder, IconFolderPlus, IconSparkles, IconX } from '../ui/icons.tsx';
+import { remoteChatOps } from '../api/devices.ts';
+import { fastModeShown, fastModeTitle, fastModeVisible } from './fastMode.ts';
 import { SetupBanner, useRuntimeCheck } from './SetupBanner.tsx';
 import { ContextStatus, ContextStatusRemote } from './ContextStatus.tsx';
 import { useShell } from '../shell/context.ts';
@@ -45,40 +47,45 @@ import './composer.css';
 // The dock items and banners above the box share the dock sheet (ChatView mounts this composer).
 import './dock.css';
 
-// The composer's fast-mode switch: the same global switch as Settings → Runtime (it lives in the
-// runtime file the workers read), so a chat can flip it without opening Settings. It is applied
-// when a chat starts, so the tooltip says plainly that this chat picks it up at its next start.
-// Not shown for a chat that runs on another PC: that one reads its own device's runtime file.
-function FastModeChip({ remote }: { remote: boolean }) {
+// The composer's fast-mode bolt: this chat's own pick for Claude Code's fast mode. It reads the
+// chat's pick off its record and falls back to the new-chat default of the PC that runs the chat
+// — for a chat that runs on another PC that default is read there, the way the model picker reads
+// its defaults, and the `chat_set_fast_mode` change is routed to that PC by the same path the
+// model picker's picks take. It is not shown for a local-model chat (fast mode is a Claude Code
+// switch) nor in the new-chat draft, where there is no chat yet to pick for.
+function FastModeBolt({ chat, ops, deviceUid, draft }: { chat: ChatRecord; ops: ChatOps; deviceUid?: string; draft?: boolean }) {
   const shell = useShell();
-  const [on, setOn] = useState<boolean | null>(null);
+  const [defaultOn, setDefaultOn] = useState<boolean | null>(null);
   useEffect(() => {
+    if (draft) return;
     let live = true;
-    shell
-      .api<RuntimeSettings>('runtime_settings_get', {})
-      .then((s) => live && setOn(!!s.fastMode))
-      .catch(() => undefined);
+    const read = deviceUid
+      ? remoteChatOps(shell.api)
+          .composerDefaults(chat.id)
+          .then((d) => (typeof d.fastMode === 'boolean' ? d.fastMode : null))
+      : shell.api<RuntimeSettings>('runtime_settings_get', {}).then((s) => !!s.fastMode);
+    read.then((on) => live && setDefaultOn(on)).catch(() => undefined);
     return () => {
       live = false;
     };
-  }, [shell]);
-  if (on === null || remote) return null;
+  }, [shell, chat.id, deviceUid, draft]);
+  if (draft || !fastModeVisible(chat.model)) return null;
+  const on = fastModeShown(chat.fastMode ?? null, defaultOn);
+  if (on === null) return null;
   const toggle = () => {
-    shell
-      .api<RuntimeSettings>('runtime_settings_save', { fastMode: !on })
-      .then((s) => setOn(!!s.fastMode))
-      .catch((e: unknown) => toast.show({ kind: 'error', text: String((e as Error).message ?? e) }));
+    ops.setFastMode(chat.id, !on).catch((e: unknown) => toast.show({ kind: 'error', text: String((e as Error).message ?? e) }));
   };
   return (
     <Button
-      variant="ghost"
-      className="fast-mode-chip"
+      variant="icon"
+      className="composer-fast-toggle"
+      label="Fast mode"
       data-testid="composer-fast-mode"
       pressed={on}
-      title="Fast mode: quicker replies on models that support it, at a higher token price. Chats take it up when they start, so this chat picks it up at its next start."
+      title={fastModeTitle(on)}
       onClick={toggle}
     >
-      Fast
+      <IconBolt size={16} />
     </Button>
   );
 }
@@ -102,6 +109,9 @@ export interface ComposerProps {
    * the sentence for Send's tooltip, and `holds` makes Send wait for the device with the message.
    */
   remote?: RemoteComposer | null;
+  /** The new-chat page's draft composer: the chat does not exist yet, so the fast-mode bolt is
+   *  left out — the chat starts at the new-chat default and can pick its own once it exists. */
+  newChatDraft?: boolean;
 }
 
 
@@ -118,7 +128,7 @@ export function isBusy(status: ChatRecord['status']): boolean {
   return status === 'running' || status === 'starting' || status === 'stopping';
 }
 
-export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, registerSetText, recall = [], autocomplete = false, remote = null }: ComposerProps) {
+export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, registerSetText, recall = [], autocomplete = false, remote = null, newChatDraft = false }: ComposerProps) {
   const shell = useShell();
   // For a chat that runs on another PC, attachments are staged with the device op; the send
   // carries them across by itself.
@@ -1053,7 +1063,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
           <div className="composer-selects">
             <ModelPicker chat={chat} ops={ops} loading={checking} deviceUid={remote?.deviceUid} />
             <PermissionChip chatId={chat.id} mode={thread?.permissionMode ?? null} busy={busy} ops={ops} />
-            <FastModeChip remote={!!remote} />
+            <FastModeBolt chat={chat} ops={ops} deviceUid={remote?.deviceUid} draft={newChatDraft} />
             {toolbarStart.map((a) => (
               <span key={a.id} className="composer-accessory" data-accessory={a.id}>
                 {a.render(actx)}

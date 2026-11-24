@@ -153,9 +153,9 @@ pub struct ClaudeRuntime {
     pub executable: String,
     #[serde(default = "yes")]
     pub skip_permissions: bool,
-    /// Claude Code's fast mode. On by default: a missing key means on, an explicit
-    /// `false` turns it off.
-    #[serde(default = "yes")]
+    /// Claude Code's fast mode, as the default new chats start with. Off by default: a missing
+    /// key means off, an explicit `true` turns it on.
+    #[serde(default)]
     pub fast_mode: bool,
     /// Let Claude Code's own worktree tools through. Off by default: a missing key means off.
     #[serde(default)]
@@ -234,7 +234,7 @@ impl Default for ClaudeRuntime {
         Self {
             executable: String::new(),
             skip_permissions: true,
-            fast_mode: true,
+            fast_mode: false,
             worktree_tools: false,
             subagent_limits: SubagentScope::Orchestrator,
             subagent_hard_stop: false,
@@ -358,7 +358,7 @@ mod tests {
         let (rt, err) = ClaudeRuntime::load(dir.path());
         assert_eq!((rt.clone(), err), (ClaudeRuntime::default(), None));
         assert!(rt.skip_permissions, "skip permission prompts defaults on");
-        assert!(rt.fast_mode, "fast mode defaults on");
+        assert!(!rt.fast_mode, "fast mode defaults off");
         assert!(
             !rt.worktree_tools,
             "Claude Code's worktree tools default off"
@@ -416,7 +416,14 @@ mod tests {
         )
         .unwrap();
         let dflt = ClaudeRuntime::load(dir.path()).0;
-        assert_eq!(dflt, ClaudeRuntime::default());
+        assert_eq!(
+            dflt,
+            ClaudeRuntime {
+                fast_mode: true,
+                ..ClaudeRuntime::default()
+            },
+            "one fastMode key on, the rest default"
+        );
         assert_eq!(dflt.subagent_limits, SubagentScope::Orchestrator);
         assert!(!dflt.subagent_hard_stop && dflt.tool_output_cap);
         assert_eq!(
@@ -450,7 +457,10 @@ mod tests {
 
     #[test]
     fn the_launch_never_carries_api_key_mode() {
-        let rt = ClaudeRuntime::default();
+        let rt = ClaudeRuntime {
+            fast_mode: true,
+            ..ClaudeRuntime::default()
+        };
         let test = TestClaude {
             command: "node.exe".into(),
             args: vec!["fake.ts".into()],
@@ -475,7 +485,7 @@ mod tests {
         assert_eq!(v["sendBehavior"]["longCommands"], "redirect");
         assert_eq!(
             v["claude"]["fastMode"], true,
-            "fast mode is explicit and on by default"
+            "fast mode rides the launch explicitly, whatever the default is"
         );
         assert!(!v.to_string().contains("apiKeyMode"));
         assert!(

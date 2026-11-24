@@ -435,6 +435,7 @@ export class NewChatController {
       stackId: null,
       prevSessionId: null,
       nextSessionId: null,
+      fastMode: null,
       error: null,
       harness: 'claude',
       model: this.device ? this.remoteModel : d.model,

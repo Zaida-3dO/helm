@@ -1957,6 +1957,7 @@ impl RemoteChats for Mirror {
                 "unread_mark" => "mark_unread",
                 "chat_mute" => "mute",
                 "chat_set_permission_mode" => "set_permission",
+                "chat_set_fast_mode" => "set_fast_mode",
                 "chat_warm" => "warm",
                 "attention_snooze" => "snooze",
                 "attention_address" => "address",
@@ -1967,9 +1968,16 @@ impl RemoteChats for Mirror {
             } else {
                 None
             };
+            // The lightning toggle answers with the chat record: keep this PC's copy's pick in
+            // step. An explicit null is a real value here: the chat drops its own pick and
+            // follows that PC's default again.
+            let fast = args.get("on").cloned();
             m.change(&chat_id, wire, args, move |rec| {
                 if let Some(on) = muted {
                     rec.insert("muted".into(), json!(on));
+                }
+                if let Some(f) = fast {
+                    rec.insert("fastMode".into(), f);
                 }
             })
             .await

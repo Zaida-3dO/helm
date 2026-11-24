@@ -80,4 +80,10 @@ prevSessionId: string | null,
  * The session that rolled over from this one; `null` for the newest, where the chat
  * carries on.
  */
-nextSessionId: string | null, };
+nextSessionId: string | null, 
+/**
+ * This chat's own pick for Claude Code's fast mode; `null` means it follows the new-chat
+ * default (Settings → Runtime). The composer's lightning toggle sets it; the value reaches
+ * the chat's agent when its worker next starts.
+ */
+fastMode: boolean | null, };
