@@ -76,9 +76,10 @@ fn write_row(tx: &Transaction<'_>, set: &ActionSet) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Read the set, writing the seeds on first read and any seeds added by a newer build. Existing
-/// buttons are never touched, and a seed the user deleted is not brought back (only seeds newer
-/// than the stored `seed_version` are added).
+/// Read the set, writing the seeds on first read and any seeds added by a newer build, and
+/// dropping untouched copies of seeds a newer build retired (see [`seeds::RETIRED`]). A button the
+/// user made or touched is never changed, and a seed the user deleted is not brought back (only
+/// seeds newer than the stored `seed_version` are added).
 pub fn get_or_seed(db: &Database) -> Result<ActionSet, ApiError> {
     get_or_seed_with(db, seeds::SEEDS, SEED_VERSION)
 }
@@ -105,6 +106,19 @@ pub(crate) fn get_or_seed_with(
         fresh.truncate(room);
         set.buttons.extend(fresh);
         if set.seed_version < target {
+            // Seeds retired by a later build: their capability moved to the skills layer, so a
+            // stored button still exactly as shipped (label and text) leaves the bar with the
+            // bump. A button the user touched — even just its label — is theirs and stays.
+            set.buttons.retain(|b| {
+                !b.seed_id.as_deref().is_some_and(|s| {
+                    seeds::RETIRED.iter().any(|r| {
+                        r.retired_in <= target
+                            && r.id == s
+                            && r.text == b.text
+                            && (b.label == r.label || b.label == r.relabel_from.unwrap_or_default())
+                    })
+                })
+            });
             // Seeds renamed by a later build: a stored button of that seed still carrying the old
             // label exactly gets the new one; a label the user edited is left alone.
             for s in list {
@@ -226,82 +240,74 @@ mod tests {
     }
 
     #[test]
-    fn first_read_writes_the_six_seeds_once() {
+    fn first_read_writes_the_one_seed_once() {
         let (_d, db) = db();
         let a = get_or_seed(&db).unwrap();
-        // Each seed's label and exact prompt, in order: the texts are what users get, so a changed
-        // word shows up here.
+        // The only seed left is the hidden new-chat launcher: the common requests it used to
+        // seed are skills now, not buttons.
         let seeded: Vec<(&str, &str)> = a
             .buttons
             .iter()
             .map(|b| (b.label.as_str(), b.text.as_str()))
             .collect();
-        assert_eq!(
-            seeded,
-            [
-                (
-                    "Report progress",
-                    "Please give me a brief plain-language status: what is finished, what is under way, what is stuck, and what you need from me."
-                ),
-                (
-                    "Needs me",
-                    "What needs my attention right now, and why? Only list things that truly need a decision from me (check each one) and give me the options for each."
-                ),
-                (
-                    "Ship it",
-                    "I am happy with this. Commit only your own changes, push, open or update the pull request, and merge to main once review passes. Tell me what landed."
-                ),
-                (
-                    "Close session",
-                    "Please wrap up this session: record what we learned, clean up worktrees and branches, then commit and push. Report each step as pass or fail."
-                ),
-                ("New session", "Let's start a new session."),
-                (
-                    "Git sync",
-                    "Please sync this repo: fetch, fast-forward only if that is safe, and tell me about anything unexpected. Do not commit."
-                ),
-            ]
-        );
+        assert_eq!(seeded, [("New session", "Let's start a new session.")]);
         assert_eq!(a.revision, 1);
+        assert_eq!(a.seed_version, seeds::SEED_VERSION);
         let b = get_or_seed(&db).unwrap();
         assert_eq!(a, b, "a second read changes nothing");
     }
 
     #[test]
-    fn new_session_launcher_is_hidden_unbound_and_git_sync_is_in_the_overflow() {
+    fn the_new_session_launcher_is_hidden_unbound_and_nothing_shows_in_the_bar() {
         let (_d, db) = db();
         let a = get_or_seed(&db).unwrap();
         let launcher = a.buttons.iter().find(|b| b.label == "New session").unwrap();
         assert!(launcher.hidden);
         assert_eq!(launcher.kind, ActionKind::NewChat);
         assert_eq!(launcher.project_id, None);
-        let sync = a.buttons.iter().find(|b| b.label == "Git sync").unwrap();
-        assert_eq!(sync.placement, Placement::Overflow);
         let visible_topbar = a
             .buttons
             .iter()
             .filter(|b| b.placement == Placement::Topbar && !b.hidden)
             .count();
-        assert_eq!(visible_topbar, 4);
+        assert_eq!(visible_topbar, 0, "a fresh install shows no seeded button");
     }
 
     #[test]
-    fn a_later_seed_version_adds_seeds_relabels_untouched_labels_and_keeps_edits() {
+    fn retired_seeds_leave_the_bar_only_while_untouched() {
         let (_d, db) = db();
-        // An install made by an older build: its status button still says "Update".
-        let v1: Vec<Seed> = seeds::SEEDS
+        // An install made by an older build: the five prompt buttons and the launcher, as shipped.
+        let v2: Vec<Seed> = seeds::RETIRED
             .iter()
-            .map(|s| Seed {
-                label: if s.id == "update" { "Update" } else { s.label },
-                relabel_from: None,
-                ..*s
+            .map(|r| Seed {
+                id: r.id,
+                since: 1,
+                label: r.label,
+                relabel_from: r.relabel_from,
+                kind: ActionKind::Prompt,
+                text: r.text,
+                placement: Placement::Topbar,
+                hidden: false,
             })
+            .chain(seeds::SEEDS.iter().copied())
             .collect();
-        let mut a = get_or_seed_with(&db, &v1, 1).unwrap();
-        // The user renames "Needs me", deletes "Ship it", and writes the set back.
-        a.buttons[1].label = "Needs you".into();
+        let mut a = get_or_seed_with(&db, &v2, 2).unwrap();
+        assert_eq!(a.buttons.len(), 6);
+        // The user renames one retired button, edits another's text, and adds one of their own
+        // whose text happens to match a third retired seed exactly.
         a.buttons
-            .retain(|b| b.seed_id.as_deref() != Some("ship-it"));
+            .iter_mut()
+            .find(|b| b.seed_id.as_deref() == Some("update"))
+            .unwrap()
+            .label = "Status please".into();
+        a.buttons
+            .iter_mut()
+            .find(|b| b.seed_id.as_deref() == Some("ship-it"))
+            .unwrap()
+            .text = "Ship it my way.".into();
+        let mut mine = button("mine");
+        mine.text = seeds::RETIRED[4].text.into();
+        a.buttons.push(mine);
         db.write::<_, Fail>(|tx| {
             let mut set = read(tx)?.unwrap();
             set.buttons = a.buttons;
@@ -310,48 +316,101 @@ mod tests {
         })
         .map_err(|f| f.0)
         .unwrap();
-        // A newer build ships one more seed (since 2) and renames two buttons: the untouched
-        // "Update" and an edited "Needs me".
-        let mut list: Vec<Seed> = Vec::new();
-        for s in seeds::SEEDS {
-            let mut s = Seed { ..*s };
-            if s.id == "needs-me" {
-                s.label = "Needs attention";
-                s.relabel_from = Some("Needs me");
-            }
-            list.push(s);
-        }
-        list.push(Seed {
-            id: "extra",
-            since: 2,
-            label: "Extra",
-            relabel_from: None,
-            kind: ActionKind::Prompt,
-            text: "extra",
-            placement: Placement::Overflow,
-            hidden: false,
-        });
+        // This build's read bumps the seed version: buttons still exactly as shipped leave, the
+        // touched ones and the user's own stay (a user button is never a seed's copy).
+        let b = get_or_seed(&db).unwrap();
+        let ids: Vec<&str> = b
+            .buttons
+            .iter()
+            .map(|x| x.seed_id.as_deref().unwrap_or(x.id.as_str()))
+            .collect();
+        assert_eq!(
+            ids,
+            ["update", "ship-it", "new-session", "mine"],
+            "touched buttons and the launcher stay, the rest leave"
+        );
+        assert_eq!(b.seed_version, seeds::SEED_VERSION);
+        assert_eq!(
+            b.buttons,
+            get_or_seed(&db).unwrap().buttons,
+            "a second read changes nothing"
+        );
+    }
+
+    #[test]
+    fn a_later_seed_version_adds_seeds_relabels_untouched_labels_and_keeps_edits() {
+        let (_d, db) = db();
+        // An install made by an older build.
+        let v1: Vec<Seed> = vec![
+            Seed {
+                id: "flag",
+                since: 1,
+                label: "Flag it",
+                relabel_from: None,
+                kind: ActionKind::Prompt,
+                text: "flag?",
+                placement: Placement::Topbar,
+                hidden: false,
+            },
+            Seed {
+                id: "quiet",
+                since: 1,
+                label: "Quiet",
+                relabel_from: None,
+                kind: ActionKind::Prompt,
+                text: "quiet?",
+                placement: Placement::Topbar,
+                hidden: false,
+            },
+        ];
+        let mut a = get_or_seed_with(&db, &v1, 1).unwrap();
+        // The user renames "Flag it" and writes the set back; "Quiet" is left as shipped.
+        a.buttons[0].label = "Flag for me".into();
+        db.write::<_, Fail>(|tx| {
+            let mut set = read(tx)?.unwrap();
+            set.buttons = a.buttons;
+            set.revision += 1;
+            Ok(write_row(tx, &set)?)
+        })
+        .map_err(|f| f.0)
+        .unwrap();
+        // A newer build ships one more seed (since 2) and renames both buttons: the untouched
+        // "Quiet" takes the new label, the edited "Flag for me" keeps the user's.
+        let list: Vec<Seed> = vec![
+            Seed {
+                id: "flag",
+                since: 1,
+                label: "Needs attention",
+                relabel_from: Some("Flag it"),
+                kind: ActionKind::Prompt,
+                text: "flag?",
+                placement: Placement::Topbar,
+                hidden: false,
+            },
+            Seed {
+                id: "quiet",
+                since: 1,
+                label: "Hush",
+                relabel_from: Some("Quiet"),
+                kind: ActionKind::Prompt,
+                text: "quiet?",
+                placement: Placement::Topbar,
+                hidden: false,
+            },
+            Seed {
+                id: "extra",
+                since: 2,
+                label: "Extra",
+                relabel_from: None,
+                kind: ActionKind::Prompt,
+                text: "extra",
+                placement: Placement::Overflow,
+                hidden: false,
+            },
+        ];
         let b = get_or_seed_with(&db, &list, 2).unwrap();
-        assert_eq!(
-            b.buttons.len(),
-            6,
-            "the five kept buttons plus the new seed"
-        );
-        assert_eq!(
-            b.buttons[0].label, "Report progress",
-            "an untouched label relabels"
-        );
-        let edited = b
-            .buttons
-            .iter()
-            .find(|x| x.seed_id.as_deref() == Some("needs-me"))
-            .unwrap();
-        assert_eq!(edited.label, "Needs you", "the user's edit stays");
-        assert!(!b
-            .buttons
-            .iter()
-            .any(|x| x.seed_id.as_deref() == Some("ship-it")));
-        assert_eq!(b.buttons.last().unwrap().label, "Extra");
+        let labels: Vec<&str> = b.buttons.iter().map(|x| x.label.as_str()).collect();
+        assert_eq!(labels, ["Flag for me", "Hush", "Extra"]);
         assert_eq!(b.seed_version, 2);
     }
 
@@ -431,7 +490,7 @@ mod tests {
             "bad_args"
         );
         let got = crate::ops::actions_get(&ctx, serde_json::Value::Null).unwrap();
-        assert_eq!(got["buttons"].as_array().unwrap().len(), 6);
-        assert_eq!(got["buttons"][4]["kind"], "new_chat");
+        assert_eq!(got["buttons"].as_array().unwrap().len(), 1);
+        assert_eq!(got["buttons"][0]["kind"], "new_chat");
     }
 }

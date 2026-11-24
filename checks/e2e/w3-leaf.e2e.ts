@@ -24,21 +24,32 @@ describe("top-bar buttons, chips and search", { timeout: 10 * 60_000 }, () => {
     try {
       await newChat(page(), scratchDir("helm-e2e-chat-"));
 
-      // The four visible top-bar buttons; the launcher is hidden and Git sync sits in the menu.
-      // A bar too narrow for them (the default window is) folds them all into one
-      // "Actions" menu, so read them from whichever form is showing.
-      const folded = (await page().locator(tid("action-row", '[data-folded="true"]')).count()) > 0;
+      // The bar starts empty: Helm no longer seeds any visible button — the common requests
+      // (Report progress, Ship it and the rest) are skills now, named in the composer.
+      assert.equal(await page().locator(tid("action-button")).count(), 0, "no seeded top-bar buttons");
+      assert.equal(await page().locator(tid("action-overflow")).count(), 0, "and no overflow trigger");
+
+      // A button made in Settings still lands in the bar: add one and read it back.
+      await page().keyboard.press("Control+Comma");
+      await page().waitForSelector(tid("settings"), { timeout: 10_000 });
+      await page().click('.settings-group-tab[data-group="Chat & agents"]');
+      await page().click('.settings-tab[data-tab="actions"]');
+      await page().waitForSelector(tid("action-add"), { timeout: 10_000 });
+      await page().click(tid("action-add"));
+      const btnId = (await page().locator(tid("action-edit")).last().getAttribute("data-action"))!;
+      assert.ok(btnId && !btnId.startsWith("seed-"), "the new button is a user button");
+      await page().fill(`#label-${btnId}`, "Status please");
+      await page().fill(`#text-${btnId}`, "Please give me a brief plain-language status: what is finished, what is under way, what is stuck, and what you need from me.");
+      await page().click(tid("actions-save"));
+      await page().waitForSelector(`${tid("settings-pane")} [role="status"]:has-text("Saved.")`, { timeout: 10_000 });
+      await page().keyboard.press("Escape");
+      // A bar too narrow for it folds it into one "Actions" menu, so use whichever form shows.
+      const folded = (await page().locator(tid("action-button", `[data-action="${btnId}"]`)).count()) === 0;
       if (folded) {
         await page().click(tid("action-overflow"));
-        const items = await page().locator(tid("action-menu")).locator('[role="menuitem"]').evaluateAll((els) => els.map((e) => e.getAttribute("data-item")));
-        assert.deepEqual(items, ["update", "needs-me", "ship-it", "close-session", "git-sync"]);
-      } else {
-        const top = await page().$$eval(tid("action-button"), (els) => els.map((e) => e.getAttribute("data-action")));
-        assert.deepEqual(top, ["update", "needs-me", "ship-it", "close-session"]);
-        await page().click(tid("action-overflow"));
-        assert.equal(await page().locator(tid("action-menu")).locator('[role="menuitem"][data-item="git-sync"]').count(), 1, "Git sync is in the menu");
+        assert.equal(await page().locator(tid("action-menu")).locator(`[role="menuitem"][data-item="${btnId}"]`).count(), 1, "the user button is in the menu");
+        await page().keyboard.press("Escape");
       }
-      await page().keyboard.press("Escape");
 
       // A reply that ends in a question offers Yes and No (Continue only follows a stopped turn).
       await send(page(), "[LEAF] shall we carry on?");
@@ -63,9 +74,9 @@ describe("top-bar buttons, chips and search", { timeout: 10 * 60_000 }, () => {
       assert.match(await page().locator(tid("composer")).innerText(), /keep this draft/);
       if (folded) {
         await page().click(tid("action-overflow"));
-        await page().click(`${tid("action-menu")} [role="menuitem"][data-item="update"]`);
+        await page().click(`${tid("action-menu")} [role="menuitem"][data-item="${btnId}"]`);
       } else {
-        await page().click(tid("action-button", '[data-action="update"]'));
+        await page().click(tid("action-button", `[data-action="${btnId}"]`));
       }
       await waitRowText(page(), "brief plain-language status");
       await waitStatus(page(), "idle");

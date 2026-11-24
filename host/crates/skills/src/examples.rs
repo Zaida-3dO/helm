@@ -44,6 +44,28 @@ pub const SKILLS: &[(&str, &str)] = &[
         "learn-from-pr",
         include_str!("../examples/skills/learn-from-pr/SKILL.md"),
     ),
+    // The requests that used to be seeded as top-bar action buttons; the skills layer is their
+    // entry now. Each does what its button's message asked.
+    (
+        "report-progress",
+        include_str!("../examples/skills/report-progress/SKILL.md"),
+    ),
+    (
+        "needs-me",
+        include_str!("../examples/skills/needs-me/SKILL.md"),
+    ),
+    (
+        "ship-it",
+        include_str!("../examples/skills/ship-it/SKILL.md"),
+    ),
+    (
+        "close-session",
+        include_str!("../examples/skills/close-session/SKILL.md"),
+    ),
+    (
+        "git-sync",
+        include_str!("../examples/skills/git-sync/SKILL.md"),
+    ),
 ];
 
 /// Whether `rel` (a path inside a layer, like `agents/coder.md`) holds exactly the text Helm ships
