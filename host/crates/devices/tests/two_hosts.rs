@@ -1977,6 +1977,48 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
             },
         ]
     );
+    // The lightning switch travels the same way: it changes the chat on the PC that runs it,
+    // so the run switch gates it, and this PC's copy keeps its pick in step. An explicit null
+    // is a real value there too: the chat drops its own pick and follows that PC's default.
+    port.set_run(false);
+    let e = api
+        .call_host("chat_set_fast_mode", json!({"chatId": "c1", "on": true}))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, "not_allowed");
+    port.set_run(true);
+    api.call_host("chat_set_fast_mode", json!({"chatId": "c1", "on": true}))
+        .await
+        .unwrap();
+    let got = api
+        .call_host("chat_get", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    assert_eq!(got["chat"]["fastMode"], json!(true));
+    api.call_host("chat_set_fast_mode", json!({"chatId": "c1", "on": null}))
+        .await
+        .unwrap();
+    let got = api
+        .call_host("chat_get", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    assert!(
+        got["chat"]["fastMode"].is_null(),
+        "the null pick crossed too"
+    );
+    assert_eq!(
+        port.st().fast_mode_set,
+        [
+            helm_devices::wire::FastModeArgs {
+                chat_id: "c1".to_owned(),
+                on: Some(true),
+            },
+            helm_devices::wire::FastModeArgs {
+                chat_id: "c1".to_owned(),
+                on: None,
+            },
+        ]
+    );
     // The Rename dialog's ask reached the PC that runs the chat.
     assert_eq!(port.st().titles_asked, ["c1"]);
     // The pages pinned on the other PC list here, and one opens from a copy brought across: the

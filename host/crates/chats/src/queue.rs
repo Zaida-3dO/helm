@@ -911,7 +911,8 @@ fn halt_working(rt: &crate::runtime::ChatRuntime, chat_id: &str, by: &str, now: 
                     state: SubmissionState::Saved,
                     origin: SubmissionOrigin::App,
                     priority: None,
-                    kind: None,
+                    // A small prompt carrying no new work from Helm: the pause note.
+                    kind: Some(crate::types::MessageKind::Nudge),
                     now,
                 },
             )?;

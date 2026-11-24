@@ -1203,6 +1203,7 @@ impl Op {
                 | Op::ConsentDecide(_)
                 | Op::Create(_)
                 | Op::SetModel(_)
+                | Op::SetFastMode(_)
                 | Op::SetSidebarState(_)
                 | Op::Rename(_)
                 | Op::Archive(_)
@@ -1496,6 +1497,19 @@ mod tests {
             ("forward_open", json!({"chatId": "c1"}), None),
             ("forward_close", json!({"forwardId": "f1"}), Some(false)),
             ("skills", json!({"chatId": "c1"}), Some(false)),
+            // The lightning toggle changes the chat where it runs, so the run switch gates it.
+            (
+                "set_fast_mode",
+                json!({"chatId": "c1", "on": true}),
+                Some(true),
+            ),
+            (
+                "set_fast_mode",
+                json!({"chatId": "c1", "on": null}),
+                Some(true),
+            ),
+            ("set_fast_mode", json!({"chatId": "c1"}), Some(true)),
+            ("set_fast_mode", json!({"chatId": "c1", "on": "yes"}), None),
             (
                 "side_resolve",
                 json!({"chatId": "c1", "action": "discard"}),

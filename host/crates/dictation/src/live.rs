@@ -37,6 +37,8 @@ pub const STATE_EVENT: &str = "dictation_live";
 pub enum LiveMsg {
     /// More of the sentence in progress; the caller accumulates it.
     Words(String),
+    /// The sentence in progress re-written whole; it replaces what came before.
+    Replace(String),
     /// The sentence in progress is finished: its settled text.
     Final(String),
     /// The engine can no longer hear; the session is over.
@@ -108,6 +110,25 @@ fn probe() -> (bool, Option<String>) {
 #[cfg(not(windows))]
 fn probe() -> (bool, Option<String>) {
     (false, Some("Live dictation needs Windows.".to_owned()))
+}
+
+/// Turn one engine hypothesis into what the word stream should carry. The speech service
+/// re-states the whole sentence in progress on every hypothesis, never just the new words, so
+/// the raw text must be folded back into the stream `drive` accumulates: the new tail when the
+/// engine only added words, the whole replacement when it re-wrote the sentence mid-way (it
+/// does, as it hears a word it mis-heard the first time). `prev` is the last hypothesis seen
+/// and stays the whole text.
+pub(crate) fn hypothesis_update(prev: &mut String, text: String) -> Option<LiveMsg> {
+    if text.trim().is_empty() {
+        return None;
+    }
+    let msg = match text.strip_prefix(prev.as_str()) {
+        Some(tail) if !tail.is_empty() => LiveMsg::Words(tail.to_owned()),
+        Some(_) => return None, // the very same sentence again: no news
+        None => LiveMsg::Replace(text.clone()),
+    };
+    *prev = text;
+    Some(msg)
 }
 
 /// One live session: the command line to its thread and the thread itself.
@@ -237,6 +258,10 @@ fn drive(
                 while let Some(m) = engine.next(Duration::from_millis(0)) {
                     match m {
                         LiveMsg::Words(w) => pending.push_str(&w),
+                        LiveMsg::Replace(t) => {
+                            pending.clear();
+                            pending.push_str(&t);
+                        }
                         LiveMsg::Final(t) => {
                             pending.clear();
                             pending.push_str(&t);
@@ -260,14 +285,12 @@ fn drive(
         match engine.next(Duration::from_millis(200)) {
             Some(LiveMsg::Words(w)) => {
                 pending.push_str(&w);
-                let t = pending.trim().to_owned();
-                if !t.is_empty() {
-                    events.emit(
-                        AppEvent::new(TRANSCRIPT_EVENT)
-                            .with("final", false)
-                            .with("text", t),
-                    );
-                }
+                emit_in_progress(&pending, &events);
+            }
+            Some(LiveMsg::Replace(t)) => {
+                pending.clear();
+                pending.push_str(&t);
+                emit_in_progress(&pending, &events);
             }
             Some(LiveMsg::Final(t)) => {
                 pending.clear();
@@ -295,6 +318,18 @@ fn drive(
             }
             None => {}
         }
+    }
+}
+
+/// The sentence in progress, as one replace-the-last event.
+fn emit_in_progress(pending: &str, events: &Arc<dyn EventSink>) {
+    let t = pending.trim().to_owned();
+    if !t.is_empty() {
+        events.emit(
+            AppEvent::new(TRANSCRIPT_EVENT)
+                .with("final", false)
+                .with("text", t),
+        );
     }
 }
 
@@ -406,7 +441,11 @@ impl Engine for WinRtEngine {
                 }
                 let session = recognizer.ContinuousRecognitionSession()?;
 
+                // The hypothesis handlers see whole sentences, so they fold each one against
+                // the last through this; a settled sentence starts the next one from nothing.
+                let heard = Arc::new(Mutex::new(String::new()));
                 let tx = self.tx.clone();
+                let heard_for_result = heard.clone();
                 let result_handler = TypedEventHandler::new(
                     move |_s: Ref<SpeechContinuousRecognitionSession>,
                           args: Ref<SpeechContinuousRecognitionResultGeneratedEventArgs>|
@@ -416,6 +455,7 @@ impl Engine for WinRtEngine {
                         let t = text.to_string();
                         if !t.trim().is_empty() {
                             let _ = tx.send(LiveMsg::Final(t));
+                            *heard_for_result.lock().unwrap() = String::new();
                         }
                         Ok(())
                     },
@@ -440,15 +480,18 @@ impl Engine for WinRtEngine {
                 );
                 let completed_token = session.Completed(&completed_handler)?;
                 let tx = self.tx.clone();
+                let heard_for_hyp = heard.clone();
                 let hypothesis_handler = TypedEventHandler::new(
                     move |_s: Ref<SpeechRecognizer>,
                           args: Ref<SpeechRecognitionHypothesisGeneratedEventArgs>|
                           -> windows::core::Result<()> {
-                        // Words as they are heard, for the sentence in progress.
+                        // Words as they are heard, for the sentence in progress. The service
+                        // re-states the whole sentence each time, so only the new tail (or the
+                        // whole re-written sentence) goes on the stream.
                         let text = args.ok()?.Hypothesis()?.Text()?;
-                        let t = text.to_string();
-                        if !t.trim().is_empty() {
-                            let _ = tx.send(LiveMsg::Words(t));
+                        let mut heard = heard_for_hyp.lock().unwrap();
+                        if let Some(m) = hypothesis_update(&mut heard, text.to_string()) {
+                            let _ = tx.send(m);
                         }
                         Ok(())
                     },

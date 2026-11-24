@@ -556,7 +556,7 @@ fn a_recording_goes_to_the_server_and_text_comes_back() {
 
 #[test]
 fn a_live_session_streams_settles_and_honours_stop_cancel_and_failure() {
-    use crate::live::{Engine, EngineFactory, LiveDictation, LiveMsg};
+    use crate::live::{hypothesis_update, Engine, EngineFactory, LiveDictation, LiveMsg};
     use helm_ipc::{AppEvent, RecordingSink, Services};
     use std::collections::VecDeque;
 
@@ -638,15 +638,29 @@ fn a_live_session_streams_settles_and_honours_stop_cancel_and_failure() {
     };
     let start = |v: &OpCtx| ops::live(v, json!({"action": "start"}));
 
+    // The real service re-states the whole sentence in progress on every hypothesis, never just
+    // the new words; the fake feeds hypotheses the same way and folds each through the engine's
+    // own diff, so `drive` sees exactly what a real session sends. `heard` is what the service
+    // last said. Skipping that fold is what makes words land twice.
+    let speak = |heard: &mut String, hypotheses: &[&str]| {
+        let mut q = factory.queued.lock().unwrap();
+        for h in hypotheses {
+            if let Some(m) = hypothesis_update(heard, (*h).to_owned()) {
+                q.push_back(m);
+            }
+        }
+    };
+
     // Speak, pause, speak again, stop: partials replace, a pause settles, stop settles the tail.
-    for m in [
-        LiveMsg::Words(" Hello".into()),
-        LiveMsg::Words(" there".into()),
-        LiveMsg::Final("Hello there.".into()),
-        LiveMsg::Words(" And more".into()),
-    ] {
-        factory.queued.lock().unwrap().push_back(m);
-    }
+    let mut heard = String::new();
+    speak(&mut heard, &[" Hello", " Hello there"]);
+    factory
+        .queued
+        .lock()
+        .unwrap()
+        .push_back(LiveMsg::Final("Hello there.".into()));
+    heard.clear();
+    speak(&mut heard, &[" And more"]);
     assert_eq!(start(&ctx), Ok(json!({"ok": true})));
     wait_len(&sink, 4);
     assert_eq!(
@@ -665,17 +679,54 @@ fn a_live_session_streams_settles_and_honours_stop_cancel_and_failure() {
         ]
     );
 
-    // A second session on the same service starts once the first thread is reaped.
-    for m in [
-        LiveMsg::Words(" Keep".into()),
-        LiveMsg::Failed("the microphone went away".into()),
-    ] {
-        factory.queued.lock().unwrap().push_back(m);
-    }
+    // Mid-sentence corrections: a re-stated sentence becomes the new tail when the service only
+    // added words, and a whole replacement when it re-wrote one — never a doubled-up sentence.
+    let mut heard = String::new();
+    speak(
+        &mut heard,
+        &["The quick", "The quick brown", "The quark brown"],
+    );
     assert_eq!(start(&ctx), Ok(json!({"ok": true})));
     wait_len(&sink, 8);
     assert_eq!(
+        ops::live(&ctx, json!({"action": "stop"})),
+        Ok(json!({"ok": true}))
+    );
+    assert_eq!(
         &wire(&sink)[5..],
+        &[
+            ("live_transcript".into(), Some(false), "The quick".into()),
+            (
+                "live_transcript".into(),
+                Some(false),
+                "The quick brown".into()
+            ),
+            // the re-write replaced the sentence instead of appending to it
+            (
+                "live_transcript".into(),
+                Some(false),
+                "The quark brown".into()
+            ),
+            (
+                "live_transcript".into(),
+                Some(true),
+                "The quark brown".into()
+            ),
+        ]
+    );
+
+    // A second session on the same service starts once the first thread is reaped.
+    let mut heard = String::new();
+    speak(&mut heard, &[" Keep"]);
+    factory
+        .queued
+        .lock()
+        .unwrap()
+        .push_back(LiveMsg::Failed("the microphone went away".into()));
+    assert_eq!(start(&ctx), Ok(json!({"ok": true})));
+    wait_len(&sink, 12);
+    assert_eq!(
+        &wire(&sink)[9..12],
         &[
             ("live_transcript".into(), Some(false), "Keep".into()),
             // the words already heard settle, then the one-line reason:
@@ -689,20 +740,17 @@ fn a_live_session_streams_settles_and_honours_stop_cancel_and_failure() {
     );
 
     // Cancel throws the unfinished sentence away; nothing more lands.
-    factory
-        .queued
-        .lock()
-        .unwrap()
-        .push_back(LiveMsg::Words(" Gone".into()));
+    let mut heard = String::new();
+    speak(&mut heard, &[" Gone"]);
     assert_eq!(start(&ctx), Ok(json!({"ok": true})));
-    wait_len(&sink, 9);
+    wait_len(&sink, 13);
     assert_eq!(
         ops::live(&ctx, json!({"action": "cancel"})),
         Ok(json!({"ok": true}))
     );
-    assert_eq!(wire(&sink).len(), 9);
+    assert_eq!(wire(&sink).len(), 13);
     assert_eq!(
-        wire(&sink)[8],
+        wire(&sink)[12],
         ("live_transcript".into(), Some(false), "Gone".into())
     );
 
@@ -722,13 +770,13 @@ fn a_live_session_streams_settles_and_honours_stop_cancel_and_failure() {
     assert_eq!(e.message, "no speech model here");
 
     // The engine ending by itself settles its tail and frees the slot for the next start.
-    for m in [LiveMsg::Words(" tail".into()), LiveMsg::Ended] {
-        factory.queued.lock().unwrap().push_back(m);
-    }
+    let mut heard = String::new();
+    speak(&mut heard, &[" tail"]);
+    factory.queued.lock().unwrap().push_back(LiveMsg::Ended);
     assert_eq!(start(&ctx), Ok(json!({"ok": true})));
-    wait_len(&sink, 11);
+    wait_len(&sink, 15);
     assert_eq!(
-        &wire(&sink)[9..11],
+        &wire(&sink)[13..15],
         &[
             ("live_transcript".into(), Some(false), "tail".into()),
             ("live_transcript".into(), Some(true), "tail".into()),
