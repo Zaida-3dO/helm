@@ -156,7 +156,8 @@ fn send_cascades(rt: &ChatRuntime, parent: &str, children: &[CascadeChild]) {
                 text: &cascade_request(&c.doc),
                 origin: SubmissionOrigin::App,
                 page: None,
-                kind: None,
+                // An instruction into a chat that is working: a steer.
+                kind: Some(MessageKind::Steer),
                 wait: None,
             },
         ) {
@@ -227,6 +228,43 @@ pub const DEFAULT_ROLLOVER_TOKENS: i64 = 300_000;
 static AUTO_DONE: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 /// Chats with a roll over running, whichever way it started.
 static IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// The IN_FLIGHT slot a roll over holds through the synchronous part of [`start`]. Dropping
+/// the guard releases the chat again — an error on the way to the background flow (a failed
+/// hand-off send, for one) must not leave the chat reading "already running" to every later
+/// roll over until the app restarts. [`InFlight::disarm`] hands the slot to the spawned flow,
+/// which removes it when the roll over ends.
+struct InFlight {
+    chat_id: String,
+    handed_off: bool,
+}
+
+impl InFlight {
+    /// Claim the chat's slot; `None` when a roll over already holds it.
+    fn take(chat_id: &str) -> Option<Self> {
+        IN_FLIGHT
+            .lock()
+            .unwrap()
+            .insert(chat_id.to_owned())
+            .then(|| Self {
+                chat_id: chat_id.to_owned(),
+                handed_off: false,
+            })
+    }
+
+    /// The background flow owns the slot from here; it clears it itself when the flow ends.
+    fn disarm(&mut self) {
+        self.handed_off = true;
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        if !self.handed_off {
+            IN_FLIGHT.lock().unwrap().remove(&self.chat_id);
+        }
+    }
+}
 /// The successor's model and effort a roll-over request asked for.
 type Target = (Option<String>, Option<String>);
 
@@ -437,9 +475,9 @@ fn start(
     model: Option<String>,
     effort: Option<String>,
 ) -> Result<(), ApiError> {
-    if !IN_FLIGHT.lock().unwrap().insert(chat.id.clone()) {
+    let Some(mut in_flight) = InFlight::take(&chat.id) else {
         return Err(refuse("A roll over for this chat is already running."));
-    }
+    };
     let children = cascade_targets(rt, chat);
     send_cascades(rt, &chat.id, &children);
     // A chat with no working children behaves exactly as before: the ask goes out right here,
@@ -490,6 +528,7 @@ fn start(
         }
         IN_FLIGHT.lock().unwrap().remove(&chat.id);
     });
+    in_flight.disarm();
     Ok(())
 }
 
@@ -534,9 +573,32 @@ async fn roll_forward(
             (mark, request_id)
         }
     };
+    let handoff = match wait_for_handoff(rt, chat, mark, &request_id).await {
+        Ok(h) => h,
+        // The children were already told to stop and write their documents: "Nothing was
+        // changed" is only true of this chat, so the failure names the ones left holding.
+        Err(why) if !children.is_empty() => return Err(failed_after_cascade(&why, &children)),
+        Err(why) => return Err(why),
+    };
+    // The roster is read after the hand-off wait, not before it: a child that writes its
+    // document while the parent is still answering counts as written.
     let roster = (!children.is_empty()).then(|| roster_for(rt, &children));
-    let handoff = wait_for_handoff(rt, chat, mark, &request_id).await?;
     carry_on(ctx, rt, chat, &handoff, roster.as_deref(), model, effort).await
+}
+
+/// The failure of a cascading roll over whose hand-off never arrived: this chat kept its
+/// state, but the children had already been stopped for it — the message names them.
+fn failed_after_cascade(why: &str, children: &[CascadeChild]) -> String {
+    let base = why.strip_suffix(" Nothing was changed.").unwrap_or(why);
+    let names = children
+        .iter()
+        .map(|c| c.title.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{base} Nothing was changed to this chat, but its subagents were already told to stop \
+         and keep what they wrote: {names}."
+    )
 }
 
 /// A turn has just ended and the chat is quiet. Two things may be waiting here: a roll over
@@ -635,9 +697,9 @@ fn start_with_handoff(
     model: Option<String>,
     effort: Option<String>,
 ) {
-    if !IN_FLIGHT.lock().unwrap().insert(chat.id.clone()) {
+    let Some(mut in_flight) = InFlight::take(&chat.id) else {
         return;
-    }
+    };
     let children = cascade_targets(rt, chat);
     send_cascades(rt, &chat.id, &children);
     let handle = rt.handle().clone();
@@ -660,6 +722,7 @@ fn start_with_handoff(
         }
         IN_FLIGHT.lock().unwrap().remove(&chat.id);
     });
+    in_flight.disarm();
 }
 
 /// Wait for the chat's reply to the hand-off request. The newest assistant reply after `mark`
@@ -1077,6 +1140,14 @@ mod tests {
         // The notice reaches the working child at once, mid-turn, as a steer.
         let notice = cw.expect("prompt").await;
         assert_eq!(notice["streamingBehavior"], "steer");
+        let notice_sid = notice["submissionId"].as_str().unwrap().to_owned();
+        assert_eq!(
+            h.col(&format!(
+                "SELECT kind FROM submission_meta WHERE submission_id = '{notice_sid}'"
+            )),
+            ["steer"],
+            "the notice carries its kind as well"
+        );
         let doc = handoff_dir(&h.rt, &parent).join(format!("{child}.md"));
         let notice_text = notice["text"].as_str().unwrap().to_owned();
         assert!(
@@ -1190,12 +1261,6 @@ mod tests {
         assert_eq!(targets.len(), 2, "both running children cascade");
         let doc = handoff_dir(&h.rt, &parent).join(format!("{with_doc}.md"));
         std::fs::create_dir_all(doc.parent().unwrap()).unwrap();
-        std::fs::write(
-            &doc,
-            "# Hand-off\nTask: keep going on branch slow-tail. Worktree ../helm-wt-slow. \
-             State: two files left. Next: the tail cases, then the review.\n",
-        )
-        .unwrap();
         // The roll over runs with a 50 ms cap: no child settles, so it carries on anyway.
         let seam = h.rt.sh.host.get().unwrap();
         let (ctx, rt) = (
@@ -1218,6 +1283,14 @@ mod tests {
         let mut pw = h.worker().await;
         pw.ready().await;
         let ask = pw.expect("prompt").await;
+        // The document lands while the parent is still writing its hand-off: the roster is
+        // read only after that wait, so this child counts as having written one.
+        std::fs::write(
+            &doc,
+            "# Hand-off\nTask: keep going on branch slow-tail. Worktree ../helm-wt-slow. \
+             State: two files left. Next: the tail cases, then the review.\n",
+        )
+        .unwrap();
         ack(&pw, &ask).await;
         pw.emit(json!({"type": "agent_start"})).await;
         reply(&h, &pw, "pmsg_1", "Goal: carry on.").await;
@@ -1275,6 +1348,59 @@ mod tests {
         assert!(
             crate::queue::is_manual(&h.db, &chat),
             "the user's park is still in place"
+        );
+    }
+
+    #[test]
+    fn a_failed_roll_over_start_gives_the_chat_back_to_later_rolls() {
+        // A roll over that fails on its way to the background flow must not keep the chat
+        // "already running" until the app restarts: the guard drops the slot on the way out.
+        let id = "in-flight-guard-test";
+        IN_FLIGHT.lock().unwrap().remove(id);
+        let guard = InFlight::take(id).expect("the slot is free");
+        assert!(
+            InFlight::take(id).is_none(),
+            "a second roll over is refused while the first holds the slot"
+        );
+        drop(guard);
+        assert!(
+            !IN_FLIGHT.lock().unwrap().contains(id),
+            "dropping the guard releases the chat again"
+        );
+        // Once the background flow has taken over, the flow clears the slot — not the guard.
+        let mut guard = InFlight::take(id).expect("free once more");
+        guard.disarm();
+        drop(guard);
+        assert!(
+            IN_FLIGHT.lock().unwrap().contains(id),
+            "the running flow still holds the chat"
+        );
+        IN_FLIGHT.lock().unwrap().remove(id);
+    }
+
+    #[test]
+    fn a_cascaded_failure_names_the_children_it_had_stopped() {
+        let kids = [
+            CascadeChild {
+                id: "kid-a".into(),
+                title: "Fix the parser".into(),
+                doc: PathBuf::from("a.md"),
+            },
+            CascadeChild {
+                id: "kid-b".into(),
+                title: "Slow, deaf".into(),
+                doc: PathBuf::from("b.md"),
+            },
+        ];
+        let m = failed_after_cascade(
+            "The agent did not write a hand-off in time. Nothing was changed.",
+            &kids,
+        );
+        assert!(
+            m.starts_with("The agent did not write a hand-off in time.")
+                && m.contains("Fix the parser, Slow, deaf")
+                && !m.ends_with("Nothing was changed."),
+            "{m}"
         );
     }
 

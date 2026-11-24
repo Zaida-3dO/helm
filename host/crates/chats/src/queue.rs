@@ -859,7 +859,7 @@ fn acting_name(db: &Database) -> String {
                     r.get::<_, String>(0)
                 }),
             };
-            Ok::<_, rusqlite::Error>(q.optional()?)
+            q.optional()
         })
         .ok()
         .flatten();
@@ -903,9 +903,26 @@ fn halt_working(rt: &crate::runtime::ChatRuntime, chat_id: &str, by: &str, now: 
         "{by} paused this chat from the queue: finish the step you are on, stop at the next \
          natural boundary, and wait for them there — do not start new work."
     );
+    // The chat can end its turn between the panel's read and this write. A steer note is an
+    // instruction to work: on a chat that is no longer working it would open a fresh turn
+    // instead of halting one. So the write looks at the chat's state first and lets the note
+    // and its transcript row go when there is nothing left to halt.
+    let mut halted = false;
     let wrote = rt
         .db()
         .write(|tx| {
+            let busy: bool = tx
+                .query_row(
+                    "SELECT status IN ('starting', 'running', 'stopping') FROM chats WHERE id = ?1",
+                    [chat_id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or(false);
+            if !busy {
+                return Ok(0);
+            }
+            halted = true;
             crate::submit::insert_submission(
                 tx,
                 &crate::submit::NewSubmission {
@@ -943,8 +960,10 @@ fn halt_working(rt: &crate::runtime::ChatRuntime, chat_id: &str, by: &str, now: 
             )
         })
         .is_ok();
-    if wrote {
+    if halted && wrote {
         let _ = rt.command(chat_id, crate::actor::Cmd::Dispatch(sid));
+    } else if !halted {
+        log::debug!("queue: pause of {chat_id}: its turn had already ended, nothing to halt");
     }
 }
 
@@ -1211,11 +1230,7 @@ mod tests {
             (q(true, None), 4, 4),
         ];
         for (seen, ours, want) in cases {
-            assert_eq!(
-                server_working(seen.clone(), ours),
-                want,
-                "{seen:?} / ours {ours}"
-            );
+            assert_eq!(server_working(seen, ours), want, "{seen:?} / ours {ours}");
         }
     }
 

@@ -5,8 +5,10 @@
 //!   The call answers at once with what is stored and whether an answer is on its way; it never
 //!   waits on a model. The card shows the last reply the whole time; when a summary arrives it
 //!   takes the last reply's place in the same fixed-height box, so nothing jumps or spins.
-//! - The cache is `chat_summary`: the text, when it was made (`summary_at`) and the
-//!   last-activity it was made for (`for_activity`). A summary is fresh while
+//! - The cache is `chat_summary`: the text, the last-activity it was made for
+//!   (`for_activity`) and the activity the stored answer covers (`summary_at` — the
+//!   `for_activity` of the attempt whose answer arrived, never the minute it landed, so a
+//!   late answer for older words does not read as fresh). A summary is fresh while
 //!   `summary_at >= last_activity_at`: once the chat moves the card asks again, and the stamp
 //!   means one ask per activity burst — an attempt that found nothing to say stamps too, so a
 //!   quiet chat the model could not answer is not asked again until it moves.
@@ -154,6 +156,24 @@ pub(crate) fn stamp_attempt(
     )
 }
 
+/// Store a generated summary. `summary_at` rides the activity the attempt was made for, not
+/// the minute the answer landed: a helper can run over twenty seconds, and a chat that moved
+/// in that time is not covered by an answer built from its older words — the card asks again
+/// for the new activity. `checked_at` keeps the finishing time. Answers the rows written
+/// (0 when the chat's summary row is gone).
+pub(crate) fn store_answer(
+    tx: &rusqlite::Transaction<'_>,
+    chat_id: &str,
+    text: &str,
+    for_activity: i64,
+    now: i64,
+) -> rusqlite::Result<usize> {
+    tx.execute(
+        "UPDATE chat_summary SET summary = ?2, summary_at = ?3, checked_at = ?4 WHERE chat_id = ?1",
+        params![chat_id, text, for_activity, now],
+    )
+}
+
 /// What one chat looks like to a hover request: its run state, its newest activity, and what
 /// the `chat_summary` row holds (nothing when there is no row yet).
 struct Seen {
@@ -262,7 +282,7 @@ pub(crate) fn request(rt: &ChatRuntime, chat_id: &str) -> Result<ChatSummary, Ap
                     ..stored()
                 });
             }
-            match start(&sh, chat_id) {
+            match start(&sh, chat_id, last_activity) {
                 Ok(()) => Ok(ChatSummary {
                     generating: true,
                     ..stored()
@@ -284,7 +304,11 @@ pub(crate) fn request(rt: &ChatRuntime, chat_id: &str) -> Result<ChatSummary, Ap
 
 /// Resolve the local route and hand the job to the background. An `Err` is a plain sentence
 /// for the log; either way the card keeps its fallback until a summary arrives.
-fn start(sh: &std::sync::Arc<crate::runtime::Shared>, chat_id: &str) -> Result<(), String> {
+fn start(
+    sh: &std::sync::Arc<crate::runtime::Shared>,
+    chat_id: &str,
+    for_activity: i64,
+) -> Result<(), String> {
     let (title, messages) = sh
         .db
         .snapshot(|tx| {
@@ -369,12 +393,7 @@ fn start(sh: &std::sync::Arc<crate::runtime::Shared>, chat_id: &str) -> Result<(
             let wrote = rt
                 .sh
                 .db
-                .write(|tx| {
-                    tx.execute(
-                        "UPDATE chat_summary SET summary = ?2, summary_at = ?3, checked_at = ?3 WHERE chat_id = ?1",
-                        params![chat_id, text, helm_core::now_ms()],
-                    )
-                })
+                .write(|tx| store_answer(tx, &chat_id, &text, for_activity, helm_core::now_ms()))
                 .unwrap_or(0);
             if wrote > 0 {
                 // The record carries the summary: this PC's sidebar picks it up, and the copy
@@ -572,14 +591,11 @@ mod tests {
         assert_eq!(stamp(&db, 9, 100), 1);
         assert_eq!(stamp(&db, 9, 110), 0, "this activity was already asked for");
         assert_eq!(stamp(&db, 12, 120), 1, "new activity asks again");
-        // A written summary rides the chat record.
-        db.write(|tx| {
-            tx.execute(
-                "UPDATE chat_summary SET summary = 'About the plan. It waits on step two.', summary_at = 130, checked_at = 130 WHERE chat_id = 'c'",
-                [],
-            )
-        })
-        .unwrap();
+        // A written summary rides the chat record — stamped with the activity the answer was
+        // made for, not the minute it landed. The burst 12 was asked at 120 and the answer
+        // arrived at 130: it covers up to 12 only, so a chat that moved at 13 is not covered.
+        db.write(|tx| store_answer(tx, "c", "About the plan. It waits on step two.", 12, 130))
+            .unwrap();
         let rec = db
             .snapshot(|tx| crate::store::get_chat(tx, "c", 1))
             .unwrap()
@@ -588,9 +604,16 @@ mod tests {
             rec.summary.as_deref(),
             Some("About the plan. It waits on step two.")
         );
-        assert_eq!(rec.summary_at, Some(130));
-        assert!(fresh(rec.summary_at, 12), "fresh against the last activity");
-        assert!(!fresh(rec.summary_at, 131), "and stale once the chat moved");
+        assert_eq!(rec.summary_at, Some(12));
+        assert!(
+            fresh(rec.summary_at, 9),
+            "fresh while the chat has not moved"
+        );
+        assert!(
+            fresh(rec.summary_at, 12),
+            "fresh against the very activity it covers"
+        );
+        assert!(!fresh(rec.summary_at, 13), "and stale the moment it moves");
         // Deleting the chat takes its summary with it.
         db.write(|tx| tx.execute("DELETE FROM chats WHERE id = 'c'", []))
             .unwrap();
