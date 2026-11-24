@@ -185,7 +185,7 @@ impl SettingsExtension for WorkModeKeys {
             if !is_board(tx, id) {
                 return Err("That is not a board.".to_owned());
             }
-            workmode::set_board(tx, id, *mode, helm_core::now_ms());
+            workmode::set_board(tx, id, *mode, helm_core::now_ms()).map_err(|e| e.to_string())?;
         }
         Ok((before, read_value(tx)))
     }
@@ -271,12 +271,12 @@ impl SettingsExtension for WorkModeKeys {
         let now = helm_core::now_ms();
         for (id, _, _) in workmode::overrides(tx).unwrap_or_default() {
             if !listed.iter().any(|(l, _)| l == &id) {
-                workmode::set_board(tx, &id, None, now);
+                workmode::set_board(tx, &id, None, now).map_err(|e| e.to_string())?;
             }
         }
         for (id, mode) in listed {
             if is_board(tx, &id) {
-                workmode::set_board(tx, &id, mode, now);
+                workmode::set_board(tx, &id, mode, now).map_err(|e| e.to_string())?;
             }
         }
         Ok(())
