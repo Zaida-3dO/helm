@@ -361,6 +361,36 @@ impl EngineFactory for PlatformEngines {
     }
 }
 
+/// Map the language the user chose onto one the speech service really has. Windows refuses a
+/// tag it has no model for, and the short codes the setting offers (like `en`) are rarely tags
+/// of their own: an exact tag wins; otherwise the system's own speech language when it shares
+/// the chosen language's prefix; otherwise the first supported tag with that prefix; otherwise
+/// `None`, which leaves the choice to Windows. `system` and the supported tags are full tags
+/// like `en-GB`; matching on tags ignores case.
+pub(crate) fn pick_speech_tag(chosen: &str, system: &str, supported: &[String]) -> Option<String> {
+    if let Some(exact) = supported.iter().find(|t| t.eq_ignore_ascii_case(chosen)) {
+        return Some(exact.clone());
+    }
+    let prefix = chosen.split('-').next().unwrap_or(chosen);
+    if system
+        .split('-')
+        .next()
+        .unwrap_or(system)
+        .eq_ignore_ascii_case(prefix)
+    {
+        return Some(system.to_owned());
+    }
+    supported
+        .iter()
+        .find(|t| {
+            t.split('-')
+                .next()
+                .unwrap_or(t)
+                .eq_ignore_ascii_case(prefix)
+        })
+        .cloned()
+}
+
 // ---- the Windows speech service --------------------------------------------------------------
 
 /// The speech service is spoken to from the session thread only, on a Runtime apartment of its
@@ -437,13 +467,28 @@ impl Engine for WinRtEngine {
         let built = (|| -> windows::core::Result<Windows> {
             {
                 use windows::core::Error as WError;
-                // The user's language when they named one (and the service then answers in one
-                // line when it has no model for it); otherwise Windows' own speech language.
+                // The user's language when they named one, brought back to a tag this PC's
+                // speech service really has (a bare `en` is not one of those); Windows' own
+                // speech language when they named none or nothing fits.
                 let recognizer = match self.language.as_deref() {
                     Some(tag) => {
-                        let lang =
-                            windows::Globalization::Language::CreateLanguage(&HSTRING::from(tag))?;
-                        SpeechRecognizer::Create(&lang)?
+                        let fallback = SpeechRecognizer::new()?;
+                        let system = fallback.CurrentLanguage()?.LanguageTag()?.to_string();
+                        let view = SpeechRecognizer::SupportedTopicLanguages()?;
+                        let mut supported: Vec<String> = Vec::new();
+                        for i in 0..view.Size()? {
+                            supported.push(view.GetAt(i)?.LanguageTag()?.to_string());
+                        }
+                        match pick_speech_tag(tag, &system, &supported) {
+                            Some(chosen) => {
+                                fallback.Close().ok();
+                                let lang = windows::Globalization::Language::CreateLanguage(
+                                    &HSTRING::from(chosen),
+                                )?;
+                                SpeechRecognizer::Create(&lang)?
+                            }
+                            None => fallback,
+                        }
                     }
                     None => SpeechRecognizer::new()?,
                 };

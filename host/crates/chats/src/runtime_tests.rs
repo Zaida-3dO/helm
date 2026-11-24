@@ -2545,8 +2545,9 @@ async fn the_queue_panel_can_pause_and_stop_a_working_chat() {
 }
 
 /// A pause click that lands just as the turn ends must not type a fresh turn onto a quiet
-/// chat: the note write finds the chat no longer working and lets the note — and its
-/// transcript row — go.
+/// chat: the halt finds the chat no longer working and lets the note — and its transcript
+/// row — go. The halt is called directly: through the queue action an idle row takes the park
+/// branch instead, which never reaches the busy check inside the halt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_pause_note_is_dropped_when_the_turn_ends_before_it_lands() {
     let mut h = harness();
@@ -2555,7 +2556,7 @@ async fn a_pause_note_is_dropped_when_the_turn_ends_before_it_lands() {
     // the host still holds a live worker, while the chats row already says idle.
     h.db.write(|tx| tx.execute("UPDATE chats SET status = 'idle' WHERE id = ?1", [&chat]))
         .unwrap();
-    crate::queue::action(&h.rt, &chat, "pause", None).unwrap();
+    crate::queue::halt_working(&h.rt, &chat, "Test", helm_core::now_ms());
     assert_eq!(
         h.col(&format!(
             "SELECT count(*) FROM submissions WHERE chat_id = '{chat}' \
@@ -5411,12 +5412,13 @@ async fn a_configured_background_model_rides_on_the_helper_job() {
         .unwrap();
     let kept_local = made["id"].as_str().unwrap().to_owned();
     h.send(&kept_local, "more private words", "default").await;
-    // The refusal leaves no job parked at all: this chat cannot be named while the setting
-    // stands, so every later send must not warn or retry.
+    // The refusal parks a free `waiting` job: no run starts and no attempt is spent while the
+    // setting stands, but a later send asks again once a background model exists again.
     h.until("local fallback", |h| {
-        title_of(h, &kept_local).1 == "fallback/"
+        title_of(h, &kept_local).1 == "fallback/waiting"
     })
     .await;
+    assert_eq!(attempts_of(&h, &kept_local), 0, "the wait costs no attempt");
     assert_eq!(
         h.spawner.title_jobs.lock().unwrap().len(),
         before,
@@ -5497,6 +5499,55 @@ async fn a_configured_background_model_rides_on_the_helper_job() {
     assert_eq!(on_local["localKey"], "sk-fake-local-key");
     assert_eq!(on_local["localContextTokens"], 65_536);
     assert_eq!(on_local["localMaxOutputTokens"], 16_384);
+
+    // The chat whose naming was refused is not left unnamed for good: with a background model
+    // chosen again, its next send takes up the parked `waiting` job and a real title lands.
+    let more = h.spawner.title_jobs.lock().unwrap().len();
+    h.send(&kept_local, "keep the notes tidy too", "steer")
+        .await;
+    h.until("the waiting job runs", |h| {
+        title_of(h, &kept_local).1 == "generated/"
+    })
+    .await;
+    assert!(
+        h.spawner.title_jobs.lock().unwrap().len() > more,
+        "the parked waiting job started on the next send"
+    );
+}
+
+/// A title job the burst cap stops before its helper ever ran costs the chat nothing: the
+/// attempt the run had charged goes back, and the next send takes the chat's first real look.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_title_job_the_burst_cap_stops_costs_the_chat_nothing() {
+    use std::sync::atomic::Ordering;
+    let h = harness();
+    *h.spawner.title.lock().unwrap() = Ok("A real name at last".into());
+    let chat = h.create().await;
+    // Every place in the burst queue is taken by the time this chat's job reaches it.
+    h.rt.sh
+        .titles
+        .jobs
+        .store(crate::titles::MAX_JOBS, Ordering::SeqCst);
+    h.send(&chat, "name a chat during a busy burst", "default")
+        .await;
+    h.until("capped job parked", |h| {
+        title_of(h, &chat).1 == "fallback/failed"
+    })
+    .await;
+    assert_eq!(
+        attempts_of(&h, &chat),
+        0,
+        "a run that never reached a model spends no attempt"
+    );
+    // Room in the queue again: the next send takes the chat's first real look and names it.
+    h.rt.sh.titles.jobs.store(0, Ordering::SeqCst);
+    h.send(&chat, "and a second message", "steer").await;
+    h.until("the retry names the chat", |h| {
+        title_of(h, &chat).1 == "generated/"
+    })
+    .await;
+    assert_eq!(title_of(&h, &chat).0, "A real name at last");
+    assert_eq!(attempts_of(&h, &chat), 1);
 }
 
 /// A manual rename wins over a title that arrives later; a failed job keeps the fallback.

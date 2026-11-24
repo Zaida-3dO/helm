@@ -4,7 +4,7 @@
 //! |---|---|
 //! | `submission_meta` | per submission: origin (`user`/`harness`), send priority (`now` or null), the run it was dispatched in |
 //! | `restart_continuations` | chats owed one restart-continuation prompt (at most 100 rows) |
-//! | `chat_titles` | per chat: where the title came from (`fallback`/`generated`/`manual`), which naming job waits there (`greeting`/`failed`/`generating`), and how many naming runs it has spent (`attempts`) |
+//! | `chat_titles` | per chat: where the title came from (`fallback`/`generated`/`manual`), which naming job waits there (`greeting`/`waiting`/`failed`/`generating`), and how many naming runs it has spent (`attempts`) |
 //! | `unread_marks` | manual unread marks with their token |
 //! | `chat_completions` | the current completion per chat |
 //! | `chat_summary` | per chat: the hover card's two-sentence summary, when it was made, and the activity it covers ([`crate::summary`]) |

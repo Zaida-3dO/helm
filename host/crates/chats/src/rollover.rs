@@ -546,11 +546,34 @@ async fn roll_forward(
     cap: Duration,
     ask: Option<(i64, String)>,
 ) -> Result<(), String> {
+    if ask.is_none() {
+        wait_for_children(rt, &children, cap).await;
+    }
+    let outcome = carry_past_handoff(rt, ctx, chat, &children, target, ask).await;
+    // Everything past the wait happens once the children have already been told to stop and
+    // write their documents: any failure there — the ask itself, the hand-off, the carry-on
+    // — only says "Nothing was changed" of this chat, so it names the ones left holding.
+    match outcome {
+        Err(why) if !children.is_empty() => Err(failed_after_cascade(&why, &children)),
+        other => other,
+    }
+}
+
+/// The roll-over flow after the children settled: send the hand-off ask (unless [`start`]
+/// already sent it for a childless chat), wait for the answer, then carry on with the roster
+/// appended.
+async fn carry_past_handoff(
+    rt: &ChatRuntime,
+    ctx: &OpCtx,
+    chat: &ChatRecord,
+    children: &[CascadeChild],
+    target: Target,
+    ask: Option<(i64, String)>,
+) -> Result<(), String> {
     let (model, effort) = target;
     let (mark, request_id) = match ask {
         Some(mr) => mr,
         None => {
-            wait_for_children(rt, &children, cap).await;
             let stack = chat.stack_id.clone().unwrap_or_else(|| chat.id.clone());
             let request_id = uuid::Uuid::new_v4().to_string();
             // The mark is taken when the request goes out, not when the roll over started: a
@@ -573,16 +596,10 @@ async fn roll_forward(
             (mark, request_id)
         }
     };
-    let handoff = match wait_for_handoff(rt, chat, mark, &request_id).await {
-        Ok(h) => h,
-        // The children were already told to stop and write their documents: "Nothing was
-        // changed" is only true of this chat, so the failure names the ones left holding.
-        Err(why) if !children.is_empty() => return Err(failed_after_cascade(&why, &children)),
-        Err(why) => return Err(why),
-    };
+    let handoff = wait_for_handoff(rt, chat, mark, &request_id).await?;
     // The roster is read after the hand-off wait, not before it: a child that writes its
     // document while the parent is still answering counts as written.
-    let roster = (!children.is_empty()).then(|| roster_for(rt, &children));
+    let roster = (!children.is_empty()).then(|| roster_for(rt, children));
     carry_on(ctx, rt, chat, &handoff, roster.as_deref(), model, effort).await
 }
 

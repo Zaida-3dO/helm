@@ -125,6 +125,29 @@ fn the_small_rules() {
     ] {
         assert_eq!(language_ok(lang), ok, "language {lang:?}");
     }
+    // The language a live session really asks Windows for: only the tags the speech service
+    // has a model for are usable, so the chosen code has to land on one of them.
+    for (chosen, system, supported, want) in [
+        // A bare short code is not usually a tag of its own: the system language of the same
+        // language wins (the default settings: `en` on a PC with `en-GB`).
+        ("en", "en-GB", &["en-GB", "en-US"][..], Some("en-GB")),
+        // An exact supported tag wins, and in the service's own spelling.
+        ("en-US", "en-GB", &["en-GB", "en-US"][..], Some("en-US")),
+        ("en-us", "en-GB", &["en-GB", "en-US"][..], Some("en-US")),
+        // No system language of that language: the first supported tag with its prefix.
+        ("pt", "en-GB", &["en-GB", "pt-BR"][..], Some("pt-BR")),
+        ("en-US", "de-DE", &["en-GB", "pt-BR"][..], Some("en-GB")),
+        // Nothing of that language anywhere: leave the choice to Windows.
+        ("fr", "en-GB", &["en-GB", "en-US"][..], None),
+        ("en", "de-DE", &[][..], None),
+    ] {
+        let supported: Vec<String> = supported.iter().map(|t| (*t).to_owned()).collect();
+        assert_eq!(
+            crate::live::pick_speech_tag(chosen, system, &supported).as_deref(),
+            want,
+            "{chosen} on {system} with {supported:?}"
+        );
+    }
     // A reply is plain text, or JSON with a text field, or a JSON string.
     for (reply, want) in [
         ("hello there\n", "hello there"),

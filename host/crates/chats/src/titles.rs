@@ -10,8 +10,9 @@
 //!   preference, on by default); with neither, the fallback stays.
 //! - One state decides everything: a chat either *has a real title* (`generated`, or `manual`
 //!   after a rename by hand — both end the automatic naming for good) or *needs a title*, where
-//!   the first-line fallback is only a stand-in and a naming job waits parked (`greeting` or
-//!   `failed`). A chat that needs a title retries on each of its sends until a real title lands,
+//!   the first-line fallback is only a stand-in and a naming job waits parked (`greeting`,
+//!   `waiting` or `failed`). A chat that needs a title retries on each of its sends until a
+//!   real title lands,
 //!   at most [`MAX_TITLE_ATTEMPTS`] helper runs in all; past the cap the stand-in stays and
 //!   Helm stops asking. A manual rename always means has-a-title and ends every retry. The
 //!   parked job is claimed to `claimed` inside the retrying send's own transaction, so two sends
@@ -21,8 +22,9 @@
 //!   repaired once at start-up, back to needing a title with the stand-in restored.
 //! - A title job starts with the first submission of a fresh chat (still "New chat", no messages)
 //!   or of a fork, from either path, and on every later send while the chat still needs a title:
-//!   after a greeting that was parked, after a run that failed or timed out, and after a run
-//!   whose answer was a label rather than a name. A retry reads the conversation so far, not one
+//!   after a greeting that was parked, after a run that failed or timed out, after a run
+//!   whose answer was a label rather than a name, and after a `waiting` park — nothing could
+//!   name the chat then (the route was switched off), and the wait cost no attempt. A retry reads the conversation so far, not one
 //!   message: the first request that is more than a greeting, the latest one, and short excerpts
 //!   of the requests in between ([`retry_job`]). At most [`MAX_CONCURRENT`] helper runs at once
 //!   and [`MAX_JOBS`] jobs in all; a job past that fails at once and the fallback stays. The
@@ -186,16 +188,21 @@ pub(crate) fn write_fallback(
 /// Record what this send left parked or running. Only starting a helper run (`generating`) costs
 /// the chat one of its [`MAX_TITLE_ATTEMPTS`]; parking a greeting or a failure costs nothing.
 fn set_job(rt: &ChatRuntime, chat_id: &str, job: Option<&str>) {
-    let run = i64::from(job == Some("generating"));
+    update_job(rt, chat_id, job, i64::from(job == Some("generating")));
+}
+
+/// The same write with an explicit attempt charge, so a caller can hand one back: a run the
+/// burst cap stopped never reached a helper, and its `generating` charge goes with it.
+fn update_job(rt: &ChatRuntime, chat_id: &str, job: Option<&str>, attempts: i64) {
     let _ = rt.db().write(|tx| {
         tx.execute(
             "INSERT INTO chat_titles(chat_id, state, job, attempts, updated_at)
-             VALUES (?1, 'fallback', ?2, ?4, ?3)
+             VALUES (?1, 'fallback', ?2, MAX(0, ?4), ?3)
              ON CONFLICT(chat_id) DO UPDATE SET
                  job = excluded.job,
-                 attempts = attempts + ?4,
+                 attempts = MAX(0, attempts + ?4),
                  updated_at = excluded.updated_at",
-            params![chat_id, job, helm_core::now_ms(), run],
+            params![chat_id, job, helm_core::now_ms(), attempts],
         )
     });
 }
@@ -307,12 +314,14 @@ pub fn start(rt: &ChatRuntime, chat_id: &str, job_body: Value) {
     // the one message the title is made from, the first or the first after a greeting (the person can
     // switch that off); with neither the fallback stays.
     if let Err(why) = crate::background::decorate_title(&rt.sh, chat_id, &mut job_body) {
-        // Nothing asked for this chat can name it (a local chat with no background model while
-        // the Claude route is switched off): leave no job parked at all. Parking `failed` would
-        // warn again on every send forever and charge the chat for something no retry can fix
-        // while the setting stands.
-        log::warn!("chat {chat_id}: no automatic title ({why}); the fallback stays");
-        set_job(rt, chat_id, None);
+        // Nothing asked for this chat can name it right now (a local chat with no background
+        // model while the Claude route is switched off). Park a free `waiting` job: it costs
+        // the chat no attempt and says nothing at warning level, but the chat's next send
+        // asks again — and names the chat once the setting allows it. Leaving no job at all
+        // would stop the retrying for good; parking `failed` would warn on every send while
+        // the setting stands.
+        log::debug!("chat {chat_id}: no automatic title for now ({why}); a later send retries");
+        set_job(rt, chat_id, Some("waiting"));
         return;
     }
     set_job(rt, chat_id, Some("generating"));
@@ -326,7 +335,10 @@ pub fn start(rt: &ChatRuntime, chat_id: &str, job_body: Value) {
         let q = &rt.sh.titles;
         if q.jobs.fetch_add(1, Ordering::SeqCst) >= MAX_JOBS {
             q.jobs.fetch_sub(1, Ordering::SeqCst);
-            set_job(&rt, &chat, Some("failed"));
+            // The helper never ran, so the attempt the `generating` state charged goes back:
+            // a busy burst must not spend a chat's five looks on runs that never reached a
+            // model. The next send retries.
+            update_job(&rt, &chat, Some("failed"), -1);
             return;
         }
         let permit = rt.sh.titles.slots.acquire().await;
@@ -791,13 +803,16 @@ pub fn run_helper_until(
 pub(crate) enum Parked {
     None,
     Greeting,
+    /// Parked because nothing can name the chat right now (the route is switched off); the
+    /// next send asks again, and the wait cost the chat nothing.
+    Waiting,
     Failed,
 }
 
 /// Whether this send should start a naming run, answering one clear question: does the chat have
 /// a real title yet? `generated` or `manual` says it has, and no run ever starts again (a rename
 /// by hand ends the automatic naming for good). Otherwise the chat needs a title: a job parked
-/// `greeting` or `failed` waits for this send — and is claimed to `claimed` right here, in this
+/// `greeting`, `waiting` or `failed` waits for this send — and is claimed to `claimed` right here, in this
 /// transaction, so two sends at once cannot both run it — a fresh chat's first submission (still
 /// "New chat", no messages) or a fork's starts one, and the run that started at most
 /// [`MAX_TITLE_ATTEMPTS`] times is the last one: past the cap the first-line stand-in stays. A
@@ -826,7 +841,7 @@ pub(crate) fn wants_job(
                         WHERE t.chat_id = c.id AND t.state IN ('manual', 'generated')),
                 (SELECT t.job FROM chat_titles t
                    WHERE t.chat_id = c.id
-                     AND t.job IN ('greeting', 'failed', 'generating', 'claimed') LIMIT 1),
+                     AND t.job IN ('greeting', 'waiting', 'failed', 'generating', 'claimed') LIMIT 1),
                 COALESCE((SELECT t.attempts FROM chat_titles t WHERE t.chat_id = c.id), 0)
          FROM chats c WHERE c.id = ?1",
         [chat_id],
@@ -849,12 +864,13 @@ pub(crate) fn wants_job(
         Some("claimed") | Some("generating") => return Ok(None),
         Some("failed") => Parked::Failed,
         Some("greeting") => Parked::Greeting,
+        Some("waiting") => Parked::Waiting,
         _ => Parked::None,
     };
     if parked != Parked::None {
         let claimed = tx.execute(
             "UPDATE chat_titles SET job = 'claimed', updated_at = ?2
-             WHERE chat_id = ?1 AND job IN ('greeting', 'failed')",
+             WHERE chat_id = ?1 AND job IN ('greeting', 'waiting', 'failed')",
             params![chat_id, helm_core::now_ms()],
         )?;
         return Ok((claimed == 1).then_some((forked, parked)));
