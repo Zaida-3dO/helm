@@ -15,7 +15,7 @@
 //! start over — the chats it was tracking may all read idle the moment the app is back.
 
 use crate::runtime::ChatRuntime;
-use crate::types::{BuildQueueEntry, ChatSendArgs, SendAction, SendOrigin};
+use crate::types::{BuildQueueEntry, ChatSendArgs, MessageKind, SendAction, SendOrigin};
 use helm_core::db::Database;
 use rusqlite::{params, OptionalExtension};
 use serde_json::json;
@@ -326,6 +326,7 @@ impl Starter for ChatStarter {
                 context: None,
                 page_title: None,
                 page_overview: None,
+                kind: Some(MessageKind::InitialPrompt),
             },
             None,
         );

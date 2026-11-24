@@ -174,6 +174,12 @@ pub struct SidebarRow {
     pub depth: u8,
     pub parent_chat_id: Option<String>,
     pub has_children: bool,
+    /// The chat's own open-item state says its row is expanded (its children are shown).
+    /// Read from the chat record, so the row is expanded on every PC that views the chat;
+    /// the chevron writes it through `chat_set_sidebar_state`. Left out when folded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub expanded: Option<bool>,
     pub status: ChatStatus,
     pub attention: Option<RowAttention>,
     pub pinned: bool,
@@ -222,6 +228,17 @@ pub struct SidebarRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub preview: Option<RowPreview>,
+    /// The hover card's two-sentence summary (the chats crate makes it on demand, from a chat
+    /// row hovered a second; see their hover-summary notes). The row carries it so a chat
+    /// watched from another PC shows the one made where it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub summary: Option<String>,
+    /// When that summary was made, Unix ms; left out with it. The card calls it stale once
+    /// `lastActivityAt` passes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub summary_at: Option<i64>,
 }
 
 /// What a chat's hover preview shows besides its title and state: the opening of the last reply

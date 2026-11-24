@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { MessageRow } from '../api/types.ts';
-import { bubbleText, fromSpeaker, fromTelegram, fromVoice, isHelmNote, isQuietReply, pageMessage, peerMessage, typedOn } from './origin.ts';
+import { bubbleText, fromSpeaker, fromTelegram, fromVoice, isHelmNote, isQuietReply, isThinkingKind, KIND_TAG, pageMessage, peerMessage, THINKING_KINDS, typedOn, waitFinished } from './origin.ts';
 
 const NOTE = '[Sent from Telegram: answer briefly in plain text, with no tables or long code. Offer choices as a numbered list. Only the final message of each turn reaches the user\'s phone, so make that message stand on its own. The user can reply "more" for detail.]';
 
@@ -133,5 +133,45 @@ test('the notes Helm writes for the agent are recognised; nothing a person or an
     [row('[quiet]'), false],
   ];
   for (const [r, want] of quiet) assert.equal(isQuietReply(r), want, JSON.stringify(r.text));
+});
+
+test('a stamped note renders instead of hiding; the kind words and thinking flags match the host', () => {
+  const stamp = (kind: 'wait-finished' | 'request-expired', waitChat?: { chatId: string; title: string }): MessageRow => ({
+    ...row('anything', 'app'),
+    details: { origin: 'app', kind, ...(waitChat ? { waitChat } : {}) },
+  });
+  // A wait or expiry note carries its kind, so it is carded, not hidden; an old un-stamped wait note still hides.
+  assert.equal(isHelmNote(stamp('wait-finished')), false);
+  assert.equal(isHelmNote(stamp('request-expired')), false);
+  assert.equal(isHelmNote(row('[Wait finished] The build is done.', 'app')), true);
+  // Every kind an agent sends counts as thinking; the relayed user action and Helm's own notes do not.
+  type Kind = 'initial-prompt' | 'steer' | 'nudge' | 'update' | 'completed' | 'user-action' | 'wait-finished';
+  const thinking = (kind: Kind): MessageRow => ({ ...row('x', 'other_chat'), details: { origin: 'other_chat', kind } });
+  const agentKinds = ['initial-prompt', 'steer', 'nudge', 'update', 'completed'] as const;
+  for (const k of agentKinds) {
+    assert.equal(isThinkingKind(thinking(k)), true, k);
+    assert.ok(KIND_TAG[k], `the tag line for ${k}`);
+  }
+  assert.equal(isThinkingKind(thinking('user-action')), false);
+  assert.equal(isThinkingKind(thinking('wait-finished')), false);
+  assert.equal(isThinkingKind(row('no kind at all', 'other_chat')), false);
+  assert.deepEqual([...THINKING_KINDS].sort(), ['completed', 'initial-prompt', 'nudge', 'steer', 'update']);
+});
+
+test('a finished wait parses into its watched thing and outcome; anything else does not', () => {
+  const wf = (text: string, waitChat?: { chatId: string; title: string }): MessageRow => ({
+    ...row(text, 'app'),
+    details: { origin: 'app', kind: 'wait-finished', ...(waitChat ? { waitChat } : {}) },
+  });
+  const cases: [MessageRow, { what: string; code: string } | null][] = [
+    [wf('[Wait finished] Wait w9 on chat 6c9e2f: idle.'), { what: 'chat 6c9e2f', code: 'idle' }],
+    [wf('[Wait finished] Wait w9 on file C:/w/out.txt: changed.'), { what: 'file C:/w/out.txt', code: 'changed' }],
+    [wf('[Wait finished] Wait w3 on the checks on https://github.com/o/r/pull/7: checks failed.'), { what: 'the checks on https://github.com/o/r/pull/7', code: 'checks failed' }],
+    [wf('[Wait finished] Wait w1 on process 4321: exited.'), { what: 'process 4321', code: 'exited' }],
+    // No kind, or not the watcher's frame: no wait line.
+    [row('[Wait finished] Wait w9 on chat 6c9e2f: idle.', 'app'), null],
+    [wf('[Wait finished] something else entirely'), null],
+  ];
+  for (const [r, want] of cases) assert.deepEqual(waitFinished(r), want, r.text.slice(0, 40));
 });
 

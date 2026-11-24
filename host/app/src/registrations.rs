@@ -99,6 +99,8 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     helm_gatekeeper::register_services(services, events);
     helm_governor::register_services(services, events);
     helm_localmodels::register_services(services, events);
+    // The live-dictation session slot the composer's microphone drives.
+    helm_dictation::register_services(services);
     helm_relay::register_services(services, events);
     // The memory indexer drives the hub's search index over that line.
     if let Some(line) = services.get::<helm_relay::index_line::IndexLine>() {
@@ -418,6 +420,10 @@ fn consent_tick(
                 text: &d.text,
                 origin: helm_chats::types::SubmissionOrigin::App,
                 page: None,
+                // The upkeep note names what it is: the user's decision relayed, or the notice
+                // that the request expired.
+                kind: helm_chats::types::MessageKind::parse(d.kind),
+                wait: None,
             },
         );
         match sent {
@@ -520,6 +526,13 @@ pub fn launch_contributors(
     let mut a = helm_hosttools::Addendum::new();
     a.register_section(Arc::new(helm_hosttools::sections::VerbositySection {
         db: db.clone(),
+    }))
+    // The tool runs and thinking are already shown as collapsible records; this says the reply's
+    // prose should not narrate them as well.
+    .register_section(Arc::new(helm_hosttools::StaticSection {
+        id: "prose",
+        order: 12,
+        text: helm_hosttools::sections::PROSE_ADDENDUM,
     }))
     .register_section(Arc::new(helm_hosttools::sections::AdoptedSection {
         id: "links",

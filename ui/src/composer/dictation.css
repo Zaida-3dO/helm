@@ -117,3 +117,10 @@ button.dictation-pill:hover {
     opacity: 0.35;
   }
 }
+
+/* Live dictation's sentence in progress, drawn after the draft's end (the ghost machinery keeps
+   the wrapping true) and quiet, because it is not settled yet. */
+.composer-dock .editor-provisional {
+  color: var(--muted);
+  font-style: italic;
+}

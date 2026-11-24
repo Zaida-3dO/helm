@@ -377,6 +377,12 @@ pub struct SendArgs {
     /// own typing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<PageOrigin>,
+    /// The message's kind word (`steer`, `update`, ... — see the chats crate's message kinds),
+    /// set when the sending side is a chat rather than a person's typing: it rides the wire so
+    /// the chat that runs the message stores the kind with it and the transcript card can tag
+    /// it. An unknown word is kept as no kind. Absent for the person's own typing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// The display words of a page's message, as the page named them: its name and a short summary.
@@ -597,6 +603,24 @@ pub struct SetModelArgs {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FastModeArgs {
+    pub chat_id: String,
+    /// The chat's own fast-mode pick; `null` drops it so the chat follows that PC's default.
+    #[serde(default)]
+    pub on: Option<bool>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SidebarStateArgs {
+    pub chat_id: String,
+    /// The chat's whole open-item state, replaced in one write; `null` resets it. The shape
+    /// is validated on the PC that runs the chat, where the record lives.
+    pub state: serde_json::Value,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -918,6 +942,12 @@ pub enum Op {
     ConsentStates(ChatIdArgs),
     Create(CreateArgs),
     SetModel(SetModelArgs),
+    /// The composer's lightning toggle: the chat's own fast-mode pick, set on the PC that runs
+    /// the chat.
+    SetFastMode(FastModeArgs),
+    /// The chat's open-item state (opened cards, row expanded), set on the PC that runs
+    /// the chat so every PC viewing it shows the same.
+    SetSidebarState(SidebarStateArgs),
     Rename(RenameArgs),
     Archive(ArchiveArgs),
     Share(ShareArgs),
@@ -999,7 +1029,7 @@ pub enum Op {
     ItemLinks(ChatIdsArgs),
     Snooze(SnoozeArgs),
     Address(ChatIdArgs),
-    /// The PC's new-chat model/effort/reply-length, three fields only. A read.
+    /// The PC's new-chat model/effort/reply-length/fast-mode defaults, four fields only. A read.
     DefaultsGet(ChatIdArgs),
     DefaultsSet(DefaultsArgs),
     /// Make a project on this PC (a board, or a folder when no task board is connected).
@@ -1072,6 +1102,8 @@ impl Op {
             "consent_states" => Op::ConsentStates(args(a)?),
             "create" => Op::Create(args(a)?),
             "set_model" => Op::SetModel(args(a)?),
+            "set_fast_mode" => Op::SetFastMode(args(a)?),
+            "set_sidebar_state" => Op::SetSidebarState(args(a)?),
             "rename" => Op::Rename(args(a)?),
             "archive" => Op::Archive(args(a)?),
             "share" => Op::Share(args(a)?),
@@ -1171,6 +1203,8 @@ impl Op {
                 | Op::ConsentDecide(_)
                 | Op::Create(_)
                 | Op::SetModel(_)
+                | Op::SetFastMode(_)
+                | Op::SetSidebarState(_)
                 | Op::Rename(_)
                 | Op::Archive(_)
                 | Op::Share(_)
@@ -1463,6 +1497,19 @@ mod tests {
             ("forward_open", json!({"chatId": "c1"}), None),
             ("forward_close", json!({"forwardId": "f1"}), Some(false)),
             ("skills", json!({"chatId": "c1"}), Some(false)),
+            // The lightning toggle changes the chat where it runs, so the run switch gates it.
+            (
+                "set_fast_mode",
+                json!({"chatId": "c1", "on": true}),
+                Some(true),
+            ),
+            (
+                "set_fast_mode",
+                json!({"chatId": "c1", "on": null}),
+                Some(true),
+            ),
+            ("set_fast_mode", json!({"chatId": "c1"}), Some(true)),
+            ("set_fast_mode", json!({"chatId": "c1", "on": "yes"}), None),
             (
                 "side_resolve",
                 json!({"chatId": "c1", "action": "discard"}),

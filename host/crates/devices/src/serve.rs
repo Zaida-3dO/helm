@@ -21,13 +21,14 @@ use crate::tunnel::{self, LocalLoopback, TunnelOut, Tunnels};
 use crate::wire::{
     code, AnswerArgs, ArchiveArgs, AttachPutArgs, AttachmentGetArgs, AttachmentRef, BlobReadArgs,
     BoardCancelArgs, BoardReadArgs, Caller, ChatIdArgs, CheckpointArgs, ConsentDecideArgs,
-    CreateArgs, DefaultsArgs, DeviceFrame, DeviceInfo, DevicePerson, EditOpenArgs, ForkArgs,
-    ForwardCloseArgs, ForwardOpenArgs, Frame, Hello, MoveProfileArgs, MuteArgs, Op, OrganizeArgs,
-    PageArgs, PageIdArgs, PageOrigin, PagesReadArgs, PanelStageArgs, PeerDevice, ProjectCreateArgs,
-    ProjectSetArgs, Push, QuickOpenArgs, RemoteChat, RenameArgs, ResendArgs, RollOverArgs,
-    SendArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SideResolveArgs, SnoozeArgs,
-    SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError, MAX_CHUNK_BYTES, MAX_PAGE_ROWS,
-    MAX_SEND_ATTACHMENTS, MAX_SEND_BYTES, MAX_UPLOAD_BYTES, SUB_ROWS,
+    CreateArgs, DefaultsArgs, DeviceFrame, DeviceInfo, DevicePerson, EditOpenArgs, FastModeArgs,
+    ForkArgs, ForwardCloseArgs, ForwardOpenArgs, Frame, Hello, MoveProfileArgs, MuteArgs, Op,
+    OrganizeArgs, PageArgs, PageIdArgs, PageOrigin, PagesReadArgs, PanelStageArgs, PeerDevice,
+    ProjectCreateArgs, ProjectSetArgs, Push, QuickOpenArgs, RemoteChat, RenameArgs, ResendArgs,
+    RollOverArgs, SendArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SideResolveArgs,
+    SidebarStateArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError,
+    MAX_CHUNK_BYTES, MAX_PAGE_ROWS, MAX_SEND_ATTACHMENTS, MAX_SEND_BYTES, MAX_UPLOAD_BYTES,
+    SUB_ROWS,
 };
 use base64::Engine as _;
 use helm_chats::types::{
@@ -209,6 +210,8 @@ pub trait ChatPort: Send + Sync {
     /// `files` are the attachments carried with it, exactly as a local send hands them over.
     /// `page` says a page on the sending PC wrote it: the card words are stored with the message
     /// and the PC line is not put in front — the page names itself inside the text.
+    /// `kind` is the message's kind word when the sending side was a chat: it is stored with
+    /// the message so its card can tag it.
     #[allow(clippy::too_many_arguments)]
     fn send(
         &self,
@@ -219,6 +222,7 @@ pub trait ChatPort: Send + Sync {
         device: DeviceInfo,
         files: Vec<SentFile>,
         page: Option<PageOrigin>,
+        kind: Option<String>,
     ) -> BoxFut<'_, PortResult<()>>;
     /// Stop the chat's turn; with `no_resend`, what the agent had not read is not sent again.
     fn stop(&self, chat_id: String, no_resend: bool) -> BoxFut<'_, PortResult<()>>;
@@ -242,6 +246,11 @@ pub trait ChatPort: Send + Sync {
     /// in its copy at once, before this PC's next list news.
     fn create(&self, a: CreateArgs) -> BoxFut<'_, PortResult<Value>>;
     fn set_model(&self, a: SetModelArgs) -> BoxFut<'_, PortResult<()>>;
+    /// The composer's lightning toggle: the chat's own fast-mode pick, applied here.
+    fn set_fast_mode(&self, a: FastModeArgs) -> BoxFut<'_, PortResult<()>>;
+    /// The chat's open-item state (opened transcript cards, row expanded), applied here so
+    /// every PC viewing the chat shows the same.
+    fn set_sidebar_state(&self, a: SidebarStateArgs) -> BoxFut<'_, PortResult<()>>;
     fn rename(&self, a: RenameArgs) -> BoxFut<'_, PortResult<()>>;
     fn archive(&self, a: ArchiveArgs) -> BoxFut<'_, PortResult<()>>;
     fn share(&self, a: ShareArgs) -> BoxFut<'_, PortResult<()>>;
@@ -1071,6 +1080,14 @@ impl Inner {
                 self.port.set_model(a).await?;
                 done(json!({}))
             }
+            Op::SetFastMode(a) => {
+                self.port.set_fast_mode(a).await?;
+                done(json!({}))
+            }
+            Op::SetSidebarState(a) => {
+                self.port.set_sidebar_state(a).await?;
+                done(json!({}))
+            }
             Op::Rename(a) => {
                 self.port.rename(a).await?;
                 done(json!({}))
@@ -1614,6 +1631,7 @@ impl Inner {
                 device.clone(),
                 files,
                 a.page,
+                a.kind,
             )
             .await;
         match sent {

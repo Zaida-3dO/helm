@@ -4,7 +4,7 @@
 import type { Api } from '../api/client.ts';
 import type { BuildQueueAddArgs, BuildQueueEntry, QueueSummary } from '../api/generated/index.ts';
 
-export type QueueAction = 'top' | 'up' | 'down' | 'move' | 'hold' | 'release' | 'cancel';
+export type QueueAction = 'top' | 'up' | 'down' | 'move' | 'hold' | 'release' | 'cancel' | 'pause' | 'stop';
 
 export function queueOps(api: Api) {
   return {

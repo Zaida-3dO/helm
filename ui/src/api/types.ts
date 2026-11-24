@@ -34,6 +34,7 @@ export type {
   SendMode,
   SendOrigin,
   SessionMark,
+  SidebarState,
   ChatStack,
   StackFound,
   StackFindResult,

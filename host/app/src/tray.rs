@@ -233,6 +233,8 @@ impl TauriShellHost {
                 text,
                 origin: helm_chats::types::SubmissionOrigin::Notification,
                 page: None,
+                kind: None,
+                wait: None,
             },
         );
         if let Err(e) = sent {

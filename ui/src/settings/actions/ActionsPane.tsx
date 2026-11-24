@@ -89,6 +89,9 @@ export function ActionsPane({ api }: { api: Api }) {
       <p className="muted">
         One-click buttons that send a message for you. They never touch your draft, and Helm runs nothing itself: a button is
         only text the agent reads. Buttons marked &quot;New chat&quot; start a chat in a project you bind them to.
+        The requests Helm used to ship as buttons (Report progress, Needs me, Ship it, Close session, Git sync) are skills
+        now: the agent can use them when asked, or you can name one in the composer. Add a button with the same message to
+        get a one-click back.
       </p>
       {buttons.length === 0 ? (
         <div className="ap-empty">No buttons yet. Add one to get started.</div>

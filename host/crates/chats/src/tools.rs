@@ -10,7 +10,7 @@ use crate::runtime::ChatRuntime;
 use crate::seams::BoardSummary;
 use crate::store::{same_path, Boards};
 use crate::submit::{host_send, HostSend};
-use crate::types::{ChatStatus, SubmissionOrigin};
+use crate::types::{ChatStatus, MessageKind, SubmissionOrigin};
 use helm_core::db::Database;
 use helm_hosttools::{HostToolRegistry, ToolCtx, ToolError, ToolResult, ToolSpec};
 use rusqlite::{params, OptionalExtension, Transaction};
@@ -1296,7 +1296,32 @@ fn message_arg(a: &Value) -> Result<String, ToolError> {
     Ok(m.to_owned())
 }
 
-fn send_framed(ctx: &ToolCtx, to: &str, body: &str) -> Result<crate::submit::HostSent, ToolError> {
+/// The kind words for the `app_send_message` refusal, so the agent can pick one without help.
+const KINDS_HELP: &str = "initial-prompt, steer, nudge, update, user-action or completed";
+
+/// The kind of an `app_send_message`: required, one of the closed set, and only the kinds a
+/// chat may stamp itself — Helm's own note kinds (`wait-finished`, `request-expired`) are
+/// stamped by the code that writes them, never asked for here.
+fn kind_arg(a: &Value) -> Result<MessageKind, ToolError> {
+    let raw = str_arg(a, "kind").ok_or_else(|| {
+        refuse(format!(
+            "kind is required: one of {KINDS_HELP}; it says what the message is."
+        ))
+    })?;
+    match MessageKind::parse(raw) {
+        Some(k) if k.sendable() => Ok(k),
+        _ => Err(refuse(format!(
+            "kind must be one of {KINDS_HELP}, got \"{raw}\"."
+        ))),
+    }
+}
+
+fn send_framed(
+    ctx: &ToolCtx,
+    to: &str,
+    body: &str,
+    kind: MessageKind,
+) -> Result<crate::submit::HostSent, ToolError> {
     let sender = meta(ctx, &ctx.caller_chat_id)?;
     let text = frame(
         sender["title"].as_str().unwrap_or(""),
@@ -1312,6 +1337,8 @@ fn send_framed(ctx: &ToolCtx, to: &str, body: &str) -> Result<crate::submit::Hos
             text: &text,
             origin: SubmissionOrigin::OtherChat,
             page: None,
+            kind: Some(kind),
+            wait: None,
         },
     )
     .map_err(|e| ToolError::refused(e.message))
@@ -1325,6 +1352,7 @@ fn send_framed(ctx: &ToolCtx, to: &str, body: &str) -> Result<crate::submit::Hos
 async fn send_message(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolResult {
     let to = chat_id_arg(&a)?;
     let body = message_arg(&a)?;
+    let kind = kind_arg(&a)?;
     // `mode` must be present. "steer" is the mode; "queue" is a retired value, still accepted
     // and meaning exactly the same.
     match str_arg(&a, "mode") {
@@ -1340,8 +1368,8 @@ async fn send_message(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRe
         .and_then(|s| s.get())
         .filter(|r| r.owns(&to).is_some());
     match remote {
-        Some(r) => send_to_mirror_chat(&ctx, r, &to, &body, &limits, &a).await,
-        None => send_local_message(&ctx, &to, &body, &limits, &a),
+        Some(r) => send_to_mirror_chat(&ctx, r, &to, &body, kind, &limits, &a).await,
+        None => send_local_message(&ctx, &to, &body, kind, &limits, &a),
     }
 }
 
@@ -1379,6 +1407,7 @@ fn send_local_message(
     ctx: &ToolCtx,
     to: &str,
     body: &str,
+    kind: MessageKind,
     limits: &SendLimits,
     a: &Value,
 ) -> ToolResult {
@@ -1404,11 +1433,12 @@ fn send_local_message(
         return Err(refuse("A chat cannot message itself."));
     }
     limits.admit(&ctx.caller_chat_id, Some(to.as_str()), Instant::now())?;
-    let sent = send_framed(ctx, &to, body)?;
+    let sent = send_framed(ctx, &to, body, kind)?;
     let (title, _) = cut_bytes(target["title"].as_str().unwrap_or(""), 512);
     let mut out = json!({
         "delivered": sent.delivered,
         "mode": a["mode"],
+        "kind": kind.as_str(),
         "chatId": to,
         "link": chat_link(&to, None),
         "title": title,
@@ -1424,6 +1454,7 @@ async fn send_to_mirror_chat(
     remote: Arc<dyn crate::remote::RemoteChats>,
     to: &str,
     body: &str,
+    kind: MessageKind,
     limits: &SendLimits,
     a: &Value,
 ) -> ToolResult {
@@ -1469,6 +1500,7 @@ async fn send_to_mirror_chat(
                 context: None,
                 page_title: None,
                 page_overview: None,
+                kind: Some(kind),
             },
             acting,
         )
@@ -1849,9 +1881,17 @@ async fn create_chat_on_device(
         })?
         .to_owned();
     // The first message crosses as a send to the mirrored chat; the link is already holding its
-    // copy, so nothing waits for the other PC's list news.
-    let mut out = send_to_mirror_chat(&ctx, remote, &id, &body, limits, a)
-        .await
+    // copy, so nothing waits for the other PC's list news. Its kind is the task itself.
+    let mut out = send_to_mirror_chat(
+        &ctx,
+        remote,
+        &id,
+        &body,
+        MessageKind::InitialPrompt,
+        limits,
+        a,
+    )
+    .await
         .map_err(|e| {
             ToolError::maybe(format!(
                 "The chat was started on {name} (id {id}), but its first message did not arrive: {} Send it the words yourself, or start the chat there.",
@@ -2055,7 +2095,7 @@ async fn create_chat(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRes
             return Err(e);
         }
     }
-    if let Err(e) = send_framed(&ctx, &id, &body) {
+    if let Err(e) = send_framed(&ctx, &id, &body, MessageKind::InitialPrompt) {
         // The first message failed: discard the untouched chat.
         let _ = ctx.op("chat_archive", json!({"chatId": id})).await;
         let _ = ctx.op("chat_delete", json!({"chatId": id})).await;
@@ -2450,18 +2490,24 @@ A rolled-over chat is a stack of sessions: its chat fields name the stack (stack
     r.async_tool(
         ToolSpec::write(
             "app_send_message",
-            format!("Send a message to another chat, on this PC or a paired one. mode must be steer: it reaches a running turn at the next safe point, or starts an idle chat. Helm adds a header saying the user did not write it. delivered is not that it acted: do not poll. Ask for a report to your chatId with app_send_message, then end your turn. More: app_help tool/app_send_message.{EXPLICIT}"),
+            format!("Send a message to another chat, on this PC or a paired one. mode must be steer: it reaches a running turn at the next safe point, or starts an idle chat. kind is required (initial-prompt, steer, nudge, update, user-action or completed): it says what the message is. Helm adds a header saying the user did not write it. delivered is not that it acted: do not poll. Ask for a report to your chatId with app_send_message, then end your turn. More: app_help tool/app_send_message.{EXPLICIT}"),
             obj(
                 json!({
                     "chatId": id,
                     "message": {"type": "string", "minLength": 1, "maxLength": 16384},
-                    "mode": {"type": "string", "enum": ["steer"]}
+                    "mode": {"type": "string", "enum": ["steer"]},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["initial-prompt", "steer", "nudge", "update", "user-action", "completed"],
+                        "description": "What this message is: steer = instructions into a working chat; update = a milestone to the chat waiting on it; completed = your hand-over when the work is done; nudge = a small prompt with no new work; user-action = telling the chat what the user did; initial-prompt = the task of a chat you are starting."
+                    }
                 }),
-                &["chatId", "message", "mode"],
+                &["chatId", "message", "mode", "kind"],
             ),
         )
         .guidelines(format!(
             "Helm adds a header naming this chat and a note that the user did not write it; a send that crosses PCs travels over the hub and arrives there as a message from the person this PC is acting as. mode is required: steer, which delivers it into the chat's running turn at the next safe point; a message never waits for the turn to end, and an idle chat starts at once; end your turn or carry on with other work. delivered means Helm accepted it, not that the other agent acted; do not poll for a reply.
+kind is required and says what the message is: steer (an instruction or correction into a chat that is working, usually one under you), update (a milestone or progress report to the chat waiting on you — usually your parent), completed (the hand-over summary when your work is done, so the waiting chat can close and clean up), nudge (a small prompt that brings no new work), user-action (the user did something somewhere — clicked, answered, approved elsewhere — and the chat that needs to know is told), initial-prompt (the task that starts a chat; app_create_chat stamps it on the first message, so you rarely send it). Pick the true one: the transcript tags the message with it, and the chat that is waiting reads your completed line to know it can stop waiting.
 {}
 {}",
             REPORT_BACK.trim(),
@@ -2593,7 +2639,7 @@ A helper started with Claude Code's Agent tool always runs on this chat's own mo
         ToolSpec::write(
             "app_roll_over",
             format!(
-                "Hand this chat's own work to a fresh chat at the end of this turn: you write the hand-off, the new chat carries on from it, and this chat is archived. Call it when Helm's context notice or your coordinator asks, or when your context has grown large. Only this chat is rolled over; to have another chat roll itself over, message it and ask it to call app_roll_over. model and effort are optional and say what the successor runs on. scheduled means noted, not done: {HAND_OFF_HEADINGS}{EXPLICIT}"
+                "Hand this chat's own work to a fresh chat at the end of this turn: you write the hand-off, the new chat carries on from it, and this chat is archived. Call it when Helm's context notice or your coordinator asks, or when your context has grown large. Only this chat is rolled over, but running subagents are cascade-noticed: each is asked to stop and write its own roll-over document, and the successor is told to restart one subagent per document. To have another chat roll itself over, message it and ask it to call app_roll_over. model and effort are optional and say what the successor runs on. scheduled means noted, not done: {HAND_OFF_HEADINGS}{EXPLICIT}"
             ),
             obj(
                 json!({
@@ -2766,7 +2812,7 @@ mod tests {
             &tools,
             &maker,
             "app_send_message",
-            json!({"chatId": a1, "message": "the report", "mode": "steer"}),
+            json!({"chatId": a1, "message": "the report", "kind": "update", "mode": "steer"}),
         )
         .await;
         assert_eq!(r["ok"], true, "{r}");
@@ -2785,7 +2831,7 @@ mod tests {
             &tools,
             &maker,
             "app_send_message",
-            json!({"chatId": b1, "message": "again", "mode": "steer"}),
+            json!({"chatId": b1, "message": "again", "kind": "update", "mode": "steer"}),
         )
         .await;
         assert_eq!(r["ok"], true, "{r}");
@@ -2797,7 +2843,7 @@ mod tests {
             &tools,
             &maker,
             "app_send_message",
-            json!({"chatId": c1, "message": "deep", "mode": "steer"}),
+            json!({"chatId": c1, "message": "deep", "kind": "update", "mode": "steer"}),
         )
         .await;
         assert!(
@@ -2810,7 +2856,7 @@ mod tests {
             &tools,
             &maker,
             "app_send_message",
-            json!({"chatId": lone, "message": "nowhere", "mode": "steer"}),
+            json!({"chatId": lone, "message": "nowhere", "kind": "update", "mode": "steer"}),
         )
         .await;
         assert!(
@@ -2823,7 +2869,7 @@ mod tests {
             &tools,
             &maker,
             "app_send_message",
-            json!({"chatId": a2, "message": "plain", "mode": "steer"}),
+            json!({"chatId": a2, "message": "plain", "kind": "update", "mode": "steer"}),
         )
         .await;
         assert_eq!(r["ok"], true, "{r}");
@@ -3025,7 +3071,7 @@ mod tests {
         let t = tools(&h);
         let a = h.create().await;
         let b = h.create().await;
-        // Refusals first: mode required, self, size.
+        // Refusals first: kind required, Helm's own kinds refused, mode required, self, size.
         let r = call(
             &h,
             &t,
@@ -3034,13 +3080,43 @@ mod tests {
             json!({"chatId": b, "message": "hi"}),
         )
         .await;
+        assert!(
+            r["error"]
+                .as_str()
+                .unwrap()
+                .contains("kind is required: one of initial-prompt, steer"),
+            "{r}"
+        );
+        let r = call(
+            &h,
+            &t,
+            &a,
+            "app_send_message",
+            json!({"chatId": b, "message": "hi", "kind": "wait-finished", "mode": "queue"}),
+        )
+        .await;
+        assert!(
+            r["error"]
+                .as_str()
+                .unwrap()
+                .contains("kind must be one of initial-prompt, steer"),
+            "Helm's own note kinds are not sendable: {r}"
+        );
+        let r = call(
+            &h,
+            &t,
+            &a,
+            "app_send_message",
+            json!({"chatId": b, "message": "hi", "kind": "update"}),
+        )
+        .await;
         assert!(r["error"].as_str().unwrap().contains("mode is required"));
         let r = call(
             &h,
             &t,
             &a,
             "app_send_message",
-            json!({"chatId": a, "message": "hi", "mode": "queue"}),
+            json!({"chatId": a, "message": "hi", "kind": "update", "mode": "queue"}),
         )
         .await;
         assert!(r["error"]
@@ -3053,7 +3129,7 @@ mod tests {
             &t,
             &a,
             "app_send_message",
-            json!({"chatId": b, "message": big, "mode": "queue"}),
+            json!({"chatId": b, "message": big, "kind": "update", "mode": "queue"}),
         )
         .await;
         assert_eq!(r["ok"], false);
@@ -3062,7 +3138,7 @@ mod tests {
             &t,
             &a,
             "app_send_message",
-            json!({"chatId": b, "message": "  ", "mode": "queue"}),
+            json!({"chatId": b, "message": "  ", "kind": "update", "mode": "queue"}),
         )
         .await;
         assert_eq!(r["ok"], false);
@@ -3072,11 +3148,15 @@ mod tests {
             &t,
             &a,
             "app_send_message",
-            json!({"chatId": b, "message": "Please check the build.", "mode": "steer"}),
+            json!({"chatId": b, "message": "Please check the build.", "kind": "update", "mode": "steer"}),
         )
         .await;
         assert_eq!(r["ok"], true, "{r}");
         assert_eq!(r["result"]["delivered"], true);
+        assert_eq!(
+            r["result"]["kind"], "update",
+            "the result names the kind it sent"
+        );
         let mut w = h.worker().await;
         w.ready().await;
         let p = w.expect("prompt").await;
@@ -3084,9 +3164,9 @@ mod tests {
         assert!(text.starts_with("[Message from another chat:"), "{text}");
         assert!(text.contains(&a) && text.ends_with("Please check the build."));
         let origins = h.col(&format!(
-            "SELECT m.origin FROM submissions s JOIN submission_meta m ON m.submission_id = s.id WHERE s.chat_id = '{b}'"
+            "SELECT m.origin || '/' || COALESCE(m.kind, '-') FROM submissions s JOIN submission_meta m ON m.submission_id = s.id WHERE s.chat_id = '{b}'"
         ));
-        assert_eq!(origins, ["other_chat"]);
+        assert_eq!(origins, ["other_chat/update"]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3611,7 +3691,7 @@ mod tests {
             &t,
             &a,
             "app_send_message",
-            json!({"chatId": OTHER_CHAT, "message": "Cross-PC report.", "mode": "steer"}),
+            json!({"chatId": OTHER_CHAT, "message": "Cross-PC report.", "kind": "update", "mode": "steer"}),
         )
         .await;
         assert_eq!(r["ok"], true, "{r}");
@@ -3635,7 +3715,7 @@ mod tests {
             &t,
             &a,
             "app_send_message",
-            json!({"chatId": GONE_CHAT, "message": "x", "mode": "steer"}),
+            json!({"chatId": GONE_CHAT, "message": "x", "kind": "update", "mode": "steer"}),
         )
         .await;
         assert!(r["error"].as_str().unwrap().contains("archived"), "{r}");
@@ -3647,7 +3727,7 @@ mod tests {
             &t,
             &a,
             "app_send_message",
-            json!({"chatId": OTHER_CHAT, "message": "x", "mode": "steer"}),
+            json!({"chatId": OTHER_CHAT, "message": "x", "kind": "update", "mode": "steer"}),
         )
         .await;
         assert!(r["error"].as_str().unwrap().contains("offline"), "{r}");
@@ -3662,7 +3742,7 @@ mod tests {
             &t,
             &a,
             "app_send_message",
-            json!({"chatId": OTHER_PERSON_CHAT, "message": "x", "mode": "steer"}),
+            json!({"chatId": OTHER_PERSON_CHAT, "message": "x", "kind": "update", "mode": "steer"}),
         )
         .await;
         assert_eq!(r["ok"], true, "{r}");
@@ -4535,6 +4615,8 @@ mod tests {
                     text: "ok",
                     origin,
                     page: None,
+                    kind: None,
+                    wait: None,
                 },
             )
             .unwrap();

@@ -3,7 +3,8 @@
 //! A button is a label and the exact text it sends into a chat (or into a brand-new chat, for the
 //! `new_chat` kind). Helm never runs anything itself: a "script" button is a prompt asking the
 //! agent to run it. The set lives in one row, revisioned for compare-and-set saves, and is
-//! seeded on first read with a handful of common requests (section 7). Seeds are versioned, so a
+//! seeded on first read: just the new-chat launcher, since the common requests are skills now;
+//! a version bump retires untouched copies of any seed it retires. Seeds are versioned, so a
 //! later release can add a seed without overwriting edits or bringing back one the user deleted.
 //!
 //! | op | class | args to result |

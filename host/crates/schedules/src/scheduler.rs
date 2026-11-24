@@ -50,6 +50,10 @@ pub(crate) fn request<'a>(chat_id: &'a str, submission_id: &'a str, text: &'a st
         // prompt goes to Claude at its next tool boundary.
         origin: SubmissionOrigin::Schedule,
         page: None,
+        // A saved schedule's prompt is its own origin; the chat-message kinds describe sends
+        // between chats, so this names none.
+        kind: None,
+        wait: None,
     }
 }
 

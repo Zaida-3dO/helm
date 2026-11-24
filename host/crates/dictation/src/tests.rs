@@ -1,7 +1,8 @@
-//! Two broad tests. The first is a table of the small pure rules (the address rule, names and
+//! Three broad tests. The first is a table of the small pure rules (the address rule, names and
 //! languages, reading a reply, the silent recording). The second walks the whole feature against
-//! in-process stand-ins on ephemeral loopback ports: a speech-to-text server and an Ollama. No
-//! real Whisper, Strata or Ollama is ever contacted, and no recording leaves the machine.
+//! in-process stand-ins on ephemeral loopback ports: a speech-to-text server and an Ollama. The
+//! third walks a live session against a scripted engine. No real Whisper, Strata, Ollama, speech
+//! service or microphone is ever contacted, and no recording leaves the machine.
 
 use crate::settings::{check_stt_url, language_ok, model_ok};
 use crate::transcribe::{read_reply, silent_wav, transcribe_with, Failure, MAX_WAV_BYTES};
@@ -549,4 +550,305 @@ fn a_recording_goes_to_the_server_and_text_comes_back() {
     let freed = env.tool("external:hub").unwrap();
     assert_eq!(freed, json!({"freedGb": 0.0, "unloaded": 0}));
     assert!(o_log.lock().unwrap().is_empty());
+}
+
+// ---- live dictation against a scripted engine -------------------------------------------------
+
+#[test]
+fn a_live_session_streams_settles_and_honours_stop_cancel_and_failure() {
+    use crate::live::{hypothesis_update, Engine, EngineFactory, LiveDictation, LiveMsg};
+    use helm_ipc::{AppEvent, RecordingSink, Services};
+    use std::collections::VecDeque;
+
+    // An engine fed from a script; it waits like the real one so the session loop keeps its shape.
+    struct Script {
+        msgs: VecDeque<LiveMsg>,
+        fail_start: Option<String>,
+    }
+    impl Engine for Script {
+        fn start(&mut self) -> Result<(), String> {
+            match self.fail_start.take() {
+                Some(m) => Err(m),
+                None => Ok(()),
+            }
+        }
+        fn next(&mut self, wait: std::time::Duration) -> Option<LiveMsg> {
+            match self.msgs.pop_front() {
+                Some(m) => Some(m),
+                None => {
+                    std::thread::sleep(std::time::Duration::from_millis(15).min(wait));
+                    None
+                }
+            }
+        }
+        fn stop(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn cancel(&mut self) {
+            self.msgs.clear();
+        }
+    }
+    #[derive(Default)]
+    struct Factory {
+        queued: Mutex<VecDeque<LiveMsg>>,
+        fail_start: Mutex<Option<String>>,
+    }
+    impl EngineFactory for Factory {
+        fn create(&self) -> Result<Box<dyn Engine>, String> {
+            Ok(Box::new(Script {
+                msgs: std::mem::take(&mut *self.queued.lock().unwrap()),
+                fail_start: self.fail_start.lock().unwrap().take(),
+            }))
+        }
+    }
+
+    // (kind, final, text/message) for every event so far, as one comparable table.
+    fn wire(sink: &RecordingSink) -> Vec<(String, Option<bool>, String)> {
+        let evs: Vec<AppEvent> = sink.events.lock().unwrap().clone();
+        evs.into_iter()
+            .map(|e| {
+                let f = e.fields.get("final").and_then(|v| v.as_bool());
+                let t = e
+                    .fields
+                    .get("text")
+                    .or_else(|| e.fields.get("message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                (e.kind, f, t)
+            })
+            .collect()
+    }
+    fn wait_len(sink: &RecordingSink, want: usize) {
+        for _ in 0..200 {
+            if wire(sink).len() >= want {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    let factory = Arc::new(Factory::default());
+    let mut services = Services::new();
+    services.insert(Arc::new(LiveDictation::with_factory(factory.clone())));
+    let sink = Arc::new(RecordingSink::default());
+    let ctx = OpCtx {
+        services: Arc::new(services),
+        events: sink.clone(),
+    };
+    let start = |v: &OpCtx| ops::live(v, json!({"action": "start"}));
+
+    // The real service re-states the whole sentence in progress on every hypothesis, never just
+    // the new words; the fake feeds hypotheses the same way and folds each through the engine's
+    // own diff, so `drive` sees exactly what a real session sends. `heard` is what the service
+    // last said. Skipping that fold is what makes words land twice.
+    let speak = |heard: &mut String, hypotheses: &[&str]| {
+        let mut q = factory.queued.lock().unwrap();
+        for h in hypotheses {
+            if let Some(m) = hypothesis_update(heard, (*h).to_owned()) {
+                q.push_back(m);
+            }
+        }
+    };
+
+    // Speak, pause, speak again, stop: partials replace, a pause settles, stop settles the tail.
+    let mut heard = String::new();
+    speak(&mut heard, &[" Hello", " Hello there"]);
+    factory
+        .queued
+        .lock()
+        .unwrap()
+        .push_back(LiveMsg::Final("Hello there.".into()));
+    heard.clear();
+    speak(&mut heard, &[" And more"]);
+    assert_eq!(start(&ctx), Ok(json!({"ok": true})));
+    wait_len(&sink, 4);
+    assert_eq!(
+        ops::live(&ctx, json!({"action": "stop"})),
+        Ok(json!({"ok": true}))
+    );
+    assert_eq!(
+        wire(&sink),
+        vec![
+            ("live_transcript".into(), Some(false), "Hello".into()),
+            ("live_transcript".into(), Some(false), "Hello there".into()),
+            ("live_transcript".into(), Some(true), "Hello there.".into()),
+            ("live_transcript".into(), Some(false), "And more".into()),
+            // stop flushed the sentence in progress: the user heard it, they keep it.
+            ("live_transcript".into(), Some(true), "And more".into()),
+        ]
+    );
+
+    // Mid-sentence corrections: a re-stated sentence becomes the new tail when the service only
+    // added words, and a whole replacement when it re-wrote one — never a doubled-up sentence.
+    let mut heard = String::new();
+    speak(
+        &mut heard,
+        &["The quick", "The quick brown", "The quark brown"],
+    );
+    assert_eq!(start(&ctx), Ok(json!({"ok": true})));
+    wait_len(&sink, 8);
+    assert_eq!(
+        ops::live(&ctx, json!({"action": "stop"})),
+        Ok(json!({"ok": true}))
+    );
+    assert_eq!(
+        &wire(&sink)[5..],
+        &[
+            ("live_transcript".into(), Some(false), "The quick".into()),
+            (
+                "live_transcript".into(),
+                Some(false),
+                "The quick brown".into()
+            ),
+            // the re-write replaced the sentence instead of appending to it
+            (
+                "live_transcript".into(),
+                Some(false),
+                "The quark brown".into()
+            ),
+            (
+                "live_transcript".into(),
+                Some(true),
+                "The quark brown".into()
+            ),
+        ]
+    );
+
+    // A second session on the same service starts once the first thread is reaped.
+    let mut heard = String::new();
+    speak(&mut heard, &[" Keep"]);
+    factory
+        .queued
+        .lock()
+        .unwrap()
+        .push_back(LiveMsg::Failed("the microphone went away".into()));
+    assert_eq!(start(&ctx), Ok(json!({"ok": true})));
+    wait_len(&sink, 12);
+    assert_eq!(
+        &wire(&sink)[9..12],
+        &[
+            ("live_transcript".into(), Some(false), "Keep".into()),
+            // the words already heard settle, then the one-line reason:
+            ("live_transcript".into(), Some(true), "Keep".into()),
+            (
+                "dictation_live".into(),
+                None,
+                "the microphone went away".into()
+            ),
+        ]
+    );
+
+    // Cancel throws the unfinished sentence away; nothing more lands.
+    let mut heard = String::new();
+    speak(&mut heard, &[" Gone"]);
+    assert_eq!(start(&ctx), Ok(json!({"ok": true})));
+    wait_len(&sink, 13);
+    assert_eq!(
+        ops::live(&ctx, json!({"action": "cancel"})),
+        Ok(json!({"ok": true}))
+    );
+    assert_eq!(wire(&sink).len(), 13);
+    assert_eq!(
+        wire(&sink)[12],
+        ("live_transcript".into(), Some(false), "Gone".into())
+    );
+
+    // A session in progress answers a second start with a refusal, not a second microphone.
+    assert_eq!(start(&ctx), Ok(json!({"ok": true})));
+    let busy = code_of(ops::live(&ctx, json!({"action": "start"})));
+    assert_eq!(busy, "busy");
+    assert_eq!(
+        ops::live(&ctx, json!({"action": "cancel"})),
+        Ok(json!({"ok": true}))
+    );
+
+    // A service with no model answers in one line, and the page keeps the recording path.
+    *factory.fail_start.lock().unwrap() = Some("no speech model here".into());
+    let e = start(&ctx).unwrap_err();
+    assert_eq!(e.code, "not_available");
+    assert_eq!(e.message, "no speech model here");
+
+    // The engine ending by itself settles its tail and frees the slot for the next start.
+    let mut heard = String::new();
+    speak(&mut heard, &[" tail"]);
+    factory.queued.lock().unwrap().push_back(LiveMsg::Ended);
+    assert_eq!(start(&ctx), Ok(json!({"ok": true})));
+    wait_len(&sink, 15);
+    assert_eq!(
+        &wire(&sink)[13..15],
+        &[
+            ("live_transcript".into(), Some(false), "tail".into()),
+            ("live_transcript".into(), Some(true), "tail".into()),
+        ]
+    );
+
+    // The args rule.
+    assert_eq!(
+        code_of(ops::live(&ctx, json!({"action": "spin"}))),
+        "bad_args"
+    );
+    assert_eq!(code_of(ops::live(&ctx, json!({}))), "bad_args");
+}
+
+/// What the pill says for each way the service can refuse to open. One line each, and each
+/// says what to do about it.
+#[cfg(windows)]
+#[test]
+fn a_service_that_refuses_to_open_is_explained_in_one_line() {
+    use crate::live::start_failure;
+    let err = |code: u32| windows::core::Error::from_hresult(windows::core::HRESULT(code as i32));
+    for code in [0x8004_0154u32, 0x8004_01e4] {
+        assert!(
+            start_failure(&err(code)).contains("not part of this Windows"),
+            "{code:#010x}"
+        );
+    }
+    // The consent gate and the missing language model say where to click.
+    assert!(start_failure(&err(0x8004_5509)).contains("Privacy & security"));
+    assert!(start_failure(&err(0x8004_5004)).contains("no model for your Windows language"));
+    // Anything else at least names the culprit.
+    let odd = start_failure(&err(0x8007_0005));
+    assert!(
+        odd.contains("unavailable") && odd.contains("0x80070005"),
+        "{odd}"
+    );
+}
+
+/// The runtime reality check, run by hand on a Windows PC with `cargo test -p helm-dictation
+/// the_windows_speech_service -- --ignored`: two seconds of silence through the real service.
+/// It needs the Windows speech consent (Settings → Privacy & security → Speech) turned on.
+/// No words are claimed here — only that the service activates, compiles its dictation model,
+/// opens the microphone, stops cleanly and leaves no failure behind. Streaming words needs a
+/// voice, which is the smoke test's job.
+#[cfg(windows)]
+#[test]
+#[ignore = "opens the real microphone for two seconds"]
+fn the_windows_speech_service_starts_stops_and_leaves_no_failure() {
+    use crate::live::{LiveDictation, STATE_EVENT, TRANSCRIPT_EVENT};
+    use std::sync::Arc;
+
+    let sink = Arc::new(RecordingSink::default());
+    let svc = LiveDictation::new();
+    svc.start(sink.clone())
+        .expect("the speech service should open on a desktop Windows");
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    svc.stop().expect("the session should stop");
+    {
+        let evs = sink.events.lock().unwrap();
+        for e in evs.iter() {
+            assert_eq!(
+                e.kind, TRANSCRIPT_EVENT,
+                "only words may come from silence: {e:?}"
+            );
+        }
+        assert!(
+            !evs.iter().any(|e| e.kind == STATE_EVENT),
+            "a session of silence ended with a failure: {evs:?}"
+        );
+    }
+    // The slot is free again: start, then cancel straight away.
+    svc.start(sink.clone())
+        .expect("the service should open a second time");
+    svc.cancel().expect("the session should cancel");
 }

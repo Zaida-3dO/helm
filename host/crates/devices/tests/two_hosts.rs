@@ -1935,6 +1935,90 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         ),
         (Some("sonnet"), Some("high"))
     );
+    // The sidebar's open-item state travels the same way: the PC that runs the chat stores
+    // it, and this PC's copy shows it at once. An explicit null is a real value there too:
+    // the copy folds again.
+    api.call_host(
+        "chat_set_sidebar_state",
+        json!({"chatId": "c1", "state": {"v": 1, "expanded": true, "openCards": [7]}}),
+    )
+    .await
+    .unwrap();
+    let got = api
+        .call_host("chat_get", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    assert_eq!(got["chat"]["sidebarState"]["expanded"], json!(true));
+    assert_eq!(got["chat"]["sidebarState"]["openCards"], json!([7]));
+    api.call_host(
+        "chat_set_sidebar_state",
+        json!({"chatId": "c1", "state": null}),
+    )
+    .await
+    .unwrap();
+    let got = api
+        .call_host("chat_get", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    assert!(
+        got["chat"]["sidebarState"].is_null(),
+        "the null reset crossed too"
+    );
+    assert_eq!(
+        port.st().sidebar_state_set,
+        [
+            helm_devices::wire::SidebarStateArgs {
+                chat_id: "c1".to_owned(),
+                state: json!({"v": 1, "expanded": true, "openCards": [7]}),
+            },
+            helm_devices::wire::SidebarStateArgs {
+                chat_id: "c1".to_owned(),
+                state: Value::Null,
+            },
+        ]
+    );
+    // The lightning switch travels the same way: it changes the chat on the PC that runs it,
+    // so the run switch gates it, and this PC's copy keeps its pick in step. An explicit null
+    // is a real value there too: the chat drops its own pick and follows that PC's default.
+    port.set_run(false);
+    let e = api
+        .call_host("chat_set_fast_mode", json!({"chatId": "c1", "on": true}))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, "not_allowed");
+    port.set_run(true);
+    api.call_host("chat_set_fast_mode", json!({"chatId": "c1", "on": true}))
+        .await
+        .unwrap();
+    let got = api
+        .call_host("chat_get", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    assert_eq!(got["chat"]["fastMode"], json!(true));
+    api.call_host("chat_set_fast_mode", json!({"chatId": "c1", "on": null}))
+        .await
+        .unwrap();
+    let got = api
+        .call_host("chat_get", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    assert!(
+        got["chat"]["fastMode"].is_null(),
+        "the null pick crossed too"
+    );
+    assert_eq!(
+        port.st().fast_mode_set,
+        [
+            helm_devices::wire::FastModeArgs {
+                chat_id: "c1".to_owned(),
+                on: Some(true),
+            },
+            helm_devices::wire::FastModeArgs {
+                chat_id: "c1".to_owned(),
+                on: None,
+            },
+        ]
+    );
     // The Rename dialog's ask reached the PC that runs the chat.
     assert_eq!(port.st().titles_asked, ["c1"]);
     // The pages pinned on the other PC list here, and one opens from a copy brought across: the
@@ -2309,6 +2393,34 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         );
     }
 
+    // A message's kind rides the same wire: the PC that runs the chat stamps the row with it, so
+    // a chat-to-chat message keeps its kind after the crossing.
+    let crossed = api
+        .call_host(
+            "chat_send",
+            json!({"chatId": "c1", "submissionId": "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b7a",
+                   "text": "steer across", "action": "steer", "draftRevision": 0, "kind": "steer"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(crossed["submission"]["state"], "accepted");
+    let kinds: Vec<_> = port
+        .st()
+        .sent_kind
+        .iter()
+        .map(|k| k.as_deref().unwrap_or("-").to_owned())
+        .collect();
+    assert_eq!(
+        kinds.last().map(String::as_str),
+        Some("steer"),
+        "the kind crosses: {kinds:?}"
+    );
+    assert_eq!(
+        kinds.first().map(String::as_str),
+        Some("-"),
+        "the plain send carried no kind"
+    );
+
     // A picture and a file ride with a message: staged on this PC, they cross in ordered
     // chunks and reach the chat on the PC that runs it just as a local attachment would.
     let stage = b.db.path().parent().unwrap().join("mirror-attachments");
@@ -2414,8 +2526,8 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         .await
         .unwrap_err();
     assert_eq!(e.code, "refused");
-    // Still the three that got through (hi, the attached one, the page's), no fourth.
-    assert_eq!(port.st().sent.len(), 3);
+    // Still the four that got through (hi, the attached one, the page's, the kinded one), no fifth.
+    assert_eq!(port.st().sent.len(), 4);
 
     // Its switch off: read-only, said in words, nothing sent.
     port.set_run(false);
@@ -2443,7 +2555,7 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         e.message.starts_with("Desk is offline (last seen "),
         "{e:?}"
     );
-    assert_eq!(port.st().sent.len(), 3);
+    assert_eq!(port.st().sent.len(), 4);
     let page = api
         .call_host("transcript_page", json!({"chatId": "c1"}))
         .await
@@ -2467,7 +2579,7 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         .await
         .unwrap();
     assert_eq!(got["chat"]["draft"], "note");
-    assert_eq!(port.st().sent.len(), 3);
+    assert_eq!(port.st().sent.len(), 4);
     // This PC's own line down reads differently.
     b.mirror.line_down();
     b.link.set_up(false);

@@ -58,11 +58,12 @@ export function remoteChatOps(api: Api) {
     /** Withdraw or recover one queued message of a chat that runs on another PC. */
     submissionAction: (chatId: string, submissionId: string, action: 'withdraw' | 'recover') =>
       api<Record<string, never>>('devices_submission_action', { chatId, submissionId, action }),
-    /** The PC that runs the chat's new-chat model/effort/reply-length; read, or saved with a patch. */
+    /** The PC that runs the chat's new-chat model/effort/reply-length/fast-mode; read, or saved
+     *  with a patch. The composer's fast-mode bolt reads `fastMode` to show its pressed state. */
     composerDefaults: (
       chatId: string,
       patch?: { model?: string; effort?: string; responseVerbosity?: string },
-    ) => api<{ model?: string | null; effort?: string; responseVerbosity?: string }>('devices_composer_defaults', { chatId, ...(patch ? { patch } : {}) }),
+    ) => api<{ model?: string | null; effort?: string; responseVerbosity?: string; fastMode?: boolean }>('devices_composer_defaults', { chatId, ...(patch ? { patch } : {}) }),
     /** Board-item links of chats that run on other PCs, read from the PCs that run them. Same
      * shape as the local `item_links_for_chats`, so the sidebar can merge the two. */
     itemLinks: (chatIds: string[]) => api<{ links: ItemLink[] }>('devices_item_links', { chatIds }),

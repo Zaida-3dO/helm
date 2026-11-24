@@ -95,6 +95,8 @@ export function remoteRow(c: RemoteChatRecord, hasChildren: boolean): SidebarRow
     depth: 0,
     parentChatId: c.parentChatId,
     hasChildren,
+    // The chat's own open item, kept in its record there: expanded over there is expanded here.
+    expanded: c.sidebarState?.expanded === true,
     status: c.status,
     attention: rowAttention({ status: c.status, unread, lingering: false, pinned: c.pinned }),
     pinned: c.pinned,
@@ -111,6 +113,10 @@ export function remoteRow(c: RemoteChatRecord, hasChildren: boolean): SidebarRow
     createdAt: c.createdAt,
     updatedAt: c.updatedAt,
     revision: c.revision,
+    // The hover summary made on the PC that runs the chat rides its record.
+    ...(c.summary
+      ? { summary: c.summary, ...(c.summaryAt != null ? { summaryAt: c.summaryAt } : {}) }
+      : {}),
   };
 }
 

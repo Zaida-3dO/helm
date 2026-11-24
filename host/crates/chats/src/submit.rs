@@ -50,6 +50,9 @@ pub(crate) struct NewSubmission<'a> {
     pub state: SubmissionState,
     pub origin: SubmissionOrigin,
     pub priority: Option<&'a str>,
+    /// The kind of a chat-to-chat send or a note Helm wrote ([`MessageKind`]); none for the
+    /// user's own sends.
+    pub kind: Option<MessageKind>,
     pub now: i64,
 }
 
@@ -66,6 +69,7 @@ pub(crate) fn insert_submission(
         state,
         origin,
         priority,
+        kind,
         now,
         ..
     } = *s;
@@ -74,8 +78,8 @@ pub(crate) fn insert_submission(
         params![id, chat_id, text, store::mode_str(mode), store::state_str(state), now],
     )?;
     tx.execute(
-        "INSERT INTO submission_meta(submission_id, origin, priority) VALUES (?1, ?2, ?3)",
-        params![id, origin.as_str(), priority],
+        "INSERT INTO submission_meta(submission_id, origin, priority, kind) VALUES (?1, ?2, ?3, ?4)",
+        params![id, origin.as_str(), priority, kind.map(MessageKind::as_str)],
     )?;
     // The user writing in the chat (here or on another of their devices) answers anything its
     // agent flagged for them.
@@ -250,6 +254,7 @@ pub fn chat_send(
                     state,
                     origin: origin.into(),
                     priority,
+                    kind: a.kind,
                     now,
                 },
             )?;
@@ -392,6 +397,12 @@ pub struct HostSend<'a> {
     /// For origin `page` brought in from another PC: the page's name and short summary, kept
     /// with the message so its card shows there too.
     pub page: Option<(&'a str, &'a str)>,
+    /// The kind of this message ([`MessageKind`]): the kind a chat-to-chat send carries, or the
+    /// specific kind of a note written inside Helm. None for sends that name no kind.
+    pub kind: Option<MessageKind>,
+    /// For a `wait-finished` note about a chat: the watched chat's id and title, stored beside
+    /// the message so the transcript's compact line can name it without its id.
+    pub wait: Option<(&'a str, &'a str)>,
 }
 
 /// Cut a display label to at most `chars` characters (a card label, not the message).
@@ -698,6 +709,7 @@ fn host_send_inner(
                 state,
                 origin: s.origin,
                 priority: None,
+                kind: s.kind,
                 now,
             },
         )?;
@@ -712,6 +724,19 @@ fn host_send_inner(
             tx.execute(
                 "UPDATE submission_meta SET page_title = ?2, page_overview = ?3 WHERE submission_id = ?1",
                 params![s.submission_id, clip(title, 240), clip(overview, 2000)],
+            )?;
+        }
+        if let Some((chat_id, title)) = s.wait {
+            tx.execute(
+                "UPDATE submission_meta SET wait_chat = ?2 WHERE submission_id = ?1",
+                params![
+                    s.submission_id,
+                    serde_json::to_string(&WatchedChat {
+                        chat_id: chat_id.to_owned(),
+                        title: clip(title, 512),
+                    })
+                    .unwrap_or_default()
+                ],
             )?;
         }
         if !ids.is_empty() {
@@ -859,6 +884,7 @@ pub fn continuation(rt: &ChatRuntime, chat_id: &str) -> Result<(), ApiError> {
                     origin: SubmissionOrigin::App,
                     priority: None,
                     now,
+                kind: None,
                 },
             )?;
             let artifacts = rt.sh.cfg.artifacts();
@@ -1125,6 +1151,119 @@ pub fn chat_set_model(rt: &ChatRuntime, a: ChatSetModelArgs) -> Result<ChatRecor
     if rt.sh.actors.lock().unwrap().contains_key(&a.chat_id) {
         rt.command(&a.chat_id, Cmd::ApplyModel { model, effort })?;
     }
+    rt.sh.events.emit(
+        ChatEvent::Refresh {
+            chat_id: a.chat_id.clone(),
+        }
+        .to_app_event(),
+    );
+    emit_chat(rt, &a.chat_id).ok_or_else(crate::ops::not_found)
+}
+
+/// `chat_set_fast_mode`: store the chat's own pick for Claude Code's fast mode; `None` drops
+/// the pick so the chat follows the new-chat default (Settings → Runtime) again. The value
+/// reaches the chat's agent when its worker next starts — the launch writes it into the CLI's
+/// settings — so a chat that is working keeps what it started with.
+pub fn chat_set_fast_mode(
+    rt: &ChatRuntime,
+    a: ChatSetFastModeArgs,
+) -> Result<ChatRecord, ApiError> {
+    let before = rt
+        .db()
+        .snapshot(|t| store::get_chat(t, &a.chat_id, 0))
+        .map_err(sql)?
+        .ok_or_else(crate::ops::not_found)?;
+    if before.fast_mode == a.on {
+        return Ok(before);
+    }
+    let now = helm_core::now_ms();
+    rt.db()
+        .write(|tx| {
+            tx.execute(
+                "UPDATE chats SET fast_mode = ?1, updated_at = ?2 WHERE id = ?3",
+                params![a.on, now, a.chat_id],
+            )
+        })
+        .map_err(sql)?;
+    rt.sh.events.emit(
+        ChatEvent::Refresh {
+            chat_id: a.chat_id.clone(),
+        }
+        .to_app_event(),
+    );
+    emit_chat(rt, &a.chat_id).ok_or_else(crate::ops::not_found)
+}
+
+/// `chat_set_sidebar_state`: store the chat's open-item state (which transcript cards are
+/// opened, whether its sidebar row is expanded), so every PC viewing the chat shows the
+/// same. The write merges field by field — a field left out keeps what the chat had, a
+/// field sent replaces it whole (last write wins) — so the sidebar's toggle and the
+/// transcript's cards never erase each other. `state: null` folds everything. Stored
+/// canonically: folded defaults are left out, and a state with nothing open stores null.
+/// Writing it never touches `updated_at`: opening a card is not activity, and an age or an
+/// Activity re-sort on every chevron would reorder the list under the reader.
+pub fn chat_set_sidebar_state(
+    rt: &ChatRuntime,
+    a: ChatSetSidebarStateArgs,
+) -> Result<ChatRecord, ApiError> {
+    const MAX_CARDS: usize = 256;
+    if let Some(s) = &a.state {
+        if s.v != 1 {
+            return Err(ApiError::bad_args(
+                "Sidebar state version is not supported.",
+            ));
+        }
+        if let Some(cards) = &s.open_cards {
+            if cards.len() > MAX_CARDS {
+                return Err(ApiError::bad_args("Too many opened cards."));
+            }
+            if cards.iter().any(|id| *id < 0) {
+                return Err(ApiError::bad_args("Card ids must be positive."));
+            }
+        }
+    }
+    let before = rt
+        .db()
+        .snapshot(|t| store::get_chat(t, &a.chat_id, 0))
+        .map_err(sql)?
+        .ok_or_else(crate::ops::not_found)?;
+    let merged = a.state.as_ref().and_then(|s| {
+        let prev = before.sidebar_state.clone().unwrap_or_default();
+        // Only `expanded: true` stores: folded is the default, so false is left out.
+        let expanded = match s.expanded {
+            Some(true) => Some(true),
+            Some(false) => None,
+            None => prev.expanded,
+        };
+        // An empty list is a real sentence: fold every card.
+        let open_cards = s
+            .open_cards
+            .clone()
+            .unwrap_or(prev.open_cards.clone().unwrap_or_default());
+        let open_cards = (!open_cards.is_empty()).then_some(open_cards);
+        let merged = SidebarState {
+            v: 1,
+            expanded,
+            open_cards,
+        };
+        (merged.expanded.is_some() || merged.open_cards.is_some()).then_some(merged)
+    });
+    if before.sidebar_state == merged {
+        return Ok(before);
+    }
+    // Canonical text: serde re-serialises, so an equivalent value stores identically and the
+    // next equal write is a no-op.
+    let stored = merged
+        .as_ref()
+        .map(|s| serde_json::to_string(s).expect("state serialises"));
+    rt.db()
+        .write(|tx| {
+            tx.execute(
+                "UPDATE chats SET sidebar_state = ?1 WHERE id = ?2",
+                params![stored, a.chat_id],
+            )
+        })
+        .map_err(sql)?;
     rt.sh.events.emit(
         ChatEvent::Refresh {
             chat_id: a.chat_id.clone(),

@@ -308,6 +308,8 @@ impl SettingsExtension for WorkModeKeys {
                     text: &workmode::switch_line(now),
                     origin: helm_chats::types::SubmissionOrigin::App,
                     page: None,
+                    kind: None,
+                    wait: None,
                 },
             );
         }

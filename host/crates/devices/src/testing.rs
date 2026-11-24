@@ -6,11 +6,11 @@ use crate::serve::{ChatPort, ChatState, PageScope, PanelRead, PortResult, SentFi
 use crate::wire::{
     code, AnswerArgs, ArchiveArgs, AttachmentGetArgs, BlobReadArgs, BlobRef, BoardCancelArgs,
     BoardReadArgs, CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo,
-    DevicePerson, EditOpenArgs, ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs,
-    PageIdArgs, PageOrigin, PagesReadArgs, PanelStageArgs, PersonInfo, ProfileInfo,
+    DevicePerson, EditOpenArgs, FastModeArgs, ForkArgs, Hello, MoveProfileArgs, MuteArgs,
+    OrganizeArgs, PageIdArgs, PageOrigin, PagesReadArgs, PanelStageArgs, PersonInfo, ProfileInfo,
     ProjectCreateArgs, ProjectInfo, ProjectSetArgs, QuickOpenArgs, RemoteChat, RenameArgs,
     ResendArgs, RollOverArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SideResolveArgs,
-    SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError,
+    SidebarStateArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError,
 };
 use base64::Engine as _;
 use helm_chats::types::{
@@ -70,6 +70,10 @@ pub fn fake_record(id: &str, title: &str, revision: i64) -> ChatRecord {
         stack_id: None,
         prev_session_id: None,
         next_session_id: None,
+        fast_mode: None,
+        sidebar_state: None,
+        summary: None,
+        summary_at: None,
     }
 }
 
@@ -141,6 +145,8 @@ pub struct FakeState {
     pub sent_on: Vec<DeviceInfo>,
     /// For each send, the page's card words when a page wrote it.
     pub sent_page: Vec<Option<PageOrigin>>,
+    /// For each send, the kind word it crossed with (a chat-to-chat send), if any.
+    pub sent_kind: Vec<Option<String>>,
     pub stopped: Vec<String>,
     /// The chats stopped without resending what the agent had not read.
     pub stopped_no_resend: Vec<String>,
@@ -158,6 +164,8 @@ pub struct FakeState {
     pub created: Vec<CreateArgs>,
     pub renamed: Vec<RenameArgs>,
     pub model_changes: Vec<SetModelArgs>,
+    pub fast_mode_set: Vec<FastModeArgs>,
+    pub sidebar_state_set: Vec<SidebarStateArgs>,
     pub archived: Vec<ArchiveArgs>,
     pub shared: Vec<ShareArgs>,
     /// For each fork: (chat id, fork id).
@@ -506,6 +514,7 @@ impl ChatPort for FakePort {
         device: DeviceInfo,
         files: Vec<SentFile>,
         page: Option<PageOrigin>,
+        kind: Option<String>,
     ) -> BoxFut<'_, PortResult<()>> {
         let mut st = self.st();
         let r = if st.chats.iter().any(|c| c.id() == chat_id) {
@@ -514,6 +523,7 @@ impl ChatPort for FakePort {
             st.sent_files.push(files);
             st.sent_on.push(device);
             st.sent_page.push(page);
+            st.sent_kind.push(kind);
             Ok(())
         } else {
             Err(WireError::not_found())
@@ -662,6 +672,16 @@ impl ChatPort for FakePort {
 
     fn set_model(&self, a: SetModelArgs) -> BoxFut<'_, PortResult<()>> {
         self.st().model_changes.push(a);
+        ready(Ok(()))
+    }
+
+    fn set_fast_mode(&self, a: FastModeArgs) -> BoxFut<'_, PortResult<()>> {
+        self.st().fast_mode_set.push(a);
+        ready(Ok(()))
+    }
+
+    fn set_sidebar_state(&self, a: SidebarStateArgs) -> BoxFut<'_, PortResult<()>> {
+        self.st().sidebar_state_set.push(a);
         ready(Ok(()))
     }
 

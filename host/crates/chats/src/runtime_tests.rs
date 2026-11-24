@@ -430,7 +430,7 @@ impl H {
 }
 
 /// Play a short assistant reply on the fake worker.
-async fn reply(h: &H, w: &FakeWorker, mid: &str, text: &str) {
+pub async fn reply(h: &H, w: &FakeWorker, mid: &str, text: &str) {
     w.emit(json!({"type": "message_start", "message": {"id": mid, "role": "assistant", "content": []}}))
         .await;
     w.emit(json!({"type": "message_update", "messageId": mid, "index": 0, "delta": {"type": "text_delta", "text": &text[..text.len() / 2]}}))
@@ -898,6 +898,8 @@ async fn afk_policy_answers_questions_and_defers_cards() {
             text: "AFK just turned on.",
             origin: crate::types::SubmissionOrigin::App,
             page: None,
+            kind: None,
+            wait: None,
         },
     )
     .unwrap();
@@ -2101,6 +2103,8 @@ async fn a_used_up_plan_allowance_holds_a_start_and_the_reset_releases_it() {
             text: "get the shopping list",
             origin: crate::types::SubmissionOrigin::Telegram,
             page: None,
+            kind: None,
+            wait: None,
         },
     )
     .unwrap();
@@ -2370,6 +2374,167 @@ async fn the_queue_line_can_be_reordered_parked_and_sent_back() {
             )) == ["0"]
     })
     .await;
+}
+
+/// What counts as working on a local server is what the server itself answers: a chat holds at
+/// its start while the server is busy for anyone — another profile, another instance, or a
+/// request that never came from Helm — even when this app's own count sits under the cap. The
+/// panel read shows the line and the working chats beside it, and a pause from the panel parks
+/// a waiting chat by hand.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_turns_wait_on_what_the_server_says_it_carries() {
+    let mut h = harness_with(Limits {
+        tick: Duration::from_millis(50),
+        ..limits()
+    });
+    h.db.write(|tx| helm_core::prefs::set_generic(tx, "localChatCap", &json!(2)))
+        .unwrap();
+    let local = Arc::new(FakeLocal {
+        turns: Mutex::new(Vec::new()),
+        outcome: Mutex::new(Ok("m-one".into())),
+        gate: Mutex::new(None),
+        finished: Mutex::new(Vec::new()),
+        refreshed: Mutex::new(Vec::new()),
+        held_outcome: Mutex::new(None),
+        // The server's own word: it is answering something right now and holds one more behind
+        // it. Two of two, whatever Helm's local count says.
+        queue: Mutex::new(Some(crate::local::QueueInfo {
+            busy: true,
+            queued: Some(1),
+        })),
+    });
+    h.rt.set_local_models(local.clone());
+    let cwd = h.work.to_string_lossy().into_owned();
+    let asked = |id: &str| -> bool { local.turns.lock().unwrap().iter().any(|t| t.chat_id == id) };
+    let new_id = |r: Value| r["id"].as_str().unwrap().to_owned();
+    let a = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
+        )
+        .await
+        .unwrap(),
+    );
+    h.send(&a, "job a", "default").await;
+    let mut wa = h.worker().await;
+    wa.ready().await;
+    let pa = wa.expect("prompt").await;
+    ack(&wa, &pa).await;
+    wa.emit(json!({"type": "agent_start"})).await;
+    // A's first gate read asked the server and the answer is in the cache by now. B would start
+    // on the old per-instance count (1 of 2 used here); the server's answer is what holds it.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let b = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
+        )
+        .await
+        .unwrap(),
+    );
+    let (sidb, _) = h.send(&b, "job b", "default").await;
+    h.until("B waits on the server's busy word", |h| {
+        h.status(&b) == "starting"
+            && h.state(&sidb) == "saved"
+            && h.col(&format!(
+                "SELECT reason FROM chat_dispatch_holds WHERE chat_id = '{b}'"
+            )) == ["local_cap"]
+    })
+    .await;
+    assert!(
+        !asked(&b),
+        "the server is busy for someone else: no new turn starts"
+    );
+    // The panel read: B waits on Strata's line, and A stands above the line as working on it.
+    let s = crate::queue::summary(&h.db, &h.rt);
+    let entry = s
+        .entries
+        .iter()
+        .find(|e| e.chat_id == b)
+        .expect("B in the line");
+    assert_eq!(entry.reason, "local_cap");
+    assert_eq!(entry.server_id.as_deref(), Some("strata"));
+    assert!(
+        s.active
+            .iter()
+            .any(|x| x.chat_id == a && x.server_id.as_deref() == Some("strata")),
+        "the working chat is listed where the panel can show and halt it"
+    );
+    // Pausing a waiting chat from the panel parks it by hand and says so in its transcript.
+    crate::queue::action(&h.rt, &b, "pause", None).unwrap();
+    assert_eq!(
+        h.col(&format!(
+            "SELECT reason FROM chat_dispatch_holds WHERE chat_id = '{b}'"
+        )),
+        ["manual"]
+    );
+    assert_eq!(
+        h.col(&format!(
+            "SELECT count(*) FROM messages WHERE chat_id = '{b}' AND role = 'context' \
+             AND json_extract(details, '$.contextKind') = 'queuePause'"
+        )),
+        ["1"]
+    );
+}
+
+/// Pause and stop from the queue panel reach any chat of this host, whoever's it is: the pause
+/// arrives as a steer the chat reads at its next boundary, the stop takes the worker down with
+/// the existing stop semantics, and both leave a transcript row naming who asked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_queue_panel_can_pause_and_stop_a_working_chat() {
+    let mut h = harness();
+    let (chat, _, mut w) = running_turn(&mut h).await;
+    crate::queue::action(&h.rt, &chat, "pause", None).unwrap();
+    let p = w.expect("prompt").await;
+    assert_eq!(
+        p["streamingBehavior"], "steer",
+        "the halt lands at a boundary"
+    );
+    let pause_sid = p["submissionId"].as_str().unwrap().to_owned();
+    let text = p["text"].as_str().unwrap();
+    assert!(text.contains("paused this chat from the queue"), "{text}");
+    assert!(
+        text.contains("do not start new work"),
+        "it says to stop, not just wait"
+    );
+    ack(&w, &p).await;
+    w.emit(json!({"type": "submission_delivered", "submissionId": &pause_sid}))
+        .await;
+    h.until("the halt is delivered", |h| {
+        h.state(&pause_sid) == "delivered"
+    })
+    .await;
+    assert_eq!(
+        h.col(&format!(
+            "SELECT count(*) FROM messages WHERE chat_id = '{chat}' AND role = 'context' \
+             AND json_extract(details, '$.contextKind') = 'queuePause'"
+        )),
+        ["1"],
+        "the transcript says a queue pause happened"
+    );
+    // Stop: the worker is taken down at once, with the existing semantics.
+    crate::queue::action(&h.rt, &chat, "stop", None).unwrap();
+    let abort = w.expect("abort").await;
+    w.respond(
+        &abort,
+        json!({"state": "stopping", "cancelledSubmissionIds": []}),
+    )
+    .await;
+    w.emit(json!({"type": "agent_settled", "outcome": "stopped"}))
+        .await;
+    h.until("the chat is stopped", |h| h.status(&chat) == "stopped")
+        .await;
+    assert_eq!(
+        h.col(&format!(
+            "SELECT count(*) FROM messages WHERE chat_id = '{chat}' AND role = 'context' \
+             AND json_extract(details, '$.contextKind') = 'queueStop'"
+        )),
+        ["1"]
+    );
+    assert!(
+        w.no_command_for(Duration::from_millis(100)).await.is_none(),
+        "the queue stop resends nothing on its own"
+    );
 }
 
 /// Withdraw: the text comes back as a newer draft revision.
@@ -3047,7 +3212,9 @@ async fn an_action_send_leaves_the_draft_untouched() {
 }
 
 /// A page's send stores the origin and its card words, so the transcript's page card survives a
-/// reload; a plain send stores neither, and a page's metadata on another origin is ignored.
+/// reload; a plain send stores neither, a page's metadata on another origin is ignored, and a
+/// send that carries a kind keeps it in both the waiting row and the transcript row, and a word
+/// outside the closed set is refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_page_send_keeps_its_origin_and_card_words() {
     let h = harness();
@@ -3093,15 +3260,53 @@ async fn a_page_send_keeps_its_origin_and_card_words() {
         "chat_send",
         json!({"chatId": held, "submissionId": "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f",
                "text": "queued page note", "action": "default", "draftRevision": 0,
-               "origin": "page", "pageTitle": "Tracker", "pageOverview": "one line"}),
+               "origin": "page", "pageTitle": "Tracker", "pageOverview": "one line", "kind": "nudge"}),
     )
     .await
     .unwrap();
     let stored = h.col(
-        "SELECT COALESCE(page_title, '-') || '/' || COALESCE(page_overview, '-')
+        "SELECT COALESCE(page_title, '-') || '/' || COALESCE(page_overview, '-') || '/' || COALESCE(kind, '-')
            FROM submission_meta WHERE submission_id = '0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f'",
     );
-    assert_eq!(stored, ["Tracker/one line"]);
+    assert_eq!(stored, ["Tracker/one line/nudge"]);
+    // A send that carries a kind keeps it on the transcript row too; a word outside the closed
+    // set is refused at the door, never stored.
+    let kinded = h.create().await;
+    h.call(
+        "chat_send",
+        json!({"chatId": kinded, "submissionId": uuid::Uuid::new_v4().to_string(),
+               "text": "steer now", "action": "default", "draftRevision": 0,
+               "origin": "action", "kind": "steer"}),
+    )
+    .await
+    .unwrap();
+    let odd = h
+        .call(
+            "chat_send",
+            json!({"chatId": kinded, "submissionId": uuid::Uuid::new_v4().to_string(),
+                   "text": "odd kind", "action": "default", "draftRevision": 0,
+                   "origin": "action", "kind": "telepathy"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(odd.code, "bad_args", "the kind set is closed at the op too");
+    h.until("the kinded send wrote its user row", |h| {
+        h.col(&format!(
+            "SELECT count(*) FROM messages WHERE role = 'user' AND chat_id = '{kinded}'"
+        ))[0]
+            == "1"
+    })
+    .await;
+    // (Counting only this chat: the queued page send above lands whenever its queue opens.)
+    let kinds = h.col(&format!(
+        "SELECT chat_id || '=' || COALESCE(json_extract(details, '$.kind'), '-')
+               FROM messages WHERE role = 'user' AND chat_id = '{kinded}'"
+    ));
+    assert_eq!(
+        kinds,
+        [format!("{kinded}=steer")],
+        "the kind reaches the row"
+    );
 }
 
 struct Ctx(Mutex<Vec<(String, u64)>>);
@@ -3142,6 +3347,7 @@ fn send_args(
         context: Some(ctx),
         page_title: None,
         page_overview: None,
+        kind: None,
     }
 }
 
@@ -4016,6 +4222,202 @@ async fn a_changed_chat_loses_its_pending_continuation() {
         .is_empty());
 }
 
+/// The composer's fast-mode bolt: the chat holds its own pick, and `null` drops it so the chat
+/// follows the new-chat default again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fast_mode_is_the_chats_own_pick_with_a_null_fallback() {
+    let h = harness();
+    let chat = h.create().await;
+    let fast = || h.col(&format!("SELECT fast_mode FROM chats WHERE id = '{chat}'"));
+    // A new chat holds no pick: the record says null and the column is NULL.
+    let g = h.call("chat_get", json!({"chatId": chat})).await.unwrap();
+    assert!(
+        g["chat"]["fastMode"].is_null(),
+        "a new chat follows the default"
+    );
+    assert_eq!(fast(), ["NULL"]);
+    // On and off set the column and answer with the new record.
+    let r = h
+        .call("chat_set_fast_mode", json!({"chatId": chat, "on": true}))
+        .await
+        .unwrap();
+    assert_eq!(r["fastMode"], json!(true));
+    assert_eq!(fast(), ["1"]);
+    let r = h
+        .call("chat_set_fast_mode", json!({"chatId": chat, "on": false}))
+        .await
+        .unwrap();
+    assert_eq!(r["fastMode"], json!(false));
+    assert_eq!(fast(), ["0"]);
+    // A null pick drops it; a missing `on` is the same null.
+    let r = h
+        .call("chat_set_fast_mode", json!({"chatId": chat, "on": null}))
+        .await
+        .unwrap();
+    assert!(r["fastMode"].is_null());
+    h.call("chat_set_fast_mode", json!({"chatId": chat, "on": true}))
+        .await
+        .unwrap();
+    let r = h
+        .call("chat_set_fast_mode", json!({"chatId": chat}))
+        .await
+        .unwrap();
+    assert!(r["fastMode"].is_null(), "no `on` in the args means no pick");
+    assert_eq!(fast(), ["NULL"]);
+    // Setting what the chat already has answers the same state without touching the row.
+    h.call("chat_set_fast_mode", json!({"chatId": chat, "on": true}))
+        .await
+        .unwrap();
+    let stamp = || {
+        h.col(&format!("SELECT updated_at FROM chats WHERE id = '{chat}'"))
+            .pop()
+            .unwrap()
+    };
+    let before = stamp();
+    let r = h
+        .call("chat_set_fast_mode", json!({"chatId": chat, "on": true}))
+        .await
+        .unwrap();
+    assert_eq!(r["fastMode"], json!(true));
+    assert_eq!(stamp(), before, "a no-op leaves the row alone");
+    // An unknown chat is not_found; a call without a chat id is refused.
+    let e = h
+        .call("chat_set_fast_mode", json!({"chatId": "nope", "on": true}))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, "not_found");
+    assert!(h
+        .call("chat_set_fast_mode", json!({"on": true}))
+        .await
+        .is_err());
+    // The launch resolves the two: the chat's own pick wins, null follows the default.
+    assert!(effective_fast_mode(None, true), "no pick: the default on");
+    assert!(
+        !effective_fast_mode(None, false),
+        "no pick: the default off"
+    );
+    assert!(
+        !effective_fast_mode(Some(false), true),
+        "the chat's off beats a default on"
+    );
+    assert!(
+        effective_fast_mode(Some(true), false),
+        "the chat's on beats a default off"
+    );
+}
+
+/// The chat's open-item state: one small blob holding the transcript cards it has opened
+/// and whether its sidebar row is expanded, so the chat shows the same on every PC. Writes
+/// merge field by field (the sidebar's toggle and the cards never erase each other); folded
+/// is the default, stored as no state.
+async fn set_sidebar(h: &H, chat: &str, state: Value) -> Result<Value, helm_ipc::ApiError> {
+    h.call(
+        "chat_set_sidebar_state",
+        json!({"chatId": chat, "state": state}),
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sidebar_state_follows_the_chat() {
+    let h = harness();
+    let chat = h.create().await;
+    let col = || {
+        h.col(&format!(
+            "SELECT sidebar_state FROM chats WHERE id = '{chat}'"
+        ))
+    };
+    let set = |state: Value| set_sidebar(&h, &chat, state);
+    // A new chat holds no state: the record leaves it out and the column is NULL.
+    let g = h.call("chat_get", json!({"chatId": &chat})).await.unwrap();
+    assert!(
+        g["chat"]["sidebarState"].is_null(),
+        "a new chat is all folded"
+    );
+    assert_eq!(col(), ["NULL"]);
+    // Opening a card stores the state and answers with the fresh record.
+    let r = set(json!({"v": 1, "openCards": [42]})).await.unwrap();
+    assert_eq!(r["sidebarState"]["openCards"], json!([42]));
+    assert_eq!(col(), ["{\"v\":1,\"openCards\":[42]}"]);
+    // The sidebar's toggle merges: expanding keeps the opened cards...
+    set(json!({"v": 1, "expanded": true})).await.unwrap();
+    assert_eq!(col(), ["{\"v\":1,\"expanded\":true,\"openCards\":[42]}"]);
+    // ...and a card patch keeps the row's expansion.
+    set(json!({"v": 1, "openCards": [42, 7]})).await.unwrap();
+    assert_eq!(col(), ["{\"v\":1,\"expanded\":true,\"openCards\":[42,7]}"]);
+    // Folding the row is a real sentence: it drops the expanded flag but keeps the cards.
+    set(json!({"v": 1, "expanded": false})).await.unwrap();
+    assert_eq!(col(), ["{\"v\":1,\"openCards\":[42,7]}"]);
+    // An empty card list folds every card; with nothing open at all the row stores null.
+    set(json!({"v": 1, "openCards": []})).await.unwrap();
+    assert_eq!(col(), ["NULL"]);
+    // null resets whatever was there.
+    set(json!({"v": 1, "expanded": true, "openCards": [1]}))
+        .await
+        .unwrap();
+    set(Value::Null).await.unwrap();
+    assert_eq!(col(), ["NULL"]);
+    // A write that changes nothing leaves the row alone, and a write that does changes
+    // nothing else: opening a card is not activity, so `updated_at` never moves.
+    let stamp = || {
+        h.col(&format!("SELECT updated_at FROM chats WHERE id = '{chat}'"))
+            .pop()
+            .unwrap()
+    };
+    let before = stamp();
+    set(json!({"v": 1, "openCards": [3]})).await.unwrap();
+    assert_ne!(col(), ["NULL"]);
+    assert_eq!(stamp(), before, "the state write leaves the age alone");
+    let r = set(json!({"v": 1, "openCards": [3]})).await.unwrap();
+    assert_eq!(r["sidebarState"]["openCards"], json!([3]));
+    assert_eq!(stamp(), before, "an equal write is a no-op");
+    // The chat_get answer carries the state whole.
+    let g = h.call("chat_get", json!({"chatId": &chat})).await.unwrap();
+    assert_eq!(g["chat"]["sidebarState"]["openCards"], json!([3]));
+    // Refusals: unknown chat; a version this build cannot read; a negative card id; an
+    // over-long card list. A call naming no state is not a refusal: it reads as the null.
+    let e = h
+        .call(
+            "chat_set_sidebar_state",
+            json!({"chatId": "nope", "state": {"v": 1, "expanded": true}}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, "not_found");
+    assert_eq!(
+        set(json!({"v": 2, "expanded": true}))
+            .await
+            .unwrap_err()
+            .code,
+        "bad_args"
+    );
+    assert_eq!(
+        set(json!({"v": 1, "openCards": [-1]}))
+            .await
+            .unwrap_err()
+            .code,
+        "bad_args"
+    );
+    let many: Vec<i64> = (0..257).collect();
+    assert_eq!(
+        set(json!({"v": 1, "openCards": many}))
+            .await
+            .unwrap_err()
+            .code,
+        "bad_args"
+    );
+    // A call that names no state reads as the null: everything folded again.
+    set(json!({"v": 1, "expanded": true})).await.unwrap();
+    let r = h
+        .call("chat_set_sidebar_state", json!({"chatId": &chat}))
+        .await
+        .unwrap();
+    assert!(
+        r["sidebarState"].is_null(),
+        "a call naming no state is the reset"
+    );
+    assert_eq!(col(), ["NULL"]);
+}
 /// One finished turn with a reply, on the fake worker.
 async fn finished_turn(h: &H, w: &mut FakeWorker, chat: &str, prompt: &str, mid: &str, text: &str) {
     h.send(chat, prompt, "default").await;
@@ -5018,6 +5420,8 @@ async fn a_host_sent_first_message_names_the_chat() {
             text: &framed,
             origin: SubmissionOrigin::OtherChat,
             page: None,
+            kind: None,
+            wait: None,
         },
     )
     .unwrap();
@@ -5040,6 +5444,8 @@ async fn a_host_sent_first_message_names_the_chat() {
             text: "Another note",
             origin: SubmissionOrigin::OtherChat,
             page: None,
+            kind: None,
+            wait: None,
         },
     )
     .unwrap();
@@ -5056,6 +5462,8 @@ async fn a_host_sent_first_message_names_the_chat() {
             text: "[Typed on Laptop]\nwhat is the dog page called",
             origin: SubmissionOrigin::Remote,
             page: None,
+            kind: None,
+            wait: None,
         },
     )
     .unwrap();
@@ -5080,6 +5488,8 @@ async fn a_host_sent_first_message_names_the_chat() {
             text: "[Voice · conversation: speak it, short, no markup]\n[Not heard by the user: your reply \"Sure.\" was never played]\n(sent 5 min ago, queued while Helm was offline)\nsummarise the notes on backups",
             origin: SubmissionOrigin::Voice,
             page: None,
+            kind: None,
+            wait: None,
         },
     )
     .unwrap();
@@ -6408,6 +6818,8 @@ async fn a_host_send_repeated_under_one_submission_id_is_delivered_once() {
                 text: "[Helm] The user allowed it.",
                 origin: crate::types::SubmissionOrigin::App,
                 page: None,
+                kind: None,
+                wait: None,
             },
         )
     };
@@ -6456,6 +6868,8 @@ async fn a_host_send_retry_hands_over_a_saved_row_the_first_hand_off_missed() {
             text: "[Helm] A wait finished.",
             origin: crate::types::SubmissionOrigin::App,
             page: None,
+            kind: None,
+            wait: None,
         },
     )
     .unwrap();
@@ -6478,6 +6892,8 @@ async fn a_host_send_retry_hands_over_a_saved_row_the_first_hand_off_missed() {
             text: "[Helm] A wait finished.",
             origin: crate::types::SubmissionOrigin::App,
             page: None,
+            kind: None,
+            wait: None,
         },
     )
     .unwrap();
@@ -6516,6 +6932,8 @@ async fn a_retry_answers_like_a_new_send_when_the_chat_cannot_take_it() {
                 text: "[Helm] The user allowed it.",
                 origin: crate::types::SubmissionOrigin::App,
                 page: None,
+                kind: None,
+                wait: None,
             },
         )
     };
@@ -7796,6 +8214,8 @@ async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
             text: "a wait fired",
             origin: crate::types::SubmissionOrigin::App,
             page: None,
+            kind: None,
+            wait: None,
         },
     )
     .unwrap();

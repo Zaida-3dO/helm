@@ -14,6 +14,10 @@
 //! - **The local server's cap** — at most `localChatCap` of our chats work on one local model
 //!   server at a time (a server can set its own cap in its settings), and the rest queue at
 //!   their start, in order: pushed-to-top first, then normal before background, then first-come.
+//!   What counts as working is the server's own answer about itself — it is answering something
+//!   right now and what it holds waiting, whoever put those requests there — floored by this
+//!   PC's chats that are open on it but whose request the server has not taken yet. So chats
+//!   wait when the GPU is actually busy, not only when this app's own list says so.
 //!
 //! The class comes from the submission's origin, never from a column on the chat: a Telegram or
 //! voice turn is *interactive* (a person is waiting on the other end — it is never queued behind
@@ -139,7 +143,9 @@ fn goes_first(w: &Waiter, mine: &Mine) -> bool {
 ///
 /// - `waiters`: the other chats waiting at the same place (the same local server, or the same
 ///   Claude windows) — not the working ones, which never wait.
-/// - `working`: chats with a turn open on that place; for a Claude target, chats working anywhere.
+/// - `working`: chats with a turn open on that place; for a Claude target, chats working
+///   anywhere. For a local model target the caller passes [`server_working`] — what the server
+///   itself says it is carrying, floored by this instance's chats open on it.
 /// - `cap`: how many chats that place may carry (`0` would hold everything — the caller passes
 ///   `usize::MAX` when the cap is off).
 /// - `claude_full`: the plan windows read at or over the hold threshold.
@@ -378,6 +384,22 @@ pub fn server_cap(db: &Database, server_id: &str) -> Option<u64> {
         .as_u64()
 }
 
+/// The working count a local model server's line is measured against: what the server itself
+/// says it carries — the one request it is answering, if it says it is, plus what it holds
+/// waiting — floored by `ours`, this instance's chats open on it whose request may not have
+/// landed yet. A server that answers nothing about its queue (Ollama serves several at once, or
+/// a server not answering) leaves the instance's own count, as before. This is what makes chats
+/// wait while the GPU is busy with anyone's work, not just this app's.
+pub fn server_working(seen: Option<crate::local::QueueInfo>, ours: usize) -> usize {
+    match seen {
+        Some(q) => {
+            let at_server = usize::from(q.busy) + q.queued.unwrap_or(0) as usize;
+            at_server.max(ours)
+        }
+        None => ours,
+    }
+}
+
 /// Swap the places in line of two held starts, so the queue panel can move one up or down.
 pub fn swap_seq(db: &Database, a: &str, b: &str) {
     let _ = db.write(|tx| {
@@ -467,15 +489,18 @@ pub fn move_hold(
 
 // ------------------------------------------------------------------ the queue as one read
 
-use crate::types::{QueueEntry, QueueServer, QueueSummary};
+use crate::types::{QueueActive, QueueEntry, QueueServer, QueueSummary};
 
 /// The queue whole in one read: every held start, front of the lines first, with each chat's
-/// title; what every local server carries; and what the Claude windows say.
+/// title and profile; the chats with a turn open right now (the panel shows them above the
+/// waiting ones, each openable and haltable); what every local server carries; and what the
+/// Claude windows say.
 pub fn summary(db: &Database, rt: &crate::runtime::ChatRuntime) -> QueueSummary {
     let entries = db
         .snapshot(|tx| {
             let mut st = tx.prepare(
-                "SELECT h.chat_id, c.title, h.reason, h.class, h.server_id, h.since, h.top
+                "SELECT h.chat_id, c.title, h.reason, h.class, h.server_id, h.since, h.top,
+                        NULLIF(c.profile_id, '')
                  FROM chat_dispatch_holds h JOIN chats c ON c.id = h.chat_id
                  WHERE c.archived = 0
                  ORDER BY h.top DESC, h.seq",
@@ -489,11 +514,46 @@ pub fn summary(db: &Database, rt: &crate::runtime::ChatRuntime) -> QueueSummary 
                     server_id: r.get(4)?,
                     since: r.get(5)?,
                     top: r.get::<_, i64>(6)? != 0,
+                    profile_id: r.get(7)?,
                 })
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
         })
         .unwrap_or_default();
+    // The working chats come from the actors' live state; their titles and profiles are read
+    // back from the db, and a chat whose turn ended between the two reads is simply gone.
+    let active = {
+        let live = rt.active_chats();
+        let titles: std::collections::HashMap<String, (String, Option<String>)> = db
+            .snapshot(|tx| {
+                let mut map = std::collections::HashMap::new();
+                for a in &live {
+                    if let Some((title, pid)) = tx
+                        .query_row(
+                            "SELECT title, NULLIF(profile_id, '') FROM chats WHERE id = ?1 AND archived = 0",
+                            [&a.chat_id],
+                            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+                        )
+                        .optional()?
+                    {
+                        map.insert(a.chat_id.clone(), (title, pid));
+                    }
+                }
+                Ok::<_, rusqlite::Error>(map)
+            })
+            .unwrap_or_default();
+        live.iter()
+            .filter_map(|a| {
+                titles.get(&a.chat_id).map(|(title, pid)| QueueActive {
+                    chat_id: a.chat_id.clone(),
+                    title: title.clone(),
+                    server_id: a.server_id.clone(),
+                    since: a.since_ms,
+                    profile_id: pid.clone(),
+                })
+            })
+            .collect()
+    };
     let servers = rt
         .local_load()
         .into_iter()
@@ -513,6 +573,7 @@ pub fn summary(db: &Database, rt: &crate::runtime::ChatRuntime) -> QueueSummary 
     let claude_full = hold != 0 && capacity.is_some_and(|c| c.full_at(hold));
     QueueSummary {
         entries,
+        active,
         servers,
         claude_queued,
         claude_full,
@@ -721,16 +782,170 @@ pub fn action(
                 ));
             }
         }
+        "pause" => {
+            // Pause is the queue's halt for any chat on this host, whoever's it is: a working
+            // chat is told to stop at its next boundary; a waiting one is parked until released.
+            let by = acting_name(db);
+            if rt.turn_under_way(chat_id) {
+                halt_working(rt, chat_id, &by, now);
+            } else {
+                let class = row
+                    .as_ref()
+                    .map(|r| r.class.clone())
+                    .unwrap_or_else(|| QueueClass::Normal.key().to_owned());
+                manual_hold(db, chat_id, &class, now);
+                stamp(rt, chat_id, "queuePause", format!("{by} paused this chat from the queue: it waits until they release it."), now);
+            }
+        }
+        "stop" => {
+            let by = acting_name(db);
+            if rt.turn_under_way(chat_id) {
+                // The existing stop semantics: the worker is taken down at once.
+                stamp(rt, chat_id, "queueStop", format!("{by} stopped this chat from the queue."), now);
+                let (reply, _gone) = tokio::sync::oneshot::channel();
+                if rt.command(chat_id, crate::actor::Cmd::Stop { reply }).is_err() {
+                    log::warn!("queue: stop of {chat_id} did not reach its actor");
+                }
+            } else if row.is_some() {
+                // A chat that only waits has no worker to end: its stop ends the wait and
+                // gives the send back, which is what "cancel" does.
+                let cancel = crate::actor::Cmd::QueueCancel { keep_park: false };
+                if rt.command(chat_id, cancel).is_err() {
+                    clear_hold(db, chat_id);
+                }
+                stamp(rt, chat_id, "queueStop", format!("{by} stopped this chat from the queue: its waiting send went back."), now);
+            } else {
+                return Err(ApiError::new(
+                    "refused",
+                    "That chat is neither working nor waiting; there is nothing to stop.",
+                ));
+            }
+        }
         other => {
             return Err(ApiError::new(
                 "bad_args",
                 format!(
-                    "The queue knows no action \"{other}\" (top, up, down, move, hold, release, cancel, start_anyway)."
+                    "The queue knows no action \"{other}\" (top, up, down, move, hold, release, cancel, pause, stop, start_anyway)."
                 ),
             ))
         }
     }
     Ok(summary(db, rt))
+}
+
+// ------------------------------------------------------------------ halting any chat from the panel
+
+/// Who is acting: the name of the profile this Helm is showing (the home profile while all of
+/// them are), used to stamp the transcript rows a queue pause or stop leaves in the target chat.
+fn acting_name(db: &Database) -> String {
+    let chosen: Option<String> = db
+        .snapshot(|tx| {
+            Ok::<_, rusqlite::Error>(
+                helm_core::prefs::read(tx, "activeProfile")
+                    .and_then(|v| v.as_str().map(str::to_owned)),
+            )
+        })
+        .ok()
+        .flatten();
+    let name: Option<String> = db
+        .snapshot(|tx| {
+            let q = match chosen.as_deref() {
+                Some(id) if id != "all" => {
+                    tx.query_row("SELECT name FROM profiles WHERE id = ?1", [id], |r| {
+                        r.get::<_, String>(0)
+                    })
+                }
+                _ => tx.query_row("SELECT name FROM profiles WHERE is_home = 1", [], |r| {
+                    r.get::<_, String>(0)
+                }),
+            };
+            Ok::<_, rusqlite::Error>(q.optional()?)
+        })
+        .ok()
+        .flatten();
+    name.unwrap_or_else(|| "Helm".to_owned())
+}
+
+/// The transcript row a queue halt leaves in the target chat, naming who asked. Context rows
+/// are the transcript's own notes; the panel's transcript already draws them.
+fn stamp(
+    rt: &crate::runtime::ChatRuntime,
+    chat_id: &str,
+    kind: &'static str,
+    text: String,
+    now: i64,
+) {
+    let _ = rt.db().write(|tx| {
+        let row = crate::session_log::RowWrite {
+            source_key: format!("c:queue:{kind}:{chat_id}:{now}"),
+            role: "context",
+            text,
+            thinking: String::new(),
+            tool_name: None,
+            tool_call_id: None,
+            status: "complete",
+            timestamp: now,
+            details: serde_json::json!({ "contextKind": kind }),
+            entry_id: None,
+            parent_id: None,
+        };
+        crate::session_log::upsert_row(tx, &rt.sh.cfg.artifacts(), chat_id, &row, rt.clock().next())
+    });
+}
+
+/// Tell a working chat to halt at its next boundary and stamp who asked. The instruction is a
+/// steer message, so a chat mid-turn reads it at the next step it takes — finish the current
+/// work, stop, and wait for the person who paused it.
+fn halt_working(rt: &crate::runtime::ChatRuntime, chat_id: &str, by: &str, now: i64) {
+    use crate::types::{SubmissionMode, SubmissionOrigin, SubmissionState};
+    let sid = uuid::Uuid::new_v4().to_string();
+    let text = format!(
+        "{by} paused this chat from the queue: finish the step you are on, stop at the next \
+         natural boundary, and wait for them there — do not start new work."
+    );
+    let wrote = rt
+        .db()
+        .write(|tx| {
+            crate::submit::insert_submission(
+                tx,
+                &crate::submit::NewSubmission {
+                    id: &sid,
+                    chat_id,
+                    text: &text,
+                    mode: SubmissionMode::Steer,
+                    state: SubmissionState::Saved,
+                    origin: SubmissionOrigin::App,
+                    priority: None,
+                    // A small prompt carrying no new work from Helm: the pause note.
+                    kind: Some(crate::types::MessageKind::Nudge),
+                    now,
+                },
+            )?;
+            let row = crate::session_log::RowWrite {
+                source_key: format!("c:queue:queuePause:{sid}"),
+                role: "context",
+                text: format!("{by} paused this chat from the queue."),
+                thinking: String::new(),
+                tool_name: None,
+                tool_call_id: None,
+                status: "complete",
+                timestamp: now,
+                details: serde_json::json!({ "contextKind": "queuePause" }),
+                entry_id: None,
+                parent_id: None,
+            };
+            crate::session_log::upsert_row(
+                tx,
+                &rt.sh.cfg.artifacts(),
+                chat_id,
+                &row,
+                rt.clock().next(),
+            )
+        })
+        .is_ok();
+    if wrote {
+        let _ = rt.command(chat_id, crate::actor::Cmd::Dispatch(sid));
+    }
 }
 
 // ------------------------------------------------------------------ Claude plan capacity
@@ -968,6 +1183,38 @@ mod tests {
             assert_eq!(
                 got, want,
                 "{mine:?} / waiters {waiters:?} / {working} of {cap}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_local_server_answers_for_itself_and_our_just_opened_turns_top_it_up() {
+        // (what the server says, our own open turns, expected count)
+        use crate::local::QueueInfo;
+        let q = |busy: bool, queued: Option<u64>| Some(QueueInfo { busy, queued });
+        let cases: Vec<(Option<QueueInfo>, usize, usize)> = vec![
+            // No answer at all (Ollama, or the first read on Strata): only our own chats count.
+            (None, 0, 0),
+            (None, 2, 2),
+            // Idle and holding nothing: our own turns are the whole load.
+            (q(false, Some(0)), 1, 1),
+            // Answering something, whoever sent it: that is one working turn.
+            (q(true, Some(0)), 0, 1),
+            // Busy and holding a line behind it: the whole queue at the server counts.
+            (q(true, Some(3)), 0, 4),
+            // Our just-opened turns the server has not taken yet are floored over its answer,
+            // and ours already at the server are not counted twice.
+            (q(false, Some(0)), 2, 2),
+            (q(true, Some(1)), 3, 3),
+            // A server that says it is busy but not how many: busy alone.
+            (q(true, None), 0, 1),
+            (q(true, None), 4, 4),
+        ];
+        for (seen, ours, want) in cases {
+            assert_eq!(
+                server_working(seen.clone(), ours),
+                want,
+                "{seen:?} / ours {ours}"
             );
         }
     }

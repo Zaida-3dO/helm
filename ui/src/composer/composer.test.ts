@@ -8,6 +8,7 @@ import type { MessageRow } from '../api/types.ts';
 import { liveRuns, wrapMarker } from './markup.ts';
 import { permissionLabel } from './permission.ts';
 import { SendHold, holdStep } from './hold.ts';
+import { fastModeShown, fastModeTitle, fastModeVisible } from './fastMode.ts';
 
 const key = (k: string, m: Partial<KeyShape> = {}): KeyShape => ({ key: k, ctrl: false, shift: false, alt: false, meta: false, ...m });
 const asap: KeyContext = { sendShortcut: 'mod-enter', mode: 'asap', showChoices: true };
@@ -172,6 +173,31 @@ test('wait reason: the running tool of this turn, else the next step', () => {
     [[user, running('Bash', 2), steer, row({ id: 5, role: 'assistant', text: 'ok' })], 'Waiting for Bash to finish'],
     [[row({ id: 0, role: 'toolResult', toolName: 'Bash', status: 'streaming' }), user], 'Claude reads it at its next step'],
   ] as const) assert.equal(waitReason(rows as never), want, JSON.stringify(rows.map((r) => r.id)));
+});
+
+test('the fast-mode bolt: Claude chats only, own pick over default, no guessing', () => {
+  // A local-model chat hides the control entirely; Claude and an unset model show it.
+  for (const [model, want] of [
+    ['claude-opus-5-5', true],
+    [null, true],
+    [undefined, true],
+    ['local/ollama/llama3', false],
+    ['local/strata/x', false],
+  ] as const) assert.equal(fastModeVisible(model), want, String(model));
+  // The chat's own pick wins; with none the PC's default shows; a default not read yet holds the bolt back.
+  assert.equal(fastModeShown(true, false), true);
+  assert.equal(fastModeShown(false, true), false);
+  assert.equal(fastModeShown(null, true), true);
+  assert.equal(fastModeShown(null, false), false);
+  assert.equal(fastModeShown(null, null), null);
+  assert.equal(fastModeShown(true, null), true, 'an own pick needs no default');
+  // The tooltip says what it costs and when it applies, and names where the fallback lives.
+  const t = fastModeTitle(true);
+  assert.match(t, /on/, 'says its state');
+  assert.match(t, /higher token price/);
+  assert.match(t, /agent next starts/);
+  assert.match(t, /Settings → Runtime/);
+  assert.match(fastModeTitle(false), /off/);
 });
 
 test('a Claude usage hold names the allowance and its opening time', () => {

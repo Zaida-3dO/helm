@@ -1405,6 +1405,9 @@ impl Actor {
             effort: chat.effort.clone(),
             resume_session_id: resume,
             fork_session,
+            // The chat's own fast-mode pick, if it has one; the spawner falls back to the
+            // runtime file's default.
+            fast_mode: chat.fast_mode,
             send_behavior: sb,
             host: crate::hostcalls::launch(
                 &self.sh,
@@ -2067,6 +2070,9 @@ impl Actor {
                     text: &text,
                     origin: crate::types::SubmissionOrigin::App,
                     page: None,
+                    // A note from Helm to the parent, asking it to notice its child: a nudge.
+                    kind: Some(crate::types::MessageKind::Nudge),
+                    wait: None,
                 },
             );
             if let Err(e) = sent {
@@ -2130,6 +2136,9 @@ impl Actor {
                     text: &text,
                     origin: crate::types::SubmissionOrigin::App,
                     page: None,
+                    // The corrective word is a nudge from Helm to the agent.
+                    kind: Some(crate::types::MessageKind::Nudge),
+                    wait: None,
                 },
             );
             if let Err(e) = sent {
@@ -2909,6 +2918,14 @@ impl Actor {
             if let Some(o) = &sub.page_overview {
                 details["pageOverview"] = json!(o);
             }
+            // A chat-to-chat send or a note Helm wrote carries its kind for the chip's tag; a
+            // `wait-finished` note also carries the chat it is about, so the short line can name it.
+            if let Some(k) = sub.kind {
+                details["kind"] = json!(k);
+            }
+            if let Some(w) = &sub.wait_chat {
+                details["waitChat"] = json!(w);
+            }
             let images = crate::message_images::for_submission(&self.sh.db, sid);
             if !images.is_empty() {
                 details["images"] = json!(images);
@@ -3334,10 +3351,12 @@ impl Actor {
     ///
     /// A local chat's place is the line on its server: the server carries at most its own cap
     /// (set in the server's settings) or else `localChatCap` (0 switches the cap off), and only
-    /// chats that are working
-    /// count against it — a chat held at its start is not working, so waiters never block each
-    /// other; they go pushed-to-top first, then normal before background, then in the order
-    /// they began to wait. The cap is deliberately soft at the margin: a chat that has passed
+    /// chats that are working count against it — a chat held at its start is not working, so
+    /// waiters never block each other; they go pushed-to-top first, then normal before
+    /// background, then in the order they began to wait. What counts as working is the server's
+    /// own answer about itself (its busy and waiting counts, whoever's requests those are),
+    /// floored by this instance's chats open on it, so a chat waits while the GPU is busy even
+    /// when another app or person is using it. The cap is deliberately soft at the margin: a chat that has passed
     /// this check but has not opened its turn yet counts as neither working nor waiting, so
     /// briefly one chat more than the cap can be preparing; it settles as soon as the turn
     /// opens. A chat on Claude instead asks the plan windows (`claudeHoldPct`) and the app's
@@ -3373,7 +3392,12 @@ impl Actor {
                 // Cap off still orders the waiters; only the working-chat count is lifted.
                 let cap = if cap == 0 { usize::MAX } else { cap };
                 let (w, waits) = self.server_line(server);
-                (w, waits, cap)
+                // The server's own answer about itself is the truth of what it carries — its
+                // request being answered plus what it holds waiting, whoever put those there —
+                // floored by our own open turns on it, whose requests may not have landed yet.
+                // A server that answers nothing about its queue keeps the old instance count.
+                let seen = self.server_queue(server);
+                (queue::server_working(seen, w), waits, cap)
             }
             None => (0, self.plan_line(), usize::MAX),
         };
@@ -4731,6 +4755,8 @@ impl Actor {
                         .filter(|o| *o != SubmissionOrigin::Typed),
                     page_title: sub.as_ref().and_then(|s| s.page_title.clone()),
                     page_overview: sub.as_ref().and_then(|s| s.page_overview.clone()),
+                    kind: sub.as_ref().and_then(|s| s.kind),
+                    wait_chat: sub.as_ref().and_then(|s| s.wait_chat.clone()),
                     images: (!images.is_empty()).then_some(images),
                     refs: (!refs.is_empty()).then_some(refs),
                     ..Default::default()

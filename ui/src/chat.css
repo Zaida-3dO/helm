@@ -111,7 +111,7 @@ button.danger {
 }
 
 .row {
-  padding: 6px 0;
+  padding: 4px 0;
   max-width: var(--chat-column);
   margin: 0 auto 0 max(0px, calc((100% - var(--chat-column)) / 2 * var(--column-factor)));
 }
@@ -120,7 +120,8 @@ button.danger {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  padding: 8px 0 30px;
+  /* The hover actions sit in this bottom space (bottom: 0); the padding is theirs, not extra air. */
+  padding: 6px 0 26px;
   font-size: 14px;
   line-height: 1.7;
 }
@@ -189,7 +190,7 @@ button.danger {
   text-decoration: underline dashed;
   cursor: pointer;
 }
-/* The one-line digest under the head, while the card is closed. */
+/* The one-line digest under the head; it stays visible when the card opens. */
 .note-card-digest {
   font-size: 13px;
   margin-top: 2px;
@@ -197,9 +198,32 @@ button.danger {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.note-card-body {
-  margin-top: 4px;
+/* The digest stays first when the card is open, separated from the full text by a rule, so
+   opening a card never loses the line that says what it is. */
+.note-card-summary {
   font-size: 13px;
+  margin-top: 2px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--line);
+}
+.note-card-body {
+  margin-top: 6px;
+  font-size: 13px;
+}
+.note-card.open .note-card-body {
+  border-top: 1px solid var(--md-border, currentColor);
+  padding-top: 4px;
+}
+/* The small tag beside the sender's name: what the message between chats was for. */
+.note-card-kind {
+  flex: none;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px solid var(--md-border, currentColor);
+  border-radius: 4px;
+  padding: 0 4px;
 }
 .note-card-note {
   font-size: 12px;
@@ -260,13 +284,14 @@ button.danger {
   position: relative;
 }
 
-/* The reply's action row: a quiet flex row that appears on hover or keyboard focus. */
+/* The reply's action row: a quiet flex row that appears on hover or keyboard focus. Its space is
+ * kept (so nothing shifts on hover) but kept tight: it is the whole gap under a reply. */
 .row-actions {
   display: flex;
   align-items: center;
   gap: 12px;
-  height: 22px;
-  margin-top: 5px;
+  height: 20px;
+  margin-top: 2px;
   color: var(--muted);
   opacity: 0;
   transition: opacity 120ms var(--ease-out-soft);
@@ -333,11 +358,12 @@ button.danger {
   cursor: default;
 }
 
-/* The user message's Copy and Edit: hover or focus only, at the row's bottom right. */
+/* The user message's Copy and Edit: hover or focus only, at the row's bottom right. They live in
+ * the row's bottom padding; nothing hangs below them. */
 .row-user-actions {
   position: absolute;
   right: 0;
-  bottom: 4px;
+  bottom: 0;
   display: flex;
   gap: 2px;
   color: var(--muted);
@@ -359,7 +385,7 @@ button.danger {
 .thinking {
   font-size: 12px;
   color: var(--muted);
-  margin-bottom: 10px;
+  margin-bottom: 6px;
 }
 
 .thinking-toggle {
@@ -403,7 +429,7 @@ button.danger {
 }
 
 .thinking-body {
-  margin: 9px 0 16px 6px;
+  margin: 8px 0 10px 6px;
   padding: 10px 13px;
   border-left: 1px solid var(--line-strong);
   line-height: 1.7;
@@ -813,6 +839,21 @@ button.danger {
   color: var(--muted);
 }
 
+/* The arguments an opened host or MCP call shows above its result: payload lines are each cut to
+   one readable line (see ellipsizeLines), so the request never buries the response. */
+.tool-request {
+  margin: 0;
+  padding: 8px 14px;
+  max-height: 180px;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-bottom: 1px solid var(--line);
+}
+
 .tool-output,
 .change-view {
   margin: 0;
@@ -977,15 +1018,15 @@ button.danger {
   gap: 5px;
 }
 
-/* "Worked for…" */
+/* One compact row per run of work: "12 tool calls · worked for 40s". */
 .row-fold {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-top: 6px;
-  margin-bottom: 18px;
-  padding-bottom: 12px;
+  margin-top: 4px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
   border-bottom: 1px solid var(--line);
   font-size: 12px;
   color: var(--muted);
@@ -1041,9 +1082,12 @@ button.danger {
   transform: rotate(90deg);
 }
 
+/* Failed calls are not their own rows: the group's header carries the marker, and the call's own
+   line shows it inside once opened. */
 .fold-failed {
   font-size: 11px;
   color: var(--secondary);
+  font-style: italic;
 }
 
 .row.indented {
@@ -1300,14 +1344,8 @@ button.danger {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
-/* The Fast chip in the composer row: a quiet pill; filled when pressed. */
-.fast-mode-chip {
-  flex: none;
-  font-size: 11px;
-  padding: 3px 8px;
-  border-radius: 999px;
-}
-.fast-mode-chip[aria-pressed='true'] {
+/* The composer's fast-mode bolt: an ordinary icon button; filled while on. */
+.composer-fast-toggle[aria-pressed='true'] {
   color: var(--text);
   background: var(--hover);
 }
@@ -1363,35 +1401,35 @@ button.danger {
 }
 
 .row.agent-group {
-  padding: 6px 0 16px;
+  padding: 6px 0 12px;
 }
 
 .row-assistant.after-tool {
-  padding-top: 16px;
+  padding-top: 12px;
 }
 
-/* In an opened turn, a note sits close above the tool rows it leads into. */
+/* In an opened group, a note sits close above the tool rows it leads into. */
 .row-assistant.before-tool {
-  padding-bottom: 6px;
+  padding-bottom: 4px;
 }
 
-/* The turn's final answer: 32 px below the work, with a hairline 20 px above the text. */
+/* The turn's final answer: 22 px below the work, with a hairline 14 px above the text. */
 .row-assistant.final-answer {
-  padding-top: 32px;
+  padding-top: 22px;
 }
 
 .row-assistant.final-answer::before {
   content: '';
   position: absolute;
-  top: 12px;
+  top: 8px;
   left: 0;
   right: 0;
   height: 1px;
   background: linear-gradient(90deg, var(--line-strong), var(--line) 65%, transparent);
 }
 
-/* Straight after a closed "Worked for" row, whose own rule already separates the answer: one rule,
-   not two, and the fold row's 18 px bottom margin is the gap. */
+/* Straight after a closed group row, whose own rule already separates the answer: one rule,
+   not two, and the group row's 10 px bottom margin is the gap. */
 .row-assistant.final-answer.after-fold,
 .row-assistant.after-tool.after-fold {
   padding-top: 0;

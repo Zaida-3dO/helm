@@ -2,6 +2,7 @@
 import type { ChatState } from "./ChatState";
 import type { ChatStatus } from "./ChatStatus";
 import type { Harness } from "./Harness";
+import type { SidebarState } from "./SidebarState";
 import type { TitleState } from "./TitleState";
 import type { UnreadState } from "./UnreadState";
 
@@ -80,4 +81,28 @@ prevSessionId: string | null,
  * The session that rolled over from this one; `null` for the newest, where the chat
  * carries on.
  */
-nextSessionId: string | null, };
+nextSessionId: string | null, 
+/**
+ * This chat's own pick for Claude Code's fast mode; `null` means it follows the new-chat
+ * default (Settings → Runtime). The composer's lightning toggle sets it; the value reaches
+ * the chat's agent when its worker next starts.
+ */
+fastMode: boolean | null, 
+/**
+ * The chat's own open-item state — which transcript cards are opened and whether its
+ * sidebar row is expanded — so the chat shows the same on every PC that views it.
+ * `null` is the default: everything folded. The sidebar sets it through
+ * `chat_set_sidebar_state`; last write wins.
+ */
+sidebarState?: SidebarState, 
+/**
+ * The hover card's two-sentence summary ("what this chat is about, where it stands now"),
+ * made on demand by a local model ([`crate::summary`]). Left out when there is none. The
+ * row carries it so a chat seen on another PC shows the one made where it runs.
+ */
+summary?: string, 
+/**
+ * When that summary was made, Unix ms; left out with it. The card calls it stale once
+ * `last_activity_at` passes it.
+ */
+summaryAt?: number, };

@@ -10,7 +10,7 @@
 //! | `lowPriority` | run agents, their tools and Helm's helpers at below-normal priority | chat changes it |
 //! | `toolOutputCap` | cut very long outputs of Helm's own tools | chat changes it |
 //! | `subagentSoftTurns` | turns before a sub-agent is told to hand off, 20 to 1000 | chat changes it |
-//! | `fastMode` | Claude Code's fast mode | needs approval |
+//! | `fastMode` | Claude Code's fast mode, as the default new chats start with | needs approval |
 //! | `worktreeTools` | let Claude Code's own worktree tools through | needs approval |
 //! | `scheduleTools` | let Claude Code's own schedule tools be offered | needs approval |
 //! | `skipPermissions` | launch chats with permissions bypassed, or asking | needs approval |
@@ -168,7 +168,7 @@ impl SettingsExtension for RuntimeKeys {
             SHELL_CHANGES => "Record which files shell commands change, for the turn's change card.",
             LOW_PRIORITY => "Run agents, their tools and Helm's helpers at below-normal priority, so games and the rest of the PC stay responsive.",
             TOOL_OUTPUT_CAP => "Cut very long outputs of Helm's own tools.",
-            FAST_MODE => "Claude Code's fast mode: faster output from the same model.",
+            FAST_MODE => "Claude Code's fast mode: faster output from the same model. This is the default new chats start with; a chat can set its own pick with the composer's lightning toggle.",
             WORKTREE_TOOLS => "Let Claude Code's own worktree tools (EnterWorktree, ExitWorktree) through to chats.",
             SCHEDULE_TOOLS => "Let Claude Code's own schedule tools be offered; each call is redirected to Helm's schedules.",
             SKIP_PERMISSIONS => "Launch chats with permissions bypassed (true) or asking (false).",
@@ -251,15 +251,15 @@ mod tests {
             assert_eq!(d["default"], value_of(&ClaudeRuntime::default(), k), "{k}");
             assert!(!ext.needs_all_settings(k), "{k}");
         }
-        assert_eq!(read(FAST_MODE), json!(true));
+        assert_eq!(read(FAST_MODE), json!(false), "fast mode starts off");
         assert_eq!(read(EXECUTABLE), json!(""));
         // Checking a staged change shows the result and writes nothing.
-        let (b, a) = go(&|tx| ext.check_approved(tx, FAST_MODE, &json!(false))).unwrap();
-        assert_eq!((b, a), (json!(true), json!(false)));
+        let (b, a) = go(&|tx| ext.check_approved(tx, FAST_MODE, &json!(true))).unwrap();
+        assert_eq!((b, a), (json!(false), json!(true)));
         assert!(!dir.path().join("claude-runtime.json").exists());
-        assert_eq!(read(FAST_MODE), json!(true));
+        assert_eq!(read(FAST_MODE), json!(false));
         // Applying writes the file; the others keep their values.
-        go(&|tx| ext.apply_approved(tx, FAST_MODE, &json!(false))).unwrap();
+        go(&|tx| ext.apply_approved(tx, FAST_MODE, &json!(true))).unwrap();
         go(&|tx| ext.apply(tx, SOFT_TURNS, &json!(50))).unwrap();
         go(&|tx| ext.apply(tx, SUBAGENT_LIMITS, &json!("all"))).unwrap();
         let rt = ClaudeRuntime::load(dir.path()).0;
@@ -270,7 +270,7 @@ mod tests {
                 rt.subagent_limits,
                 rt.low_priority
             ),
-            (false, 50, SubagentScope::All, true)
+            (true, 50, SubagentScope::All, true)
         );
         // Values the Settings page would refuse are refused with the same words.
         for (key, bad, part) in [

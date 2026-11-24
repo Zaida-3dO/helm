@@ -24,12 +24,70 @@ const SPEAKER_NOTE = /^\[Speaker · [^\]\n]*\]\n(\[Previous conversation ended:[
 
 /**
  * A note Helm itself put in the chat for the agent, not something the user wrote or an agent sent:
- * the voice chat's `[Attention]` and `[Wait finished]` news. It is for the agent, so the
- * transcript does not draw it (the turn it starts still folds and settles as any other).
+ * the voice chat's `[Attention]` news, and a `[Wait finished]` line that carries no kind (older
+ * chats). It is for the agent, so the transcript does not draw it (the turn it starts still folds
+ * and settles as any other). A wait note that carries its kind renders as a minimal card instead,
+ * so it is not hidden.
  */
 export function isHelmNote(row: MessageRow): boolean {
-  return row.role === 'user' && row.details?.origin === 'app' && /^\[(?:Attention|Wait finished)\]/.test(row.text);
+  if (row.role !== 'user' || row.details?.origin !== 'app') return false;
+  if (row.details.kind) return false;
+  return /^\[(?:Attention|Wait finished)\]/.test(row.text);
 }
+
+/** The words each kind of chat-to-chat message shows as its tag on the card. */
+export const KIND_TAG: Record<string, string> = {
+  'initial-prompt': 'first brief',
+  steer: 'steer',
+  nudge: 'nudge',
+  update: 'update',
+  'user-action': 'user action',
+  completed: 'completed',
+};
+
+/**
+ * The kinds an agent sends, so a message of one of these counts as agent thinking and is eligible
+ * to collapse alongside thinking blocks and tool calls. The relayed user action is the one kind
+ * that does not.
+ */
+export const THINKING_KINDS = new Set(['initial-prompt', 'steer', 'nudge', 'update', 'completed']);
+
+/** True when this message's kind is one an agent sent: eligible for the thinking collapse. */
+export function isThinkingKind(row: MessageRow): boolean {
+  const kind = row.details?.kind;
+  return kind != null && THINKING_KINDS.has(kind);
+}
+
+export interface WaitFinished {
+  /** What was watched, as the watcher wrote it; empty when the watched thing is a chat whose title the row carries. */
+  what: string;
+  /** The outcome code with its underscores already turned into spaces. */
+  code: string;
+}
+
+/**
+ * The watcher's finished-wait news, for the minimal card: its own kind stamp plus the shape the
+ * watcher frames it in. Null for any other message.
+ */
+const WAIT_FRAME = /^\[Wait finished\] Wait \S+ on (.+?): ([a-z ]+)\./;
+export function waitFinished(row: MessageRow): WaitFinished | null {
+  if (row.role !== 'user' || row.details?.origin !== 'app' || row.details?.kind !== 'wait-finished') return null;
+  const m = WAIT_FRAME.exec(row.text);
+  return m ? { what: (m[1] as string).trim(), code: (m[2] as string).trim() } : null;
+}
+
+/** What a finished wait happened to, in the one line the card shows. */
+export const WAIT_VERB: Record<string, string> = {
+  idle: 'is idle',
+  gone: 'is gone',
+  finished: 'finished',
+  changed: 'changed',
+  exited: 'exited',
+  timeout: 'timed out',
+  'checks failed': 'failed',
+  'checks passed': 'passed',
+  'review changed': 'changed',
+};
 
 /**
  * An agent's answer of `[quiet]`: what a voice chat says when a note needs no word to the user. It

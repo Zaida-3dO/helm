@@ -180,6 +180,51 @@ pub struct ChatRecord {
     /// The session that rolled over from this one; `null` for the newest, where the chat
     /// carries on.
     pub next_session_id: Option<String>,
+    /// This chat's own pick for Claude Code's fast mode; `null` means it follows the new-chat
+    /// default (Settings → Runtime). The composer's lightning toggle sets it; the value reaches
+    /// the chat's agent when its worker next starts.
+    pub fast_mode: Option<bool>,
+    /// The chat's own open-item state — which transcript cards are opened and whether its
+    /// sidebar row is expanded — so the chat shows the same on every PC that views it.
+    /// `null` is the default: everything folded. The sidebar sets it through
+    /// `chat_set_sidebar_state`; last write wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub sidebar_state: Option<SidebarState>,
+    /// The hover card's two-sentence summary ("what this chat is about, where it stands now"),
+    /// made on demand by a local model ([`crate::summary`]). Left out when there is none. The
+    /// row carries it so a chat seen on another PC shows the one made where it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub summary: Option<String>,
+    /// When that summary was made, Unix ms; left out with it. The card calls it stale once
+    /// `last_activity_at` passes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub summary_at: Option<i64>,
+}
+
+/// The chat's open-item state, stored whole per chat. A write merges field by field: a
+/// field left out keeps what the chat already had (the sidebar writes only its `expanded`,
+/// the transcript only its `openCards`), a field sent replaces it whole, and last write
+/// wins. Small by design: the renderer trims before sending.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SidebarState {
+    /// The shape's version; this build writes and reads 1.
+    pub v: u32,
+    /// The chat's row in the sidebar is expanded (its children are shown). Left out means
+    /// keep what it was; the stored value leaves `false` out, since folded is the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub expanded: Option<bool>,
+    /// Ids of the transcript cards (note cards, page cards) the person has opened, most
+    /// recently opened last. A card whose id is not listed is folded. Left out means keep
+    /// what was; an empty list closes every card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    #[ts(type = "number[]")]
+    pub open_cards: Option<Vec<i64>>,
 }
 
 /// The roll-over stack of a chat, as `chat_stack` reports it: every session sharing the chat's
@@ -224,6 +269,28 @@ pub struct QueueEntry {
     pub since: i64,
     /// The queue pushed it to the front of its line.
     pub top: bool,
+    /// The profile this chat belongs to, for the panel's tag when it is not the current one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub profile_id: Option<String>,
+}
+
+/// A chat with a turn open right now: the queue panel shows these above the waiting rows,
+/// each with its own pause and stop. See [`crate::queue::summary`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueActive {
+    pub chat_id: String,
+    pub title: String,
+    /// The local model server its turn runs on; nothing for a Claude chat.
+    pub server_id: Option<String>,
+    /// When the turn opened, Unix ms.
+    #[ts(type = "number")]
+    pub since: i64,
+    /// The profile this chat belongs to, for the panel's tag when it is not the current one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub profile_id: Option<String>,
 }
 
 /// One local model server's load right now: chats working on it, and chats whose turn start
@@ -239,11 +306,14 @@ pub struct QueueServer {
 }
 
 /// `queue_list`: the queue whole in one read — every held start, front of the lines first,
-/// plus the load each place it waits on carries.
+/// the chats with a turn open right now (oldest first), plus the load each place it waits on
+/// carries.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueSummary {
     pub entries: Vec<QueueEntry>,
+    /// Chats with a turn open right now, oldest turn first.
+    pub active: Vec<QueueActive>,
     pub servers: Vec<QueueServer>,
     /// Chats waiting for the Claude plan windows to open again.
     #[ts(type = "number")]
@@ -261,7 +331,10 @@ pub struct QueueSummary {
 #[serde(rename_all = "camelCase")]
 pub struct QueueActionArgs {
     pub chat_id: String,
-    /// `top`, `up`, `down`, `move`, `hold`, `release`, `cancel` or `start_anyway`.
+    /// `top`, `up`, `down`, `move`, `hold`, `release`, `cancel`, `pause`, `stop` or
+    /// `start_anyway`. `pause` tells a working chat to halt at its next boundary (and parks a
+    /// waiting one); `stop` takes down a working chat's worker at once (and ends a waiting
+    /// one's wait). Both stamp the acting profile on the target's transcript.
     pub action: String,
     /// For `move`: stand just before this waiting chat (at the end when given as none).
     #[serde(default)]
@@ -959,6 +1032,16 @@ pub struct MessageDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub page_overview: Option<String>,
+    /// For a user row from another chat or a note Helm wrote: its kind ([`MessageKind`]), shown
+    /// as a small tag on the card. Absent for the user's own sends and older rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub kind: Option<MessageKind>,
+    /// For a `wait-finished` note about a chat: the watched chat, so the card's short line can
+    /// name and link it. Absent otherwise and when that chat is already gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub wait_chat: Option<WatchedChat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub retry: Option<RetryInfo>,
@@ -1176,6 +1259,77 @@ impl From<SendOrigin> for SubmissionOrigin {
     }
 }
 
+/// What kind of message a chat-to-chat or Helm-written message is. A closed set: `app_send_message`
+/// requires one of the inter-chat kinds and teaches the agents which to use; the code inside Helm
+/// that writes a note for an agent stamps a specific kind of its own (`wait-finished`,
+/// `request-expired`) rather than one catch-all "system" kind. The user's own typing never carries
+/// one, and neither does any send that is none of these: where a kind is asked for, a word
+/// outside the set is refused, and one already stored reads back as none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum MessageKind {
+    /// The task that starts a sub-chat.
+    InitialPrompt,
+    /// An instruction or correction into a chat that is working.
+    Steer,
+    /// A small prompt carrying no new work, between chats or from Helm.
+    Nudge,
+    /// A milestone or progress report to the chat that is waiting on it.
+    Update,
+    /// What the user did somewhere else, relayed to the agent that needs it.
+    UserAction,
+    /// The hand-over summary at the end of finished work.
+    Completed,
+    /// Helm's wait watcher: the wait the chat declared has finished.
+    WaitFinished,
+    /// Helm: a request the chat made expired without an answer.
+    RequestExpired,
+}
+
+impl MessageKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InitialPrompt => "initial-prompt",
+            Self::Steer => "steer",
+            Self::Nudge => "nudge",
+            Self::Update => "update",
+            Self::UserAction => "user-action",
+            Self::Completed => "completed",
+            Self::WaitFinished => "wait-finished",
+            Self::RequestExpired => "request-expired",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "initial-prompt" => Some(Self::InitialPrompt),
+            "steer" => Some(Self::Steer),
+            "nudge" => Some(Self::Nudge),
+            "update" => Some(Self::Update),
+            "user-action" => Some(Self::UserAction),
+            "completed" => Some(Self::Completed),
+            "wait-finished" => Some(Self::WaitFinished),
+            "request-expired" => Some(Self::RequestExpired),
+            _ => None,
+        }
+    }
+
+    /// The kinds a chat may stamp on a message it sends to another chat. Helm's own note kinds
+    /// (`wait-finished`, `request-expired`) are stamped only by the code that writes them.
+    pub fn sendable(self) -> bool {
+        !matches!(self, Self::WaitFinished | Self::RequestExpired)
+    }
+}
+
+/// For a `wait-finished` note about a chat: the watched chat's id and title, stored beside the
+/// message so the transcript's one-line form can name and link that chat without showing its id.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchedChat {
+    pub chat_id: String,
+    pub title: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Submission {
@@ -1205,6 +1359,16 @@ pub struct Submission {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub page_overview: Option<String>,
+    /// What kind of message this is, for a chat-to-chat send or a note Helm wrote
+    /// ([`MessageKind`]). Absent for the user's own sends and for notes that name no kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub kind: Option<MessageKind>,
+    /// For a `wait-finished` note about a chat: the chat it watched, so the card can name it.
+    /// Absent otherwise and when that chat is already gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub wait_chat: Option<WatchedChat>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
@@ -1342,6 +1506,21 @@ pub struct ChatCreateArgs {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChatIdArgs {
     pub chat_id: String,
+}
+
+/// `chat_summarize`: what the hover card shows now and whether an answer is on its way.
+/// The call never waits on the model — see [`crate::summary`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSummary {
+    /// The stored two-sentence summary, or `null` when there is none yet.
+    pub summary: Option<String>,
+    /// When it was made, Unix ms; `null` with it. The card calls it stale once its own
+    /// `lastActivityAt` passes it.
+    #[ts(type = "number | null")]
+    pub summary_at: Option<i64>,
+    /// A summary is being made on this PC right now: the card can ask again shortly.
+    pub generating: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
@@ -1523,6 +1702,12 @@ pub struct ChatSendArgs {
     #[serde(default)]
     #[ts(optional)]
     pub page_overview: Option<String>,
+    /// For a send from another chat or a paired device's agent: the kind of message
+    /// ([`MessageKind`]), stored with it and shown on the transcript card. Absent for the user's
+    /// own sends.
+    #[serde(default)]
+    #[ts(optional)]
+    pub kind: Option<MessageKind>,
 }
 
 /// Where a user's send came from. Every origin is still the user's own send
@@ -1628,6 +1813,27 @@ pub struct ChatSetModelArgs {
     #[serde(default)]
     #[ts(optional)]
     pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChatSetFastModeArgs {
+    pub chat_id: String,
+    /// The chat's own pick: `true`/`false` sets it, `null` drops it so the chat follows the
+    /// new-chat default again.
+    #[serde(default)]
+    #[ts(optional)]
+    pub on: Option<bool>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChatSetSidebarStateArgs {
+    pub chat_id: String,
+    /// The chat's open-item state. Fields merge one at a time: a field left out keeps what
+    /// the chat had, a field sent replaces it whole (last write wins); `null` — or no state
+    /// named at all — resets, everything folded.
+    pub state: Option<SidebarState>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]

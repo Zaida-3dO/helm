@@ -15,11 +15,14 @@
 //! | `interaction_answer` | async | [`InteractionAnswerArgs`] → `null` |
 //! | `draft_save` | blocking | [`DraftSaveArgs`] → [`DraftSaveResult`] |
 //! | `chat_set_model` | maintenance | [`ChatSetModelArgs`] → `ChatRecord` |
+//! | `chat_set_fast_mode` | maintenance | [`ChatSetFastModeArgs`] → `ChatRecord` — the chat's own fast-mode pick (`on: null` follows the new-chat default again); reaches the agent at the chat's next worker start |
+//! | `chat_set_sidebar_state` | maintenance | [`ChatSetSidebarStateArgs`] → `ChatRecord` — store the chat's whole open-item state (cards opened, row expanded); last write wins, and it does not touch `updated_at` |
 //! | `chat_set_folder` | maintenance | `{chatId, cwd}` → `{chatId, cwd, projectId}` — move the chat to work in another folder; the board it is shown on is left alone (`chat_organize`), and a chat whose worker is running is refused |
 //! | `model_catalogue` | blocking | [`ModelCatalogueArgs`] → [`ModelCatalogue`] |
 //! | `tool_stop` | async | [`ToolStopArgs`] → [`ToolStopResult`] |
 //! | `chat_compact` | maintenance | [`ChatIdArgs`] → `null` |
 //! | `chat_warm` | blocking | [`ChatIdArgs`] → `null` |
+//! | `chat_summarize` | blocking | [`ChatIdArgs`] → [`ChatSummary`] (the hover card's two-sentence summary; [`crate::summary`]) |
 //! | `chat_roll_over` | async | [`ChatIdArgs`] → `{started}` (see [`crate::rollover`]) |
 //! | `chat_stack` | blocking | [`ChatIdArgs`] → [`ChatStack`] (the roll-over stack: every session and the newest) |
 //! | `attention_get` | blocking | `{}` → [`AttentionSummary`] |
@@ -55,6 +58,21 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .async_op("interaction_answer", interaction_answer)
         .blocking("draft_save", OpClass::Blocking, draft_save)
         .blocking("chat_set_model", OpClass::Maintenance, chat_set_model)
+        .blocking(
+            "chat_set_fast_mode",
+            OpClass::Maintenance,
+            chat_set_fast_mode,
+        )
+        .blocking(
+            "chat_set_sidebar_state",
+            OpClass::Maintenance,
+            |ctx, args| {
+                to_value(&submit::chat_set_sidebar_state(
+                    &runtime(ctx)?,
+                    parse_args(args)?,
+                )?)
+            },
+        )
         .blocking("chat_set_folder", OpClass::Maintenance, chat_set_folder)
         // The composer's permission-mode picker.
         .blocking(
@@ -91,6 +109,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
         )
         .blocking("chat_retry_now", OpClass::Maintenance, chat_retry_now)
         .blocking("chat_rename", OpClass::Maintenance, chat_rename)
+        .blocking("chat_summarize", OpClass::Blocking, chat_summarize)
         .async_op("title_suggest", title_suggest)
         .blocking("skills_list", OpClass::Blocking, skills_list)
         .async_op("autocomplete_suggest", autocomplete_suggest);
@@ -125,6 +144,13 @@ fn chat_rename(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         &a.chat_id,
         &a.title,
     )?)
+}
+
+/// `chat_summarize {chatId}`: what the hover card can show right now, and whether a summary
+/// is being made. Answers at once; the model never waits in front of the UI ([`crate::summary`]).
+fn chat_summarize(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ChatIdArgs = parse_args(args)?;
+    to_value(&crate::summary::request(&runtime(ctx)?, &a.chat_id)?)
 }
 
 async fn title_suggest(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
@@ -164,7 +190,10 @@ fn queue_list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
 /// `release`, `cancel` or `start_anyway` (let a Claude-held start through the plan windows
 /// once) — answering with the fresh summary. `move` takes a `beforeChatId` (or none, for the
 /// end of the line). `cancel` gives a waiting send back to its owner (typed text to the draft,
-/// as a refusal would); nothing is ever deleted.
+/// as a refusal would); nothing is ever deleted. `pause` and `stop` work on any chat this host
+/// runs: a working chat is told to halt at its next boundary (`pause`) or its worker is taken
+/// down at once (`stop`); a waiting chat is parked or its wait ended; the acting profile is
+/// stamped on the target's transcript.
 fn queue_action(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: QueueActionArgs = parse_args(args)?;
     let rt = runtime(ctx)?;
@@ -419,6 +448,11 @@ async fn interaction_answer(ctx: OpCtx, args: Value) -> Result<Value, ApiError> 
 fn chat_set_model(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ChatSetModelArgs = parse_args(args)?;
     to_value(&submit::chat_set_model(&runtime(ctx)?, a)?)
+}
+
+fn chat_set_fast_mode(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ChatSetFastModeArgs = parse_args(args)?;
+    to_value(&submit::chat_set_fast_mode(&runtime(ctx)?, a)?)
 }
 
 #[derive(serde::Deserialize)]
@@ -963,6 +997,8 @@ pub(crate) mod tests {
             ("interaction_answer", OpClass::Async),
             ("draft_save", OpClass::Blocking),
             ("chat_set_model", OpClass::Maintenance),
+            ("chat_set_fast_mode", OpClass::Maintenance),
+            ("chat_set_sidebar_state", OpClass::Maintenance),
             ("chat_set_folder", OpClass::Maintenance),
             ("chat_set_permission_mode", OpClass::Maintenance),
             ("model_catalogue", OpClass::Blocking),
@@ -1026,6 +1062,8 @@ pub(crate) mod tests {
             ("build_queue_remove", OpClass::Maintenance),
             // A failed turn's retry, now.
             ("chat_retry_now", OpClass::Maintenance),
+            // The hover card's on-demand summary.
+            ("chat_summarize", OpClass::Blocking),
         ];
         for (name, class) in expected {
             assert_eq!(reg.class_of(name), Some(class), "{name}");

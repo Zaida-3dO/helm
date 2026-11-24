@@ -13,6 +13,7 @@ import type {
   MessageRow,
   SendBehavior,
   SessionMark,
+  SidebarState,
   Submission,
   ThreadState,
   TranscriptPage,
@@ -323,6 +324,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         stackId: null,
         prevSessionId: null,
         nextSessionId: null,
+        fastMode: null,
         error: null,
         harness: 'claude',
         model,
@@ -761,7 +763,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
 
   // Settings → Runtime's stored settings.
   const chatVerbosity = new Map<string, string>();
-  const runtimeSettings: Record<string, unknown> = { executable: '', skipPermissions: true, fastMode: true, worktreeTools: false, scheduleTools: false, shellChanges: true, lowPriority: true, subagentLimits: 'orchestrator', subagentHardStop: false, subagentSoftTurns: 100, toolOutputCap: true, model: null, effort: 'xhigh', responseVerbosity: 'low', problem: null };
+  const runtimeSettings: Record<string, unknown> = { executable: '', skipPermissions: true, fastMode: false, worktreeTools: false, scheduleTools: false, shellChanges: true, lowPriority: true, subagentLimits: 'orchestrator', subagentHardStop: false, subagentSoftTurns: 100, toolOutputCap: true, model: null, effort: 'xhigh', responseVerbosity: 'low', problem: null };
 
   // Settings → Runtime's repositories.
   const repos: { repoId: string; remoteUrl?: string; worktreesAllowed: boolean; locations: { id: string; path: string }[] }[] = [
@@ -1119,6 +1121,30 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       addRow(c, { role: 'context', text: `Model set to ${c.chat.model} · ${c.chat.effort}`, details: { contextKind: 'modelChange' } });
       return c.chat;
     },
+    // the fast-mode bolt sets the chat's own pick; null drops it back to the new-chat default.
+    chat_set_fast_mode: (a) => {
+      const c = find(a.chatId);
+      c.chat = { ...c.chat, fastMode: (a.on as boolean | null) ?? null, revision: rev() };
+      emitChat(c);
+      return c.chat;
+    },
+
+    // The chat's open-item state (opened cards, row expanded): merged field by field and
+    // emitted back as the fresh record, as the host's chat_set_sidebar_state does.
+    chat_set_sidebar_state: (a) => {
+      const c = find(a.chatId);
+      const prev = c.chat.sidebarState;
+      const s = a.state as { v: number; expanded?: boolean; openCards?: number[] } | null;
+      let next: SidebarState | undefined;
+      if (s) {
+        const expanded = s.expanded === true || (s.expanded === undefined && prev?.expanded === true);
+        const cards = s.openCards ?? prev?.openCards ?? [];
+        if (expanded || cards.length > 0) next = { v: 1, ...(expanded ? { expanded: true } : {}), ...(cards.length ? { openCards: cards } : {}) };
+      }
+      c.chat = { ...c.chat, ...(next ? { sidebarState: next } : { sidebarState: undefined }), revision: rev() };
+      emitChat(c);
+      return c.chat;
+    },
     // the permission-mode pick lands as the live mode, as a worker would report it.
     chat_set_permission_mode: (a) => {
       const c = find(a.chatId);
@@ -1261,6 +1287,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       return { attachmentId, kind: 'file', name, target };
     },
     title_suggest: () => ({ title: 'Suggested chat title', titles: ['Suggested chat title', 'Shop 2.0 · team X: suggested title', 'Another suggested name'] }),
+    chat_summarize: () => ({ summary: null, summaryAt: null, generating: false }),
     files_pick: () => ({ paths: ['C:\\Users\\me\\Documents\\notes.md', 'C:\\Users\\me\\Pictures\\shot.png'] }),
     attachment_put: (a) => {
       const attachmentId = uid();

@@ -32,7 +32,8 @@ import { SidebarActions, compactChat, exportChatMarkdown, rollOverChat, rollOver
 import { SidebarData, errorText } from './data.ts';
 import { canSitUnder, dropAction, passedThreshold, type DragSource, type DropTarget } from './drag.ts';
 import { chatMenuItems, projectMenuItems } from './menus.ts';
-import { buildList, chatAncestors, groupStatus, projectsHolding, rightCluster, titleCluster, visibleChatOrder, type GroupMarks, type ListView, type ListItem } from './model.ts';
+import { buildList, chatAncestors, effectiveExpanded, groupStatus, projectsHolding, rightCluster, titleCluster, visibleChatOrder, type GroupMarks, type ListView, type ListItem } from './model.ts';
+import { patchExpanded } from './state.ts';
 import { setVisibleOrder } from './rowOrder.ts';
 import { SidebarTop } from './SidebarTop.tsx';
 import { PromptDialog, type Prompt } from './PromptDialog.tsx';
@@ -55,7 +56,6 @@ import {
   IconRename,
   IconRestore,
   IconSettings,
-  IconUnread,
   IconX,
 } from '../ui/icons.tsx';
 import { withChatIcons, withProjectIcons } from './menuIcons.tsx';
@@ -64,6 +64,7 @@ import { openNewChat, openPrimaryFolder } from '../newchat/index.ts';
 import { ProjectIcon, openIconPicker } from '../projects/index.ts';
 import { getDefaultBoard } from '../newchat/boards.ts';
 import { age, foldStatus, isBusy, needsYouLabel, rowStateLabel, rowStatusLabel, STATUS_LABEL, type RowStatus } from './status.ts';
+import { freshAnswer, freshSummary, SUMMARY_DELAY_MS, SUMMARY_POLLS, SUMMARY_POLL_MS, type SummaryAnswer } from './summary.ts';
 import { localWaitLabel } from '../state/localModel.ts';
 import { useSubagentsRunning } from '../transcript/subagents/counts.ts';
 import { startSyncTriggers, syncOnOpen, type SyncHost } from './sync.ts';
@@ -319,6 +320,10 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const itemRefs = useItemRefs(useMemo(() => snap.rows.map((r) => r.chatId), [snap.rows]));
   const allItemRefs = useMemo(() => new Map([...itemRefs, ...remoteRefs]), [itemRefs, remoteRefs]);
   const flaggedIds = useMemo(() => new Set([...snap.needsYou, ...snap.flagged.keys(), ...remoteNeedsYouIds, ...remoteFlagReasons.keys()]), [snap.needsYou, snap.flagged, remoteNeedsYouIds, remoteFlagReasons]);
+  // Each row carries its chat's own open state; the window's set adds the auto-expansions
+  // that bring the open chat into view; a chat shut in this window stays shut until its
+  // write answers. See effectiveExpanded.
+  const expandedNow = useMemo(() => effectiveExpanded(shownRows, expanded, userCollapsed.current), [shownRows, expanded]);
   // Chats that finished a reply nobody has opened: the animated done status. The summary comes
   // from this PC, so chats of another PC never read as done (their read state lives over there).
   const finishedIds = useMemo(() => new Set((snap.attention?.finished ?? []).map((r) => r.chatId)), [snap.attention]);
@@ -327,7 +332,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       buildList(shownProjects, shownRows, {
         view: listView,
         compact,
-        expandedChats: expanded,
+        expandedChats: expandedNow,
         selectedChatId: selected,
         keptShut: keptShut.chat === selected ? keptShut.ids : undefined,
         flagged: flaggedIds,
@@ -335,7 +340,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         closed: remote ? undefined : snap.closed,
         itemLinks: currentView === 'activity' ? undefined : { refs: allItemRefs, collapsed: collapsedItems },
       }),
-    [shownProjects, shownRows, listView, currentView, compact, expanded, selected, keptShut, flaggedIds, finishedIds, snap.closed, allItemRefs, collapsedItems, remote],
+    [shownProjects, shownRows, listView, currentView, compact, expandedNow, selected, keptShut, flaggedIds, finishedIds, snap.closed, allItemRefs, collapsedItems, remote],
   );
   useEffect(() => setVisibleOrder(visibleChatOrder(items)), [items]);
   const projectsById = useMemo(() => new Map(shownProjects.map((p) => [p.id, p])), [shownProjects]);
@@ -357,18 +362,26 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     openNewChat(projectId ? { projectId } : {});
   };
 
-  const toggleChat = (id: string) =>
+  // The chat's own expanded state rides on its record (the row carries it, and a `chat`
+  // refresh re-patches it), so a chat is expanded the same on every PC. The window's own
+  // set adds the auto-expansions that made this chat visible (aids for this screen only);
+  // a chat collapsed here stays shut even while its record still says open, until that
+  // shut write answers and the record says shut too.
+  const toggleChat = (id: string) => {
+    const open = !expandedNow.has(id);
     setExpanded((s) => {
       const n = new Set(s);
-      if (n.has(id)) {
-        n.delete(id);
-        userCollapsed.current.add(id);
-      } else {
+      if (open) {
         n.add(id);
         userCollapsed.current.delete(id);
+      } else {
+        n.delete(id);
+        userCollapsed.current.add(id);
       }
       return n;
     });
+    void ops.setSidebarState(id, patchExpanded(open)).catch(() => undefined);
+  };
 
   // A running chat is archived through a confirmation that stops its task first.
   const archiveRow = (row: SidebarRow) => void act.archive(row);
@@ -435,7 +448,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       if (!record) return withChatIcons([{ id: 'rename', label: 'Rename chat…', onSelect: () => promptRename(row) }]);
       const { siblings, depthOf, heightOf } = nesting(other.rows, row);
       items = withChatIcons(chatMenuItems(
-        { row, projects: other.projects, siblings, heightOf, depthOf, expanded: expanded.has(row.chatId), view: archived ? 'archived' : currentView, profiles: remoteProfileChoices(device, record), shares: remoteShareChoices(device, record) },
+        { row, projects: other.projects, siblings, heightOf, depthOf, expanded: expandedNow.has(row.chatId), view: archived ? 'archived' : currentView, profiles: remoteProfileChoices(device, record), shares: remoteShareChoices(device, record) },
         {
           fork: () => void act.fork(row),
           rename: () => promptRename(row),
@@ -449,6 +462,8 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           nestUnder: (id) => {
             userCollapsed.current.delete(id);
             setExpanded((s) => new Set(s).add(id));
+            // The parent opens to show its new child, and that opening follows the chat.
+            void ops.setSidebarState(id, patchExpanded(true)).catch(() => undefined);
             void act.nestUnder(row, id);
           },
           topLevel: () => void act.topLevel(row),
@@ -464,7 +479,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     } else {
       const { siblings, depthOf, heightOf } = nesting(snap.rows, row);
       items = withChatIcons(chatMenuItems(
-        { row, projects: snap.projects, hidden: hiddenBoards, siblings, heightOf, depthOf, expanded: expanded.has(row.chatId), view: archived ? 'archived' : currentView, profiles: profileChoices(prof, row.chatId, snap.rows), shares: shareChoices(prof, row.chatId, snap.rows) },
+        { row, projects: snap.projects, hidden: hiddenBoards, siblings, heightOf, depthOf, expanded: expandedNow.has(row.chatId), view: archived ? 'archived' : currentView, profiles: profileChoices(prof, row.chatId, snap.rows), shares: shareChoices(prof, row.chatId, snap.rows) },
         {
           fork: () => void act.fork(row),
           rename: () => promptRename(row),
@@ -478,6 +493,8 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           nestUnder: (id) => {
             userCollapsed.current.delete(id);
             setExpanded((s) => new Set(s).add(id));
+            // The parent opens to show its new child, and that opening follows the chat.
+            void ops.setSidebarState(id, patchExpanded(true)).catch(() => undefined);
             void act.nestUnder(row, id);
           },
           topLevel: () => void act.topLevel(row),
@@ -681,6 +698,8 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         else {
           userCollapsed.current.delete(a.parentChatId);
           setExpanded((s) => new Set(s).add(a.parentChatId));
+          // The parent opens to show its new child, and that opening follows the chat.
+          void ops.setSidebarState(a.parentChatId, patchExpanded(true)).catch(() => undefined);
           void act.nestUnder(row, a.parentChatId, a.moveGroup ? a.groupId : undefined);
         }
       } else {
@@ -913,7 +932,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       {confirm && <ConfirmDialog spec={confirm} onClose={() => setConfirm(null)} />}
       {cost && <CostDialog api={api} target={cost} onClose={() => setCost(null)} />}
       {inboxOpen && <AttentionInbox summary={scopedAttention} ops={ops} onOpen={onSelect} onClose={() => setInboxOpen(false)} />}
-      {queueOpen && <QueuePanel store={queueStore} api={api} bus={bus} projects={snap.projects} currentProjectId={selectedLocalRow?.groupProjectId ?? null} onOpen={onSelect} onClose={() => setQueueOpen(false)} />}
+      {queueOpen && <QueuePanel store={queueStore} api={api} bus={bus} projects={snap.projects} currentProjectId={selectedLocalRow?.groupProjectId ?? null} profiles={prof.view ?? null} onOpen={onSelect} onClose={() => setQueueOpen(false)} />}
       <ItemPickerHost />
       {preview && !menu && !drag && (
         <PreviewCard
@@ -921,6 +940,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           project={projectsById.get(preview.row.groupProjectId)}
           now={now}
           load={(id) => pops.rows([id]).then((rs) => rs[0]?.preview ?? null)}
+          ask={(id) => api<SummaryAnswer>('chat_summarize', { chatId: id })}
           onEnter={() => clearTimeout(previewTimer.current)}
           onLeave={leaveRow}
           onOpen={() => {
@@ -1046,7 +1066,9 @@ function projectIconNode(p: ProjectNode): ReactNode {
 }
 
 /** The glyph a folded status shows. One shape per status, shared by chat rows and collapsed
- *  headers; an interrupted row carries no glyph (the CSS slot dot says it). */
+ *  headers; an interrupted row carries no glyph (the CSS slot dot says it). A finished chat —
+ *  whether the attention summary calls it done or the person marked it unread — wears the old
+ *  shimmering star: the animation is the mark, not a still shape. */
 function StatusGlyph({ kind, wheel }: { kind: RowStatus; wheel?: 'working' | 'stopping' }) {
   return (
     <>
@@ -1054,8 +1076,7 @@ function StatusGlyph({ kind, wheel }: { kind: RowStatus; wheel?: 'working' | 'st
       {kind === 'lingering' && <WheelMark size={20} state="calm" className="sb-ind-wheel" />}
       {kind === 'flagged' && <IconFlag size={12} filled />}
       {kind === 'draft' && <IconEdit size={11} />}
-      {kind === 'done' && <StarMark size={26} className="sb-ind-star ui-star-shimmer" />}
-      {kind === 'unread' && <IconUnread size={11} />}
+      {(kind === 'done' || kind === 'unread') && <StarMark size={26} className="sb-ind-star ui-star-shimmer" />}
       {kind === 'pinned' && <IconPin size={11} />}
     </>
   );
@@ -1517,6 +1538,7 @@ function PreviewCard({
   project,
   now,
   load,
+  ask,
   onEnter,
   onLeave,
   onOpen,
@@ -1526,6 +1548,8 @@ function PreviewCard({
   now: number;
   /** The row's hover preview from the host (`sidebar_rows`): last reply and current step. */
   load: (chatId: string) => Promise<RowPreview | null>;
+  /** `chat_summarize`: what the host can show and whether it is making one (see `summary.ts`). */
+  ask: (chatId: string) => Promise<SummaryAnswer>;
   onEnter: () => void;
   onLeave: () => void;
   onOpen: () => void;
@@ -1544,6 +1568,44 @@ function PreviewCard({
     // Re-read when the row changes (a new reply or step arrives as a new row revision).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [r.chatId, r.revision, r.status, r.updatedAt]);
+  // The summary: a second into the hover, the two-sentence summary takes the last reply's
+  // place in the same fixed box. Nothing on screen waits or spins while it is made — the card
+  // keeps showing the last reply until it arrives, and gives up quietly if it never does.
+  const [sum, setSum] = useState<{ chatId: string; text: string } | null>(null);
+  useEffect(() => {
+    let on = true;
+    setSum(null);
+    const timer = setTimeout(() => {
+      const cached = freshSummary(r);
+      if (cached) {
+        if (on) setSum({ chatId: r.chatId, text: cached });
+        return;
+      }
+      void (async () => {
+        for (let i = 0; i < SUMMARY_POLLS && on; i += 1) {
+          let a: SummaryAnswer | null = null;
+          try {
+            a = await ask(r.chatId);
+          } catch {
+            a = null; // a chat that runs elsewhere, or a host that cannot answer: fallback
+          }
+          if (!on) return;
+          const shown = a ? freshAnswer(a, r) : null;
+          if (shown) {
+            setSum({ chatId: r.chatId, text: shown });
+            return;
+          }
+          if (!a?.generating) return;
+          await new Promise((res) => setTimeout(res, SUMMARY_POLL_MS));
+        }
+      })();
+    }, SUMMARY_DELAY_MS);
+    return () => {
+      on = false;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [r.chatId, r.revision]);
   const mine = got?.chatId === r.chatId ? got : null;
   const step = live ? mine?.preview?.step : null;
   const state = r.local && r.localAhead !== null
@@ -1557,11 +1619,14 @@ function PreviewCard({
         : r.unread
           ? 'Finished, unread'
           : 'Finished';
-  const body = !mine
-    ? 'Loading preview…'
-    : mine.failed
-      ? 'Preview unavailable. Open the chat to view this task.'
-      : (mine.preview?.excerpt ?? (live ? 'Waiting for the first update…' : 'No messages yet.'));
+  // The summary, when one arrived, shows in the last reply's place: same box, same rules.
+  const shown = sum?.chatId === r.chatId ? sum.text : null;
+  const body = shown
+    ?? (!mine
+      ? 'Loading preview…'
+      : mine.failed
+        ? 'Preview unavailable. Open the chat to view this task.'
+        : (mine.preview?.excerpt ?? (live ? 'Waiting for the first update…' : 'No messages yet.')));
   return (
     <div
       className="sb-preview"
@@ -1579,7 +1644,7 @@ function PreviewCard({
         {live && <span className="sb-preview-live">● Live</span>}
       </div>
       <div className="sb-preview-body">
-        <p className="sb-preview-excerpt" data-empty={mine?.preview?.excerpt ? undefined : 'true'}>
+        <p className="sb-preview-excerpt" data-empty={!shown && !mine?.preview?.excerpt ? 'true' : undefined}>
           {body}
         </p>
         <span className="sb-preview-meta">

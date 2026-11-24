@@ -154,11 +154,20 @@ pub struct SpawnRequest {
     pub resume_session_id: Option<String>,
     /// Resume `resume_session_id` as a new session (`--fork-session`): a fork's first launch.
     pub fork_session: bool,
+    /// The chat's own fast-mode pick; `None` follows the runtime file's fast mode. The launch
+    /// resolves the two ([`effective_fast_mode`]) and the worker passes the result to the CLI.
+    pub fast_mode: Option<bool>,
     pub send_behavior: SendBehavior,
     /// Host tools for this launch; `None` when the host-tool seam is not attached (tests).
     pub host: Option<HostLaunch>,
     /// The chat runs on a local model server: what to start it with.
     pub local: Option<LocalSpawn>,
+}
+
+/// What fast mode this launch runs with: the chat's own pick when it has one, else the runtime
+/// file's value (the new-chat default). The worker writes the answer into the CLI's settings.
+pub fn effective_fast_mode(chat_pick: Option<bool>, default: bool) -> bool {
+    chat_pick.unwrap_or(default)
 }
 
 /// A local chat's launch: the server and model (the name the worker asks the server for), and how
@@ -243,6 +252,12 @@ pub trait Spawner: Send + Sync {
     /// never reads that JSON itself: the crate that runs the gate parses it.
     fn run_gatekeeper(&self, _job: &Value) -> Result<Value, String> {
         Err("the gatekeeper helper is not available".into())
+    }
+
+    /// Run the summarize helper on one job and answer the two-sentence summary
+    /// ([`crate::summary`]). A spawner without the helper is simply "not available".
+    fn run_summarize(&self, _job: &Value) -> Result<String, String> {
+        Err("the summarize helper is not available".into())
     }
 
     /// The app is quitting: end any gatekeeper helper still running, so none outlives it.
@@ -407,6 +422,8 @@ impl Spawner for ProcessSpawner {
             req.effort.clone(),
             req.resume_session_id.clone(),
         );
+        // The chat's own fast-mode pick wins over the runtime file's (the new-chat default).
+        claude.fast_mode = effective_fast_mode(req.fast_mode, runtime.fast_mode);
         claude.append_system_prompt = contrib::system_prompt(&extras);
         // The knowledge layers load in every chat (Claude and local-model alike: both run the
         // same CLI): skills as one plugin folder per layer for this chat's person and project,
@@ -580,6 +597,18 @@ impl Spawner for ProcessSpawner {
         self.run_helper_job("gatekeeper", job, GATEKEEPER_TIMEOUT, Some(&self.closing))
     }
 
+    fn run_summarize(&self, job: &Value) -> Result<String, String> {
+        let out = self.run_helper("summarize", job, crate::summary::HOST_TIMEOUT)?;
+        match (
+            out.get("summary").and_then(Value::as_str),
+            out.get("error").and_then(Value::as_str),
+        ) {
+            (Some(s), _) => Ok(s.to_owned()),
+            (_, Some(e)) => Err(e.to_owned()),
+            _ => Err("the helper gave no summary".into()),
+        }
+    }
+
     fn close_helpers(&self) {
         self.closing.store(true, Ordering::SeqCst);
     }
@@ -702,6 +731,14 @@ pub struct ServerLoad {
     pub queued: usize,
 }
 
+/// One chat with a turn open right now. See [`ChatRuntime::active_chats`].
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ActiveChat {
+    pub chat_id: String,
+    pub server_id: Option<String>,
+    pub since_ms: i64,
+}
+
 /// What a local server last said about requests waiting on it, and when. Filled only while some
 /// chat has a request open against that server — never at start-up, never on a plain timer.
 pub(crate) struct QueueSeen {
@@ -734,6 +771,9 @@ pub(crate) struct Shared {
     /// The last published attention summary ([`crate::attention::publish`]).
     pub attention: Mutex<Option<AttentionSummary>>,
     pub titles: TitleQueue,
+    /// Chats whose hover summary is being made on this PC right now ([`crate::summary`]): at
+    /// most one per chat at a time.
+    pub summaries: Mutex<std::collections::HashSet<String>>,
     pub triage: Mutex<crate::triage::Gate>,
     pub autocomplete: Mutex<crate::autocomplete::AutocompleteGate>,
     /// Host tools and the worker-message registry, attached once the app's services exist.
@@ -806,6 +846,7 @@ impl ChatRuntime {
                     slots: tokio::sync::Semaphore::new(crate::titles::MAX_CONCURRENT),
                     jobs: std::sync::atomic::AtomicUsize::new(0),
                 },
+                summaries: Mutex::new(std::collections::HashSet::new()),
                 triage: Mutex::new(Default::default()),
                 autocomplete: Mutex::new(Default::default()),
                 host: std::sync::OnceLock::new(),
@@ -937,6 +978,33 @@ impl ChatRuntime {
             }
         }
         per.into_values().collect()
+    }
+
+    /// The chats with a turn open right now: each with the server its turn runs on (nothing
+    /// for a Claude chat) and when the turn opened. Chats held at their start wait, so they
+    /// are not here — the queue's own table has them. Read from the actors' live state; the
+    /// queue panel draws these above the waiting rows.
+    pub(crate) fn active_chats(&self) -> Vec<ActiveChat> {
+        let mut out: Vec<ActiveChat> = self
+            .sh
+            .actors
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(id, h)| {
+                let l = h.live.lock().unwrap();
+                if !l.thread.status.is_busy() || l.held_at_start.is_some() {
+                    return None;
+                }
+                Some(ActiveChat {
+                    chat_id: id.clone(),
+                    server_id: l.server_id.clone(),
+                    since_ms: l.turn_opened_ms.unwrap_or_else(helm_core::now_ms),
+                })
+            })
+            .collect();
+        out.sort_by_key(|a| (a.since_ms, a.chat_id.clone()));
+        out
     }
 
     /// Hand every chat the stored send behaviour. An actor whose worker was

@@ -13,11 +13,12 @@ use crate::serve::{ChatPort, ChatState, PageScope, PortResult, SentFile};
 use crate::wire::{
     code, AnswerArgs, ArchiveArgs, AttachmentGetArgs, BlobReadArgs, BlobRef, BoardCancelArgs,
     BoardReadArgs, CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo,
-    DevicePerson, EditOpenArgs, ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs,
-    PageIdArgs, PageOrigin, PagesReadArgs, PanelStageArgs, PersonInfo, ProfileInfo,
+    DevicePerson, EditOpenArgs, FastModeArgs, ForkArgs, Hello, MoveProfileArgs, MuteArgs,
+    OrganizeArgs, PageIdArgs, PageOrigin, PagesReadArgs, PanelStageArgs, PersonInfo, ProfileInfo,
     ProjectCreateArgs, ProjectInfo, ProjectSetArgs, QuickOpenArgs, RemoteChat, RenameArgs,
     ResendArgs, RollOverArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SideResolveArgs,
-    SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError, MAX_BLOB_BYTES,
+    SidebarStateArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError,
+    MAX_BLOB_BYTES,
 };
 use base64::Engine as _;
 use helm_chats::submit::{self, HostFile, HostImage, HostSend};
@@ -1180,6 +1181,7 @@ impl ChatPort for HostPort {
         device: DeviceInfo,
         files: Vec<SentFile>,
         page: Option<PageOrigin>,
+        kind: Option<String>,
     ) -> BoxFut<'_, PortResult<()>> {
         Box::pin(async move {
             self.here(&chat_id)?;
@@ -1245,6 +1247,11 @@ impl ChatPort for HostPort {
                         text: &text,
                         origin,
                         page: page_meta.as_ref().map(|(t, o)| (t.as_str(), o.as_str())),
+                        // The kind crossed with the message: an unknown word reads as none.
+                        kind: kind
+                            .as_deref()
+                            .and_then(helm_chats::types::MessageKind::parse),
+                        wait: None,
                     },
                     &images,
                     &attached,
@@ -1480,6 +1487,34 @@ impl ChatPort for HostPort {
                 args["effort"] = json!(e);
             }
             self.op("chat_set_model", args).await?;
+            Ok(())
+        })
+    }
+
+    fn set_fast_mode(&self, a: FastModeArgs) -> BoxFut<'_, PortResult<()>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            // The pick rides across explicitly: an explicit null means "follow the default
+            // again", the same sentence the local op takes.
+            self.op(
+                "chat_set_fast_mode",
+                json!({ "chatId": a.chat_id, "on": a.on }),
+            )
+            .await?;
+            Ok(())
+        })
+    }
+
+    fn set_sidebar_state(&self, a: SidebarStateArgs) -> BoxFut<'_, PortResult<()>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            // The whole state rides across explicitly: an explicit null means "reset it",
+            // the same sentence the local op takes.
+            self.op(
+                "chat_set_sidebar_state",
+                json!({ "chatId": a.chat_id, "state": a.state }),
+            )
+            .await?;
             Ok(())
         })
     }
@@ -2142,7 +2177,9 @@ impl ChatPort for HostPort {
             self.here(&chat_id)?;
             let all = self.op("runtime_settings_get", json!({})).await?;
             let mut out = serde_json::Map::new();
-            for key in ["model", "effort", "responseVerbosity"] {
+            // `fastMode` rides along: a mirrored chat's lightning toggle needs this PC's default
+            // to show its pressed state.
+            for key in ["model", "effort", "responseVerbosity", "fastMode"] {
                 if let Some(v) = all.get(key) {
                     out.insert(key.to_owned(), v.clone());
                 }

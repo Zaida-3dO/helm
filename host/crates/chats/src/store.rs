@@ -26,13 +26,17 @@ const CHAT_COLUMNS: &str = concat!(
     "(SELECT json_group_array(s.profile_id) FROM chat_shares s WHERE s.chat_id = c.id), ",
     "CASE WHEN c.status IN ('starting', 'running', 'stopping') THEN a.state ELSE NULL END",
     ", CASE WHEN c.status IN ('starting', 'running', 'stopping') THEN a.queue_reason ELSE NULL END",
-    ", c.stack_id, c.prev_session_id, c.next_session_id"
+    ", c.stack_id, c.prev_session_id, c.next_session_id",
+    ", c.fast_mode",
+    ", c.sidebar_state",
+    ", sm.summary, sm.summary_at"
 );
 
 /// The joins [`CHAT_COLUMNS`] needs, after `FROM chats c`.
 pub(crate) const CHAT_JOINS: &str = "JOIN projects p ON p.id = c.project_id \
      LEFT JOIN chat_titles t ON t.chat_id = c.id LEFT JOIN unread_marks u ON u.chat_id = c.id \
-     LEFT JOIN chat_activity a ON a.chat_id = c.id";
+     LEFT JOIN chat_activity a ON a.chat_id = c.id \
+     LEFT JOIN chat_summary sm ON sm.chat_id = c.id";
 
 fn chat_from_row(r: &Row<'_>, revision: i64) -> rusqlite::Result<ChatRecord> {
     Ok(ChatRecord {
@@ -79,6 +83,13 @@ fn chat_from_row(r: &Row<'_>, revision: i64) -> rusqlite::Result<ChatRecord> {
         stack_id: r.get(29)?,
         prev_session_id: r.get(30)?,
         next_session_id: r.get(31)?,
+        fast_mode: r.get(32)?,
+        // The state is written by this same build; one it cannot read is no state.
+        sidebar_state: r
+            .get::<_, Option<String>>(33)?
+            .and_then(|j| serde_json::from_str::<crate::types::SidebarState>(&j).ok()),
+        summary: r.get(34)?,
+        summary_at: r.get(35)?,
     })
 }
 
@@ -1232,8 +1243,22 @@ fn parse_mode(s: &str) -> SubmissionMode {
 /// A submission with no origin row reads as `unknown`, which parses to `app`: never the user's own
 /// typing, so it cannot pass for consent.
 const SUBMISSION_SELECT: &str = "SELECT s.id, s.chat_id, s.text, s.mode, s.state, \
-     COALESCE(m.origin, 'unknown'), s.created_at, m.priority, m.page_title, m.page_overview \
+     COALESCE(m.origin, 'unknown'), s.created_at, m.priority, m.page_title, m.page_overview, \
+     m.kind, m.wait_chat \
      FROM submissions s LEFT JOIN submission_meta m ON m.submission_id = s.id";
+
+/// The stored kind text: anything unknown reads as no kind, so a value from a newer version
+/// never breaks an older reader.
+fn parse_kind(s: Option<String>) -> Option<MessageKind> {
+    s.as_deref().and_then(MessageKind::parse)
+}
+
+/// The JSON object naming the chat a `wait-finished` note is about; unreadable text reads as
+/// no chat.
+fn parse_wait_chat(s: Option<String>) -> Option<WatchedChat> {
+    let raw = s?;
+    serde_json::from_str(&raw).ok()
+}
 
 fn submission_from_row(r: &Row<'_>) -> rusqlite::Result<Submission> {
     Ok(Submission {
@@ -1248,6 +1273,8 @@ fn submission_from_row(r: &Row<'_>) -> rusqlite::Result<Submission> {
         refs: None,
         page_title: r.get(8)?,
         page_overview: r.get(9)?,
+        kind: parse_kind(r.get(10)?),
+        wait_chat: parse_wait_chat(r.get(11)?),
     })
 }
 

@@ -10,7 +10,7 @@ import { QueueItem, inFlightItems } from '../composer/QueueList.tsx';
 import { FoldRow, Row, type RowContext } from './Rows.tsx';
 import { VirtualList } from './VirtualList.tsx';
 import { skillsByReply, turnTimes } from './rowMeta.ts';
-import { estimateItem, layout, type Item } from './workBlocks.ts';
+import { estimateItem, layout, revealKey, type Item } from './workBlocks.ts';
 import { AgentGroup } from './subagents/AgentGroup.tsx';
 
 export interface TranscriptProps {
@@ -78,8 +78,8 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
   const times = useMemo(() => turnTimes(items), [items]);
   const skills = useMemo(() => skillsByReply(rows), [rows]);
 
-  // A jump into folded work (find in chat) opens that turn first, once per target, so the reader can
-  // fold it again; the list scrolls once the row exists.
+  // A jump into folded work (find in chat) opens that turn's groups first, once per target, so
+  // the reader can fold them again; the list scrolls once the row exists.
   const revealed = useRef<number | null>(null);
   useEffect(() => {
     if (jumpToRowId == null) {
@@ -93,12 +93,34 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
     for (let j = at; j >= 0; j--) {
       const r = rows[j]!;
       if (r.role === 'user' && r.details?.mode !== 'steer') {
-        const turn = r.sourceKey;
+        const turn = revealKey(r.sourceKey);
         setExpanded((s) => (s.has(turn) ? s : new Set(s).add(turn)));
         return;
       }
     }
   }, [jumpToRowId, rows, byKey]);
+  // One click closes one group: when a whole turn was revealed at once, the other groups of that
+  // turn get their own keys at that moment, so closing one leaves the rest open.
+  const foldsByTurn = useMemo(() => {
+    const m = new Map<string, string[]>();
+    for (const i of items) {
+      if (i.kind !== 'fold') continue;
+      const list = m.get(i.turnKey);
+      if (list) list.push(i.key);
+      else m.set(i.turnKey, [i.key]);
+    }
+    return m;
+  }, [items]);
+  const toggleFold = (key: string, turnKey: string) =>
+    setExpanded((s) => {
+      const n = new Set(s);
+      const rk = revealKey(turnKey);
+      if (n.has(key) || n.has(rk)) {
+        if (n.delete(rk)) for (const k of foldsByTurn.get(turnKey) ?? []) if (k !== key) n.add(k);
+        n.delete(key);
+      } else n.add(key);
+      return n;
+    });
   const jumpItem = jumpToRowId != null ? byKey.get(`r:${jumpToRowId}`) : undefined;
   const jumpKey = jumpItem ? itemKey(jumpItem) : null;
 
@@ -133,23 +155,19 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
         const item = byKey.get(k);
         if (!item) return null;
         if (item.kind === 'row') return (
-            <Row row={item.row} ctx={ctx} final={item.final} afterTool={item.afterTool} indent={item.indent} afterFold={item.afterFold} hideThinking={item.hideThinking} beforeTool={item.beforeTool} noticeLive={item.noticeLive} recap={item.recap} turnMs={times.get(item.row.id)} skills={skills.get(item.row.id)} />
+            <Row row={item.row} ctx={ctx} final={item.final} afterTool={item.afterTool} indent={item.indent} afterFold={item.afterFold} beforeTool={item.beforeTool} noticeLive={item.noticeLive} recap={item.recap} turnMs={times.get(item.row.id)} skills={skills.get(item.row.id)} />
           );
         if (item.kind === 'divider') return <SessionDivider title={item.title} rolledOverAt={item.rolledOverAt} />;
         if (item.kind === 'agents') return <AgentGroup rows={item.rows} flags={item.flags} ctx={ctx} />;
         return (
           <FoldRow
-            count={item.steps}
+            tools={item.tools}
+            thoughts={item.thoughts}
+            messages={item.messages}
             elapsedMs={item.elapsedMs}
             failed={item.failed}
             open={item.open}
-            onToggle={() =>
-              setExpanded((s) => {
-                const next = new Set(s);
-                if (!next.delete(item.turnKey)) next.add(item.turnKey);
-                return next;
-              })
-            }
+            onToggle={() => toggleFold(item.key, item.turnKey)}
           />
         );
       }}

@@ -17,6 +17,7 @@
 //! | [`outage`] | sleep and outage lines in the transcript, and the continuation after an outage or a worker crash |
 //! | [`exits`] | worker exits: the line the chat shows, the exit log, incidents and crashes |
 //! | [`titles`] | automatic titles through `helpers/titles`, renames, suggestions |
+//! | [`summary`] | the hover card's two-sentence summary, made on demand by a local model through `helpers/summarize` |
 //! | [`toolsummary`] | the few plain words a running tool call shows in the progress lines |
 //! | [`autocomplete`] | composer autocomplete through `helpers/autocomplete` |
 //! | [`attachments`] | image attachments and their limits |
@@ -94,6 +95,7 @@ pub mod shown_images;
 mod spawning;
 pub mod store;
 pub mod submit;
+pub mod summary;
 pub mod thumbs;
 mod timeline;
 pub mod titles;

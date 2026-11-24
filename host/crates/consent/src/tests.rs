@@ -523,6 +523,10 @@ fn upkeep_expires_and_lists_deliveries_once() {
     assert_eq!(u.deliveries.len(), 1);
     assert_eq!(u.deliveries[0].submission_id, g.id);
     assert!(u.deliveries[0].text.starts_with("[Helm] The user allowed"));
+    assert_eq!(
+        u.deliveries[0].kind, "user-action",
+        "the answer the user gave is their action relayed"
+    );
     store::mark_delivered(&e.db, &g.id, T0 + MINUTE).unwrap();
     assert!(store::upkeep(&e.db, &e.kinds, T0 + 2 * MINUTE)
         .unwrap()
@@ -534,6 +538,10 @@ fn upkeep_expires_and_lists_deliveries_once() {
     assert_eq!(u.deliveries.len(), 1);
     assert_eq!(u.deliveries[0].request_id, p.id);
     assert!(u.deliveries[0].text.contains("expired without an answer"));
+    assert_eq!(
+        u.deliveries[0].kind, "request-expired",
+        "the expiry notice is its own kind, not the catch-all note"
+    );
     assert!(
         spend(&e, "c1", &a, T0 + 2 * MINUTE).is_err(),
         "a lapsed grant is gone"

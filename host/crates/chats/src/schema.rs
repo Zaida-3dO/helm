@@ -7,6 +7,7 @@
 //! | `chat_titles` | per chat: where the title came from (`fallback`/`generated`/`manual`) |
 //! | `unread_marks` | manual unread marks with their token |
 //! | `chat_completions` | the current completion per chat |
+//! | `chat_summary` | per chat: the hover card's two-sentence summary, when it was made, and the activity it covers ([`crate::summary`]) |
 //! | `chat_mutes` | muted chats (user-only) |
 //! | `chat_activity` | per chat: the last worker output time, the stalled flag, and how many local chats stand ahead in the model server's queue while this chat's turn waits on it |
 //! | `chat_attention` | per chat: when its attention was marked addressed, and a snooze |
@@ -117,6 +118,16 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              completed_at  INTEGER NOT NULL,
              read          INTEGER NOT NULL DEFAULT 0,
              dismissed     INTEGER NOT NULL DEFAULT 0
+         );
+         -- The hover card's summary: the text, when it was made, and the last-activity stamp it
+         -- was made for (`for_activity`, also stamped when an attempt found nothing to say, so
+         -- one activity burst asks the model at most once). See [`crate::summary`].
+         CREATE TABLE IF NOT EXISTS chat_summary (
+             chat_id       TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+             summary       TEXT,
+             summary_at    INTEGER,
+             checked_at    INTEGER NOT NULL,
+             for_activity  INTEGER NOT NULL
          );
          CREATE TABLE IF NOT EXISTS chat_mutes (
              chat_id   TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
@@ -485,6 +496,18 @@ fn late_columns(tx: &Transaction<'_>) -> rusqlite::Result<()> {
         // reload. Both stay null for every other send.
         ("submission_meta", "page_title", "TEXT"),
         ("submission_meta", "page_overview", "TEXT"),
+        // What kind of message a chat-to-chat send or a Helm-written note is (a MessageKind in
+        // kebab-case: `steer`, `wait-finished`, ...). Null for the user's own sends and for
+        // notes that name no kind. `wait_chat` rides with `wait-finished` notes about a chat:
+        // the watched chat as JSON {chatId,title}, so the compact line can name it.
+        ("submission_meta", "kind", "TEXT"),
+        ("submission_meta", "wait_chat", "TEXT"),
+        // The chat's own fast-mode pick: 1 on, 0 off, null follows the new-chat default.
+        ("chats", "fast_mode", "INTEGER"),
+        // The chat's own open-item state (which transcript cards are opened, whether its
+        // sidebar row is expanded), so every PC viewing the chat shows the same. JSON as
+        // written by `chat_set_sidebar_state`; null means all folded.
+        ("chats", "sidebar_state", "TEXT"),
     ] {
         let has: bool = tx.query_row(
             "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",

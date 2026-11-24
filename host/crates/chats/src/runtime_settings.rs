@@ -12,7 +12,9 @@
 //!   `claude-runtime.json`, as does `worktreeTools` (let Claude Code's own worktree tools through,
 //!   off by default) and `lowPriority` (run agents and helpers at below-normal priority, on by
 //!   default). A worker reads it when it starts, so a change reaches a chat at its
-//!   next worker start.
+//!   next worker start. `fastMode` is only the default new chats start with: a chat with its own
+//!   pick (`chats.fast_mode`, set by the composer's lightning toggle through `chat_set_fast_mode`)
+//!   uses that instead, and keeps it across a change of the default.
 //! - `model` and `effort` for new chats: the `newChat` preference (`{model, effort}`), read by
 //!   `chat_create` through [`new_chat_defaults`]; an unset effort is the catalogue's default.
 //! - `permissionMode`: the mode the user last picked with the composer's chip in any chat
@@ -374,7 +376,7 @@ mod tests {
         let caller = main();
         let api = |op: &'static str, args: Value| h.api.call(&caller, op, args);
         let s = api("runtime_settings_get", json!({})).await.unwrap();
-        assert_eq!(s["fastMode"], true, "fast mode defaults on");
+        assert_eq!(s["fastMode"], false, "fast mode defaults off");
         assert_eq!(
             s["worktreeTools"], false,
             "Claude Code's worktree tools default off"

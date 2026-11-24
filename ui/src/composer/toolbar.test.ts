@@ -3,6 +3,9 @@ import { test } from 'node:test';
 import { commitPatch, effortLabel, filterRows, formatContext, isLocalModel, localHint, localModelChoices, localModelName, localServerId, modelRows, shortName, stepEffort, thinkingLabel, triggerLabel, triggerParts, withDefaultRow } from './modelEffort.ts';
 import { afterTurn, newPick, permissionTooltip, pickedMode, setPickedMode, shownMode } from './permission.ts';
 import { sendLabel } from './keymap.ts';
+import { prettyLocalModelId, prettyModelName } from '../state/localModel.ts';
+import { ensureLabels, invalidateLocalLabels, modelDisplayName, primeLocalLabels } from '../state/modelNames.ts';
+import type { Api } from '../api/client.ts';
 import type { ModelCatalogue } from '../api/types.ts';
 
 const cat: ModelCatalogue = {
@@ -108,7 +111,7 @@ test('local models: their own group with server and context, greyed only when th
   // A chat on a model the lists no longer hold still shows it (disabled), under its own group.
   const gone = modelRows(localCat, 'local/strata/old');
   assert.deepEqual([gone.at(-1)!.id, gone.at(-1)!.group, gone.at(-1)!.disabled], ['local/strata/old', 'Local', true]);
-  assert.equal(gone.at(-1)!.title, 'old', 'before the servers have been asked, a local model reads as its own name');
+  assert.equal(gone.at(-1)!.title, 'Old', 'before the servers have been asked, a local model reads as the short name made from it, never the raw id');
   assert.equal(localModelName('local/ollama/org/llama:3b'), 'org/llama:3b');
   // The servers are only asked on "Check servers": until then the picker says so, and says if the check found nothing.
   assert.deepEqual([localHint(cat, false), localHint(cat, true), localHint(localCat, false)], ['Local models: not checked yet', 'Local models: none found', 'Local models']);
@@ -183,4 +186,71 @@ test('references: twenty attachments in all, one chip per target, drops hit-test
   assert.equal(dropLandsIn(null, 300, 1100, 2), false);
   assert.deepEqual(parseFileDrop({ phase: 'drop', paths: ['C:/a', 3], x: 1, y: 2 }), { phase: 'drop', paths: ['C:/a'], x: 1, y: 2 });
   assert.equal(parseFileDrop({ phase: 'hover' }), null);
+});
+
+test('a local model id reads as a person would say it, not as the server writes it', () => {
+  for (const [raw, want] of [
+    ['qwen3.8-flash-next-iq3_s', 'Qwen 3.8'],
+    ['qwen3:32b', 'Qwen 3 32B'],
+    ['qwen3:8b-instruct-q4_K_M', 'Qwen 3 8B'],
+    ['llama3.2:latest', 'Llama 3.2'],
+    ['hf.co/org/llama:3b', 'Llama 3B'],
+    ['llama-3.1-8b-instruct-q8_0.gguf', 'Llama 3.1 8B'],
+    ['gpt-oss-20b', 'Gpt 20B'],
+    ['gemma-3-27b-it-q4-k-m', 'Gemma 3 27B'],
+    ['mistral', 'Mistral'],
+    ['12345', '12345'],
+    ['', ''],
+  ] as const) {
+    assert.equal(prettyModelName(raw), want, raw);
+  }
+  // A whole model id: the server's segment is skipped, the model's own name prettified (it may hold / and :).
+  assert.equal(prettyLocalModelId('local/strata/qwen3.8-flash-next-iq3_s'), 'Qwen 3.8');
+  assert.equal(prettyLocalModelId('local/ollama/hf.co/org/llama:3b'), 'Llama 3B');
+});
+
+test('an alias rides with the default name in the picker and stands alone on the trigger', () => {
+  const aliased: ModelCatalogue = {
+    ...cat,
+    local: [
+      { id: 'local/strata/qwen3.8-flash-next-iq3_s', name: 'Jane', model: 'qwen3.8-flash-next-iq3_s', server: 'Strata', kind: 'strata', contextTokens: 262144, reachable: true, startable: false },
+      { id: 'local/strata/qwen3.8-coder-iq3_s', name: 'Qwen 3.8 Coder', model: 'qwen3.8-coder-iq3_s', server: 'Strata', kind: 'strata', reachable: true, startable: false },
+    ],
+  };
+  const rows = modelRows(aliased, null);
+  const [jane, coder] = rows.slice(2);
+  // The row says whose pet name this is; the trigger and chip wear the alias alone.
+  assert.deepEqual([jane!.title, jane!.name], ['Jane · Qwen 3.8', 'Jane']);
+  // A default name lengthened by the model's own distinguishing words (a clash) is not a user name.
+  assert.deepEqual([coder!.title, coder!.name], ['Qwen 3.8 Coder', 'Qwen 3.8 Coder']);
+  assert.equal(triggerParts(jane!.name, 'high', true).name, 'Jane');
+  // The raw model name keeps its place in the row's detail.
+  assert.match(jane!.detail, /^qwen3\.8-flash-next-iq3_s · Strata · 256k/);
+});
+
+test('model display names: the settings alias first, else the name made from the id, on either PC', async () => {
+  const state = {
+    modelNames: [
+      { id: 'local/strata/qwen3.8-flash-next-iq3_s', model: 'qwen3.8-flash-next-iq3_s', server: 'Strata', defaultName: 'Qwen 3.8', alias: 'Jane' },
+      { id: 'local/ollama/llama3.2:latest', model: 'llama3.2:latest', server: 'Ollama', defaultName: 'Llama 3.2' },
+    ],
+  } as unknown as Parameters<typeof primeLocalLabels>[0];
+  primeLocalLabels(state);
+  assert.equal(modelDisplayName('local/strata/qwen3.8-flash-next-iq3_s'), 'Jane');
+  assert.equal(modelDisplayName('local/ollama/llama3.2:latest'), 'Llama 3.2');
+  // A local model nobody listed yet still reads as its short name, never as its id.
+  assert.equal(modelDisplayName('local/strata/gemma-3-27b-it-q4_k_m'), 'Gemma 3 27B');
+  // A Claude id has no name of its own here; the catalogue carries those.
+  assert.equal(modelDisplayName('opus'), null);
+  // Another PC's labels come from that PC's own list, so its aliases show here as they do there.
+  const api = (async (op: string) => {
+    if (op === 'model_catalogue') return { local: [{ id: 'local/strata/qwen3.8-coder-iq3_s', name: 'Rex' }] };
+    throw new Error(`unexpected op ${op}`);
+  }) as unknown as Api;
+  await ensureLabels(api, 'pc-2');
+  assert.equal(modelDisplayName('local/strata/qwen3.8-coder-iq3_s', 'pc-2'), 'Rex');
+  assert.equal(modelDisplayName('local/strata/qwen3.8-coder-iq3_s'), 'Qwen 3.8', 'this PC never heard of that model, so its own short name answers');
+  invalidateLocalLabels();
+  assert.equal(modelDisplayName('local/ollama/llama3.2:latest'), 'Llama 3.2', 'an invalidation still leaves the short-name fallback');
+  assert.equal(modelDisplayName('local/strata/qwen3.8-flash-next-iq3_s'), 'Qwen 3.8', 'and with it the alias is gone until the settings are read again');
 });

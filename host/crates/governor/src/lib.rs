@@ -100,6 +100,8 @@ impl ChatControl for RuntimeControl {
                 text,
                 origin: helm_chats::types::SubmissionOrigin::App,
                 page: None,
+                kind: None,
+                wait: None,
             },
         )
         .map(|_| ())

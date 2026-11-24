@@ -300,6 +300,7 @@ pub fn stage(
                 origin: SubmissionOrigin::Typed,
                 priority: None,
                 now,
+            kind: None,
             },
         )?;
         carry_images(
