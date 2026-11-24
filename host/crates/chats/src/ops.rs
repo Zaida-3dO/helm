@@ -20,6 +20,7 @@
 //! | `tool_stop` | async | [`ToolStopArgs`] → [`ToolStopResult`] |
 //! | `chat_compact` | maintenance | [`ChatIdArgs`] → `null` |
 //! | `chat_warm` | blocking | [`ChatIdArgs`] → `null` |
+//! | `chat_summarize` | blocking | [`ChatIdArgs`] → [`ChatSummary`] (the hover card's two-sentence summary; [`crate::summary`]) |
 //! | `chat_roll_over` | async | [`ChatIdArgs`] → `{started}` (see [`crate::rollover`]) |
 //! | `chat_stack` | blocking | [`ChatIdArgs`] → [`ChatStack`] (the roll-over stack: every session and the newest) |
 //! | `attention_get` | blocking | `{}` → [`AttentionSummary`] |
@@ -91,6 +92,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
         )
         .blocking("chat_retry_now", OpClass::Maintenance, chat_retry_now)
         .blocking("chat_rename", OpClass::Maintenance, chat_rename)
+        .blocking("chat_summarize", OpClass::Blocking, chat_summarize)
         .async_op("title_suggest", title_suggest)
         .blocking("skills_list", OpClass::Blocking, skills_list)
         .async_op("autocomplete_suggest", autocomplete_suggest);
@@ -125,6 +127,13 @@ fn chat_rename(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         &a.chat_id,
         &a.title,
     )?)
+}
+
+/// `chat_summarize {chatId}`: what the hover card can show right now, and whether a summary
+/// is being made. Answers at once; the model never waits in front of the UI ([`crate::summary`]).
+fn chat_summarize(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ChatIdArgs = parse_args(args)?;
+    to_value(&crate::summary::request(&runtime(ctx)?, &a.chat_id)?)
 }
 
 async fn title_suggest(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
@@ -1026,6 +1035,8 @@ pub(crate) mod tests {
             ("build_queue_remove", OpClass::Maintenance),
             // A failed turn's retry, now.
             ("chat_retry_now", OpClass::Maintenance),
+            // The hover card's on-demand summary.
+            ("chat_summarize", OpClass::Blocking),
         ];
         for (name, class) in expected {
             assert_eq!(reg.class_of(name), Some(class), "{name}");

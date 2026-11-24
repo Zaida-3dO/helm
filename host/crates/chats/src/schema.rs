@@ -7,6 +7,7 @@
 //! | `chat_titles` | per chat: where the title came from (`fallback`/`generated`/`manual`) |
 //! | `unread_marks` | manual unread marks with their token |
 //! | `chat_completions` | the current completion per chat |
+//! | `chat_summary` | per chat: the hover card's two-sentence summary, when it was made, and the activity it covers ([`crate::summary`]) |
 //! | `chat_mutes` | muted chats (user-only) |
 //! | `chat_activity` | per chat: the last worker output time, the stalled flag, and how many local chats stand ahead in the model server's queue while this chat's turn waits on it |
 //! | `chat_attention` | per chat: when its attention was marked addressed, and a snooze |
@@ -117,6 +118,16 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              completed_at  INTEGER NOT NULL,
              read          INTEGER NOT NULL DEFAULT 0,
              dismissed     INTEGER NOT NULL DEFAULT 0
+         );
+         -- The hover card's summary: the text, when it was made, and the last-activity stamp it
+         -- was made for (`for_activity`, also stamped when an attempt found nothing to say, so
+         -- one activity burst asks the model at most once). See [`crate::summary`].
+         CREATE TABLE IF NOT EXISTS chat_summary (
+             chat_id       TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+             summary       TEXT,
+             summary_at    INTEGER,
+             checked_at    INTEGER NOT NULL,
+             for_activity  INTEGER NOT NULL
          );
          CREATE TABLE IF NOT EXISTS chat_mutes (
              chat_id   TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,

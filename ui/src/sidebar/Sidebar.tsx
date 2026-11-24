@@ -64,6 +64,7 @@ import { openNewChat, openPrimaryFolder } from '../newchat/index.ts';
 import { ProjectIcon, openIconPicker } from '../projects/index.ts';
 import { getDefaultBoard } from '../newchat/boards.ts';
 import { age, foldStatus, isBusy, needsYouLabel, rowStateLabel, rowStatusLabel, STATUS_LABEL, type RowStatus } from './status.ts';
+import { freshAnswer, freshSummary, SUMMARY_DELAY_MS, SUMMARY_POLLS, SUMMARY_POLL_MS, type SummaryAnswer } from './summary.ts';
 import { localWaitLabel } from '../state/localModel.ts';
 import { useSubagentsRunning } from '../transcript/subagents/counts.ts';
 import { startSyncTriggers, syncOnOpen, type SyncHost } from './sync.ts';
@@ -921,6 +922,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           project={projectsById.get(preview.row.groupProjectId)}
           now={now}
           load={(id) => pops.rows([id]).then((rs) => rs[0]?.preview ?? null)}
+          ask={(id) => api<SummaryAnswer>('chat_summarize', { chatId: id })}
           onEnter={() => clearTimeout(previewTimer.current)}
           onLeave={leaveRow}
           onOpen={() => {
@@ -1517,6 +1519,7 @@ function PreviewCard({
   project,
   now,
   load,
+  ask,
   onEnter,
   onLeave,
   onOpen,
@@ -1526,6 +1529,8 @@ function PreviewCard({
   now: number;
   /** The row's hover preview from the host (`sidebar_rows`): last reply and current step. */
   load: (chatId: string) => Promise<RowPreview | null>;
+  /** `chat_summarize`: what the host can show and whether it is making one (see `summary.ts`). */
+  ask: (chatId: string) => Promise<SummaryAnswer>;
   onEnter: () => void;
   onLeave: () => void;
   onOpen: () => void;
@@ -1544,6 +1549,44 @@ function PreviewCard({
     // Re-read when the row changes (a new reply or step arrives as a new row revision).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [r.chatId, r.revision, r.status, r.updatedAt]);
+  // The summary: a second into the hover, the two-sentence summary takes the last reply's
+  // place in the same fixed box. Nothing on screen waits or spins while it is made — the card
+  // keeps showing the last reply until it arrives, and gives up quietly if it never does.
+  const [sum, setSum] = useState<{ chatId: string; text: string } | null>(null);
+  useEffect(() => {
+    let on = true;
+    setSum(null);
+    const timer = setTimeout(() => {
+      const cached = freshSummary(r);
+      if (cached) {
+        if (on) setSum({ chatId: r.chatId, text: cached });
+        return;
+      }
+      void (async () => {
+        for (let i = 0; i < SUMMARY_POLLS && on; i += 1) {
+          let a: SummaryAnswer | null = null;
+          try {
+            a = await ask(r.chatId);
+          } catch {
+            a = null; // a chat that runs elsewhere, or a host that cannot answer: fallback
+          }
+          if (!on) return;
+          const shown = a ? freshAnswer(a, r) : null;
+          if (shown) {
+            setSum({ chatId: r.chatId, text: shown });
+            return;
+          }
+          if (!a?.generating) return;
+          await new Promise((res) => setTimeout(res, SUMMARY_POLL_MS));
+        }
+      })();
+    }, SUMMARY_DELAY_MS);
+    return () => {
+      on = false;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [r.chatId, r.revision]);
   const mine = got?.chatId === r.chatId ? got : null;
   const step = live ? mine?.preview?.step : null;
   const state = r.local && r.localAhead !== null
@@ -1557,11 +1600,14 @@ function PreviewCard({
         : r.unread
           ? 'Finished, unread'
           : 'Finished';
-  const body = !mine
-    ? 'Loading preview…'
-    : mine.failed
-      ? 'Preview unavailable. Open the chat to view this task.'
-      : (mine.preview?.excerpt ?? (live ? 'Waiting for the first update…' : 'No messages yet.'));
+  // The summary, when one arrived, shows in the last reply's place: same box, same rules.
+  const shown = sum?.chatId === r.chatId ? sum.text : null;
+  const body = shown
+    ?? (!mine
+      ? 'Loading preview…'
+      : mine.failed
+        ? 'Preview unavailable. Open the chat to view this task.'
+        : (mine.preview?.excerpt ?? (live ? 'Waiting for the first update…' : 'No messages yet.')));
   return (
     <div
       className="sb-preview"
@@ -1579,7 +1625,7 @@ function PreviewCard({
         {live && <span className="sb-preview-live">● Live</span>}
       </div>
       <div className="sb-preview-body">
-        <p className="sb-preview-excerpt" data-empty={mine?.preview?.excerpt ? undefined : 'true'}>
+        <p className="sb-preview-excerpt" data-empty={!shown && !mine?.preview?.excerpt ? 'true' : undefined}>
           {body}
         </p>
         <span className="sb-preview-meta">

@@ -180,6 +180,17 @@ pub struct ChatRecord {
     /// The session that rolled over from this one; `null` for the newest, where the chat
     /// carries on.
     pub next_session_id: Option<String>,
+    /// The hover card's two-sentence summary ("what this chat is about, where it stands now"),
+    /// made on demand by a local model ([`crate::summary`]). Left out when there is none. The
+    /// row carries it so a chat seen on another PC shows the one made where it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub summary: Option<String>,
+    /// When that summary was made, Unix ms; left out with it. The card calls it stale once
+    /// `last_activity_at` passes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub summary_at: Option<i64>,
 }
 
 /// The roll-over stack of a chat, as `chat_stack` reports it: every session sharing the chat's
@@ -1342,6 +1353,21 @@ pub struct ChatCreateArgs {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChatIdArgs {
     pub chat_id: String,
+}
+
+/// `chat_summarize`: what the hover card shows now and whether an answer is on its way.
+/// The call never waits on the model — see [`crate::summary`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSummary {
+    /// The stored two-sentence summary, or `null` when there is none yet.
+    pub summary: Option<String>,
+    /// When it was made, Unix ms; `null` with it. The card calls it stale once its own
+    /// `lastActivityAt` passes it.
+    #[ts(type = "number | null")]
+    pub summary_at: Option<i64>,
+    /// A summary is being made on this PC right now: the card can ask again shortly.
+    pub generating: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]

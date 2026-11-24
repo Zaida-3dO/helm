@@ -1242,6 +1242,8 @@ fn row_from(r: &Row<'_>, revision: i64) -> rusqlite::Result<RawRow> {
             updated_at: r.get(11)?,
             revision,
             preview: None,
+            summary: None,
+            summary_at: None,
         },
     })
 }
@@ -1405,6 +1407,10 @@ fn finish(
                 }
                 r.row.last_activity_at = c.last_activity_at;
                 r.row.attention = row_attention(r.row.status, r.row.unread, false, r.row.pinned);
+                // The hover card's summary rides the chat record, pages included, so the copy of
+                // a chat watched from another PC has it too.
+                r.row.summary = c.summary;
+                r.row.summary_at = c.summary_at;
             }
             if with_preview {
                 r.row.preview = Some(row_preview(tx, &r.row.chat_id, r.row.status)?);

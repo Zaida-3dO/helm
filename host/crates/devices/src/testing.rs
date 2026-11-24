@@ -70,6 +70,8 @@ pub fn fake_record(id: &str, title: &str, revision: i64) -> ChatRecord {
         stack_id: None,
         prev_session_id: None,
         next_session_id: None,
+        summary: None,
+        summary_at: None,
     }
 }
 

@@ -1107,9 +1107,12 @@
   line-height: 1.65;
   color: var(--sb-text);
   display: -webkit-box;
-  -webkit-line-clamp: 6;
+  -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  /* The last reply gives way to the two-sentence summary a second into the hover; the box
+     holds four lines either way, so the card never jumps. */
+  height: calc(12px * 1.65 * 4);
 }
 
 .sb-preview-excerpt[data-empty='true'] {

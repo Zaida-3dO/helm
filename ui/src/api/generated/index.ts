@@ -34,6 +34,7 @@ export type { ChatState } from './ChatState.ts';
 export type { ChatStatus } from './ChatStatus.ts';
 export type { ChatStopArgs } from './ChatStopArgs.ts';
 export type { ChatStopResult } from './ChatStopResult.ts';
+export type { ChatSummary } from './ChatSummary.ts';
 export type { Compacting } from './Compacting.ts';
 export type { Completion } from './Completion.ts';
 export type { CompletionAckArgs } from './CompletionAckArgs.ts';

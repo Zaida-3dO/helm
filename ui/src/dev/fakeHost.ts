@@ -1261,6 +1261,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       return { attachmentId, kind: 'file', name, target };
     },
     title_suggest: () => ({ title: 'Suggested chat title', titles: ['Suggested chat title', 'Shop 2.0 · team X: suggested title', 'Another suggested name'] }),
+    chat_summarize: () => ({ summary: null, summaryAt: null, generating: false }),
     files_pick: () => ({ paths: ['C:\\Users\\me\\Documents\\notes.md', 'C:\\Users\\me\\Pictures\\shot.png'] }),
     attachment_put: (a) => {
       const attachmentId = uid();
