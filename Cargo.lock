@@ -1981,6 +1981,8 @@ dependencies = [
  "ts-rs",
  "ureq",
  "uuid",
+ "windows",
+ "windows-future",
 ]
 
 [[package]]

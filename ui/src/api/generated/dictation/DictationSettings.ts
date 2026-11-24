@@ -12,4 +12,8 @@ configured: boolean,
  * Graphics memory (GB) Helm tries to keep free for speech when it makes room for a local
  * model, from Local models. It is only waited for after something was unloaded.
  */
-speechReserveGb: number, speechReserveMaxGb: number, };
+speechReserveGb: number, speechReserveMaxGb: number, 
+/**
+ * The Windows speech service can run here: the composer dictates live instead of recording.
+ */
+liveAvailable: boolean, };

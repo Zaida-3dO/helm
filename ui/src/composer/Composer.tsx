@@ -646,6 +646,8 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   // chat's model); the host owns the 10-per-minute budget. Tab accepts while the draft is
   // unchanged; Escape or any edit drops the suggestion.
   const [ghost, setGhost] = useState<{ base: string; completion: string } | null>(null);
+  /** Live dictation's sentence in progress; settled sentences go straight into the draft. */
+  const [liveText, setLiveText] = useState('');
   const asked = useRef<string>('');
   useEffect(() => {
     setGhost((g) => (g && g.base === draftText ? g : null));
@@ -1034,6 +1036,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
           onKey={onKey}
           handle={editor}
           ghost={ghost}
+          provisional={liveText || null}
           commands={commands}
           onPaste={onPasteData}
           trailing={
@@ -1066,7 +1069,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
                 {a.render(actx)}
               </span>
             ))}
-            {offBy === null && <MicButton editor={editor} />}
+            {offBy === null && <MicButton editor={editor} onLiveText={setLiveText} />}
             <Button
               variant="icon"
               className="composer-attach"

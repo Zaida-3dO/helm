@@ -6,6 +6,8 @@ import {
   encodeWav,
   IDLE,
   keyStep,
+  LIVE_IDLE,
+  liveStep,
   MicError,
   NO_ANSWER,
   NO_MIC,
@@ -19,6 +21,7 @@ import {
   wavSeconds,
   type KeyAction,
   type KeyInput,
+  type LiveEvent,
 } from './dictation.ts';
 
 /** Run presses and releases through the rule; the actions it asked for, in order. */
@@ -148,5 +151,24 @@ test('the microphone, the words and the problems', () => {
   for (const code of ['too_big', 'bad_audio']) {
     const p = problemOf(new ApiError(code, 'x'));
     assert.deepEqual([p.retry, p.settings, p.message.length > 10], [false, false, true], code);
+  }
+});
+
+test('live words update the sentence in progress whole, and final text settles it', () => {
+  let s = LIVE_IDLE;
+  for (const [ev, wantProvisional, wantSettled] of [
+    [{ final: false, text: 'Hello' }, 'Hello', ''],
+    [{ final: false, text: 'Hello there' }, 'Hello there', ''], // an update replaces, never appends
+    [{ final: false, text: 'Hello there and a second thought' }, 'Hello there and a second thought', ''],
+    [{ final: true, text: 'Hello there.' }, '', 'Hello there.'], // the whole sentence at once, provisional gone
+    [{ final: false, text: ' And more' }, ' And more', ''],
+    [{ final: false, text: '' }, '', ''],
+    [{ final: true, text: '   ' }, '', ''], // an empty final settles nothing
+    [{ final: true, text: ' trimmed ' }, '', 'trimmed'],
+  ] as Array<[LiveEvent, string, string]>) {
+    const [next, settled] = liveStep(s, ev);
+    s = next;
+    assert.equal(s.provisional, wantProvisional, JSON.stringify(ev));
+    assert.equal(settled, wantSettled, JSON.stringify(ev));
   }
 });

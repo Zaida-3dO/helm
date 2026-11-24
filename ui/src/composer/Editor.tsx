@@ -68,6 +68,8 @@ export interface EditorProps {
   onPaste?: (data: DataTransfer) => string | true | null;
   /** Drawn inside the editor box, over its bottom right corner (the autocomplete marker). */
   trailing?: ReactNode;
+  /** Live dictation's sentence in progress: drawn after the draft's end, in its own style, until it settles. */
+  provisional?: string | null;
   /** False makes the draft read-only (a chat on a device that cannot take a message now). */
   editable?: boolean;
 }
@@ -356,6 +358,54 @@ function Ghost({ ghost }: { ghost: NonNullable<EditorProps['ghost']> }) {
   );
 }
 
+/**
+ * Live dictation's sentence in progress: like the ghost, an invisible copy of the draft keeps the
+ * wrapping true, and the provisional words follow it in their own style. They settle into the
+ * draft (through the mic button) as each sentence finishes, so this only ever holds the tail.
+ */
+function Provisional({ text }: { text: string }) {
+  const [editor] = useLexicalComposerContext();
+  const [atEnd, setAtEnd] = useState(false);
+  const [top, setTop] = useState(0);
+  const [draft, setDraft] = useState('');
+  useEffect(() => {
+    const check = () => {
+      const s = editor.getEditorState().read(() => ({ text: $getRoot().getTextContent(), end: caretAtEnd() }));
+      setDraft(s.text);
+      setAtEnd(s.end);
+    };
+    check();
+    return editor.registerUpdateListener(check);
+  }, [editor]);
+  useEffect(() => {
+    const root = editor.getRootElement();
+    if (!root) return;
+    const sync = () => setTop(root.scrollTop);
+    sync();
+    root.addEventListener('scroll', sync);
+    return () => root.removeEventListener('scroll', sync);
+  }, [editor, text]);
+  if (!atEnd) return null;
+  const lines: ReactNode[] = liveRuns(draft).map((runs, i) => (
+    <span key={i}>
+      {i > 0 && '\n'}
+      {runs.map((r, j) => (
+        <span key={j} style={cssOf(r.style)}>
+          {r.text}
+        </span>
+      ))}
+    </span>
+  ));
+  return (
+    <div className="editor-ghost" aria-hidden="true" data-testid="dictation-live">
+      <div className="editor-ghost-text" style={{ transform: `translateY(${-top}px)` }}>
+        <span className="editor-ghost-copy">{lines}</span>
+        <span className="editor-provisional"> {text}</span>
+      </div>
+    </div>
+  );
+}
+
 /** An inline style string as a React style object. */
 function cssOf(style: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -413,7 +463,7 @@ function markupKey(editor: LexicalEditor, e: KeyboardEvent): boolean {
   return false;
 }
 
-export function Editor({ initialText, placeholder, onChange, onKey, handle, ghost, commands, onPaste, trailing, editable = true }: EditorProps) {
+export function Editor({ initialText, placeholder, onChange, onKey, handle, ghost, commands, onPaste, trailing, provisional, editable = true }: EditorProps) {
   const config = {
     namespace: 'helm-composer',
     onError: (e: Error) => console.error(e),
@@ -441,6 +491,7 @@ export function Editor({ initialText, placeholder, onChange, onKey, handle, ghos
         <Editable on={editable} />
         <Bridge onKey={onKey} handle={handle} onPaste={onPaste} />
         {ghost && <Ghost ghost={ghost} />}
+        {provisional ? <Provisional text={provisional} /> : null}
         {trailing}
       </div>
     </LexicalComposer>
