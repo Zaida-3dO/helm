@@ -768,7 +768,9 @@
   --inspector-width: 370px;
   --inspector-min: 280px;
   --topbar-height: 49px;
-  --tags-strip-height: 34px;
+  /* The tags strip under the bar is gone (one-row top bar); the variable stays at 0 so the toast
+     and popover offsets that were measured from it keep working. */
+  --tags-strip-height: 0px;
 
   /* Older names, kept as aliases so existing stylesheets keep working. New code uses the names above. */
   --panel: var(--surface);
@@ -1263,37 +1265,31 @@ dd {
   flex: 1;
   font-size: calc(12 * var(--ui-unit));
 }
-.crumb-project {
-  color: var(--secondary);
-  max-width: 140px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.crumb-chevron,
-.crumb-folder {
-  color: var(--muted);
-  flex: none;
-}
-.topbar-quick {
-  display: contents;
-}
-/* Narrower main pane: shed the optional parts (see topBarTier). Fork, Pin and Archive stay in the
-   chat menu, and the usage meter stays in Settings. */
+/* Narrower main pane: shed the optional parts (see topBarTier); the usage meter stays in
+   Settings, and the composer's / menu keeps the chat commands. */
 .topbar[data-tier='mid'] .usage-track {
   display: none;
 }
 .topbar[data-tier='narrow'] .usage-meter,
-.topbar[data-tier='narrow'] .topbar-quick,
 .topbar[data-tier='tight'] .usage-meter,
-.topbar[data-tier='tight'] .topbar-quick,
 .topbar[data-tier='tight'] .action-row {
   display: none;
 }
-.topbar[data-tier='tight'] .crumb-project,
-.topbar[data-tier='tight'] .crumb-folder,
-.topbar[data-tier='tight'] .crumb-chevron {
-  display: none;
+/* The chat's project pill after the title: the board it is shown under, giving way (ellipsis)
+   before the title does. */
+.topbar .crumbs .project-pill {
+  min-width: 0;
+  max-width: 170px;
+}
+.topbar .crumbs .project-pill .ui-picker-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 760px) {
+  .topbar .crumbs .project-pill {
+    max-width: 90px;
+  }
 }
 .topbar .caption {
   flex: none;
@@ -1311,12 +1307,6 @@ dd {
   gap: 5px;
   flex: none;
 }
-@media (max-width: 760px) {
-  .crumb-project {
-    max-width: 70px;
-  }
-}
-
 /* Dialogs. */
 .dialog-backdrop {
   position: fixed;
@@ -1643,18 +1633,21 @@ dd {
   padding: 3px 6px !important;
   min-width: 160px;
 }
-.tags-strip {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-height: var(--tags-strip-height);
-  padding: 0 22px;
-  border-bottom: 1px solid var(--line);
+/* The project pill's action row (Change folder) in its popover. */
+.project-pill-footer {
+  padding: 6px 10px;
+  border-top: 1px solid var(--line);
 }
-/* No chat, no tags: no empty band under the bar. */
-.tags-strip:empty {
-  display: none;
+.project-pill-footer button {
+  font: inherit;
+  background: none;
+  border: none;
+  padding: 2px 0;
+  color: var(--secondary);
+  cursor: var(--cursor-pointer);
+}
+.project-pill-footer button:hover {
+  color: var(--text);
 }
 
 /* The settings footer: "Helm <version>" left, a muted note right; 12 x 23, 10 px. */
