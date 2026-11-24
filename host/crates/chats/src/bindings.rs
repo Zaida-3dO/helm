@@ -62,6 +62,7 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         InteractionAnswerArgs,
         DraftSaveArgs,
         ChatSetModelArgs,
+        ChatSetSidebarStateArgs,
         ModelCatalogueArgs,
         ToolStopArgs,
         AttentionSummary,

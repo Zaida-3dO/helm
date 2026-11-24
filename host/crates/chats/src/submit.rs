@@ -1134,6 +1134,85 @@ pub fn chat_set_model(rt: &ChatRuntime, a: ChatSetModelArgs) -> Result<ChatRecor
     emit_chat(rt, &a.chat_id).ok_or_else(crate::ops::not_found)
 }
 
+/// `chat_set_sidebar_state`: store the chat's open-item state (which transcript cards are
+/// opened, whether its sidebar row is expanded), so every PC viewing the chat shows the
+/// same. The write merges field by field — a field left out keeps what the chat had, a
+/// field sent replaces it whole (last write wins) — so the sidebar's toggle and the
+/// transcript's cards never erase each other. `state: null` folds everything. Stored
+/// canonically: folded defaults are left out, and a state with nothing open stores null.
+/// Writing it never touches `updated_at`: opening a card is not activity, and an age or an
+/// Activity re-sort on every chevron would reorder the list under the reader.
+pub fn chat_set_sidebar_state(
+    rt: &ChatRuntime,
+    a: ChatSetSidebarStateArgs,
+) -> Result<ChatRecord, ApiError> {
+    const MAX_CARDS: usize = 256;
+    if let Some(s) = &a.state {
+        if s.v != 1 {
+            return Err(ApiError::bad_args(
+                "Sidebar state version is not supported.",
+            ));
+        }
+        if let Some(cards) = &s.open_cards {
+            if cards.len() > MAX_CARDS {
+                return Err(ApiError::bad_args("Too many opened cards."));
+            }
+            if cards.iter().any(|id| *id < 0) {
+                return Err(ApiError::bad_args("Card ids must be positive."));
+            }
+        }
+    }
+    let before = rt
+        .db()
+        .snapshot(|t| store::get_chat(t, &a.chat_id, 0))
+        .map_err(sql)?
+        .ok_or_else(crate::ops::not_found)?;
+    let merged = a.state.as_ref().and_then(|s| {
+        let prev = before.sidebar_state.clone().unwrap_or_default();
+        // Only `expanded: true` stores: folded is the default, so false is left out.
+        let expanded = match s.expanded {
+            Some(true) => Some(true),
+            Some(false) => None,
+            None => prev.expanded,
+        };
+        // An empty list is a real sentence: fold every card.
+        let open_cards = s
+            .open_cards
+            .clone()
+            .unwrap_or(prev.open_cards.clone().unwrap_or_default());
+        let open_cards = (!open_cards.is_empty()).then_some(open_cards);
+        let merged = SidebarState {
+            v: 1,
+            expanded,
+            open_cards,
+        };
+        (merged.expanded.is_some() || merged.open_cards.is_some()).then_some(merged)
+    });
+    if before.sidebar_state == merged {
+        return Ok(before);
+    }
+    // Canonical text: serde re-serialises, so an equivalent value stores identically and the
+    // next equal write is a no-op.
+    let stored = merged
+        .as_ref()
+        .map(|s| serde_json::to_string(s).expect("state serialises"));
+    rt.db()
+        .write(|tx| {
+            tx.execute(
+                "UPDATE chats SET sidebar_state = ?1 WHERE id = ?2",
+                params![stored, a.chat_id],
+            )
+        })
+        .map_err(sql)?;
+    rt.sh.events.emit(
+        ChatEvent::Refresh {
+            chat_id: a.chat_id.clone(),
+        }
+        .to_app_event(),
+    );
+    emit_chat(rt, &a.chat_id).ok_or_else(crate::ops::not_found)
+}
+
 /// Permission modes the composer's mode picker offers: the chip picks the mode for the next turn.
 pub const PERMISSION_MODES: &[&str] = &["bypassPermissions", "default", "acceptEdits", "plan"];
 

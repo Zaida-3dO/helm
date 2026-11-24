@@ -17,7 +17,8 @@ use crate::wire::{
     PageIdArgs, PageOrigin, PagesReadArgs, PanelStageArgs, PersonInfo, ProfileInfo,
     ProjectCreateArgs, ProjectInfo, ProjectSetArgs, QuickOpenArgs, RemoteChat, RenameArgs,
     ResendArgs, RollOverArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SideResolveArgs,
-    SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError, MAX_BLOB_BYTES,
+    SidebarStateArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError,
+    MAX_BLOB_BYTES,
 };
 use base64::Engine as _;
 use helm_chats::submit::{self, HostFile, HostImage, HostSend};
@@ -1480,6 +1481,20 @@ impl ChatPort for HostPort {
                 args["effort"] = json!(e);
             }
             self.op("chat_set_model", args).await?;
+            Ok(())
+        })
+    }
+
+    fn set_sidebar_state(&self, a: SidebarStateArgs) -> BoxFut<'_, PortResult<()>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            // The whole state rides across explicitly: an explicit null means "reset it",
+            // the same sentence the local op takes.
+            self.op(
+                "chat_set_sidebar_state",
+                json!({ "chatId": a.chat_id, "state": a.state }),
+            )
+            .await?;
             Ok(())
         })
     }

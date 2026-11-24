@@ -26,7 +26,8 @@ const CHAT_COLUMNS: &str = concat!(
     "(SELECT json_group_array(s.profile_id) FROM chat_shares s WHERE s.chat_id = c.id), ",
     "CASE WHEN c.status IN ('starting', 'running', 'stopping') THEN a.state ELSE NULL END",
     ", CASE WHEN c.status IN ('starting', 'running', 'stopping') THEN a.queue_reason ELSE NULL END",
-    ", c.stack_id, c.prev_session_id, c.next_session_id"
+    ", c.stack_id, c.prev_session_id, c.next_session_id",
+    ", c.sidebar_state"
 );
 
 /// The joins [`CHAT_COLUMNS`] needs, after `FROM chats c`.
@@ -79,6 +80,10 @@ fn chat_from_row(r: &Row<'_>, revision: i64) -> rusqlite::Result<ChatRecord> {
         stack_id: r.get(29)?,
         prev_session_id: r.get(30)?,
         next_session_id: r.get(31)?,
+        // The state is written by this same build; one it cannot read is no state.
+        sidebar_state: r
+            .get::<_, Option<String>>(32)?
+            .and_then(|j| serde_json::from_str::<crate::types::SidebarState>(&j).ok()),
     })
 }
 

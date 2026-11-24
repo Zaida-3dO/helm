@@ -169,6 +169,8 @@ export class SidebarData {
       state: c.state ?? undefined,
       hasDraft: c.draft.trim() !== '',
       lastActivityAt: c.lastActivityAt,
+      // The chat's own open item, so expanding it here shows expanded on every PC.
+      expanded: c.sidebarState?.expanded === true,
     };
     next.attention = rowAttention({ status: c.status, unread, lingering: false, pinned: c.pinned });
     if (JSON.stringify(next) === JSON.stringify(prev)) return;

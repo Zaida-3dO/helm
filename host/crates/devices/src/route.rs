@@ -1952,6 +1952,7 @@ impl RemoteChats for Mirror {
                 "unread_mark" => "mark_unread",
                 "chat_mute" => "mute",
                 "chat_set_permission_mode" => "set_permission",
+                "chat_set_sidebar_state" => "set_sidebar_state",
                 "chat_warm" => "warm",
                 "attention_snooze" => "snooze",
                 "attention_address" => "address",
@@ -1962,9 +1963,15 @@ impl RemoteChats for Mirror {
             } else {
                 None
             };
+            // The open-item state answers with the chat record: keep this PC's copy's state
+            // in step. An explicit null is a real value here: the chat is folded again.
+            let st = args.get("state").cloned();
             m.change(&chat_id, wire, args, move |rec| {
                 if let Some(on) = muted {
                     rec.insert("muted".into(), json!(on));
+                }
+                if let Some(s) = &st {
+                    rec.insert("sidebarState".into(), s.clone());
                 }
             })
             .await

@@ -10,6 +10,7 @@ import type {
   ModelCatalogue,
   SendAction,
   SendOrigin,
+  SidebarState,
   Submission,
   SubmissionAction,
   ThreadState,
@@ -82,6 +83,10 @@ export function chatOps(api: Api) {
       api<{ revision: number }>('draft_save', { chatId, text, revision }),
     setModel: (chatId: string, model?: string, effort?: string) =>
       api<ChatRecord>('chat_set_model', { chatId, model, effort }),
+    /** The chat's open-item state (opened transcript cards, row expanded): fields merge one at
+     *  a time, last write wins, so the sidebar and the transcript never erase each other. */
+    setSidebarState: (chatId: string, state: SidebarState | null) =>
+      api<ChatRecord>('chat_set_sidebar_state', { chatId, state }),
     /** The composer's permission-mode pick; applies from the next turn. */
     setPermissionMode: (chatId: string, mode: string) => api<{ mode: string }>('chat_set_permission_mode', { chatId, mode }),
     catalogue: (refresh = false) => api<ModelCatalogue>('model_catalogue', { harness: 'claude', refresh }),

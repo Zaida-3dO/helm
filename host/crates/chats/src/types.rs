@@ -180,6 +180,36 @@ pub struct ChatRecord {
     /// The session that rolled over from this one; `null` for the newest, where the chat
     /// carries on.
     pub next_session_id: Option<String>,
+    /// The chat's own open-item state — which transcript cards are opened and whether its
+    /// sidebar row is expanded — so the chat shows the same on every PC that views it.
+    /// `null` is the default: everything folded. The sidebar sets it through
+    /// `chat_set_sidebar_state`; last write wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub sidebar_state: Option<SidebarState>,
+}
+
+/// The chat's open-item state, stored whole per chat. A write merges field by field: a
+/// field left out keeps what the chat already had (the sidebar writes only its `expanded`,
+/// the transcript only its `openCards`), a field sent replaces it whole, and last write
+/// wins. Small by design: the renderer trims before sending.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SidebarState {
+    /// The shape's version; this build writes and reads 1.
+    pub v: u32,
+    /// The chat's row in the sidebar is expanded (its children are shown). Left out means
+    /// keep what it was; the stored value leaves `false` out, since folded is the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub expanded: Option<bool>,
+    /// Ids of the transcript cards (note cards, page cards) the person has opened, most
+    /// recently opened last. A card whose id is not listed is folded. Left out means keep
+    /// what was; an empty list closes every card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    #[ts(type = "number[]")]
+    pub open_cards: Option<Vec<i64>>,
 }
 
 /// The roll-over stack of a chat, as `chat_stack` reports it: every session sharing the chat's
@@ -1628,6 +1658,16 @@ pub struct ChatSetModelArgs {
     #[serde(default)]
     #[ts(optional)]
     pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChatSetSidebarStateArgs {
+    pub chat_id: String,
+    /// The chat's open-item state. Fields merge one at a time: a field left out keeps what
+    /// the chat had, a field sent replaces it whole (last write wins); `null` — or no state
+    /// named at all — resets, everything folded.
+    pub state: Option<SidebarState>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]

@@ -2,6 +2,7 @@
 import type { ChatState } from "./ChatState";
 import type { ChatStatus } from "./ChatStatus";
 import type { Harness } from "./Harness";
+import type { SidebarState } from "./SidebarState";
 import type { TitleState } from "./TitleState";
 import type { UnreadState } from "./UnreadState";
 
@@ -80,4 +81,11 @@ prevSessionId: string | null,
  * The session that rolled over from this one; `null` for the newest, where the chat
  * carries on.
  */
-nextSessionId: string | null, };
+nextSessionId: string | null, 
+/**
+ * The chat's own open-item state — which transcript cards are opened and whether its
+ * sidebar row is expanded — so the chat shows the same on every PC that views it.
+ * `null` is the default: everything folded. The sidebar sets it through
+ * `chat_set_sidebar_state`; last write wins.
+ */
+sidebarState?: SidebarState, };

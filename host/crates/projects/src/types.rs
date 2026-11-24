@@ -174,6 +174,12 @@ pub struct SidebarRow {
     pub depth: u8,
     pub parent_chat_id: Option<String>,
     pub has_children: bool,
+    /// The chat's own open-item state says its row is expanded (its children are shown).
+    /// Read from the chat record, so the row is expanded on every PC that views the chat;
+    /// the chevron writes it through `chat_set_sidebar_state`. Left out when folded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub expanded: Option<bool>,
     pub status: ChatStatus,
     pub attention: Option<RowAttention>,
     pub pinned: bool,

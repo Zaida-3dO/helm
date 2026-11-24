@@ -10,7 +10,7 @@ use crate::wire::{
     PageIdArgs, PageOrigin, PagesReadArgs, PanelStageArgs, PersonInfo, ProfileInfo,
     ProjectCreateArgs, ProjectInfo, ProjectSetArgs, QuickOpenArgs, RemoteChat, RenameArgs,
     ResendArgs, RollOverArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SideResolveArgs,
-    SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError,
+    SidebarStateArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError,
 };
 use base64::Engine as _;
 use helm_chats::types::{
@@ -70,6 +70,7 @@ pub fn fake_record(id: &str, title: &str, revision: i64) -> ChatRecord {
         stack_id: None,
         prev_session_id: None,
         next_session_id: None,
+        sidebar_state: None,
     }
 }
 
@@ -158,6 +159,7 @@ pub struct FakeState {
     pub created: Vec<CreateArgs>,
     pub renamed: Vec<RenameArgs>,
     pub model_changes: Vec<SetModelArgs>,
+    pub sidebar_state_set: Vec<SidebarStateArgs>,
     pub archived: Vec<ArchiveArgs>,
     pub shared: Vec<ShareArgs>,
     /// For each fork: (chat id, fork id).
@@ -662,6 +664,11 @@ impl ChatPort for FakePort {
 
     fn set_model(&self, a: SetModelArgs) -> BoxFut<'_, PortResult<()>> {
         self.st().model_changes.push(a);
+        ready(Ok(()))
+    }
+
+    fn set_sidebar_state(&self, a: SidebarStateArgs) -> BoxFut<'_, PortResult<()>> {
+        self.st().sidebar_state_set.push(a);
         ready(Ok(()))
     }
 

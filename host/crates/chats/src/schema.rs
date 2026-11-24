@@ -485,6 +485,10 @@ fn late_columns(tx: &Transaction<'_>) -> rusqlite::Result<()> {
         // reload. Both stay null for every other send.
         ("submission_meta", "page_title", "TEXT"),
         ("submission_meta", "page_overview", "TEXT"),
+        // The chat's own open-item state (which transcript cards are opened, whether its
+        // sidebar row is expanded), so every PC viewing the chat shows the same. JSON as
+        // written by `chat_set_sidebar_state`; null means all folded.
+        ("chats", "sidebar_state", "TEXT"),
     ] {
         let has: bool = tx.query_row(
             "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",

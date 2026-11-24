@@ -1221,6 +1221,9 @@ fn row_from(r: &Row<'_>, revision: i64) -> rusqlite::Result<RawRow> {
             depth: 0,
             parent_chat_id: r.get(5)?,
             has_children: r.get::<_, i64>(12)? != 0,
+            // The real value rides in from the chat record in `finish`; the page query has
+            // no reason to parse JSON here.
+            expanded: None,
             status,
             // Unread and lingering come from the attention summary and the live thread;
             // the host fills what the database knows.
@@ -1394,6 +1397,13 @@ fn finish(
             if let Some(c) = helm_chats::archive::chat_record(tx, &r.row.chat_id, r.row.revision)? {
                 r.row.unread = c.unread.mark_token.is_some() || c.unread.completion_id.is_some();
                 r.row.muted = c.muted;
+                // The row's own open item: expanded for every PC that views the chat.
+                // Folded stays left out rather than written as false.
+                r.row.expanded = c
+                    .sidebar_state
+                    .as_ref()
+                    .is_some_and(|s| s.expanded == Some(true))
+                    .then_some(true);
                 r.row.stalled = c.stalled;
                 r.row.local = c.model.as_deref().is_some_and(|m| m.starts_with("local/"));
                 r.row.local_ahead = c.local_ahead;

@@ -32,7 +32,8 @@ import { SidebarActions, compactChat, exportChatMarkdown, rollOverChat, rollOver
 import { SidebarData, errorText } from './data.ts';
 import { canSitUnder, dropAction, passedThreshold, type DragSource, type DropTarget } from './drag.ts';
 import { chatMenuItems, projectMenuItems } from './menus.ts';
-import { buildList, chatAncestors, groupStatus, projectsHolding, rightCluster, titleCluster, visibleChatOrder, type GroupMarks, type ListView, type ListItem } from './model.ts';
+import { buildList, chatAncestors, effectiveExpanded, groupStatus, projectsHolding, rightCluster, titleCluster, visibleChatOrder, type GroupMarks, type ListView, type ListItem } from './model.ts';
+import { patchExpanded } from './state.ts';
 import { setVisibleOrder } from './rowOrder.ts';
 import { SidebarTop } from './SidebarTop.tsx';
 import { PromptDialog, type Prompt } from './PromptDialog.tsx';
@@ -319,6 +320,10 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const itemRefs = useItemRefs(useMemo(() => snap.rows.map((r) => r.chatId), [snap.rows]));
   const allItemRefs = useMemo(() => new Map([...itemRefs, ...remoteRefs]), [itemRefs, remoteRefs]);
   const flaggedIds = useMemo(() => new Set([...snap.needsYou, ...snap.flagged.keys(), ...remoteNeedsYouIds, ...remoteFlagReasons.keys()]), [snap.needsYou, snap.flagged, remoteNeedsYouIds, remoteFlagReasons]);
+  // Each row carries its chat's own open state; the window's set adds the auto-expansions
+  // that bring the open chat into view; a chat shut in this window stays shut until its
+  // write answers. See effectiveExpanded.
+  const expandedNow = useMemo(() => effectiveExpanded(shownRows, expanded, userCollapsed.current), [shownRows, expanded]);
   // Chats that finished a reply nobody has opened: the animated done status. The summary comes
   // from this PC, so chats of another PC never read as done (their read state lives over there).
   const finishedIds = useMemo(() => new Set((snap.attention?.finished ?? []).map((r) => r.chatId)), [snap.attention]);
@@ -327,7 +332,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       buildList(shownProjects, shownRows, {
         view: listView,
         compact,
-        expandedChats: expanded,
+        expandedChats: expandedNow,
         selectedChatId: selected,
         keptShut: keptShut.chat === selected ? keptShut.ids : undefined,
         flagged: flaggedIds,
@@ -335,7 +340,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         closed: remote ? undefined : snap.closed,
         itemLinks: currentView === 'activity' ? undefined : { refs: allItemRefs, collapsed: collapsedItems },
       }),
-    [shownProjects, shownRows, listView, currentView, compact, expanded, selected, keptShut, flaggedIds, finishedIds, snap.closed, allItemRefs, collapsedItems, remote],
+    [shownProjects, shownRows, listView, currentView, compact, expandedNow, selected, keptShut, flaggedIds, finishedIds, snap.closed, allItemRefs, collapsedItems, remote],
   );
   useEffect(() => setVisibleOrder(visibleChatOrder(items)), [items]);
   const projectsById = useMemo(() => new Map(shownProjects.map((p) => [p.id, p])), [shownProjects]);
@@ -357,18 +362,26 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     openNewChat(projectId ? { projectId } : {});
   };
 
-  const toggleChat = (id: string) =>
+  // The chat's own expanded state rides on its record (the row carries it, and a `chat`
+  // refresh re-patches it), so a chat is expanded the same on every PC. The window's own
+  // set adds the auto-expansions that made this chat visible (aids for this screen only);
+  // a chat collapsed here stays shut even while its record still says open, until that
+  // shut write answers and the record says shut too.
+  const toggleChat = (id: string) => {
+    const open = !expandedNow.has(id);
     setExpanded((s) => {
       const n = new Set(s);
-      if (n.has(id)) {
-        n.delete(id);
-        userCollapsed.current.add(id);
-      } else {
+      if (open) {
         n.add(id);
         userCollapsed.current.delete(id);
+      } else {
+        n.delete(id);
+        userCollapsed.current.add(id);
       }
       return n;
     });
+    void ops.setSidebarState(id, patchExpanded(open)).catch(() => undefined);
+  };
 
   // A running chat is archived through a confirmation that stops its task first.
   const archiveRow = (row: SidebarRow) => void act.archive(row);
@@ -435,7 +448,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       if (!record) return withChatIcons([{ id: 'rename', label: 'Rename chat…', onSelect: () => promptRename(row) }]);
       const { siblings, depthOf, heightOf } = nesting(other.rows, row);
       items = withChatIcons(chatMenuItems(
-        { row, projects: other.projects, siblings, heightOf, depthOf, expanded: expanded.has(row.chatId), view: archived ? 'archived' : currentView, profiles: remoteProfileChoices(device, record), shares: remoteShareChoices(device, record) },
+        { row, projects: other.projects, siblings, heightOf, depthOf, expanded: expandedNow.has(row.chatId), view: archived ? 'archived' : currentView, profiles: remoteProfileChoices(device, record), shares: remoteShareChoices(device, record) },
         {
           fork: () => void act.fork(row),
           rename: () => promptRename(row),
@@ -449,6 +462,8 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           nestUnder: (id) => {
             userCollapsed.current.delete(id);
             setExpanded((s) => new Set(s).add(id));
+            // The parent opens to show its new child, and that opening follows the chat.
+            void ops.setSidebarState(id, patchExpanded(true)).catch(() => undefined);
             void act.nestUnder(row, id);
           },
           topLevel: () => void act.topLevel(row),
@@ -464,7 +479,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     } else {
       const { siblings, depthOf, heightOf } = nesting(snap.rows, row);
       items = withChatIcons(chatMenuItems(
-        { row, projects: snap.projects, hidden: hiddenBoards, siblings, heightOf, depthOf, expanded: expanded.has(row.chatId), view: archived ? 'archived' : currentView, profiles: profileChoices(prof, row.chatId, snap.rows), shares: shareChoices(prof, row.chatId, snap.rows) },
+        { row, projects: snap.projects, hidden: hiddenBoards, siblings, heightOf, depthOf, expanded: expandedNow.has(row.chatId), view: archived ? 'archived' : currentView, profiles: profileChoices(prof, row.chatId, snap.rows), shares: shareChoices(prof, row.chatId, snap.rows) },
         {
           fork: () => void act.fork(row),
           rename: () => promptRename(row),
@@ -478,6 +493,8 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           nestUnder: (id) => {
             userCollapsed.current.delete(id);
             setExpanded((s) => new Set(s).add(id));
+            // The parent opens to show its new child, and that opening follows the chat.
+            void ops.setSidebarState(id, patchExpanded(true)).catch(() => undefined);
             void act.nestUnder(row, id);
           },
           topLevel: () => void act.topLevel(row),
@@ -681,6 +698,8 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         else {
           userCollapsed.current.delete(a.parentChatId);
           setExpanded((s) => new Set(s).add(a.parentChatId));
+          // The parent opens to show its new child, and that opening follows the chat.
+          void ops.setSidebarState(a.parentChatId, patchExpanded(true)).catch(() => undefined);
           void act.nestUnder(row, a.parentChatId, a.moveGroup ? a.groupId : undefined);
         }
       } else {

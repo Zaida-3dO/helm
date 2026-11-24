@@ -916,6 +916,37 @@ fn row(db: &Database, id: &str) -> SidebarRow {
         .unwrap()
 }
 
+/// The chat's open-item state rides onto its sidebar row, so the row reads expanded on
+/// every PC that views the chat (each keeps its own copy of the chat's record).
+#[test]
+fn a_chats_open_item_state_shows_on_its_sidebar_row() {
+    let (_d, db) = temp_db();
+    let c = chat_in(&db, "C:/w/app", 1);
+    assert_ne!(row(&db, &c).expanded, Some(true), "folded by default");
+    let set_state = |state: &str| {
+        db.write(|tx| {
+            tx.execute(
+                "UPDATE chats SET sidebar_state = ?1 WHERE id = ?2",
+                params![state, &c],
+            )
+        })
+        .unwrap();
+    };
+    set_state(r#"{"v":1,"expanded":true,"openCards":[7]}"#);
+    assert_eq!(row(&db, &c).expanded, Some(true));
+    // A state that only opens cards leaves the row folded; malformed text is no state.
+    set_state(r#"{"v":1,"openCards":[7]}"#);
+    assert_ne!(row(&db, &c).expanded, Some(true));
+    set_state("not json");
+    assert_ne!(
+        row(&db, &c).expanded,
+        Some(true),
+        "unreadable text is no state, never a page failure"
+    );
+    set_state("");
+    assert_ne!(row(&db, &c).expanded, Some(true));
+}
+
 #[test]
 fn dragging_a_chat_onto_a_group_writes_chat_groups_and_never_moves_where_it_runs() {
     let (_d, db) = temp_db();

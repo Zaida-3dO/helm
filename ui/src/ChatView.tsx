@@ -30,6 +30,7 @@ import { registerMessageAction } from './transcript/slots.ts';
 import { useShell } from './shell/context.ts';
 import { ConfirmDialog, toast, useLayer, type ConfirmSpec } from './ui/index.ts';
 import { rollOverChat, rollOverConfirm } from './sidebar/actions.ts';
+import { patchCardOpen } from './sidebar/state.ts';
 import { ContextBar } from './transcript/ContextBar.tsx';
 import { isTooLargeRefusal, type ChatContextReading } from './transcript/rowMeta.ts';
 import { isSignInError } from './transcript/signin.ts';
@@ -276,6 +277,20 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
     [ops, chatId],
   );
   const latestAssistantId = useMemo(() => [...view.rows].reverse().find((r) => r.role === 'assistant')?.id ?? null, [view.rows]);
+  // Which note/page cards this chat records as opened: the state rides on the chat, so the
+  // cards read open the same on every PC and survive the row virtualizing away. The op
+  // answers with the fresh record, which lands in the store at once; the chat's refresh
+  // event carries it to the other PCs.
+  const openCards = useMemo(() => new Set(chat?.sidebarState?.openCards ?? []), [chat?.sidebarState]);
+  const setCardOpen = useCallback(
+    (rowId: number, open: boolean) => {
+      void ops
+        .setSidebarState(chatId, patchCardOpen(chat?.sidebarState, rowId, open))
+        .then((rec) => store.chat(rec))
+        .catch(() => undefined);
+    },
+    [chat?.sidebarState, chatId, ops, store],
+  );
   const interactionOpen = (thread?.interactions.length ?? 0) > 0;
   const mentionRepo = useMentionRepo(shell.api, remote ? undefined : chat?.cwd);
   // chatState rides along so the waiting lines can show the queue hold's own copy (and arm its
@@ -323,8 +338,10 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       // Every link click goes through the panel's gate, which validates it before acting and
       // shows any refusal in the shell's toast slot itself.
       onLink: (t: LinkTarget) => void handleLink(t, { chatId }),
+      openCards,
+      setCardOpen,
     }),
-    [behavior.toolStop, thread?.capabilities.stopTool, thread?.stopCheck, stopTool, chatId, latestAssistantId, busy, interactionOpen, editing, ops, elements, mentionRepo, remote?.state.deviceName, chat?.model, remoteOn, forwardHere],
+    [behavior.toolStop, thread?.capabilities.stopTool, thread?.stopCheck, stopTool, chatId, latestAssistantId, busy, interactionOpen, editing, ops, elements, mentionRepo, remote?.state.deviceName, chat?.model, remoteOn, forwardHere, openCards, setCardOpen],
   );
 
   // Escape while the chat works stops the turn; whatever it had not read goes back to it at

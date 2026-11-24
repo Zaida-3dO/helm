@@ -4016,6 +4016,119 @@ async fn a_changed_chat_loses_its_pending_continuation() {
         .is_empty());
 }
 
+/// The chat's open-item state: one small blob holding the transcript cards it has opened
+/// and whether its sidebar row is expanded, so the chat shows the same on every PC. Writes
+/// merge field by field (the sidebar's toggle and the cards never erase each other); folded
+/// is the default, stored as no state.
+async fn set_sidebar(h: &H, chat: &str, state: Value) -> Result<Value, helm_ipc::ApiError> {
+    h.call(
+        "chat_set_sidebar_state",
+        json!({"chatId": chat, "state": state}),
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sidebar_state_follows_the_chat() {
+    let h = harness();
+    let chat = h.create().await;
+    let col = || {
+        h.col(&format!(
+            "SELECT sidebar_state FROM chats WHERE id = '{chat}'"
+        ))
+    };
+    let set = |state: Value| set_sidebar(&h, &chat, state);
+    // A new chat holds no state: the record leaves it out and the column is NULL.
+    let g = h.call("chat_get", json!({"chatId": &chat})).await.unwrap();
+    assert!(
+        g["chat"]["sidebarState"].is_null(),
+        "a new chat is all folded"
+    );
+    assert_eq!(col(), ["NULL"]);
+    // Opening a card stores the state and answers with the fresh record.
+    let r = set(json!({"v": 1, "openCards": [42]})).await.unwrap();
+    assert_eq!(r["sidebarState"]["openCards"], json!([42]));
+    assert_eq!(col(), ["{\"v\":1,\"openCards\":[42]}"]);
+    // The sidebar's toggle merges: expanding keeps the opened cards...
+    set(json!({"v": 1, "expanded": true})).await.unwrap();
+    assert_eq!(col(), ["{\"v\":1,\"expanded\":true,\"openCards\":[42]}"]);
+    // ...and a card patch keeps the row's expansion.
+    set(json!({"v": 1, "openCards": [42, 7]})).await.unwrap();
+    assert_eq!(col(), ["{\"v\":1,\"expanded\":true,\"openCards\":[42,7]}"]);
+    // Folding the row is a real sentence: it drops the expanded flag but keeps the cards.
+    set(json!({"v": 1, "expanded": false})).await.unwrap();
+    assert_eq!(col(), ["{\"v\":1,\"openCards\":[42,7]}"]);
+    // An empty card list folds every card; with nothing open at all the row stores null.
+    set(json!({"v": 1, "openCards": []})).await.unwrap();
+    assert_eq!(col(), ["NULL"]);
+    // null resets whatever was there.
+    set(json!({"v": 1, "expanded": true, "openCards": [1]}))
+        .await
+        .unwrap();
+    set(Value::Null).await.unwrap();
+    assert_eq!(col(), ["NULL"]);
+    // A write that changes nothing leaves the row alone, and a write that does changes
+    // nothing else: opening a card is not activity, so `updated_at` never moves.
+    let stamp = || {
+        h.col(&format!("SELECT updated_at FROM chats WHERE id = '{chat}'"))
+            .pop()
+            .unwrap()
+    };
+    let before = stamp();
+    set(json!({"v": 1, "openCards": [3]})).await.unwrap();
+    assert_ne!(col(), ["NULL"]);
+    assert_eq!(stamp(), before, "the state write leaves the age alone");
+    let r = set(json!({"v": 1, "openCards": [3]})).await.unwrap();
+    assert_eq!(r["sidebarState"]["openCards"], json!([3]));
+    assert_eq!(stamp(), before, "an equal write is a no-op");
+    // The chat_get answer carries the state whole.
+    let g = h.call("chat_get", json!({"chatId": &chat})).await.unwrap();
+    assert_eq!(g["chat"]["sidebarState"]["openCards"], json!([3]));
+    // Refusals: unknown chat; a version this build cannot read; a negative card id; an
+    // over-long card list. A call naming no state is not a refusal: it reads as the null.
+    let e = h
+        .call(
+            "chat_set_sidebar_state",
+            json!({"chatId": "nope", "state": {"v": 1, "expanded": true}}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, "not_found");
+    assert_eq!(
+        set(json!({"v": 2, "expanded": true}))
+            .await
+            .unwrap_err()
+            .code,
+        "bad_args"
+    );
+    assert_eq!(
+        set(json!({"v": 1, "openCards": [-1]}))
+            .await
+            .unwrap_err()
+            .code,
+        "bad_args"
+    );
+    let many: Vec<i64> = (0..257).collect();
+    assert_eq!(
+        set(json!({"v": 1, "openCards": many}))
+            .await
+            .unwrap_err()
+            .code,
+        "bad_args"
+    );
+    // A call that names no state reads as the null: everything folded again.
+    set(json!({"v": 1, "expanded": true})).await.unwrap();
+    let r = h
+        .call("chat_set_sidebar_state", json!({"chatId": &chat}))
+        .await
+        .unwrap();
+    assert!(
+        r["sidebarState"].is_null(),
+        "a call naming no state is the reset"
+    );
+    assert_eq!(col(), ["NULL"]);
+}
+
 /// One finished turn with a reply, on the fake worker.
 async fn finished_turn(h: &H, w: &mut FakeWorker, chat: &str, prompt: &str, mid: &str, text: &str) {
     h.send(chat, prompt, "default").await;

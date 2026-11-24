@@ -25,9 +25,9 @@ use crate::wire::{
     ForwardCloseArgs, ForwardOpenArgs, Frame, Hello, MoveProfileArgs, MuteArgs, Op, OrganizeArgs,
     PageArgs, PageIdArgs, PageOrigin, PagesReadArgs, PanelStageArgs, PeerDevice, ProjectCreateArgs,
     ProjectSetArgs, Push, QuickOpenArgs, RemoteChat, RenameArgs, ResendArgs, RollOverArgs,
-    SendArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SideResolveArgs, SnoozeArgs,
-    SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError, MAX_CHUNK_BYTES, MAX_PAGE_ROWS,
-    MAX_SEND_ATTACHMENTS, MAX_SEND_BYTES, MAX_UPLOAD_BYTES, SUB_ROWS,
+    SendArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SideResolveArgs, SidebarStateArgs,
+    SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError, MAX_CHUNK_BYTES,
+    MAX_PAGE_ROWS, MAX_SEND_ATTACHMENTS, MAX_SEND_BYTES, MAX_UPLOAD_BYTES, SUB_ROWS,
 };
 use base64::Engine as _;
 use helm_chats::types::{
@@ -242,6 +242,9 @@ pub trait ChatPort: Send + Sync {
     /// in its copy at once, before this PC's next list news.
     fn create(&self, a: CreateArgs) -> BoxFut<'_, PortResult<Value>>;
     fn set_model(&self, a: SetModelArgs) -> BoxFut<'_, PortResult<()>>;
+    /// The chat's open-item state (opened transcript cards, row expanded), applied here so
+    /// every PC viewing the chat shows the same.
+    fn set_sidebar_state(&self, a: SidebarStateArgs) -> BoxFut<'_, PortResult<()>>;
     fn rename(&self, a: RenameArgs) -> BoxFut<'_, PortResult<()>>;
     fn archive(&self, a: ArchiveArgs) -> BoxFut<'_, PortResult<()>>;
     fn share(&self, a: ShareArgs) -> BoxFut<'_, PortResult<()>>;
@@ -1069,6 +1072,10 @@ impl Inner {
             Op::Create(a) => done(self.port.create(a).await?),
             Op::SetModel(a) => {
                 self.port.set_model(a).await?;
+                done(json!({}))
+            }
+            Op::SetSidebarState(a) => {
+                self.port.set_sidebar_state(a).await?;
                 done(json!({}))
             }
             Op::Rename(a) => {
