@@ -697,3 +697,28 @@ test('hover actions join the row line instead of covering it: age and status giv
   assert.deepEqual([...hidden].sort(), ['sb-age', 'sb-chip', 'sb-status']);
   assert.ok(!hidden.has('sb-queue'), 'the queue stays through hover');
 });
+
+test('marks hug the title right after it, and the wheel/star slots keep the gap to the date', () => {
+  const css = readFileSync(new URL('./sidebar.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules = css.split('}').map((chunk) => {
+    const [selector = '', body = ''] = chunk.split('{');
+    return { sels: selector.split(',').map((s) => s.trim().replace(/\s+/g, ' ')), body };
+  });
+  const find = (sel: string) => rules.filter((r) => r.sels.includes(sel));
+  // The title block gives room but never stretches: the muted bell and the children count follow
+  // the title itself, and the auto margin puts all the slack between them and the right cluster.
+  const text = find('.sb-chat-text');
+  assert.equal(text.length, 1, 'the title block has one rule');
+  assert.match(text[0]!.body, /flex:\s*0 1 auto/, 'the title does not stretch, so its marks are not pushed to the row end');
+  const right = find('.sb-right');
+  assert.equal(right.length, 1, 'the right cluster has one rule');
+  assert.match(right[0]!.body, /margin-left:\s*auto/, 'queue, status and time stay pinned to the right edge');
+  // The 20 px wheel and 26 px star get slots of their own box: on the 13 px slot they overhung it
+  // and pressed into the queue and the date, so the cluster's 8 px gap is the visible gap again.
+  const width = (sel: string): string | undefined => {
+    const r = find(sel)[0];
+    return r?.body.match(/(?:^|[;\s])width:\s*([\d.]+px)/)?.[1];
+  };
+  for (const kind of ['running', 'lingering']) assert.equal(width(`.sb-status[data-kind='${kind}']`), '20px', `${kind}'s slot fits the 20 px wheel`);
+  for (const kind of ['done', 'unread']) assert.equal(width(`.sb-status[data-kind='${kind}']`), '26px', `${kind}'s slot fits the 26 px star`);
+});
