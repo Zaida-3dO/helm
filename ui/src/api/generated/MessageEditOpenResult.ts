@@ -4,4 +4,9 @@ export type MessageEditOpenResult = { messageId: number,
 /**
  * Pass back on resend; a message that changed meanwhile refuses it.
  */
-revision: number, text: string, };
+revision: number, text: string, 
+/**
+ * The message carries pictures or file references, which ride the resend: with them an
+ * empty text is still a sendable message. Default keeps an older PC's answer readable.
+ */
+hasAttachments: boolean, };

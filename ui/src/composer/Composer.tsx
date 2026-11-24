@@ -20,7 +20,7 @@ import { addRef, dropLandsIn, parseFileDrop, pathName, roomLeft, type AttachedRe
 import { ModelPicker } from './ModelPicker.tsx';
 import { isLocalModel } from './modelEffort.ts';
 import { PermissionChip } from './PermissionChip.tsx';
-import { bytesToBase64, isAnimated, refusal, unstagedOnly, type Attached } from './attachments.ts';
+import { bytesToBase64, hasSendContent, isAnimated, refusal, unstagedOnly, type Attached } from './attachments.ts';
 import { deviceOps } from '../devices/api.ts';
 import { bytesFromBase64 } from '../transcript/messageImages.ts';
 import { Recall } from './recall.ts';
@@ -492,7 +492,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
       const sentRefs = refsRef.current;
       if (blockedRef.current) return;
       setError(null);
-      if (!text.trim() && images.length === 0 && sentRefs.length === 0) return;
+      if (!hasSendContent(text, images.length, sentRefs.length)) return;
       if (sendingRef.current) return;
       // A Helm command is run here, not sent to Claude; the draft clears only once it has started.
       // `/rollover` works for a chat that runs elsewhere too: the op is routed to that PC.

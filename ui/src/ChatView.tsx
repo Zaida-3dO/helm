@@ -307,7 +307,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       onEdit: (row: MessageRow) => {
         ops
           .editOpen(chatId, row.id)
-          .then((o) => setEditing({ rowId: o.messageId, revision: o.revision, text: o.text }))
+          .then((o) => setEditing({ rowId: o.messageId, revision: o.revision, text: o.text, hasAttachments: o.hasAttachments === true }))
           .catch((e: unknown) => setNotice(e instanceof Error ? e.message : String(e)));
       },
       onResend: async (text: string) => {

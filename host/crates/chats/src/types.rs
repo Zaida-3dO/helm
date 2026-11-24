@@ -1700,6 +1700,10 @@ pub struct MessageEditOpenResult {
     #[ts(type = "number")]
     pub revision: i64,
     pub text: String,
+    /// The message carries pictures or file references, which ride the resend: with them an
+    /// empty text is still a sendable message. Default keeps an older PC's answer readable.
+    #[serde(default)]
+    pub has_attachments: bool,
 }
 
 /// `message_resend`: replaces the message and everything after it.
