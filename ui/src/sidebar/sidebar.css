@@ -693,7 +693,7 @@
 }
 
 /* The row's one status icon, folded from the row and (when collapsed) its children. */
-.sb-status {
+.sb-mark {
   width: 13px;
   height: 13px;
   flex: none;
@@ -710,18 +710,18 @@
    on the 13 px slot the wheel and the star hung over its edges and pressed into the queue and
    the date; grown, the cluster's 8 px gap reads as the real gap, like every other gap in the
    row. */
-.sb-status[data-kind='running'],
-.sb-status[data-kind='lingering'] {
+.sb-mark[data-kind='running'],
+.sb-mark[data-kind='lingering'] {
   width: 20px;
 }
 
-.sb-status[data-kind='done'],
-.sb-status[data-kind='unread'] {
+.sb-mark[data-kind='done'],
+.sb-mark[data-kind='unread'] {
   width: 26px;
 }
 
-.sb-status .sb-ind-wheel,
-.sb-status .sb-ind-star {
+.sb-mark .sb-ind-wheel,
+.sb-mark .sb-ind-star {
   position: absolute;
   left: 50%;
   top: 50%;
@@ -731,11 +731,11 @@
   translate: -50% -50%;
 }
 
-.sb-root[data-compact='true'] .sb-status .sb-ind-wheel {
+.sb-root[data-compact='true'] .sb-mark .sb-ind-wheel {
   scale: 0.85;
 }
 
-.sb-status[data-kind='interrupted']::before {
+.sb-mark[data-kind='interrupted']::before {
   content: '';
   width: 4px;
   height: 4px;
@@ -745,13 +745,13 @@
 
 /* The flag's three shades: a chat waiting on an answer, the idle check's quiet hunch, and what
    rides up from the chats under a collapsed parent. */
-.sb-status[data-kind='flagged'] {
+.sb-mark[data-kind='flagged'] {
   color: var(--warning-text, var(--sb-secondary));
 }
-.sb-status[data-kind='flagged'][data-flag-kind='quiet'] {
+.sb-mark[data-kind='flagged'][data-flag-kind='quiet'] {
   color: var(--att-triage, var(--sb-secondary));
 }
-.sb-status[data-kind='flagged'][data-flag-kind='under'] {
+.sb-mark[data-kind='flagged'][data-flag-kind='under'] {
   color: var(--att-triage, var(--sb-secondary));
 }
 
@@ -907,8 +907,8 @@
 /* On hover the age and the status give way to the actions; the queue (and the state word) do not. */
 .sb-chat-wrap:hover .sb-age,
 .sb-chat-wrap:focus-within .sb-age,
-.sb-chat-wrap:hover .sb-status,
-.sb-chat-wrap:focus-within .sb-status,
+.sb-chat-wrap:hover .sb-mark,
+.sb-chat-wrap:focus-within .sb-mark,
 .sb-chat-wrap:hover .sb-chip,
 .sb-chat-wrap:focus-within .sb-chip {
   display: none;
@@ -963,7 +963,7 @@
 }
 
 /* Running with no output for a while: the wheel dims (no glyph of its own). */
-.sb-status[data-stalled='true'] .sb-ind-wheel {
+.sb-mark[data-stalled='true'] .sb-ind-wheel {
   opacity: 0.5;
 }
 

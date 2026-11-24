@@ -694,7 +694,7 @@ test('hover actions join the row line instead of covering it: age and status giv
       for (const m of sel.matchAll(/\.(sb-[a-z-]+)(?![\w-])/g)) { const cls = m[1]; if (cls && cls !== 'sb-chat-wrap') hidden.add(cls); }
     }
   }
-  assert.deepEqual([...hidden].sort(), ['sb-age', 'sb-chip', 'sb-status']);
+  assert.deepEqual([...hidden].sort(), ['sb-age', 'sb-chip', 'sb-mark']);
   assert.ok(!hidden.has('sb-queue'), 'the queue stays through hover');
 });
 
@@ -719,6 +719,6 @@ test('marks hug the title right after it, and the wheel/star slots keep the gap 
     const r = find(sel)[0];
     return r?.body.match(/(?:^|[;\s])width:\s*([\d.]+px)/)?.[1];
   };
-  for (const kind of ['running', 'lingering']) assert.equal(width(`.sb-status[data-kind='${kind}']`), '20px', `${kind}'s slot fits the 20 px wheel`);
-  for (const kind of ['done', 'unread']) assert.equal(width(`.sb-status[data-kind='${kind}']`), '26px', `${kind}'s slot fits the 26 px star`);
+  for (const kind of ['running', 'lingering']) assert.equal(width(`.sb-mark[data-kind='${kind}']`), '20px', `${kind}'s slot fits the 20 px wheel`);
+  for (const kind of ['done', 'unread']) assert.equal(width(`.sb-mark[data-kind='${kind}']`), '26px', `${kind}'s slot fits the 26 px star`);
 });

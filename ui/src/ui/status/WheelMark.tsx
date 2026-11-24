@@ -14,6 +14,10 @@ export interface WheelMarkProps {
   className?: string;
   /** Set when the wheel marks a chat's activity: stopping dims to .55, calm (background work) to .6. */
   state?: WheelState;
+  /** The row-size drawing: bare strokes in flat colours (rim, eight spokes with handles, hub), no
+   *  keylines or gradients, so it still reads as a ship's wheel at 16-20 px, where the detailed art
+   *  muddies into a cog. */
+  simple?: boolean;
 }
 
 const SPOKES = [0, 45, 90, 135, 180, 225, 270, 315];
@@ -23,11 +27,12 @@ const polar = (deg: number, r: number) => {
   return { x: 50 + r * Math.cos(t), y: 50 + r * Math.sin(t) };
 };
 
-export function WheelMark({ size = 24, label, className, state }: WheelMarkProps) {
+export function WheelMark({ size = 24, label, className, state, simple }: WheelMarkProps) {
   const id = useId().replace(/:/g, '');
   const wood = `wm-wood-${id}`;
   const brass = `wm-brass-${id}`;
   const dome = `wm-dome-${id}`;
+  if (simple) return <SimpleWheel size={size} label={label} className={className} state={state} />;
   return (
     <span
       className={`ui-wheel${state ? ` ui-wheel-${state}` : ''}${className ? ` ${className}` : ''}`}
@@ -84,6 +89,34 @@ export function WheelMark({ size = 24, label, className, state }: WheelMarkProps
         {/* The hub: a brass collar and a domed bronze cap. */}
         <circle cx="50" cy="50" r="13" fill={`url(#${brass})`} stroke="#5e3d0c" strokeWidth="1" />
         <circle cx="50" cy="50" r="8" fill={`url(#${dome})`} />
+      </svg>
+    </span>
+  );
+}
+
+function SimpleWheel({ size, label, className, state }: Pick<WheelMarkProps, 'size' | 'label' | 'className' | 'state'>) {
+  return (
+    <span
+      className={`ui-wheel ui-wheel-simple${state ? ` ui-wheel-${state}` : ''}${className ? ` ${className}` : ''}`}
+      data-wheel-state={state}
+      style={{ width: size, height: size }}
+      role={label ? 'img' : undefined}
+      aria-label={label}
+      aria-hidden={label ? undefined : true}
+    >
+      <svg viewBox="0 0 100 100" width={size} height={size} focusable="false" fill="none" strokeLinecap="round">
+        {SPOKES.map((a) => {
+          const end = polar(a, 40);
+          const tip = polar(a, 47);
+          return (
+            <g key={a}>
+              <line className="wm-spoke" x1="50" y1="50" x2={end.x} y2={end.y} strokeWidth="5" />
+              <line className="wm-handle" x1={end.x} y1={end.y} x2={tip.x} y2={tip.y} strokeWidth="9" />
+            </g>
+          );
+        })}
+        <circle className="wm-rim" cx="50" cy="50" r="29" strokeWidth="7" />
+        <circle className="wm-hub" cx="50" cy="50" r="10" strokeWidth="3" />
       </svg>
     </span>
   );

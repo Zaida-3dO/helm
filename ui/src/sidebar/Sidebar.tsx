@@ -1072,8 +1072,8 @@ function projectIconNode(p: ProjectNode): ReactNode {
 function StatusGlyph({ kind, wheel }: { kind: RowStatus; wheel?: 'working' | 'stopping' }) {
   return (
     <>
-      {kind === 'running' && <WheelMark size={20} state={wheel ?? 'working'} className="sb-ind-wheel" />}
-      {kind === 'lingering' && <WheelMark size={20} state="calm" className="sb-ind-wheel" />}
+      {kind === 'running' && <WheelMark simple size={20} state={wheel ?? 'working'} className="sb-ind-wheel" />}
+      {kind === 'lingering' && <WheelMark simple size={20} state="calm" className="sb-ind-wheel" />}
       {kind === 'flagged' && <IconFlag size={12} filled />}
       {kind === 'draft' && <IconEdit size={11} />}
       {(kind === 'done' || kind === 'unread') && <StarMark size={26} className="sb-ind-star ui-star-shimmer" />}
@@ -1190,7 +1190,7 @@ function GroupHeader({
           </span>
           {gs && (
             <span
-              className="sb-status"
+              className="sb-mark"
               data-kind={gs}
               data-testid={gs === 'flagged' ? 'group-flag' : 'group-marks'}
               role="img"
@@ -1387,7 +1387,7 @@ function ChatRow({
   if (status)
     rightMarks.status = (
       <span
-        className="sb-status"
+        className="sb-mark"
         data-kind={status}
         data-testid={status === 'flagged' ? 'chat-flag' : 'row-status'}
         data-flag-kind={status === 'flagged' ? (needsYou ? 'you' : flagReason !== undefined ? 'quiet' : 'under') : undefined}
