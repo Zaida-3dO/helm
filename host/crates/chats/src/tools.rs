@@ -2639,7 +2639,7 @@ A helper started with Claude Code's Agent tool always runs on this chat's own mo
         ToolSpec::write(
             "app_roll_over",
             format!(
-                "Hand this chat's own work to a fresh chat at the end of this turn: you write the hand-off, the new chat carries on from it, and this chat is archived. Call it when Helm's context notice or your coordinator asks, or when your context has grown large. Only this chat is rolled over; to have another chat roll itself over, message it and ask it to call app_roll_over. model and effort are optional and say what the successor runs on. scheduled means noted, not done: {HAND_OFF_HEADINGS}{EXPLICIT}"
+                "Hand this chat's own work to a fresh chat at the end of this turn: you write the hand-off, the new chat carries on from it, and this chat is archived. Call it when Helm's context notice or your coordinator asks, or when your context has grown large. Only this chat is rolled over, but running subagents are cascade-noticed: each is asked to stop and write its own roll-over document, and the successor is told to restart one subagent per document. To have another chat roll itself over, message it and ask it to call app_roll_over. model and effort are optional and say what the successor runs on. scheduled means noted, not done: {HAND_OFF_HEADINGS}{EXPLICIT}"
             ),
             obj(
                 json!({

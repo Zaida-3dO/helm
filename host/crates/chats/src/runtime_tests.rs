@@ -430,7 +430,7 @@ impl H {
 }
 
 /// Play a short assistant reply on the fake worker.
-async fn reply(h: &H, w: &FakeWorker, mid: &str, text: &str) {
+pub async fn reply(h: &H, w: &FakeWorker, mid: &str, text: &str) {
     w.emit(json!({"type": "message_start", "message": {"id": mid, "role": "assistant", "content": []}}))
         .await;
     w.emit(json!({"type": "message_update", "messageId": mid, "index": 0, "delta": {"type": "text_delta", "text": &text[..text.len() / 2]}}))
