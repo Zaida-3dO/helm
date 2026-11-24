@@ -485,6 +485,12 @@ fn late_columns(tx: &Transaction<'_>) -> rusqlite::Result<()> {
         // reload. Both stay null for every other send.
         ("submission_meta", "page_title", "TEXT"),
         ("submission_meta", "page_overview", "TEXT"),
+        // What kind of message a chat-to-chat send or a Helm-written note is (a MessageKind in
+        // kebab-case: `steer`, `wait-finished`, ...). Null for the user's own sends and for
+        // notes that name no kind. `wait_chat` rides with `wait-finished` notes about a chat:
+        // the watched chat as JSON {chatId,title}, so the compact line can name it.
+        ("submission_meta", "kind", "TEXT"),
+        ("submission_meta", "wait_chat", "TEXT"),
     ] {
         let has: bool = tx.query_row(
             "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",

@@ -282,6 +282,8 @@ fn start(
             text: REQUEST,
             origin: SubmissionOrigin::App,
             page: None,
+            kind: None,
+            wait: None,
         },
     ) {
         IN_FLIGHT.lock().unwrap().remove(&chat.id);
@@ -565,6 +567,8 @@ async fn carry_on(
             context: None,
             page_title: None,
             page_overview: None,
+            // The successor's brief is Helm's own continuation word: no chat-to-chat kind.
+            kind: None,
         },
         None,
     );
@@ -800,6 +804,8 @@ mod tests {
                 text: "write the hand-off",
                 origin: SubmissionOrigin::Schedule,
                 page: None,
+                kind: None,
+                wait: None,
             },
         )
         .unwrap();

@@ -139,6 +139,8 @@ fn set_mode(ctx: &OpCtx, a: &ModeSetArgs) -> Result<(), ApiError> {
                         text: &workmode::switch_line(now_mode),
                         origin: helm_chats::types::SubmissionOrigin::App,
                         page: None,
+                        kind: None,
+                        wait: None,
                     },
                 );
             }

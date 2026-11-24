@@ -2067,6 +2067,9 @@ impl Actor {
                     text: &text,
                     origin: crate::types::SubmissionOrigin::App,
                     page: None,
+                    // A note from Helm to the parent, asking it to notice its child: a nudge.
+                    kind: Some(crate::types::MessageKind::Nudge),
+                    wait: None,
                 },
             );
             if let Err(e) = sent {
@@ -2130,6 +2133,9 @@ impl Actor {
                     text: &text,
                     origin: crate::types::SubmissionOrigin::App,
                     page: None,
+                    // The corrective word is a nudge from Helm to the agent.
+                    kind: Some(crate::types::MessageKind::Nudge),
+                    wait: None,
                 },
             );
             if let Err(e) = sent {
@@ -2908,6 +2914,14 @@ impl Actor {
             }
             if let Some(o) = &sub.page_overview {
                 details["pageOverview"] = json!(o);
+            }
+            // A chat-to-chat send or a note Helm wrote carries its kind for the chip's tag; a
+            // `wait-finished` note also carries the chat it is about, so the short line can name it.
+            if let Some(k) = sub.kind {
+                details["kind"] = json!(k);
+            }
+            if let Some(w) = &sub.wait_chat {
+                details["waitChat"] = json!(w);
             }
             let images = crate::message_images::for_submission(&self.sh.db, sid);
             if !images.is_empty() {
@@ -4738,6 +4752,8 @@ impl Actor {
                         .filter(|o| *o != SubmissionOrigin::Typed),
                     page_title: sub.as_ref().and_then(|s| s.page_title.clone()),
                     page_overview: sub.as_ref().and_then(|s| s.page_overview.clone()),
+                    kind: sub.as_ref().and_then(|s| s.kind),
+                    wait_chat: sub.as_ref().and_then(|s| s.wait_chat.clone()),
                     images: (!images.is_empty()).then_some(images),
                     refs: (!refs.is_empty()).then_some(refs),
                     ..Default::default()

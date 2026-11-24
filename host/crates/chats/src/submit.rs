@@ -50,6 +50,9 @@ pub(crate) struct NewSubmission<'a> {
     pub state: SubmissionState,
     pub origin: SubmissionOrigin,
     pub priority: Option<&'a str>,
+    /// The kind of a chat-to-chat send or a note Helm wrote ([`MessageKind`]); none for the
+    /// user's own sends.
+    pub kind: Option<MessageKind>,
     pub now: i64,
 }
 
@@ -66,6 +69,7 @@ pub(crate) fn insert_submission(
         state,
         origin,
         priority,
+        kind,
         now,
         ..
     } = *s;
@@ -74,8 +78,8 @@ pub(crate) fn insert_submission(
         params![id, chat_id, text, store::mode_str(mode), store::state_str(state), now],
     )?;
     tx.execute(
-        "INSERT INTO submission_meta(submission_id, origin, priority) VALUES (?1, ?2, ?3)",
-        params![id, origin.as_str(), priority],
+        "INSERT INTO submission_meta(submission_id, origin, priority, kind) VALUES (?1, ?2, ?3, ?4)",
+        params![id, origin.as_str(), priority, kind.map(MessageKind::as_str)],
     )?;
     // The user writing in the chat (here or on another of their devices) answers anything its
     // agent flagged for them.
@@ -250,6 +254,7 @@ pub fn chat_send(
                     state,
                     origin: origin.into(),
                     priority,
+                    kind: a.kind,
                     now,
                 },
             )?;
@@ -392,6 +397,12 @@ pub struct HostSend<'a> {
     /// For origin `page` brought in from another PC: the page's name and short summary, kept
     /// with the message so its card shows there too.
     pub page: Option<(&'a str, &'a str)>,
+    /// The kind of this message ([`MessageKind`]): the kind a chat-to-chat send carries, or the
+    /// specific kind of a note written inside Helm. None for sends that name no kind.
+    pub kind: Option<MessageKind>,
+    /// For a `wait-finished` note about a chat: the watched chat's id and title, stored beside
+    /// the message so the transcript's compact line can name it without its id.
+    pub wait: Option<(&'a str, &'a str)>,
 }
 
 /// Cut a display label to at most `chars` characters (a card label, not the message).
@@ -698,6 +709,7 @@ fn host_send_inner(
                 state,
                 origin: s.origin,
                 priority: None,
+                kind: s.kind,
                 now,
             },
         )?;
@@ -712,6 +724,19 @@ fn host_send_inner(
             tx.execute(
                 "UPDATE submission_meta SET page_title = ?2, page_overview = ?3 WHERE submission_id = ?1",
                 params![s.submission_id, clip(title, 240), clip(overview, 2000)],
+            )?;
+        }
+        if let Some((chat_id, title)) = s.wait {
+            tx.execute(
+                "UPDATE submission_meta SET wait_chat = ?2 WHERE submission_id = ?1",
+                params![
+                    s.submission_id,
+                    serde_json::to_string(&WatchedChat {
+                        chat_id: chat_id.to_owned(),
+                        title: clip(title, 512),
+                    })
+                    .unwrap_or_default()
+                ],
             )?;
         }
         if !ids.is_empty() {
@@ -859,6 +884,7 @@ pub fn continuation(rt: &ChatRuntime, chat_id: &str) -> Result<(), ApiError> {
                     origin: SubmissionOrigin::App,
                     priority: None,
                     now,
+                kind: None,
                 },
             )?;
             let artifacts = rt.sh.cfg.artifacts();

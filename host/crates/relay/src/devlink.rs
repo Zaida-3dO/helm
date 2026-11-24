@@ -232,9 +232,10 @@ impl ChatPort for ChannelPort {
         device: DeviceInfo,
         files: Vec<SentFile>,
         page: Option<helm_devices::wire::PageOrigin>,
+        kind: Option<String>,
     ) -> BoxFut<'_, PortResult<()>> {
         self.port
-            .send(chat_id, client_id, text, from, device, files, page)
+            .send(chat_id, client_id, text, from, device, files, page, kind)
     }
     fn stop(&self, chat_id: String, no_resend: bool) -> BoxFut<'_, PortResult<()>> {
         self.port.stop(chat_id, no_resend)

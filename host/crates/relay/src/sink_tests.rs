@@ -994,6 +994,9 @@ async fn a_message_starts_the_telegram_chat_with_origin_telegram_and_is_stored_o
             text: "one more",
             origin: helm_chats::types::SubmissionOrigin::App,
             page: None,
+
+            kind: None,
+            wait: None,
         },
         &[],
         &[HostFile {
@@ -1277,7 +1280,7 @@ async fn a_relayed_outside_send_is_stored_as_another_chat_never_as_typed() {
     });
     let call = crate::gate::admit(
         "app_send_message",
-        &json!({"chatId": chat, "message": "from remote", "mode": "queue"}),
+        &json!({"chatId": chat, "message": "from remote", "kind": "update", "mode": "queue"}),
     )
     .unwrap();
     use crate::client::Executor;
@@ -1466,7 +1469,7 @@ async fn outside_calls_reach_reads_and_sends_cross_to_another_pc() {
     // A send for Sam crosses, framed as acting for them, steer, and not the composer's.
     let call = crate::gate::admit(
         "app_send_message",
-        &json!({"chatId": MIRRORED, "message": "Cross-PC note.", "mode": "steer"}),
+        &json!({"chatId": MIRRORED, "message": "Cross-PC note.", "kind": "update", "mode": "steer"}),
     )
     .unwrap();
     let r = exec
@@ -1492,14 +1495,14 @@ async fn outside_calls_reach_reads_and_sends_cross_to_another_pc() {
     // An archived copy refuses, and a chat no copy holds stays unknown.
     let call = crate::gate::admit(
         "app_send_message",
-        &json!({"chatId": MIRRORED_ARCHIVED, "message": "x", "mode": "steer"}),
+        &json!({"chatId": MIRRORED_ARCHIVED, "message": "x", "kind": "update", "mode": "steer"}),
     )
     .unwrap();
     let e1 = exec.run("remote-caller", None, call).await.unwrap_err();
     assert!(e1.text.contains("archived"), "{}", e1.text);
     let call = crate::gate::admit(
         "app_send_message",
-        &json!({"chatId": "0f0f0f0f-7777-8888-9999-000000000003", "message": "x", "mode": "steer"}),
+        &json!({"chatId": "0f0f0f0f-7777-8888-9999-000000000003", "message": "x", "kind": "update", "mode": "steer"}),
     )
     .unwrap();
     let e2 = exec.run("remote-caller", None, call).await.unwrap_err();

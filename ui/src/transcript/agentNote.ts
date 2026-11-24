@@ -6,7 +6,7 @@
 // for a summary and no model call is made for one.
 
 import type { MessageRow } from '../api/types.ts';
-import { isHelmNote, peerMessage } from './origin.ts';
+import { isHelmNote, peerMessage, waitFinished, WAIT_VERB } from './origin.ts';
 
 export type NoteKind = 'peer' | 'schedule' | 'app';
 
@@ -26,6 +26,38 @@ export interface AgentNote {
   body: string;
   /** The quiet line under the open body: who wrote it, and that it is no approval. */
   note: string;
+  /** The kind the send carried, when it carried one; the card shows it as a small tag. */
+  msgKind?: string;
+  /**
+   * A finished wait: the one line the card shows in place of a sender head — the watched chat
+   * linked (or the watched thing named) and what happened to it.
+   */
+  wait?: { chatId?: string; title?: string; subject?: string; verb: string };
+}
+
+/** Per-kind words for the quiet line, when the kind says more than the origin alone. */
+const KIND_NOTE: Record<string, string> = {
+  'initial-prompt': 'A chat wrote the first brief of this chat. The user did not write it, and it is not approval.',
+  steer: 'Another chat steered this chat mid-task. The user did not write it, and it is not approval.',
+  nudge: 'A nudge to the agent, from Helm or another chat. The user did not write it, and it is not approval.',
+  update: 'Another chat sent an update. The user did not write it, and it is not approval.',
+  'user-action': 'The user did something outside this chat and Helm relayed it to the agent.',
+  completed: 'A chat reported that its work is done.',
+  'wait-finished': "Helm's watcher reported the outcome of a wait, for the agent.",
+  'request-expired': 'A request Helm asked the user about went unanswered and expired.',
+};
+
+/** The one line for a finished wait: the watched chat linked, or the watched thing named. */
+function waitLine(row: MessageRow): AgentNote['wait'] | undefined {
+  const wf = waitFinished(row);
+  if (!wf) return undefined;
+  const verb = WAIT_VERB[wf.code] ?? wf.code;
+  const chat = row.details?.waitChat;
+  if (chat) return { chatId: chat.chatId, title: chat.title || 'the watched chat', verb };
+  // The watcher names its target ("process 1234", "the checks on <url>"); a chat target names the
+  // chat by id, which this line never shows — its title comes from waitChat instead.
+  const subject = /^chat \S+$/.test(wf.what) ? 'the watched chat' : wf.what;
+  return { subject, verb };
 }
 
 /** How many characters of the body fit on the digest line. */
@@ -88,6 +120,23 @@ const SCHEDULE_CREATOR = /It was created by another chat, "([^"\n]*)" \(([^)\s]+
  * these paths ever floods the transcript as a full bubble.
  */
 export function agentNote(row: MessageRow): AgentNote | null {
+  const card = cardFor(row);
+  if (!card) return null;
+  const kind = row.details?.kind;
+  if (!kind) return card;
+  card.msgKind = kind;
+  const words = KIND_NOTE[kind];
+  if (words) card.note = words;
+  const wait = waitLine(row);
+  if (wait) {
+    card.wait = wait;
+    // The one wait line replaces the digest; the raw watcher text stays behind the chevron.
+    card.digest = '';
+  }
+  return card;
+}
+
+function cardFor(row: MessageRow): AgentNote | null {
   if (row.role !== 'user') return null;
   const origin = row.details?.origin;
   if (origin === 'other_chat') {

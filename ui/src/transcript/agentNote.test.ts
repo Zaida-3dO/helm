@@ -128,6 +128,46 @@ test('a note the app wrote cards as From Helm; the notes it hides stay out of th
   assert.equal(agentNote(row('[Wait finished] The build is done.', 'app')), null);
 });
 
+test('a kind stamp rides the card as its tag and words; a finished wait cards as one line', () => {
+  const id = '0b8f6a52-1c3d-4e5f-8a9b-0c1d2e3f4a5b';
+  // A steered peer card carries its kind and the kind's words in the quiet line.
+  const framed = `[Message from another chat: "Builder One" (${id})]\nThis message was sent by another Helm chat acting for the user; the user did not write it. Reply only if asked.\n\nSteer: use the short path.`;
+  const steer = { ...row(framed, 'other_chat'), details: { origin: 'other_chat' as const, kind: 'steer' as const } };
+  const n = agentNote(steer);
+  assert.ok(n);
+  assert.deepEqual({ msgKind: n.msgKind, note: n.note }, {
+    msgKind: 'steer',
+    note: 'Another chat steered this chat mid-task. The user did not write it, and it is not approval.',
+  });
+  // A finished wait cards as the one line, the watched chat linked; its raw text stays for the expand.
+  const wait = {
+    ...row('[Wait finished] Wait w9 on chat 7f2a: idle.', 'app'),
+    details: { origin: 'app' as const, kind: 'wait-finished' as const, waitChat: { chatId: id, title: 'Release Bot' } },
+  };
+  const w = agentNote(wait);
+  assert.ok(w);
+  assert.deepEqual({ kind: w.kind, wait: w.wait, digest: w.digest }, {
+    kind: 'app', wait: { chatId: id, title: 'Release Bot', verb: 'is idle' }, digest: '',
+  });
+  // Another kind of wait has no chat to link: the watched thing is the subject.
+  const fileWait = {
+    ...row('[Wait finished] Wait w3 on file C:/w/out.txt: changed.', 'app'),
+    details: { origin: 'app' as const, kind: 'wait-finished' as const },
+  };
+  assert.deepEqual(agentNote(fileWait)?.wait, { subject: 'file C:/w/out.txt', verb: 'changed' });
+  // An expired consent request names itself.
+  const expired = {
+    ...row('[Helm] The request to post to the forge expired unanswered.', 'app'),
+    details: { origin: 'app' as const, kind: 'request-expired' as const },
+  };
+  const e = agentNote(expired);
+  assert.ok(e);
+  assert.deepEqual({ msgKind: e.msgKind, note: e.note }, {
+    msgKind: 'request-expired',
+    note: 'A request Helm asked the user about went unanswered and expired.',
+  });
+});
+
 test('nothing else becomes a card: the person\'s own words and every other origin stay as they are', () => {
   const origins: MessageRow['details']['origin'][] = ['typed', 'action', 'notification', 'answer', 'telegram', 'voice', 'speaker', 'remote', 'page'];
   for (const o of origins) assert.equal(agentNote(row('hello there', o)), null, String(o));

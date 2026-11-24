@@ -377,6 +377,12 @@ pub struct SendArgs {
     /// own typing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<PageOrigin>,
+    /// The message's kind word (`steer`, `update`, ... — see the chats crate's message kinds),
+    /// set when the sending side is a chat rather than a person's typing: it rides the wire so
+    /// the chat that runs the message stores the kind with it and the transcript card can tag
+    /// it. An unknown word is kept as no kind. Absent for the person's own typing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// The display words of a page's message, as the page named them: its name and a short summary.

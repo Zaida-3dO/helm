@@ -1696,6 +1696,11 @@ impl RemoteChats for Mirror {
                 args["page"] =
                     json!({ "title": page_title.clone(), "overview": page_overview.clone() });
             }
+            // A chat-to-chat send names its kind; it rides the wire so the far chat stores the
+            // message with the kind it was sent as and its card shows it.
+            if let Some(k) = a.kind {
+                args["kind"] = json!(k.as_str());
+            }
             m.ask_as(&device, "send", args, "this message", &act)
                 .await?;
             // The message arrived: this PC has no further use for the staged files.

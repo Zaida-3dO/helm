@@ -13,7 +13,7 @@ import { MessageRefs } from './MessageRefs.tsx';
 import { OptionBoardCard } from './OptionBoard.tsx';
 import { RecapCard } from './RecapCard.tsx';
 import { agentNote, type AgentNote } from './agentNote.ts';
-import { bubbleText, fromTelegram, pageMessage, typedOn } from './origin.ts';
+import { bubbleText, fromTelegram, KIND_TAG, pageMessage, typedOn } from './origin.ts';
 import { messageTimeLabel } from './rowMeta.ts';
 import { IconMonitor, IconPaperPlane } from '../ui/icons.tsx';
 import { ReplyActions, UserActions } from './MessageActions.tsx';
@@ -176,6 +176,7 @@ const NOTE_HEAD: Record<AgentNote['kind'], string> = { peer: 'Message from ', sc
  * sending chat when a chat did) and a one-line digest, the whole text behind the chevron. */
 function NoteCard({ note, ctx }: { note: AgentNote; ctx: RowContext }) {
   const [open, setOpen] = useState(false);
+  const wait = note.wait;
   const link = (
     <button type="button" className="note-card-from" data-testid="note-card-from" onClick={() => ctx.onLink({ kind: 'chat', href: `helm://chats/${note.chatId}` })}>
       {note.sender}
@@ -188,20 +189,41 @@ function NoteCard({ note, ctx }: { note: AgentNote; ctx: RowContext }) {
           <Glyph name="chevron" size={12} className="note-card-chevron" />
         </button>
         <Glyph name={NOTE_GLYPH[note.kind]} size={12} className="note-card-glyph" />
-        <span className="note-card-title" data-testid="note-card-title">
-          {NOTE_HEAD[note.kind]}
-          {note.senderIsLink && note.chatId ? link : note.sender}
-          {!note.senderIsLink && note.chatId && (
-            <>
-              {' by '}
-              <button type="button" className="note-card-from" data-testid="note-card-by" onClick={() => ctx.onLink({ kind: 'chat', href: `helm://chats/${note.chatId}` })}>
-                {note.chatTitle || 'the chat that made it'}
+        {wait ? (
+          <span className="note-card-title" data-testid="note-card-wait">
+            The{' '}
+            {wait.chatId ? (
+              <button type="button" className="note-card-from" data-testid="note-card-wait-chat" onClick={() => ctx.onLink({ kind: 'chat', href: `helm://chats/${wait.chatId}` })}>
+                {wait.title}
               </button>
-            </>
-          )}
-        </span>
+            ) : (
+              wait.subject
+            )}{' '}
+            {wait.verb}
+          </span>
+        ) : (
+          <>
+            <span className="note-card-title" data-testid="note-card-title">
+              {NOTE_HEAD[note.kind]}
+              {note.senderIsLink && note.chatId ? link : note.sender}
+              {!note.senderIsLink && note.chatId && (
+                <>
+                  {' by '}
+                  <button type="button" className="note-card-from" data-testid="note-card-by" onClick={() => ctx.onLink({ kind: 'chat', href: `helm://chats/${note.chatId}` })}>
+                    {note.chatTitle || 'the chat that made it'}
+                  </button>
+                </>
+              )}
+            </span>
+            {note.msgKind && KIND_TAG[note.msgKind] && (
+              <span className="note-card-kind" data-testid="note-card-kind" data-msg-kind={note.msgKind}>
+                {KIND_TAG[note.msgKind]}
+              </span>
+            )}
+          </>
+        )}
       </div>
-      {!open && note.digest && <div className="note-card-digest" data-testid="note-card-digest">{note.digest}</div>}
+      {note.digest && <div className="note-card-digest" data-testid="note-card-digest">{note.digest}</div>}
       {open && (
         <>
           {/* The summary stays first when the card opens, so opening never loses the one line

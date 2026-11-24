@@ -884,6 +884,10 @@ pub struct Delivery {
     pub chat_id: String,
     pub submission_id: String,
     pub text: String,
+    /// What this note is, in the message-kind words the host stores: the user's decision
+    /// relayed to the agent ("user-action"), or the notice that the request expired
+    /// ("request-expired"). A chat that never answered is the only thing it can be told.
+    pub kind: &'static str,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -955,8 +959,13 @@ pub fn upkeep(db: &Database, kinds: &AllowKinds, now: i64) -> Result<Upkeep, Api
                 // retried delivery is the same submission and is held at most once.
                 submission_id: v.id.clone(),
                 text: decision_text(&v),
-                request_id: v.id,
-                chat_id: v.chat_id,
+                request_id: v.id.clone(),
+                chat_id: v.chat_id.clone(),
+                kind: if v.state == RequestState::Expired {
+                    "request-expired"
+                } else {
+                    "user-action"
+                },
             })
             .collect();
         Ok(Upkeep {

@@ -418,6 +418,10 @@ fn consent_tick(
                 text: &d.text,
                 origin: helm_chats::types::SubmissionOrigin::App,
                 page: None,
+                // The upkeep note names what it is: the user's decision relayed, or the notice
+                // that the request expired.
+                kind: helm_chats::types::MessageKind::parse(d.kind),
+                wait: None,
             },
         );
         match sent {

@@ -1232,8 +1232,22 @@ fn parse_mode(s: &str) -> SubmissionMode {
 /// A submission with no origin row reads as `unknown`, which parses to `app`: never the user's own
 /// typing, so it cannot pass for consent.
 const SUBMISSION_SELECT: &str = "SELECT s.id, s.chat_id, s.text, s.mode, s.state, \
-     COALESCE(m.origin, 'unknown'), s.created_at, m.priority, m.page_title, m.page_overview \
+     COALESCE(m.origin, 'unknown'), s.created_at, m.priority, m.page_title, m.page_overview, \
+     m.kind, m.wait_chat \
      FROM submissions s LEFT JOIN submission_meta m ON m.submission_id = s.id";
+
+/// The stored kind text: anything unknown reads as no kind, so a value from a newer version
+/// never breaks an older reader.
+fn parse_kind(s: Option<String>) -> Option<MessageKind> {
+    s.as_deref().and_then(MessageKind::parse)
+}
+
+/// The JSON object naming the chat a `wait-finished` note is about; unreadable text reads as
+/// no chat.
+fn parse_wait_chat(s: Option<String>) -> Option<WatchedChat> {
+    let raw = s?;
+    serde_json::from_str(&raw).ok()
+}
 
 fn submission_from_row(r: &Row<'_>) -> rusqlite::Result<Submission> {
     Ok(Submission {
@@ -1248,6 +1262,8 @@ fn submission_from_row(r: &Row<'_>) -> rusqlite::Result<Submission> {
         refs: None,
         page_title: r.get(8)?,
         page_overview: r.get(9)?,
+        kind: parse_kind(r.get(10)?),
+        wait_chat: parse_wait_chat(r.get(11)?),
     })
 }
 

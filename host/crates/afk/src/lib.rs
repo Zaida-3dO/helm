@@ -57,6 +57,8 @@ impl DigestSender for RuntimeSender {
                 text,
                 origin: helm_chats::types::SubmissionOrigin::App,
                 page: None,
+                kind: None,
+                wait: None,
             },
         )
         .map(|_| ())
@@ -99,6 +101,8 @@ impl AfkHooks for RuntimeHooks {
                 text,
                 origin: helm_chats::types::SubmissionOrigin::App,
                 page: None,
+                kind: None,
+                wait: None,
             },
         )
         .map(|_| ())
