@@ -63,6 +63,11 @@ pub const NAMED: &[(&str, Risk, &str)] = &[
         Risk::High,
         "Helm writes this file while local models are unloaded, so you approve where.",
     ),
+    (
+        "workmode",
+        Risk::High,
+        "It decides how much a chat may decide on its own, so only you change it: the chat stages it and you approve.",
+    ),
     // The Claude Code runtime switches (Settings > Runtime), kept in a file Helm's workers read.
     (
         "shellChanges",
