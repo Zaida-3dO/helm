@@ -64,6 +64,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `tool-stop` | Stop on a running tool card (only when supported) | |
 | `tool-save-full` / `tool-saved` | Save full output on a long output (the row holds only its start), and the line beside it | |
 | `work-fold-open` | The "Worked for …" row of a turn the reader has opened (click to fold again); the closed row keeps `work-fold` | |
+| `progress-line` | The one progress line an agent declared with `app_progress`: a quiet single line under the turn's work group; when superseded it folds into the group as an ordinary row, and one kept above a mid-turn message marks where the agent was | `data-pinned` = `true` on the marker above the person's mid-turn message |
 | `work-failed` | The "N failed" count on a "Worked for" row | |
 | `session-divider` | The thin divider where two sessions of a roll-over stack meet in one transcript ("Earlier session · <title> · rolled over <date>") | |
 | `tool-status` / `tool-box` / `result-grid` | A tool row's trailing status, its opened output or diff box, and the key/value grid for host and MCP results | `tool-card` also carries `data-source` (`host` `mcp` `native`) |

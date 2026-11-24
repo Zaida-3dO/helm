@@ -26,7 +26,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { after, before, describe, test } from "node:test";
 import { startFakeTelegram, type FakeTelegram } from "../../fakes/telegram/server.ts";
-import { api, APP_BROWSER_ARGS, dispose, E2E_FIXTURE, FAKE_CLAUDE, launchApp, newChat, openChat, REPO, scratchDir, tid, waitText, type App } from "./harness.ts";
+import { api, APP_BROWSER_ARGS, dispose, E2E_FIXTURE, FAKE_CLAUDE, launchApp, newChat, openChat, REPO, scratchDir, tid, unfoldAll, waitText, type App } from "./harness.ts";
 
 const HUB_EXE =
   process.env.HELM_E2E_HUB_EXE ?? path.join(REPO, "hub", "target", "debug", process.platform === "win32" ? "helm-hub.exe" : "helm-hub");
@@ -172,6 +172,9 @@ describe("the hub line, forwarding and the Telegram bot", { timeout: 10 * 60_000
   test("R3: a message from outside arrives framed as an agent's, not the user's", async () => {
     const r = await mcp("app_send_message", { chatId: chat, message: "E2E relay hello", mode: "steer" });
     assert.notEqual(r.isError, true, text(r));
+    // A message from another chat mid-turn is agent traffic: it sits inside the turn's collapsed
+    // work group. Unfold the group first rather than expecting it loose in the flow.
+    await unfoldAll(app!.page);
     await waitText(app!.page, "E2E relay hello");
     // This caller's token belongs to the hub's owner, and this PC now knows that person as its
     // home profile's, so Helm frames it as an agent acting for that person by name — still an

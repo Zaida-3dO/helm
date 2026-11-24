@@ -20,11 +20,16 @@
 // and counts the work folded under it, and the transcript does not jump at settle — only the
 // header's "what it is doing now" word changes.
 //
+// A declared progress line (an app_progress call) sits under that group as the turn's newest
+// visible thing. A newer line, a real agent message or the reply folds the old one into the group
+// as a thought-style row; when the person speaks mid-turn, the line that was current at that
+// moment stays in the flow above their message, as the mark of where the agent was.
+//
 // A row with nothing to show — the empty message each tool call is saved under — is never drawn at
 // all, closed or opened: hidden tool activity takes no space rather than leaving an empty gap.
 
 import type { MessageRow } from '../api/types.ts';
-import { isCardRow } from './cards.ts';
+import { isCardRow, progressText } from './cards.ts';
 import { buildRecap, type Recap } from './recap.ts';
 import { agentNote } from './agentNote.ts';
 import { isHelmNote, isQuietReply, isUserAction, pageMessage } from './origin.ts';
@@ -74,6 +79,11 @@ export type Item =
     }
   // Agent calls that follow one another, drawn as one header over a grid of subagent cards.
   | { kind: 'agents'; key: string; rows: MessageRow[]; flags: RowFlags[] }
+  // A declared progress line (an app_progress call): one short line on what the agent is doing.
+  // The newest one stands under the turn's work group, the newest thing in the turn; `pinned`
+  // marks one kept in the flow above the person's mid-turn message, as the mark of where the
+  // agent was when they spoke.
+  | { kind: 'progress'; key: string; row: MessageRow; text: string; pinned?: boolean }
   // Where a roll-over stack's sessions meet in one transcript: a thin divider, no content.
   | { kind: 'divider'; key: string; sessionId: string; title: string; rolledOverAt: number };
 
@@ -266,11 +276,32 @@ export function layout(
     }
     const settled = !(isLast && live);
     const hadTools = work.some((r) => r.role === 'toolResult');
+    // Declared progress lines (app_progress calls): the newest stands under the group as the
+    // turn's live line. A message the person sends mid-turn keeps the line that was current at
+    // that moment above it, as the mark of where the agent was; every other progress row folds
+    // into the group with the rest of the work. The newest line stops being the live one the
+    // moment a real agent message follows it — a note or the reply takes over from it.
+    let lastUnpinned = -1;
+    let latestProg = -1;
+    const pinned = new Set<number>();
+    for (let j = 0; j < work.length; j++) {
+      const r = work[j]!;
+      if (progressText(r)) {
+        latestProg = j;
+        lastUnpinned = j;
+      } else if (r.role === 'user' && !groupable(r) && lastUnpinned >= 0) {
+        pinned.add(lastUnpinned);
+        lastUnpinned = -1;
+      }
+    }
+    const currentProg = latestProg >= 0 && latestProg > reply && !pinned.has(latestProg) ? latestProg : -1;
     // One work group per turn, under the whole turn: every groupable row of it in time order,
     // however scattered it arrived among the visible rows. A run of nothing but the blank
     // messages tool calls hide under is no work to show: no header over those alone.
     const group: number[] = [];
-    for (let j = 0; j < work.length; j++) if (groupable(work[j]!)) group.push(j);
+    for (let j = 0; j < work.length; j++) {
+      if (groupable(work[j]!) && j !== currentProg && !pinned.has(j)) group.push(j);
+    }
     const hasWork = group.some((j) => !isBlank(work[j]!));
     const groupKey = hasWork ? `cg:${turnKey}:${work[group[0]!]!.id}` : '';
     const groupOpen = hasWork && (revealed || expanded.has(groupKey));
@@ -286,12 +317,20 @@ export function layout(
     // The visible rows first, in time order; the group follows them as one item.
     let prevShown: MessageRow | undefined;
     const nextShown = (j: number) => {
-      for (let k = j + 1; k < work.length; k++) if (!groupable(work[k]!) && !undrawn(work[k]!)) return work[k]!;
+      for (let k = j + 1; k < work.length; k++) {
+        if (!groupable(work[k]!) && !undrawn(work[k]!) && !pinned.has(k) && k !== currentProg) return work[k]!;
+      }
       return undefined;
     };
     for (let j = 0; j < work.length; j++) {
       const r = work[j]!;
-      if (groupable(r) || undrawn(r)) continue;
+      // A progress line kept in the flow: it marks where the agent was, just above the
+      // message the person sent at that moment.
+      if (pinned.has(j)) {
+        items.push({ kind: 'progress', key: `prog:${r.id}`, row: r, text: progressText(r), pinned: true });
+        continue;
+      }
+      if (j === currentProg || groupable(r) || undrawn(r)) continue;
       const next = nextShown(j);
       items.push({
         kind: 'row',
@@ -347,6 +386,12 @@ export function layout(
         }
       }
     }
+    // The turn's live progress line under everything: the newest visible thing, until a newer
+    // progress line, a real message or the reply takes its place.
+    if (currentProg >= 0) {
+      const r = work[currentProg]!;
+      items.push({ kind: 'progress', key: `prog:${r.id}`, row: r, text: progressText(r) });
+    }
   }
   const laid = groupAgents(items);
   // Only the newest notice is a live region for screen readers, and only while it is still the
@@ -376,6 +421,8 @@ export function estimateItem(item: Item | undefined): number {
   if (!item) return ESTIMATE;
   if (item.kind === 'fold') return estimateHeight({ kind: 'fold', chars: 0, lines: 0 });
   if (item.kind === 'divider') return 34;
+  // A single muted line, capped short by the tool.
+  if (item.kind === 'progress') return 36;
   // A header and two cards a line.
   if (item.kind === 'agents') return 44 + 96 * Math.ceil(item.rows.length / 2);
   const row = item.row;

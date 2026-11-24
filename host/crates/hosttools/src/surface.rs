@@ -26,6 +26,7 @@ pub const CORE: &[&str] = &[
     "app_stop_chat",
     "app_telegram_send",
     "app_offer_options",
+    "app_progress",
     "app_background_result",
     "app_help",
     // Offered only where the launch says so (a key is set), and then always listed.
@@ -60,6 +61,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "app_background_result",
             "app_show_images",
             "app_offer_options",
+            "app_progress",
             "app_link_item",
             "app_resolve_side_chat",
             "app_resume_saved_agent",

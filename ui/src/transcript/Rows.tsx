@@ -5,7 +5,7 @@
 import { memo, useState } from 'react';
 import type { MessageRow } from '../api/types.ts';
 import { EditMessage, type EditState } from './EditMessage.tsx';
-import { boardRef, forwardRef, galleryRef, panelRef, type ForwardRef } from './cards.ts';
+import { boardRef, forwardRef, galleryRef, panelRef, progressText, type ForwardRef } from './cards.ts';
 import { GalleryCard } from './GalleryCard.tsx';
 import { Markdown, type LinkTarget } from './Markdown.tsx';
 import { MessageImages } from './MessageImages.tsx';
@@ -317,6 +317,16 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
     );
   }
   if (row.role === 'toolResult') {
+    // A progress call that already gave way to a newer line or a real message folds into the
+    // group with the rest of the work: there it reads as a thought-style line, not a tool card.
+    const prog = progressText(row);
+    if (prog) {
+      return (
+        <div className={`row row-progress folded${place}`} {...common}>
+          <span className="progress-text">{prog}</span>
+        </div>
+      );
+    }
     // An agent's gallery or option board is drawn as a card, not as a tool row.
     const gallery = galleryRef(row);
     const board = gallery ? null : boardRef(row);
@@ -408,6 +418,19 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
     </div>
   );
 });
+
+/**
+ * The progress line an agent declared (an app_progress call): one quiet line, the turn's newest
+ * thing under its work group. A pinned line marks where the agent was, kept just above the
+ * message the person sent mid-turn. Superseded lines fold into the group (drawn by `Row`).
+ */
+export function ProgressLine({ text, pinned }: { text: string; pinned?: boolean }) {
+  return (
+    <div className={`row row-progress${pinned ? ' pinned' : ''}`} data-testid="progress-line" data-pinned={pinned ? 'true' : undefined}>
+      <span className="progress-text">{text}</span>
+    </div>
+  );
+}
 
 /** The turn's one work group: what it holds, how many calls failed inside it, and while the turn
  *  runs, a short line naming what the agent is doing now — the transcript's working indicator. */
