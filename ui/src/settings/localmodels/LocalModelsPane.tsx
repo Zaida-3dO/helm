@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useGpuActions, useLockView } from '../../gpu/GpuControl.tsx';
 import { lockSentence } from '../../gpu/model.ts';
 import { useShell } from '../../shell/context.ts';
+import { primeLocalLabels } from '../../state/modelNames.ts';
 import { Button, Checkbox, Picker, SettingRow, TextArea, TextInput } from '../../ui/index.ts';
 import { localModelsOps, type SettingsPatch } from './api.ts';
 import {
@@ -58,6 +59,8 @@ export function LocalModelsPane() {
   /** Takes in the host's state; the server cards follow it unless the user is in the middle of editing them. */
   const adopt = useCallback((s: LocalModelsState) => {
     setState(s);
+    // The same names feed the top bar chip and the composer's model line everywhere else.
+    primeLocalLabels(s);
     if (!dirtyRef.current) setDrafts(s.servers.map(toDraft));
   }, []);
 

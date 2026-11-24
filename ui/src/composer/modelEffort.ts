@@ -1,6 +1,7 @@
 // The unified model and effort picker's pure parts.
 
 import type { LocalModelInfo, ModelCatalogue } from '../api/types.ts';
+import { prettyModelName } from '../state/localModel.ts';
 
 const EFFORT_LABELS: Record<string, string> = {
   off: 'No thinking',
@@ -98,6 +99,9 @@ export function stepEffort(efforts: string[], current: string, dir: -1 | 1): str
 export interface ModelRow {
   id: string;
   title: string;
+  /** The name the trigger and the chip use: the user's name, or the default short name — never
+   * the row title, which may carry both ("Jane · Qwen 3.8"). */
+  name: string;
   detail: string;
   disabled: boolean;
   /** Set on every row when the list has local models too: "Claude" or "Local". */
@@ -106,8 +110,23 @@ export interface ModelRow {
   hint?: string;
 }
 
+/**
+ * The user's own name for a model, when the row carries one. The app names an unaliased model by
+ * its default short name (which a clash may lengthen with the model's next distinguishing word —
+ * that still starts with the short name); any other name is one the user typed.
+ */
+function userAlias(name: string, model: string): string | null {
+  const pretty = prettyModelName(model);
+  if (!pretty || name === pretty || name.startsWith(`${pretty} `) || pretty === model) return null;
+  return name;
+}
+
 function localRow(m: LocalModelInfo): ModelRow {
-  // The row is titled by the name the app gives the model; its own name goes in the detail.
+  // The row is titled by the name the app gives the model; its own name goes in the detail. An
+  // alias rides with the default short name, so "Jane" reads "Jane · Qwen 3.8" and nobody has to
+  // remember which pet name belongs to which model.
+  const alias = userAlias(m.name, m.model);
+  const title = alias ? `${alias} · ${prettyModelName(m.model)}` : m.name;
   const parts = [m.model !== m.name ? m.model : '', m.server, formatContext(m.contextTokens)].filter(Boolean);
   let hint: string | undefined;
   if (!m.reachable) {
@@ -120,7 +139,8 @@ function localRow(m: LocalModelInfo): ModelRow {
   } else if (m.loaded === true) parts.push('loaded');
   return {
     id: m.id,
-    title: m.name,
+    title,
+    name: m.name,
     detail: parts.join(' · '),
     disabled: !m.reachable && !m.startable,
     hint,
@@ -144,16 +164,19 @@ export function modelRows(catalogue: ModelCatalogue | null, current: string | nu
   const claude: ModelRow[] = (catalogue?.models ?? []).map((m) => ({
     id: m.id,
     title: shortName(m.name),
+    name: shortName(m.name),
     detail: m.description ? `Claude Code · ${m.description}` : 'Claude Code',
     disabled: false,
     group: 'Claude',
   }));
   const local = (catalogue?.local ?? []).map(localRow);
   if (current && ![...claude, ...local].some((r) => r.id === current)) {
-    const orphan: ModelRow = { id: current, title: current, detail: 'Not in the current model list', disabled: true };
-    // A local model not listed (yet: the servers are only asked when the picker opens) reads as its own name.
-    if (isLocalModel(current)) local.push({ ...orphan, title: localModelName(current), group: 'Local' });
-    else claude.push({ ...orphan, group: 'Claude' });
+    // A local model not listed (yet: the servers are only asked when the picker opens) reads as the
+    // short name made from its id, never as the raw id.
+    if (isLocalModel(current)) {
+      const pretty = prettyModelName(localModelName(current));
+      local.push({ id: current, title: pretty, name: pretty, detail: 'Not in the current model list', disabled: true, group: 'Local' });
+    } else claude.push({ id: current, title: current, name: current, detail: 'Not in the current model list', disabled: true, group: 'Claude' });
   }
   const rows = [...claude, ...local];
   // Headings only help when there is more than one group.
@@ -166,7 +189,7 @@ export function modelRows(catalogue: ModelCatalogue | null, current: string | nu
  * default offers it: choosing it stores no model, so Claude Code picks its own.
  */
 export function withDefaultRow(rows: ModelRow[], id: string): ModelRow[] {
-  const row: ModelRow = { id, title: "Claude Code's default", detail: 'Claude Code picks the model', disabled: false };
+  const row: ModelRow = { id, title: "Claude Code's default", name: "Claude Code's default", detail: 'Claude Code picks the model', disabled: false };
   if (rows.some((r) => r.group)) row.group = 'Claude';
   return [row, ...rows];
 }
