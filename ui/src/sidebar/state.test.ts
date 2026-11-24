@@ -11,9 +11,9 @@ import { MAX_OPEN_CARDS, cardOpen, patchCardOpen, patchExpanded } from './state.
 test('the patches carry one field each, so the two never erase each other', () => {
   assert.deepEqual(patchExpanded(true), { v: 1, expanded: true });
   assert.deepEqual(patchExpanded(false), { v: 1, expanded: false });
-  const opened = patchCardOpen(null, 7, true);
+  const opened: SidebarState = patchCardOpen(null, 7, true);
   assert.deepEqual(opened, { v: 1, openCards: [7] });
-  assert.equal(opened.expanded, undefined, "opening a card says nothing about the row");
+  assert.ok(!("expanded" in opened), "opening a card says nothing about the row");
   assert.equal(patchExpanded(true).openCards, undefined, "expanding says nothing about the cards");
 });
 
@@ -43,6 +43,7 @@ test('card patches add, move and fold by message id', () => {
 test('the opened-card list stays under its cap, dropping the oldest first', () => {
   let s: SidebarState | null = null;
   for (let i = 1; i <= MAX_OPEN_CARDS + 5; i++) s = patchCardOpen(s, i, true);
+  assert.ok(s, "the loop opened cards");
   assert.equal(s.openCards!.length, MAX_OPEN_CARDS);
   assert.equal(s.openCards![0], 6, "the five oldest opened were dropped");
   assert(cardOpen(s, MAX_OPEN_CARDS + 5));

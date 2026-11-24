@@ -88,12 +88,14 @@ nextSessionId: string | null,
  * the chat's agent when its worker next starts.
  */
 fastMode: boolean | null, 
+/**
  * The chat's own open-item state — which transcript cards are opened and whether its
  * sidebar row is expanded — so the chat shows the same on every PC that views it.
  * `null` is the default: everything folded. The sidebar sets it through
  * `chat_set_sidebar_state`; last write wins.
  */
 sidebarState?: SidebarState, 
+/**
  * The hover card's two-sentence summary ("what this chat is about, where it stands now"),
  * made on demand by a local model ([`crate::summary`]). Left out when there is none. The
  * row carries it so a chat seen on another PC shows the one made where it runs.

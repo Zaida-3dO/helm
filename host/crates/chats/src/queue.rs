@@ -911,6 +911,7 @@ fn halt_working(rt: &crate::runtime::ChatRuntime, chat_id: &str, by: &str, now: 
                     state: SubmissionState::Saved,
                     origin: SubmissionOrigin::App,
                     priority: None,
+                    kind: None,
                     now,
                 },
             )?;
