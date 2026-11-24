@@ -254,6 +254,12 @@ pub trait Spawner: Send + Sync {
         Err("the gatekeeper helper is not available".into())
     }
 
+    /// Run the summarize helper on one job and answer the two-sentence summary
+    /// ([`crate::summary`]). A spawner without the helper is simply "not available".
+    fn run_summarize(&self, _job: &Value) -> Result<String, String> {
+        Err("the summarize helper is not available".into())
+    }
+
     /// The app is quitting: end any gatekeeper helper still running, so none outlives it.
     fn close_helpers(&self) {}
 }
@@ -591,6 +597,18 @@ impl Spawner for ProcessSpawner {
         self.run_helper_job("gatekeeper", job, GATEKEEPER_TIMEOUT, Some(&self.closing))
     }
 
+    fn run_summarize(&self, job: &Value) -> Result<String, String> {
+        let out = self.run_helper("summarize", job, crate::summary::HOST_TIMEOUT)?;
+        match (
+            out.get("summary").and_then(Value::as_str),
+            out.get("error").and_then(Value::as_str),
+        ) {
+            (Some(s), _) => Ok(s.to_owned()),
+            (_, Some(e)) => Err(e.to_owned()),
+            _ => Err("the helper gave no summary".into()),
+        }
+    }
+
     fn close_helpers(&self) {
         self.closing.store(true, Ordering::SeqCst);
     }
@@ -753,6 +771,9 @@ pub(crate) struct Shared {
     /// The last published attention summary ([`crate::attention::publish`]).
     pub attention: Mutex<Option<AttentionSummary>>,
     pub titles: TitleQueue,
+    /// Chats whose hover summary is being made on this PC right now ([`crate::summary`]): at
+    /// most one per chat at a time.
+    pub summaries: Mutex<std::collections::HashSet<String>>,
     pub triage: Mutex<crate::triage::Gate>,
     pub autocomplete: Mutex<crate::autocomplete::AutocompleteGate>,
     /// Host tools and the worker-message registry, attached once the app's services exist.
@@ -825,6 +846,7 @@ impl ChatRuntime {
                     slots: tokio::sync::Semaphore::new(crate::titles::MAX_CONCURRENT),
                     jobs: std::sync::atomic::AtomicUsize::new(0),
                 },
+                summaries: Mutex::new(std::collections::HashSet::new()),
                 triage: Mutex::new(Default::default()),
                 autocomplete: Mutex::new(Default::default()),
                 host: std::sync::OnceLock::new(),

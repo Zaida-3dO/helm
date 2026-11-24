@@ -113,6 +113,10 @@ export function remoteRow(c: RemoteChatRecord, hasChildren: boolean): SidebarRow
     createdAt: c.createdAt,
     updatedAt: c.updatedAt,
     revision: c.revision,
+    // The hover summary made on the PC that runs the chat rides its record.
+    ...(c.summary
+      ? { summary: c.summary, ...(c.summaryAt != null ? { summaryAt: c.summaryAt } : {}) }
+      : {}),
   };
 }
 

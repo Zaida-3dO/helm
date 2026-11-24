@@ -28,13 +28,15 @@ const CHAT_COLUMNS: &str = concat!(
     ", CASE WHEN c.status IN ('starting', 'running', 'stopping') THEN a.queue_reason ELSE NULL END",
     ", c.stack_id, c.prev_session_id, c.next_session_id",
     ", c.fast_mode",
-    ", c.sidebar_state"
+    ", c.sidebar_state",
+    ", sm.summary, sm.summary_at"
 );
 
 /// The joins [`CHAT_COLUMNS`] needs, after `FROM chats c`.
 pub(crate) const CHAT_JOINS: &str = "JOIN projects p ON p.id = c.project_id \
      LEFT JOIN chat_titles t ON t.chat_id = c.id LEFT JOIN unread_marks u ON u.chat_id = c.id \
-     LEFT JOIN chat_activity a ON a.chat_id = c.id";
+     LEFT JOIN chat_activity a ON a.chat_id = c.id \
+     LEFT JOIN chat_summary sm ON sm.chat_id = c.id";
 
 fn chat_from_row(r: &Row<'_>, revision: i64) -> rusqlite::Result<ChatRecord> {
     Ok(ChatRecord {
@@ -86,6 +88,8 @@ fn chat_from_row(r: &Row<'_>, revision: i64) -> rusqlite::Result<ChatRecord> {
         sidebar_state: r
             .get::<_, Option<String>>(33)?
             .and_then(|j| serde_json::from_str::<crate::types::SidebarState>(&j).ok()),
+        summary: r.get(34)?,
+        summary_at: r.get(35)?,
     })
 }
 

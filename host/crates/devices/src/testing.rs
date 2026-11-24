@@ -72,6 +72,8 @@ pub fn fake_record(id: &str, title: &str, revision: i64) -> ChatRecord {
         next_session_id: None,
         fast_mode: None,
         sidebar_state: None,
+        summary: None,
+        summary_at: None,
     }
 }
 

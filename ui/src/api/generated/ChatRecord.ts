@@ -93,4 +93,14 @@ fastMode: boolean | null,
  * `null` is the default: everything folded. The sidebar sets it through
  * `chat_set_sidebar_state`; last write wins.
  */
-sidebarState?: SidebarState, };
+sidebarState?: SidebarState, 
+ * The hover card's two-sentence summary ("what this chat is about, where it stands now"),
+ * made on demand by a local model ([`crate::summary`]). Left out when there is none. The
+ * row carries it so a chat seen on another PC shows the one made where it runs.
+ */
+summary?: string, 
+/**
+ * When that summary was made, Unix ms; left out with it. The card calls it stale once
+ * `last_activity_at` passes it.
+ */
+summaryAt?: number, };

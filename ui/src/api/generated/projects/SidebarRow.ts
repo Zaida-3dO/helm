@@ -67,4 +67,15 @@ sharedWith?: Array<string>, lastActivityAt: number, archived: boolean, position:
  * The hover preview. Filled by `sidebar_rows`, which the sidebar calls for one
  * row on hover; pages leave it out.
  */
-preview?: RowPreview, };
+preview?: RowPreview, 
+/**
+ * The hover card's two-sentence summary (the chats crate makes it on demand, from a chat
+ * row hovered a second; see their hover-summary notes). The row carries it so a chat
+ * watched from another PC shows the one made where it runs.
+ */
+summary?: string, 
+/**
+ * When that summary was made, Unix ms; left out with it. The card calls it stale once
+ * `lastActivityAt` passes it.
+ */
+summaryAt?: number, };

@@ -77,6 +77,7 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         MessageEditOpenResult,
         MessageResendArgs,
         ChatRenameArgs,
+        ChatSummary,
         TitleSuggestResult,
         AttachmentPutArgs,
         AttachmentPutResult,
