@@ -31,6 +31,8 @@ pub struct View {
     /// model, from Local models. It is only waited for after something was unloaded.
     pub speech_reserve_gb: u32,
     pub speech_reserve_max_gb: u32,
+    /// The Windows speech service can run here: the composer dictates live instead of recording.
+    pub live_available: bool,
 }
 
 fn db(ctx: &OpCtx) -> Result<Arc<Database>, ApiError> {
@@ -60,6 +62,7 @@ fn view(ctx: &OpCtx, s: &Settings) -> View {
                 l.settings().speech_reserve_gb
             }),
         speech_reserve_max_gb: local::MAX_SPEECH_RESERVE_GB,
+        live_available: crate::live::available().0,
     }
 }
 
@@ -96,6 +99,12 @@ struct SetArgs {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TranscribeArgs {
     wav_base64: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LiveArgs {
+    action: String,
 }
 
 pub(crate) fn get(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
@@ -209,9 +218,34 @@ pub(crate) fn test(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
     )
 }
 
+/// Live dictation against the Windows speech service: start a streaming session, or end the one
+/// running. The words themselves arrive as `live_transcript` events; a session that ends by
+/// itself says so in one line.
+pub(crate) fn live(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
+    let a: LiveArgs = args(v, "action: start, stop or cancel")?;
+    let Some(svc) = ctx.services.get::<crate::live::LiveDictation>() else {
+        return Err(ApiError::new(
+            "not_available",
+            "Live dictation is not wired up on this host.",
+        ));
+    };
+    match a.action.as_str() {
+        "start" => svc.start(ctx.events.clone())?,
+        "stop" => svc.stop()?,
+        "cancel" => svc.cancel()?,
+        other => {
+            return Err(ApiError::bad_args(format!(
+                "action must be start, stop or cancel (got {other})."
+            )))
+        }
+    }
+    Ok(json!({"ok": true}))
+}
+
 pub fn register_ops(reg: &mut OpRegistry) {
     reg.blocking("dictation_settings_get", OpClass::Blocking, get)
         .blocking("dictation_settings_set", OpClass::Maintenance, set)
         .blocking("dictation_transcribe", OpClass::Blocking, transcribe)
-        .blocking("dictation_test", OpClass::Blocking, test);
+        .blocking("dictation_test", OpClass::Blocking, test)
+        .blocking("dictation_live", OpClass::Blocking, live);
 }

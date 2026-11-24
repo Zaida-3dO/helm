@@ -341,6 +341,8 @@ export interface DictationView {
   configured: boolean;
   speechReserveGb: number;
   speechReserveMaxGb: number;
+  /** Windows' own speech service can run: the composer dictates live instead of recording. */
+  liveAvailable: boolean;
 }
 
 export interface DictationSettingsChange {
@@ -358,6 +360,8 @@ export function dictationOps(api: Api) {
     test: () => api<{ ok: boolean; message: string }>('dictation_test', {}),
     /** The recording as the host takes it: base64 in `wavBase64`. */
     transcribe: (wav: Uint8Array) => api<{ text: string }>('dictation_transcribe', { wavBase64: bytesToBase64(wav) }),
+    /** A live session on the host's own speech service; the words come as `live_transcript` events. */
+    live: (action: 'start' | 'stop' | 'cancel') => api<{ ok: boolean }>('dictation_live', { action }),
   };
 }
 
@@ -385,8 +389,38 @@ export function problemOf(e: unknown): Problem {
   if (code === 'bad_address' && e instanceof ApiError) return { message: e.message, retry: false, settings: true };
   if (code === 'too_big') return { message: TOO_LONG, retry: false, settings: false };
   if (code === 'bad_audio') return { message: "That recording couldn't be read. Try again.", retry: false, settings: false };
+  // Live dictation problems: the host's line says it all, and there is no recording to retry.
+  if (code === 'not_available' || code === 'busy' || code === 'audio') {
+    return { message: e instanceof ApiError ? e.message : 'Live dictation is not available.', retry: false, settings: false };
+  }
   // Nothing answered, or it answered with an error: the audio is still here to send again.
   return { message: NO_ANSWER, retry: true, settings: false };
+}
+
+// ---- live dictation ---------------------------------------------------------------------------
+
+/** One `live_transcript` event from the host. `final: false` carries the sentence in progress
+ * whole (each update replaces the last); `final: true` carries a sentence now settled. */
+export interface LiveEvent {
+  final: boolean;
+  text: string;
+}
+
+/** What a live session holds back: the sentence in progress, not yet in the draft. */
+export interface LiveState {
+  provisional: string;
+}
+
+export const LIVE_IDLE: LiveState = { provisional: '' };
+
+/**
+ * Apply one live event. Returns the new state and the settled text to place in the draft ('' when
+ * the event only updated the sentence in progress). A final event settles the whole sentence at
+ * once, so the provisional tail of that sentence is simply gone.
+ */
+export function liveStep(_s: LiveState, ev: LiveEvent): [LiveState, string] {
+  if (ev.final) return [LIVE_IDLE, ev.text.trim()];
+  return [{ provisional: ev.text }, ''];
 }
 
 // ---- the words ----------------------------------------------------------------------------------

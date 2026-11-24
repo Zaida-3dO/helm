@@ -20,6 +20,17 @@ uuid.workspace = true
 ureq = { version = "3", default-features = false }
 ts-rs = { version = "10.1", features = ["serde-json-impl", "no-serde-warnings"] }
 
+[target.'cfg(windows)'.dependencies]
+# Windows' own speech service for live dictation (`live.rs`). Only the parts it needs:
+# the recognizer classes, the async waits and the Runtime initialiser.
+windows = { version = "0.62", features = [
+  "Foundation",
+  "Foundation_Collections",
+  "Media_SpeechRecognition",
+  "Win32_System_WinRT",
+] }
+windows-future = "0.3"
+
 [dev-dependencies]
 tempfile.workspace = true
 helm-chats.workspace = true

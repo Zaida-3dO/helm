@@ -99,6 +99,8 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     helm_gatekeeper::register_services(services, events);
     helm_governor::register_services(services, events);
     helm_localmodels::register_services(services, events);
+    // The live-dictation session slot the composer's microphone drives.
+    helm_dictation::register_services(services);
     helm_relay::register_services(services, events);
     // The memory indexer drives the hub's search index over that line.
     if let Some(line) = services.get::<helm_relay::index_line::IndexLine>() {
