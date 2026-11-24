@@ -2075,12 +2075,13 @@ impl Actor {
         });
     }
 
-    /// A chat on a local model whose turn ended with a tool call printed as text: the model
-    /// wrote markup nobody runs, so the turn changed nothing and the chat just sits there. Once
-    /// per run of such turns it gets one corrective message telling it so; if the next turn ends
-    /// the same way, the person is flagged to step in or switch the model, and the chat is left
-    /// alone. A Claude-model chat gets neither: its harness runs that markup for real. The
-    /// parent note (`notify_parent_unreported`) still fires alongside.
+    /// A chat on a local model whose turn wrote a tool call as text: the model wrote markup
+    /// nobody runs, and that call changed nothing — even when the turn went on to run real
+    /// calls and close with words. Once per run of such turns it gets one corrective message
+    /// telling it so; if the next turn ends the same way, the person is flagged to step in or
+    /// switch the model, and the chat is left alone. A Claude-model chat gets neither: its
+    /// harness runs that markup for real. The parent note (`notify_parent_unreported`) still
+    /// fires alongside, on how the turn closed.
     fn recover_printed_tool_call(&mut self) {
         if self.launched_local.is_none() {
             return;
@@ -2108,9 +2109,10 @@ impl Actor {
     /// it opens the next turn. It names the tool when the markup names one, since that is the
     /// case of a model calling a tool its chat does not have.
     fn send_printed_call_nudge(&self, markup: &str) {
-        let mut text = "Helm noticed: your last reply wrote a tool call as text, so nothing ran. \
-                        Use only the tools in your tool list; if the tool you wanted is not \
-                        there, say so in words."
+        let mut text = "Helm noticed: your turn wrote a tool call as text, so that call did not \
+                        run. Never write tool-call markup: call the tools in your tool list \
+                        directly, and when the tool you want is not in it, call it through \
+                        app_mcp_call (app_list_tools shows what is available)."
             .to_owned();
         if let Some(tool) = crate::childnote::named_tool(markup) {
             text.push_str(&format!(" The call you wrote named \"{tool}\"."));

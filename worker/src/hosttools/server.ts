@@ -13,16 +13,18 @@
 // answers `app_background_result` from there itself; the host's handler for that tool is only a
 // fallback.
 //
-// `catalogue()` lists only the core host tools (the host marks them `core`): a local model server
-// cannot expand tool-search results, so every listed schema is sent in every request, and on
-// Claude Code every listed name costs a line. Every other host tool stays reachable:
-// `app_list_tools` finds them by group and `app_mcp_call` calls any of them, a merged tool's
-// old names included (those are `aliasOf` entries: callable, never listed or searched).
+// `catalogue()` lists every host tool except a merged tool's old names — on a Claude chat. Claude
+// Code refuses to dispatch a call naming a tool it was never shown, so a real host tool has to be
+// listed to be callable at all, whether or not it was in the chat's declared set. A local model
+// server is the exception: it cannot expand tool-search results, so every listed schema rides
+// every request, and there the listing stays with the core tools the host marks `core`.
+// `app_list_tools` finds the rest by group and `app_mcp_call` calls any of them either way, a
+// merged tool's old names included (those are `aliasOf` entries: callable, never listed or searched).
 
 import type { Json } from "../protocol/types.ts";
 import { DEFAULT_TIMEOUT_MS, NOTHING_CHANGED, type CallResult, type RequestChannel } from "./channel.ts";
 import { capToolResult, type OutputCap } from "./cap.ts";
-import { COMPAT_ALWAYS, COMPAT_WITH_MCP } from "./names.ts";
+import { COMPAT_ALWAYS, COMPAT_WITH_MCP, WORKER_SERVED } from "./names.ts";
 import { BackgroundStore, type BackgroundCall } from "./background.ts";
 import { MAX_TOOL_NAME_BYTES } from "../mcp/naming.ts";
 
@@ -78,6 +80,9 @@ export interface CallerInfo {
 export interface ServerOptions {
   hostTools: HostTool[];
   channel: RequestChannel;
+  /** A chat on a local model server: only the core host tools are listed, because a local server
+   * sends every listed schema in every request. */
+  local?: boolean;
   bridge?: McpBridgeLike;
   /** A successful self-archive with `archivePending: true` ends the turn. */
   onEndTurn?: () => void;
@@ -174,6 +179,11 @@ function refuse(msg: string): CallResult {
   return { ok: false, error: `${msg}${NOTHING_CHANGED}`, changed: "no" };
 }
 
+/** What the agent reads when a call names a tool that exists nowhere in this chat. */
+function noSuchTool(name: string): string {
+  return `No such tool in this chat: ${name}. Tools found with app_list_tools must be called through app_mcp_call.`;
+}
+
 /** Never moved to the background: tool discovery, and the fetch itself. */
 const STAYS_IN_FOREGROUND = new Set([LIST_TOOLS.name, MCP_TOOLS.name, BACKGROUND_RESULT]);
 
@@ -216,9 +226,20 @@ export class HostToolServer {
     return this.movable.get(toolCallId)?.() ?? false;
   }
 
-  /** The tools/list catalogue, host tools first: only the core ones, and never a merged tool's old name. */
+  /** The tools/list catalogue, host tools first: never a merged tool's old name; every other host
+   * tool on a Claude chat, only the core ones on a local chat. */
   catalogue(): HostTool[] {
-    return [...this.o.hostTools.filter((t) => !t.aliasOf && t.core !== false), ...this.compatTools()];
+    const listed = this.o.hostTools.filter((t) => !t.aliasOf && (this.o.local !== true || t.core !== false));
+    return [...listed, ...this.compatTools()];
+  }
+
+  /** Every name this server answers, as Claude Code spells it: the full host surface (a merged
+   * tool's old names included) and the worker's own tools. A local model server is offered this as
+   * a parse-only list: names it should understand even though the chat was not shown them. */
+  surfaceNames(): string[] {
+    const names = this.o.hostTools.map((t) => `${toolPrefix}${t.name}`);
+    for (const n of [...WORKER_SERVED, BACKGROUND_RESULT]) names.push(`${toolPrefix}${n}`);
+    return [...new Set(names)];
   }
 
   private compatTools(): HostTool[] {
@@ -360,12 +381,12 @@ export class HostToolServer {
       if (this.o.bridge?.has(target)) return this.o.bridge.call(target, inner, signal);
       // A child reaches only discovered MCP tools through app_mcp_call, never a host tool.
       if (caller.child) return refuse(`${target} is only available to the parent chat.`);
-      return this.host.has(target) ? this.hostCall(target, inner, caller, signal) : refuse(`There is no tool ${target}.`);
+      return this.host.has(target) ? this.hostCall(target, inner, caller, signal) : refuse(noSuchTool(target));
     }
     if (name === BACKGROUND_RESULT && this.host.has(name)) return this.backgroundResult(args, caller);
     if (this.host.has(name)) return this.hostCall(name, args, caller, signal);
     if (this.o.bridge?.has(name)) return this.o.bridge.call(name, args, signal);
-    return refuse(`There is no tool ${name}.`);
+    return refuse(noSuchTool(name));
   }
 
   private async hostCall(name: string, args: Json, caller: CallerInfo, signal?: AbortSignal): Promise<CallResult> {

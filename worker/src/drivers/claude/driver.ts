@@ -13,7 +13,7 @@ import { markLaunch, markPrompt } from "../../protocol/timing.ts";
 import { DEFAULT_EFFORT, isEffort, type Json, type Launch, type UiResponse } from "../../protocol/types.ts";
 import { isAlive, treeKill } from "../../process/kill.ts";
 import { appendText, buildClaudeArgs, modelTakesEffort } from "./args.ts";
-import { buildClaudeEnv, contextRefusalNote, localThinkingTokens } from "./env.ts";
+import { buildClaudeEnv, contextRefusalNote, localExtraBody, localThinkingTokens } from "./env.ts";
 import { Interactions } from "./interactions.ts";
 import { BUDGET_HOOK_ID, SubagentBudget, subagentRule } from "./limits.ts";
 import { isLongCommandLevel, LongCommandPolicy, PROMPT_RULE, SHELL_TOOLS_MATCHER } from "./longcmd.ts";
@@ -224,6 +224,8 @@ export class ClaudeDriver implements Driver {
   private autoCompacting = false;
   /** Helm's in-process MCP server, when the launch lists host tools. */
   private readonly hostTools: HostToolServer | undefined;
+  /** A local chat's parse-only tool-name body (`CLAUDE_CODE_EXTRA_BODY`), when it has host tools. */
+  private readonly localExtraBody: string | undefined;
   /** Helm's own MCP client (the bridge), reached through the helm server's tools. */
   private readonly mcp: McpBridge | undefined;
   private readonly attribution = new Attribution(toolPrefix);
@@ -283,6 +285,7 @@ export class ClaudeDriver implements Driver {
       this.hostTools = new HostToolServer({
         bridge: asHostToolBridge(this.mcp),
         hostTools: launch.hostTools,
+        local: this.isLocal,
         outputCap: c.toolOutputCap === true ? { maxChars: DEFAULT_MAX_CHARS, save: fileSaver(launch.chatId) } : undefined,
         channel,
         notify: (text) => this.ch.emit({ type: "notice", text }),
@@ -291,6 +294,10 @@ export class ClaudeDriver implements Driver {
           if (this.turnOpen) this.control({ subtype: "interrupt" }, this.limits.controlTimeoutMs).catch((e: Error) => this.deps.diag(`self-archive interrupt failed: ${e.message}`));
         },
       });
+      // A local model server is told the whole surface as parse-only names: a reply that writes a
+      // call for a tool the chat was not shown should be understood, not printed. It rides every
+      // request as an extra body field; a server that does not know the field ignores it.
+      if (this.isLocal) this.localExtraBody = localExtraBody(this.hostTools.surfaceNames());
       this.guard = new LandingGuard({ emit: (l) => this.ch.emit(l), diag: deps.diag, timeoutMs: this.limits.guardTimeoutMs });
     }
   }
@@ -321,10 +328,10 @@ export class ClaudeDriver implements Driver {
     const appendFile = appendFileFor(appendText(c, promptRule), version, command, this.deps.workerFolder);
     const args = [
       ...(c.commandArgs ?? []),
-      ...buildClaudeArgs(c, { promptRule, appendFile, mcpConfig: this.hostTools ? sdkMcpConfig() : undefined, agentsArg: agents }),
+      ...buildClaudeArgs(c, { promptRule, appendFile, mcpConfig: this.hostTools ? sdkMcpConfig() : undefined, agentsArg: agents, localExtraBody: this.localExtraBody }),
     ];
     checkSpawnArgs(args, command);
-    const env = buildClaudeEnv(this.deps.env, { apiKeyMode: c.apiKeyMode === true, chatId: this.launch.chatId, local: c.local, localKey: this.deps.localKey, claudeToken: this.deps.claudeToken, effort: this.effort });
+    const env = buildClaudeEnv(this.deps.env, { apiKeyMode: c.apiKeyMode === true, chatId: this.launch.chatId, local: c.local, localKey: this.deps.localKey, claudeToken: this.deps.claudeToken, effort: this.effort, localExtraBody: this.localExtraBody });
     const child = spawn(command, args, {
       cwd: this.launch.cwd ?? process.cwd(),
       env,
