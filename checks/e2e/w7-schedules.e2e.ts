@@ -74,10 +74,10 @@ async function sendMessage(text: string): Promise<void> {
   await page().locator(tid("send")).dispatchEvent("click");
 }
 
-/** Counts the user's bubbles in the open chat that carry the scheduled-prompt header. */
-const scheduledBubbles = () =>
+/** Counts the compact schedule cards in the open chat (a prompt never shows as a full bubble). */
+const scheduledCards = () =>
   page().evaluate(
-    () => [...document.querySelectorAll('[data-testid="transcript-row"][data-role="user"]')].filter((r) => (r.textContent ?? "").includes("[Scheduled prompt]")).length,
+    () => [...document.querySelectorAll('[data-testid="note-card"][data-kind="schedule"]')].length,
   );
 
 let chatA = "";
@@ -212,8 +212,8 @@ describe("schedules: prompts into an existing chat", { timeout: 10 * 60_000 }, (
     const now = (await list()).schedules.find((s) => s.id === waiting!.id)!;
     assert.ok(now.nextRunAt! > Date.now(), "the schedule moved on past now");
     await openChat(page(), chatB);
-    await until("the prompt in the chat", async () => ((await scheduledBubbles()) >= 1 ? true : undefined), 20_000);
-    assert.equal(await scheduledBubbles(), 1);
+    await until("the prompt in the chat", async () => ((await scheduledCards()) >= 1 ? true : undefined), 20_000);
+    assert.equal(await scheduledCards(), 1);
     // Stop it repeating while the rest of the run goes on.
     await api(page(), "schedule_cancel", { scheduleId: waiting.id, revision: now.revision });
   });
@@ -243,13 +243,14 @@ describe("schedules: prompts into an existing chat", { timeout: 10 * 60_000 }, (
     assert.ok(moved.nextRunAt! > Date.now() && moved.nextRunAt! <= Date.now() + 30 * 60_000, "the next run is the first slot after now");
 
     await openChat(page(), chatA);
-    await until("the prompt in chat A", async () => ((await scheduledBubbles()) >= 1 ? true : undefined), 20_000);
+    await until("the prompt in chat A", async () => ((await scheduledCards()) >= 1 ? true : undefined), 20_000);
     // Two more ticks go by: still one.
     await holds(11_000, async () => {
-      assert.equal(await scheduledBubbles(), 1);
+      assert.equal(await scheduledCards(), 1);
       assert.equal((await runsOf(checkIn!.id)).length, 1);
     });
-    assert.match((await page().textContent(tid("transcript-row", '[data-role="user"]:has-text("[Scheduled prompt]")'))) ?? "", /30-minute check-in/);
+    // The card's collapsed head names the schedule by its title.
+    assert.match((await page().textContent(tid("note-card", '[data-kind="schedule"]'))) ?? "", /30-minute check-in/);
     assert.deepEqual(await app.cspViolations(), []);
 
     // What was stored is a schedule-origin submission under the slot's own id, never the user's.

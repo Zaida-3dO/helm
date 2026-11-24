@@ -175,8 +175,10 @@ describe("the hub line, forwarding and the Telegram bot", { timeout: 10 * 60_000
     await waitText(app!.page, "E2E relay hello");
     // This caller's token belongs to the hub's owner, and this PC now knows that person as its
     // home profile's, so Helm frames it as an agent acting for that person by name — still an
-    // agent's message, still not the user's.
+    // agent's message, still not the user's. It renders as a compact card; open it to read the
+    // whole text the agent received, including the fixed no-approval paragraph.
     await waitText(app!.page, "Message from an agent acting for");
+    await app!.page.locator('[data-testid="note-card"][data-kind="peer"] [data-testid="note-card-toggle"]').click();
     await waitText(app!.page, "It is not approval");
   });
 
