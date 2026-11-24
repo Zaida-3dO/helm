@@ -10,7 +10,7 @@
 import type { MessageRow } from '../api/types.ts';
 import type { OptionBoard } from '../api/ops.ts';
 import { helmFileHref, parseHelmLink, type LinkTarget } from '../markdown/links.ts';
-import { toolIdentity } from './toolKinds.ts';
+import { toolArgs, toolIdentity } from './toolKinds.ts';
 
 export type CardKind = 'gallery' | 'board';
 
@@ -44,6 +44,18 @@ export function boardRef(row: MessageRow): { boardId: string } | null {
   if (hostTool(row) !== 'app_offer_options' || row.status !== 'complete' || row.details?.isError) return null;
   const r = resultObject(row);
   return r && typeof r.boardId === 'string' && r.boardId ? { boardId: r.boardId } : null;
+}
+
+/**
+ * The work-in-progress line an agent declared by calling app_progress: one short line on what it
+ * is doing right now, taken from the call's `text` argument (its answer is just "ok"). A failed
+ * or stopped call is no line: it stays an ordinary tool row. The layout decides which line shows
+ * and where; this only reads the row.
+ */
+export function progressText(row: MessageRow): string {
+  if (hostTool(row) !== 'app_progress' || row.status === 'interrupted' || row.details?.isError) return '';
+  const t = toolArgs(row).text;
+  return typeof t === 'string' ? t.trim() : '';
 }
 
 /** Which card a tool row is drawn as, or null for an ordinary tool row (a running or failed call stays one). */

@@ -7,7 +7,7 @@ import type { RemoteChatOps } from '../api/devices.ts';
 import type { ChatState, MessageRow, SessionMark, Submission, ThreadState } from '../api/types.ts';
 import { claudeHold, holdLine, waitReason } from '../composer/inFlight.ts';
 import { QueueItem, inFlightItems } from '../composer/QueueList.tsx';
-import { FoldRow, Row, type RowContext } from './Rows.tsx';
+import { FoldRow, ProgressLine, Row, type RowContext } from './Rows.tsx';
 import { VirtualList } from './VirtualList.tsx';
 import { skillsByReply, turnTimes } from './rowMeta.ts';
 import { estimateItem, layout, opensTurn, revealKey, type Item } from './workBlocks.ts';
@@ -65,6 +65,7 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
     for (const i of items) {
       m.set(itemKey(i), i);
       if (i.kind === 'agents') i.rows.forEach((r) => m.set(`r:${r.id}`, i));
+      if (i.kind === 'progress') m.set(`r:${i.row.id}`, i);
     }
     return m;
   }, [items]);
@@ -159,6 +160,7 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
           );
         if (item.kind === 'divider') return <SessionDivider title={item.title} rolledOverAt={item.rolledOverAt} />;
         if (item.kind === 'agents') return <AgentGroup rows={item.rows} flags={item.flags} ctx={ctx} />;
+        if (item.kind === 'progress') return <ProgressLine text={item.text} pinned={item.pinned} />;
         return (
           <FoldRow
             tools={item.tools}

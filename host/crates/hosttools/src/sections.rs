@@ -4,6 +4,7 @@
 //!   `responseVerbosity` (low by default; high adds nothing).
 //! - `prose` (order 12): the work shows as collapsible records, so visible prose should not narrate
 //!   it; always on.
+//! - `progress` (order 13): the progress heartbeat is a tool call, not prose; always on.
 //! - `links` (order 20): the link teaching (vault notes and `file:line`, the panel crate's
 //!   fragment), adopted unchanged through [`AdoptedSection`] so it is taught once.
 
@@ -19,6 +20,11 @@ pub const VERBOSITY_MEDIUM: &str = "Reply length: be reasonably concise. Lead wi
 /// The `prose` section (order 12): the work itself is shown to the user as collapsible records,
 /// so the agent's visible prose should not narrate it. One line, harness-neutral, always on.
 pub const PROSE_ADDENDUM: &str = "Prose: your reasoning and tool activity already reach the user as collapsible records. Keep user-visible text to results and the few words that carry them: do not narrate each tool call, restate what a call returned, or think out loud in the reply.";
+
+/// The `progress` section (order 13): where a work-in-progress line belongs. It rides every
+/// launch (a Claude chat and a chat on a local model server both get the addendum), so the
+/// teaching is the same for both. One heartbeat tool, one line of rules about it.
+pub const PROGRESS_ADDENDUM: &str = "Progress: to say where you are while you work, call app_progress with one short line; it shows as a single live line for the turn, replaced by the next one and never kept as a message, so the reader may not see it at all. Never make it the only place a fact appears, and write the final reply to stand on its own, as if the reader saw no progress line. Real messages to the user stay milestones only: raise the bar for between-steps prose.";
 
 /// The stored verbosity, `low` when unset or unknown.
 pub fn verbosity(db: &Database) -> String {

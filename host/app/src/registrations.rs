@@ -534,6 +534,13 @@ pub fn launch_contributors(
         order: 12,
         text: helm_hosttools::sections::PROSE_ADDENDUM,
     }))
+    // A work-in-progress line is a declared tool call, never prose: the same section rides on
+    // Claude launches and local-model launches alike, since every launch gets the addendum.
+    .register_section(Arc::new(helm_hosttools::StaticSection {
+        id: "progress",
+        order: 13,
+        text: helm_hosttools::sections::PROGRESS_ADDENDUM,
+    }))
     .register_section(Arc::new(helm_hosttools::sections::AdoptedSection {
         id: "links",
         order: 20,
@@ -647,6 +654,7 @@ mod host_tool_tests {
             "app_ide_context",
             "app_show_images",
             "app_offer_options",
+            "app_progress",
             "app_pin_page",
             "app_list_pages",
             "app_open_panel",

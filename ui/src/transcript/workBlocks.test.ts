@@ -323,6 +323,54 @@ test('a relayed user action stays in the flow, not folded with the work', () => 
   assert.deepEqual(shape(layout(rows, false)), [1, 3, 5, 'fold[2,4]']);
 });
 
+test('declared progress lines: the newest stands under the group, superseded ones fold, and a mid-turn message keeps the line current when it was sent above it', () => {
+  const prog = (id: number, text: string, ts: number) =>
+    row({ id, role: 'toolResult', toolName: 'mcp__helm__app_progress', details: { toolArgs: JSON.stringify({ text }) }, timestamp: ts });
+  // Live: the newest line is the turn's last item, under the group; the older one folds with the calls.
+  const base = [
+    row({ id: 1, role: 'user', timestamp: 0 }),
+    prog(2, 'Reading the code', 1000),
+    row({ id: 3, role: 'toolResult', toolName: 'Read', timestamp: 2000 }),
+    prog(4, 'Running the tests', 3000),
+    row({ id: 5, role: 'toolResult', toolName: 'Bash', status: 'streaming', timestamp: 4000 }),
+  ];
+  const live = layout(base, true);
+  assert.deepEqual(shape(live), [1, 'fold[2,3,5]', 'progress']);
+  const line = live[live.length - 1]!;
+  assert.ok(line.kind === 'progress' && line.text === 'Running the tests' && line.pinned === undefined, 'the newest declared line, by its text');
+  // A turn whose only work is a declared line has no group at all: just the line under the prompt.
+  assert.deepEqual(shape(layout([row({ id: 1, role: 'user', timestamp: 0 }), prog(2, 'Starting', 1000)], true)), [1, 'progress']);
+  // A real reply or a note after it folds the line away: the agent spoke, the heartbeat is history.
+  const replied = [...base, row({ id: 6, role: 'assistant', text: 'Green.', timestamp: 5000 })];
+  assert.deepEqual(shape(layout(replied, false)), [1, 6, 'fold[2,3,4,5]']);
+  const noted = [...base, row({ id: 6, role: 'assistant', text: 'tests next', timestamp: 5000 })];
+  assert.deepEqual(shape(layout(noted, true)), [1, 6, 'fold[2,3,4,5]']);
+  // The person speaks mid-turn: the line current at that moment stays in the flow above their
+  // message; the call that was running then and the later line fold under the group.
+  const steered = [
+    row({ id: 1, role: 'user', timestamp: 0 }),
+    prog(2, 'Reading the code', 1000),
+    row({ id: 3, role: 'toolResult', toolName: 'Read', timestamp: 2000 }),
+    row({ id: 4, role: 'user', text: 'also do this', details: { mode: 'steer' }, timestamp: 3000 }),
+    prog(5, 'Adding it', 3500),
+    row({ id: 6, role: 'assistant', text: 'done', timestamp: 4000 }),
+  ];
+  const st = layout(steered, false);
+  assert.deepEqual(shape(st), [1, 'progress', 4, 6, 'fold[3,5]']);
+  const mark = st[1]!;
+  assert.ok(mark.kind === 'progress' && mark.pinned === true && mark.text === 'Reading the code', 'the line that was current when they spoke marks the turn there');
+  // Opened, the folded progress rows list among the group's rows, and the live line stays last.
+  const opened = layout(base, true, new Set([revealKey('k1')]));
+  assert.deepEqual(shape(opened), [1, 'fold[2,3,5]', 2, 3, 5, 'progress']);
+  // A failed progress call is no line at all: it folds as an ordinary tool row.
+  const failed = [
+    row({ id: 1, role: 'user', timestamp: 0 }),
+    row({ id: 2, role: 'toolResult', toolName: 'mcp__helm__app_progress', details: { toolArgs: '{"text":"x"}', isError: true }, timestamp: 1000 }),
+    row({ id: 3, role: 'assistant', text: 'done', timestamp: 2000 }),
+  ];
+  assert.deepEqual(shape(layout(failed, false)), [1, 3, 'fold[2]']);
+});
+
 test('short aside notes fold into the group with their thinking; shape decides, not length', () => {
   const rows = [
     row({ id: 1, role: 'user', timestamp: 0 }),

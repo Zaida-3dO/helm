@@ -64,6 +64,7 @@
     "app_orchestrator_on",
     "app_pages",
     "app_pin_page",
+    "app_progress",
     "app_project",
     "app_project_startup",
     "app_queue_action",

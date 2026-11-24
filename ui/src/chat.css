@@ -1095,6 +1095,26 @@ button.danger {
   font-style: italic;
 }
 
+/* The progress line an agent declared: one quiet line under the turn's work group. A pinned one
+   (kept above the message the person sent mid-turn) and a superseded one folded into the group
+   both read back, not forward. */
+.row-progress {
+  display: flex;
+  align-items: baseline;
+  padding: 3px 0 5px;
+  font-size: 12.5px;
+  color: var(--secondary);
+}
+
+.row-progress.pinned,
+.row-progress.folded {
+  color: var(--muted);
+}
+
+.progress-text {
+  overflow-wrap: anywhere;
+}
+
 .row.indented {
   border-left: 1px solid var(--line);
   padding-left: 12px;

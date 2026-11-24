@@ -12,7 +12,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { after, before, describe, test } from "node:test";
-import { api, dispose, FAKE_CLAUDE, launchApp, newChat, openChat, quitGracefully, scratchDir, shot, tid, typeMessage, type App } from "./harness.ts";
+import { api, dispose, FAKE_CLAUDE, launchApp, newChat, openChat, quitGracefully, scratchDir, shot, tid, typeMessage, unfoldAll, type App } from "./harness.ts";
 
 const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 const OUT = process.env.HELM_E2E_OUT ?? scratchDir("helm-e2e-out-");
@@ -212,7 +212,12 @@ describe("schedules: prompts into an existing chat", { timeout: 10 * 60_000 }, (
     const now = (await list()).schedules.find((s) => s.id === waiting!.id)!;
     assert.ok(now.nextRunAt! > Date.now(), "the schedule moved on past now");
     await openChat(page(), chatB);
-    await until("the prompt in the chat", async () => ((await scheduledCards()) >= 1 ? true : undefined), 20_000);
+    // A scheduled prompt lands inside the running turn's collapsed work group: unfold it so the
+    // card is in the DOM again.
+    await until("the prompt in the chat", async () => {
+      await unfoldAll(page());
+      return (await scheduledCards()) >= 1 ? true : undefined;
+    }, 20_000);
     assert.equal(await scheduledCards(), 1);
     // Stop it repeating while the rest of the run goes on.
     await api(page(), "schedule_cancel", { scheduleId: waiting.id, revision: now.revision });
@@ -243,7 +248,11 @@ describe("schedules: prompts into an existing chat", { timeout: 10 * 60_000 }, (
     assert.ok(moved.nextRunAt! > Date.now() && moved.nextRunAt! <= Date.now() + 30 * 60_000, "the next run is the first slot after now");
 
     await openChat(page(), chatA);
-    await until("the prompt in chat A", async () => ((await scheduledCards()) >= 1 ? true : undefined), 20_000);
+    // As in S3: the prompt card sits in the turn's work group; unfold before counting it.
+    await until("the prompt in chat A", async () => {
+      await unfoldAll(page());
+      return (await scheduledCards()) >= 1 ? true : undefined;
+    }, 20_000);
     // Two more ticks go by: still one.
     await holds(11_000, async () => {
       assert.equal(await scheduledCards(), 1);
