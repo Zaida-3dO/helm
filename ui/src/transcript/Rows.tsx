@@ -12,7 +12,8 @@ import { MessageImages } from './MessageImages.tsx';
 import { MessageRefs } from './MessageRefs.tsx';
 import { OptionBoardCard } from './OptionBoard.tsx';
 import { RecapCard } from './RecapCard.tsx';
-import { bubbleText, fromTelegram, pageMessage, peerMessage, typedOn } from './origin.ts';
+import { agentNote, type AgentNote } from './agentNote.ts';
+import { bubbleText, fromTelegram, pageMessage, typedOn } from './origin.ts';
 import { messageTimeLabel } from './rowMeta.ts';
 import { IconMonitor, IconPaperPlane } from '../ui/icons.tsx';
 import { ReplyActions, UserActions } from './MessageActions.tsx';
@@ -166,6 +167,49 @@ function PageCard({ page, row, ctx }: { page: NonNullable<ReturnType<typeof page
   );
 }
 
+const NOTE_GLYPH: Record<AgentNote['kind'], 'chat' | 'clock' | 'bell'> = { peer: 'chat', schedule: 'clock', app: 'bell' };
+const NOTE_HEAD: Record<AgentNote['kind'], string> = { peer: 'Message from ', schedule: 'Scheduled: ', app: 'From ' };
+
+/** A message from another agent or from the app: one compact card — who sent it (linked to the
+ * sending chat when a chat did) and a one-line digest, the whole text behind the chevron. */
+function NoteCard({ note, ctx }: { note: AgentNote; ctx: RowContext }) {
+  const [open, setOpen] = useState(false);
+  const link = (
+    <button type="button" className="note-card-from" data-testid="note-card-from" onClick={() => ctx.onLink({ kind: 'chat', href: `helm://chats/${note.chatId}` })}>
+      {note.sender}
+    </button>
+  );
+  return (
+    <div className={`bubble note-card note-${note.kind}${open ? ' open' : ''}`} data-testid="note-card" data-kind={note.kind}>
+      <div className="note-card-head">
+        <button type="button" className="note-card-toggle" data-testid="note-card-toggle" onClick={() => setOpen((o) => !o)} aria-expanded={open} aria-label={open ? 'Hide the full message' : 'Show the full message'}>
+          <Glyph name="chevron" size={12} className="note-card-chevron" />
+        </button>
+        <Glyph name={NOTE_GLYPH[note.kind]} size={12} className="note-card-glyph" />
+        <span className="note-card-title" data-testid="note-card-title">
+          {NOTE_HEAD[note.kind]}
+          {note.senderIsLink && note.chatId ? link : note.sender}
+          {!note.senderIsLink && note.chatId && (
+            <>
+              {' by '}
+              <button type="button" className="note-card-from" data-testid="note-card-by" onClick={() => ctx.onLink({ kind: 'chat', href: `helm://chats/${note.chatId}` })}>
+                {note.chatTitle || 'the chat that made it'}
+              </button>
+            </>
+          )}
+        </span>
+      </div>
+      {!open && note.digest && <div className="note-card-digest" data-testid="note-card-digest">{note.digest}</div>}
+      {open && (
+        <div className="note-card-body" data-testid="note-card-body">
+          <Markdown text={note.body} onLink={ctx.onLink} />
+          <div className="note-card-note muted">{note.note}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AssistantBody({ row, ctx, hideThinking, hideText }: { row: MessageRow; ctx: RowContext; hideThinking?: boolean; hideText?: boolean }) {
   const streaming = row.status === 'streaming';
   const text = usePacedText(row.text, streaming);
@@ -182,7 +226,7 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
   const common = { 'data-testid': 'transcript-row', 'data-status': row.status, 'data-role': row.role, 'data-row-id': row.id };
   const place = `${afterTool ? ' after-tool' : ''}${final ? ' final-answer' : ''}${indent ? ' indented' : ''}${afterFold ? ' after-fold' : ''}${beforeTool ? ' before-tool' : ''}`;
   if (row.role === 'user') {
-    const peer = peerMessage(row);
+    const note = agentNote(row);
     const page = pageMessage(row);
     const pc = typedOn(row);
     return (
@@ -201,17 +245,8 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
           <EditMessage edit={ctx.editing} onResend={ctx.onResend} onCancel={ctx.onCancelEdit} />
         ) : page ? (
           <PageCard page={page} row={row} ctx={ctx} />
-        ) : peer ? (
-          <div className="bubble peer-card" data-testid="peer-card" data-from={peer.chatId}>
-            <div className="peer-card-head">
-              From{' '}
-              <button type="button" className="peer-card-from" onClick={() => ctx.onLink({ kind: 'chat', href: `helm://chats/${peer.chatId}` })}>
-                {peer.title}
-              </button>
-            </div>
-            <Markdown text={peer.body} onLink={ctx.onLink} />
-            <div className="peer-card-note muted">Sent by another chat. You did not write this.</div>
-          </div>
+        ) : note ? (
+          <NoteCard note={note} ctx={ctx} />
         ) : (
           <div className="bubble" title={messageTimeLabel(row.timestamp, Date.now())} data-testid="user-bubble">
             <MessageImages chatId={ctx.chatId} images={row.details?.images} />
@@ -224,7 +259,7 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
           <UserActions
             row={row}
             sctx={slotContext(row, ctx)}
-            onEdit={row.status === 'complete' && !ctx.running && !peer && !page && ctx.onEdit ? () => ctx.onEdit?.(row) : undefined}
+            onEdit={row.status === 'complete' && !ctx.running && !note && !page && ctx.onEdit ? () => ctx.onEdit?.(row) : undefined}
           />
         )}
         <Footers row={row} ctx={ctx} />

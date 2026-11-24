@@ -141,15 +141,45 @@ button.danger {
   margin-top: 2px;
 }
 
-/* A message another chat sent: sender and link, the body, and a quiet note that the user did not write it. */
-.peer-card {
-  border-left: 3px solid var(--md-border, currentColor);
+/* A message from another agent or the app, in the transcript as a compact card: a head naming
+ * the sender (linked to the sending chat when one did) and one line of digest, collapsed to two
+ * lines; the whole text the agent received opens behind the chevron. */
+.note-card {
+  border-left: 3px solid var(--helm-accent, var(--md-border, currentColor));
 }
-.peer-card-head {
+.note-card-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   font-size: 12px;
-  margin-bottom: 4px;
+  min-width: 0;
 }
-.peer-card-from {
+.note-card-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.note-card-glyph {
+  flex: none;
+  color: var(--muted);
+}
+.note-card-toggle {
+  display: inline-flex;
+  align-items: center;
+  background: none;
+  border: 0;
+  padding: 2px;
+  color: inherit;
+  cursor: pointer;
+}
+.note-card-chevron {
+  transition: transform 0.15s ease;
+}
+.note-card.open .note-card-chevron {
+  transform: rotate(90deg);
+}
+.note-card-from {
   background: none;
   border: 0;
   padding: 0;
@@ -159,7 +189,19 @@ button.danger {
   text-decoration: underline dashed;
   cursor: pointer;
 }
-.peer-card-note {
+/* The one-line digest under the head, while the card is closed. */
+.note-card-digest {
+  font-size: 13px;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.note-card-body {
+  margin-top: 4px;
+  font-size: 13px;
+}
+.note-card-note {
   font-size: 12px;
   margin-top: 6px;
 }
