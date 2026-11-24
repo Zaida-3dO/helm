@@ -230,7 +230,13 @@ pub(crate) fn live(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
         ));
     };
     match a.action.as_str() {
-        "start" => svc.start(ctx.events.clone())?,
+        "start" => {
+            // Live recognition follows the language saved here; "auto" leaves the choice to
+            // the operating system's own speech language.
+            let s = load(&*db(ctx)?);
+            let lang = (s.language != settings::AUTO_LANGUAGE).then(|| s.language.clone());
+            svc.start(ctx.events.clone(), lang)?;
+        }
         "stop" => svc.stop()?,
         "cancel" => svc.cancel()?,
         other => {

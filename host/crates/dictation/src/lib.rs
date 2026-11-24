@@ -37,7 +37,7 @@
 //! | `dictation_settings_set` | maintenance | `{sttUrl?, allowPrivateNetwork?, model?, language?, speechReserveGb?}` | [`ops::View`] |
 //! | `dictation_transcribe` | blocking | `{wavBase64}` | `{text}`, or an error whose `code` is `not_set_up`, `bad_address`, `too_big`, `bad_audio`, `unreachable`, `server` or `unreadable` |
 //! | `dictation_test` | blocking | none | `{ok, message}` (one second of silence to the server) |
-//! | `dictation_live` | blocking | `{action: start, stop or cancel}` | `{ok}`, or an error whose `code` is `not_available` or `busy` |
+//! | `dictation_live` | blocking | `{action: start, stop or cancel}` | `{ok}`, or an error whose `code` is `not_available`. A `start` takes the microphone from any session still running. |
 //!
 //! The `dictation` event tells the page the settings changed. A live session speaks for itself:
 //! `live_transcript {final, text}` carries the words, and `dictation_live {state: failed, message}`
