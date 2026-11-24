@@ -2544,6 +2544,43 @@ async fn the_queue_panel_can_pause_and_stop_a_working_chat() {
     );
 }
 
+/// A pause click that lands just as the turn ends must not type a fresh turn onto a quiet
+/// chat: the note write finds the chat no longer working and lets the note — and its
+/// transcript row — go.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pause_note_is_dropped_when_the_turn_ends_before_it_lands() {
+    let mut h = harness();
+    let (chat, _, _w) = running_turn(&mut h).await;
+    // The race: the panel read the chat as working, and the turn ended before the write —
+    // the host still holds a live worker, while the chats row already says idle.
+    h.db.write(|tx| tx.execute("UPDATE chats SET status = 'idle' WHERE id = ?1", [&chat]))
+        .unwrap();
+    crate::queue::action(&h.rt, &chat, "pause", None).unwrap();
+    assert_eq!(
+        h.col(&format!(
+            "SELECT count(*) FROM submissions WHERE chat_id = '{chat}' \
+             AND text LIKE '%paused this chat from the queue%'"
+        )),
+        ["0"],
+        "no note went, so no fresh turn starts on a chat that is done"
+    );
+    assert_eq!(
+        h.col(&format!(
+            "SELECT count(*) FROM messages WHERE chat_id = '{chat}' AND role = 'context' \
+             AND json_extract(details, '$.contextKind') = 'queuePause'"
+        )),
+        ["0"],
+        "and the transcript says nothing was halted"
+    );
+    assert_eq!(
+        h.col(&format!(
+            "SELECT count(*) FROM chat_dispatch_holds WHERE chat_id = '{chat}'"
+        )),
+        ["0"],
+        "the dropped note parked nothing either"
+    );
+}
+
 /// Withdraw: the text comes back as a newer draft revision.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_withdrawn_steer_returns_as_a_newer_draft() {
@@ -4287,6 +4324,14 @@ async fn fast_mode_is_the_chats_own_pick_with_a_null_fallback() {
         .unwrap();
     assert_eq!(r["fastMode"], json!(true));
     assert_eq!(stamp(), before, "a no-op leaves the row alone");
+    // A real change moves the pick but not the row's age: the bolt changes a setting, not the
+    // chat's activity, and an updated_at bump would slide it up an Activity-sorted list.
+    let r = h
+        .call("chat_set_fast_mode", json!({"chatId": chat, "on": false}))
+        .await
+        .unwrap();
+    assert_eq!(r["fastMode"], json!(false));
+    assert_eq!(stamp(), before, "the bolt never bumps updated_at");
     // An unknown chat is not_found; a call without a chat id is refused.
     let e = h
         .call("chat_set_fast_mode", json!({"chatId": "nope", "on": true}))

@@ -1163,7 +1163,9 @@ pub fn chat_set_model(rt: &ChatRuntime, a: ChatSetModelArgs) -> Result<ChatRecor
 /// `chat_set_fast_mode`: store the chat's own pick for Claude Code's fast mode; `None` drops
 /// the pick so the chat follows the new-chat default (Settings → Runtime) again. The value
 /// reaches the chat's agent when its worker next starts — the launch writes it into the CLI's
-/// settings — so a chat that is working keeps what it started with.
+/// settings — so a chat that is working keeps what it started with. Writing it never touches
+/// `updated_at`: the bolt changes a setting, and an age bump would slide the chat up an
+/// Activity-sorted sidebar (as for `chat_set_sidebar_state`).
 pub fn chat_set_fast_mode(
     rt: &ChatRuntime,
     a: ChatSetFastModeArgs,
@@ -1176,12 +1178,11 @@ pub fn chat_set_fast_mode(
     if before.fast_mode == a.on {
         return Ok(before);
     }
-    let now = helm_core::now_ms();
     rt.db()
         .write(|tx| {
             tx.execute(
-                "UPDATE chats SET fast_mode = ?1, updated_at = ?2 WHERE id = ?3",
-                params![a.on, now, a.chat_id],
+                "UPDATE chats SET fast_mode = ?1 WHERE id = ?2",
+                params![a.on, a.chat_id],
             )
         })
         .map_err(sql)?;
