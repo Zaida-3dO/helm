@@ -15,6 +15,7 @@
 //! | `interaction_answer` | async | [`InteractionAnswerArgs`] → `null` |
 //! | `draft_save` | blocking | [`DraftSaveArgs`] → [`DraftSaveResult`] |
 //! | `chat_set_model` | maintenance | [`ChatSetModelArgs`] → `ChatRecord` |
+//! | `chat_set_folder` | maintenance | `{chatId, cwd}` → `{chatId, cwd, projectId}` — move the chat to work in another folder; the board it is shown on is left alone (`chat_organize`), and a chat whose worker is running is refused |
 //! | `model_catalogue` | blocking | [`ModelCatalogueArgs`] → [`ModelCatalogue`] |
 //! | `tool_stop` | async | [`ToolStopArgs`] → [`ToolStopResult`] |
 //! | `chat_compact` | maintenance | [`ChatIdArgs`] → `null` |
@@ -54,6 +55,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .async_op("interaction_answer", interaction_answer)
         .blocking("draft_save", OpClass::Blocking, draft_save)
         .blocking("chat_set_model", OpClass::Maintenance, chat_set_model)
+        .blocking("chat_set_folder", OpClass::Maintenance, chat_set_folder)
         // The composer's permission-mode picker.
         .blocking(
             "chat_set_permission_mode",
@@ -417,6 +419,67 @@ async fn interaction_answer(ctx: OpCtx, args: Value) -> Result<Value, ApiError> 
 fn chat_set_model(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ChatSetModelArgs = parse_args(args)?;
     to_value(&submit::chat_set_model(&runtime(ctx)?, a)?)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SetFolderArgs {
+    chat_id: String,
+    cwd: String,
+}
+
+/// `chat_set_folder`: move a chat to work in another folder. A chat's working folder is its
+/// folder project; moving one re-points the chat at the folder project for the new path, making
+/// that project when nothing has worked there yet. The board it is shown on (`chat_organize`) is
+/// left alone: where a chat runs and where it is shown are separate choices. A chat whose worker
+/// is running is refused — the move must not change the ground under a live Claude Code session;
+/// its next start reads the new folder.
+fn chat_set_folder(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: SetFolderArgs = parse_args(args)?;
+    let cwd = a.cwd.trim();
+    let path = std::path::Path::new(cwd);
+    if cwd.is_empty() || !path.is_absolute() {
+        return Err(ApiError::bad_args("The folder must be an absolute path."));
+    }
+    if !path.is_dir() {
+        return Err(ApiError::bad_args("That folder does not exist."));
+    }
+    if let Some(rt) = ctx.services.get::<ChatRuntime>() {
+        if rt.busy_chats().iter().any(|c| c == &a.chat_id) {
+            return Err(ApiError::conflict(
+                "That chat is working: stop it before moving its folder.",
+            ));
+        }
+    }
+    let db = ctx.services.need::<Database>()?;
+    let project = db
+        .write(|tx| {
+            let known: Option<String> = tx
+                .query_row(
+                    "SELECT project_id FROM chats WHERE id = ?1",
+                    [&a.chat_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if known.is_none() {
+                return Ok(None);
+            }
+            let now = helm_core::now_ms();
+            let pid = store::upsert_folder_project(tx, cwd, now)?;
+            tx.execute(
+                "UPDATE chats SET project_id = ?2, updated_at = ?3 WHERE id = ?1",
+                rusqlite::params![a.chat_id, pid, now],
+            )?;
+            Ok(Some(pid))
+        })
+        .map_err(sql)?
+        .ok_or_else(not_found)?;
+    let mut e = helm_ipc::AppEvent::new("sidebar");
+    e.fields
+        .insert("chatIds".into(), serde_json::json!([a.chat_id]));
+    ctx.events.emit(e);
+    let chat = crate::manage::changed(ctx, &a.chat_id)?;
+    Ok(serde_json::json!({ "chatId": chat.id, "cwd": chat.cwd, "projectId": project }))
 }
 
 async fn tool_stop(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
@@ -900,6 +963,7 @@ pub(crate) mod tests {
             ("interaction_answer", OpClass::Async),
             ("draft_save", OpClass::Blocking),
             ("chat_set_model", OpClass::Maintenance),
+            ("chat_set_folder", OpClass::Maintenance),
             ("chat_set_permission_mode", OpClass::Maintenance),
             ("model_catalogue", OpClass::Blocking),
             ("tool_stop", OpClass::Async),
@@ -1039,6 +1103,80 @@ pub(crate) mod tests {
             h.db.snapshot(|tx| tx.query_row("SELECT count(*) FROM chats", [], |r| r.get(0)))
                 .unwrap();
         assert_eq!(n, 3, "refusals make nothing");
+    }
+
+    /// `chat_set_folder`: the chat's folder project follows the new path (made when missing),
+    /// an existing folder reuses its project, and a relative, missing or unknown-chat call is
+    /// refused without touching the chat.
+    #[tokio::test]
+    async fn set_folder_moves_the_chat_to_its_folder_project() {
+        let h = harness();
+        let chat: ChatRecord = serde_json::from_value(
+            h.api
+                .call(&main(), "chat_create", json!({"cwd": h.work.to_string_lossy()}))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let other = h.work.join("moved");
+        std::fs::create_dir_all(&other).unwrap();
+        let out = h
+            .api
+            .call(
+                &main(),
+                "chat_set_folder",
+                json!({"chatId": chat.id, "cwd": other.to_string_lossy()}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["cwd"], other.to_string_lossy().to_string());
+        assert_ne!(out["projectId"], chat.project_id, "a new folder project");
+        let cwd_of = |h: &Harness| -> String {
+            h.db
+                .snapshot(|tx| {
+                    tx.query_row(
+                        "SELECT p.path FROM chats c JOIN projects p ON p.id = c.project_id WHERE c.id = ?1",
+                        [&chat.id],
+                        |r| r.get(0),
+                    )
+                })
+                .unwrap()
+        };
+        assert_eq!(cwd_of(&h), other.to_string_lossy().to_string());
+        // Moving to a folder that already has a project reuses that project.
+        let second = h
+            .api
+            .call(
+                &main(),
+                "chat_create",
+                json!({"cwd": other.to_string_lossy()}),
+            )
+            .await
+            .unwrap();
+        let back = h
+            .api
+            .call(
+                &main(),
+                "chat_set_folder",
+                json!({"chatId": chat.id, "cwd": other.to_string_lossy()}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(back["projectId"], second["projectId"].as_str().unwrap(), "the same project");
+        // Refusals: relative, missing, and an unknown chat; the chat keeps its folder.
+        for args in [
+            json!({"chatId": chat.id, "cwd": "sub"}),
+            json!({"chatId": chat.id, "cwd": h.work.join("gone").to_string_lossy()}),
+            json!({"chatId": "nope", "cwd": other.to_string_lossy()}),
+        ] {
+            let e = h
+                .api
+                .call(&main(), "chat_set_folder", args.clone())
+                .await
+                .unwrap_err();
+            assert!(matches!(e.code.as_str(), "bad_args" | "not_found"), "{args}: {e:?}");
+        }
+        assert_eq!(cwd_of(&h), other.to_string_lossy().to_string(), "still moved");
     }
 
     #[tokio::test]
