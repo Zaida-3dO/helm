@@ -224,6 +224,28 @@ pub struct QueueEntry {
     pub since: i64,
     /// The queue pushed it to the front of its line.
     pub top: bool,
+    /// The profile this chat belongs to, for the panel's tag when it is not the current one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub profile_id: Option<String>,
+}
+
+/// A chat with a turn open right now: the queue panel shows these above the waiting rows,
+/// each with its own pause and stop. See [`crate::queue::summary`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueActive {
+    pub chat_id: String,
+    pub title: String,
+    /// The local model server its turn runs on; nothing for a Claude chat.
+    pub server_id: Option<String>,
+    /// When the turn opened, Unix ms.
+    #[ts(type = "number")]
+    pub since: i64,
+    /// The profile this chat belongs to, for the panel's tag when it is not the current one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub profile_id: Option<String>,
 }
 
 /// One local model server's load right now: chats working on it, and chats whose turn start
@@ -239,11 +261,14 @@ pub struct QueueServer {
 }
 
 /// `queue_list`: the queue whole in one read — every held start, front of the lines first,
-/// plus the load each place it waits on carries.
+/// the chats with a turn open right now (oldest first), plus the load each place it waits on
+/// carries.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueSummary {
     pub entries: Vec<QueueEntry>,
+    /// Chats with a turn open right now, oldest turn first.
+    pub active: Vec<QueueActive>,
     pub servers: Vec<QueueServer>,
     /// Chats waiting for the Claude plan windows to open again.
     #[ts(type = "number")]
@@ -261,7 +286,10 @@ pub struct QueueSummary {
 #[serde(rename_all = "camelCase")]
 pub struct QueueActionArgs {
     pub chat_id: String,
-    /// `top`, `up`, `down`, `move`, `hold`, `release`, `cancel` or `start_anyway`.
+    /// `top`, `up`, `down`, `move`, `hold`, `release`, `cancel`, `pause`, `stop` or
+    /// `start_anyway`. `pause` tells a working chat to halt at its next boundary (and parks a
+    /// waiting one); `stop` takes down a working chat's worker at once (and ends a waiting
+    /// one's wait). Both stamp the acting profile on the target's transcript.
     pub action: String,
     /// For `move`: stand just before this waiting chat (at the end when given as none).
     #[serde(default)]

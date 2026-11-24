@@ -23,4 +23,8 @@ since: number,
 /**
  * The queue pushed it to the front of its line.
  */
-top: boolean, };
+top: boolean, 
+/**
+ * The profile this chat belongs to, for the panel's tag when it is not the current one.
+ */
+profileId?: string, };

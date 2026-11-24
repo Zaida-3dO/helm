@@ -2372,6 +2372,149 @@ async fn the_queue_line_can_be_reordered_parked_and_sent_back() {
     .await;
 }
 
+/// What counts as working on a local server is what the server itself answers: a chat holds at
+/// its start while the server is busy for anyone — another profile, another instance, or a
+/// request that never came from Helm — even when this app's own count sits under the cap. The
+/// panel read shows the line and the working chats beside it, and a pause from the panel parks
+/// a waiting chat by hand.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_turns_wait_on_what_the_server_says_it_carries() {
+    let mut h = harness_with(Limits {
+        tick: Duration::from_millis(50),
+        ..limits()
+    });
+    h.db.write(|tx| helm_core::prefs::set_generic(tx, "localChatCap", &json!(2)))
+        .unwrap();
+    let local = Arc::new(FakeLocal {
+        turns: Mutex::new(Vec::new()),
+        outcome: Mutex::new(Ok("m-one".into())),
+        gate: Mutex::new(None),
+        finished: Mutex::new(Vec::new()),
+        refreshed: Mutex::new(Vec::new()),
+        held_outcome: Mutex::new(None),
+        // The server's own word: it is answering something right now and holds one more behind
+        // it. Two of two, whatever Helm's local count says.
+        queue: Mutex::new(Some(crate::local::QueueInfo {
+            busy: true,
+            queued: Some(1),
+        })),
+    });
+    h.rt.set_local_models(local.clone());
+    let cwd = h.work.to_string_lossy().into_owned();
+    let asked = |id: &str| -> bool { local.turns.lock().unwrap().iter().any(|t| t.chat_id == id) };
+    let new_id = |r: Value| r["id"].as_str().unwrap().to_owned();
+    let a = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
+        )
+        .await
+        .unwrap(),
+    );
+    h.send(&a, "job a", "default").await;
+    let mut wa = h.worker().await;
+    wa.ready().await;
+    let pa = wa.expect("prompt").await;
+    ack(&wa, &pa).await;
+    wa.emit(json!({"type": "agent_start"})).await;
+    // A's first gate read asked the server and the answer is in the cache by now. B would start
+    // on the old per-instance count (1 of 2 used here); the server's answer is what holds it.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let b = new_id(
+        h.call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/x"}),
+        )
+        .await
+        .unwrap(),
+    );
+    let (sidb, _) = h.send(&b, "job b", "default").await;
+    h.until("B waits on the server's busy word", |h| {
+        h.status(&b) == "starting"
+            && h.state(&sidb) == "saved"
+            && h.col(&format!(
+                "SELECT reason FROM chat_dispatch_holds WHERE chat_id = '{b}'"
+            )) == ["local_cap"]
+    })
+    .await;
+    assert!(!asked(&b), "the server is busy for someone else: no new turn starts");
+    // The panel read: B waits on Strata's line, and A stands above the line as working on it.
+    let s = crate::queue::summary(&h.db, &h.rt);
+    let entry = s.entries.iter().find(|e| e.chat_id == b).expect("B in the line");
+    assert_eq!(entry.reason, "local_cap");
+    assert_eq!(entry.server_id.as_deref(), Some("strata"));
+    assert!(
+        s.active
+            .iter()
+            .any(|x| x.chat_id == a && x.server_id.as_deref() == Some("strata")),
+        "the working chat is listed where the panel can show and halt it"
+    );
+    // Pausing a waiting chat from the panel parks it by hand and says so in its transcript.
+    crate::queue::action(&h.rt, &b, "pause", None).unwrap();
+    assert_eq!(
+        h.col(&format!(
+            "SELECT reason FROM chat_dispatch_holds WHERE chat_id = '{b}'"
+        )),
+        ["manual"]
+    );
+    assert_eq!(
+        h.col(&format!(
+            "SELECT count(*) FROM messages WHERE chat_id = '{b}' AND role = 'context' \
+             AND json_extract(details, '$.contextKind') = 'queuePause'"
+        )),
+        ["1"]
+    );
+}
+
+/// Pause and stop from the queue panel reach any chat of this host, whoever's it is: the pause
+/// arrives as a steer the chat reads at its next boundary, the stop takes the worker down with
+/// the existing stop semantics, and both leave a transcript row naming who asked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_queue_panel_can_pause_and_stop_a_working_chat() {
+    let mut h = harness();
+    let (chat, _, mut w) = running_turn(&mut h).await;
+    crate::queue::action(&h.rt, &chat, "pause", None).unwrap();
+    let p = w.expect("prompt").await;
+    assert_eq!(p["streamingBehavior"], "steer", "the halt lands at a boundary");
+    let pause_sid = p["submissionId"].as_str().unwrap().to_owned();
+    let text = p["text"].as_str().unwrap();
+    assert!(text.contains("paused this chat from the queue"), "{text}");
+    assert!(text.contains("do not start new work"), "it says to stop, not just wait");
+    ack(&w, &p).await;
+    w.emit(json!({"type": "submission_delivered", "submissionId": &pause_sid}))
+        .await;
+    h.until("the halt is delivered", |h| h.state(&pause_sid) == "delivered")
+        .await;
+    assert_eq!(
+        h.col(&format!(
+            "SELECT count(*) FROM messages WHERE chat_id = '{chat}' AND role = 'context' \
+             AND json_extract(details, '$.contextKind') = 'queuePause'"
+        )),
+        ["1"],
+        "the transcript says a queue pause happened"
+    );
+    // Stop: the worker is taken down at once, with the existing semantics.
+    crate::queue::action(&h.rt, &chat, "stop", None).unwrap();
+    let abort = w.expect("abort").await;
+    w.respond(&abort, json!({"state": "stopping", "cancelledSubmissionIds": []}))
+        .await;
+    w.emit(json!({"type": "agent_settled", "outcome": "stopped"}))
+        .await;
+    h.until("the chat is stopped", |h| h.status(&chat) == "stopped")
+        .await;
+    assert_eq!(
+        h.col(&format!(
+            "SELECT count(*) FROM messages WHERE chat_id = '{chat}' AND role = 'context' \
+             AND json_extract(details, '$.contextKind') = 'queueStop'"
+        )),
+        ["1"]
+    );
+    assert!(
+        w.no_command_for(Duration::from_millis(100)).await.is_none(),
+        "the queue stop resends nothing on its own"
+    );
+}
+
 /// Withdraw: the text comes back as a newer draft revision.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_withdrawn_steer_returns_as_a_newer_draft() {

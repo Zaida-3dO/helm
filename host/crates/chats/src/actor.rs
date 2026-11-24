@@ -3334,10 +3334,12 @@ impl Actor {
     ///
     /// A local chat's place is the line on its server: the server carries at most its own cap
     /// (set in the server's settings) or else `localChatCap` (0 switches the cap off), and only
-    /// chats that are working
-    /// count against it — a chat held at its start is not working, so waiters never block each
-    /// other; they go pushed-to-top first, then normal before background, then in the order
-    /// they began to wait. The cap is deliberately soft at the margin: a chat that has passed
+    /// chats that are working count against it — a chat held at its start is not working, so
+    /// waiters never block each other; they go pushed-to-top first, then normal before
+    /// background, then in the order they began to wait. What counts as working is the server's
+    /// own answer about itself (its busy and waiting counts, whoever's requests those are),
+    /// floored by this instance's chats open on it, so a chat waits while the GPU is busy even
+    /// when another app or person is using it. The cap is deliberately soft at the margin: a chat that has passed
     /// this check but has not opened its turn yet counts as neither working nor waiting, so
     /// briefly one chat more than the cap can be preparing; it settles as soon as the turn
     /// opens. A chat on Claude instead asks the plan windows (`claudeHoldPct`) and the app's
@@ -3373,7 +3375,12 @@ impl Actor {
                 // Cap off still orders the waiters; only the working-chat count is lifted.
                 let cap = if cap == 0 { usize::MAX } else { cap };
                 let (w, waits) = self.server_line(server);
-                (w, waits, cap)
+                // The server's own answer about itself is the truth of what it carries — its
+                // request being answered plus what it holds waiting, whoever put those there —
+                // floored by our own open turns on it, whose requests may not have landed yet.
+                // A server that answers nothing about its queue keeps the old instance count.
+                let seen = self.server_queue(server);
+                (queue::server_working(seen, w), waits, cap)
             }
             None => (0, self.plan_line(), usize::MAX),
         };

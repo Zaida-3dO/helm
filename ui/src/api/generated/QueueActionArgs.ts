@@ -5,7 +5,10 @@
  */
 export type QueueActionArgs = { chatId: string, 
 /**
- * `top`, `up`, `down`, `move`, `hold`, `release`, `cancel` or `start_anyway`.
+ * `top`, `up`, `down`, `move`, `hold`, `release`, `cancel`, `pause`, `stop` or
+ * `start_anyway`. `pause` tells a working chat to halt at its next boundary (and parks a
+ * waiting one); `stop` takes down a working chat's worker at once (and ends a waiting
+ * one's wait). Both stamp the acting profile on the target's transcript.
  */
 action: string, 
 /**

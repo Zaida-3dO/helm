@@ -23,14 +23,27 @@ export function reasonLabel(reason: string): string {
   return REASON_LABEL[reason] ?? reason;
 }
 
-/** "Waiting for the local model · 2 waiting ahead" — the line a row shows for its wait.
- * For a Claude-window wait with a known reset it names the time instead, when given. */
-export function waitLine(entry: QueueEntry, ahead: number, untilText: string | null): string {
+/** "Waiting for the local model on Strata · 2 waiting ahead" — the line a row shows for its
+ * wait: the reason, the place it waits on for a local-server wait, and how many of yours stand
+ * ahead. For a Claude-window wait with a known reset it names the time instead, when given. */
+export function waitLine(entry: QueueEntry, ahead: number, untilText: string | null, serverLabel?: string | null): string {
   const base = reasonLabel(entry.reason);
   if (entry.reason === 'claude_capacity' && untilText) return `${base} · opens again ${untilText}`;
   if (entry.reason === 'manual') return base;
-  if (ahead > 0) return `${base} · ${ahead} waiting ahead`;
-  return base;
+  const why = entry.reason === 'local_cap' && serverLabel ? `${base} on ${serverLabel}` : base;
+  if (ahead > 0) return `${why} · ${ahead} waiting ahead`;
+  return why;
+}
+
+/** The line a working chat's row shows: which place its turn is running on. */
+export function activeLine(serverLabel: string | null): string {
+  return serverLabel ? `on ${serverLabel}` : 'on Claude';
+}
+
+/** Whether a row should carry a tag for its profile: it has one, and it is not the profile the
+ * panel is showing (the chosen profile, or the home profile while all of them are on screen). */
+export function showsProfile(profileId: string | null, currentId: string | null): boolean {
+  return profileId != null && profileId !== currentId;
 }
 
 /** How many starts stand ahead of this one in its line (the list is front to back). */

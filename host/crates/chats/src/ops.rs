@@ -164,7 +164,10 @@ fn queue_list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
 /// `release`, `cancel` or `start_anyway` (let a Claude-held start through the plan windows
 /// once) — answering with the fresh summary. `move` takes a `beforeChatId` (or none, for the
 /// end of the line). `cancel` gives a waiting send back to its owner (typed text to the draft,
-/// as a refusal would); nothing is ever deleted.
+/// as a refusal would); nothing is ever deleted. `pause` and `stop` work on any chat this host
+/// runs: a working chat is told to halt at its next boundary (`pause`) or its worker is taken
+/// down at once (`stop`); a waiting chat is parked or its wait ended; the acting profile is
+/// stamped on the target's transcript.
 fn queue_action(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: QueueActionArgs = parse_args(args)?;
     let rt = runtime(ctx)?;

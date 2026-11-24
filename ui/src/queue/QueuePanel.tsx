@@ -1,25 +1,27 @@
 // The queue panel: a modal over the host's queues, opened from the sidebar's Queue tile.
-// Two tabs: the chat queue — one row per chat whose turn start waits (open it, move it to
-// the top, up or down, park it by hand, release a parked one, or send it back) — and the
-// build queue: features to run one after another, each started by the host when the one
-// before it settles. The rows come straight from the host; every action answers with the
-// fresh queue.
+// Two tabs: the chat queue — chats working first, then chats whose turn start waits — and
+// the build queue: features to run one after another, each started by the host when the one
+// before it settles. Every chat row opens its chat and carries a tag when the chat belongs
+// to another profile, and pause and stop reach any chat this PC runs, whoever's it is (the
+// host stamps the acting profile on the target's transcript). The rows come straight from
+// the host; every action answers with the fresh queue.
 
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
-import type { BuildQueueEntry, ModelCatalogue, QueueEntry, QueueSummary } from '../api/generated/index.ts';
+import type { BuildQueueEntry, ModelCatalogue, QueueActive, QueueEntry, QueueSummary } from '../api/generated/index.ts';
 import type { ProjectNode } from '../api/projects.ts';
+import type { ProfilesView } from '../api/profiles.ts';
 import type { Api } from '../api/client.ts';
 import type { EventBus } from '../api/events.ts';
 import { chatOps } from '../api/ops.ts';
 import type { QueueStore } from './store.ts';
 import { BuildQueueStore } from './store.ts';
 import { buildQueueOps } from './api.ts';
-import { actionsFor, aheadOf, buildActionsFor, buildLine, buildStateLabel, CLASS_LABEL, claudeLine, queueCount, serverLine, untilText, waitLine } from './model.ts';
+import { actionsFor, activeLine, aheadOf, buildActionsFor, buildLine, buildStateLabel, CLASS_LABEL, claudeLine, showsProfile, untilText, waitLine } from './model.ts';
 import { Button, Dialog, dropBefore, toast, useDragReorder, type DragRowProps } from '../ui/index.ts';
-import { IconChevronDown, IconChevronUp, IconExternalLink, IconPause, IconPlay, IconX } from '../ui/icons.tsx';
+import { IconChevronDown, IconChevronUp, IconExternalLink, IconPause, IconPlay, IconStop, IconX } from '../ui/icons.tsx';
 import './queue.css';
 
-type MoveAction = 'top' | 'up' | 'down' | 'move' | 'hold' | 'release' | 'cancel';
+type MoveAction = 'top' | 'up' | 'down' | 'move' | 'hold' | 'release' | 'cancel' | 'pause' | 'stop';
 
 function toastError(e: unknown): void {
   toast.show({ kind: 'error', text: String((e as Error)?.message ?? e) });
@@ -42,6 +44,7 @@ export function QueuePanel({
   bus,
   projects,
   currentProjectId,
+  profiles,
   onOpen,
   onClose,
 }: {
@@ -52,6 +55,8 @@ export function QueuePanel({
   projects: readonly ProjectNode[];
   /** The open chat's project: the picker starts on it. */
   currentProjectId: string | null;
+  /** The profiles of this install: the tag on a chat that belongs to someone else. */
+  profiles: ProfilesView | null;
   onOpen: (chatId: string) => void;
   onClose: () => void;
 }) {
@@ -84,7 +89,7 @@ export function QueuePanel({
       testId="queue-panel"
       intro={
         tab === 'chats'
-          ? 'Chats whose turn is waiting to open. A waiting chat keeps its message saved and opens on its own when its place frees.'
+          ? 'Chats working now and chats whose turn is waiting to open. A waiting chat keeps its message saved and opens on its own when its place frees; pause and stop reach any chat this PC runs, whoever it belongs to.'
           : 'Features queued to build one after another. Helm starts a waiting entry only when the build before it has settled, one at a time.'
       }
     >
@@ -96,24 +101,25 @@ export function QueuePanel({
         <>
           {summary === null ? (
             <p className="queue-empty">Checking the queue…</p>
-          ) : summary.entries.length === 0 ? (
-            <p className="queue-empty" data-testid="queue-empty">Nothing is waiting.</p>
           ) : (
-            summary.entries.map((e, i) => <QueueRow key={e.chatId} entry={e} index={i} summary={summary} claudeUntil={claudeUntil} act={act} onOpen={onOpen} onClose={onClose} reorder={reorder} />)
+            <>
+              <div className="queue-group" data-testid="queue-group-active">Working{summary.active.length > 0 ? ` · ${summary.active.length}` : ''}</div>
+              {summary.active.length === 0 ? (
+                <p className="queue-empty" data-testid="queue-active-empty">Nothing is working.</p>
+              ) : (
+                summary.active.map((a) => <ActiveRow key={a.chatId} entry={a} act={act} onOpen={onOpen} onClose={onClose} profiles={profiles} />)
+              )}
+              <div className="queue-group" data-testid="queue-group-queued">Waiting{summary.entries.length > 0 ? ` · ${summary.entries.length}` : ''}</div>
+              {summary.entries.length === 0 ? (
+                <p className="queue-empty" data-testid="queue-empty">Nothing is waiting.</p>
+              ) : (
+                summary.entries.map((e, i) => <QueueRow key={e.chatId} entry={e} index={i} summary={summary} claudeUntil={claudeUntil} act={act} onOpen={onOpen} onClose={onClose} reorder={reorder} profiles={profiles} />)
+              )}
+              {summary.claudeQueued > 0 || summary.claudeFull ? (
+                <span className="queue-foot" data-testid="queue-claude-foot">{claudeLine(summary, now)}</span>
+              ) : null}
+            </>
           )}
-          {summary != null && (summary.servers.length > 0 || summary.claudeQueued > 0 || summary.claudeFull) && (
-            <div className="queue-servers" data-testid="queue-servers">
-              {summary.servers.map((s) => (
-                <span key={s.serverId} className="queue-server" data-server-id={s.serverId}>
-                  {serverName(s.serverId)}: {serverLine(s.working, s.queued)}
-                </span>
-              ))}
-              <span className="queue-claude">{claudeLine(summary, now)}</span>
-            </div>
-          )}
-          <span className="queue-foot" data-testid="queue-foot">
-            {queueCount(summary)} waiting
-          </span>
         </>
       )}
       {tab === 'build' && <BuildQueueTab store={buildStore} entries={buildEntries} api={api} projects={projects} currentProjectId={currentProjectId} onOpen={onOpen} onClose={onClose} />}
@@ -126,6 +132,55 @@ interface QueueReorder {
   drag: { from: number; to: number; offset: number } | null;
 }
 
+/** The tag for a chat that belongs to another profile: the profile's own name. */
+function ProfileChip({ profileId, profiles }: { profileId: string | null | undefined; profiles: ProfilesView | null }) {
+  const currentId = profiles ? profiles.activeId ?? profiles.homeId : null;
+  if (!showsProfile(profileId ?? null, currentId)) return null;
+  const name = profiles?.profiles.find((p) => p.id === profileId)?.name;
+  if (!name) return null;
+  return (
+    <span className="queue-tag" title={`This chat belongs to ${name}`} data-testid="queue-profile">
+      {name}
+    </span>
+  );
+}
+
+/** A chat with a turn open: open it, pause it at its next boundary, or stop its worker. */
+function ActiveRow({
+  entry: a,
+  act,
+  onOpen,
+  onClose,
+  profiles,
+}: {
+  entry: QueueActive;
+  act: (chatId: string, action: MoveAction, beforeChatId?: string | null) => void;
+  onOpen: (chatId: string) => void;
+  onClose: () => void;
+  profiles: ProfilesView | null;
+}) {
+  return (
+    <div className="queue-row chat-row" data-testid="queue-active-row" data-chat-id={a.chatId}>
+      <button type="button" className="queue-open" title="Open this chat" onClick={() => { onClose(); onOpen(a.chatId); }}>
+        <span className="queue-title">{a.title}</span>
+        <IconExternalLink size={13} />
+      </button>
+      <span className="queue-line">{activeLine(a.serverId ? serverName(a.serverId) : null)}</span>
+      <span className="queue-chips">
+        <ProfileChip profileId={a.profileId} profiles={profiles} />
+      </span>
+      <div className="queue-actions">
+        <Button variant="ghost" className="queue-btn" title="Pause this chat: it finishes the current step, stops at the next boundary and waits" onClick={() => act(a.chatId, 'pause')} data-testid="queue-pause">
+          <IconPause size={13} />
+        </Button>
+        <Button variant="ghost" className="queue-btn" title="Stop this chat at once: its worker is taken down" onClick={() => act(a.chatId, 'stop')} data-testid="queue-stop">
+          <IconStop size={13} />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function QueueRow({
   entry: e,
   index,
@@ -135,6 +190,7 @@ function QueueRow({
   onOpen,
   onClose,
   reorder,
+  profiles,
 }: {
   entry: QueueEntry;
   index: number;
@@ -144,13 +200,14 @@ function QueueRow({
   onOpen: (chatId: string) => void;
   onClose: () => void;
   reorder: QueueReorder;
+  profiles: ProfilesView | null;
 }) {
   const ahead = aheadOf(summary.entries, e.chatId);
   const last = ahead >= lineSize(summary.entries, e) - 1;
   const live = reorder.drag?.from === index;
   return (
     <div
-      className={`queue-row${live ? ' drag-live' : ''}`}
+      className={`queue-row chat-row${live ? ' drag-live' : ''}`}
       style={live ? { transform: `translateY(${reorder.drag!.offset}px)` } : undefined}
       {...reorder.rowProps(index, actionsFor(e).drag)}
       data-testid="queue-row"
@@ -162,8 +219,11 @@ function QueueRow({
         <span className="queue-title">{e.title}</span>
         <IconExternalLink size={13} />
       </button>
-      <span className="queue-line">{waitLine(e, ahead, e.reason === 'claude_capacity' ? claudeUntil : null)}</span>
-      <span className="queue-class" title={`This start is from ${CLASS_LABEL[e.class] ?? e.class}`}>{e.class}</span>
+      <span className="queue-line">{waitLine(e, ahead, e.reason === 'claude_capacity' ? claudeUntil : null, e.serverId ? serverName(e.serverId) : null)}</span>
+      <span className="queue-chips">
+        <ProfileChip profileId={e.profileId} profiles={profiles} />
+        <span className="queue-class" title={`This start is from ${CLASS_LABEL[e.class] ?? e.class}`}>{e.class}</span>
+      </span>
       <div className="queue-actions">
         <Button variant="ghost" className="queue-btn" title="Push to the front of its line" onClick={() => act(e.chatId, 'top')} data-testid="queue-top">
           To top
@@ -193,12 +253,12 @@ function QueueRow({
             <IconPlay size={13} />
           </Button>
         ) : (
-          <Button variant="ghost" className="queue-btn" title="Park this chat until you release it" onClick={() => act(e.chatId, 'hold')} data-testid="queue-hold">
+          <Button variant="ghost" className="queue-btn" title="Pause this chat until you release it" onClick={() => act(e.chatId, 'hold')} data-testid="queue-hold">
             <IconPause size={13} />
           </Button>
         )}
-        <Button variant="ghost" className="queue-btn" title="Send it back: typed text returns to the draft" onClick={() => act(e.chatId, 'cancel')} data-testid="queue-cancel">
-          <IconX size={13} />
+        <Button variant="ghost" className="queue-btn" title="Stop this chat: its waiting send goes back to its owner" onClick={() => act(e.chatId, 'stop')} data-testid="queue-stop">
+          <IconStop size={13} />
         </Button>
       </div>
     </div>

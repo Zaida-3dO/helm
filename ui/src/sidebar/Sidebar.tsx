@@ -913,7 +913,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       {confirm && <ConfirmDialog spec={confirm} onClose={() => setConfirm(null)} />}
       {cost && <CostDialog api={api} target={cost} onClose={() => setCost(null)} />}
       {inboxOpen && <AttentionInbox summary={scopedAttention} ops={ops} onOpen={onSelect} onClose={() => setInboxOpen(false)} />}
-      {queueOpen && <QueuePanel store={queueStore} api={api} bus={bus} projects={snap.projects} currentProjectId={selectedLocalRow?.groupProjectId ?? null} onOpen={onSelect} onClose={() => setQueueOpen(false)} />}
+      {queueOpen && <QueuePanel store={queueStore} api={api} bus={bus} projects={snap.projects} currentProjectId={selectedLocalRow?.groupProjectId ?? null} profiles={prof.view ?? null} onOpen={onSelect} onClose={() => setQueueOpen(false)} />}
       <ItemPickerHost />
       {preview && !menu && !drag && (
         <PreviewCard
