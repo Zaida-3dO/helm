@@ -27,7 +27,8 @@ const CHAT_COLUMNS: &str = concat!(
     "CASE WHEN c.status IN ('starting', 'running', 'stopping') THEN a.state ELSE NULL END",
     ", CASE WHEN c.status IN ('starting', 'running', 'stopping') THEN a.queue_reason ELSE NULL END",
     ", c.stack_id, c.prev_session_id, c.next_session_id",
-    ", c.fast_mode"
+    ", c.fast_mode",
+    ", c.sidebar_state"
 );
 
 /// The joins [`CHAT_COLUMNS`] needs, after `FROM chats c`.
@@ -81,6 +82,10 @@ fn chat_from_row(r: &Row<'_>, revision: i64) -> rusqlite::Result<ChatRecord> {
         prev_session_id: r.get(30)?,
         next_session_id: r.get(31)?,
         fast_mode: r.get(32)?,
+        // The state is written by this same build; one it cannot read is no state.
+        sidebar_state: r
+            .get::<_, Option<String>>(33)?
+            .and_then(|j| serde_json::from_str::<crate::types::SidebarState>(&j).ok()),
     })
 }
 

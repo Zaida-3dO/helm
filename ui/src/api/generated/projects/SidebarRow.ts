@@ -16,7 +16,13 @@ folderProjectId: string, folderPath: string,
 /**
  * Stored nesting depth, 0–2. The sidebar recomputes the drawn depth from the rows it holds.
  */
-depth: number, parentChatId: string | null, hasChildren: boolean, status: ChatStatus, attention: RowAttention | null, pinned: boolean, 
+depth: number, parentChatId: string | null, hasChildren: boolean, 
+/**
+ * The chat's own open-item state says its row is expanded (its children are shown).
+ * Read from the chat record, so the row is expanded on every PC that views the chat;
+ * the chevron writes it through `chat_set_sidebar_state`. Left out when folded.
+ */
+expanded?: boolean, status: ChatStatus, attention: RowAttention | null, pinned: boolean, 
 /**
  * A manual unread mark or an unread completion (the chat's `unread`).
  */

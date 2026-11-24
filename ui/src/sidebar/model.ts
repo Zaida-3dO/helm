@@ -31,6 +31,17 @@ export const HEIGHTS = {
 /** Where an item sits in its project's block: the header and its chats draw as one tinted block. */
 export type BlockPos = 'only' | 'first' | 'mid' | 'last';
 
+/** The expanded chats to draw: each chat's own open state (it rides on the chat's row, so
+ *  the chat is expanded the same on every PC that views it) plus the window's ephemeral
+ *  auto-expansions that bring the open chat into view, minus any chat the person shut in
+ *  this window (which stays shut until its shut write answers). */
+export function effectiveExpanded(rows: readonly SidebarRow[], ephemeral: ReadonlySet<string>, shut: ReadonlySet<string>): Set<string> {
+  const out = new Set<string>();
+  for (const r of rows) if (r.expanded && !shut.has(r.chatId)) out.add(r.chatId);
+  for (const id of ephemeral) if (!shut.has(id)) out.add(id);
+  return out;
+}
+
 /** What a collapsed group still has going on inside it: chats running, chats with an unread
  *  result, chats waiting on you or flagged as possibly needing you, chats holding an unsent
  *  draft, chats that finished a reply nobody has opened, and chats idle apart from background

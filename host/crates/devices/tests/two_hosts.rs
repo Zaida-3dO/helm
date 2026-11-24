@@ -1935,6 +1935,48 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         ),
         (Some("sonnet"), Some("high"))
     );
+    // The sidebar's open-item state travels the same way: the PC that runs the chat stores
+    // it, and this PC's copy shows it at once. An explicit null is a real value there too:
+    // the copy folds again.
+    api.call_host(
+        "chat_set_sidebar_state",
+        json!({"chatId": "c1", "state": {"v": 1, "expanded": true, "openCards": [7]}}),
+    )
+    .await
+    .unwrap();
+    let got = api
+        .call_host("chat_get", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    assert_eq!(got["chat"]["sidebarState"]["expanded"], json!(true));
+    assert_eq!(got["chat"]["sidebarState"]["openCards"], json!([7]));
+    api.call_host(
+        "chat_set_sidebar_state",
+        json!({"chatId": "c1", "state": null}),
+    )
+    .await
+    .unwrap();
+    let got = api
+        .call_host("chat_get", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    assert!(
+        got["chat"]["sidebarState"].is_null(),
+        "the null reset crossed too"
+    );
+    assert_eq!(
+        port.st().sidebar_state_set,
+        [
+            helm_devices::wire::SidebarStateArgs {
+                chat_id: "c1".to_owned(),
+                state: json!({"v": 1, "expanded": true, "openCards": [7]}),
+            },
+            helm_devices::wire::SidebarStateArgs {
+                chat_id: "c1".to_owned(),
+                state: Value::Null,
+            },
+        ]
+    );
     // The Rename dialog's ask reached the PC that runs the chat.
     assert_eq!(port.st().titles_asked, ["c1"]);
     // The pages pinned on the other PC list here, and one opens from a copy brought across: the

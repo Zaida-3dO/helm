@@ -16,6 +16,7 @@
 //! | `draft_save` | blocking | [`DraftSaveArgs`] → [`DraftSaveResult`] |
 //! | `chat_set_model` | maintenance | [`ChatSetModelArgs`] → `ChatRecord` |
 //! | `chat_set_fast_mode` | maintenance | [`ChatSetFastModeArgs`] → `ChatRecord` — the chat's own fast-mode pick (`on: null` follows the new-chat default again); reaches the agent at the chat's next worker start |
+//! | `chat_set_sidebar_state` | maintenance | [`ChatSetSidebarStateArgs`] → `ChatRecord` — store the chat's whole open-item state (cards opened, row expanded); last write wins, and it does not touch `updated_at` |
 //! | `chat_set_folder` | maintenance | `{chatId, cwd}` → `{chatId, cwd, projectId}` — move the chat to work in another folder; the board it is shown on is left alone (`chat_organize`), and a chat whose worker is running is refused |
 //! | `model_catalogue` | blocking | [`ModelCatalogueArgs`] → [`ModelCatalogue`] |
 //! | `tool_stop` | async | [`ToolStopArgs`] → [`ToolStopResult`] |
@@ -60,6 +61,16 @@ pub fn register_ops(reg: &mut OpRegistry) {
             "chat_set_fast_mode",
             OpClass::Maintenance,
             chat_set_fast_mode,
+        )
+        .blocking(
+            "chat_set_sidebar_state",
+            OpClass::Maintenance,
+            |ctx, args| {
+                to_value(&submit::chat_set_sidebar_state(
+                    &runtime(ctx)?,
+                    parse_args(args)?,
+                )?)
+            },
         )
         .blocking("chat_set_folder", OpClass::Maintenance, chat_set_folder)
         // The composer's permission-mode picker.
@@ -978,6 +989,7 @@ pub(crate) mod tests {
             ("draft_save", OpClass::Blocking),
             ("chat_set_model", OpClass::Maintenance),
             ("chat_set_fast_mode", OpClass::Maintenance),
+            ("chat_set_sidebar_state", OpClass::Maintenance),
             ("chat_set_folder", OpClass::Maintenance),
             ("chat_set_permission_mode", OpClass::Maintenance),
             ("model_catalogue", OpClass::Blocking),

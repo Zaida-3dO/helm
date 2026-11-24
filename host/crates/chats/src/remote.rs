@@ -242,6 +242,7 @@ async fn route(
         // The composer's picks and the chat view's actions, applied where the chat runs.
         | "chat_set_permission_mode"
         | "chat_set_fast_mode"
+        | "chat_set_sidebar_state"
         | "chat_verbosity_get"
         | "chat_verbosity_set"
         | "panel_context_get"

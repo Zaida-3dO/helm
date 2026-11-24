@@ -13,6 +13,7 @@ import type {
   MessageRow,
   SendBehavior,
   SessionMark,
+  SidebarState,
   Submission,
   ThreadState,
   TranscriptPage,
@@ -1124,6 +1125,23 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     chat_set_fast_mode: (a) => {
       const c = find(a.chatId);
       c.chat = { ...c.chat, fastMode: (a.on as boolean | null) ?? null, revision: rev() };
+      emitChat(c);
+      return c.chat;
+    },
+
+    // The chat's open-item state (opened cards, row expanded): merged field by field and
+    // emitted back as the fresh record, as the host's chat_set_sidebar_state does.
+    chat_set_sidebar_state: (a) => {
+      const c = find(a.chatId);
+      const prev = c.chat.sidebarState;
+      const s = a.state as { v: number; expanded?: boolean; openCards?: number[] } | null;
+      let next: SidebarState | undefined;
+      if (s) {
+        const expanded = s.expanded === true || (s.expanded === undefined && prev?.expanded === true);
+        const cards = s.openCards ?? prev?.openCards ?? [];
+        if (expanded || cards.length > 0) next = { v: 1, ...(expanded ? { expanded: true } : {}), ...(cards.length ? { openCards: cards } : {}) };
+      }
+      c.chat = { ...c.chat, ...(next ? { sidebarState: next } : { sidebarState: undefined }), revision: rev() };
       emitChat(c);
       return c.chat;
     },

@@ -616,6 +616,15 @@ pub struct FastModeArgs {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SidebarStateArgs {
+    pub chat_id: String,
+    /// The chat's whole open-item state, replaced in one write; `null` resets it. The shape
+    /// is validated on the PC that runs the chat, where the record lives.
+    pub state: serde_json::Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenameArgs {
     pub chat_id: String,
     pub title: String,
@@ -936,6 +945,9 @@ pub enum Op {
     /// The composer's lightning toggle: the chat's own fast-mode pick, set on the PC that runs
     /// the chat.
     SetFastMode(FastModeArgs),
+    /// The chat's open-item state (opened cards, row expanded), set on the PC that runs
+    /// the chat so every PC viewing it shows the same.
+    SetSidebarState(SidebarStateArgs),
     Rename(RenameArgs),
     Archive(ArchiveArgs),
     Share(ShareArgs),
@@ -1091,6 +1103,7 @@ impl Op {
             "create" => Op::Create(args(a)?),
             "set_model" => Op::SetModel(args(a)?),
             "set_fast_mode" => Op::SetFastMode(args(a)?),
+            "set_sidebar_state" => Op::SetSidebarState(args(a)?),
             "rename" => Op::Rename(args(a)?),
             "archive" => Op::Archive(args(a)?),
             "share" => Op::Share(args(a)?),
@@ -1190,6 +1203,7 @@ impl Op {
                 | Op::ConsentDecide(_)
                 | Op::Create(_)
                 | Op::SetModel(_)
+                | Op::SetSidebarState(_)
                 | Op::Rename(_)
                 | Op::Archive(_)
                 | Op::Share(_)

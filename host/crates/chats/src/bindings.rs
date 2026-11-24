@@ -63,6 +63,7 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         DraftSaveArgs,
         ChatSetModelArgs,
         ChatSetFastModeArgs,
+        ChatSetSidebarStateArgs,
         ModelCatalogueArgs,
         ToolStopArgs,
         AttentionSummary,

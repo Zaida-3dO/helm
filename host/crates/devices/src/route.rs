@@ -1958,6 +1958,7 @@ impl RemoteChats for Mirror {
                 "chat_mute" => "mute",
                 "chat_set_permission_mode" => "set_permission",
                 "chat_set_fast_mode" => "set_fast_mode",
+                "chat_set_sidebar_state" => "set_sidebar_state",
                 "chat_warm" => "warm",
                 "attention_snooze" => "snooze",
                 "attention_address" => "address",
@@ -1972,12 +1973,18 @@ impl RemoteChats for Mirror {
             // step. An explicit null is a real value here: the chat drops its own pick and
             // follows that PC's default again.
             let fast = args.get("on").cloned();
+            // The open-item state answers with the chat record: keep this PC's copy's state
+            // in step. An explicit null is a real value here: the chat is folded again.
+            let st = args.get("state").cloned();
             m.change(&chat_id, wire, args, move |rec| {
                 if let Some(on) = muted {
                     rec.insert("muted".into(), json!(on));
                 }
                 if let Some(f) = fast {
                     rec.insert("fastMode".into(), f);
+                }
+                if let Some(s) = &st {
+                    rec.insert("sidebarState".into(), s.clone());
                 }
             })
             .await

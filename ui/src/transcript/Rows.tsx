@@ -53,6 +53,13 @@ export interface RowContext {
   onCancelEdit?: () => void;
   /** Forward a port an agent offered to this PC; set only for a chat that runs on another PC. */
   onForward?: (ref: ForwardRef) => void;
+  /** The transcript card ids (note cards, page cards) this chat records as open. The state
+   *  rides on the chat, so the cards are open the same on every PC, and they survive the row
+   *  virtualizing away and coming back. Missing means this view does not track it (a hover
+   *  preview or the queue's copy): those cards keep their own fold. */
+  openCards?: ReadonlySet<number>;
+  /** Open or fold one card: written to the chat, and shown the same wherever the chat is viewed. */
+  setCardOpen?: (rowId: number, open: boolean) => void;
 }
 
 /** The button a tool row offers for what its call asked the PC showing the chat to do. */
@@ -152,7 +159,11 @@ function Thinking({ text, streaming, onLink }: { text: string; streaming: boolea
 /** A message a page wrote: a neat card naming its page and summarising it, collapsed by
  * default, expanding to the whole text the agent received. */
 function PageCard({ page, row, ctx }: { page: NonNullable<ReturnType<typeof pageMessage>>; row: MessageRow; ctx: RowContext }) {
-  const [open, setOpen] = useState(false);
+  // Open state rides on the chat when the view tracks it (folded the same on every PC, and
+  // it survives the row virtualizing away); otherwise the card keeps its own fold.
+  const [local, setLocal] = useState(false);
+  const open = ctx.openCards ? ctx.openCards.has(row.id) : local;
+  const toggle = () => (ctx.setCardOpen ? ctx.setCardOpen(row.id, !open) : setLocal(!local));
   return (
     <div className={`bubble page-card${open ? ' open' : ''}`} data-testid="page-card" data-page={page.title || undefined}>
       <div className="page-card-head">
@@ -160,7 +171,7 @@ function PageCard({ page, row, ctx }: { page: NonNullable<ReturnType<typeof page
       </div>
       {page.overview && !open && <div className="page-card-overview" data-testid="page-card-overview">{page.overview}</div>}
       {open && <Markdown text={row.text} onLink={ctx.onLink} />}
-      <button type="button" className="page-card-toggle" onClick={() => setOpen((o) => !o)} aria-expanded={open} data-testid="page-card-toggle">
+      <button type="button" className="page-card-toggle" onClick={toggle} aria-expanded={open} data-testid="page-card-toggle">
         <Glyph name="chevron" size={12} className="page-card-chevron" />
         {open ? 'Hide what the agent received' : 'Show what the agent received'}
       </button>
@@ -174,8 +185,12 @@ const NOTE_HEAD: Record<AgentNote['kind'], string> = { peer: 'Message from ', sc
 
 /** A message from another agent or from the app: one compact card — who sent it (linked to the
  * sending chat when a chat did) and a one-line digest, the whole text behind the chevron. */
-function NoteCard({ note, ctx }: { note: AgentNote; ctx: RowContext }) {
-  const [open, setOpen] = useState(false);
+function NoteCard({ note, ctx, rowId }: { note: AgentNote; ctx: RowContext; rowId: number }) {
+  // Open state rides on the chat when the view tracks it (folded the same on every PC, and
+  // it survives the row virtualizing away); otherwise the card keeps its own fold.
+  const [local, setLocal] = useState(false);
+  const open = ctx.openCards ? ctx.openCards.has(rowId) : local;
+  const toggle = () => (ctx.setCardOpen ? ctx.setCardOpen(rowId, !open) : setLocal(!local));
   const wait = note.wait;
   const link = (
     <button type="button" className="note-card-from" data-testid="note-card-from" onClick={() => ctx.onLink({ kind: 'chat', href: `helm://chats/${note.chatId}` })}>
@@ -185,7 +200,7 @@ function NoteCard({ note, ctx }: { note: AgentNote; ctx: RowContext }) {
   return (
     <div className={`bubble note-card note-${note.kind}${open ? ' open' : ''}`} data-testid="note-card" data-kind={note.kind}>
       <div className="note-card-head">
-        <button type="button" className="note-card-toggle" data-testid="note-card-toggle" onClick={() => setOpen((o) => !o)} aria-expanded={open} aria-label={open ? 'Hide the full message' : 'Show the full message'}>
+        <button type="button" className="note-card-toggle" data-testid="note-card-toggle" onClick={toggle} aria-expanded={open} aria-label={open ? 'Hide the full message' : 'Show the full message'}>
           <Glyph name="chevron" size={12} className="note-card-chevron" />
         </button>
         <Glyph name={NOTE_GLYPH[note.kind]} size={12} className="note-card-glyph" />
@@ -281,7 +296,7 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
         ) : page ? (
           <PageCard page={page} row={row} ctx={ctx} />
         ) : note ? (
-          <NoteCard note={note} ctx={ctx} />
+          <NoteCard note={note} ctx={ctx} rowId={row.id} />
         ) : (
           <div className="bubble" title={messageTimeLabel(row.timestamp, Date.now())} data-testid="user-bubble">
             <MessageImages chatId={ctx.chatId} images={row.details?.images} />
