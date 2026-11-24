@@ -55,7 +55,6 @@ import {
   IconRename,
   IconRestore,
   IconSettings,
-  IconUnread,
   IconX,
 } from '../ui/icons.tsx';
 import { withChatIcons, withProjectIcons } from './menuIcons.tsx';
@@ -1046,7 +1045,9 @@ function projectIconNode(p: ProjectNode): ReactNode {
 }
 
 /** The glyph a folded status shows. One shape per status, shared by chat rows and collapsed
- *  headers; an interrupted row carries no glyph (the CSS slot dot says it). */
+ *  headers; an interrupted row carries no glyph (the CSS slot dot says it). A finished chat —
+ *  whether the attention summary calls it done or the person marked it unread — wears the old
+ *  shimmering star: the animation is the mark, not a still shape. */
 function StatusGlyph({ kind, wheel }: { kind: RowStatus; wheel?: 'working' | 'stopping' }) {
   return (
     <>
@@ -1054,8 +1055,7 @@ function StatusGlyph({ kind, wheel }: { kind: RowStatus; wheel?: 'working' | 'st
       {kind === 'lingering' && <WheelMark size={20} state="calm" className="sb-ind-wheel" />}
       {kind === 'flagged' && <IconFlag size={12} filled />}
       {kind === 'draft' && <IconEdit size={11} />}
-      {kind === 'done' && <StarMark size={26} className="sb-ind-star ui-star-shimmer" />}
-      {kind === 'unread' && <IconUnread size={11} />}
+      {(kind === 'done' || kind === 'unread') && <StarMark size={26} className="sb-ind-star ui-star-shimmer" />}
       {kind === 'pinned' && <IconPin size={11} />}
     </>
   );

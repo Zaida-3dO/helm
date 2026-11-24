@@ -643,8 +643,11 @@
   background: color-mix(in srgb, var(--group-colour) 8%, transparent);
 }
 
+/* The title block is only as wide as its text: it gives (min-width 0) when the row runs out of
+   room but never stretches, so the marks that ride after the title — the muted bell, the children
+   count, the shared-from disc — sit next to the title, not at the row's right edge. */
 .sb-chat-text {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -676,11 +679,14 @@
   height: calc(var(--sb-chat-h) + 20px);
 }
 
-/* The far-right cluster: state word, queue, the one status icon, and the age hard right. On
-   hover the age, status and state word hide and the row's action buttons take their place;
-   the queue stays, moving left with the buttons. */
+/* The far-right cluster: state word, queue, the one status icon, and the age hard right. The auto
+   margin pins it to the right edge however short the title is, so all the slack sits between the
+   title's marks and the cluster — never between the title and its marks. On hover the age, status
+   and state word hide and the row's action buttons take their place; the queue stays, moving left
+   with the buttons. */
 .sb-right {
   flex: none;
+  margin-left: auto;
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -700,7 +706,20 @@
 }
 
 /* Still status shapes from the kit: the wheel (20 px) and the star (26 px) are
-   centred on the 13 px slot. */
+   centred on the slot. For the kinds that wear them the slot grows to the glyph's own box:
+   on the 13 px slot the wheel and the star hung over its edges and pressed into the queue and
+   the date; grown, the cluster's 8 px gap reads as the real gap, like every other gap in the
+   row. */
+.sb-status[data-kind='running'],
+.sb-status[data-kind='lingering'] {
+  width: 20px;
+}
+
+.sb-status[data-kind='done'],
+.sb-status[data-kind='unread'] {
+  width: 26px;
+}
+
 .sb-status .sb-ind-wheel,
 .sb-status .sb-ind-star {
   position: absolute;
