@@ -1503,7 +1503,7 @@ impl ChatPort for HostPort {
             .await?;
             Ok(())
         })
-}
+    }
 
     fn set_sidebar_state(&self, a: SidebarStateArgs) -> BoxFut<'_, PortResult<()>> {
         Box::pin(async move {

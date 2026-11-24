@@ -2441,10 +2441,17 @@ async fn local_turns_wait_on_what_the_server_says_it_carries() {
             )) == ["local_cap"]
     })
     .await;
-    assert!(!asked(&b), "the server is busy for someone else: no new turn starts");
+    assert!(
+        !asked(&b),
+        "the server is busy for someone else: no new turn starts"
+    );
     // The panel read: B waits on Strata's line, and A stands above the line as working on it.
     let s = crate::queue::summary(&h.db, &h.rt);
-    let entry = s.entries.iter().find(|e| e.chat_id == b).expect("B in the line");
+    let entry = s
+        .entries
+        .iter()
+        .find(|e| e.chat_id == b)
+        .expect("B in the line");
     assert_eq!(entry.reason, "local_cap");
     assert_eq!(entry.server_id.as_deref(), Some("strata"));
     assert!(
@@ -2479,16 +2486,24 @@ async fn the_queue_panel_can_pause_and_stop_a_working_chat() {
     let (chat, _, mut w) = running_turn(&mut h).await;
     crate::queue::action(&h.rt, &chat, "pause", None).unwrap();
     let p = w.expect("prompt").await;
-    assert_eq!(p["streamingBehavior"], "steer", "the halt lands at a boundary");
+    assert_eq!(
+        p["streamingBehavior"], "steer",
+        "the halt lands at a boundary"
+    );
     let pause_sid = p["submissionId"].as_str().unwrap().to_owned();
     let text = p["text"].as_str().unwrap();
     assert!(text.contains("paused this chat from the queue"), "{text}");
-    assert!(text.contains("do not start new work"), "it says to stop, not just wait");
+    assert!(
+        text.contains("do not start new work"),
+        "it says to stop, not just wait"
+    );
     ack(&w, &p).await;
     w.emit(json!({"type": "submission_delivered", "submissionId": &pause_sid}))
         .await;
-    h.until("the halt is delivered", |h| h.state(&pause_sid) == "delivered")
-        .await;
+    h.until("the halt is delivered", |h| {
+        h.state(&pause_sid) == "delivered"
+    })
+    .await;
     assert_eq!(
         h.col(&format!(
             "SELECT count(*) FROM messages WHERE chat_id = '{chat}' AND role = 'context' \
@@ -2500,8 +2515,11 @@ async fn the_queue_panel_can_pause_and_stop_a_working_chat() {
     // Stop: the worker is taken down at once, with the existing semantics.
     crate::queue::action(&h.rt, &chat, "stop", None).unwrap();
     let abort = w.expect("abort").await;
-    w.respond(&abort, json!({"state": "stopping", "cancelledSubmissionIds": []}))
-        .await;
+    w.respond(
+        &abort,
+        json!({"state": "stopping", "cancelledSubmissionIds": []}),
+    )
+    .await;
     w.emit(json!({"type": "agent_settled", "outcome": "stopped"}))
         .await;
     h.until("the chat is stopped", |h| h.status(&chat) == "stopped")

@@ -841,7 +841,8 @@ fn acting_name(db: &Database) -> String {
     let chosen: Option<String> = db
         .snapshot(|tx| {
             Ok::<_, rusqlite::Error>(
-                helm_core::prefs::read(tx, "activeProfile").and_then(|v| v.as_str().map(str::to_owned)),
+                helm_core::prefs::read(tx, "activeProfile")
+                    .and_then(|v| v.as_str().map(str::to_owned)),
             )
         })
         .ok()
@@ -849,16 +850,14 @@ fn acting_name(db: &Database) -> String {
     let name: Option<String> = db
         .snapshot(|tx| {
             let q = match chosen.as_deref() {
-                Some(id) if id != "all" => tx.query_row(
-                    "SELECT name FROM profiles WHERE id = ?1",
-                    [id],
-                    |r| r.get::<_, String>(0),
-                ),
-                _ => tx.query_row(
-                    "SELECT name FROM profiles WHERE is_home = 1",
-                    [],
-                    |r| r.get::<_, String>(0),
-                ),
+                Some(id) if id != "all" => {
+                    tx.query_row("SELECT name FROM profiles WHERE id = ?1", [id], |r| {
+                        r.get::<_, String>(0)
+                    })
+                }
+                _ => tx.query_row("SELECT name FROM profiles WHERE is_home = 1", [], |r| {
+                    r.get::<_, String>(0)
+                }),
             };
             Ok::<_, rusqlite::Error>(q.optional()?)
         })
@@ -869,7 +868,13 @@ fn acting_name(db: &Database) -> String {
 
 /// The transcript row a queue halt leaves in the target chat, naming who asked. Context rows
 /// are the transcript's own notes; the panel's transcript already draws them.
-fn stamp(rt: &crate::runtime::ChatRuntime, chat_id: &str, kind: &'static str, text: String, now: i64) {
+fn stamp(
+    rt: &crate::runtime::ChatRuntime,
+    chat_id: &str,
+    kind: &'static str,
+    text: String,
+    now: i64,
+) {
     let _ = rt.db().write(|tx| {
         let row = crate::session_log::RowWrite {
             source_key: format!("c:queue:{kind}:{chat_id}:{now}"),
@@ -929,7 +934,13 @@ fn halt_working(rt: &crate::runtime::ChatRuntime, chat_id: &str, by: &str, now: 
                 entry_id: None,
                 parent_id: None,
             };
-            crate::session_log::upsert_row(tx, &rt.sh.cfg.artifacts(), chat_id, &row, rt.clock().next())
+            crate::session_log::upsert_row(
+                tx,
+                &rt.sh.cfg.artifacts(),
+                chat_id,
+                &row,
+                rt.clock().next(),
+            )
         })
         .is_ok();
     if wrote {
@@ -1200,7 +1211,11 @@ mod tests {
             (q(true, None), 4, 4),
         ];
         for (seen, ours, want) in cases {
-            assert_eq!(server_working(seen.clone(), ours), want, "{seen:?} / ours {ours}");
+            assert_eq!(
+                server_working(seen.clone(), ours),
+                want,
+                "{seen:?} / ours {ours}"
+            );
         }
     }
 

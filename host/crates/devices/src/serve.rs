@@ -26,9 +26,9 @@ use crate::wire::{
     OrganizeArgs, PageArgs, PageIdArgs, PageOrigin, PagesReadArgs, PanelStageArgs, PeerDevice,
     ProjectCreateArgs, ProjectSetArgs, Push, QuickOpenArgs, RemoteChat, RenameArgs, ResendArgs,
     RollOverArgs, SendArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SideResolveArgs,
-    SidebarStateArgs,
-    SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError, MAX_CHUNK_BYTES,
-    MAX_PAGE_ROWS, MAX_SEND_ATTACHMENTS, MAX_SEND_BYTES, MAX_UPLOAD_BYTES, SUB_ROWS,
+    SidebarStateArgs, SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError,
+    MAX_CHUNK_BYTES, MAX_PAGE_ROWS, MAX_SEND_ATTACHMENTS, MAX_SEND_BYTES, MAX_UPLOAD_BYTES,
+    SUB_ROWS,
 };
 use base64::Engine as _;
 use helm_chats::types::{
