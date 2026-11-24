@@ -22,6 +22,8 @@ import { UpdatePill } from '../updates/UpdatePill.tsx';
 import { UsageMeter } from '../usage/UsageMeter.tsx';
 import { isBusy } from '../sidebar/status.ts';
 import { LOCAL_WORKING_LABEL, isLocalModelId, localWaitLabel } from '../state/localModel.ts';
+import { useModelDisplayName } from '../state/modelNames.ts';
+import { useRemoteChat } from '../devices/hooks.ts';
 import { CaptionButtons, dragHandlers } from './caption.tsx';
 import { ProjectPill } from './ProjectPill.tsx';
 import { crumbsFixedWidth, MIN_TITLE_ROOM, optionalWidth, shedTier, shouldFold, titleRoom, topBarTier, type TopBarTier } from './fold.ts';
@@ -50,6 +52,12 @@ export function TopBar({ actionRow, updatePill, swarm, chatView }: TopBarProps) 
   const chat = useSyncExternalStore(shell.store.subscribe, () =>
     chatId ? (shell.store.view(chatId).chat ?? shell.store.chatList().find((c) => c.id === chatId) ?? null) : null,
   );
+  // The local-model chip wears the model's display name — the name the user gave it in Settings →
+  // Local models, else the short name made from the model's own — never the bare word "Local". A
+  // chat that runs on another PC wears the name that PC gave the model, from that PC's own list.
+  const remote = useRemoteChat(shell.api, shell.bus, chat);
+  const chipModel = chat && isBusy(chat.status) && isLocalModelId(chat.model) ? chat.model : null;
+  const chipName = useModelDisplayName(shell.api, shell.bus, chipModel, remote?.uid ?? null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const rename = (title: string) => {
     setRenaming(null);
@@ -173,19 +181,20 @@ ${renameHint}` : undefined}
         )}
         {/* A busy chat on a local model server says which half of its wait it is in: queued
             behind other work, or being answered. The model server answers one request at a time.
-            The chip is one line at every width: the glyph and one word, with the full wording in
-            its tooltip; a short bar drops the word and keeps the glyph. */}
+            The chip is one line at every width: the glyph and the model's display name (its alias
+            when it has one — never the bare word "Local"), with the full wording in its tooltip;
+            a short bar drops the name and keeps the glyph. */}
         {chat && isBusy(chat.status) && isLocalModelId(chat.model) && (
           <span
             className="crumb-status muted"
             data-testid="topbar-local-status"
             data-ahead={chat.localAhead != null ? String(chat.localAhead) : undefined}
             role="img"
-            aria-label={localStatus(chat.localAhead)}
-            title={localStatus(chat.localAhead)}
+            aria-label={chipName ? `${chipName}: ${localStatus(chat.localAhead)}` : localStatus(chat.localAhead)}
+            title={chipName ? `${chipName} — ${localStatus(chat.localAhead)}` : localStatus(chat.localAhead)}
           >
             <IconServer size={13} />
-            <span className="crumb-status-word">Local</span>
+            <span className="crumb-status-word">{chipName}</span>
           </span>
         )}
         {/* The project pill comes after the title: what the chat is shown under, and from there

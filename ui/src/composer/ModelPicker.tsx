@@ -25,6 +25,7 @@ import type { ChatRecord, ModelCatalogue } from '../api/types.ts';
 import { DEFAULT_MODEL, VERBOSITY_OPTIONS, type RuntimeSettings } from '../settings/runtime/model.ts';
 import { useShell } from '../shell/context.ts';
 import { remoteChatOps } from '../api/devices.ts';
+import { useModelDisplayName } from '../state/modelNames.ts';
 import { rollOverChat } from '../sidebar/actions.ts';
 import { ConfirmDialog, Segmented, type ConfirmSpec } from '../ui/index.ts';
 import { useBinding } from '../ui/hooks.ts';
@@ -231,7 +232,11 @@ function ModelEffortPicker({
   const local = isLocalModel(model);
   const stopLabel = local ? thinkingLabel : effortLabel;
   // While the app is still checking its runtimes the chip says so, muted, instead of a model name.
-  const parts = loading ? null : triggerParts(current?.title ?? (model || 'Default'), effort, local);
+  // The trigger wears the model's own name (the alias when it has one), not the row title, which
+  // may carry the default name alongside it. Before the catalogue has been read, the shared label
+  // store answers, so a local model never shows its raw id.
+  const labelName = useModelDisplayName(shell.api, shell.bus, source.model, deviceUid ?? null);
+  const parts = loading ? null : triggerParts(current?.name ?? labelName ?? (model || 'Default'), effort, local);
   const label = parts ? `${parts.name} · ${parts.rest}` : 'Loading…';
   // A chat with its own reply length says so after the effort.
   const shown = !loading && source.verbosityOwn && !settingsRow && source.verbosity ? `${label} · ${verbosityTitle(source.verbosity)}` : label;

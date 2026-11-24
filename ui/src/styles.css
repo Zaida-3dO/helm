@@ -1613,9 +1613,9 @@ dd {
   margin-left: 6px;
   color: var(--muted);
 }
-/* The local-model chip: one line at every width (glyph and one word). It never shrinks, so the title
-   gives way first; a short bar drops the word and keeps the glyph. A bar that shed its optional
-   parts for the title has room for the word again. */
+/* The local-model chip: one line at every width (glyph and the model's display name, its alias when
+   it has one). It never shrinks, so the title gives way first; a short bar drops the name and keeps
+   the glyph. A bar that shed its optional parts for the title has room for the name again. */
 .crumb-status {
   flex: none;
   display: inline-flex;
