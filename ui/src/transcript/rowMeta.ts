@@ -155,17 +155,27 @@ export function tokenChip(u: Usage): { text: string; title: string } {
 }
 
 /**
- * The turn time shown in a reply's action row: on the last reply of a turn whose work
- * folded, the same span its "Worked for" row shows. A turn with nothing folded shows no time.
+ * The turn time shown in a reply's action row: on the last reply of a turn whose work folded,
+ * from the turn's first work output to that reply. A turn with nothing folded shows no time.
  */
 export function turnTimes(items: Item[]): Map<number, number> {
   const out = new Map<number, number>();
-  let elapsed: number | null = null;
+  let firstTs: number | null = null;
+  let lastTs: number | null = null;
   let reply: number | null = null;
+  let hadFold = false;
   const close = () => {
-    if (elapsed !== null && reply !== null) out.set(reply, elapsed);
-    elapsed = null;
+    if (hadFold && reply !== null && firstTs !== null && lastTs !== null) out.set(reply, lastTs - firstTs);
+    firstTs = null;
+    lastTs = null;
     reply = null;
+    hadFold = false;
+  };
+  // Items arrive in visual order, and a group can sit above an older note of the same turn: the
+  // span is the least and greatest timestamp seen, not first and last seen.
+  const note = (ts: number) => {
+    if (firstTs === null || ts < firstTs) firstTs = ts;
+    if (lastTs === null || ts > lastTs) lastTs = ts;
   };
   for (const it of items) {
     if (it.kind === 'agents') continue;
@@ -174,9 +184,17 @@ export function turnTimes(items: Item[]): Map<number, number> {
       close();
       continue;
     }
-    if (it.kind === 'fold') elapsed = it.elapsedMs;
-    else if (it.row.role === 'user' && it.row.details?.mode !== 'steer') close();
-    else if (elapsed !== null && it.row.role === 'assistant' && it.row.text.trim()) reply = it.row.id;
+    if (it.kind === 'fold') {
+      hadFold = true;
+      for (const r of it.rows) note(r.timestamp);
+      continue;
+    }
+    const r = it.row;
+    if (r.role === 'user' && r.details?.mode !== 'steer') close();
+    else {
+      note(r.timestamp);
+      if (r.role === 'assistant' && r.text.trim()) reply = r.id;
+    }
   }
   close();
   return out;

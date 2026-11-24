@@ -25,7 +25,7 @@ import { ToolCard, type ToolAction } from './ToolCard.tsx';
 import { GatekeeperReviewLink } from '../gatekeeper/ReviewLink.tsx';
 import { stopCheckLine, stopClass, stopKindLabel } from '../gatekeeper/model.ts';
 import { usePacedText, useThinkingPreview } from './usePaced.ts';
-import { formatElapsed, type RowFlags } from './workBlocks.ts';
+import { foldLabel, type RowFlags } from './workBlocks.ts';
 
 export interface RowContext {
   canStopTool: (row: MessageRow) => boolean;
@@ -201,27 +201,38 @@ function NoteCard({ note, ctx }: { note: AgentNote; ctx: RowContext }) {
       </div>
       {!open && note.digest && <div className="note-card-digest" data-testid="note-card-digest">{note.digest}</div>}
       {open && (
-        <div className="note-card-body" data-testid="note-card-body">
-          <Markdown text={note.body} onLink={ctx.onLink} />
-          <div className="note-card-note muted">{note.note}</div>
-        </div>
+        <>
+          {/* The summary stays first when the card opens, so opening never loses the one line
+              that says what the message is; the rule separates it from the full text. */}
+          {note.digest && (
+            <div className="note-card-summary" data-testid="note-card-summary">
+              {note.digest}
+            </div>
+          )}
+          <div className="note-card-body" data-testid="note-card-body">
+            <Markdown text={note.body} onLink={ctx.onLink} />
+            <div className="note-card-note muted">{note.note}</div>
+          </div>
+        </>
       )}
     </div>
   );
 }
 
-function AssistantBody({ row, ctx, hideThinking, hideText }: { row: MessageRow; ctx: RowContext; hideThinking?: boolean; hideText?: boolean }) {
+function AssistantBody({ row, ctx, hideText }: { row: MessageRow; ctx: RowContext; hideText?: boolean }) {
   const streaming = row.status === 'streaming';
   const text = usePacedText(row.text, streaming);
   return (
     <>
-      <Thinking text={hideThinking ? '' : row.thinking} streaming={streaming} onLink={ctx.onLink} />
+      {/* A note's own thinking sits with the note, behind its own collapsed toggle: never hidden
+          outright, just folded until the reader opens it. */}
+      <Thinking text={row.thinking} streaming={streaming} onLink={ctx.onLink} />
       {text && !hideText && <Markdown text={text} streaming={streaming} interactive mentionRepo={ctx.mentionRepo} onLink={ctx.onLink} />}
     </>
   );
 }
 
-export const Row = memo(function Row({ row, ctx, final, afterTool, indent, afterFold, hideThinking, beforeTool, noticeLive, recap, turnMs, skills }: { row: MessageRow; ctx: RowContext; turnMs?: number; skills?: string } & RowFlags) {
+export const Row = memo(function Row({ row, ctx, final, afterTool, indent, afterFold, beforeTool, noticeLive, recap, turnMs, skills }: { row: MessageRow; ctx: RowContext; turnMs?: number; skills?: string } & RowFlags) {
   const retry = row.details?.retry;
   const common = { 'data-testid': 'transcript-row', 'data-status': row.status, 'data-role': row.role, 'data-row-id': row.id };
   const place = `${afterTool ? ' after-tool' : ''}${final ? ' final-answer' : ''}${indent ? ' indented' : ''}${afterFold ? ' after-fold' : ''}${beforeTool ? ' before-tool' : ''}`;
@@ -318,7 +329,6 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
       <AssistantBody
         row={row}
         ctx={ctx}
-        hideThinking={hideThinking}
         hideText={row.status === 'error' && !!row.text && row.text === row.details?.errorMessage}
       />
       {row.status === 'error' && (
@@ -360,7 +370,9 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
   );
 });
 
-export function FoldRow({ count, elapsedMs, failed, open, onToggle }: { count: number; elapsedMs: number; failed: number; open: boolean; onToggle: () => void }) {
+/** One compact row per run of work: what it holds, and how many calls failed inside it. */
+export function FoldRow({ tools, thoughts, messages, elapsedMs, failed, open, onToggle }: { tools: number; thoughts: number; messages: number; elapsedMs: number; failed: number; open: boolean; onToggle: () => void }) {
+  const label = foldLabel({ tools, thoughts, messages, elapsedMs });
   return (
     <div className={`row row-fold${open ? ' open' : ''}`}>
       <button
@@ -369,21 +381,17 @@ export function FoldRow({ count, elapsedMs, failed, open, onToggle }: { count: n
         // The closed variant keeps the original hook the e2e harness clicks to unfold; the open one is separate so that a loop clicking "the first fold" cannot close it again.
         data-testid={open ? 'work-fold-open' : 'work-fold'}
         aria-expanded={open}
-        title={open ? 'Hide thinking and tool activity' : 'Show thinking and tool activity'}
+        title={open ? 'Hide this work' : 'Show this work'}
         onClick={onToggle}
       >
         <Glyph name="chevron" size={14} className="fold-chevron" />
-        <span>Worked for {formatElapsed(elapsedMs)}</span>
-        <span className="visually-hidden">
-          {' '}
-          · {count} {count === 1 ? 'step' : 'steps'}
-        </span>
+        <span>{label}</span>
+        {failed > 0 && (
+          <span className="fold-failed" data-testid="work-failed">
+            {failed} failed
+          </span>
+        )}
       </button>
-      {failed > 0 && (
-        <span className="fold-failed" data-testid="work-failed">
-          {failed} failed
-        </span>
-      )}
     </div>
   );
 }

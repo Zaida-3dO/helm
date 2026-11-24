@@ -23,6 +23,7 @@ import {
   isFileTool,
   readable,
   splitPath,
+  toolArgs,
   toolIdentity,
   toolKind,
   toolStatus,
@@ -232,6 +233,23 @@ export function ToolCard({ row, canStop, onStop, remoteDevice, action }: ToolCar
   );
 }
 
+/** A call's arguments as stored on the row; empty when it recorded none. */
+function requestText(row: MessageRow): string {
+  const raw = row.details?.toolArgs;
+  if (typeof raw === 'string' && raw.trim()) return raw.trim();
+  const a = toolArgs(row);
+  return Object.keys(a).length > 0 ? JSON.stringify(a, null, 1) : '';
+}
+
+/** Payload lines are cut to one readable line each; long arguments stay ellipsized, not wrapped to pages. */
+const ARG_LINE_CHARS = 160;
+function ellipsizeLines(text: string): string {
+  return text
+    .split('\n')
+    .map((l) => (l.length > ARG_LINE_CHARS ? `${l.slice(0, ARG_LINE_CHARS).trimEnd()}…` : l))
+    .join('\n');
+}
+
 function ToolBody({ row, kind, status, source, rawName }: { row: MessageRow; kind: ToolKind; status: ToolStatus; source: 'host' | 'mcp' | 'native'; rawName: string }) {
   if (kind === 'edit' && source === 'native') return <ChangeView row={row} />;
   const todos = source === 'native' ? parseTodos(row) : null;
@@ -247,10 +265,23 @@ function ToolBody({ row, kind, status, source, rawName }: { row: MessageRow; kin
       </div>
     );
   }
+  // Host and MCP calls open to what was asked as well as what came back; native tools already
+  // carry their request in the summary line (or, for an edit, in the diff).
+  const args = source !== 'native' ? requestText(row) : '';
   const grid = source !== 'native' && output ? parseResult(output) : null;
   const header = status === 'failed' ? 'Error' : source !== 'native' ? 'Result' : rawName === 'Read' ? 'File contents' : 'Output';
   return (
     <div className="tool-box" data-testid="tool-box">
+      {args && (
+        <>
+          <div className="tool-box-head">
+            <span className="tool-box-label">Request</span>
+          </div>
+          <pre className="tool-request mono" data-testid="tool-request">
+            {ellipsizeLines(args)}
+          </pre>
+        </>
+      )}
       {source === 'mcp' && <div className="tool-id-strip">Tool ID {rawName}</div>}
       {grid ? <GridView rows={grid} header={header} /> : <OutputBox header={header} output={output} status={status} full={row.artifact ? { chatId: row.chatId, messageId: row.id } : null} />}
     </div>
