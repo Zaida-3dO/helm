@@ -14,9 +14,12 @@ import type { SidebarRow } from '../api/projects.ts';
 
 /** After the card opens: how long a hover must last before it asks for the summary. */
 export const SUMMARY_DELAY_MS = 1_000;
-/** While the host is generating: how often the card asks again, for at most `SUMMARY_POLLS`. */
+/** While the host is generating: how often the card asks again, for at least as long as the
+ *  host lets its summary helper run (22 seconds there), so a first summary on a cold chat can
+ *  land during the same hover instead of only on the next one. */
 export const SUMMARY_POLL_MS = 1_500;
-export const SUMMARY_POLLS = 6;
+export const HOST_HELPER_BUDGET_MS = 22_000;
+export const SUMMARY_POLLS = 15;
 
 /** What `chat_summarize` answers. */
 export interface SummaryAnswer {

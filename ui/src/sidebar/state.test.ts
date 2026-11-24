@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { SidebarRow } from '../api/projects.ts';
 import type { SidebarState } from '../api/types.ts';
-import { effectiveExpanded } from './model.ts';
+import { effectiveExpanded, pruneToggled } from './model.ts';
 import { MAX_OPEN_CARDS, cardOpen, patchCardOpen, patchExpanded } from './state.ts';
 
 test('the patches carry one field each, so the two never erase each other', () => {
@@ -62,4 +62,28 @@ test('the drawn expansion is the chat state plus this window aids, minus what wa
   assert.deepEqual([...effectiveExpanded(rows, new Set(['e']), shut)], ['d']);
   // A chat whose record never opened still shows while the window holds it.
   assert.deepEqual([...effectiveExpanded(rows, new Set(['c']), new Set())].sort(), ['a', 'c', 'd']);
+});
+
+test('local toggle bridges ride on until the chat record agrees, then are dropped', () => {
+  const rows = [row('a', true), row('b', false), row('c'), row('d', true)];
+  // An expand whose record now says open, and a fold whose record now says folded: the
+  // bridges are dead weight, dropping them lets a later change from another PC through.
+  let p = pruneToggled(rows, new Set(['a', 'c']), new Set(['b', 'd']), new Set());
+  assert.deepEqual([...p.ephemeral], ['c'], 'a: the record caught up; c: still a pending expand');
+  assert.deepEqual([...p.shut], ['d'], 'b: the shut write answered; d: record still open');
+  assert.ok(p.changed);
+  // Rows this window does not hold say nothing either way; both bridges ride on.
+  p = pruneToggled(rows, new Set(['z']), new Set(['y']), new Set());
+  assert.deepEqual([...p.ephemeral], ['z']);
+  assert.deepEqual([...p.shut], ['y']);
+  assert.ok(!p.changed, 'nothing dropped');
+  // The open chat's ancestors: a shut one stays shut while that chat is open — the person's
+  // collapse here outranks the auto-expansion aid.
+  p = pruneToggled(rows, new Set(['c']), new Set(['b']), new Set(['b', 'c']));
+  assert.deepEqual([...p.shut], ['b'], 'the collapsed ancestor keeps its shut');
+  assert.deepEqual([...p.ephemeral], ['c']);
+  assert.ok(!p.changed);
+  // Idempotent: pruning again changes nothing.
+  p = pruneToggled(rows, p.ephemeral, p.shut, new Set());
+  assert.ok(!p.changed);
 });

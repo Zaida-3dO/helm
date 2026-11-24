@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { freshAnswer, freshSummary, SUMMARY_DELAY_MS, SUMMARY_POLLS, SUMMARY_POLL_MS } from './summary.ts';
+import { freshAnswer, freshSummary, HOST_HELPER_BUDGET_MS, SUMMARY_DELAY_MS, SUMMARY_POLLS, SUMMARY_POLL_MS } from './summary.ts';
 
 const row = (over: Partial<{ summary: string | null; summaryAt: number | null; lastActivityAt: number; updatedAt: number }> = {}) => ({
   summary: null,
@@ -40,5 +40,9 @@ test('an answer from the host is used only when it is fresh and non-empty', () =
 test('the timing rules keep the card quiet', () => {
   // A second of hover before the summary is asked for, and bounded retries after.
   assert.equal(SUMMARY_DELAY_MS, 1_000);
-  assert.ok(SUMMARY_POLL_MS >= 500 && SUMMARY_POLLS * SUMMARY_POLL_MS <= 12_000);
+  // The polling covers the host's own budget for the summary helper (so a cold summary can
+  // land in the same hover), but stays bounded: no unbounded retry loop.
+  assert.ok(SUMMARY_POLL_MS >= 500);
+  assert.ok(SUMMARY_POLLS * SUMMARY_POLL_MS >= HOST_HELPER_BUDGET_MS, 'polling outlasts the host helper');
+  assert.ok(SUMMARY_POLLS * SUMMARY_POLL_MS <= 30_000, 'and still gives up');
 });

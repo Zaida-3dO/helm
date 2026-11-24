@@ -1398,6 +1398,47 @@ fn not_allowed(name: &str) -> ApiError {
     )
 }
 
+/// Fold a sidebar-state patch into this PC's copy of the chat, field by field, the way the
+/// PC that runs the chat stores it: a field the patch carries replaces what the copy had, a
+/// field it omits keeps what was, and `null` folds everything. Stored canonically: a folded
+/// row leaves `expanded` out and an empty card list leaves `openCards` out, and a state with
+/// nothing open is `null`. Storing the patch whole would erase the field it does not carry,
+/// and this copy's next write would then erase it on the PC that runs the chat too.
+fn merge_sidebar_state(prev: Option<&Value>, patch: &Value) -> Value {
+    if patch.is_null() {
+        return Value::Null;
+    }
+    let mut merged = prev
+        .filter(|v| v.is_object())
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let map = merged.as_object_mut().expect("an object");
+    if let Some(exp) = patch.get("expanded") {
+        if exp.as_bool() == Some(true) {
+            map.insert("expanded".into(), json!(true));
+        } else {
+            map.remove("expanded");
+        }
+    }
+    if let Some(cards) = patch.get("openCards") {
+        if cards.as_array().is_some_and(|a| !a.is_empty()) {
+            map.insert("openCards".into(), cards.clone());
+        } else {
+            map.remove("openCards");
+        }
+    }
+    if !map.contains_key("v") {
+        map.insert("v".into(), json!(1));
+    }
+    let open = map.get("expanded").and_then(Value::as_bool) == Some(true)
+        || map.contains_key("openCards");
+    if open {
+        merged
+    } else {
+        Value::Null
+    }
+}
+
 /// The local op → the wire op for the reads of a mirrored chat: they answer while the device's
 /// run switch is off, like a cost read.
 fn read_op(op: &str) -> Option<&'static str> {
@@ -1984,7 +2025,8 @@ impl RemoteChats for Mirror {
                     rec.insert("fastMode".into(), f);
                 }
                 if let Some(s) = &st {
-                    rec.insert("sidebarState".into(), s.clone());
+                    let prev = rec.get("sidebarState").cloned();
+                    rec.insert("sidebarState".into(), merge_sidebar_state(prev.as_ref(), s));
                 }
             })
             .await
