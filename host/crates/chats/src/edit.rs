@@ -109,14 +109,13 @@ type EditOpenRow = Result<(String, i64, String, bool), Refusal>;
 pub fn open(db: &Database, chat_id: &str, message_id: i64) -> Result<EditOpen, Refusal> {
     let r = db
         .snapshot(|tx| -> Result<EditOpenRow, rusqlite::Error> {
-                let (key, revision, text) = match editable(tx, chat_id, message_id)? {
-                    Ok(v) => v,
-                    Err(r) => return Ok(Err(r)),
-                };
-                let has_attachments = message_has_attachments(tx, chat_id, message_id, &key)?;
-                Ok(Ok((key, revision, text, has_attachments)))
-            },
-        )
+            let (key, revision, text) = match editable(tx, chat_id, message_id)? {
+                Ok(v) => v,
+                Err(r) => return Ok(Err(r)),
+            };
+            let has_attachments = message_has_attachments(tx, chat_id, message_id, &key)?;
+            Ok(Ok((key, revision, text, has_attachments)))
+        })
         .map_err(|e| Refusal::new("internal", e.to_string()))??;
     Ok(EditOpen {
         message_id,

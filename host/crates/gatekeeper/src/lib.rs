@@ -29,8 +29,8 @@ pub mod settings;
 pub mod stoproute;
 pub mod stops;
 pub mod store;
-pub mod workmode;
 pub mod wmode_ext;
+pub mod workmode;
 
 pub use ops::register_ops;
 pub use service::GateService;

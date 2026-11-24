@@ -1928,7 +1928,13 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         .call_host("chat_get", json!({"chatId": "c1"}))
         .await
         .unwrap();
-    assert_eq!((got["chat"]["model"].as_str(), got["chat"]["effort"].as_str()), (Some("sonnet"), Some("high")));
+    assert_eq!(
+        (
+            got["chat"]["model"].as_str(),
+            got["chat"]["effort"].as_str()
+        ),
+        (Some("sonnet"), Some("high"))
+    );
     // The Rename dialog's ask reached the PC that runs the chat.
     assert_eq!(port.st().titles_asked, ["c1"]);
     // The pages pinned on the other PC list here, and one opens from a copy brought across: the

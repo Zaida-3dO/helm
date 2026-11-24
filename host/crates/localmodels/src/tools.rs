@@ -110,9 +110,15 @@ mod tests {
             panic!()
         };
         let ops = Arc::new(Fake(Mutex::new(Vec::new())));
-        assert_eq!(f(ctx(&ops), json!({"action": "status"})).await.unwrap()["state"], "on");
+        assert_eq!(
+            f(ctx(&ops), json!({"action": "status"})).await.unwrap()["state"],
+            "on"
+        );
         // An unload without the user's say-so never reaches the op.
-        let why = f(ctx(&ops), json!({"action": "unload"})).await.unwrap_err().public;
+        let why = f(ctx(&ops), json!({"action": "unload"}))
+            .await
+            .unwrap_err()
+            .public;
         assert!(why.contains("confirm true"), "{why}");
         assert_eq!(
             f(ctx(&ops), json!({"action": "unload", "confirm": true}))
@@ -120,8 +126,14 @@ mod tests {
                 .unwrap()["working"],
             true
         );
-        assert_eq!(f(ctx(&ops), json!({"action": "reload"})).await.unwrap()["state"], "on");
-        let why = f(ctx(&ops), json!({"action": "defrost"})).await.unwrap_err().public;
+        assert_eq!(
+            f(ctx(&ops), json!({"action": "reload"})).await.unwrap()["state"],
+            "on"
+        );
+        let why = f(ctx(&ops), json!({"action": "defrost"}))
+            .await
+            .unwrap_err()
+            .public;
         assert!(why.contains("status, unload or reload"), "{why}");
         let got = ops.0.lock().unwrap().clone();
         assert_eq!(

@@ -2060,18 +2060,21 @@ async fn a_used_up_plan_allowance_holds_a_start_and_the_reset_releases_it() {
     .await;
     // The queued state the UI reads carries the hold's words with it: why, how full, and when
     // the gating window reopens.
-    h.until("the queued state names the hold and its opening time", |h| {
-        let s = serde_json::from_str::<Value>(
-            &h.col(&format!(
-                "SELECT COALESCE(state, 'null') FROM chat_activity WHERE chat_id = '{chat}'"
-            ))[0],
-        )
-        .unwrap();
-        s["kind"] == "queued"
-            && s["reason"] == "claude_capacity"
-            && s["pct"] == 96.0
-            && s["until"] == json!(seed_at + 4_000)
-    })
+    h.until(
+        "the queued state names the hold and its opening time",
+        |h| {
+            let s = serde_json::from_str::<Value>(
+                &h.col(&format!(
+                    "SELECT COALESCE(state, 'null') FROM chat_activity WHERE chat_id = '{chat}'"
+                ))[0],
+            )
+            .unwrap();
+            s["kind"] == "queued"
+                && s["reason"] == "claude_capacity"
+                && s["pct"] == 96.0
+                && s["until"] == json!(seed_at + 4_000)
+        },
+    )
     .await;
     h.until("the reset clears the hold", |h| {
         h.col(&format!(
@@ -2140,7 +2143,10 @@ async fn start_anyway_opens_one_held_send_and_the_next_start_waits_again() {
     // A chat that waits on nothing cannot be forced through it.
     let idle = h.create().await;
     let refused = h
-        .call("queue_action", json!({"chatId": idle, "action": "start_anyway"}))
+        .call(
+            "queue_action",
+            json!({"chatId": idle, "action": "start_anyway"}),
+        )
         .await
         .unwrap_err();
     assert!(
@@ -2151,7 +2157,10 @@ async fn start_anyway_opens_one_held_send_and_the_next_start_waits_again() {
     // A hand park is the user's to end, not to force through.
     crate::queue::manual_hold(&h.db, &idle, "normal", now);
     let refused = h
-        .call("queue_action", json!({"chatId": idle, "action": "start_anyway"}))
+        .call(
+            "queue_action",
+            json!({"chatId": idle, "action": "start_anyway"}),
+        )
         .await
         .unwrap_err();
     assert!(
@@ -2171,13 +2180,20 @@ async fn start_anyway_opens_one_held_send_and_the_next_start_waits_again() {
     })
     .await;
     // Start anyway: the held send goes through the gate at once, windows and all.
-    h.call("queue_action", json!({"chatId": chat, "action": "start_anyway"}))
-        .await
-        .unwrap();
+    h.call(
+        "queue_action",
+        json!({"chatId": chat, "action": "start_anyway"}),
+    )
+    .await
+    .unwrap();
     let mut w = h.worker().await;
     w.ready().await;
     let p = w.expect("prompt").await;
-    assert_eq!(p["submissionId"], sid.as_str(), "the same send opens the turn");
+    assert_eq!(
+        p["submissionId"],
+        sid.as_str(),
+        "the same send opens the turn"
+    );
     h.until("the hold and its reason go once it opens", |h| {
         h.col(&format!(
             "SELECT count(*) FROM chat_dispatch_holds WHERE chat_id = '{chat}'"

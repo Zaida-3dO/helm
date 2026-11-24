@@ -1113,7 +1113,11 @@ pub(crate) mod tests {
         let h = harness();
         let chat: ChatRecord = serde_json::from_value(
             h.api
-                .call(&main(), "chat_create", json!({"cwd": h.work.to_string_lossy()}))
+                .call(
+                    &main(),
+                    "chat_create",
+                    json!({"cwd": h.work.to_string_lossy()}),
+                )
                 .await
                 .unwrap(),
         )
@@ -1162,7 +1166,11 @@ pub(crate) mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(back["projectId"], second["projectId"].as_str().unwrap(), "the same project");
+        assert_eq!(
+            back["projectId"],
+            second["projectId"].as_str().unwrap(),
+            "the same project"
+        );
         // Refusals: relative, missing, and an unknown chat; the chat keeps its folder.
         for args in [
             json!({"chatId": chat.id, "cwd": "sub"}),
@@ -1174,9 +1182,16 @@ pub(crate) mod tests {
                 .call(&main(), "chat_set_folder", args.clone())
                 .await
                 .unwrap_err();
-            assert!(matches!(e.code.as_str(), "bad_args" | "not_found"), "{args}: {e:?}");
+            assert!(
+                matches!(e.code.as_str(), "bad_args" | "not_found"),
+                "{args}: {e:?}"
+            );
         }
-        assert_eq!(cwd_of(&h), other.to_string_lossy().to_string(), "still moved");
+        assert_eq!(
+            cwd_of(&h),
+            other.to_string_lossy().to_string(),
+            "still moved"
+        );
     }
 
     #[tokio::test]

@@ -34,7 +34,10 @@ pub struct WorkModeKeys {
 }
 
 /// The extension to register as a [`helm_hosttools::SettingsExtensions`] entry.
-pub fn extension(db: Arc<Database>, runtime: Option<Arc<helm_chats::ChatRuntime>>) -> Arc<dyn SettingsExtension> {
+pub fn extension(
+    db: Arc<Database>,
+    runtime: Option<Arc<helm_chats::ChatRuntime>>,
+) -> Arc<dyn SettingsExtension> {
     Arc::new(WorkModeKeys {
         db,
         runtime,
@@ -65,18 +68,21 @@ fn parse(value: &Value) -> Result<Parsed, String> {
     if obj.is_empty() {
         return Err("workmode needs an \"app\" or a \"board\".".to_owned());
     }
-    let mut out = Parsed { app: None, board: None };
+    let mut out = Parsed {
+        app: None,
+        board: None,
+    };
     for (k, v) in obj {
         match k.as_str() {
             "app" => {
-                out.app = Some(match v {
-                    Value::Null => None,
-                    Value::String(s) => Some(
-                        Mode::parse(s)
-                            .ok_or_else(|| "app must be \"run\", \"check_in\" or null.".to_owned())?,
-                    ),
-                    _ => return Err("app must be \"run\", \"check_in\" or null.".to_owned()),
-                });
+                out.app =
+                    Some(match v {
+                        Value::Null => None,
+                        Value::String(s) => Some(Mode::parse(s).ok_or_else(|| {
+                            "app must be \"run\", \"check_in\" or null.".to_owned()
+                        })?),
+                        _ => return Err("app must be \"run\", \"check_in\" or null.".to_owned()),
+                    });
             }
             "board" => {
                 let b = v
@@ -89,10 +95,12 @@ fn parse(value: &Value) -> Result<Parsed, String> {
                     .ok_or_else(|| "board.id is the board's id.".to_owned())?;
                 let mode = match b.get("mode") {
                     None | Some(Value::Null) => None,
-                    Some(Value::String(s)) => {
-                        Some(Mode::parse(s).ok_or_else(|| "board.mode must be \"run\", \"check_in\" or null.".to_owned())?)
+                    Some(Value::String(s)) => Some(Mode::parse(s).ok_or_else(|| {
+                        "board.mode must be \"run\", \"check_in\" or null.".to_owned()
+                    })?),
+                    Some(_) => {
+                        return Err("board.mode must be \"run\", \"check_in\" or null.".to_owned())
                     }
-                    Some(_) => return Err("board.mode must be \"run\", \"check_in\" or null.".to_owned()),
                 };
                 if b.keys().any(|k| k != "id" && k != "mode") {
                     return Err("board takes only id and mode.".to_owned());
@@ -207,7 +215,9 @@ impl SettingsExtension for WorkModeKeys {
         }
         if let Some((id, mode)) = &p.board {
             let name = tx
-                .query_row("SELECT name FROM projects WHERE id = ?1", [id], |r| r.get::<_, String>(0))
+                .query_row("SELECT name FROM projects WHERE id = ?1", [id], |r| {
+                    r.get::<_, String>(0)
+                })
                 .unwrap_or_default();
             match mode {
                 None => {
@@ -217,8 +227,13 @@ impl SettingsExtension for WorkModeKeys {
                 }
                 Some(m) => {
                     let entry = json!({"id": id, "name": name, "mode": m.as_str()});
-                    let list = after["boards"].as_array_mut().ok_or("boards is not a list")?;
-                    match list.iter_mut().find(|b| b.get("id").and_then(Value::as_str) == Some(id)) {
+                    let list = after["boards"]
+                        .as_array_mut()
+                        .ok_or("boards is not a list")?;
+                    match list
+                        .iter_mut()
+                        .find(|b| b.get("id").and_then(Value::as_str) == Some(id))
+                    {
                         Some(b) => *b = entry,
                         None => list.push(entry),
                     }
@@ -331,7 +346,10 @@ mod tests {
     }
 
     /// Run one extension call inside a write transaction, keeping its own refusal.
-    fn run<T>(db: &Database, f: impl FnOnce(&Transaction<'_>) -> Result<T, String>) -> Result<T, String> {
+    fn run<T>(
+        db: &Database,
+        f: impl FnOnce(&Transaction<'_>) -> Result<T, String>,
+    ) -> Result<T, String> {
         db.write(|tx| Ok::<_, rusqlite::Error>(f(tx)))
             .expect("the transaction")
     }
@@ -352,22 +370,27 @@ mod tests {
 
         // The dry check answers what it would become; the transaction below rolls back, and
         // check_approved itself stores nothing anyway.
-        let (before, after) = run(&db, |tx| ext.check_approved(tx, KEY, &json!({"app": "run"}))).unwrap();
+        let (before, after) = run(&db, |tx| {
+            ext.check_approved(tx, KEY, &json!({"app": "run"}))
+        })
+        .unwrap();
         assert_eq!(before["app"], "check_in");
         assert_eq!(after["app"], "run");
 
         // The approved change lands, answering before and after.
-        let (before, after) = run(&db, |tx| ext.apply_approved(tx, KEY, &json!({"app": "run"}))).unwrap();
+        let (before, after) = run(&db, |tx| {
+            ext.apply_approved(tx, KEY, &json!({"app": "run"}))
+        })
+        .unwrap();
         assert_eq!(before["app"], "check_in");
         assert_eq!(after["app"], "run");
         assert_eq!(snap()["app"], "run");
 
         // A board override joins the list; a bad board or a bad word is refused whole.
         board(&db, "b1", "Garden");
-        let (_, after) = run(
-            &db,
-            |tx| ext.apply_approved(tx, KEY, &json!({"board": {"id": "b1", "mode": "check_in"}})),
-        )
+        let (_, after) = run(&db, |tx| {
+            ext.apply_approved(tx, KEY, &json!({"board": {"id": "b1", "mode": "check_in"}}))
+        })
         .unwrap();
         assert_eq!(
             after["boards"],

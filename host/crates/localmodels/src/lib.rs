@@ -51,8 +51,8 @@ mod variants;
 
 pub use lock::LockState;
 pub use ops::register_ops;
-pub use tools::register_host_tools;
 pub use service::{ChatControl, LocalService};
+pub use tools::register_host_tools;
 
 use helm_chats::ChatRuntime;
 use helm_core::credentials::CredentialStore;
