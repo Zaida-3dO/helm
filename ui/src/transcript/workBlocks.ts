@@ -32,7 +32,7 @@ import type { MessageRow } from '../api/types.ts';
 import { isCardRow, progressText } from './cards.ts';
 import { buildRecap, type Recap } from './recap.ts';
 import { agentNote } from './agentNote.ts';
-import { isHelmNote, isQuietReply, isUserAction, pageMessage } from './origin.ts';
+import { isHelmNote, isQuietReply, isUserAction } from './origin.ts';
 import { isAgentRow } from './subagents/model.ts';
 import { toolStatus } from './toolKinds.ts';
 import { ESTIMATE, estimateHeight, type EstimateInput } from './virtual.ts';
@@ -104,13 +104,13 @@ export function foldLabel(g: { tools: number; thoughts: number; messages: number
 }
 
 /**
- * Only a message from the person opens a turn. A steer they read mid-turn belongs to the running
- * turn, and an agent's or the app's message never opens one: it keeps the turn it landed in, the
- * way it reads to the agent.
+ * Only a message from the person opens a turn (typed, voice, Telegram, or a click on a page's
+ * button). A steer they read mid-turn belongs to the running turn, and an agent's or the app's
+ * message never opens one: it keeps the turn it landed in, the way it reads to the agent.
  */
 export function opensTurn(r: MessageRow): boolean {
   if (r.role !== 'user' || r.details?.mode === 'steer') return false;
-  return !isHelmNote(r) && !agentNote(r) && !pageMessage(r);
+  return !isHelmNote(r) && !agentNote(r);
 }
 
 /** A notice row: what a refusal or a give-back leaves in the transcript (the default kind). */
@@ -126,10 +126,11 @@ function isBlank(r: MessageRow): boolean {
 /**
  * A row the transcript never draws. A blank assistant row has no content once its tool call sits
  * in a group, and an empty row would only stand between the messages as a tall gap; rows that
- * speak for themselves (an error, a retry, a stop) still show.
+ * speak for themselves (an error, a retry, a stop) still show. A note the app wrote for the
+ * agent alone is never drawn either.
  */
 function undrawn(r: MessageRow): boolean {
-  return (isBlank(r) && !alwaysShown(r)) || isQuietReply(r);
+  return (isBlank(r) && !alwaysShown(r)) || isQuietReply(r) || isHelmNote(r);
 }
 
 function alwaysShown(r: MessageRow): boolean {
@@ -249,21 +250,20 @@ export function layout(
     }
     lastChatId = r.chatId;
   };
-  // Rows before the first user row (a page that starts mid-turn) are shown as they are,
-  // except the empty ones, which are never drawn.
-  while (i < rows.length && !opensTurn(rows[i]!)) {
-    const r = rows[i++]!;
-    boundary(r);
-    if (!undrawn(r)) items.push({ kind: 'row', row: r });
-  }
   while (i < rows.length) {
-    const user = rows[i++]!;
-    boundary(user);
-    if (!isHelmNote(user)) items.push({ kind: 'row', row: user });
+    // Rows before the first message from the person (a chat started by another chat or a
+    // schedule, or a page that starts mid-turn) make a turn of their own with no opener row.
+    const user = opensTurn(rows[i]!) ? rows[i] : undefined;
+    const first = rows[i]!;
+    boundary(first);
+    if (user) {
+      i++;
+      items.push({ kind: 'row', row: user });
+    }
     const work: MessageRow[] = [];
     while (i < rows.length && !opensTurn(rows[i]!)) work.push(rows[i++]!);
     const isLast = i >= rows.length;
-    const turnKey = user.sourceKey;
+    const turnKey = (user ?? first).sourceKey;
     const revealed = expanded.has(revealKey(turnKey));
     // The final reply: the last assistant row with text that is not just an aside.
     let reply = -1;
@@ -289,12 +289,17 @@ export function layout(
       if (progressText(r)) {
         latestProg = j;
         lastUnpinned = j;
-      } else if (r.role === 'user' && !groupable(r) && lastUnpinned >= 0) {
+      } else if (r.role === 'user' && !groupable(r) && !isHelmNote(r) && lastUnpinned >= 0) {
         pinned.add(lastUnpinned);
+        lastUnpinned = -1;
+      } else if (isNote(r) && !isStubNote(r) && !isQuietReply(r)) {
+        // A real agent message replaces the line before it: nothing is left to pin above a steer.
         lastUnpinned = -1;
       }
     }
-    const currentProg = latestProg >= 0 && latestProg > reply && !pinned.has(latestProg) ? latestProg : -1;
+    // Only a running turn keeps its newest line under the group; once it settles (with or
+    // without a reply) the line folds into the group like the rest.
+    const currentProg = !settled && latestProg >= 0 && latestProg > reply && !pinned.has(latestProg) ? latestProg : -1;
     // One work group per turn, under the whole turn: every groupable row of it in time order,
     // however scattered it arrived among the visible rows. A run of nothing but the blank
     // messages tool calls hide under is no work to show: no header over those alone.

@@ -84,6 +84,6 @@ test('local toggle bridges ride on until the chat record agrees, then are droppe
   assert.deepEqual([...p.ephemeral], ['c']);
   assert.ok(!p.changed);
   // Idempotent: pruning again changes nothing.
-  p = pruneToggled(rows, p.ephemeral, p.shut, new Set());
+  p = pruneToggled(rows, p.ephemeral, p.shut, new Set(['b', 'c']));
   assert.ok(!p.changed);
 });
