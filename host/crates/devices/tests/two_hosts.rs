@@ -1897,6 +1897,38 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
             Err(m) => assert_eq!(got.unwrap_err().message, m, "{op}"),
         }
     }
+    // The model picker's rows travel the way they read on a chat that runs here: the effort/
+    // thinking row changes the effort with no model named, the model row a model with its
+    // effort. Each goes to the PC that runs the chat, and the copy shows it at once.
+    api.call_host("chat_set_model", json!({"chatId": "c1", "effort": "low"}))
+        .await
+        .unwrap();
+    api.call_host(
+        "chat_set_model",
+        json!({"chatId": "c1", "model": "sonnet", "effort": "high"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        port.st().model_changes,
+        [
+            helm_devices::wire::SetModelArgs {
+                chat_id: "c1".to_owned(),
+                model: None,
+                effort: Some("low".to_owned()),
+            },
+            helm_devices::wire::SetModelArgs {
+                chat_id: "c1".to_owned(),
+                model: Some("sonnet".to_owned()),
+                effort: Some("high".to_owned()),
+            },
+        ]
+    );
+    let got = api
+        .call_host("chat_get", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
+    assert_eq!((got["chat"]["model"].as_str(), got["chat"]["effort"].as_str()), (Some("sonnet"), Some("high")));
     // The Rename dialog's ask reached the PC that runs the chat.
     assert_eq!(port.st().titles_asked, ["c1"]);
     // The pages pinned on the other PC list here, and one opens from a copy brought across: the

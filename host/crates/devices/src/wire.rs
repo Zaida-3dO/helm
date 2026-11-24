@@ -591,7 +591,10 @@ pub struct CreateArgs {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetModelArgs {
     pub chat_id: String,
-    pub model: String,
+    /// The model to switch to, or `None` to keep it: the picker's effort/thinking row sends an
+    /// effort change with no model, exactly as a chat that runs here takes one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
 }
