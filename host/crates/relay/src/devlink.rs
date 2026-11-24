@@ -16,9 +16,9 @@ use helm_devices::host::HostPort;
 use helm_devices::link::{BoxFut, DeviceLink, FrameCb};
 use helm_devices::serve::{ChatPort, ChatState, PortResult, SentFile};
 use helm_devices::wire::{
-    AnswerArgs, ArchiveArgs, ConsentDecideArgs, CreateArgs, DeviceInfo, DevicePerson, ForkArgs,
-    Frame, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, RemoteChat, RenameArgs, RollOverArgs,
-    SetModelArgs, ShareArgs,
+    AnswerArgs, ArchiveArgs, ConsentDecideArgs, CreateArgs, DeviceInfo, DevicePerson, FastModeArgs,
+    ForkArgs, Frame, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs, RemoteChat, RenameArgs,
+    RollOverArgs, SetModelArgs, ShareArgs,
 };
 use helm_devices::{EventTap, Service};
 use serde_json::Value;
@@ -261,6 +261,9 @@ impl ChatPort for ChannelPort {
     }
     fn set_model(&self, a: SetModelArgs) -> BoxFut<'_, PortResult<()>> {
         self.port.set_model(a)
+    }
+    fn set_fast_mode(&self, a: FastModeArgs) -> BoxFut<'_, PortResult<()>> {
+        self.port.set_fast_mode(a)
     }
     fn rename(&self, a: RenameArgs) -> BoxFut<'_, PortResult<()>> {
         self.port.rename(a)

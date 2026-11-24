@@ -28,6 +28,7 @@ export type { ChatRecord } from './ChatRecord.ts';
 export type { ChatRenameArgs } from './ChatRenameArgs.ts';
 export type { ChatSendArgs } from './ChatSendArgs.ts';
 export type { ChatSendResult } from './ChatSendResult.ts';
+export type { ChatSetFastModeArgs } from './ChatSetFastModeArgs.ts';
 export type { ChatSetModelArgs } from './ChatSetModelArgs.ts';
 export type { ChatStack } from './ChatStack.ts';
 export type { ChatState } from './ChatState.ts';

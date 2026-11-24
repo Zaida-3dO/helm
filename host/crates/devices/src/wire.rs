@@ -601,6 +601,15 @@ pub struct SetModelArgs {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FastModeArgs {
+    pub chat_id: String,
+    /// The chat's own fast-mode pick; `null` drops it so the chat follows that PC's default.
+    #[serde(default)]
+    pub on: Option<bool>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenameArgs {
     pub chat_id: String,
     pub title: String,
@@ -918,6 +927,9 @@ pub enum Op {
     ConsentStates(ChatIdArgs),
     Create(CreateArgs),
     SetModel(SetModelArgs),
+    /// The composer's lightning toggle: the chat's own fast-mode pick, set on the PC that runs
+    /// the chat.
+    SetFastMode(FastModeArgs),
     Rename(RenameArgs),
     Archive(ArchiveArgs),
     Share(ShareArgs),
@@ -999,7 +1011,7 @@ pub enum Op {
     ItemLinks(ChatIdsArgs),
     Snooze(SnoozeArgs),
     Address(ChatIdArgs),
-    /// The PC's new-chat model/effort/reply-length, three fields only. A read.
+    /// The PC's new-chat model/effort/reply-length/fast-mode defaults, four fields only. A read.
     DefaultsGet(ChatIdArgs),
     DefaultsSet(DefaultsArgs),
     /// Make a project on this PC (a board, or a folder when no task board is connected).
@@ -1072,6 +1084,7 @@ impl Op {
             "consent_states" => Op::ConsentStates(args(a)?),
             "create" => Op::Create(args(a)?),
             "set_model" => Op::SetModel(args(a)?),
+            "set_fast_mode" => Op::SetFastMode(args(a)?),
             "rename" => Op::Rename(args(a)?),
             "archive" => Op::Archive(args(a)?),
             "share" => Op::Share(args(a)?),

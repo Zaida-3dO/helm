@@ -180,6 +180,10 @@ pub struct ChatRecord {
     /// The session that rolled over from this one; `null` for the newest, where the chat
     /// carries on.
     pub next_session_id: Option<String>,
+    /// This chat's own pick for Claude Code's fast mode; `null` means it follows the new-chat
+    /// default (Settings → Runtime). The composer's lightning toggle sets it; the value reaches
+    /// the chat's agent when its worker next starts.
+    pub fast_mode: Option<bool>,
 }
 
 /// The roll-over stack of a chat, as `chat_stack` reports it: every session sharing the chat's
@@ -1628,6 +1632,17 @@ pub struct ChatSetModelArgs {
     #[serde(default)]
     #[ts(optional)]
     pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChatSetFastModeArgs {
+    pub chat_id: String,
+    /// The chat's own pick: `true`/`false` sets it, `null` drops it so the chat follows the
+    /// new-chat default again.
+    #[serde(default)]
+    #[ts(optional)]
+    pub on: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]

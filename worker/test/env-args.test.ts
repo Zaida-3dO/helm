@@ -145,7 +145,7 @@ test("a local launch: loopback http only, every model slot local, the effort as 
   assert.equal(a.join(" ").includes("ANTHROPIC_AUTH_TOKEN"), false, "no token on the command line");
   // The parse-only body is pinned in the settings env too, over anything a user's settings file
   // sets there, and absent for a local chat with nothing to hand over.
-  const pinnedBody = JSON.parse(flag(buildClaudeArgs({ model: "qwen:8b", local, localExtraBody: body, settings: { env: { CLAUDE_CODE_EXTRA_BODY: "other" } } }), "--settings") ?? "null").env;
+  const pinnedBody = JSON.parse(flag(buildClaudeArgs({ model: "qwen:8b", local, settings: { env: { CLAUDE_CODE_EXTRA_BODY: "other" } } }, { localExtraBody: body }), "--settings") ?? "null").env;
   assert.equal(pinnedBody.CLAUDE_CODE_EXTRA_BODY, body);
   assert.equal("CLAUDE_CODE_EXTRA_BODY" in JSON.parse(flag(buildClaudeArgs({ local }), "--settings") ?? "null").env, false);
   assert.equal("env" in JSON.parse(flag(buildClaudeArgs({ settings: { env: { KEEP: "1" } } }), "--settings") ?? "null"), true, "a Claude chat keeps its own env block untouched");

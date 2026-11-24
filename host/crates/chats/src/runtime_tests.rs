@@ -4016,6 +4016,90 @@ async fn a_changed_chat_loses_its_pending_continuation() {
         .is_empty());
 }
 
+/// The composer's fast-mode bolt: the chat holds its own pick, and `null` drops it so the chat
+/// follows the new-chat default again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fast_mode_is_the_chats_own_pick_with_a_null_fallback() {
+    let h = harness();
+    let chat = h.create().await;
+    let fast = || h.col(&format!("SELECT fast_mode FROM chats WHERE id = '{chat}'"));
+    // A new chat holds no pick: the record says null and the column is NULL.
+    let g = h.call("chat_get", json!({"chatId": chat})).await.unwrap();
+    assert!(
+        g["chat"]["fastMode"].is_null(),
+        "a new chat follows the default"
+    );
+    assert_eq!(fast(), ["NULL"]);
+    // On and off set the column and answer with the new record.
+    let r = h
+        .call("chat_set_fast_mode", json!({"chatId": chat, "on": true}))
+        .await
+        .unwrap();
+    assert_eq!(r["fastMode"], json!(true));
+    assert_eq!(fast(), ["1"]);
+    let r = h
+        .call("chat_set_fast_mode", json!({"chatId": chat, "on": false}))
+        .await
+        .unwrap();
+    assert_eq!(r["fastMode"], json!(false));
+    assert_eq!(fast(), ["0"]);
+    // A null pick drops it; a missing `on` is the same null.
+    let r = h
+        .call("chat_set_fast_mode", json!({"chatId": chat, "on": null}))
+        .await
+        .unwrap();
+    assert!(r["fastMode"].is_null());
+    h.call("chat_set_fast_mode", json!({"chatId": chat, "on": true}))
+        .await
+        .unwrap();
+    let r = h
+        .call("chat_set_fast_mode", json!({"chatId": chat}))
+        .await
+        .unwrap();
+    assert!(r["fastMode"].is_null(), "no `on` in the args means no pick");
+    assert_eq!(fast(), ["NULL"]);
+    // Setting what the chat already has answers the same state without touching the row.
+    h.call("chat_set_fast_mode", json!({"chatId": chat, "on": true}))
+        .await
+        .unwrap();
+    let stamp = || {
+        h.col(&format!("SELECT updated_at FROM chats WHERE id = '{chat}'"))
+            .pop()
+            .unwrap()
+    };
+    let before = stamp();
+    let r = h
+        .call("chat_set_fast_mode", json!({"chatId": chat, "on": true}))
+        .await
+        .unwrap();
+    assert_eq!(r["fastMode"], json!(true));
+    assert_eq!(stamp(), before, "a no-op leaves the row alone");
+    // An unknown chat is not_found; a call without a chat id is refused.
+    let e = h
+        .call("chat_set_fast_mode", json!({"chatId": "nope", "on": true}))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, "not_found");
+    assert!(h
+        .call("chat_set_fast_mode", json!({"on": true}))
+        .await
+        .is_err());
+    // The launch resolves the two: the chat's own pick wins, null follows the default.
+    assert!(effective_fast_mode(None, true), "no pick: the default on");
+    assert!(
+        !effective_fast_mode(None, false),
+        "no pick: the default off"
+    );
+    assert!(
+        !effective_fast_mode(Some(false), true),
+        "the chat's off beats a default on"
+    );
+    assert!(
+        effective_fast_mode(Some(true), false),
+        "the chat's on beats a default off"
+    );
+}
+
 /// One finished turn with a reply, on the fake worker.
 async fn finished_turn(h: &H, w: &mut FakeWorker, chat: &str, prompt: &str, mid: &str, text: &str) {
     h.send(chat, prompt, "default").await;

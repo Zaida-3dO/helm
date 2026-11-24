@@ -13,8 +13,8 @@ use crate::serve::{ChatPort, ChatState, PageScope, PortResult, SentFile};
 use crate::wire::{
     code, AnswerArgs, ArchiveArgs, AttachmentGetArgs, BlobReadArgs, BlobRef, BoardCancelArgs,
     BoardReadArgs, CheckpointArgs, ConsentDecideArgs, CreateArgs, DefaultsArgs, DeviceInfo,
-    DevicePerson, EditOpenArgs, ForkArgs, Hello, MoveProfileArgs, MuteArgs, OrganizeArgs,
-    PageIdArgs, PageOrigin, PagesReadArgs, PanelStageArgs, PersonInfo, ProfileInfo,
+    DevicePerson, EditOpenArgs, FastModeArgs, ForkArgs, Hello, MoveProfileArgs, MuteArgs,
+    OrganizeArgs, PageIdArgs, PageOrigin, PagesReadArgs, PanelStageArgs, PersonInfo, ProfileInfo,
     ProjectCreateArgs, ProjectInfo, ProjectSetArgs, QuickOpenArgs, RemoteChat, RenameArgs,
     ResendArgs, RollOverArgs, SetModelArgs, SetPermissionArgs, ShareArgs, SideResolveArgs,
     SnoozeArgs, SubmissionArgs, ToolStopArgs, VerbositySetArgs, WireError, MAX_BLOB_BYTES,
@@ -1484,6 +1484,20 @@ impl ChatPort for HostPort {
         })
     }
 
+    fn set_fast_mode(&self, a: FastModeArgs) -> BoxFut<'_, PortResult<()>> {
+        Box::pin(async move {
+            self.here(&a.chat_id)?;
+            // The pick rides across explicitly: an explicit null means "follow the default
+            // again", the same sentence the local op takes.
+            self.op(
+                "chat_set_fast_mode",
+                json!({ "chatId": a.chat_id, "on": a.on }),
+            )
+            .await?;
+            Ok(())
+        })
+    }
+
     fn rename(&self, a: RenameArgs) -> BoxFut<'_, PortResult<()>> {
         Box::pin(async move {
             self.here(&a.chat_id)?;
@@ -2142,7 +2156,9 @@ impl ChatPort for HostPort {
             self.here(&chat_id)?;
             let all = self.op("runtime_settings_get", json!({})).await?;
             let mut out = serde_json::Map::new();
-            for key in ["model", "effort", "responseVerbosity"] {
+            // `fastMode` rides along: a mirrored chat's lightning toggle needs this PC's default
+            // to show its pressed state.
+            for key in ["model", "effort", "responseVerbosity", "fastMode"] {
                 if let Some(v) = all.get(key) {
                     out.insert(key.to_owned(), v.clone());
                 }

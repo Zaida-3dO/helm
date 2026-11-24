@@ -15,6 +15,7 @@
 //! | `interaction_answer` | async | [`InteractionAnswerArgs`] → `null` |
 //! | `draft_save` | blocking | [`DraftSaveArgs`] → [`DraftSaveResult`] |
 //! | `chat_set_model` | maintenance | [`ChatSetModelArgs`] → `ChatRecord` |
+//! | `chat_set_fast_mode` | maintenance | [`ChatSetFastModeArgs`] → `ChatRecord` — the chat's own fast-mode pick (`on: null` follows the new-chat default again); reaches the agent at the chat's next worker start |
 //! | `chat_set_folder` | maintenance | `{chatId, cwd}` → `{chatId, cwd, projectId}` — move the chat to work in another folder; the board it is shown on is left alone (`chat_organize`), and a chat whose worker is running is refused |
 //! | `model_catalogue` | blocking | [`ModelCatalogueArgs`] → [`ModelCatalogue`] |
 //! | `tool_stop` | async | [`ToolStopArgs`] → [`ToolStopResult`] |
@@ -55,6 +56,11 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .async_op("interaction_answer", interaction_answer)
         .blocking("draft_save", OpClass::Blocking, draft_save)
         .blocking("chat_set_model", OpClass::Maintenance, chat_set_model)
+        .blocking(
+            "chat_set_fast_mode",
+            OpClass::Maintenance,
+            chat_set_fast_mode,
+        )
         .blocking("chat_set_folder", OpClass::Maintenance, chat_set_folder)
         // The composer's permission-mode picker.
         .blocking(
@@ -419,6 +425,11 @@ async fn interaction_answer(ctx: OpCtx, args: Value) -> Result<Value, ApiError> 
 fn chat_set_model(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ChatSetModelArgs = parse_args(args)?;
     to_value(&submit::chat_set_model(&runtime(ctx)?, a)?)
+}
+
+fn chat_set_fast_mode(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ChatSetFastModeArgs = parse_args(args)?;
+    to_value(&submit::chat_set_fast_mode(&runtime(ctx)?, a)?)
 }
 
 #[derive(serde::Deserialize)]
@@ -963,6 +974,7 @@ pub(crate) mod tests {
             ("interaction_answer", OpClass::Async),
             ("draft_save", OpClass::Blocking),
             ("chat_set_model", OpClass::Maintenance),
+            ("chat_set_fast_mode", OpClass::Maintenance),
             ("chat_set_folder", OpClass::Maintenance),
             ("chat_set_permission_mode", OpClass::Maintenance),
             ("model_catalogue", OpClass::Blocking),

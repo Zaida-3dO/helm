@@ -154,11 +154,20 @@ pub struct SpawnRequest {
     pub resume_session_id: Option<String>,
     /// Resume `resume_session_id` as a new session (`--fork-session`): a fork's first launch.
     pub fork_session: bool,
+    /// The chat's own fast-mode pick; `None` follows the runtime file's fast mode. The launch
+    /// resolves the two ([`effective_fast_mode`]) and the worker passes the result to the CLI.
+    pub fast_mode: Option<bool>,
     pub send_behavior: SendBehavior,
     /// Host tools for this launch; `None` when the host-tool seam is not attached (tests).
     pub host: Option<HostLaunch>,
     /// The chat runs on a local model server: what to start it with.
     pub local: Option<LocalSpawn>,
+}
+
+/// What fast mode this launch runs with: the chat's own pick when it has one, else the runtime
+/// file's value (the new-chat default). The worker writes the answer into the CLI's settings.
+pub fn effective_fast_mode(chat_pick: Option<bool>, default: bool) -> bool {
+    chat_pick.unwrap_or(default)
 }
 
 /// A local chat's launch: the server and model (the name the worker asks the server for), and how
@@ -407,6 +416,8 @@ impl Spawner for ProcessSpawner {
             req.effort.clone(),
             req.resume_session_id.clone(),
         );
+        // The chat's own fast-mode pick wins over the runtime file's (the new-chat default).
+        claude.fast_mode = effective_fast_mode(req.fast_mode, runtime.fast_mode);
         claude.append_system_prompt = contrib::system_prompt(&extras);
         // The knowledge layers load in every chat (Claude and local-model alike: both run the
         // same CLI): skills as one plugin folder per layer for this chat's person and project,

@@ -485,6 +485,8 @@ fn late_columns(tx: &Transaction<'_>) -> rusqlite::Result<()> {
         // reload. Both stay null for every other send.
         ("submission_meta", "page_title", "TEXT"),
         ("submission_meta", "page_overview", "TEXT"),
+        // The chat's own fast-mode pick: 1 on, 0 off, null follows the new-chat default.
+        ("chats", "fast_mode", "INTEGER"),
     ] {
         let has: bool = tx.query_row(
             "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",

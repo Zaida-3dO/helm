@@ -198,6 +198,8 @@ export const IconStop = kitIcon(Square, 'square');
 export const IconEye = kitIcon(Eye, 'eye');
 export const IconEyeOff = kitIcon(EyeOff, 'eye-off');
 export const IconAttach = kitIcon(Paperclip, 'paperclip');
+/** The composer's fast-mode toggle (a lightning bolt). */
+export const IconBolt = kitIcon(Zap, 'zap');
 export const IconStar = kitIcon(Star, 'star');
 /** AFK. */
 export const IconMoon = kitIcon(Moon, 'moon');
