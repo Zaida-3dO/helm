@@ -70,6 +70,14 @@ export function bytesToBase64(bytes: Uint8Array): string {
 }
 
 /**
+ * Whether the composer has something to send: words, or attached pictures or references. An
+ * attachment alone is a message; only when there is neither does Send have nothing to do.
+ */
+export function hasSendContent(text: string, imageCount: number, refCount: number): boolean {
+  return text.trim() !== '' || imageCount > 0 || refCount > 0;
+}
+
+/**
  * The host's unstaged pool entries the composer is not showing yet (matched by id): what a
  * reopening composer stages, and what a taken-back send's message brings back.
  */

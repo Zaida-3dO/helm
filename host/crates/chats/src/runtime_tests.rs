@@ -4499,6 +4499,61 @@ async fn a_crash_between_stage_and_apply_is_repaired_at_startup() {
     );
 }
 
+/// A message whose only content is its picture is content for an edit too: the open reports it
+/// as having attachments, an empty edit stages (carrying a fresh copy of the picture), and the
+/// same empty edit on a plain text message stays refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_image_only_message_edits_with_empty_text() {
+    let mut h = harness();
+    let chat = h.create().await;
+    first_turn_with_image(&mut h, &chat).await;
+    let first = user_row(&h, &chat, "first");
+    let o = crate::edit::open(&h.db, &chat, first).unwrap();
+    assert!(o.has_attachments, "the message carries a picture");
+    let sid = uuid::Uuid::new_v4().to_string();
+    crate::edit::stage(
+        &h.db,
+        &h.profile.path("sessions"),
+        &h.profile.path("attachments"),
+        &crate::types::MessageResendArgs {
+            chat_id: chat.clone(),
+            message_id: first,
+            revision: o.revision,
+            submission_id: sid.clone(),
+            text: String::new(),
+        },
+    )
+    .unwrap();
+    assert_eq!(h.state(&sid), "saved");
+    // The picture rides the new submission as its own copy.
+    let copies: i64 = h.col(&format!(
+        "SELECT count(*) FROM chat_attachments WHERE submission_id = '{sid}'"
+    ))[0]
+        .parse()
+        .unwrap();
+    assert_eq!(copies, 1, "the empty edit keeps the picture");
+    // Control: the same empty edit on a message with nothing attached is refused.
+    let plain = h.create().await;
+    let _w = first_turn(&mut h, &plain).await;
+    let row = user_row(&h, &plain, "first");
+    let o = crate::edit::open(&h.db, &plain, row).unwrap();
+    assert!(!o.has_attachments, "a plain message carries nothing");
+    let err = crate::edit::stage(
+        &h.db,
+        &h.profile.path("sessions"),
+        &h.profile.path("attachments"),
+        &crate::types::MessageResendArgs {
+            chat_id: plain,
+            message_id: row,
+            revision: o.revision,
+            submission_id: uuid::Uuid::new_v4().to_string(),
+            text: "  ".into(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.message, "There is nothing to send.");
+}
+
 /// Edits are refused while the chat works, and only for the user's sent messages.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn edits_are_refused_while_busy_and_for_replies() {

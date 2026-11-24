@@ -336,6 +336,7 @@ fn message_edit_open(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         message_id: o.message_id,
         revision: o.revision,
         text: o.text,
+        has_attachments: o.has_attachments,
     })
 }
 

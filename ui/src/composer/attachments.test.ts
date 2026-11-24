@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MAX_IMAGE_BYTES, isAnimated, refusal, toBase64, unstagedOnly, type Attached } from './attachments.ts';
+import { MAX_IMAGE_BYTES, hasSendContent, isAnimated, refusal, toBase64, unstagedOnly, type Attached } from './attachments.ts';
 import { isBlocked } from './runtimeCheck.ts';
 
 const att = (size: number): Attached => ({ id: 'a', name: 'a.png', size, url: 'blob:x' });
@@ -11,6 +11,22 @@ test('the composer applies the attachment limits before uploading', () => {
   assert.match(refusal([], { name: 'b.png', type: 'image/png', size: MAX_IMAGE_BYTES + 1 }) ?? '', /25 MB/);
   assert.match(refusal(Array.from({ length: 20 }, () => att(1)), { name: 'c.png', type: 'image/png', size: 1 }) ?? '', /20 attachments/);
   assert.match(refusal([att(25 * 1024 * 1024), att(25 * 1024 * 1024)], { name: 'd.png', type: 'image/png', size: 11 * 1024 * 1024 }) ?? '', /60 MB/);
+});
+
+test('an attachment alone is sendable; only words and attachments both absent is not', () => {
+  // [text, attached images, references, may send]
+  const cases: Array<[string, number, number, boolean]> = [
+    ['hello', 0, 0, true],
+    ['', 0, 0, false],
+    ['   ', 0, 0, false],
+    ['', 1, 0, true],
+    ['', 0, 1, true],
+    ['', 0, 0, false],
+    ['   ', 2, 0, true],
+    ['', 3, 5, true],
+  ];
+  for (const [text, imgs, refs, want] of cases)
+    assert.equal(hasSendContent(text, imgs, refs), want, `text=${JSON.stringify(text)}, ${imgs} images, ${refs} refs`);
 });
 
 test('bytes are base64-encoded', async () => {

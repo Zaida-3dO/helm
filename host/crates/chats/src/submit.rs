@@ -619,7 +619,8 @@ fn host_send_inner(
     files: &[HostFile<'_>],
     afk_note: bool,
 ) -> Result<HostSent, ApiError> {
-    if s.text.trim().is_empty() {
+    // Pictures and files are content of their own: a send that carries them may have no text.
+    if s.text.trim().is_empty() && images.is_empty() && files.is_empty() {
         return Err(ApiError::bad_args("The message is empty."));
     }
     if s.text.len() > store::MAX_SUBMISSION_BYTES {

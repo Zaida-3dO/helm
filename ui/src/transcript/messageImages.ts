@@ -132,3 +132,21 @@ export function fitImage(width: number, height: number, maxWidth: number, maxHei
   const scale = Math.min(1, Math.max(1, maxWidth) / width, Math.max(1, maxHeight) / height);
   return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
 }
+
+/** The widest the viewer ever gets; its dialog's header, padding and facts line take the rest. */
+export const VIEWER_MAX_WIDTH = 1400;
+const VIEWER_CHROME_WIDTH = 44 + 40 + 2;
+const VIEWER_CHROME_HEIGHT = 35 + 110;
+
+/**
+ * The viewer's picture box, fixed for the whole viewing: width is as wide as the dialog ever
+ * gets (today's widest picture), height a commensurate cap that stays inside the window. It
+ * depends only on the window, never on which picture is showing — stepping between different
+ * aspect ratios keeps the same box and letterboxes inside it.
+ */
+export function viewerFrame(win: { width: number; height: number }): { width: number; height: number } {
+  const width = Math.max(240, Math.min(VIEWER_MAX_WIDTH, win.width - VIEWER_CHROME_WIDTH));
+  const tallest = Math.max(120, win.height - VIEWER_CHROME_HEIGHT - Math.max(70, win.height * 0.1));
+  const height = Math.min(tallest, Math.max(240, Math.min(tallest, Math.round(width * 0.72))));
+  return { width, height };
+}

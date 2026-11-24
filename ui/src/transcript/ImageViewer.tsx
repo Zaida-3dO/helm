@@ -7,7 +7,7 @@
 import { useEffect, useState, type KeyboardEvent } from 'react';
 import { Dialog } from '../ui/index.ts';
 import { IconChevronLeft, IconChevronRight } from '../ui/icons.tsx';
-import { fitImage, imageFacts, stepImage } from './messageImages.ts';
+import { fitImage, imageFacts, stepImage, viewerFrame } from './messageImages.ts';
 import { useSwipe } from './swipe.ts';
 import './messageImages.css';
 
@@ -34,10 +34,6 @@ export interface ImageViewerProps {
   imageTestId?: string;
 }
 
-/** Room the dialog's own header, padding and facts line take around the picture. */
-const CHROME_WIDTH = 44 + 40 + 2;
-const CHROME_HEIGHT = 35 + 110;
-const MAX_WIDTH = 1400;
 
 function useWindowSize(): { width: number; height: number } {
   const [size, setSize] = useState(() => ({ width: innerWidth, height: innerHeight }));
@@ -62,8 +58,10 @@ export function ImageViewer({ images, index, onIndex, onClose, src, state = 'rea
   const known = image.width && image.height ? { width: image.width, height: image.height } : null;
   const loaded = natural?.key === image.key ? natural : null;
   const dims = loaded ?? known;
-  const room = { width: Math.min(MAX_WIDTH, win.width - CHROME_WIDTH), height: win.height - Math.max(70, win.height * 0.1) - CHROME_HEIGHT };
-  const box = dims ? fitImage(dims.width, dims.height, room.width, room.height) : null;
+  // One fixed box for the whole viewing: the same picture frame for every image, so stepping
+  // between different aspect ratios never resizes the window; the picture fits inside it.
+  const frame = viewerFrame(win);
+  const box = dims ? fitImage(dims.width, dims.height, frame.width, frame.height) : null;
   const facts = imageFacts({ size: image.size, width: dims?.width, height: dims?.height });
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (count < 2 || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
@@ -105,7 +103,7 @@ export function ImageViewer({ images, index, onIndex, onClose, src, state = 'rea
           if (!(e.target instanceof HTMLImageElement)) onClose();
         }}
       >
-        <div className="image-viewer-stage" {...swipe}>
+        <div className="image-viewer-stage" style={{ width: frame.width, height: frame.height }} {...swipe}>
           {src && state !== 'failed' ? (
             <img
               key={image.key}
