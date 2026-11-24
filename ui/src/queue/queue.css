@@ -1,4 +1,4 @@
-/* The queue panel rows and the per-server summary line. */
+/* The queue panel rows: chats working, then chats waiting, and the build queue. */
 
 .queue-empty {
   color: var(--helm-muted);
@@ -16,6 +16,41 @@
   padding: 6px 2px;
   border-bottom: 1px solid var(--helm-border);
 }
+
+/* A chat row in the chat queue: one line — title, why it waits or where it runs, its tags,
+   and the controls at the right hand — instead of the old stacked scatter. */
+.queue-row.chat-row {
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.1fr) auto auto;
+  grid-template-areas: "open line chips actions";
+}
+
+/* The group headers: chats working, then chats waiting. */
+.queue-group {
+  margin: 10px 2px 2px;
+  color: var(--helm-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.queue-chips {
+  grid-area: chips;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* A chat belonging to another profile: its name, so it is clear whose chat a row is. */
+.queue-tag {
+  color: var(--helm-muted);
+  font-size: 11px;
+  border: 1px solid var(--helm-border);
+  border-radius: 7px;
+  padding: 1px 6px;
+  background: var(--hover);
+}
+
 
 .queue-open {
   grid-area: open;
@@ -136,15 +171,6 @@
 .queue-btn {
   padding: 2px 8px;
   font-size: 12px;
-}
-
-.queue-servers {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 14px;
-  color: var(--helm-muted);
-  font-size: 12px;
-  padding: 8px 2px 2px;
 }
 
 .queue-foot {

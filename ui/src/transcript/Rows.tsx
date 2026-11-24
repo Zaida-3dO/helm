@@ -125,6 +125,8 @@ const CONTEXT_LABEL: Record<string, string> = {
   interruption: 'Interruption',
   signIn: 'Sign-in',
   startup: 'Startup',
+  queuePause: 'Paused',
+  queueStop: 'Stopped',
 };
 
 function Thinking({ text, streaming, onLink }: { text: string; streaming: boolean; onLink: RowContext['onLink'] }) {

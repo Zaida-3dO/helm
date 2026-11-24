@@ -702,6 +702,14 @@ pub struct ServerLoad {
     pub queued: usize,
 }
 
+/// One chat with a turn open right now. See [`ChatRuntime::active_chats`].
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ActiveChat {
+    pub chat_id: String,
+    pub server_id: Option<String>,
+    pub since_ms: i64,
+}
+
 /// What a local server last said about requests waiting on it, and when. Filled only while some
 /// chat has a request open against that server — never at start-up, never on a plain timer.
 pub(crate) struct QueueSeen {
@@ -937,6 +945,33 @@ impl ChatRuntime {
             }
         }
         per.into_values().collect()
+    }
+
+    /// The chats with a turn open right now: each with the server its turn runs on (nothing
+    /// for a Claude chat) and when the turn opened. Chats held at their start wait, so they
+    /// are not here — the queue's own table has them. Read from the actors' live state; the
+    /// queue panel draws these above the waiting rows.
+    pub(crate) fn active_chats(&self) -> Vec<ActiveChat> {
+        let mut out: Vec<ActiveChat> = self
+            .sh
+            .actors
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(id, h)| {
+                let l = h.live.lock().unwrap();
+                if !l.thread.status.is_busy() || l.held_at_start.is_some() {
+                    return None;
+                }
+                Some(ActiveChat {
+                    chat_id: id.clone(),
+                    server_id: l.server_id.clone(),
+                    since_ms: l.turn_opened_ms.unwrap_or_else(helm_core::now_ms),
+                })
+            })
+            .collect();
+        out.sort_by_key(|a| (a.since_ms, a.chat_id.clone()));
+        out
     }
 
     /// Hand every chat the stored send behaviour. An actor whose worker was

@@ -4,7 +4,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { aheadOf, actionsFor, buildActionsFor, buildLine, buildStateLabel, claudeLine, queueCount, reasonLabel, sameLine, serverLine, waitLine } from './model.ts';
+import { activeLine, aheadOf, actionsFor, buildActionsFor, buildLine, buildStateLabel, claudeLine, queueCount, reasonLabel, sameLine, serverLine, showsProfile, waitLine } from './model.ts';
 import type { BuildQueueEntry, QueueEntry, QueueSummary } from '../api/generated/index.ts';
 import { dropBefore } from '../ui/useDragReorder.ts';
 
@@ -21,6 +21,7 @@ const e = (over: Partial<QueueEntry>): QueueEntry => ({
 
 const s = (over: Partial<QueueSummary>): QueueSummary => ({
   entries: [],
+  active: [],
   servers: [],
   claudeQueued: 0,
   claudeFull: false,
@@ -35,17 +36,31 @@ test('reasons read in plain words, unknown ones show as stored', () => {
   assert.equal(reasonLabel('something_new'), 'something_new');
 });
 
-test('the wait line names the reason, the reset time, or the place ahead', () => {
-  for (const [entry, ahead, until, want] of [
-    [e({ reason: 'local_cap', serverId: 'strata' }), 0, null, 'Waiting for the local model'],
-    [e({ reason: 'local_cap', serverId: 'strata' }), 2, null, 'Waiting for the local model · 2 waiting ahead'],
-    [e({ reason: 'claude_capacity' }), 1, 'in 40 min', 'Claude allowance used up · opens again in 40 min'],
-    [e({ reason: 'claude_capacity' }), 1, null, 'Claude allowance used up · 1 waiting ahead'],
-    [e({ reason: 'manual' }), 3, null, 'Parked by you'],
-    [e({ reason: 'at_limit' }), 0, null, 'Too many chats running'],
+test('the wait line names the reason, the place it waits on, the reset time, or the count ahead', () => {
+  for (const [entry, ahead, until, server, want] of [
+    [e({ reason: 'local_cap', serverId: 'strata' }), 0, null, 'Strata', 'Waiting for the local model on Strata'],
+    [e({ reason: 'local_cap', serverId: 'strata' }), 2, null, 'Strata', 'Waiting for the local model on Strata · 2 waiting ahead'],
+    [e({ reason: 'local_cap', serverId: null }), 0, null, null, 'Waiting for the local model'],
+    [e({ reason: 'claude_capacity' }), 1, 'in 40 min', null, 'Claude allowance used up · opens again in 40 min'],
+    [e({ reason: 'claude_capacity' }), 1, null, null, 'Claude allowance used up · 1 waiting ahead'],
+    [e({ reason: 'manual' }), 3, null, null, 'Parked by you'],
+    [e({ reason: 'at_limit' }), 0, null, 'Strata', 'Too many chats running'],
   ] as const) {
-    assert.equal(waitLine(entry, ahead, until), want);
+    assert.equal(waitLine(entry, ahead, until, server), want);
   }
+});
+
+test('the working line says where the turn is running, and a profile tag stands for other people', () => {
+  assert.equal(activeLine('Strata'), 'on Strata');
+  assert.equal(activeLine(null), 'on Claude');
+  // The tag only shows for a chat that is not the profile on screen; while all of them are on
+  // screen the panel passes the home profile as the current one.
+  assert.equal(showsProfile('b', 'a'), true);
+  assert.equal(showsProfile('a', 'a'), false);
+  assert.equal(showsProfile(null, 'a'), false, 'a chat with no profile of its own carries no tag');
+  assert.equal(showsProfile('home', 'home'), false);
+  assert.equal(showsProfile('other', 'home'), true);
+  assert.equal(showsProfile('other', null), true, 'unknown whose: tag it');
 });
 
 test('ahead counts only starts on the same line, and manual holds have no line', () => {
