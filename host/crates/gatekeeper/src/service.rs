@@ -241,6 +241,8 @@ impl GateService {
                         text: &text,
                         origin: SubmissionOrigin::Answer,
                         page: None,
+                        kind: None,
+                        wait: None,
                     },
                 )
                 .map(|_| ())

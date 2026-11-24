@@ -649,6 +649,7 @@ fn send_continuation(rt: &ChatRuntime, due: &Due) -> Result<bool, ApiError> {
                     origin: SubmissionOrigin::App,
                     priority: None,
                     now,
+                    kind: None,
                 },
             )?;
             let row = RowWrite {

@@ -1180,6 +1180,7 @@ impl ChatPort for HostPort {
         device: DeviceInfo,
         files: Vec<SentFile>,
         page: Option<PageOrigin>,
+        kind: Option<String>,
     ) -> BoxFut<'_, PortResult<()>> {
         Box::pin(async move {
             self.here(&chat_id)?;
@@ -1245,6 +1246,11 @@ impl ChatPort for HostPort {
                         text: &text,
                         origin,
                         page: page_meta.as_ref().map(|(t, o)| (t.as_str(), o.as_str())),
+                        // The kind crossed with the message: an unknown word reads as none.
+                        kind: kind
+                            .as_deref()
+                            .and_then(helm_chats::types::MessageKind::parse),
+                        wait: None,
                     },
                     &images,
                     &attached,

@@ -959,6 +959,16 @@ pub struct MessageDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub page_overview: Option<String>,
+    /// For a user row from another chat or a note Helm wrote: its kind ([`MessageKind`]), shown
+    /// as a small tag on the card. Absent for the user's own sends and older rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub kind: Option<MessageKind>,
+    /// For a `wait-finished` note about a chat: the watched chat, so the card's short line can
+    /// name and link it. Absent otherwise and when that chat is already gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub wait_chat: Option<WatchedChat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub retry: Option<RetryInfo>,
@@ -1176,6 +1186,77 @@ impl From<SendOrigin> for SubmissionOrigin {
     }
 }
 
+/// What kind of message a chat-to-chat or Helm-written message is. A closed set: `app_send_message`
+/// requires one of the inter-chat kinds and teaches the agents which to use; the code inside Helm
+/// that writes a note for an agent stamps a specific kind of its own (`wait-finished`,
+/// `request-expired`) rather than one catch-all "system" kind. The user's own typing never carries
+/// one, and neither does any send that is none of these: where a kind is asked for, a word
+/// outside the set is refused, and one already stored reads back as none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum MessageKind {
+    /// The task that starts a sub-chat.
+    InitialPrompt,
+    /// An instruction or correction into a chat that is working.
+    Steer,
+    /// A small prompt carrying no new work, between chats or from Helm.
+    Nudge,
+    /// A milestone or progress report to the chat that is waiting on it.
+    Update,
+    /// What the user did somewhere else, relayed to the agent that needs it.
+    UserAction,
+    /// The hand-over summary at the end of finished work.
+    Completed,
+    /// Helm's wait watcher: the wait the chat declared has finished.
+    WaitFinished,
+    /// Helm: a request the chat made expired without an answer.
+    RequestExpired,
+}
+
+impl MessageKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InitialPrompt => "initial-prompt",
+            Self::Steer => "steer",
+            Self::Nudge => "nudge",
+            Self::Update => "update",
+            Self::UserAction => "user-action",
+            Self::Completed => "completed",
+            Self::WaitFinished => "wait-finished",
+            Self::RequestExpired => "request-expired",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "initial-prompt" => Some(Self::InitialPrompt),
+            "steer" => Some(Self::Steer),
+            "nudge" => Some(Self::Nudge),
+            "update" => Some(Self::Update),
+            "user-action" => Some(Self::UserAction),
+            "completed" => Some(Self::Completed),
+            "wait-finished" => Some(Self::WaitFinished),
+            "request-expired" => Some(Self::RequestExpired),
+            _ => None,
+        }
+    }
+
+    /// The kinds a chat may stamp on a message it sends to another chat. Helm's own note kinds
+    /// (`wait-finished`, `request-expired`) are stamped only by the code that writes them.
+    pub fn sendable(self) -> bool {
+        !matches!(self, Self::WaitFinished | Self::RequestExpired)
+    }
+}
+
+/// For a `wait-finished` note about a chat: the watched chat's id and title, stored beside the
+/// message so the transcript's one-line form can name and link that chat without showing its id.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchedChat {
+    pub chat_id: String,
+    pub title: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Submission {
@@ -1205,6 +1286,16 @@ pub struct Submission {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub page_overview: Option<String>,
+    /// What kind of message this is, for a chat-to-chat send or a note Helm wrote
+    /// ([`MessageKind`]). Absent for the user's own sends and for notes that name no kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub kind: Option<MessageKind>,
+    /// For a `wait-finished` note about a chat: the chat it watched, so the card can name it.
+    /// Absent otherwise and when that chat is already gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub wait_chat: Option<WatchedChat>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
@@ -1523,6 +1614,12 @@ pub struct ChatSendArgs {
     #[serde(default)]
     #[ts(optional)]
     pub page_overview: Option<String>,
+    /// For a send from another chat or a paired device's agent: the kind of message
+    /// ([`MessageKind`]), stored with it and shown on the transcript card. Absent for the user's
+    /// own sends.
+    #[serde(default)]
+    #[ts(optional)]
+    pub kind: Option<MessageKind>,
 }
 
 /// Where a user's send came from. Every origin is still the user's own send

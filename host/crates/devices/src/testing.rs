@@ -141,6 +141,8 @@ pub struct FakeState {
     pub sent_on: Vec<DeviceInfo>,
     /// For each send, the page's card words when a page wrote it.
     pub sent_page: Vec<Option<PageOrigin>>,
+    /// For each send, the kind word it crossed with (a chat-to-chat send), if any.
+    pub sent_kind: Vec<Option<String>>,
     pub stopped: Vec<String>,
     /// The chats stopped without resending what the agent had not read.
     pub stopped_no_resend: Vec<String>,
@@ -506,6 +508,7 @@ impl ChatPort for FakePort {
         device: DeviceInfo,
         files: Vec<SentFile>,
         page: Option<PageOrigin>,
+        kind: Option<String>,
     ) -> BoxFut<'_, PortResult<()>> {
         let mut st = self.st();
         let r = if st.chats.iter().any(|c| c.id() == chat_id) {
@@ -514,6 +517,7 @@ impl ChatPort for FakePort {
             st.sent_files.push(files);
             st.sent_on.push(device);
             st.sent_page.push(page);
+            st.sent_kind.push(kind);
             Ok(())
         } else {
             Err(WireError::not_found())

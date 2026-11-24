@@ -209,6 +209,8 @@ pub trait ChatPort: Send + Sync {
     /// `files` are the attachments carried with it, exactly as a local send hands them over.
     /// `page` says a page on the sending PC wrote it: the card words are stored with the message
     /// and the PC line is not put in front — the page names itself inside the text.
+    /// `kind` is the message's kind word when the sending side was a chat: it is stored with
+    /// the message so its card can tag it.
     #[allow(clippy::too_many_arguments)]
     fn send(
         &self,
@@ -219,6 +221,7 @@ pub trait ChatPort: Send + Sync {
         device: DeviceInfo,
         files: Vec<SentFile>,
         page: Option<PageOrigin>,
+        kind: Option<String>,
     ) -> BoxFut<'_, PortResult<()>>;
     /// Stop the chat's turn; with `no_resend`, what the agent had not read is not sent again.
     fn stop(&self, chat_id: String, no_resend: bool) -> BoxFut<'_, PortResult<()>>;
@@ -1614,6 +1617,7 @@ impl Inner {
                 device.clone(),
                 files,
                 a.page,
+                a.kind,
             )
             .await;
         match sent {

@@ -186,6 +186,9 @@ pub fn place(c: &Ctx, turn: &SpeakerTurn, now: i64) -> Result<Placed, String> {
                 text: &text,
                 origin: SPEAKER_ORIGIN,
                 page: None,
+
+                kind: None,
+                wait: None,
             },
         );
         match r {

@@ -15,6 +15,7 @@ use crate::model::{self, Observation, Outcome, Target, Wait};
 use crate::probes::Probes;
 use crate::store::{self, AddError};
 use helm_core::db::Database;
+use rusqlite::OptionalExtension;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -37,9 +38,17 @@ pub enum Delivery {
     Retry,
 }
 
-/// Where a fired wait's message goes.
+/// Where a fired wait's message goes. `watch` names the chat the wait was about (its id and
+/// title) when the wait watched a chat: it rides along so the chat's card can show one plain
+/// line about that chat instead of the raw note.
 pub trait Deliver: Send + Sync {
-    fn deliver(&self, chat_id: &str, submission_id: &str, text: &str) -> Delivery;
+    fn deliver(
+        &self,
+        chat_id: &str,
+        submission_id: &str,
+        text: &str,
+        watch: Option<(&str, &str)>,
+    ) -> Delivery;
 }
 
 pub struct WaitsService {
@@ -303,7 +312,15 @@ impl WaitsService {
         for (w, o) in owed {
             let text = model::framed(&w, &o);
             let sid = delivery_id(&w.id);
-            match sink.deliver(&w.chat_id, &sid, &text) {
+            let watch = watched_chat(&self.db, &w);
+            match sink.deliver(
+                &w.chat_id,
+                &sid,
+                &text,
+                watch
+                    .as_ref()
+                    .map(|(id, title)| (id.as_str(), title.as_str())),
+            ) {
                 Delivery::Sent | Delivery::Gone => {
                     let _ = self.db.write(|tx| store::mark_delivered(tx, &w.id));
                 }
@@ -314,6 +331,32 @@ impl WaitsService {
             }
         }
     }
+}
+
+/// The chat a wait watched, with its title: `Some` only for a chat wait whose chat still has a
+/// row. The title comes from the chats table beside the waits', as the probes read them.
+fn watched_chat(db: &Database, w: &Wait) -> Option<(String, String)> {
+    let Target::ChatIdle { chat_id } = &w.target else {
+        return None;
+    };
+    let id = chat_id.clone();
+    let id_for_read = id.clone();
+    let title = db
+        .snapshot(move |tx| -> rusqlite::Result<Option<String>> {
+            let title = tx
+                .query_row(
+                    "SELECT title FROM chats WHERE id = ?1",
+                    [&id_for_read],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()
+                .ok()
+                .flatten();
+            Ok(title)
+        })
+        .ok()
+        .flatten()?;
+    Some((id, title))
 }
 
 /// The submission id for a fired wait's message: the same wait always maps to the same id, so
@@ -355,7 +398,13 @@ fn resend_id(first: &str, n: u32) -> String {
 pub struct RuntimeSink(pub helm_chats::ChatRuntime);
 
 impl Deliver for RuntimeSink {
-    fn deliver(&self, chat_id: &str, submission_id: &str, text: &str) -> Delivery {
+    fn deliver(
+        &self,
+        chat_id: &str,
+        submission_id: &str,
+        text: &str,
+        watch: Option<(&str, &str)>,
+    ) -> Delivery {
         use helm_chats::types::SubmissionState as S;
         let state_of = |id: &str| {
             self.0
@@ -385,7 +434,7 @@ impl Deliver for RuntimeSink {
                 }
                 // Handed over (or about to be) and not answered yet: ask again at the next sweep.
                 Some(S::Saved | S::Dispatching) | None => {
-                    return match self.hand_over(chat_id, &id, text) {
+                    return match self.hand_over(chat_id, &id, text, watch) {
                         Delivery::Sent => Delivery::Retry,
                         other => other,
                     };
@@ -400,7 +449,13 @@ impl Deliver for RuntimeSink {
 impl RuntimeSink {
     /// Save the message in the chat (or hand a saved one over again). `Sent` means the chat has
     /// it; whether it accepts it is seen at a later sweep.
-    fn hand_over(&self, chat_id: &str, submission_id: &str, text: &str) -> Delivery {
+    fn hand_over(
+        &self,
+        chat_id: &str,
+        submission_id: &str,
+        text: &str,
+        watch: Option<(&str, &str)>,
+    ) -> Delivery {
         use helm_chats::submit::{host_send, HostSend};
         let sent = host_send(
             &self.0,
@@ -410,6 +465,10 @@ impl RuntimeSink {
                 text,
                 origin: helm_chats::types::SubmissionOrigin::App,
                 page: None,
+                // Helm's own wait note: its kind is the wait finishing, and when the wait was
+                // about a chat, the card gets that chat's name with it.
+                kind: Some(helm_chats::types::MessageKind::WaitFinished),
+                wait: watch,
             },
         );
         match sent {
@@ -795,16 +854,33 @@ mod tests {
         ))
         .unwrap()
         .unwrap();
+        db.write(|tx| {
+            tx.execute("UPDATE chats SET title = 'Docs desk' WHERE id = 'c2'", [])?;
+            Ok::<(), rusqlite::Error>(())
+        })
+        .unwrap();
         probes.chats.lock().unwrap().get_mut("c2").unwrap().busy = true;
         svc.sweep_local(t0 + 12_000);
         probes.chats.lock().unwrap().get_mut("c2").unwrap().busy = false;
         svc.sweep_local(t0 + 14_000);
-        assert!(sink
-            .sent
-            .lock()
-            .unwrap()
+        let fired = sink.sent.lock().unwrap().clone();
+        let w1 = fired
             .iter()
-            .any(|m| m.1 == delivery_id("w1") && m.2.contains("finished")));
+            .find(|m| m.1 == delivery_id("w1"))
+            .expect("w1 delivered");
+        assert!(w1.2.contains("finished"));
+        assert_eq!(
+            w1.3.as_ref()
+                .map(|(id, title)| (id.as_str(), title.as_str())),
+            Some(("c2", "Docs desk")),
+            "the watched chat's name rides with the note, so the transcript can link it"
+        );
+        assert!(
+            fired
+                .iter()
+                .any(|m| m.2.contains("process 101: exited") && m.3.is_none()),
+            "a process wait has no chat to name"
+        );
 
         // A timeout, and a deleted waiting chat taking its waits with it.
         svc.declare(&wait("t1", "c3", proc(300), t0, 60))

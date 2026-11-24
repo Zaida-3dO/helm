@@ -191,7 +191,8 @@ fn allowed_args(tool: &str) -> &'static [&'static str] {
         // Which prompt (chat and request) and the answer: an option's number with the label the
         // page showed for it, or typed text.
         "app_answer_waiting" => &["chatId", "requestId", "index", "label", "text"],
-        "app_send_message" => &["chatId", "message", "mode"],
+        // The kind is required by the tool itself, so an outside caller names it too.
+        "app_send_message" => &["chatId", "message", "mode", "kind"],
         "app_stop_chat" => &["chatId"],
         _ => &[],
     }

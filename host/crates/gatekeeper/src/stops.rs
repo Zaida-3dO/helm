@@ -95,6 +95,9 @@ impl Host for ChatRuntime {
                 // Helm's own note, never the user's words: it cannot count as consent.
                 origin: SubmissionOrigin::App,
                 page: None,
+                // A stop verdict tells the agent to change course: a nudge.
+                kind: Some(helm_chats::types::MessageKind::Nudge),
+                wait: None,
             },
         )
         .map(|_| ())

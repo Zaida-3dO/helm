@@ -211,6 +211,8 @@ impl AppExecutor {
                 text: &text,
                 origin: SubmissionOrigin::OtherChat,
                 page: None,
+                kind: None,
+                wait: None,
             },
         )
         .map_err(|e| refused(e.message))?;
@@ -305,6 +307,7 @@ impl AppExecutor {
                     context: None,
                     page_title: None,
                     page_overview: None,
+                    kind: None,
                 },
                 person.map(str::to_owned),
             )

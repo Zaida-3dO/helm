@@ -73,20 +73,24 @@ impl Probes for Fake {
 
 #[derive(Default)]
 pub struct Sink {
-    pub sent: Mutex<Vec<(String, String, String)>>,
+    /// Each delivered message: the chat, the submission id, the text, and (for a chat wait)
+    /// the watched chat's id and title that rides with it.
+    pub sent: Mutex<Vec<(String, String, String, Option<(String, String)>)>>,
     pub fail_first: AtomicUsize,
 }
 
 impl Deliver for Sink {
-    fn deliver(&self, chat: &str, sid: &str, text: &str) -> Delivery {
+    fn deliver(&self, chat: &str, sid: &str, text: &str, watch: Option<(&str, &str)>) -> Delivery {
         if self.fail_first.load(Ordering::SeqCst) > 0 {
             self.fail_first.fetch_sub(1, Ordering::SeqCst);
             return Delivery::Retry;
         }
-        self.sent
-            .lock()
-            .unwrap()
-            .push((chat.into(), sid.into(), text.into()));
+        self.sent.lock().unwrap().push((
+            chat.into(),
+            sid.into(),
+            text.into(),
+            watch.map(|(id, title)| (id.into(), title.into())),
+        ));
         Delivery::Sent
     }
 }

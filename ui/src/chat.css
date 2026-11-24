@@ -189,7 +189,7 @@ button.danger {
   text-decoration: underline dashed;
   cursor: pointer;
 }
-/* The one-line digest under the head, while the card is closed. */
+/* The one-line digest under the head; it stays visible when the card opens. */
 .note-card-digest {
   font-size: 13px;
   margin-top: 2px;
@@ -200,6 +200,21 @@ button.danger {
 .note-card-body {
   margin-top: 4px;
   font-size: 13px;
+}
+.note-card.open .note-card-body {
+  border-top: 1px solid var(--md-border, currentColor);
+  padding-top: 4px;
+}
+/* The small tag beside the sender's name: what the message between chats was for. */
+.note-card-kind {
+  flex: none;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px solid var(--md-border, currentColor);
+  border-radius: 4px;
+  padding: 0 4px;
 }
 .note-card-note {
   font-size: 12px;

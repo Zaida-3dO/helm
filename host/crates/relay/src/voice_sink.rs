@@ -943,6 +943,8 @@ pub fn place(c: &Ctx, turn: &VoiceTurn, notes: &[String], now: i64) -> Result<Pl
                 text: &text,
                 origin: VOICE_ORIGIN,
                 page: None,
+                kind: None,
+                wait: None,
             },
         );
         match r {
@@ -1030,6 +1032,8 @@ pub fn place_note(
             text,
             origin: SubmissionOrigin::App,
             page: None,
+            kind: None,
+            wait: None,
         },
     )
     .map_err(|e| e.message)?;
