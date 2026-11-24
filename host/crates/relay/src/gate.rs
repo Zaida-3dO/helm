@@ -75,6 +75,7 @@ pub const TABLE: &[(&str, Class)] = &[
     ("app_gmail_thread", Class::Denied(MCP)),
     ("app_gmail_trash", Class::Denied(MCP)),
     ("app_google_sign_in", Class::Denied(MCP)),
+    ("app_gpu", Class::Denied(LOCAL)),
     ("app_helm_feedback", Class::Denied(LOCAL)),
     ("app_help", Class::Denied(LOCAL)),
     ("app_ide_context", Class::Denied(EDITOR)),
