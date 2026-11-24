@@ -91,6 +91,9 @@ export function chatMenuItems(i: ChatMenuInput, a: ChatMenuActions): MenuItem[] 
   const busy = r.status === 'starting' || r.status === 'running' || r.status === 'stopping';
   const archivedGroup = i.projects.find((p) => p.id === r.groupProjectId)?.archived ?? false;
   const items: MenuItem[] = [
+    // Pin leads the menu (and Archive closes it): the two switches people reach for sit at the ends,
+    // and everything else keeps its order between them.
+    { id: 'pin', label: r.pinned ? 'Unpin chat' : 'Pin chat', shortcut: 'Ctrl+Alt+P', onSelect: () => a.pin(!r.pinned) },
     { id: 'fork', label: 'Fork chat', shortcut: 'Ctrl+Shift+F', disabled: archivedGroup, onSelect: a.fork },
     { id: 'rename', label: 'Rename chat…', shortcut: 'Ctrl+Alt+R', onSelect: a.rename },
     // Compacting summarises the conversation so far to free context; not while a turn runs.
@@ -142,11 +145,10 @@ export function chatMenuItems(i: ChatMenuInput, a: ChatMenuActions): MenuItem[] 
       items.push({ id: 'children', label: i.expanded ? 'Collapse started chats' : 'Expand started chats', onSelect: a.toggleChildren });
     }
   }
-  // The entries from here on are a plain list: an item added after Pin (a new switch for the chat)
-  // slots in without moving the others.
+  // The entries from here on are a plain list: an item added before Archive (a new switch for
+  // the chat) slots in without moving the others, and Archive always closes the menu.
   items.push(
     { id: 'unread', label: 'Mark as unread', shortcut: 'Ctrl+Shift+U', disabled: r.unread, onSelect: a.markUnread },
-    { id: 'pin', label: r.pinned ? 'Unpin chat' : 'Pin chat', shortcut: 'Ctrl+Alt+P', onSelect: () => a.pin(!r.pinned) },
     { id: 'mute', label: r.muted ? 'Unmute chat' : 'Mute chat', onSelect: () => a.mute(!r.muted) },
   );
   if (r.archived) {
