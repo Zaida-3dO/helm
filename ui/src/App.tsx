@@ -11,7 +11,7 @@ import { SearchDialog } from './search/index.ts';
 import { chatOps, type ChatOps } from './api/ops.ts';
 import { ChatMenu, ProjectTags, Sidebar } from './sidebar/index.ts';
 import { ChatView } from './ChatView.tsx';
-import { SidePanel, registerLinkRoute } from './panel/index.ts';
+import { applyPanelOpen, openInPanel, panelStore, SidePanel, registerLinkRoute } from './panel/index.ts';
 import { showSlot } from './panel/registry.ts';
 import { pageOps } from './pages/api.ts';
 import { openPageTab, openRemotePageTab } from './pages/open.ts';
@@ -171,11 +171,11 @@ export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers:
         // The list names only the person's own pins; a pin of someone else's still opens by id.
         const listed = await pages.devicePages().catch(() => null);
         const found = listed?.devices.find((d) => d.deviceUid === host)?.pages.find((p) => p.id === req.pageId);
-        return openRemotePageTab(host, found ?? { id: req.pageId, path: '', title: 'Page' }) || noRoom;
+        return openRemotePageTab(host, found ?? { id: req.pageId, path: '', title: 'Page' }, ctx.chatId) || noRoom;
       }
       const found = (await pages.list()).pages.find((p) => p.id === req.pageId);
       if (!found) return 'That page is not pinned on this PC any more.';
-      return openPageTab(found.path) || noRoom;
+      return openPageTab(found.path, ctx.chatId) || noRoom;
     });
     // Panel links (`helm://panel/changes|files|tasks`) show that view for the chat.
     const offPanel = registerLinkRoute('panel', async (req, ctx) => {
@@ -192,6 +192,21 @@ export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers:
       offPanel();
     };
   }, [api, bus, ops]);
+  // A chat that shows the user a file or a page (app_open_panel) pushes it through a `panel_open`
+  // event naming that chat: it lands in the chat's own panel, even while another chat is on screen.
+  useEffect(
+    () =>
+      bus.on('panel_open', (e) =>
+        applyPanelOpen(e, {
+          openTab: (kind, key, data, opts) => openInPanel(kind, key, data, opts),
+          openPage: (path, chatId) => openPageTab(path, chatId),
+          openModal: (path, opts) => panelStore.openModal(path, opts),
+          notice: (text) => panelStore.showNotice(text),
+          current: () => panelStore.current,
+        }),
+      ),
+    [bus],
+  );
   // The global hotkey lives in the same key map as every other shortcut (scope "global": the host
   // registers it with Windows; the window listener never fires it).
   useEffect(() => {

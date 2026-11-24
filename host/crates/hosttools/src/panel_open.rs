@@ -2,13 +2,16 @@
 //!
 //! The tool opens nothing itself. It checks the target through the same ops the panel uses (a
 //! file through `path_resolve` against the chat's folder, a page through the chat's own Pages
-//! list) and answers with what to open. The window showing the chat opens it when that answer
-//! arrives while the chat is in view, on whichever PC the user is looking at it from, so the same
-//! result works for a chat watched from another PC. A result read back from history opens nothing;
-//! its card keeps an Open button.
+//! list), answers with what to open, and sends the app a `panel_open` event naming this chat:
+//! the document belongs to this chat's side panel. When the person is looking at this chat it
+//! opens at once; when they are looking at another chat it waits in this chat's own panel until
+//! they open it. It never lands in the panel of whichever chat happens to be on screen. A chat
+//! watched from another PC still opens from its rows while it is in view there. A result read
+//! back from history opens nothing; its card keeps an Open button.
 
 use crate::registry::{HostToolRegistry, ToolCtx, ToolError, ToolResult};
 use crate::spec::ToolSpec;
+use helm_ipc::AppEvent;
 use serde_json::{json, Value};
 
 /// The longest line number taken: past it, the file is opened at its top.
@@ -96,13 +99,19 @@ async fn open_panel(ctx: ToolCtx, a: Value) -> ToolResult {
                 ));
             }
             let mut opened = json!({"kind": "file", "path": abs});
+            let mut event = AppEvent::new("panel_open")
+                .with("chatId", ctx.caller_chat_id.clone())
+                .with("doc", "file")
+                .with("path", abs);
             if let Some(l) = line {
                 opened["line"] = json!(l);
+                event = event.with("line", l);
             }
+            ctx.events.emit(event);
             Ok(json!({
                 "opened": opened,
                 "link": file_link(abs, line),
-                "note": "The file opens in the side panel wherever the user is looking at this chat; if they are elsewhere, the result keeps an Open button. Do not paste its contents as well.",
+                "note": "The file opens in this chat's side panel; if the user is looking at another chat, they see it when they open this one. Do not paste its contents as well.",
             }))
         }
         (None, Some(id)) => {
@@ -124,6 +133,14 @@ async fn open_panel(ctx: ToolCtx, a: Value) -> ToolResult {
                 .ok_or_else(|| {
                     ToolError::refused("No pinned page has that id: app_list_pages lists them.")
                 })?;
+            ctx.events.emit(
+                AppEvent::new("panel_open")
+                    .with("chatId", ctx.caller_chat_id.clone())
+                    .with("doc", "page")
+                    .with("pageId", id.to_owned())
+                    .with("path", found["path"].clone())
+                    .with("title", found["title"].clone()),
+            );
             Ok(json!({
                 "opened": {
                     "kind": "page",
@@ -132,7 +149,7 @@ async fn open_panel(ctx: ToolCtx, a: Value) -> ToolResult {
                     "title": found["title"],
                 },
                 "link": page_link(id),
-                "note": "The page opens in the side panel wherever the user is looking at this chat; if they are elsewhere, the result keeps an Open button.",
+                "note": "The page opens in this chat's side panel; if the user is looking at another chat, they see it when they open this one.",
             }))
         }
     }
@@ -193,7 +210,11 @@ mod tests {
         }
     }
 
-    async fn call(fake: &Arc<Fake>, args: Value) -> ToolResult {
+    async fn call(
+        fake: &Arc<Fake>,
+        sink: &Arc<helm_ipc::RecordingSink>,
+        args: Value,
+    ) -> ToolResult {
         let mut r = HostToolRegistry::new();
         register_host_tools(&mut r);
         let ToolHandler::Async(f) = r.get("app_open_panel").unwrap().handler.clone() else {
@@ -206,7 +227,7 @@ mod tests {
                 tool_call_id: Some("tc1".into()),
                 origin: CallOrigin::Agent,
                 services: Arc::new(helm_ipc::Services::new()),
-                events: Arc::new(helm_ipc::NullSink),
+                events: sink.clone(),
                 ops: Some(fake.clone()),
             },
             args,
@@ -217,10 +238,13 @@ mod tests {
     #[tokio::test]
     async fn a_file_or_a_page_is_checked_and_named_and_anything_else_is_refused() {
         let fake = Arc::new(Fake(Mutex::new(vec![])));
+        let sink = Arc::new(helm_ipc::RecordingSink::default());
 
         // A file is resolved against the calling chat, and the answer names the absolute path,
-        // the line and a link whose path cannot be mistaken for a line suffix.
-        let r = call(&fake, json!({"path": "main.rs", "line": 12}))
+        // the line and a link whose path cannot be mistaken for a line suffix. A `panel_open`
+        // event names the calling chat: the file belongs to that chat's own panel, wherever the
+        // user is looking.
+        let r = call(&fake, &sink, json!({"path": "main.rs", "line": 12}))
             .await
             .unwrap();
         assert_eq!(
@@ -232,16 +256,34 @@ mod tests {
             fake.0.lock().unwrap().last().unwrap().1,
             json!({"chatId": "me", "path": "main.rs"})
         );
+        assert_eq!(
+            *sink.events.lock().unwrap(),
+            vec![AppEvent::new("panel_open")
+                .with("chatId", "me")
+                .with("doc", "file")
+                .with("path", "C:\\w\\app\\main.rs")
+                .with("line", 12)]
+        );
 
-        // A page is found by id in the chat's own Pages list.
-        let r = call(&fake, json!({"pageId": "p-1"})).await.unwrap();
+        // A page is found by id in the chat's own Pages list, and pushed the same way.
+        let r = call(&fake, &sink, json!({"pageId": "p-1"})).await.unwrap();
         assert_eq!(r["opened"]["kind"], "page");
         assert_eq!(r["opened"]["title"], "Plan");
         assert_eq!(r["opened"]["path"], "C:\\w\\plan.html");
         assert_eq!(r["link"], "helm://pages/p-1");
+        assert_eq!(
+            sink.events.lock().unwrap()[1],
+            AppEvent::new("panel_open")
+                .with("chatId", "me")
+                .with("doc", "page")
+                .with("pageId", "p-1")
+                .with("path", "C:\\w\\plan.html")
+                .with("title", "Plan")
+        );
 
         // Refusals: nothing reaches the panel and nothing changed.
         let calls_before = fake.0.lock().unwrap().len();
+        let pushed_before = sink.events.lock().unwrap().len();
         for (args, says) in [
             (json!({}), "exactly one"),
             (json!({"path": "a.rs", "pageId": "p-1"}), "exactly one"),
@@ -253,7 +295,7 @@ mod tests {
             (json!({"path": "a.rs", "line": 0}), "whole number"),
             (json!({"path": 7}), "must be a string"),
         ] {
-            let e = call(&fake, args.clone()).await.unwrap_err();
+            let e = call(&fake, &sink, args.clone()).await.unwrap_err();
             assert!(e.public.contains(says), "{args}: {}", e.public);
             assert_eq!(e.changed, crate::Changed::No);
         }
@@ -268,8 +310,13 @@ mod tests {
             (json!({"path": "secret.txt"}), "Helm's own"),
             (json!({"pageId": "p-2"}), "No pinned page"),
         ] {
-            let e = call(&fake, args.clone()).await.unwrap_err();
+            let e = call(&fake, &sink, args.clone()).await.unwrap_err();
             assert!(e.public.contains(says), "{args}: {}", e.public);
         }
+        assert_eq!(
+            sink.events.lock().unwrap().len(),
+            pushed_before,
+            "a refusal never pushes the panel"
+        );
     }
 }

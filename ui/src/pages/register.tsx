@@ -28,7 +28,6 @@ registerPanelKind({
     return d.remote?.title ?? basename(d.path).replace(/\.html?$/i, '');
   },
   icon: () => <IconBrowser size={14} />,
-  scope: 'app',
   maxTabs: 6,
   keepMounted: true,
   render: (tab, ctx) => <PageTab tab={tab as PanelTab} ctx={ctx} />,

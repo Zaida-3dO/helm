@@ -1,5 +1,6 @@
-// Opening a page as a side-panel tab. The tab is app-wide (a pinned page is not one chat's), keyed
-// by the file's path so a page is never open twice.
+// Opening a page as a side-panel tab. The tab belongs to the chat that opened it (a pinned page is
+// one chat's view, even though the pin itself is not), keyed by the file's path so a page is never
+// open twice in one chat.
 
 import { openInPanel } from '../panel/registry.ts';
 import { displayPath, pathKey } from '../panel/viewer/paths.ts';
@@ -37,15 +38,21 @@ export function validPagePath(p: unknown): p is string {
   return typeof p === 'string' && p.length <= 8192 && /^[A-Za-z]:[\\/]/.test(p) && !/\p{Cc}/u.test(p);
 }
 
-/** Opens a page pinned on another PC in the side panel. `false` means the panel has no room. */
-export function openRemotePageTab(deviceUid: string, page: { id: string; path: string; title: string }): boolean {
+/** Opens a page pinned on another PC in the side panel, in `chatId`'s own tabs (default: the chat
+ *  on screen). `false` means the panel has no room. */
+export function openRemotePageTab(
+  deviceUid: string,
+  page: { id: string; path: string; title: string },
+  chatId?: string | null,
+): boolean {
   const data: PageTabData = { path: page.path, remote: { deviceUid, pageId: page.id, title: page.title } };
-  return openInPanel(PAGE_KIND, remoteTabKey(deviceUid, page.id), data, { intent: 'user', chatId: null });
+  return openInPanel(PAGE_KIND, remoteTabKey(deviceUid, page.id), data, { intent: 'user', chatId: chatId ?? null });
 }
 
-/** Opens the page in the side panel. `false` means the panel has no room for another tab. */
-export function openPageTab(path: string): boolean {
+/** Opens the page in the side panel, in `chatId`'s own tabs (default: the chat on screen).
+ *  `false` means the panel has no room for another tab. */
+export function openPageTab(path: string, chatId?: string | null): boolean {
   const shown = displayPath(path);
   const data: PageTabData = { path: shown };
-  return openInPanel(PAGE_KIND, pathKey(shown), data, { intent: 'user', chatId: null });
+  return openInPanel(PAGE_KIND, pathKey(shown), data, { intent: 'user', chatId: chatId ?? null });
 }
