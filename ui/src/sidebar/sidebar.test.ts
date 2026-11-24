@@ -691,7 +691,7 @@ test('hover actions join the row line instead of covering it: age and status giv
     if (!/display:\s*none/.test(rule.body)) continue;
     for (const sel of rule.selector.split(',')) {
       if (!/\.sb-chat-wrap:(hover|focus-within)/.test(sel)) continue;
-      for (const m of sel.matchAll(/\.(sb-[a-z-]+)(?![\w-])/g)) if (m[1] !== 'sb-chat-wrap') hidden.add(m[1]);
+      for (const m of sel.matchAll(/\.(sb-[a-z-]+)(?![\w-])/g)) { const cls = m[1]; if (cls && cls !== 'sb-chat-wrap') hidden.add(cls); }
     }
   }
   assert.deepEqual([...hidden].sort(), ['sb-age', 'sb-chip', 'sb-status']);
