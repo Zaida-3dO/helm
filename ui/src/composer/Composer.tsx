@@ -25,9 +25,13 @@ import { deviceOps } from '../devices/api.ts';
 import { bytesFromBase64 } from '../transcript/messageImages.ts';
 import { Recall } from './recall.ts';
 import { ImageViewer } from '../transcript/ImageViewer.tsx';
-import { commandWithArgs, helmCommand, matchesHidden, moveActive, SCOPE_LABEL, skillMenu, skillQuery, withHelmCommands, type Skill } from './skills.ts';
+import { applySlash, commandWithArgs, helmCommand, matchesHidden, moveActive, rankSkills, SCOPE_LABEL, skillMenu, skillQuery, slashAt, withHelmCommands, type Skill, type SlashWord } from './skills.ts';
 import { SendHold, holdStep } from './hold.ts';
-import { rollOverChat } from '../sidebar/actions.ts';
+import { rollOverChat, SidebarActions } from '../sidebar/actions.ts';
+import { SidebarData } from '../sidebar/data.ts';
+import { sidebarUndo } from '../sidebar/undo.ts';
+import { projectOps } from '../api/projects.ts';
+import type { RuntimeSettings } from '../settings/runtime/model.ts';
 import { ContextMenu, toast } from '../ui/index.ts';
 import { panelOps, type QuickItem } from '../api/panel.ts';
 import { isLongPaste, linkedPaste, pastedFileName } from './paste.ts';
@@ -40,6 +44,44 @@ import { accessoriesAt, accessorySide, announceSent, collectSendContributions, m
 import './composer.css';
 // The dock items and banners above the box share the dock sheet (ChatView mounts this composer).
 import './dock.css';
+
+// The composer's fast-mode switch: the same global switch as Settings → Runtime (it lives in the
+// runtime file the workers read), so a chat can flip it without opening Settings. It is applied
+// when a chat starts, so the tooltip says plainly that this chat picks it up at its next start.
+// Not shown for a chat that runs on another PC: that one reads its own device's runtime file.
+function FastModeChip({ remote }: { remote: boolean }) {
+  const shell = useShell();
+  const [on, setOn] = useState<boolean | null>(null);
+  useEffect(() => {
+    let live = true;
+    shell
+      .api<RuntimeSettings>('runtime_settings_get', {})
+      .then((s) => live && setOn(!!s.fastMode))
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [shell]);
+  if (on === null || remote) return null;
+  const toggle = () => {
+    shell
+      .api<RuntimeSettings>('runtime_settings_save', { fastMode: !on })
+      .then((s) => setOn(!!s.fastMode))
+      .catch((e: unknown) => toast.show({ kind: 'error', text: String((e as Error).message ?? e) }));
+  };
+  return (
+    <Button
+      variant="ghost"
+      className="fast-mode-chip"
+      data-testid="composer-fast-mode"
+      pressed={on}
+      title="Fast mode: quicker replies on models that support it, at a higher token price. Chats take it up when they start, so this chat picks it up at its next start."
+      onClick={toggle}
+    >
+      Fast
+    </Button>
+  );
+}
 
 export interface ComposerProps {
   chat: ChatRecord;
@@ -436,6 +478,13 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
     [chat.id, ops, saver, pending, remote],
   );
 
+  // Archive run from here behaves as it does in the sidebar: the same undo entry and Undo toast
+  // (SidebarActions is the sidebar's own, imported not edited).
+  const side = useMemo(() => {
+    const pops = projectOps(shell.api);
+    return new SidebarActions({ api: shell.api, pops, ops, data: new SidebarData(pops), undo: sidebarUndo, onError: (m) => toast.show({ kind: 'error', text: m }) });
+  }, [shell.api, shell.ops, ops]);
+
   const send = useCallback(
     async (action: SendAction) => {
       const text = editor.current?.getText() ?? '';
@@ -447,7 +496,8 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
       if (sendingRef.current) return;
       // A Helm command is run here, not sent to Claude; the draft clears only once it has started.
       // `/rollover` works for a chat that runs elsewhere too: the op is routed to that PC.
-      if (helmCommand(text)?.name === 'rollover') {
+      const cmd = helmCommand(text)?.name;
+      if (cmd === 'rollover') {
         sendingRef.current = true;
         setSending(true);
         try {
@@ -456,6 +506,29 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
             setEmpty(true);
             prevText.current = '';
           }
+        } finally {
+          sendingRef.current = false;
+          setSending(false);
+        }
+        return;
+      }
+      // Fork, Pin and Archive left the top bar and live in the `/` menu. Pin and Archive toggle:
+      // a pinned chat unpins, an archived one restores. Archive goes through the sidebar's action,
+      // so it pushes the same undo entry and Undo toast as the row menu's does.
+      if (cmd === 'fork' || cmd === 'pin' || cmd === 'archive') {
+        sendingRef.current = true;
+        setSending(true);
+        try {
+          if (cmd === 'fork') shell.select((await ops.fork(chat.id)).id);
+          else if (cmd === 'pin') await shell.api('chat_organize', { chatId: chat.id, pinned: !chat.pinned });
+          else if (chat.archived) await ops.restore(chat.id);
+          else await side.archive({ chatId: chat.id, title: chat.title });
+          editor.current?.setText('');
+          setEmpty(true);
+          prevText.current = '';
+          setSlash(null);
+        } catch (e) {
+          toast.show({ kind: 'error', text: String((e as Error).message ?? e) });
         } finally {
           sendingRef.current = false;
           setSending(false);
@@ -472,7 +545,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
       await deliver(text, action, uid());
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [chat.id, ops, saver, pending, remote, away, hold, deliver],
+    [chat.id, ops, saver, pending, remote, away, hold, deliver, side, shell],
   );
 
   // The device is live again: the waiting message goes, exactly once — however many live updates
@@ -517,7 +590,10 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   const [skills, setSkills] = useState<Skill[]>([]);
   const commands = useMemo(() => new Set(withHelmCommands(skills).map((s) => s.name.toLowerCase())), [skills]);
   const skillPrefix = skillQuery(draftText);
-  const wantsSkills = skillPrefix !== null || commandWithArgs(draftText) !== null;
+  // The word at the caret when a `/` is being typed, anywhere in the draft: it opens the menu
+  // mid-sentence too, and a pick only replaces that word.
+  const [slash, setSlash] = useState<SlashWord | null>(null);
+  const wantsSkills = skillPrefix !== null || commandWithArgs(draftText) !== null || slash !== null;
   useEffect(() => {
     if (!wantsSkills || skills.length > 0) return;
     void ops
@@ -534,11 +610,34 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
     () => withHelmCommands(skills.filter((k) => !matchesHidden(k, hiddenSkills))),
     [skills, hiddenSkills],
   );
-  const menu = menuShut === draftText ? null : skillMenu(draftText, shownSkills);
+  // A `/` word at the caret opens the pick menu for its query (Helm's own commands lead it); the
+  // whole-draft menu also carries the args mode, where the chosen command stays named while its
+  // arguments are typed.
+  const menu =
+    menuShut === draftText
+      ? null
+      : slash
+        ? (() => {
+            const items = rankSkills(shownSkills, slash.query, 12);
+            return items.length ? { mode: 'pick' as const, items } : null;
+          })()
+        : skillMenu(draftText, shownSkills);
   const menuKey = menu ? `${menu.mode}:${menu.items.map((x) => x.name).join(',')}` : '';
   useEffect(() => setActive(0), [menuKey]);
   const pickSkill = (name: string) => {
-    showText(`/${name} `);
+    const text = editor.current?.getText() ?? '';
+    const at = slashAt(text, editor.current?.caretOffset() ?? -1);
+    if (at) {
+      const next = applySlash(text, at, name);
+      editor.current?.setTextAt(next.text, next.caret);
+      saver.edit(next.text);
+      setEmpty(!next.text);
+      setDraftText(next.text);
+      prevText.current = next.text;
+      setSlash(null);
+    } else {
+      showText(`/${name} `);
+    }
     editor.current?.focus();
   };
 
@@ -631,6 +730,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
     setEmpty(!next.text);
     setDraftText(next.text);
     prevText.current = next.text;
+    setSlash(null);
     editor.current?.focus();
   };
   const showText = (t: string) => {
@@ -724,6 +824,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
       setDraftText(text);
       const caret = editor.current?.caretOffset();
       setMention(caret == null ? null : mentionAt(text, caret));
+      setSlash(caret == null ? null : slashAt(text, caret));
     },
     [saver, chat.id, chat.model, ops, remote],
   );
@@ -952,6 +1053,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
           <div className="composer-selects">
             <ModelPicker chat={chat} ops={ops} loading={checking} deviceUid={remote?.deviceUid} />
             <PermissionChip chatId={chat.id} mode={thread?.permissionMode ?? null} busy={busy} ops={ops} />
+            <FastModeChip remote={!!remote} />
             {toolbarStart.map((a) => (
               <span key={a.id} className="composer-accessory" data-accessory={a.id}>
                 {a.render(actx)}
