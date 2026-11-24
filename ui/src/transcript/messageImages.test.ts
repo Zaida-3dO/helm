@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { THUMB_MAX_HEIGHT, THUMB_MAX_WIDTH, THUMB_MIN_SIDE, UrlCache, bytesFromBase64, fitImage, imageFacts, imageLabel, stepImage, thumbSize } from './messageImages.ts';
+import { THUMB_MAX_HEIGHT, THUMB_MAX_WIDTH, THUMB_MIN_SIDE, UrlCache, VIEWER_MAX_WIDTH, bytesFromBase64, fitImage, imageFacts, imageLabel, stepImage, thumbSize, viewerFrame } from './messageImages.ts';
 
 test('a small image is shown at its own size, never scaled up', () => {
   assert.deepEqual(thumbSize(100, 60), { width: 100, height: 60 });
@@ -107,5 +107,37 @@ test('the image viewer fits a picture to the window, steps through a set and sta
     [{}, ''],
   ] as const) {
     assert.equal(imageFacts(facts), want);
+  }
+});
+
+// The viewer's box is fixed for the whole viewing: it is chosen from the window alone, so
+// stepping between different aspect ratios never resizes it, and each picture fits inside it.
+test('the viewer box comes from the window alone', () => {
+  // A big window: the widest box ever (1400) and a commensurate, viewport-capped height.
+  assert.deepEqual(viewerFrame({ width: 1920, height: 1080 }), { width: VIEWER_MAX_WIDTH, height: 827 });
+  // It narrows with a narrower window; the same window always answers the same box.
+  assert.deepEqual(viewerFrame({ width: 1440, height: 900 }), { width: 1354, height: 665 });
+  assert.deepEqual(viewerFrame({ width: 1000, height: 700 }), { width: 914, height: 485 });
+  // Never wider than the cap, never taller than the window leaves for it.
+  for (const win of [{ width: 1920, height: 1080 }, { width: 1440, height: 900 }, { width: 1000, height: 700 }, { width: 600, height: 500 }]) {
+    const f = viewerFrame(win);
+    assert.ok(f.width <= VIEWER_MAX_WIDTH && f.width <= win.width - 86, `${win.width}px window: ${f.width} fits the width`);
+    assert.ok(f.height <= win.height - 145, `${win.height}px window: ${f.height} fits the height`);
+  }
+});
+
+test('every aspect ratio fits inside the one fixed box, and small pictures are not scaled up', () => {
+  const f = viewerFrame({ width: 1920, height: 1080 });
+  for (const [w, h] of [[3000, 2000], [2000, 3000], [4000, 500], [400, 300], [100, 80]] as const) {
+    const box = fitImage(w, h, f.width, f.height);
+    assert.ok(box.width <= f.width && box.height <= f.height, `${w}x${h} fits inside the box`);
+    assert.ok(box.width <= w && box.height <= h, `${w}x${h} is not scaled up`);
+    if (w !== 100) assert.ok(Math.abs(box.width / box.height - w / h) < 0.01, `${w}x${h} keeps its aspect`);
+  }
+  // Stepping: the same box for the first, second and third picture of a mixed set.
+  const mixed = [[1920, 1080], [1080, 1920], [2000, 2000]] as const;
+  for (const [w, h] of mixed) {
+    const box = fitImage(w, h, f.width, f.height);
+    assert.ok(box.width <= f.width && box.height <= f.height, `${w}x${h} fits the same box`);
   }
 });
