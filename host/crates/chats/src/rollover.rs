@@ -16,7 +16,21 @@
 //! carries a plain message for the UI to show.
 //!
 //! Refused up front: an archived chat, a chat that is working or has messages waiting, and a chat
-//! that has never had an assistant reply.
+//! that has never had an assistant reply. The cascade therefore starts only from an idle parent:
+//! an idle chat with working children still rolls over, because the children are what the
+//! cascade is for.
+//!
+//! A roll over of a chat with children cascades one level first: every child that is working or
+//! has messages waiting is asked to stop at the next reasonable point and write its **own**
+//! roll-over document — a Markdown file at `<profile>/handoffs/<stack>/<child id>.md` that the
+//! child writes itself with its file tools (its task, state, branch and worktree, what it was
+//! doing, next steps). The parent waits for the children to go quiet, bounded by
+//! [`CASCADE_WAIT`]; then it is asked for its own hand-off, with a "Running subagents" section
+//! taught in. Whatever the children did, the HOST appends a machine-written roster after the
+//! hand-off — each cascaded child, its state at roll-over, and whether its document is really
+//! there — so the successor is told, in the successor's own first message, to start one new
+//! subagent per document. After the cap the roll over carries on regardless: a straggler that
+//! ignored the notice is named honestly in the roster, never a reason to lose the roll over.
 //!
 //! The same flow runs itself when a chat's turn ends and its context has grown past the
 //! roll-over setting ([`on_turn_end`]): the chat is idle at that moment, so every check the op
@@ -31,21 +45,175 @@ use helm_ipc::{ApiError, AppEvent, OpCtx, OpRegistry};
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 /// How long the agent gets to write the hand-off.
 pub const HANDOFF_WAIT: Duration = Duration::from_secs(300);
+/// How long a cascading roll over waits for its children to go quiet before it carries on
+/// without them. Ten minutes covers a child finishing a step and writing its document; past
+/// that the roster marks the straggler and the roll over proceeds.
+pub const CASCADE_WAIT: Duration = Duration::from_secs(600);
 const POLL: Duration = Duration::from_millis(250);
 /// The hand-off is cut here, on a character boundary, before it is sent on.
 const MAX_HANDOFF_BYTES: usize = 60 * 1024;
+/// A child's roll-over document counts as written when it is at least this many bytes: long
+/// enough that a stray word or an empty file does not count.
+const MIN_DOC_BYTES: u64 = 80;
 
 pub fn register(reg: &mut OpRegistry) {
     reg.async_op("chat_roll_over", chat_roll_over);
 }
 
-/// What the old chat's agent is asked. Plain text, because it appears in that chat's transcript.
-pub const REQUEST: &str = "This chat is being rolled over into a fresh one because its context has grown large. Reply with a hand-off for the agent that takes over, and nothing else: no tool calls. Use these headings: Goal, Done, Left to do, Key files and branches, Open problems and decisions. Be specific (paths, branch names, commands, ids) and keep it under 600 words. The new agent starts with no memory of this chat.";
+/// The core of what the old chat's agent is asked. Plain text, because it appears in that
+/// chat's transcript.
+const REQUEST_CORE: &str = "This chat is being rolled over into a fresh one because its context has grown large. Reply with a hand-off for the agent that takes over, and nothing else: no tool calls except writing packet files in the folder named below. Use these headings: Goal, Done, Left to do, Key files and branches, Open problems and decisions. Be specific (paths, branch names, commands, ids) and keep it under 600 words. The new agent starts with no memory of this chat.";
+
+/// The hand-off request as sent. The packet teaching is in every ask: detail that does not fit
+/// 600 words goes into a packet file beside the hand-off documents, linked by path — critical
+/// context only, because the successor can search the old sessions itself. `with_subagents`
+/// adds the "Running subagents" section a cascading roll over needs.
+fn handoff_request(dir: &Path, with_subagents: bool) -> String {
+    let mut s = format!(
+        "{REQUEST_CORE} Anything too detailed for 600 words goes into a packet file inside {} (any clear name; make the folder first if it is missing), linked by its full path from the hand-off. A packet holds only critical context — the successor can search this chat's older sessions, so no transcripts.",
+        plain_path(dir)
+    );
+    if with_subagents {
+        s.push_str(" This chat has subagents being rolled over with it: end with a heading \"Running subagents\", one line per child — what it was doing, the path of its roll-over document if you know it, and that the successor's first job is to start one new subagent per document, each picking up where that child stopped.");
+    }
+    s
+}
+
+/// What a working or waiting child is asked first: stop soon and write its own roll-over
+/// document where the successor will look for it.
+fn cascade_request(doc: &Path) -> String {
+    format!(
+        "Your parent chat is being rolled over into a fresh one, and the roll over cascades to you. Stop at the next reasonable point: finish what is already in flight, start no new work. Then write your own roll-over document to this exact path (make the folders if needed — your file tools can):\n{}\nCover: your task, its current state, the branch and worktree you work in, what you were doing when this arrived, and your next steps. Write the file, then answer with one short line saying you wrote it (or why you could not), and end your turn.",
+        plain_path(doc)
+    )
+}
+
+/// The folder one stack's hand-off documents and packets live in: `<profile>/handoffs/<stack>`.
+fn handoff_dir(rt: &ChatRuntime, stack: &str) -> PathBuf {
+    rt.sh.cfg.profile_dir.join("handoffs").join(stack)
+}
+
+/// A path as an agent should read it: Windows' verbatim (`\\?\`) prefix would only confuse it.
+fn plain_path(p: &Path) -> String {
+    let s = p.to_string_lossy().into_owned();
+    match s.strip_prefix(r"\\?\") {
+        Some(s) => s.to_owned(),
+        None => s,
+    }
+}
+
+/// A child chat the roll over cascades to, and where its roll-over document must go.
+struct CascadeChild {
+    id: String,
+    title: String,
+    doc: PathBuf,
+}
+
+/// The direct children of `chat` that are working or have messages waiting: each gets the
+/// cascade notice and writes its own roll-over document. Archived chats, side chats and
+/// children with a roll over of their own running are left alone; idle children need no
+/// document — they carry on under the successor untouched.
+fn cascade_targets(rt: &ChatRuntime, chat: &ChatRecord) -> Vec<CascadeChild> {
+    let stack = chat.stack_id.clone().unwrap_or_else(|| chat.id.clone());
+    let children = rt
+        .db()
+        .snapshot(|tx| {
+            let mut st = tx.prepare(
+                "SELECT id, title FROM chats
+                 WHERE parent_chat_id = ?1 AND archived = 0 AND side_source_id IS NULL
+                 ORDER BY created_at, id",
+            )?;
+            let rows = st.query_map([&chat.id], |r| Ok((r.get::<_, String>(0)?, r.get(1)?)))?;
+            rows.collect::<rusqlite::Result<Vec<(String, String)>>>()
+        })
+        .unwrap_or_default();
+    children
+        .into_iter()
+        .filter(|(id, _)| !settled(rt, id) && !IN_FLIGHT.lock().unwrap().contains(id))
+        .map(|(id, title)| CascadeChild {
+            doc: handoff_dir(rt, &stack).join(format!("{id}.md")),
+            id,
+            title,
+        })
+        .collect()
+}
+
+/// Tell each cascaded child to stop and write its document. A child whose notice cannot be
+/// queued still lands in the roster, marked as having written nothing.
+fn send_cascades(rt: &ChatRuntime, parent: &str, children: &[CascadeChild]) {
+    for c in children {
+        if let Err(e) = crate::submit::host_send(
+            rt,
+            HostSend {
+                chat_id: &c.id,
+                submission_id: &uuid::Uuid::new_v4().to_string(),
+                text: &cascade_request(&c.doc),
+                origin: SubmissionOrigin::App,
+                page: None,
+            },
+        ) {
+            log::warn!(
+                "roll over of {parent}: child {} got no cascade notice: {}",
+                c.id,
+                e.message
+            );
+        }
+    }
+}
+
+/// Wait for every cascaded child to go quiet, up to `cap`. The cascade notice itself keeps a
+/// child unsettled until it has answered, so "settled" here means the child stopped, wrote
+/// its document (or said why it could not) and ended its turn. Past the cap the roll over
+/// carries on whatever the children are doing: losing the roll over is worse than leaving a
+/// straggler, and the roster marks it.
+async fn wait_for_children(rt: &ChatRuntime, children: &[CascadeChild], cap: Duration) {
+    let deadline = tokio::time::Instant::now() + cap;
+    while tokio::time::Instant::now() < deadline {
+        if children.iter().all(|c| settled(rt, &c.id)) {
+            return;
+        }
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// The roster the host appends after the parent's hand-off: what became of each cascaded
+/// child, honestly — state at roll-over, and whether the document is really there (the file
+/// exists and is not a stub) — with the successor's first job spelled out.
+fn roster_for(rt: &ChatRuntime, children: &[CascadeChild]) -> String {
+    let mut out = String::from(
+        "## Running subagents (written by Helm)\n\
+         The rolled-over chat had these subagents running. Their roll-over documents:\n",
+    );
+    for c in children {
+        let state = if settled(rt, &c.id) {
+            "idle"
+        } else {
+            "still working"
+        };
+        let doc = match std::fs::metadata(&c.doc) {
+            Ok(m) if m.len() >= MIN_DOC_BYTES => {
+                format!("wrote a roll-over document at {}", plain_path(&c.doc))
+            }
+            _ => "no roll-over document was written".to_owned(),
+        };
+        out.push_str(&format!(
+            "- {} (chat id {}): {state}, {doc}.\n",
+            c.title, c.id
+        ));
+    }
+    out.push_str(
+        "First job of the successor: start one new subagent per document above, each picking up \
+         where that child stopped. For any child with no document, check what that chat is \
+         doing now before starting anything new.",
+    );
+    out
+}
 
 /// Context size at which a quiet chat is asked to roll over, when the setting is unset
 /// (`0` in the setting switches the asking off).
@@ -253,9 +421,13 @@ async fn chat_roll_over(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
     Ok(json!({"started": true}))
 }
 
-/// Run the roll-over flow for `chat`: ask for a hand-off, then finish in the background. Shared
-/// by the op, the automatic trigger and the agent tool. A chat with a roll over already running
-/// is refused; `model` and `effort` must already be validated.
+/// Run the roll-over flow for `chat`: cascade to any working children, then ask for a hand-off,
+/// then finish in the background. Shared by the op, the automatic trigger and the agent tool.
+/// A chat with a roll over already running is refused; `model` and `effort` must already be
+/// validated. What the old chat or its children are told happens here, before the background
+/// part starts, so `started: true` means the notices are in. With no working children that
+/// includes the hand-off ask itself; with children it waits on them, and a failed ask travels
+/// as a `chat_roll_over_failed` event.
 fn start(
     rt: &Arc<ChatRuntime>,
     ctx: &OpCtx,
@@ -266,33 +438,45 @@ fn start(
     if !IN_FLIGHT.lock().unwrap().insert(chat.id.clone()) {
         return Err(refuse("A roll over for this chat is already running."));
     }
-    let request_id = uuid::Uuid::new_v4().to_string();
-    let mark = match last_message_id(rt, &chat.id) {
-        Ok(m) => m,
-        Err(e) => {
-            IN_FLIGHT.lock().unwrap().remove(&chat.id);
-            return Err(crate::ops::sql(e));
-        }
+    let children = cascade_targets(rt, chat);
+    send_cascades(rt, &chat.id, &children);
+    // A chat with no working children behaves exactly as before: the ask goes out right here,
+    // so `started: true` means it has been asked, and a failed send answers as an op error.
+    // With children the ask waits in [`roll_forward`] until they have gone quiet.
+    let ask = if children.is_empty() {
+        let stack = chat.stack_id.clone().unwrap_or_else(|| chat.id.clone());
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let mark = last_message_id(rt, &chat.id).map_err(crate::ops::sql)?;
+        crate::submit::host_send(
+            rt,
+            HostSend {
+                chat_id: &chat.id,
+                submission_id: &request_id,
+                text: &handoff_request(&handoff_dir(rt, &stack), false),
+                origin: SubmissionOrigin::App,
+                page: None,
+            },
+        )?;
+        Some((mark, request_id))
+    } else {
+        None
     };
-    if let Err(e) = crate::submit::host_send(
-        rt,
-        HostSend {
-            chat_id: &chat.id,
-            submission_id: &request_id,
-            text: REQUEST,
-            origin: SubmissionOrigin::App,
-            page: None,
-        },
-    ) {
-        IN_FLIGHT.lock().unwrap().remove(&chat.id);
-        return Err(e);
-    }
     let handle = rt.handle().clone();
     let rt = Arc::clone(rt);
     let ctx = ctx.clone();
     let chat = chat.clone();
     handle.spawn(async move {
-        if let Err(why) = finish(&ctx, &rt, &chat, mark, &request_id, model, effort).await {
+        if let Err(why) = roll_forward(
+            &ctx,
+            &rt,
+            &chat,
+            children,
+            (model, effort),
+            CASCADE_WAIT,
+            ask,
+        )
+        .await
+        {
             log::warn!("roll over of {}: {why}", chat.id);
             ctx.events.emit(
                 AppEvent::new("chat_roll_over_failed")
@@ -303,6 +487,50 @@ fn start(
         IN_FLIGHT.lock().unwrap().remove(&chat.id);
     });
     Ok(())
+}
+
+/// The roll-over flow past the guards: wait (bounded) for the cascaded children, ask the parent
+/// for its hand-off, then carry on with the roster appended. `cap` is how long the children get
+/// to go quiet; every real roll over passes [`CASCADE_WAIT`]. `ask` is the request [`start`]
+/// already sent for a chat with no children (its mark and submission id); with children the ask
+/// goes out here, after the wait. With no children this is exactly the old flow.
+async fn roll_forward(
+    ctx: &OpCtx,
+    rt: &ChatRuntime,
+    chat: &ChatRecord,
+    children: Vec<CascadeChild>,
+    target: Target,
+    cap: Duration,
+    ask: Option<(i64, String)>,
+) -> Result<(), String> {
+    let (model, effort) = target;
+    let (mark, request_id) = match ask {
+        Some(mr) => mr,
+        None => {
+            wait_for_children(rt, &children, cap).await;
+            let stack = chat.stack_id.clone().unwrap_or_else(|| chat.id.clone());
+            let request_id = uuid::Uuid::new_v4().to_string();
+            // The mark is taken when the request goes out, not when the roll over started: a
+            // child's note can reach this chat while the children settle, and its reply must
+            // not be read as the hand-off.
+            let mark = last_message_id(rt, &chat.id).map_err(|e| e.to_string())?;
+            crate::submit::host_send(
+                rt,
+                HostSend {
+                    chat_id: &chat.id,
+                    submission_id: &request_id,
+                    text: &handoff_request(&handoff_dir(rt, &stack), !children.is_empty()),
+                    origin: SubmissionOrigin::App,
+                    page: None,
+                },
+            )
+            .map_err(|e| e.message)?;
+            (mark, request_id)
+        }
+    };
+    let roster = (!children.is_empty()).then(|| roster_for(rt, &children));
+    let handoff = wait_for_handoff(rt, chat, mark, &request_id).await?;
+    carry_on(ctx, rt, chat, &handoff, roster.as_deref(), model, effort).await
 }
 
 /// A turn has just ended and the chat is quiet. Two things may be waiting here: a roll over
@@ -390,7 +618,9 @@ pub(crate) fn on_turn_end(sh: &Arc<Shared>, chat_id: &str) {
 
 /// The roll-over flow when the hand-off is already written: no request turn — the successor
 /// starts from the text at once. Used when the chat's own turn ended with `app_roll_over`
-/// pending and its last reply is the hand-off.
+/// pending and its last reply is the hand-off. The cascade still runs: the children are told
+/// to write their own documents and the roster is appended after the parent's text, because
+/// the parent wrote its hand-off before any of them existed.
 fn start_with_handoff(
     rt: &Arc<ChatRuntime>,
     ctx: &OpCtx,
@@ -402,13 +632,19 @@ fn start_with_handoff(
     if !IN_FLIGHT.lock().unwrap().insert(chat.id.clone()) {
         return;
     }
+    let children = cascade_targets(rt, chat);
+    send_cascades(rt, &chat.id, &children);
     let handle = rt.handle().clone();
     let rt = Arc::clone(rt);
     let ctx = ctx.clone();
     let chat = chat.clone();
     let handoff = handoff.to_owned();
     handle.spawn(async move {
-        if let Err(why) = carry_on(&ctx, &rt, &chat, &handoff, model, effort).await {
+        wait_for_children(&rt, &children, CASCADE_WAIT).await;
+        let roster = (!children.is_empty()).then(|| roster_for(&rt, &children));
+        if let Err(why) =
+            carry_on(&ctx, &rt, &chat, &handoff, roster.as_deref(), model, effort).await
+        {
             log::warn!("roll over of {}: {why}", chat.id);
             ctx.events.emit(
                 AppEvent::new("chat_roll_over_failed")
@@ -420,17 +656,16 @@ fn start_with_handoff(
     });
 }
 
-async fn finish(
-    ctx: &OpCtx,
+/// Wait for the chat's reply to the hand-off request. The newest assistant reply after `mark`
+/// is the hand-off.
+async fn wait_for_handoff(
     rt: &ChatRuntime,
     chat: &ChatRecord,
     mark: i64,
     request_id: &str,
-    model: Option<String>,
-    effort: Option<String>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let deadline = tokio::time::Instant::now() + HANDOFF_WAIT;
-    let handoff = loop {
+    loop {
         if tokio::time::Instant::now() >= deadline {
             withdraw_request(rt, &chat.id, request_id);
             return Err("The agent did not write a hand-off in time. Nothing was changed.".into());
@@ -439,11 +674,12 @@ async fn finish(
         if !settled(rt, &chat.id) {
             continue;
         }
-        break handoff_after(rt, &chat.id, mark)
+        return handoff_after(rt, &chat.id, mark)
             .map_err(|e| e.to_string())?
-            .ok_or("The agent ended its turn without a hand-off. Nothing was changed.")?;
-    };
-    carry_on(ctx, rt, chat, &handoff, model, effort).await
+            .ok_or_else(|| {
+                "The agent ended its turn without a hand-off. Nothing was changed.".to_owned()
+            });
+    }
 }
 
 /// The hand-off request is still waiting in the queue after the wait ran out: take it back, so it
@@ -471,16 +707,22 @@ fn withdraw_request(rt: &ChatRuntime, chat: &str, request_id: &str) {
 }
 
 /// The hand-off exists: start the successor, hand it the brief, take the old chat's place and
-/// archive the old chat.
+/// archive the old chat. `roster` is the machine-written list of the cascaded children; it rides
+/// after the byte-cut so a long hand-off can never swallow it.
 async fn carry_on(
     ctx: &OpCtx,
     rt: &ChatRuntime,
     chat: &ChatRecord,
     handoff: &str,
+    roster: Option<&str>,
     model: Option<String>,
     effort: Option<String>,
 ) -> Result<(), String> {
-    let message = successor_message(&chat.title, &chat.id, &cut(handoff, MAX_HANDOFF_BYTES));
+    let body = match roster {
+        Some(r) => format!("{}\n\n{r}", cut(handoff, MAX_HANDOFF_BYTES)),
+        None => cut(handoff, MAX_HANDOFF_BYTES),
+    };
+    let message = successor_message(&chat.title, &chat.id, &body);
     let mut create = json!({"cwd": chat.cwd, "projectId": chat.project_id});
     // The successor stays on the old chat's board while that board still takes chats; otherwise
     // the host picks its home as for any new chat.
@@ -785,6 +1027,216 @@ fn map_session(r: &rusqlite::Row<'_>) -> rusqlite::Result<(StackSession, Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_roll_over_cascades_to_a_working_child_and_hands_both_over() {
+        use crate::runtime_tests::{ack, echo, harness, reply};
+        let mut h = harness();
+        let (parent, child) = (h.create().await, h.create().await);
+        h.db.write(|tx| {
+            tx.execute(
+                "UPDATE chats SET parent_chat_id = ?1, title = 'Fix the parser' WHERE id = ?2",
+                [&parent, &child],
+            )
+        })
+        .unwrap();
+        // The parent answers once, so it has a reply to hand over, and its worker stays idle.
+        let (psid, _) = h.send(&parent, "build the thing", "default").await;
+        let mut pw = h.worker().await;
+        pw.ready().await;
+        let p0 = pw.expect("prompt").await;
+        ack(&pw, &p0).await;
+        pw.emit(json!({"type": "agent_start"})).await;
+        echo(&pw, &psid).await;
+        reply(&h, &pw, "pmsg_1", "Started.").await;
+        pw.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+            .await;
+        h.until("parent idle", |h| h.status(&parent) == "idle")
+            .await;
+        // The child is mid-turn when the roll over is asked: a cascade target.
+        let (csid, _) = h.send(&child, "fix the grammar", "default").await;
+        let mut cw = h.worker().await;
+        cw.ready().await;
+        let c0 = cw.expect("prompt").await;
+        ack(&cw, &c0).await;
+        cw.emit(json!({"type": "agent_start"})).await;
+        echo(&cw, &csid).await;
+        let started = h
+            .call("chat_roll_over", json!({"chatId": parent}))
+            .await
+            .unwrap();
+        assert_eq!(started["started"], true);
+        // The notice reaches the working child at once, mid-turn, as a steer.
+        let notice = cw.expect("prompt").await;
+        assert_eq!(notice["streamingBehavior"], "steer");
+        let doc = handoff_dir(&h.rt, &parent).join(format!("{child}.md"));
+        let notice_text = notice["text"].as_str().unwrap().to_owned();
+        assert!(
+            notice_text.contains("roll-over document") && notice_text.contains(&plain_path(&doc)),
+            "{notice_text}"
+        );
+        assert_eq!(
+            h.col(&format!(
+                "SELECT count(*) FROM submissions WHERE chat_id = '{parent}'
+                 AND text LIKE 'This chat is being rolled over%'"
+            )),
+            ["0"],
+            "the parent is not asked until the child has settled"
+        );
+        // The child "writes" its document, answers, and goes quiet. (No `reply` after the
+        // first turn: its flush check expects the one streaming row, and now the parent has
+        // an assistant row too.)
+        std::fs::create_dir_all(doc.parent().unwrap()).unwrap();
+        std::fs::write(
+            &doc,
+            "# Hand-off\nTask: fix the grammar. State: half done on branch fix-grammar. \
+             Next: cover the semicolon cases.\n",
+        )
+        .unwrap();
+        ack(&cw, &notice).await;
+        cw.emit(json!({"type": "submission_delivered", "submissionId": notice["submissionId"]}))
+            .await;
+        cw.emit(json!({"type": "message_end", "message": {"id": "cmsg_1", "role": "assistant", "content": [{"type": "text", "text": "Wrote the roll-over document."}], "status": "complete"}}))
+            .await;
+        cw.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+            .await;
+        // Only now the parent is asked, with the subagents section and the packet folder taught.
+        let ask = pw.expect("prompt").await;
+        let ask_text = ask["text"].as_str().unwrap().to_owned();
+        assert!(
+            ask_text.contains("Running subagents")
+                && ask_text.contains("packet")
+                && ask_text.contains(&plain_path(&handoff_dir(&h.rt, &parent))),
+            "{ask_text}"
+        );
+        ack(&pw, &ask).await;
+        pw.emit(json!({"type": "agent_start"})).await;
+        pw.emit(json!({"type": "message_end", "message": {"id": "pmsg_2", "role": "assistant", "content": [{"type": "text", "text": "Goal: finish it. Left to do: part two."}], "status": "complete"}}))
+            .await;
+        pw.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+            .await;
+        // The successor's first message: hand-off plus the machine-written roster.
+        let mut sw = h.worker().await;
+        sw.ready().await;
+        let first = sw.expect("prompt").await;
+        let brief = first["text"].as_str().unwrap().to_owned();
+        assert!(
+            brief.contains("Left to do: part two.")
+                && brief.contains("Running subagents (written by Helm)")
+                && brief.contains("Fix the parser")
+                && brief.contains(&plain_path(&doc))
+                && brief.contains("idle, wrote a roll-over document")
+                && brief.contains("one new subagent per document"),
+            "{brief}"
+        );
+        h.until("old chat archived", |h| {
+            h.col(&format!("SELECT archived FROM chats WHERE id = '{parent}'")) == ["1"]
+        })
+        .await;
+        let succ = h.col(&format!(
+            "SELECT chat_id FROM chat_succession WHERE predecessor_id = '{parent}'"
+        ))[0]
+            .clone();
+        assert_eq!(
+            h.col(&format!(
+                "SELECT COALESCE(parent_chat_id = '{succ}', 0) FROM chats WHERE id = '{child}'"
+            )),
+            ["1"],
+            "the child answers to the successor now"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_straggler_child_never_stops_the_roll_over_past_the_wait_cap() {
+        use crate::runtime_tests::{ack, attach_ops_host, harness, reply};
+        let mut h = harness();
+        attach_ops_host(&h);
+        let (parent, with_doc, no_doc) = (h.create().await, h.create().await, h.create().await);
+        h.db.write(|tx| {
+            tx.execute(
+                "UPDATE chats SET parent_chat_id = ?1, title = 'Slow with doc' WHERE id = ?2",
+                [&parent, &with_doc],
+            )?;
+            tx.execute(
+                "UPDATE chats SET parent_chat_id = ?1, title = 'Slow, deaf' WHERE id = ?2",
+                [&parent, &no_doc],
+            )?;
+            // Both children are stuck 'running' with a submission outstanding: they never
+            // settle, so the wait cap, not their answer, is what lets the roll over proceed.
+            tx.execute(
+                "UPDATE chats SET status = 'running' WHERE id IN (?1, ?2)",
+                [&with_doc, &no_doc],
+            )?;
+            tx.execute(
+                "INSERT INTO submissions(id, chat_id, text, state, created_at)
+                 VALUES ('strag-1', ?1, 'work', 'delivered', 1)",
+                [&with_doc],
+            )
+        })
+        .unwrap();
+        let rec =
+            h.db.snapshot(|tx| crate::store::get_chat(tx, &parent, 0))
+                .unwrap()
+                .unwrap();
+        let targets = cascade_targets(&h.rt, &rec);
+        assert_eq!(targets.len(), 2, "both running children cascade");
+        let doc = handoff_dir(&h.rt, &parent).join(format!("{with_doc}.md"));
+        std::fs::create_dir_all(doc.parent().unwrap()).unwrap();
+        std::fs::write(
+            &doc,
+            "# Hand-off\nTask: keep going on branch slow-tail. Worktree ../helm-wt-slow. \
+             State: two files left. Next: the tail cases, then the review.\n",
+        )
+        .unwrap();
+        // The roll over runs with a 50 ms cap: no child settles, so it carries on anyway.
+        let seam = h.rt.sh.host.get().unwrap();
+        let (ctx, rt) = (
+            seam.ctx.clone(),
+            seam.ctx.services.need::<ChatRuntime>().unwrap(),
+        );
+        let rec2 = rec.clone();
+        let flow = tokio::spawn(async move {
+            roll_forward(
+                &ctx,
+                &rt,
+                &rec2,
+                targets,
+                (None, None),
+                Duration::from_millis(50),
+                None,
+            )
+            .await
+        });
+        let mut pw = h.worker().await;
+        pw.ready().await;
+        let ask = pw.expect("prompt").await;
+        ack(&pw, &ask).await;
+        pw.emit(json!({"type": "agent_start"})).await;
+        reply(&h, &pw, "pmsg_1", "Goal: carry on.").await;
+        pw.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+            .await;
+        flow.await
+            .unwrap()
+            .expect("the roll over carried on past the stragglers");
+        let mut sw = h.worker().await;
+        sw.ready().await;
+        let brief = sw.expect("prompt").await;
+        let brief = brief["text"].as_str().unwrap().to_owned();
+        assert!(
+            brief.contains("Goal: carry on.")
+                && brief.contains("Slow with doc")
+                && brief.contains("still working, wrote a roll-over document at")
+                && brief.contains(&plain_path(&doc))
+                && brief.contains("Slow, deaf")
+                && brief.contains("no roll-over document was written"),
+            "{brief}"
+        );
+        assert_eq!(
+            h.col(&format!("SELECT archived FROM chats WHERE id = '{parent}'")),
+            ["1"],
+            "the stragglers did not block the archive"
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_hand_off_request_taken_back_leaves_the_users_park_in_place() {
