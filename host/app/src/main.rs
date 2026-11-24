@@ -668,6 +668,7 @@ mod tests {
             helm_mcp::unencrypted::KEY,
             helm_governor::ext::KEY,
             helm_relay::hub_view::KEY,
+            helm_gatekeeper::wmode_ext::KEY,
             "webSearchInClaudeChats",
         ]);
         let _ = std::fs::remove_dir_all(&dir);

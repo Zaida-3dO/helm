@@ -659,6 +659,7 @@ mod host_tool_tests {
             "app_wait_for",
             "app_background_result",
             "app_usage_summary",
+            "app_gpu",
             "app_list_knowledge",
             "app_save_rule",
             "app_save_memory",
@@ -849,8 +850,8 @@ mod surface_tests {
     fn a_chats_own_tool_list_stays_small_and_every_description_stays_short() {
         let reg = super::host_tools();
         for (label, keys, listed_cap, visible_cap) in [
-            ("default", LaunchKeys::default(), 10_500, 46),
-            ("everything on", everything_on(), 11_500, 58),
+            ("default", LaunchKeys::default(), 10_500, 47),
+            ("everything on", everything_on(), 11_500, 59),
         ] {
             let all = reg.for_launch(&keys);
             let visible: Vec<_> = all.iter().filter(|e| e.alias_of.is_none()).collect();
