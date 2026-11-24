@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { estimateItem, formatElapsed, layout, type Item } from './workBlocks.ts';
+import { estimateItem, foldLabel, formatElapsed, layout, revealKey, type Item } from './workBlocks.ts';
 import { ESTIMATE } from './virtual.ts';
 import { row } from '../dev/fixtures.ts';
 import { recapLine } from './recapText.ts';
@@ -25,12 +25,15 @@ const shape = (items: Item[]) =>
         : i.kind,
   );
 
-test('a settled turn folds its tool calls, keeping notes, errors and the final reply', () => {
+test('a settled turn folds its tool calls into one group, keeping notes and the final reply; a failed call folds like a passed one', () => {
   const items = layout(turn(), false);
-  assert.deepEqual(shape(items), [1, 'fold[3]', 2, 4, 5]);
+  // The failed call is not its own visible row any more: it sits inside the group, counted there.
+  assert.deepEqual(shape(items), [1, 2, 'fold[3,4]', 5]);
   const fold = items.find((i) => i.kind === 'fold');
-  // Timed from the run's first output (1 s), not from the prompt (0 s).
-  assert.equal(fold?.kind === 'fold' && fold.elapsedMs, 64_000);
+  // Timed over the run itself: the two calls at 2 s and 3 s.
+  assert.equal(fold?.kind === 'fold' && fold.elapsedMs, 1000);
+  assert.equal(fold?.kind === 'fold' && fold.failed, 1);
+  assert.equal(fold?.kind === 'fold' && fold.tools, 2);
 });
 
 test('a turn with no tool call and no thinking does not fold, however long it took to start', () => {
@@ -44,11 +47,11 @@ test('a turn with no tool call and no thinking does not fold, however long it to
   // A voice chat's "[quiet]" answer is never drawn, and the reply before it stays the final one.
   const quiet = [...turn(), row({ id: 6, role: 'assistant', text: '[quiet]', timestamp: 66_000 })];
   const items = layout(quiet, false);
-  assert.deepEqual(shape(items), [1, 'fold[3]', 2, 4, 5]);
+  assert.deepEqual(shape(items), [1, 2, 'fold[3,4]', 5]);
   assert.equal(items.find((i) => i.kind === 'row' && i.row.id === 5 && i.final) !== undefined, true);
 });
 
-test('thinking alone is work: the turn folds, timed from its first output', () => {
+test('thinking alone is work: the turn folds it, reachable, not hidden', () => {
   const rows = [
     row({ id: 1, role: 'user', timestamp: 0 }),
     row({ id: 2, role: 'assistant', thinking: 'weighing it up', timestamp: 30_000 }),
@@ -57,22 +60,27 @@ test('thinking alone is work: the turn folds, timed from its first output', () =
   const items = layout(rows, false);
   assert.deepEqual(shape(items), [1, 'fold[2]', 3]);
   const fold = items.find((i) => i.kind === 'fold');
-  assert.equal(fold?.kind === 'fold' && fold.elapsedMs, 12_000);
+  assert.equal(fold?.kind === 'fold' && fold.thoughts, 1);
+  // Opened, the thinking row itself appears, under the group's rule.
+  const opened = layout(rows, false, new Set([revealKey('k1')]));
+  assert.deepEqual(shape(opened), [1, 'fold[2]', 2, 3]);
+  const thought = opened.find((i) => i.kind === 'row' && i.row.id === 2);
+  assert.ok(thought?.kind === 'row' && thought.indent, 'the opened group lists its rows, indented');
 });
 
-test('the row right after a closed fold is marked, so it draws no second rule', () => {
+test('the row right after a closed group is marked, so it draws no second rule', () => {
   const items = layout(turn(), false);
   const flag = (id: number) => {
     const it = items.find((i) => i.kind === 'row' && i.row.id === id);
     return it?.kind === 'row' && it.afterFold;
   };
-  assert.equal(flag(2), true);
-  assert.equal(flag(4), false);
+  assert.equal(flag(2), false, 'the note sits above its following group, not below one');
+  assert.equal(flag(5), true, 'the reply after the closed group needs no second rule');
   const plain = layout([row({ id: 1, role: 'user' }), row({ id: 2, role: 'toolResult' }), row({ id: 3, role: 'assistant', text: 'done' })], false);
   const done = plain.find((i) => i.kind === 'row' && i.row.id === 3);
   assert.equal(done?.kind === 'row' && done.final && done.afterFold, true);
-  // Opened, the work sits between the fold and the reply, so the reply keeps its hairline.
-  const open = layout(turn(), false, new Set(['k1']));
+  // Opened, the work sits between the group row and the reply, so the reply keeps its hairline.
+  const open = layout(turn(), false, new Set([revealKey('k1')]));
   const reply = open.find((i) => i.kind === 'row' && i.row.id === 5);
   assert.equal(reply?.kind === 'row' && reply.afterFold, false);
 });
@@ -80,7 +88,7 @@ test('the row right after a closed fold is marked, so it draws no second rule', 
 test('a live turn folds as it goes, so settling changes nothing', () => {
   const live = layout(turn(), true);
   const settled = layout(turn(), false);
-  assert.deepEqual(shape(live), [1, 'fold[3]', 2, 4, 5]);
+  assert.deepEqual(shape(live), [1, 2, 'fold[3,4]', 5]);
   assert.deepEqual(shape(live), shape(settled));
   // The reply being written after the last tool already has its final look.
   const flags = (items: Item[]) => items.map((i) => (i.kind === 'row' ? [i.final, i.afterFold, i.afterTool] : 'fold'));
@@ -95,13 +103,13 @@ test('while a tool is the newest row, it is the open part and the work before it
     row({ id: 4, role: 'assistant', text: 'now the tests', timestamp: 3000 }),
     row({ id: 5, role: 'toolResult', toolName: 'Bash', status: 'streaming', timestamp: 4000 }),
   ];
-  assert.deepEqual(shape(layout(rows, true)), [1, 'fold[3]', 2, 4, 5]);
-  // Text written after it opens instead, and the tool folds.
+  assert.deepEqual(shape(layout(rows, true)), [1, 2, 'fold[3]', 4, 5]);
+  // Text written after it opens instead; the note splits the finished run off as its own group.
   const more = [...rows.slice(0, 4), { ...rows[4]!, status: 'complete' as const }, row({ id: 6, role: 'assistant', text: 'All', timestamp: 5000 })];
-  assert.deepEqual(shape(layout(more, true)), [1, 'fold[3,5]', 2, 4, 6]);
+  assert.deepEqual(shape(layout(more, true)), [1, 2, 'fold[3]', 4, 'fold[5]', 6]);
 });
 
-test('live, nothing folds until there is visible work to fold (no "Worked for 0s" over the first tool)', () => {
+test('live, nothing folds until there is visible work to fold (no empty header over the first tool)', () => {
   const rows = [
     row({ id: 1, role: 'user', timestamp: 0 }),
     // The empty message the host saves a tool call under.
@@ -115,7 +123,7 @@ test('live, nothing folds until there is visible work to fold (no "Worked for 0s
   assert.deepEqual(shape(layout(second, true)), [1, 'fold[2,3,4]', 5]);
 });
 
-test('rows with nothing to show are never drawn, so hidden tool activity leaves no empty gap', () => {
+test('rows with nothing to show are never drawn, so grouped tool activity leaves no empty gap', () => {
   const rows = [
     row({ id: 1, role: 'user', timestamp: 0 }),
     // The empty messages the host saves the two tool calls under.
@@ -126,18 +134,21 @@ test('rows with nothing to show are never drawn, so hidden tool activity leaves 
     row({ id: 6, role: 'toolResult', toolName: 'Read', timestamp: 5000 }),
     row({ id: 7, role: 'assistant', text: 'done', timestamp: 6000 }),
   ];
-  // Closed: the calls and their empty messages fold behind one compact row; the step count is
-  // the two calls, not each call counted twice.
+  // Closed: the note splits the run, so each call folds into its own compact row; the counts are
+  // the calls themselves, not each call's empty message.
   const closed = layout(rows, false);
-  assert.deepEqual(shape(closed), [1, 'fold[2,3,5,6]', 4, 7]);
-  const fold = closed.find((i) => i.kind === 'fold');
-  assert.equal(fold?.kind === 'fold' && fold.steps, 2);
+  assert.deepEqual(shape(closed), [1, 'fold[2,3]', 4, 'fold[5,6]', 7]);
+  const folds = closed.filter((i) => i.kind === 'fold');
+  assert.deepEqual(folds.map((f) => (f.kind === 'fold' ? f.tools : 0)), [1, 1]);
   // Opened: the calls are listed, the empty messages take no room between them, and the note
   // still tightens above the call that follows it across its empty message.
-  const opened = layout(rows, false, new Set(['k1']));
-  assert.deepEqual(shape(opened), [1, 'fold[2,3,5,6]', 3, 4, 6, 7]);
+  const opened = layout(rows, false, new Set([revealKey('k1')]));
+  assert.deepEqual(shape(opened), [1, 'fold[2,3]', 3, 4, 'fold[5,6]', 6, 7]);
   const note = opened.find((i) => i.kind === 'row' && i.row.id === 4);
-  assert.equal(note?.kind === 'row' && note.beforeTool, true, 'note id4 is followed by empty id5 then tool id6');
+  assert.equal(note?.kind === 'row' && note.beforeTool, true, 'note id4 is followed by group row then tool id6');
+  // Only the opened group lists its rows: opening one leaves the other folded.
+  const oneOpen = layout(rows, false, new Set(['cg:k1:2']));
+  assert.deepEqual(shape(oneOpen), [1, 'fold[2,3]', 3, 4, 'fold[5,6]', 7]);
   // Live, before anything real can fold, the running call sits under the prompt with no empty row.
   const live = [
     rows[0]!,
@@ -149,7 +160,7 @@ test('rows with nothing to show are never drawn, so hidden tool activity leaves 
   assert.deepEqual(shape(layout([row({ id: 1, role: 'user', timestamp: 0 }), row({ id: 2, role: 'assistant', text: '', thinking: '  ', timestamp: 1000 })], false)), [1]);
 });
 
-test('a live turn that only thought folds its thinking behind the newest row', () => {
+test('a live turn that only thought folds its thinking behind its own row', () => {
   const rows = [
     row({ id: 1, role: 'user', timestamp: 0 }),
     row({ id: 2, role: 'assistant', text: '', thinking: 'hmm', timestamp: 1000 }),
@@ -159,7 +170,7 @@ test('a live turn that only thought folds its thinking behind the newest row', (
   assert.deepEqual(shape(layout(rows, false)), [1, 'fold[2]', 3]);
 });
 
-test('Agent calls stay in the flow, side by side as one group, whether they run or have finished', () => {
+test('Agent calls stay in the flow, side by side as one group, even when a folded call sat between them', () => {
   const rows = [
     row({ id: 1, role: 'user', timestamp: 0 }),
     row({ id: 2, role: 'toolResult', toolName: 'Agent', toolCallId: 'a1', timestamp: 1000 }),
@@ -168,23 +179,26 @@ test('Agent calls stay in the flow, side by side as one group, whether they run 
     row({ id: 5, role: 'assistant', text: 'Started two reviewers.', timestamp: 4000 }),
     row({ id: 6, role: 'toolResult', toolName: 'Agent', toolCallId: 'a3', timestamp: 5000 }),
   ];
-  // The Read between the first two folds away, so the two calls are neighbours; the note splits the third off.
+  // The Read between the first two folds away, so the two calls are neighbours and the folded
+  // group's row moves ahead of them; the note splits the third off.
   assert.deepEqual(shape(layout(rows, false)), [1, 'fold[3]', 'agents[2,4]', 5, 'agents[6]']);
   assert.deepEqual(shape(layout(rows, true)), shape(layout(rows, false)));
+  // Opened, the Read is on screen between the two cards, so they are not one group.
+  assert.deepEqual(shape(layout(rows, false, new Set([revealKey('k1')]))), [1, 'agents[2]', 'fold[3]', 3, 'agents[4]', 5, 'agents[6]']);
 });
 
-test('an earlier turn folds while the latest is live; expanding unfolds it', () => {
+test('an earlier turn folds while the latest is live; opening the turn unfolds its work', () => {
   const rows = [
     ...turn(),
     row({ id: 6, role: 'user', timestamp: 70_000 }),
     row({ id: 7, role: 'toolResult', timestamp: 71_000 }),
   ];
-  assert.deepEqual(shape(layout(rows, true)), [1, 'fold[3]', 2, 4, 5, 6, 7]);
-  // Opened: the "Worked for" row stays (so it can be closed again) and the work follows in order.
-  assert.deepEqual(shape(layout(rows, true, new Set(['k1']))), [1, 'fold[3]', 2, 3, 4, 5, 6, 7]);
+  assert.deepEqual(shape(layout(rows, true)), [1, 2, 'fold[3,4]', 5, 6, 7]);
+  // Opened: the group row stays (so it can be closed again) and the work follows in order.
+  assert.deepEqual(shape(layout(rows, true, new Set([revealKey('k1')]))), [1, 2, 'fold[3,4]', 3, 4, 5, 6, 7]);
 });
 
-test('context, retry and interrupted rows stay visible', () => {
+test('context, retry and interrupted rows stay visible; an interrupted call is not folded away', () => {
   const rows = [
     row({ id: 1, role: 'user' }),
     row({ id: 2, role: 'context', text: 'compacted' }),
@@ -193,7 +207,7 @@ test('context, retry and interrupted rows stay visible', () => {
     row({ id: 8, role: 'toolResult', status: 'interrupted' }),
     row({ id: 5, role: 'assistant', text: 'reply' }),
   ];
-  assert.deepEqual(shape(layout(rows, false)), [1, 'fold[4]', 2, 3, 8, 5]);
+  assert.deepEqual(shape(layout(rows, false)), [1, 2, 3, 'fold[4]', 8, 5]);
 });
 
 test("only the newest notice is a live region, and only while it is the transcript's last row", () => {
@@ -214,6 +228,13 @@ test('formatElapsed', () => {
   assert.equal(formatElapsed(3_720_000), '1h 2m');
 });
 
+test('foldLabel says what the group holds, and how long it took', () => {
+  assert.equal(foldLabel({ tools: 12, thoughts: 0, messages: 0, elapsedMs: 40_000 }), '12 tool calls · worked for 40s');
+  assert.equal(foldLabel({ tools: 1, thoughts: 0, messages: 0, elapsedMs: 1000 }), '1 tool call · worked for 1s');
+  assert.equal(foldLabel({ tools: 0, thoughts: 2, messages: 1, elapsedMs: 0 }), '2 thoughts · 1 message');
+  assert.equal(foldLabel({ tools: 3, thoughts: 1, messages: 2, elapsedMs: 65_000 }), '3 tool calls · 1 thought · 2 messages · worked for 1m 5s');
+});
+
 test('a steer read mid-turn stays in the turn and is never folded, live or settled', () => {
   const rows = [
     row({ id: 1, role: 'user' }),
@@ -222,11 +243,44 @@ test('a steer read mid-turn stays in the turn and is never folded, live or settl
     row({ id: 4, role: 'toolResult' }),
     row({ id: 5, role: 'assistant', text: 'reply' }),
   ];
-  assert.deepEqual(shape(layout(rows, true)), [1, 'fold[2,4]', 3, 5]);
-  assert.deepEqual(shape(layout(rows, false)), [1, 'fold[2,4]', 3, 5]);
+  // The steer is the person's own words: it stands on its own and splits the run into two groups.
+  assert.deepEqual(shape(layout(rows, true)), [1, 'fold[2]', 3, 'fold[4]', 5]);
+  assert.deepEqual(shape(layout(rows, false)), [1, 'fold[2]', 3, 'fold[4]', 5]);
 });
 
-test('the fold counts failed tool calls and flags the final answer', () => {
+test('message cards from another chat, a schedule or the app fold into the group they sit in', () => {
+  const peer = (id: number) =>
+    row({
+      id,
+      role: 'user',
+      text: `[Message from another chat: "Coordinator" (chat-9)]\nSent by another Helm chat.\n\nSteer message body.`,
+      details: { origin: 'other_chat', mode: 'steer' },
+    });
+  const fromHelm = (id: number) => row({ id, role: 'user', text: 'Forward the port when the bridge is up.', details: { origin: 'app', mode: 'steer' } });
+  const rows = [
+    row({ id: 1, role: 'user', timestamp: 0 }),
+    row({ id: 2, role: 'toolResult', toolName: 'Bash', timestamp: 1000 }),
+    peer(3),
+    row({ id: 4, role: 'toolResult', toolName: 'Read', timestamp: 3000 }),
+    fromHelm(5),
+    row({ id: 6, role: 'assistant', text: 'reply', timestamp: 5000 }),
+  ];
+  const items = layout(rows, false);
+  // Two calls and both cards make one group: the message cards count as steps toward the label.
+  assert.deepEqual(shape(items), [1, 'fold[2,3,4,5]', 6]);
+  const fold = items.find((i) => i.kind === 'fold');
+  assert.equal(fold?.kind === 'fold' && fold.tools, 2);
+  assert.equal(fold?.kind === 'fold' && fold.messages, 2);
+  // Opened, the cards appear between the calls, each one visible.
+  const opened = layout(rows, false, new Set([revealKey('k1')]));
+  assert.deepEqual(shape(opened), [1, 'fold[2,3,4,5]', 2, 3, 4, 5, 6]);
+  assert.deepEqual(
+    opened.flatMap((i) => (i.kind === 'row' && i.indent ? [i.row.id] : [])),
+    [2, 3, 4, 5],
+  );
+});
+
+test('the group counts failed tool calls and flags the final answer', () => {
   const rows = [
     row({ id: 1, role: 'user' }),
     row({ id: 2, role: 'toolResult', toolName: 'Bash', details: { isError: true } }),
@@ -235,6 +289,8 @@ test('the fold counts failed tool calls and flags the final answer', () => {
     row({ id: 5, role: 'assistant', text: 'done' }),
   ];
   const items = layout(rows, false);
+  // Passed and failed calls sit in the same group; the failure shows as a count on the group row.
+  assert.deepEqual(shape(items), [1, 'fold[2,3,4]', 5]);
   const fold = items.find((i) => i.kind === 'fold');
   assert.equal(fold?.kind === 'fold' && fold.failed, 2);
   const reply = items.find((i) => i.kind === 'row' && i.row.id === 5);
@@ -247,12 +303,13 @@ test('the fold counts failed tool calls and flags the final answer', () => {
 });
 
 test('opened work is indented, the shown rows are not', () => {
-  const items = layout(turn(), false, new Set(['k1']));
+  const items = layout(turn(), false, new Set([revealKey('k1')]));
   const ind = (id: number) => {
     const it = items.find((i) => i.kind === 'row' && i.row.id === id);
     return it?.kind === 'row' && it.indent;
   };
   assert.equal(ind(3), true);
+  assert.equal(ind(4), true);
   assert.equal(ind(2), false);
   assert.equal(ind(5), false);
 });
@@ -273,26 +330,18 @@ test('estimateItem guesses by kind and length, and remembers each row', () => {
   assert.equal(estimateItem({ kind: 'row', row: frozen }), first);
 });
 
-test('thinking behind a closed fold is hidden on the notes that carry it, and shown once opened', () => {
+test("a note keeps its own thinking: never hidden by the layout, folded by the row's own toggle", () => {
   const rows = [
     row({ id: 1, role: 'user', timestamp: 0 }),
     row({ id: 2, role: 'assistant', text: 'note', thinking: 'why', timestamp: 1000 }),
     row({ id: 3, role: 'toolResult', toolName: 'Read', timestamp: 2000 }),
     row({ id: 4, role: 'assistant', text: 'answer', thinking: 'wrap up', timestamp: 3000 }),
   ];
-  const hidden = (items: Item[]) => items.flatMap((i) => (i.kind === 'row' && i.hideThinking ? [i.row.id] : []));
-  assert.deepEqual(hidden(layout(rows, false)), [2, 4]);
-  assert.deepEqual(hidden(layout(rows, false, new Set(['k1']))), []);
-  // The step count is tool calls and thinking blocks, not the final reply's thinking.
-  const fold = layout(rows, false).find((i) => i.kind === 'fold');
-  assert.equal(fold?.kind === 'fold' && fold.steps, 2);
-  // Opened, the note above a tool row tightens its bottom padding; the reply does not.
-  const tight = layout(rows, false, new Set(['k1'])).flatMap((i) => (i.kind === 'row' && i.beforeTool ? [i.row.id] : []));
-  assert.deepEqual(tight, [2]);
-  // Live, the part still being written keeps its thinking in view.
-  assert.deepEqual(hidden(layout(rows, true)), [2]);
+  // Nothing carries a hidden-thinking mark any more: the thinking sits with the note, reachable,
+  // and only the thinking that has no text of its own joins a group.
+  assert.deepEqual(shape(layout(rows, false)), [1, 2, 'fold[3]', 4]);
   // A turn that only thought and answered has nothing to fold: the thinking stays where it is.
-  assert.deepEqual(hidden(layout([rows[0]!, { ...rows[3]!, id: 2 }], false)), []);
+  assert.deepEqual(shape(layout([rows[0]!, rows[3]!], false)), [1, 4]);
 });
 
 test('a gallery or board never folds, and a settled turn with a checklist or three steps gets a recap', () => {
@@ -311,8 +360,8 @@ test('a gallery or board never folds, and a settled turn with a checklist or thr
     row({ id: 8, role: 'assistant', text: 'done', timestamp: 125_000 }),
   ];
   const items = layout(rows, false);
-  // The cards stay in the flow; the plain tool rows fold.
-  assert.deepEqual(shape(items), [1, 'fold[2,3,6,7]', 4, 5, 8]);
+  // The cards stay in the flow; the plain tool runs fold into two groups.
+  assert.deepEqual(shape(items), [1, 'fold[2,3]', 4, 5, 'fold[6,7]', 8]);
   const reply = items.find((i) => i.kind === 'row' && i.row.id === 8);
   const recap = reply?.kind === 'row' ? reply.recap : undefined;
   assert.equal(recap?.files, 2);
