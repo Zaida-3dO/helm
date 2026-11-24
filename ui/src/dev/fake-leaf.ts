@@ -8,26 +8,17 @@ import type { ActionButton, ActionSet } from '../api/actions.ts';
 import type { SearchHit } from '../api/search.ts';
 import type { FakeOpHandler } from './fakeHost.ts';
 
+// Helm's only seed is the hidden new-chat launcher; the old common-request seeds are skills now.
+// The two unseeded buttons keep the dev preview interesting: they stand in for the ones a user
+// makes in Settings, which is what the bar shows from here on.
 export const FAKE_SEED_BUTTONS: ActionButton[] = [
-  ['update', 'Report progress', 'Please give me a brief plain-language status: what is finished, what is under way, what is stuck, and what you need from me.', 'topbar', false, 'prompt'],
-  ['needs-me', 'Needs me', 'What needs my attention right now, and why? Only list things that truly need a decision from me (check each one) and give me the options for each.', 'topbar', false, 'prompt'],
-  ['ship-it', 'Ship it', 'I am happy with this. Commit only your own changes, push, open or update the pull request, and merge to main once review passes. Tell me what landed.', 'topbar', false, 'prompt'],
-  ['close-session', 'Close session', 'Please wrap up this session: record what we learned, clean up worktrees and branches, then commit and push. Report each step as pass or fail.', 'topbar', false, 'prompt'],
-  ['new-session', 'New session', "Let's start a new session.", 'topbar', true, 'new_chat'],
-  ['git-sync', 'Git sync', 'Please sync this repo: fetch, fast-forward only if that is safe, and tell me about anything unexpected. Do not commit.', 'overflow', false, 'prompt'],
-].map(([seed, label, text, placement, hidden, kind]) => ({
-  id: `seed-${seed as string}`,
-  label: label as string,
-  kind: kind as ActionButton['kind'],
-  text: text as string,
-  projectId: null,
-  placement: placement as ActionButton['placement'],
-  hidden: hidden as boolean,
-  seedId: seed as string,
-}));
+  { id: 'seed-new-session', label: 'New session', kind: 'new_chat', text: "Let's start a new session.", projectId: null, placement: 'topbar', hidden: true, seedId: 'new-session' },
+  { id: 'fake-report', label: 'Report progress', kind: 'prompt', text: 'Please give me a brief plain-language status: what is finished, what is under way, what is stuck, and what you need from me.', projectId: null, placement: 'topbar', hidden: false, seedId: null },
+  { id: 'fake-sync', label: 'Git sync', kind: 'prompt', text: 'Please sync this repo: fetch, fast-forward only if that is safe, and tell me about anything unexpected. Do not commit.', projectId: null, placement: 'overflow', hidden: false, seedId: null },
+];
 
 export function leafFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
-  let set: ActionSet = { revision: 1, seedVersion: 1, buttons: FAKE_SEED_BUTTONS };
+  let set: ActionSet = { revision: 1, seedVersion: 3, buttons: FAKE_SEED_BUTTONS };
   const items = new Map<string, FakeSavedItem>();
   const notes = new Map<string, FakeSavedNote[]>();
   /** Removed items, kept so Undo (`restore`) can bring them back, as the host does for a while. */
