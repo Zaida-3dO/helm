@@ -896,7 +896,7 @@ fn stamp(
 /// Tell a working chat to halt at its next boundary and stamp who asked. The instruction is a
 /// steer message, so a chat mid-turn reads it at the next step it takes — finish the current
 /// work, stop, and wait for the person who paused it.
-fn halt_working(rt: &crate::runtime::ChatRuntime, chat_id: &str, by: &str, now: i64) {
+pub(crate) fn halt_working(rt: &crate::runtime::ChatRuntime, chat_id: &str, by: &str, now: i64) {
     use crate::types::{SubmissionMode, SubmissionOrigin, SubmissionState};
     let sid = uuid::Uuid::new_v4().to_string();
     let text = format!(

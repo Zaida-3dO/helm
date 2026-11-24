@@ -1430,8 +1430,8 @@ fn merge_sidebar_state(prev: Option<&Value>, patch: &Value) -> Value {
     if !map.contains_key("v") {
         map.insert("v".into(), json!(1));
     }
-    let open = map.get("expanded").and_then(Value::as_bool) == Some(true)
-        || map.contains_key("openCards");
+    let open =
+        map.get("expanded").and_then(Value::as_bool) == Some(true) || map.contains_key("openCards");
     if open {
         merged
     } else {
