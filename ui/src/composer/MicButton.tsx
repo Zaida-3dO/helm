@@ -4,10 +4,15 @@
 // release. The words land at the caret and are never sent. Esc cancels (no request is made),
 // Enter or a click finishes. The rules are in dictation.ts; this file is the screen part.
 //
-// Where the Windows speech service can run, the mic is live: the host streams words while the
-// user speaks, settled sentences land in the draft as they come and the sentence in progress is
-// handed to `onLiveText` for the editor to show. There is no recording, no level bars (the engine
-// holds the microphone) and no second wait at the end.
+// Where the Windows speech service can run and no speech-to-text server is set up, the mic is
+// live: the host streams words while the user speaks, settled sentences land in the draft as they
+// come and the sentence in progress is handed to `onLiveText` for the editor to show. A configured
+// server wins: the user's own server and language beat the operating system's speech service.
+// There is no recording, no level bars (the engine holds the microphone) and no second wait.
+//
+// Both composers mount a mic button, but a live session has one owner: only the button that
+// started it applies its words. Pressing the mic in the other composer takes the session over —
+// the host takes the microphone from the old session — and the first button falls back to idle.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { shellOps } from '../api/shell.ts';
@@ -52,6 +57,19 @@ type Status = 'idle' | 'listening' | 'transcribing' | 'error';
 
 /** A recording shorter than this has nothing in it worth sending. */
 const MIN_SECONDS = 0.3;
+
+/**
+ * The claim of the button that started the one live session. A session's words only land in its
+ * owner's composer, even though every open composer mounts a mic button; the claim clears once
+ * the host's stop or cancel has answered, so the last sentence settled during a stop still lands.
+ */
+let liveOwner: symbol | null = null;
+/** Buttons watch the owner: a takeover sends the button that lost its session back to idle. */
+const liveOwnerListeners = new Set<() => void>();
+function setLiveOwner(claim: symbol | null): void {
+  liveOwner = claim;
+  for (const l of liveOwnerListeners) l();
+}
 
 /** Whether decoration may animate, and a re-render when that changes. */
 function useMayMove(): boolean {
@@ -101,6 +119,8 @@ export function MicButton({
   const alive = useRef(true);
   /** A live session (the host's speech service, no Recorder) is the one this button owns. */
   const liveMode = useRef(false);
+  /** This button's claim on the one live session; null while it holds none. */
+  const liveClaim = useRef<symbol | null>(null);
   /** The sentence in progress of a live session; settled sentences go straight to the draft. */
   const liveState = useRef<LiveState>(LIVE_IDLE);
   const liveStart = useRef(0);
@@ -156,9 +176,12 @@ export function MicButton({
   }, [editor]);
 
   // A live session's words. A settled sentence lands at the caret the moment it arrives; the
-  // sentence in progress is handed to the editor, which shows it after the draft.
+  // sentence in progress is handed to the editor, which shows it after the draft. Only the
+  // session's owner applies them: every open composer hears the same events.
   useEffect(() => {
+    const owns = () => liveClaim.current !== null && liveOwner === liveClaim.current;
     const offWords = shell.bus.on('live_transcript', (e) => {
+      if (!owns()) return;
       const [next, settled] = liveStep(liveState.current, {
         final: e.final === true,
         text: typeof e.text === 'string' ? e.text : '',
@@ -168,7 +191,7 @@ export function MicButton({
       if (settled) place(settled);
     });
     const offState = shell.bus.on('dictation_live', (e) => {
-      if (e.state !== 'failed') return;
+      if (e.state !== 'failed' || !owns()) return;
       liveMode.current = false;
       liveState.current = LIVE_IDLE;
       onLiveText('');
@@ -211,20 +234,33 @@ export function MicButton({
     [ops, place, showProblem, setStatus],
   );
 
+  /** Let go of this button's claim on the live session, if nothing has taken it already. */
+  const giveUpLive = useCallback((claim: symbol | null) => {
+    if (claim && liveClaim.current === claim) {
+      liveClaim.current = null;
+      setLiveOwner(null);
+    }
+  }, []);
+
   const finish = useCallback(
     async (capped = false) => {
       if (liveMode.current) {
-        // The host settles the sentence in progress and sends it as a final word.
+        // The host settles the sentence in progress and sends it as a final word. The claim is
+        // only given up once the host has answered, so that last word still lands here.
+        const claim = liveClaim.current;
         liveMode.current = false;
         keyState.current = IDLE;
         generation.current++;
         setStatus('idle');
-        ready.current = ops.live('stop').then(
-          () => undefined,
-          (e: unknown) => {
-            if (alive.current) showProblem(problemOf(e));
-          },
-        );
+        ready.current = ops
+          .live('stop')
+          .then(
+            () => undefined,
+            (e: unknown) => {
+              if (alive.current) showProblem(problemOf(e));
+            },
+          )
+          .finally(() => giveUpLive(claim));
         return;
       }
       const r = recorder.current;
@@ -238,7 +274,7 @@ export function MicButton({
       if (capped) toast.show({ kind: 'info', text: 'Dictation stopped at five minutes.' });
       await send(wav);
     },
-    [ops, send, showProblem, setStatus],
+    [ops, send, showProblem, setStatus, giveUpLive],
   );
 
   /** Throw the recording away (Esc), or ignore a request still in flight. No request is made. */
@@ -246,11 +282,18 @@ export function MicButton({
     generation.current++;
     keyState.current = IDLE;
     if (liveMode.current) {
-      // The host throws the unfinished sentence away; nothing is placed.
+      // The host throws the unfinished sentence away; nothing is placed. The claim is kept
+      // until the host answers, so a sentence that had already settled still lands.
+      const claim = liveClaim.current;
       liveMode.current = false;
       liveState.current = LIVE_IDLE;
       onLiveText('');
-      void ops.live('cancel').catch(() => undefined);
+      void ops
+        .live('cancel')
+        .then(
+          () => giveUpLive(claim),
+          () => giveUpLive(claim),
+        );
       clearProblem();
       setStatus('idle');
       return;
@@ -260,7 +303,7 @@ export function MicButton({
     lastWav.current = null;
     clearProblem();
     setStatus('idle');
-  }, [clearProblem, onLiveText, ops, setStatus]);
+  }, [clearProblem, onLiveText, ops, setStatus, giveUpLive]);
 
   /** Begin a live session on the host's speech service. The words arrive as events. */
   const startLive = useCallback(() => {
@@ -271,7 +314,15 @@ export function MicButton({
     setElapsed(0);
     setStatus('listening');
     ready.current = ops.live('start').then(
-      () => undefined,
+      () => {
+        // The session is ours from the moment it opened: the host has just taken the microphone
+        // from whatever session ran before (in the other composer that falls back to idle), and
+        // from here the host's words are this composer's.
+        if (alive.current && mine === generation.current && liveMode.current) {
+          liveClaim.current = Symbol('live');
+          setLiveOwner(liveClaim.current);
+        }
+      },
       (e: unknown) => {
         // The session never opened: let the pill go back to the microphone.
         if (alive.current && mine === generation.current && liveMode.current) {
@@ -289,7 +340,9 @@ export function MicButton({
       return;
     }
     clearProblem();
-    if (viewRef.current?.liveAvailable) {
+    // A configured speech-to-text server wins: the user's server and their language choice beat
+    // the operating system's speech service. Live dictation fills in when nothing is set up.
+    if (viewRef.current?.liveAvailable && viewRef.current?.configured !== true) {
       startLive();
       await ready.current;
       return;
@@ -391,6 +444,24 @@ export function MicButton({
     return () => clearInterval(t);
   }, [status, may]);
 
+  // Another composer took the microphone: this button lost its session, so its pill goes back
+  // to the microphone and the sentence in progress is let go.
+  useEffect(() => {
+    const check = () => {
+      if (liveMode.current && liveOwner !== liveClaim.current) {
+        liveMode.current = false;
+        liveState.current = LIVE_IDLE;
+        liveClaim.current = null;
+        onLiveText('');
+        setStatus('idle');
+      }
+    };
+    liveOwnerListeners.add(check);
+    return () => {
+      liveOwnerListeners.delete(check);
+    };
+  }, [onLiveText, setStatus]);
+
   useEffect(() => {
     alive.current = true; // again after a strict-mode remount
     return () => {
@@ -398,11 +469,12 @@ export function MicButton({
       clearTimeout(errorTimer.current);
       if (liveMode.current) void ops.live('cancel').catch(() => undefined);
       liveMode.current = false;
+      giveUpLive(liveClaim.current);
       onLiveText('');
       recorder.current?.cancel();
       recorder.current = null;
     };
-  }, [ops, onLiveText]);
+  }, [ops, onLiveText, giveUpLive]);
 
   const keepFocus = (e: { preventDefault(): void }) => e.preventDefault();
   const press = (e: { button: number }) => {

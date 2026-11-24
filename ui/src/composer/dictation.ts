@@ -390,7 +390,7 @@ export function problemOf(e: unknown): Problem {
   if (code === 'too_big') return { message: TOO_LONG, retry: false, settings: false };
   if (code === 'bad_audio') return { message: "That recording couldn't be read. Try again.", retry: false, settings: false };
   // Live dictation problems: the host's line says it all, and there is no recording to retry.
-  if (code === 'not_available' || code === 'busy' || code === 'audio') {
+  if (code === 'not_available' || code === 'audio') {
     return { message: e instanceof ApiError ? e.message : 'Live dictation is not available.', retry: false, settings: false };
   }
   // Nothing answered, or it answered with an error: the audio is still here to send again.

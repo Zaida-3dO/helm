@@ -556,7 +556,7 @@ fn a_recording_goes_to_the_server_and_text_comes_back() {
 
 #[test]
 fn a_live_session_streams_settles_and_honours_stop_cancel_and_failure() {
-    use crate::live::{hypothesis_update, Engine, EngineFactory, LiveDictation, LiveMsg};
+    use crate::live::{Engine, EngineFactory, LiveDictation, LiveMsg};
     use helm_ipc::{AppEvent, RecordingSink, Services};
     use std::collections::VecDeque;
 
@@ -592,9 +592,12 @@ fn a_live_session_streams_settles_and_honours_stop_cancel_and_failure() {
     struct Factory {
         queued: Mutex<VecDeque<LiveMsg>>,
         fail_start: Mutex<Option<String>>,
+        /// Every language a start asked for, in order, so the settings hand-off is checked too.
+        langs: Mutex<Vec<Option<String>>>,
     }
     impl EngineFactory for Factory {
-        fn create(&self) -> Result<Box<dyn Engine>, String> {
+        fn create(&self, language: Option<&str>) -> Result<Box<dyn Engine>, String> {
+            self.langs.lock().unwrap().push(language.map(str::to_owned));
             Ok(Box::new(Script {
                 msgs: std::mem::take(&mut *self.queued.lock().unwrap()),
                 fail_start: self.fail_start.lock().unwrap().take(),
@@ -628,8 +631,14 @@ fn a_live_session_streams_settles_and_honours_stop_cancel_and_failure() {
         }
     }
 
+    // The op reads the saved settings for the language, so this service has a database too.
+    let dir = tempfile::tempdir().unwrap();
+    let mut reg = MigrationRegistry::new();
+    register_migrations(&mut reg);
+    let db = Arc::new(Database::open(&dir.path().join("live.db"), &reg).unwrap());
     let factory = Arc::new(Factory::default());
     let mut services = Services::new();
+    services.insert(db.clone());
     services.insert(Arc::new(LiveDictation::with_factory(factory.clone())));
     let sink = Arc::new(RecordingSink::default());
     let ctx = OpCtx {
@@ -639,28 +648,23 @@ fn a_live_session_streams_settles_and_honours_stop_cancel_and_failure() {
     let start = |v: &OpCtx| ops::live(v, json!({"action": "start"}));
 
     // The real service re-states the whole sentence in progress on every hypothesis, never just
-    // the new words; the fake feeds hypotheses the same way and folds each through the engine's
-    // own diff, so `drive` sees exactly what a real session sends. `heard` is what the service
-    // last said. Skipping that fold is what makes words land twice.
-    let speak = |heard: &mut String, hypotheses: &[&str]| {
+    // the new words; the fake feeds each whole sentence straight to the session the way the
+    // Windows handler now does, so `drive` sees exactly what a real session sends.
+    let speak = |hypotheses: &[&str]| {
         let mut q = factory.queued.lock().unwrap();
         for h in hypotheses {
-            if let Some(m) = hypothesis_update(heard, (*h).to_owned()) {
-                q.push_back(m);
-            }
+            q.push_back(LiveMsg::Replace((*h).to_owned()));
         }
     };
 
     // Speak, pause, speak again, stop: partials replace, a pause settles, stop settles the tail.
-    let mut heard = String::new();
-    speak(&mut heard, &[" Hello", " Hello there"]);
+    speak(&[" Hello", " Hello there"]);
     factory
         .queued
         .lock()
         .unwrap()
         .push_back(LiveMsg::Final("Hello there.".into()));
-    heard.clear();
-    speak(&mut heard, &[" And more"]);
+    speak(&[" And more"]);
     assert_eq!(start(&ctx), Ok(json!({"ok": true})));
     wait_len(&sink, 4);
     assert_eq!(
@@ -679,13 +683,21 @@ fn a_live_session_streams_settles_and_honours_stop_cancel_and_failure() {
         ]
     );
 
-    // Mid-sentence corrections: a re-stated sentence becomes the new tail when the service only
-    // added words, and a whole replacement when it re-wrote one — never a doubled-up sentence.
-    let mut heard = String::new();
-    speak(
-        &mut heard,
-        &["The quick", "The quick brown", "The quark brown"],
-    );
+    // From now on the saved language says "auto": starts leave the choice to Windows.
+    db.write(|tx| {
+        settings::save(
+            tx,
+            &settings::Settings {
+                language: "auto".to_owned(),
+                ..Default::default()
+            },
+        )
+    })
+    .unwrap();
+
+    // Mid-sentence corrections: every hypothesis carries the whole sentence and replaces the
+    // one in progress, so a re-write never doubles up.
+    speak(&["The quick", "The quick brown", "The quark brown"]);
     assert_eq!(start(&ctx), Ok(json!({"ok": true})));
     wait_len(&sink, 8);
     assert_eq!(
@@ -716,8 +728,7 @@ fn a_live_session_streams_settles_and_honours_stop_cancel_and_failure() {
     );
 
     // A second session on the same service starts once the first thread is reaped.
-    let mut heard = String::new();
-    speak(&mut heard, &[" Keep"]);
+    speak(&[" Keep"]);
     factory
         .queued
         .lock()
@@ -740,8 +751,7 @@ fn a_live_session_streams_settles_and_honours_stop_cancel_and_failure() {
     );
 
     // Cancel throws the unfinished sentence away; nothing more lands.
-    let mut heard = String::new();
-    speak(&mut heard, &[" Gone"]);
+    speak(&[" Gone"]);
     assert_eq!(start(&ctx), Ok(json!({"ok": true})));
     wait_len(&sink, 13);
     assert_eq!(
@@ -754,10 +764,14 @@ fn a_live_session_streams_settles_and_honours_stop_cancel_and_failure() {
         ("live_transcript".into(), Some(false), "Gone".into())
     );
 
-    // A session in progress answers a second start with a refusal, not a second microphone.
+    // One owner holds the microphone, and a second start takes it from the session in progress
+    // rather than refusing: this is what frees the microphone when a page reload skipped the
+    // cleanup and left a session listening. The old session's unfinished words are thrown away.
+    speak(&[" Old"]);
     assert_eq!(start(&ctx), Ok(json!({"ok": true})));
-    let busy = code_of(ops::live(&ctx, json!({"action": "start"})));
-    assert_eq!(busy, "busy");
+    wait_len(&sink, 14);
+    assert_eq!(start(&ctx), Ok(json!({"ok": true})));
+    assert_eq!(wire(&sink).len(), 14);
     assert_eq!(
         ops::live(&ctx, json!({"action": "cancel"})),
         Ok(json!({"ok": true}))
@@ -770,16 +784,31 @@ fn a_live_session_streams_settles_and_honours_stop_cancel_and_failure() {
     assert_eq!(e.message, "no speech model here");
 
     // The engine ending by itself settles its tail and frees the slot for the next start.
-    let mut heard = String::new();
-    speak(&mut heard, &[" tail"]);
+    speak(&[" tail"]);
     factory.queued.lock().unwrap().push_back(LiveMsg::Ended);
     assert_eq!(start(&ctx), Ok(json!({"ok": true})));
-    wait_len(&sink, 15);
+    wait_len(&sink, 16);
     assert_eq!(
-        &wire(&sink)[13..15],
+        &wire(&sink)[14..16],
         &[
             ("live_transcript".into(), Some(false), "tail".into()),
             ("live_transcript".into(), Some(true), "tail".into()),
+        ]
+    );
+
+    // The language hand-off: the first start asked with the saved language ("en", the default);
+    // every start after the settings said "auto" left the choice to Windows.
+    assert_eq!(
+        *factory.langs.lock().unwrap(),
+        vec![
+            Some("en".to_owned()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         ]
     );
 
@@ -830,7 +859,7 @@ fn the_windows_speech_service_starts_stops_and_leaves_no_failure() {
 
     let sink = Arc::new(RecordingSink::default());
     let svc = LiveDictation::new();
-    svc.start(sink.clone())
+    svc.start(sink.clone(), None)
         .expect("the speech service should open on a desktop Windows");
     std::thread::sleep(std::time::Duration::from_secs(2));
     svc.stop().expect("the session should stop");
@@ -848,7 +877,7 @@ fn the_windows_speech_service_starts_stops_and_leaves_no_failure() {
         );
     }
     // The slot is free again: start, then cancel straight away.
-    svc.start(sink.clone())
+    svc.start(sink.clone(), None)
         .expect("the service should open a second time");
     svc.cancel().expect("the session should cancel");
 }

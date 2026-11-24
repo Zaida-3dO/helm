@@ -26,6 +26,7 @@ ts-rs = { version = "10.1", features = ["serde-json-impl", "no-serde-warnings"] 
 windows = { version = "0.62", features = [
   "Foundation",
   "Foundation_Collections",
+  "Globalization",
   "Media_SpeechRecognition",
   "Win32_System_WinRT",
 ] }

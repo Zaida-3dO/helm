@@ -6,8 +6,10 @@
 //! sentence when the speaker pauses (the `ResultGenerated` event). Nothing is recorded, sent to a
 //! server, or stored: the words come from the speech engine on this machine.
 //!
-//! One session at a time owns the microphone. `start` spins a thread of its own (COM's apartment
-//! never touches the async runtime's threads, the way `helm-platform`'s audio enumeration works),
+//! One session at a time owns the microphone, and `start` takes it from whatever session was
+//! running before: a page reload never asks the old session to close first, and only one owner
+//! can hold the microphone at a time. `start` spins a thread of its own (COM's apartment never
+//! touches the async runtime's threads, the way `helm-platform`'s audio enumeration works),
 //! streams the words out as events, and obeys `stop` (finish, keep what was heard) or `cancel`
 //! (throw the unfinished sentence away). A session that ends by itself — the microphone taken, the
 //! engine stopped — says so in one line and its words up to that point still settle into the
@@ -68,7 +70,9 @@ pub trait Engine: Send {
 }
 
 pub trait EngineFactory: Send + Sync {
-    fn create(&self) -> Result<Box<dyn Engine>, String>;
+    /// Make an engine for one session. `language` is the BCP-47 tag the user chose, or `None`
+    /// to leave the choice to the operating system.
+    fn create(&self, language: Option<&str>) -> Result<Box<dyn Engine>, String>;
 }
 
 /// Whether a live session can run here, and why not when it cannot. Answered once per process:
@@ -112,25 +116,6 @@ fn probe() -> (bool, Option<String>) {
     (false, Some("Live dictation needs Windows.".to_owned()))
 }
 
-/// Turn one engine hypothesis into what the word stream should carry. The speech service
-/// re-states the whole sentence in progress on every hypothesis, never just the new words, so
-/// the raw text must be folded back into the stream `drive` accumulates: the new tail when the
-/// engine only added words, the whole replacement when it re-wrote the sentence mid-way (it
-/// does, as it hears a word it mis-heard the first time). `prev` is the last hypothesis seen
-/// and stays the whole text.
-pub(crate) fn hypothesis_update(prev: &mut String, text: String) -> Option<LiveMsg> {
-    if text.trim().is_empty() {
-        return None;
-    }
-    let msg = match text.strip_prefix(prev.as_str()) {
-        Some(tail) if !tail.is_empty() => LiveMsg::Words(tail.to_owned()),
-        Some(_) => return None, // the very same sentence again: no news
-        None => LiveMsg::Replace(text.clone()),
-    };
-    *prev = text;
-    Some(msg)
-}
-
 /// One live session: the command line to its thread and the thread itself.
 struct Running {
     cmd: Sender<Cmd>,
@@ -164,23 +149,28 @@ impl LiveDictation {
         }
     }
 
-    /// Begin a session. The words arrive on `events` afterwards.
-    pub fn start(&self, events: Arc<dyn EventSink>) -> Result<(), ApiError> {
+    /// Begin a session, taking the microphone from any session still running (there is only
+    /// ever one owner, and a page reload never told the old session to close). `language` is
+    /// the BCP-47 tag the user chose, or `None` for the operating system's own speech language.
+    /// The words arrive on `events` afterwards.
+    pub fn start(
+        &self,
+        events: Arc<dyn EventSink>,
+        language: Option<String>,
+    ) -> Result<(), ApiError> {
         let mut slot = self.slot.lock().unwrap();
         if let Some(r) = slot.take() {
             if r.thread.is_finished() {
                 let _ = r.thread.join(); // it ended by itself: reap it
             } else {
-                *slot = Some(r);
-                return Err(ApiError::new(
-                    "busy",
-                    "Dictation is already listening. Finish it, or press Esc.",
-                ));
+                // Take over: the unfinished sentence goes the way Esc would have thrown it.
+                let _ = r.cmd.send(Cmd::Cancel);
+                let _ = r.thread.join();
             }
         }
         let engine = self
             .factory
-            .create()
+            .create(language.as_deref())
             .map_err(|m| ApiError::new("not_available", m))?;
         let (cmd_tx, cmd_rx) = channel();
         let (ack_tx, ack_rx) = sync_channel(1);
@@ -253,8 +243,9 @@ fn drive(
         match cmd_rx.try_recv() {
             Ok(Cmd::Stop) => {
                 engine.stop().ok();
-                // The engine may have settled the last sentence on its way out (it fires before
-                // the stop completes); its word is better than the tail we last saw, so drain it.
+                // The engine may have settled sentences on its way out (they fire before the
+                // stop completes); each settled one is sent as it is drained, so two of them
+                // are never collapsed into one, and only the sentence still in progress is kept.
                 while let Some(m) = engine.next(Duration::from_millis(0)) {
                     match m {
                         LiveMsg::Words(w) => pending.push_str(&w),
@@ -264,7 +255,14 @@ fn drive(
                         }
                         LiveMsg::Final(t) => {
                             pending.clear();
-                            pending.push_str(&t);
+                            let t = t.trim().to_owned();
+                            if !t.is_empty() {
+                                events.emit(
+                                    AppEvent::new(TRANSCRIPT_EVENT)
+                                        .with("final", true)
+                                        .with("text", t),
+                                );
+                            }
                         }
                         LiveMsg::Failed(_) | LiveMsg::Ended => {}
                     }
@@ -293,15 +291,15 @@ fn drive(
                 emit_in_progress(&pending, &events);
             }
             Some(LiveMsg::Final(t)) => {
+                // A settled sentence. An empty one says the engine heard nothing during the
+                // pause: it still goes out, so the in-progress text it replaces is cleared
+                // rather than left to settle into the draft as real words at stop.
                 pending.clear();
-                let t = t.trim().to_owned();
-                if !t.is_empty() {
-                    events.emit(
-                        AppEvent::new(TRANSCRIPT_EVENT)
-                            .with("final", true)
-                            .with("text", t),
-                    );
-                }
+                events.emit(
+                    AppEvent::new(TRANSCRIPT_EVENT)
+                        .with("final", true)
+                        .with("text", t.trim().to_owned()),
+                );
             }
             Some(LiveMsg::Failed(m)) => {
                 flush(&mut pending, &events);
@@ -349,14 +347,14 @@ struct PlatformEngines;
 
 #[cfg(windows)]
 impl EngineFactory for PlatformEngines {
-    fn create(&self) -> Result<Box<dyn Engine>, String> {
-        Ok(Box::<WinRtEngine>::default())
+    fn create(&self, language: Option<&str>) -> Result<Box<dyn Engine>, String> {
+        Ok(Box::new(WinRtEngine::new(language.map(str::to_owned))))
     }
 }
 
 #[cfg(not(windows))]
 impl EngineFactory for PlatformEngines {
-    fn create(&self) -> Result<Box<dyn Engine>, String> {
+    fn create(&self, _language: Option<&str>) -> Result<Box<dyn Engine>, String> {
         Err(probe()
             .1
             .unwrap_or_else(|| "Live dictation is not available here.".to_owned()))
@@ -372,6 +370,8 @@ impl EngineFactory for PlatformEngines {
 struct WinRtEngine {
     tx: Sender<LiveMsg>,
     rx: Receiver<LiveMsg>,
+    /// The speech language the user asked for, if any; `None` leaves it to Windows.
+    language: Option<String>,
     inner: Option<Windows>,
 }
 
@@ -383,15 +383,30 @@ struct Windows {
     completed_token: i64,
     hypothesis_token: i64,
     started: bool,
+    /// Balances the `RoInitialize` this session opened. Declared last so it drops after every
+    /// interface: the Runtime must stay initialised until the last one is released.
+    _apartment: UninitializeOnDrop,
+}
+
+/// Releases the Runtime apartment when it drops. Only ever used as the last field of `Windows`.
+#[cfg(windows)]
+struct UninitializeOnDrop;
+
+#[cfg(windows)]
+impl Drop for UninitializeOnDrop {
+    fn drop(&mut self) {
+        unsafe { windows::Win32::System::WinRT::RoUninitialize() };
+    }
 }
 
 #[cfg(windows)]
-impl Default for WinRtEngine {
-    fn default() -> Self {
+impl WinRtEngine {
+    fn new(language: Option<String>) -> Self {
         let (tx, rx) = channel();
         Self {
             tx,
             rx,
+            language,
             inner: None,
         }
     }
@@ -422,7 +437,16 @@ impl Engine for WinRtEngine {
         let built = (|| -> windows::core::Result<Windows> {
             {
                 use windows::core::Error as WError;
-                let recognizer = SpeechRecognizer::new()?;
+                // The user's language when they named one (and the service then answers in one
+                // line when it has no model for it); otherwise Windows' own speech language.
+                let recognizer = match self.language.as_deref() {
+                    Some(tag) => {
+                        let lang =
+                            windows::Globalization::Language::CreateLanguage(&HSTRING::from(tag))?;
+                        SpeechRecognizer::Create(&lang)?
+                    }
+                    None => SpeechRecognizer::new()?,
+                };
                 let hint = HSTRING::from("helm dictation");
                 let constraint = SpeechRecognitionTopicConstraint::Create(
                     SpeechRecognitionScenario::Dictation,
@@ -441,22 +465,15 @@ impl Engine for WinRtEngine {
                 }
                 let session = recognizer.ContinuousRecognitionSession()?;
 
-                // The hypothesis handlers see whole sentences, so they fold each one against
-                // the last through this; a settled sentence starts the next one from nothing.
-                let heard = Arc::new(Mutex::new(String::new()));
                 let tx = self.tx.clone();
-                let heard_for_result = heard.clone();
                 let result_handler = TypedEventHandler::new(
                     move |_s: Ref<SpeechContinuousRecognitionSession>,
                           args: Ref<SpeechContinuousRecognitionResultGeneratedEventArgs>|
                           -> windows::core::Result<()> {
-                        // A settled sentence; an empty one (nothing heard in this pause) is no news.
+                        // A settled sentence; an empty one (nothing heard in this pause) still
+                        // goes, so the session clears the in-progress text of the dropped phrase.
                         let text = args.ok()?.Result()?.Text()?;
-                        let t = text.to_string();
-                        if !t.trim().is_empty() {
-                            let _ = tx.send(LiveMsg::Final(t));
-                            *heard_for_result.lock().unwrap() = String::new();
-                        }
+                        let _ = tx.send(LiveMsg::Final(text.to_string()));
                         Ok(())
                     },
                 );
@@ -480,18 +497,18 @@ impl Engine for WinRtEngine {
                 );
                 let completed_token = session.Completed(&completed_handler)?;
                 let tx = self.tx.clone();
-                let heard_for_hyp = heard.clone();
                 let hypothesis_handler = TypedEventHandler::new(
                     move |_s: Ref<SpeechRecognizer>,
                           args: Ref<SpeechRecognitionHypothesisGeneratedEventArgs>|
                           -> windows::core::Result<()> {
                         // Words as they are heard, for the sentence in progress. The service
-                        // re-states the whole sentence each time, so only the new tail (or the
-                        // whole re-written sentence) goes on the stream.
+                        // re-states the whole sentence on every hypothesis, never just the new
+                        // words, so every hypothesis replaces the one before it — no shared
+                        // state, nothing the thread ordering can double up or drop.
                         let text = args.ok()?.Hypothesis()?.Text()?;
-                        let mut heard = heard_for_hyp.lock().unwrap();
-                        if let Some(m) = hypothesis_update(&mut heard, text.to_string()) {
-                            let _ = tx.send(m);
+                        let t = text.to_string();
+                        if !t.trim().is_empty() {
+                            let _ = tx.send(LiveMsg::Replace(t));
                         }
                         Ok(())
                     },
@@ -505,6 +522,7 @@ impl Engine for WinRtEngine {
                     completed_token,
                     hypothesis_token,
                     started: true,
+                    _apartment: UninitializeOnDrop,
                 })
             }
         })();
@@ -562,7 +580,7 @@ impl Drop for Windows {
             self.session.CancelAsync().ok();
         }
         self.recognizer.Close().ok();
-        unsafe { windows::Win32::System::WinRT::RoUninitialize() };
+        // The apartment is uninitialised by the `_apartment` field, which drops after this one.
     }
 }
 
