@@ -8,7 +8,7 @@
 import type { ReactNode } from 'react';
 import type { Api } from '../api/client.ts';
 import { toast } from '../ui/toasts.ts';
-import { PanelModel } from './model.ts';
+import { APP_SET, PanelModel } from './model.ts';
 import type { CloseReason, Intent, KindRules, PanelTab, SlotId } from './model.ts';
 
 export interface TabContext {
@@ -176,7 +176,10 @@ export function openInPanel(
 ): boolean {
   const tab = panelStore.update((m) => m.open(kind, key, data, opts, panelStore.current));
   const want = panelStore.kinds.get(kind)?.preferredWidth;
-  if (tab && want && opts.intent === 'user' && panelStore.width < want) {
+  // Only a tab the shown chat displays may widen the panel: a push into another chat's set
+  // must leave the shown chat's layout alone.
+  const shown = tab !== null && (tab.set === APP_SET || tab.set === PanelModel.view(panelStore.current));
+  if (tab && want && opts.intent === 'user' && shown && panelStore.width < want) {
     // A kind that likes room: widen the panel when the window has it, else fill the window.
     const sidebar = typeof document === 'undefined' ? 0 : (document.querySelector<HTMLElement>('.shell-sidebar:not([hidden])')?.offsetWidth ?? 0);
     const room = typeof window === 'undefined' ? want : window.innerWidth - PREFERRED_WIDTH_RESERVE - sidebar;

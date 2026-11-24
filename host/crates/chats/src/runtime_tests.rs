@@ -2060,18 +2060,21 @@ async fn a_used_up_plan_allowance_holds_a_start_and_the_reset_releases_it() {
     .await;
     // The queued state the UI reads carries the hold's words with it: why, how full, and when
     // the gating window reopens.
-    h.until("the queued state names the hold and its opening time", |h| {
-        let s = serde_json::from_str::<Value>(
-            &h.col(&format!(
-                "SELECT COALESCE(state, 'null') FROM chat_activity WHERE chat_id = '{chat}'"
-            ))[0],
-        )
-        .unwrap();
-        s["kind"] == "queued"
-            && s["reason"] == "claude_capacity"
-            && s["pct"] == 96.0
-            && s["until"] == json!(seed_at + 4_000)
-    })
+    h.until(
+        "the queued state names the hold and its opening time",
+        |h| {
+            let s = serde_json::from_str::<Value>(
+                &h.col(&format!(
+                    "SELECT COALESCE(state, 'null') FROM chat_activity WHERE chat_id = '{chat}'"
+                ))[0],
+            )
+            .unwrap();
+            s["kind"] == "queued"
+                && s["reason"] == "claude_capacity"
+                && s["pct"] == 96.0
+                && s["until"] == json!(seed_at + 4_000)
+        },
+    )
     .await;
     h.until("the reset clears the hold", |h| {
         h.col(&format!(
@@ -2140,7 +2143,10 @@ async fn start_anyway_opens_one_held_send_and_the_next_start_waits_again() {
     // A chat that waits on nothing cannot be forced through it.
     let idle = h.create().await;
     let refused = h
-        .call("queue_action", json!({"chatId": idle, "action": "start_anyway"}))
+        .call(
+            "queue_action",
+            json!({"chatId": idle, "action": "start_anyway"}),
+        )
         .await
         .unwrap_err();
     assert!(
@@ -2151,7 +2157,10 @@ async fn start_anyway_opens_one_held_send_and_the_next_start_waits_again() {
     // A hand park is the user's to end, not to force through.
     crate::queue::manual_hold(&h.db, &idle, "normal", now);
     let refused = h
-        .call("queue_action", json!({"chatId": idle, "action": "start_anyway"}))
+        .call(
+            "queue_action",
+            json!({"chatId": idle, "action": "start_anyway"}),
+        )
         .await
         .unwrap_err();
     assert!(
@@ -2171,13 +2180,20 @@ async fn start_anyway_opens_one_held_send_and_the_next_start_waits_again() {
     })
     .await;
     // Start anyway: the held send goes through the gate at once, windows and all.
-    h.call("queue_action", json!({"chatId": chat, "action": "start_anyway"}))
-        .await
-        .unwrap();
+    h.call(
+        "queue_action",
+        json!({"chatId": chat, "action": "start_anyway"}),
+    )
+    .await
+    .unwrap();
     let mut w = h.worker().await;
     w.ready().await;
     let p = w.expect("prompt").await;
-    assert_eq!(p["submissionId"], sid.as_str(), "the same send opens the turn");
+    assert_eq!(
+        p["submissionId"],
+        sid.as_str(),
+        "the same send opens the turn"
+    );
     h.until("the hold and its reason go once it opens", |h| {
         h.col(&format!(
             "SELECT count(*) FROM chat_dispatch_holds WHERE chat_id = '{chat}'"
@@ -4497,6 +4513,61 @@ async fn a_crash_between_stage_and_apply_is_repaired_at_startup() {
         h.col("SELECT chat_id FROM pending_edits"),
         std::slice::from_ref(&broken)
     );
+}
+
+/// A message whose only content is its picture is content for an edit too: the open reports it
+/// as having attachments, an empty edit stages (carrying a fresh copy of the picture), and the
+/// same empty edit on a plain text message stays refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_image_only_message_edits_with_empty_text() {
+    let mut h = harness();
+    let chat = h.create().await;
+    first_turn_with_image(&mut h, &chat).await;
+    let first = user_row(&h, &chat, "first");
+    let o = crate::edit::open(&h.db, &chat, first).unwrap();
+    assert!(o.has_attachments, "the message carries a picture");
+    let sid = uuid::Uuid::new_v4().to_string();
+    crate::edit::stage(
+        &h.db,
+        &h.profile.path("sessions"),
+        &h.profile.path("attachments"),
+        &crate::types::MessageResendArgs {
+            chat_id: chat.clone(),
+            message_id: first,
+            revision: o.revision,
+            submission_id: sid.clone(),
+            text: String::new(),
+        },
+    )
+    .unwrap();
+    assert_eq!(h.state(&sid), "saved");
+    // The picture rides the new submission as its own copy.
+    let copies: i64 = h.col(&format!(
+        "SELECT count(*) FROM chat_attachments WHERE submission_id = '{sid}'"
+    ))[0]
+        .parse()
+        .unwrap();
+    assert_eq!(copies, 1, "the empty edit keeps the picture");
+    // Control: the same empty edit on a message with nothing attached is refused.
+    let plain = h.create().await;
+    let _w = first_turn(&mut h, &plain).await;
+    let row = user_row(&h, &plain, "first");
+    let o = crate::edit::open(&h.db, &plain, row).unwrap();
+    assert!(!o.has_attachments, "a plain message carries nothing");
+    let err = crate::edit::stage(
+        &h.db,
+        &h.profile.path("sessions"),
+        &h.profile.path("attachments"),
+        &crate::types::MessageResendArgs {
+            chat_id: plain,
+            message_id: row,
+            revision: o.revision,
+            submission_id: uuid::Uuid::new_v4().to_string(),
+            text: "  ".into(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.message, "There is nothing to send.");
 }
 
 /// Edits are refused while the chat works, and only for the user's sent messages.

@@ -75,6 +75,27 @@ test('a chat-scoped open for another chat lands in that chat and is selected the
   assert.equal(m.activeEntry('c2'), t.id);
 });
 
+test('a push into another chat leaves the shown chat alone: a round trip restores both as they were', () => {
+  const { m } = setup();
+  // c1 is on screen and has an open file.
+  const f = m.open('file', 'x', { path: 'x' }, { intent: 'user' }, 'c1')!;
+  (f.data as { top?: number }).top = 40; // the reading position, kept on the tab
+  assert.equal(m.activeEntry('c1'), f.id);
+  // The panel is hidden and maximised for the shown chat when c2 (in the background) pushes a file.
+  m.hide();
+  m.setMaximized(true);
+  const p = m.open('file', 'b', {}, { intent: 'user', chatId: 'c2' }, 'c1')!;
+  assert.equal(p.set, 'c2');
+  assert.equal(m.hidden, true, 'a push never unhides the shown chat panel');
+  assert.equal(m.maximized, true, 'a push never changes maximisation');
+  assert.deepEqual(keys(m.displayed('c1')), ['x'], 'the shown chat gains nothing');
+  assert.deepEqual(keys(m.displayed('c2')), ['b']);
+  // Back on screen, c1 shows its file exactly as it was; c2 has its push selected and waiting.
+  assert.equal(m.activeEntry('c1'), f.id);
+  assert.equal((f.data as { top?: number }).top, 40);
+  assert.equal(m.activeEntry('c2'), p.id);
+});
+
 test('the kind cap evicts the least recently used tab of that kind in the set', () => {
   const { m, closes } = setup();
   m.open('one', 'x', {}, { intent: 'user' }, 'c1');

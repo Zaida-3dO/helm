@@ -38,6 +38,9 @@ pub struct EditOpen {
     pub message_id: i64,
     pub revision: i64,
     pub text: String,
+    /// Whether the message carries pictures or file references. They ride the resend, so an
+    /// empty text is still a message when this is true.
+    pub has_attachments: bool,
 }
 
 fn refuse(m: &str) -> Refusal {
@@ -99,15 +102,58 @@ fn editable(
     Ok(Ok((key, revision, text)))
 }
 
+/// One `open` read: the editable message's key, revision and text, with whether it carries
+/// attachments — or the refusal.
+type EditOpenRow = Result<(String, i64, String, bool), Refusal>;
+
 pub fn open(db: &Database, chat_id: &str, message_id: i64) -> Result<EditOpen, Refusal> {
     let r = db
-        .snapshot(|tx| editable(tx, chat_id, message_id))
+        .snapshot(|tx| -> Result<EditOpenRow, rusqlite::Error> {
+            let (key, revision, text) = match editable(tx, chat_id, message_id)? {
+                Ok(v) => v,
+                Err(r) => return Ok(Err(r)),
+            };
+            let has_attachments = message_has_attachments(tx, chat_id, message_id, &key)?;
+            Ok(Ok((key, revision, text, has_attachments)))
+        })
         .map_err(|e| Refusal::new("internal", e.to_string()))??;
     Ok(EditOpen {
         message_id,
         revision: r.1,
         text: r.2,
+        has_attachments: r.3,
     })
+}
+
+/// Whether the message carries pictures or file references: either is content enough on its own
+/// for a resend, since the edit carries them over to the new submission either way.
+fn message_has_attachments(
+    tx: &Transaction<'_>,
+    chat_id: &str,
+    message_id: i64,
+    entry_id: &str,
+) -> rusqlite::Result<bool> {
+    let details: Option<String> = tx
+        .query_row(
+            "SELECT details FROM messages WHERE chat_id = ?1 AND id = ?2",
+            params![chat_id, message_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let has_image = details
+        .and_then(|d| serde_json::from_str(&d).ok())
+        .is_some_and(|d: Value| !crate::message_images::ids_in(&d).is_empty());
+    if has_image {
+        return Ok(true);
+    }
+    match entry_id.strip_prefix("u:") {
+        Some(old_sid) => tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_attachment_refs WHERE submission_id = ?1)",
+            [old_sid],
+            |r| r.get(0),
+        ),
+        None => Ok(false),
+    }
 }
 
 /// Give the new submission its own copy of the edited message's images. The ids of the files made
@@ -202,9 +248,6 @@ pub fn stage(
     attachments: &Path,
     a: &MessageResendArgs,
 ) -> Result<Submission, Refusal> {
-    if a.text.trim().is_empty() {
-        return Err(Refusal::new("bad_args", "There is nothing to send."));
-    }
     if a.text.len() > crate::store::MAX_SUBMISSION_BYTES {
         return Err(Refusal::new(
             "too_large",
@@ -232,6 +275,11 @@ pub fn stage(
             return Ok(Err(refuse(
                 "This message changed while you were editing; copy your edit and open it again.",
             )));
+        }
+        // An empty edit sends when the message carries pictures or references: the resend keeps
+        // them, so the message is still content. Nothing at all is still refused.
+        if a.text.trim().is_empty() && !message_has_attachments(tx, &a.chat_id, a.message_id, &key)? {
+            return Ok(Err(refuse("There is nothing to send.")));
         }
         let pending: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM pending_edits WHERE chat_id = ?1)",

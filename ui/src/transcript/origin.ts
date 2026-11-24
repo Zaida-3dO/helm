@@ -88,7 +88,8 @@ const PEER_FRAME = /^\[Message from another chat: "([^"\n]*)" \(([^)\s]+)\)\]\n[
 
 /**
  * A message another chat sent, split into sender and body for the card. Null for anything else,
- * and for an older or odd message whose text does not have the frame: that stays a plain bubble.
+ * and for an older or odd message whose text does not have the frame; the transcript cards those
+ * generically (see `agentNote`).
  */
 export function peerMessage(row: MessageRow): PeerMessage | null {
   if (row.role !== 'user' || row.details?.origin !== 'other_chat') return null;

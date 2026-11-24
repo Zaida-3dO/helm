@@ -123,6 +123,8 @@ function host(initial: { stored: string | null; devices: DevicesList | null; sav
         state.stored = a.value;
         return null;
       }
+      case 'relay_reconnect':
+        return null;
       default:
         throw new ApiError('unknown_op', op);
     }
@@ -184,11 +186,13 @@ test('the devices store follows the choice, falls back to this PC when that devi
   assert.deepEqual([old.snapshot.loaded, old.snapshot.list, old.snapshot.selected, old.snapshot.remote], [true, null, null, null]);
   store.stop();
 
-  // A window that comes back re-reads the list (so a PC that woke up shows at once), but at most
-  // once per FOCUS_READ_MS.
+  // A window that comes back re-reads the list and pokes the hub line (so a PC that woke up
+  // shows, and a line waiting between retries connects, at once), but at most once per FOCUS_READ_MS.
   let reads = 0;
+  let pokes = 0;
   const counted = (async (op: string, args: unknown) => {
     if (op === 'devices_list') reads++;
+    if (op === 'relay_reconnect') pokes++;
     return h.api(op, args);
   }) as Api;
   const focus = new DevicesStore({ api: counted, bus: new EventBus() });
@@ -198,11 +202,13 @@ test('the devices store follows the choice, falls back to this PC when that devi
   const t0 = Date.now();
   await settle();
   assert.equal(reads, 1, 'starting reads once');
+  assert.equal(pokes, 0, 'starting does not poke the line: the host is already trying it');
   assert.equal(focus.readOnFocus(t0 + FOCUS_READ_MS), true, 'the first focus after the start re-reads');
   assert.equal(focus.readOnFocus(t0 + 2 * FOCUS_READ_MS - 1), false, 'a second focus inside 10 s of that one does not');
   assert.equal(focus.readOnFocus(t0 + 2 * FOCUS_READ_MS), true, 'once 10 s have passed it does');
   await settle();
   assert.equal(reads, 3);
+  assert.equal(pokes, 2, 'a woken window wakes a waiting line too, once per interval');
   focus.stop();
 });
 

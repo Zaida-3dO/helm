@@ -1472,7 +1472,10 @@ impl ChatPort for HostPort {
     fn set_model(&self, a: SetModelArgs) -> BoxFut<'_, PortResult<()>> {
         Box::pin(async move {
             self.here(&a.chat_id)?;
-            let mut args = json!({ "chatId": a.chat_id, "model": a.model });
+            let mut args = json!({ "chatId": a.chat_id });
+            if let Some(m) = &a.model {
+                args["model"] = json!(m);
+            }
             if let Some(e) = &a.effort {
                 args["effort"] = json!(e);
             }

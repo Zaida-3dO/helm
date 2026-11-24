@@ -12,7 +12,8 @@
 //!
 //! Every chat is told the mode in its launch prompt (the `workmode` section of the prompt
 //! addendum). The section remembers what each chat was told, so a later turn can say so when
-//! the mode has changed since. No agent tool reads or writes the mode: only the user's own ops.
+//! the mode has changed since. Chats read the mode and may stage a change through the `workmode`
+//! settings key ([`crate::wmode_ext`]); only the user's approval writes it.
 
 use helm_core::db::Database;
 use helm_hosttools::addendum::AddendumSection;

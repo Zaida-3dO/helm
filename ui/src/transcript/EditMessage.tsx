@@ -1,6 +1,7 @@
 // Inline edit of a sent message: change the text, then Resend (Mod+Enter) or
 // Cancel (Escape). Resending replaces every later message; it does not undo changes to project
 // files, leaves the draft alone, and keeps the earlier conversation in the local history.
+// A message that carries pictures or files keeps them through the edit, so its text may go empty.
 
 import { useEffect, useRef, useState } from 'react';
 
@@ -8,6 +9,13 @@ export interface EditState {
   rowId: number;
   revision: number;
   text: string;
+  /** The message carries pictures or references; with them an empty text still resends. */
+  hasAttachments: boolean;
+}
+
+/** What the edit may send: words, or the attachments that ride along with them. */
+export function canResend(text: string, hasAttachments: boolean): boolean {
+  return text.trim() !== '' || hasAttachments;
 }
 
 export const EDIT_NOTE =
@@ -29,7 +37,7 @@ export function EditMessage({
   useEffect(() => ref.current?.focus(), []);
 
   const submit = async () => {
-    if (!text.trim() || busy) return;
+    if (!canResend(text, edit.hasAttachments) || busy) return;
     setBusy(true);
     setError(null);
     try {
@@ -64,7 +72,7 @@ export function EditMessage({
         <button type="button" className="small" onClick={onCancel} disabled={busy}>
           Cancel
         </button>
-        <button type="button" className="small primary" data-testid="edit-resend" onClick={() => void submit()} disabled={busy || !text.trim()}>
+        <button type="button" className="small primary" data-testid="edit-resend" onClick={() => void submit()} disabled={busy || !canResend(text, edit.hasAttachments)}>
           Resend
         </button>
       </div>

@@ -32,11 +32,11 @@ import { SidebarActions, compactChat, exportChatMarkdown, rollOverChat, rollOver
 import { SidebarData, errorText } from './data.ts';
 import { canSitUnder, dropAction, passedThreshold, type DragSource, type DropTarget } from './drag.ts';
 import { chatMenuItems, projectMenuItems } from './menus.ts';
-import { badgeOrder, buildList, chatAncestors, projectsHolding, showsCalmWheel, visibleChatOrder, type ListView, type ListItem } from './model.ts';
+import { buildList, chatAncestors, groupStatus, projectsHolding, rightCluster, titleCluster, visibleChatOrder, type GroupMarks, type ListView, type ListItem } from './model.ts';
 import { setVisibleOrder } from './rowOrder.ts';
 import { SidebarTop } from './SidebarTop.tsx';
 import { PromptDialog, type Prompt } from './PromptDialog.tsx';
-import { ItemChip, ItemFolderRow, ItemOpenButton, ItemPickerHost, useItemRefs, useOpenItem } from '../itemlinks/ItemUi.tsx'; // item links
+import { ItemFolderRow, ItemPickerHost, useItemRefs, useOpenItem } from '../itemlinks/ItemUi.tsx'; // item links
 import { refsByChat, type ItemRef } from '../itemlinks/folders.ts';
 import type { ItemLink } from '../api/itemlinks.ts';
 import {
@@ -48,12 +48,14 @@ import {
   IconGrip,
   IconMore,
   IconMute,
+  IconPause,
   IconPin,
   IconPlus,
   IconQuit,
   IconRename,
   IconRestore,
   IconSettings,
+  IconUnread,
   IconX,
 } from '../ui/icons.tsx';
 import { withChatIcons, withProjectIcons } from './menuIcons.tsx';
@@ -61,7 +63,7 @@ import { StarMark, WheelMark } from '../ui/status/index.ts';
 import { openNewChat, openPrimaryFolder } from '../newchat/index.ts';
 import { ProjectIcon, openIconPicker } from '../projects/index.ts';
 import { getDefaultBoard } from '../newchat/boards.ts';
-import { ATTENTION_LABEL, age, needsYouLabel, rowStateLabel, rowStatusLabel, trailingIndicator } from './status.ts';
+import { age, foldStatus, isBusy, needsYouLabel, rowStateLabel, rowStatusLabel, STATUS_LABEL, type RowStatus } from './status.ts';
 import { localWaitLabel } from '../state/localModel.ts';
 import { useSubagentsRunning } from '../transcript/subagents/counts.ts';
 import { startSyncTriggers, syncOnOpen, type SyncHost } from './sync.ts';
@@ -317,6 +319,9 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const itemRefs = useItemRefs(useMemo(() => snap.rows.map((r) => r.chatId), [snap.rows]));
   const allItemRefs = useMemo(() => new Map([...itemRefs, ...remoteRefs]), [itemRefs, remoteRefs]);
   const flaggedIds = useMemo(() => new Set([...snap.needsYou, ...snap.flagged.keys(), ...remoteNeedsYouIds, ...remoteFlagReasons.keys()]), [snap.needsYou, snap.flagged, remoteNeedsYouIds, remoteFlagReasons]);
+  // Chats that finished a reply nobody has opened: the animated done status. The summary comes
+  // from this PC, so chats of another PC never read as done (their read state lives over there).
+  const finishedIds = useMemo(() => new Set((snap.attention?.finished ?? []).map((r) => r.chatId)), [snap.attention]);
   const items = useMemo(
     () =>
       buildList(shownProjects, shownRows, {
@@ -326,10 +331,11 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         selectedChatId: selected,
         keptShut: keptShut.chat === selected ? keptShut.ids : undefined,
         flagged: flaggedIds,
+        finished: finishedIds,
         closed: remote ? undefined : snap.closed,
         itemLinks: currentView === 'activity' ? undefined : { refs: allItemRefs, collapsed: collapsedItems },
       }),
-    [shownProjects, shownRows, listView, currentView, compact, expanded, selected, keptShut, flaggedIds, snap.closed, allItemRefs, collapsedItems, remote],
+    [shownProjects, shownRows, listView, currentView, compact, expanded, selected, keptShut, flaggedIds, finishedIds, snap.closed, allItemRefs, collapsedItems, remote],
   );
   useEffect(() => setVisibleOrder(visibleChatOrder(items)), [items]);
   const projectsById = useMemo(() => new Map(shownProjects.map((p) => [p.id, p])), [shownProjects]);
@@ -1039,6 +1045,32 @@ function projectIconNode(p: ProjectNode): ReactNode {
   return <ProjectIcon project={p} size={16} />;
 }
 
+/** The glyph a folded status shows. One shape per status, shared by chat rows and collapsed
+ *  headers; an interrupted row carries no glyph (the CSS slot dot says it). */
+function StatusGlyph({ kind, wheel }: { kind: RowStatus; wheel?: 'working' | 'stopping' }) {
+  return (
+    <>
+      {kind === 'running' && <WheelMark size={20} state={wheel ?? 'working'} className="sb-ind-wheel" />}
+      {kind === 'lingering' && <WheelMark size={20} state="calm" className="sb-ind-wheel" />}
+      {kind === 'flagged' && <IconFlag size={12} filled />}
+      {kind === 'draft' && <IconEdit size={11} />}
+      {kind === 'done' && <StarMark size={26} className="sb-ind-star ui-star-shimmer" />}
+      {kind === 'unread' && <IconUnread size={11} />}
+      {kind === 'pinned' && <IconPin size={11} />}
+    </>
+  );
+}
+
+/** What a collapsed project header says its single folded status means, with the counts inside. */
+const GROUP_MARK_LABEL: Record<'running' | 'flagged' | 'draft' | 'done' | 'lingering' | 'unread', (m: GroupMarks) => string> = {
+  running: (m) => `${m.running} running`,
+  flagged: (m) => `${m.flagged} may need you`,
+  draft: (m) => `${m.draft} chats hold an unsent draft`,
+  done: (m) => `${m.done} finished, unread`,
+  lingering: () => 'Background work running',
+  unread: (m) => `${m.unread} unread`,
+};
+
 function GroupHeader({
   item,
   current,
@@ -1073,6 +1105,8 @@ function GroupHeader({
 }) {
   const p = item.project;
   const colour = colourCss(p.colour);
+  const gs = item.marks ? groupStatus(item.marks) : null;
+  const gsLabel = item.marks && gs ? GROUP_MARK_LABEL[gs](item.marks) : '';
   return (
     <div
       className="sb-header"
@@ -1130,31 +1164,19 @@ function GroupHeader({
               <IconRename size={11} />
             </span>
           )}
-          <span className="sb-count" title={`${p.chatCount} non-archived chats`}>
+          <span className="sb-agg sb-count" title={`${p.chatCount} non-archived chats`}>
             {p.chatCount}
           </span>
-          {item.marks && (
-            <span className="sb-group-marks" data-testid="group-marks">
-              {item.marks.running > 0 && (
-                <span className="sb-ind" role="img" aria-label={`${item.marks.running} running`} title={`${item.marks.running} running`}>
-                  <WheelMark size={20} state="working" className="sb-ind-wheel" />
-                </span>
-              )}
-              {showsCalmWheel(item.marks) && (
-                <span className="sb-ind" data-testid="group-background" role="img" aria-label="Background work running" title="Background work running">
-                  <WheelMark size={20} state="calm" className="sb-ind-wheel" />
-                </span>
-              )}
-              {item.marks.unread > 0 && (
-                <span className="sb-ind" role="img" aria-label={`${item.marks.unread} unread`} title={`${item.marks.unread} unread`}>
-                  <StarMark size={26} className="sb-ind-star ui-star-shimmer" />
-                </span>
-              )}
-              {item.marks.flagged > 0 && (
-                <span className="sb-flag" data-testid="group-flag" role="img" aria-label={`${item.marks.flagged} may need you`} title={`${item.marks.flagged} may need you`}>
-                  <IconFlag size={12} filled />
-                </span>
-              )}
+          {gs && (
+            <span
+              className="sb-status"
+              data-kind={gs}
+              data-testid={gs === 'flagged' ? 'group-flag' : 'group-marks'}
+              role="img"
+              aria-label={gsLabel}
+              title={gsLabel}
+            >
+              <StatusGlyph kind={gs} />
             </span>
           )}
         </button>
@@ -1221,29 +1243,6 @@ function GroupHeader({
   );
 }
 
-function Indicator({ row }: { row: SidebarRow }) {
-  const a = row.attention;
-  if (!a) return <span className="sb-ind" aria-hidden="true" />;
-  const label = a === 'running' ? rowStatusLabel(row) : ATTENTION_LABEL[a];
-  return (
-    <span
-      className={`sb-ind sb-ind-${a}`}
-      data-state={a}
-      data-stalled={row.stalled ? 'true' : undefined}
-      data-local={a === 'running' && row.local ? 'true' : undefined}
-      data-ahead={a === 'running' && row.local && row.localAhead !== null ? String(row.localAhead) : undefined}
-      role="img"
-      aria-label={label}
-      title={label}
-    >
-      {a === 'pinned' && <IconPin size={11} />}
-      {a === 'running' && <WheelMark size={20} state={row.status === 'stopping' ? 'stopping' : 'working'} className="sb-ind-wheel" />}
-      {a === 'lingering' && <WheelMark size={20} state="calm" className="sb-ind-wheel" />}
-      {a === 'unread' && <StarMark size={26} className="sb-ind-star ui-star-shimmer" />}
-    </span>
-  );
-}
-
 function ChatRow({
   item,
   indent,
@@ -1291,92 +1290,108 @@ function ChatRow({
   onLeave: () => void;
   onPointerDown: (e: ReactPointerEvent) => void;
 }) {
-  // A chat whose own turn ended but whose subagents still run shows the wheel.
+  // A chat whose own turn ended but whose subagents still run reads as running.
   const subagents = useSubagentsRunning(item.row.chatId);
-  const r = subagents > 0 && item.row.attention !== 'running' ? { ...item.row, attention: 'running' as const } : item.row;
-  const chip = rowStateLabel(r.state);
+  const r = item.row;
+  const queued = r.state && r.state.kind === 'queued' ? r.state : null;
+  // The live-state text stays a word (a tool's name, or "Quiet") beside the status icon; a queue
+  // wait is no longer a tag — it becomes the queue icon and number.
+  const chip = r.state && (r.state.kind === 'tool' || r.state.kind === 'silent') ? rowStateLabel(r.state) : null;
   const colour = colourCss(project?.colour);
-  const trailing = trailingIndicator(r.attention);
-  const childRunning = item.childRunning ?? 0;
-  const childFlagged = item.childFlagged ?? 0;
-  // One trailing order for every row (flag, chip, mute, shared-from, children and their status,
-  // item, draft, age last) — the badges are built once and drawn in badgeOrder's order.
-  const badges: Record<string, ReactNode> = {};
-  if (needsYou)
-    badges.flag = (
-      <span className="sb-flag" role="img" aria-label={needsLabel} title={needsLabel}>
-        <IconFlag size={12} filled />
-      </span>
-    );
-  else if (flagReason !== undefined)
-    badges.flag = (
-      <span className="sb-flag" data-kind="quiet" data-testid="chat-flag" role="img" aria-label={`May still need you: ${flagReason}`} title={`May still need you: ${flagReason}`}>
-        <IconFlag size={12} filled />
-      </span>
-    );
-  if (chip)
-    badges.chip = (
-      <span className="sb-chip" data-kind={r.state?.kind} data-testid="chat-state-chip" title={chip}>
-        {chip}
-      </span>
-    );
+  // The row's one status icon: its own signals, folded with what rides up from the chats under a
+  // collapsed parent. An expanded parent's children read as their own rows instead.
+  const folded = !item.expanded && item.children > 0;
+  const status = foldStatus({
+    running: isBusy(r.status) || subagents > 0,
+    flagged: needsYou || flagReason !== undefined || (folded && (item.childFlagged ?? 0) > 0),
+    draft: r.hasDraft || (folded && (item.childDraft ?? 0) > 0),
+    done: item.finished === true || (folded && (item.childDone ?? 0) > 0),
+    lingering: r.attention === 'lingering',
+    interrupted: r.status === 'interrupted',
+    pinned: r.pinned,
+    unread: r.unread,
+  });
+  const statusLabel =
+    status === 'running'
+      ? rowStatusLabel(r)
+      : status === 'flagged'
+        ? needsYou
+          ? needsLabel
+          : flagReason !== undefined
+            ? `May still need you: ${flagReason}`
+            : `${item.childFlagged ?? 0} underneath may need you`
+        : status === 'done' && item.finished !== true
+          ? `${item.childDone ?? 0} finished, unread underneath`
+          : status
+            ? STATUS_LABEL[status]
+            : '';
+  // Marks right after the title — they stay put on hover — and the far-right cluster: state word,
+  // queue, the one status icon, and the age hard right. On hover the age and status give way to
+  // the row's action buttons, which sit where they were, and the queue moves left with them.
+  const titleMarks: Record<string, ReactNode> = {};
   if (r.muted)
-    badges.mute = (
+    titleMarks.mute = (
       <span className="sb-muted" data-testid="row-muted" role="img" aria-label="Muted: no notices or flags" title="Muted: no notices or flags">
         <IconMute size={11} />
       </span>
     );
+  if (folded)
+    titleMarks.children = (
+      <span className="sb-agg" data-testid="chat-agg" title={`${item.children} started chats under ${r.title}`}>
+        {item.children}
+      </span>
+    );
   if (sharedBy)
-    badges.shared = (
+    titleMarks.shared = (
       <span className="sb-shared-from" data-testid="chat-shared-from" role="img" aria-label={`Shared by ${sharedBy.name}`} title={`Shared by ${sharedBy.name}`}>
         <ProfileDisc name={sharedBy.name} colour={sharedBy.colour} size={14} />
       </span>
     );
-  if (!item.expanded && item.children > 0) {
-    badges.children = <span className="sb-agg" title={`${item.children} started chats under ${r.title}`}>{item.children}</span>;
-    if (childRunning > 0)
-      badges['child-running'] = (
-        <span className="sb-child-mark" data-testid="chat-agg-working" role="img" aria-label={`${childRunning} running underneath`} title={`${childRunning} running underneath`}>
-          <WheelMark size={20} state="working" className="sb-ind-wheel" />
-        </span>
-      );
-    if (childFlagged > 0)
-      badges['child-flag'] = (
-        <span className="sb-flag" data-kind="under" data-testid="chat-agg-flag" role="img" aria-label={`${childFlagged} underneath may need you`} title={`${childFlagged} underneath may need you`}>
-          <IconFlag size={12} filled />
-        </span>
-      );
-  }
-  if (item.itemChip) badges.item = <ItemChip item={item.itemChip} />;
-  if (r.hasDraft)
-    badges.draft = (
-      <span className="sb-draft" role="img" aria-label="Unsent draft" title="Unsent draft">
-        <IconEdit size={10} />
+  const rightMarks: Record<string, ReactNode> = {};
+  if (chip)
+    rightMarks.chip = (
+      <span className="sb-chip" data-kind={r.state?.kind} data-testid="chat-state-chip" title={chip}>
+        {chip}
       </span>
     );
-  badges.age = <span className="sb-age">{age(r.updatedAt, now)}</span>;
-  const order = badgeOrder({
-    flag: needsYou || flagReason !== undefined,
-    chip: chip !== null,
-    muted: r.muted,
-    shared: sharedBy !== null,
-    children: item.children,
-    expanded: item.expanded,
-    childRunning: childRunning > 0,
-    childFlagged: childFlagged > 0,
-    itemChip: item.itemChip !== undefined,
-    draft: r.hasDraft,
-  });
+  if (queued) {
+    const queueLabel = rowStateLabel(queued) ?? 'Queued';
+    rightMarks.queue = (
+      <span className="sb-queue" data-testid="chat-queue" role="img" aria-label={queueLabel} title={queueLabel}>
+        <IconPause size={11} />
+        {queued.ahead != null && <span className="sb-queue-n">{queued.ahead}</span>}
+      </span>
+    );
+  }
+  if (status)
+    rightMarks.status = (
+      <span
+        className="sb-status"
+        data-kind={status}
+        data-testid={status === 'flagged' ? 'chat-flag' : 'row-status'}
+        data-flag-kind={status === 'flagged' ? (needsYou ? 'you' : flagReason !== undefined ? 'quiet' : 'under') : undefined}
+        data-stalled={status === 'running' && r.stalled ? 'true' : undefined}
+        data-local={status === 'running' && r.local ? 'true' : undefined}
+        data-ahead={status === 'running' && r.local && r.localAhead !== null ? String(r.localAhead) : undefined}
+        role="img"
+        aria-label={statusLabel}
+        title={statusLabel}
+      >
+        <StatusGlyph kind={status} wheel={r.status === 'stopping' ? 'stopping' : undefined} />
+      </span>
+    );
+  rightMarks.age = <span className="sb-age">{age(r.updatedAt, now)}</span>;
+  const tOrder = titleCluster({ muted: r.muted, shared: sharedBy !== null, children: item.children, expanded: item.expanded });
+  const order = rightCluster({ chip: chip !== null, queue: queued !== null, status: status !== null });
   const wrap = useRef<HTMLDivElement>(null);
   return (
     <div
       ref={wrap}
       className="sb-chat-wrap"
       data-selected={selected ? 'true' : undefined}
-      data-trailing={trailing ? 'true' : undefined}
       data-linked={item.itemChip ? 'true' : undefined}
       data-coloured={colour ? 'true' : undefined}
-      data-flagged={needsYou || flagReason !== undefined ? 'true' : undefined}
+      data-unread={r.unread ? 'true' : undefined}
       data-drag-source={dragging ? 'true' : undefined}
       data-offline={remote && !remote.online ? 'true' : undefined}
       data-chat-id={r.chatId}
@@ -1411,6 +1426,7 @@ function ChatRow({
         data-depth={item.depth}
         data-group={r.groupProjectId}
         data-muted={r.muted ? 'true' : undefined}
+        data-linked={item.itemChip ? 'true' : undefined}
         title={remote && !remote.online ? `${remote.name} is offline` : undefined}
         data-stalled={r.stalled ? 'true' : undefined}
         data-local={r.local ? 'true' : undefined}
@@ -1420,17 +1436,20 @@ function ChatRow({
         onDoubleClick={onRename}
         onPointerDown={onPointerDown}
       >
-        <Indicator row={r} />
         <span className="sb-chat-text">
           <span className="sb-chat-title">{r.title}</span>
           {item.twoLine && <span className="sb-chat-sub">{project?.name ?? r.folderPath}</span>}
         </span>
-        {order.map((k) => (
-          <Fragment key={k}>{badges[k]}</Fragment>
+        {tOrder.map((k) => (
+          <Fragment key={k}>{titleMarks[k]}</Fragment>
         ))}
+        <span className="sb-right">
+          {order.map((k) => (
+            <Fragment key={k}>{rightMarks[k]}</Fragment>
+          ))}
+        </span>
       </button>
       <span className="sb-row-actions">
-        {item.itemChip && <ItemOpenButton item={item.itemChip} />}
         <button
           type="button"
           className="sb-act"

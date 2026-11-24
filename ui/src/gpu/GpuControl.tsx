@@ -1,19 +1,14 @@
-// The graphics-card control in the top bar. With a local model server switched on it is an icon
-// button, "Unload local models"; the click asks first, then stops local-model chats, unloads the
-// servers and refuses every load until the user turns them back on. While models are unloaded the
-// button gives way to a "GPU reserved" pill (a game that is running can set it too); a click on the
-// pill lists what the unload did and offers "Turn local models back on".
-// The same state and actions drive the Graphics card section of Settings → Local models.
+// The graphics-card state and actions, shared by the Graphics card section of
+// Settings → Local models and by nothing else: the top bar used to carry an unload button and a
+// "GPU reserved" pill, and both moved to Settings (a chat can do the same through the app_gpu
+// tool). The hooks below read the host's lock view and drive unload (with its confirm dialog),
+// turning back on, and keeping models off after a game.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useShell } from '../shell/context.ts';
-import { AnchoredDialog, Button, ConfirmDialog, toast, type ConfirmSpec } from '../ui/index.ts';
-import { IconGpu } from '../ui/icons.tsx';
-import { WheelMark } from '../ui/status/WheelMark.tsx';
-import type { Rect } from '../ui/place.ts';
-import type { TopBarTier } from '../topbar/fold.ts';
+import { ConfirmDialog, toast, type ConfirmSpec } from '../ui/index.ts';
 import { gpuOps, type LockView } from './api.ts';
-import { comeBackSentence, gpuControl, lockSentence, unloadConfirmLines } from './model.ts';
+import { unloadConfirmLines } from './model.ts';
 import './gpu.css';
 
 const errorText = (e: unknown) => String((e as Error).message ?? e);
@@ -40,7 +35,7 @@ export function useLockView(): { view: LockView | null; set: (v: LockView) => vo
   return { view, set: setView };
 }
 
-/** Unload (after the confirm) and turn back on, shared by the top bar and Settings. */
+/** Unload (after the confirm) and turn back on, as Settings draws them. */
 export function useGpuActions(view: LockView | null, set: (v: LockView) => void) {
   const shell = useShell();
   const ops = useMemo(() => gpuOps(shell.api), [shell.api]);
@@ -94,83 +89,4 @@ export function useGpuActions(view: LockView | null, set: (v: LockView) => void)
 
   const dialog = confirm && <ConfirmDialog spec={confirm} onClose={() => setConfirm(null)} />;
   return { askUnload, turnOn, keepOff, turningOn, dialog };
-}
-
-export function GpuControl({ tier }: { tier: TopBarTier }) {
-  const { view, set } = useLockView();
-  const { askUnload, turnOn, keepOff, turningOn, dialog } = useGpuActions(view, set);
-  const [anchor, setAnchor] = useState<Rect | null>(null);
-  const pill = useRef<HTMLButtonElement | null>(null);
-  const face = gpuControl(view, tier);
-
-  // The popover belongs to the pill: when the lock lifts underneath it, it closes.
-  useEffect(() => {
-    if (face.face !== 'locked') setAnchor(null);
-  }, [face.face]);
-
-  if (!view || face.face === 'none') return <>{dialog}</>;
-  if (face.face === 'unload') {
-    return (
-      <>
-        <button type="button" className="ui-btn ui-btn-icon gpu-unload" aria-label={face.label} title={face.tooltip} data-testid="gpu-unload" onClick={askUnload}>
-          <IconGpu size={16} />
-        </button>
-        {dialog}
-      </>
-    );
-  }
-  const openPopover = () => {
-    // Nothing to offer while models are being turned back on.
-    if (!face.lock) return;
-    const r = pill.current?.getBoundingClientRect();
-    if (r) setAnchor({ left: r.left, top: r.top, width: r.width, height: r.height });
-  };
-  return (
-    <>
-      <button
-        ref={pill}
-        type="button"
-        className="gpu-pill"
-        data-testid="gpu-locked"
-        data-state={face.lock ?? 'on'}
-        data-working={face.working || undefined}
-        title={face.tooltip}
-        onClick={openPopover}
-      >
-        {face.working && <WheelMark size={13} state="working" />}
-        {face.label}
-      </button>
-      {anchor && (
-        <AnchoredDialog
-          title="GPU reserved"
-          testId="gpu-popover"
-          anchor={anchor}
-          onClose={() => setAnchor(null)}
-          footer={
-            <>
-              {face.keepOff && (
-                <Button variant="secondary" data-testid="gpu-keep-off" disabled={turningOn} onClick={() => void keepOff()}>
-                  Keep them off after the game
-                </Button>
-              )}
-              <Button variant="primary" data-testid="gpu-reload" busy={turningOn} disabled={turningOn} onClick={() => void turnOn().then(() => setAnchor(null))}>
-                Turn local models back on
-              </Button>
-            </>
-          }
-        >
-          <p className="gpu-popover-lead">{lockSentence(view)}.</p>
-          <p className="gpu-popover-lead">{comeBackSentence(view)}</p>
-          {view.report.length > 0 && (
-            <ul className="gpu-report" data-testid="gpu-report">
-              {view.report.map((line, i) => (
-                <li key={i}>{line}</li>
-              ))}
-            </ul>
-          )}
-        </AnchoredDialog>
-      )}
-      {dialog}
-    </>
-  );
 }

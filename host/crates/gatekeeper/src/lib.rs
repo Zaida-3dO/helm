@@ -10,6 +10,7 @@
 //! | [`stoproute`] | the stop judge's pure decision table: which turn ends are never looked at, what the model's answer is, and what Helm does about it |
 //! | [`stops`] | the stop judge: holds a clean turn end while the working mode is run to completion, judges it through the same helper, and nudges the chat on or lets it stop |
 //! | [`workmode`] | the working mode (run to completion, or check in with me): the app's mode, a board's own, the launch text and the line a turn carries after a change |
+//! | [`wmode_ext`] | the working mode as the `workmode` settings key: chats read it, and only change it through a card the user approves |
 //! | [`ops`] | the UI-only `gate_*` and `workmode_*` ops: history, review, change answer, settings, and the working mode |
 //! | `bindings` | the TypeScript for the shapes the UI reads |
 //!
@@ -28,6 +29,7 @@ pub mod settings;
 pub mod stoproute;
 pub mod stops;
 pub mod store;
+pub mod wmode_ext;
 pub mod workmode;
 
 pub use ops::register_ops;

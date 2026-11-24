@@ -8,7 +8,7 @@ import { agentsArg, agentsMode, appendMode, cliVersion, parseCliVersion } from "
 import { appendFileFor } from "../src/drivers/claude/driver.ts";
 import { decideGate, decideStop, gateHook, startupWanted, stopHook } from "../src/drivers/claude/gates.ts";
 import { cronTiming, NATIVE_SCHEDULE_TOOLS, scheduleRedirect } from "../src/drivers/claude/schedulecalls.ts";
-import { assertLoopbackHttp, buildClaudeEnv, contextRefusalNote, STRIPPED_UNLESS_API_KEY_MODE, takeClaudeToken, takeLocalKey } from "../src/drivers/claude/env.ts";
+import { assertLoopbackHttp, buildClaudeEnv, contextRefusalNote, localExtraBody, STRIPPED_UNLESS_API_KEY_MODE, takeClaudeToken, takeLocalKey } from "../src/drivers/claude/env.ts";
 
 const base = {
   PATH: "/bin",
@@ -97,6 +97,13 @@ test("a local launch: loopback http only, every model slot local, the effort as 
   assert.equal(env.CLAUDE_CODE_SUBAGENT_MODEL, "qwen:8b", "sub-agents stay on the local model, whatever the user set for Claude");
   assert.equal(env.CLAUDE_CODE_USE_GATEWAY, "1", "the base URL is treated as a gateway, so the thinking budget is what is sent");
   assert.equal(env.ENABLE_TOOL_SEARCH, "false", "no tool is deferred behind a search a local server cannot answer");
+  // The parse-only tool names ride every request body: set when there are names to hand over,
+  // never without them, and never for a Claude chat.
+  const body = localExtraBody(["mcp__helm__app_stage_settings", "mcp__helm__app_list_tools"]);
+  assert.deepEqual(JSON.parse(body), { parse_only_tool_names: ["mcp__helm__app_stage_settings", "mcp__helm__app_list_tools"] });
+  assert.equal(buildClaudeEnv({}, { local, localKey: "k", localExtraBody: body }).CLAUDE_CODE_EXTRA_BODY, body);
+  assert.equal("CLAUDE_CODE_EXTRA_BODY" in buildClaudeEnv({}, { local, localKey: "k" }), false, "no body without names to hand over");
+  assert.equal("CLAUDE_CODE_EXTRA_BODY" in buildClaudeEnv({}, { apiKeyMode: true, localExtraBody: body }), false, "a Claude chat never gets it");
   assert.equal(buildClaudeEnv({}, { local, effort: "low" }).ANTHROPIC_AUTH_TOKEN, "local", "a keyless server still gets a token of its own");
   assert.throws(() => buildClaudeEnv({}, { local: { ...local, baseUrl: "http://example.com" } }));
   assert.throws(() => buildClaudeEnv({}, { local: { ...local, model: " " } }));
@@ -136,6 +143,11 @@ test("a local launch: loopback http only, every model slot local, the effort as 
     API_MAX_RETRIES: "6",
   });
   assert.equal(a.join(" ").includes("ANTHROPIC_AUTH_TOKEN"), false, "no token on the command line");
+  // The parse-only body is pinned in the settings env too, over anything a user's settings file
+  // sets there, and absent for a local chat with nothing to hand over.
+  const pinnedBody = JSON.parse(flag(buildClaudeArgs({ model: "qwen:8b", local, localExtraBody: body, settings: { env: { CLAUDE_CODE_EXTRA_BODY: "other" } } }), "--settings") ?? "null").env;
+  assert.equal(pinnedBody.CLAUDE_CODE_EXTRA_BODY, body);
+  assert.equal("CLAUDE_CODE_EXTRA_BODY" in JSON.parse(flag(buildClaudeArgs({ local }), "--settings") ?? "null").env, false);
   assert.equal("env" in JSON.parse(flag(buildClaudeArgs({ settings: { env: { KEEP: "1" } } }), "--settings") ?? "null"), true, "a Claude chat keeps its own env block untouched");
   assert.throws(() => buildClaudeArgs({ local: { ...local, baseUrl: "http://example.com" } }));
   assert.equal("skipWebFetchPreflight" in JSON.parse(flag(buildClaudeArgs({}), "--settings") ?? "null"), false);

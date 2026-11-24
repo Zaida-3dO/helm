@@ -106,7 +106,7 @@ export function chatOps(api: Api) {
     ackCompletion: (chatId: string, completionId: string) => api<ChatRecord>('completion_ack', { chatId, completionId }),
     /** Open a sent message for editing. */
     editOpen: (chatId: string, messageId: number) =>
-      api<{ messageId: number; revision: number; text: string }>('message_edit_open', { chatId, messageId }),
+      api<{ messageId: number; revision: number; text: string; hasAttachments?: boolean }>('message_edit_open', { chatId, messageId }),
     /** Replace a sent message and everything after it; the old branch is kept. */
     resend: (chatId: string, messageId: number, revision: number, text: string) =>
       api<{ submission: Submission; chat: ChatRecord }>('message_resend', {

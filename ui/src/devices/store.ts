@@ -106,6 +106,12 @@ export class DevicesStore {
     if (now - this.lastFocusRead < FOCUS_READ_MS) return false;
     this.lastFocusRead = now;
     void this.reload();
+    // Waking the window is also the moment to wake the hub line: after a sleep the line can
+    // be sitting between retries, and an open window should catch up on another PC's chats
+    // at once instead of waiting for someone to type. While the line is up this does nothing
+    // (`relay_reconnect` only wakes a line that is down or off), and a hub that is not set
+    // up at all answers "refused", which is as before.
+    this.deps.api('relay_reconnect', {}).catch(() => undefined);
     return true;
   }
 

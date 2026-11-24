@@ -31,19 +31,28 @@ export const HEIGHTS = {
 /** Where an item sits in its project's block: the header and its chats draw as one tinted block. */
 export type BlockPos = 'only' | 'first' | 'mid' | 'last';
 
-/** What a collapsed group still has going on inside it: chats running, chats with an unread result,
- *  chats waiting on you or flagged as possibly needing you, and chats idle apart from background
- *  work still running (the header shows the calm wheel for those when nothing runs). */
+/** What a collapsed group still has going on inside it: chats running, chats with an unread
+ *  result, chats waiting on you or flagged as possibly needing you, chats holding an unsent
+ *  draft, chats that finished a reply nobody has opened, and chats idle apart from background
+ *  work still running. The header folds these into one status, same priority as a chat row. */
 export interface GroupMarks {
   running: number;
   unread: number;
   flagged: number;
+  draft: number;
+  done: number;
   lingering: number;
 }
 
-/** The calm wheel on a collapsed header: background work only. A running chat's wheel wins over it. */
-export function showsCalmWheel(m: GroupMarks): boolean {
-  return m.lingering > 0 && m.running === 0;
+/** The one status a collapsed header shows, in the same priority order as a row. */
+export function groupStatus(m: GroupMarks): 'running' | 'flagged' | 'draft' | 'done' | 'lingering' | 'unread' | null {
+  if (m.running > 0) return 'running';
+  if (m.flagged > 0) return 'flagged';
+  if (m.draft > 0) return 'draft';
+  if (m.done > 0) return 'done';
+  if (m.lingering > 0) return 'lingering';
+  if (m.unread > 0) return 'unread';
+  return null;
 }
 
 export type ListItem = (
@@ -69,13 +78,19 @@ export type ListItem = (
       children: number;
       expanded: boolean;
       twoLine: boolean;
-      /** The task-board item this chat is linked to, shown as a small chip. */
+      /** The task-board item this chat is linked to. No longer drawn on the row itself
+       *  (the row's menu opens the item), but the folder grouping reads it. */
       itemChip?: ItemRef;
-      /** Totalled over every descendant of a chat with children: how many are running and how
-       *  many may need the person. A collapsed chat rides these up next to its children count
-       *  (the wheel for running, the flag for needs-you); finished ones never ride up. */
+      /** The chat finished a reply the person has not opened (from the attention summary):
+       *  the row's one status icon, animated. */
+      finished?: boolean;
+      /** Totalled over every descendant of a chat with children: how many run, may need the
+       *  person, hold an unsent draft or finished unread. A collapsed parent folds these
+       *  into its own status; an expanded one shows its children as rows instead. */
       childRunning?: number;
       childFlagged?: number;
+      childDraft?: number;
+      childDone?: number;
     }
   | { kind: 'itemFolder'; key: string; groupId: string; itemId: string; title: string; members: number; depth: number; height: number; collapsed: boolean }
   | { kind: 'pinBreak'; key: string; height: number }
@@ -98,6 +113,8 @@ export interface BuildOptions {
   keptShut?: ReadonlySet<string>;
   /** Chats waiting on the user or flagged by the idle check: a collapsed group counts them. */
   flagged?: ReadonlySet<string>;
+  /** Chats that finished a reply the person has not opened: a collapsed group folds them as done. */
+  finished?: ReadonlySet<string>;
   /** Closed projects: their chats are never drawn, not even as loose rows. */
   closed?: ReadonlySet<string>;
   /** Item links: the item each chat shows, and the item folders the user collapsed. */
@@ -117,12 +134,12 @@ export function isFinished(p: ProjectNode): boolean {
 }
 
 /** Per-row drawn depth and the children each row holds, for one group's held rows. With the
- *  flagged set it also totals, under each chat, the descendants that are running or may need the
- *  person (for a collapsed parent's marks); finished descendants never ride up. */
-export function nestRows(rows: SidebarRow[], flagged?: ReadonlySet<string>): {
+ *  flagged and finished sets it also totals, under each chat, the descendants that run, may need
+ *  the person, hold an unsent draft or finished unread (for a collapsed parent's one status). */
+export function nestRows(rows: SidebarRow[], flagged?: ReadonlySet<string>, finished?: ReadonlySet<string>): {
   order: { row: SidebarRow; depth: number }[];
   childCount: Map<string, number>;
-  childMarks: Map<string, { running: number; flagged: number }>;
+  childMarks: Map<string, { running: number; flagged: number; draft: number; done: number }>;
 } {
   const byId = new Map(rows.map((r) => [r.chatId, r]));
   const parentOf = (r: SidebarRow): string | null => {
@@ -165,20 +182,24 @@ export function nestRows(rows: SidebarRow[], flagged?: ReadonlySet<string>): {
   for (const r of roots) walk(r, 0);
   const childCount = new Map<string, number>();
   for (const [k, v] of children) childCount.set(k, v.length);
-  // What rides up under each chat: every descendant (the cycle cut above keeps this a forest),
-  // counted once each for running and for the flagged set. Only set when something rides up.
-  const childMarks = new Map<string, { running: number; flagged: number }>();
-  const marksUnder = (id: string): { running: number; flagged: number } => {
+  // What folds into each collapsed parent: every descendant (the cycle cut above keeps this a
+  // forest), counted once each for running, the flagged set, held drafts and unread completions.
+  const childMarks = new Map<string, { running: number; flagged: number; draft: number; done: number }>();
+  const marksUnder = (id: string): { running: number; flagged: number; draft: number; done: number } => {
     const hit = childMarks.get(id);
     if (hit) return hit;
     let running = 0;
     let needPerson = 0;
+    let draft = 0;
+    let done = 0;
     for (const c of children.get(id) ?? []) {
       const sub = marksUnder(c.chatId);
       running += sub.running + (isBusy(c.status) ? 1 : 0);
       needPerson += sub.flagged + (flagged?.has(c.chatId) ? 1 : 0);
+      draft += sub.draft + (c.hasDraft ? 1 : 0);
+      done += sub.done + (finished?.has(c.chatId) ? 1 : 0);
     }
-    const m = { running, flagged: needPerson };
+    const m = { running, flagged: needPerson, draft, done };
     childMarks.set(id, m);
     return m;
   };
@@ -186,34 +207,25 @@ export function nestRows(rows: SidebarRow[], flagged?: ReadonlySet<string>): {
   return { order, childCount, childMarks };
 }
 
-/** The trailing marks of a chat row, in draw order. One order for every row: flag, state chip,
- *  mute, shared-from, children (count and what is running inside when collapsed), item chip,
- *  draft — and the age always last, hard right. The leading status indicator is not part of it.
- *  An expanded parent names its children through the chevron instead, so no count rides. */
-export function badgeOrder(b: {
-  flag: boolean;
-  chip: boolean;
-  muted: boolean;
-  shared: boolean;
-  children: number;
-  expanded: boolean;
-  childRunning: boolean;
-  childFlagged: boolean;
-  itemChip: boolean;
-  draft: boolean;
-}): ('flag' | 'chip' | 'mute' | 'shared' | 'children' | 'child-running' | 'child-flag' | 'item' | 'draft' | 'age')[] {
-  const out: ('flag' | 'chip' | 'mute' | 'shared' | 'children' | 'child-running' | 'child-flag' | 'item' | 'draft' | 'age')[] = [];
-  if (b.flag) out.push('flag');
-  if (b.chip) out.push('chip');
+/** The marks that ride the title line, in draw order: the muted bell right after the title, the
+ *  shared-from disc, and the children count (collapsed parents only — an expanded one reaches its
+ *  children through the chevron). These stay put on hover; the far-right cluster changes there. */
+export function titleCluster(b: { muted: boolean; shared: boolean; children: number; expanded: boolean }): ('mute' | 'shared' | 'children')[] {
+  const out: ('mute' | 'shared' | 'children')[] = [];
   if (b.muted) out.push('mute');
+  if (!b.expanded && b.children > 0) out.push('children');
   if (b.shared) out.push('shared');
-  if (!b.expanded && b.children > 0) {
-    out.push('children');
-    if (b.childRunning) out.push('child-running');
-    if (b.childFlagged) out.push('child-flag');
-  }
-  if (b.itemChip) out.push('item');
-  if (b.draft) out.push('draft');
+  return out;
+}
+
+/** The far-right cluster, left to right: state text, queue, the one status icon, age last.
+ *  The age sits hard right and no icon ever pushes it in; on hover the age and status hide and
+ *  the row's action buttons take their place, while the queue stays. */
+export function rightCluster(b: { chip: boolean; queue: boolean; status: boolean }): ('chip' | 'queue' | 'status' | 'age')[] {
+  const out: ('chip' | 'queue' | 'status' | 'age')[] = [];
+  if (b.chip) out.push('chip');
+  if (b.queue) out.push('queue');
+  if (b.status) out.push('status');
   out.push('age');
   return out;
 }
@@ -250,6 +262,7 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
         children: 0,
         expanded: false,
         twoLine: true,
+        ...(o.finished?.has(row.chatId) ? { finished: true } : {}),
       }));
   }
   const archivedView = o.view === 'archivedProjects';
@@ -301,20 +314,26 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
     let unread = 0;
     let flagged = 0;
     let lingering = 0;
+    let draft = 0;
+    let done = 0;
     for (const r of byGroup.get(p.id) ?? []) {
       if (isBusy(r.status)) running += 1;
+      else if (o.finished?.has(r.chatId)) done += 1;
       else if (r.unread) unread += 1;
       else if (r.attention === 'lingering') lingering += 1;
       if (o.flagged?.has(r.chatId)) flagged += 1;
+      if (r.hasDraft) draft += 1;
     }
     for (const k of kids.get(p.id) ?? []) {
       const sub = groupMarks(k, next);
       running += sub?.running ?? 0;
       unread += sub?.unread ?? 0;
       flagged += sub?.flagged ?? 0;
+      draft += sub?.draft ?? 0;
+      done += sub?.done ?? 0;
       lingering += sub?.lingering ?? 0;
     }
-    return running + unread + flagged + lingering > 0 ? { running, unread, flagged, lingering } : null;
+    return running + unread + flagged + draft + done + lingering > 0 ? { running, unread, flagged, draft, done, lingering } : null;
   };
 
   const out: ListItem[] = [];
@@ -336,7 +355,7 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
     if (collapsed) return;
     const next = new Set(path).add(p.id);
     for (const k of kids.get(p.id) ?? []) emitGroup(k, depth + 1, next);
-    const { order, childCount, childMarks } = nestRows(byGroup.get(p.id) ?? [], o.flagged);
+    const { order, childCount, childMarks } = nestRows(byGroup.get(p.id) ?? [], o.flagged, o.finished);
     const hidden = new Set<string>();
     for (const e of arrange(order, o.itemLinks?.refs, o.itemLinks?.collapsed, MAX_DEPTH, o.selectedChatId)) {
       if (e.type === 'folder') {
@@ -351,6 +370,7 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
       const n = childCount.get(row.chatId) ?? 0;
       const expanded = n > 0 && o.expandedChats.has(row.chatId);
       if (n > 0 && !expanded) hidden.add(row.chatId);
+      const marks = n > 0 ? childMarks.get(row.chatId) : undefined;
       out.push({
         kind: 'chat',
         key: row.chatId,
@@ -361,7 +381,8 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
         expanded,
         twoLine: false,
         ...(e.chip ? { itemChip: e.chip } : {}),
-        ...(n > 0 ? { childRunning: childMarks.get(row.chatId)?.running ?? 0, childFlagged: childMarks.get(row.chatId)?.flagged ?? 0 } : {}),
+        ...(o.finished?.has(row.chatId) ? { finished: true } : {}),
+        ...(marks ? { childRunning: marks.running, childFlagged: marks.flagged, childDraft: marks.draft, childDone: marks.done } : {}),
       });
     }
   };
@@ -377,7 +398,7 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
   const orphans = shown.filter((r) => !known.has(r.groupProjectId));
   if (orphans.length > 0) {
     for (const row of orphans) {
-      out.push({ kind: 'chat', key: row.chatId, row, depth: 0, height: h.chat, children: 0, expanded: false, twoLine: false });
+      out.push({ kind: 'chat', key: row.chatId, row, depth: 0, height: h.chat, children: 0, expanded: false, twoLine: false, ...(o.finished?.has(row.chatId) ? { finished: true } : {}) });
     }
   }
   markBlocks(out);

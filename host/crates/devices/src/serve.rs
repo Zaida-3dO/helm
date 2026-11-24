@@ -1567,7 +1567,8 @@ impl Inner {
         from: Option<String>,
     ) -> Result<Value, WireError> {
         let owner = sender.uid.as_str();
-        if a.text.trim().is_empty() {
+        // Files the send names count as content: a message of just pictures or files sends.
+        if a.text.trim().is_empty() && a.attachments.is_empty() {
             return Err(WireError::bad_args("There is nothing to send."));
         }
         if a.text.len() > MAX_SEND_BYTES {

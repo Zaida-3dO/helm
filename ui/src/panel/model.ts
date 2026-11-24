@@ -191,6 +191,9 @@ export class PanelModel {
     tab.used = this.tick();
     // A chat tab is selected in its own chat; an app tab in the chat being viewed.
     this.selected.set(tab.set === APP_SET ? PanelModel.view(current) : tab.set, tab.id);
+    // A tab pushed into another chat's set must not change how the shown chat's panel looks:
+    // no unhiding, no maximising. The person sees it when they open that chat.
+    if (tab.set !== APP_SET && tab.set !== PanelModel.view(current)) return;
     this.hidden = false;
     const max = typeof rules.defaultMaximized === 'function' ? rules.defaultMaximized(tab.data) : rules.defaultMaximized;
     if (max) this.maximized = true;

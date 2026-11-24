@@ -171,6 +171,13 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     if let Some(store) = services.get::<helm_mcp::McpStore>() {
         extensions.push(helm_mcp::unencrypted::settings_extension(store));
     }
+    // The working mode: chats read it and may stage a change; only the user's approval writes it.
+    if let Some(db) = services.get::<helm_core::db::Database>() {
+        extensions.push(helm_gatekeeper::wmode_ext::extension(
+            db,
+            services.get::<helm_chats::ChatRuntime>(),
+        ));
+    }
     // The Telegram new-chat defaults: chats read the whole policy, change only model and effort.
     if let Some(profile) = services.get::<helm_core::profile::Profile>() {
         extensions.push(helm_relay::settings_extension(&profile.dir));
@@ -299,6 +306,7 @@ pub fn host_tools() -> helm_hosttools::HostToolRegistry {
     helm_relay::register_host_tools(&mut reg);
     helm_waits::register_host_tools(&mut reg);
     helm_usage::register_host_tools(&mut reg);
+    helm_localmodels::register_host_tools(&mut reg);
     helm_webtools::register_host_tools(&mut reg);
     helm_skills::register_host_tools(&mut reg);
     helm_dictation::register_host_tools(&mut reg);
@@ -651,6 +659,7 @@ mod host_tool_tests {
             "app_wait_for",
             "app_background_result",
             "app_usage_summary",
+            "app_gpu",
             "app_list_knowledge",
             "app_save_rule",
             "app_save_memory",
@@ -841,8 +850,8 @@ mod surface_tests {
     fn a_chats_own_tool_list_stays_small_and_every_description_stays_short() {
         let reg = super::host_tools();
         for (label, keys, listed_cap, visible_cap) in [
-            ("default", LaunchKeys::default(), 10_500, 46),
-            ("everything on", everything_on(), 11_500, 58),
+            ("default", LaunchKeys::default(), 10_500, 47),
+            ("everything on", everything_on(), 11_500, 59),
         ] {
             let all = reg.for_launch(&keys);
             let visible: Vec<_> = all.iter().filter(|e| e.alias_of.is_none()).collect();

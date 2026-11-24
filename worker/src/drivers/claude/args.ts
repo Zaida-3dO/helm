@@ -78,6 +78,9 @@ export interface ArgOptions {
   mcpConfig?: string;
   /** What to pass to `--agents` in place of the launch's file path (the file's JSON, for an older CLI). */
   agentsArg?: string;
+  /** The local chat's `CLAUDE_CODE_EXTRA_BODY` JSON (see `localExtraBody` in env.ts), pinned in
+   * the settings `env` block so a user or project settings file cannot replace it. */
+  localExtraBody?: string;
 }
 
 /**
@@ -139,7 +142,7 @@ export function buildClaudeArgs(c: ClaudeLaunch, opts: ArgOptions = {}): string[
   // Its `env` block pins where the requests go (address, gateway mode, every model slot, other
   // providers off) over anything a user or project settings file sets; the token is not in it.
   const customEnv = custom.env && typeof custom.env === "object" && !Array.isArray(custom.env) ? custom.env : {};
-  const localSettings = c.local ? { skipWebFetchPreflight: true, env: { ...customEnv, ...localPinnedEnv(c.local) } } : {};
+  const localSettings = c.local ? { skipWebFetchPreflight: true, env: { ...customEnv, ...localPinnedEnv(c.local), ...(opts.localExtraBody ? { CLAUDE_CODE_EXTRA_BODY: opts.localExtraBody } : {}) } } : {};
   args.push("--settings", JSON.stringify({ ...custom, ...extra, ...localSettings, fastMode: c.fastMode === true }));
   if (c.extraArgs) args.push(...c.extraArgs);
   return args;

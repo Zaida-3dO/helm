@@ -28,9 +28,13 @@ export function matchesHidden(s: Skill, hidden: readonly string[]): boolean {
   });
 }
 
-/** Commands Helm runs itself. They lead the `/` menu's list and shadow a CLI skill of the same name. */
+/** Commands Helm runs itself. They lead the `/` menu's list and shadow a CLI skill of the same name.
+ *  Fork, Pin and Archive left the top bar and live here now; Pin and Archive toggle. */
 export const HELM_COMMANDS: readonly Skill[] = [
   { name: 'rollover', description: 'Hand this chat’s work to a fresh chat, then archive this one', scope: 'helm' },
+  { name: 'fork', description: 'Continue this conversation in a copy of the chat', scope: 'helm' },
+  { name: 'pin', description: 'Pin this chat to the top of its board, or unpin it', scope: 'helm' },
+  { name: 'archive', description: 'Archive this chat, or restore it if it is archived', scope: 'helm' },
 ];
 
 /** The menu's list: Helm's commands, then the CLI's (minus any a Helm command shadows). */
@@ -54,6 +58,35 @@ export function skillQuery(text: string): string | null {
   return m ? m[1]! : null;
 }
 
+/** The "/word" at the caret: the range it covers and the query typed so far. */
+export interface SlashWord {
+  start: number;
+  end: number;
+  query: string;
+}
+
+/**
+ * A "/word" being typed at the caret, wherever the caret sits in the draft (a `/` after a space
+ * opens the menu mid-sentence): the range it covers, including a word the caret sits inside, and
+ * the query typed so far. null when the caret is not on one.
+ */
+export function slashAt(text: string, caret: number): SlashWord | null {
+  if (caret < 0 || caret > text.length) return null;
+  const m = /(?:^|\s)\/([A-Za-z0-9_:-]{0,128})$/.exec(text.slice(0, caret));
+  if (!m) return null;
+  const query = m[1]!;
+  const rest = /^\S*/.exec(text.slice(caret))![0];
+  return { start: caret - query.length - 1, end: caret + rest.length, query };
+}
+
+/** What choosing a skill at such a word writes: the word replaced by "/name " — the separating
+ *  space added only when the text after the word does not already start with one. */
+export function applySlash(text: string, at: { start: number; end: number }, name: string): { text: string; caret: number } {
+  const ins = `/${name}`;
+  const space = text[at.end] === undefined || !/\s/.test(text[at.end]!) ? ' ' : '';
+  return { text: text.slice(0, at.start) + ins + space + text.slice(at.end), caret: at.start + ins.length + space.length };
+}
+
 
 /** Best first: exact, prefix, word prefix, substring, description substring; ties by name. */
 export function rankSkills(list: readonly Skill[], query: string, limit = 8): Skill[] {
@@ -61,7 +94,8 @@ export function rankSkills(list: readonly Skill[], query: string, limit = 8): Sk
   const nq = norm(query);
   const score = (s: Skill): number => {
     const n = s.name.toLowerCase();
-    if (!q) return 4;
+    // Nothing typed yet: Helm's own commands lead the menu, the rest by name.
+    if (!q) return s.scope === 'helm' ? 3 : 4;
     if (n === q || norm(n) === nq) return 0;
     if (n.startsWith(q) || (nq && norm(n).startsWith(nq))) return 1;
     if (n.split(/[-_:\s]/).some((w) => w.startsWith(q))) return 2;

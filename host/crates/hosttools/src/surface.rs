@@ -170,6 +170,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "app_update_settings",
             "app_stage_settings",
             "app_reload_configuration",
+            "app_gpu",
         ],
     ),
     ("updates", &["app_update"]),

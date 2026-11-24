@@ -45,12 +45,14 @@ pub mod starter;
 pub mod task;
 #[cfg(test)]
 mod tests;
+mod tools;
 pub mod types;
 mod variants;
 
 pub use lock::LockState;
 pub use ops::register_ops;
 pub use service::{ChatControl, LocalService};
+pub use tools::register_host_tools;
 
 use helm_chats::ChatRuntime;
 use helm_core::credentials::CredentialStore;

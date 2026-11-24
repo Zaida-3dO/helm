@@ -89,8 +89,8 @@ describe("the plan-usage meter, Settings → Usage and item links", { timeout: 1
       const one = await newChat(page(), work);
       await sendMessage("link this chat");
       await until("the first link", async () => ((await links()).length === 1 ? true : undefined));
-      await page().waitForSelector(tid("item-chip"), { timeout: 15_000 });
-      assert.equal(await page().locator(tid("item-folder")).count(), 0, "one chat: a chip and no folder");
+      await page().waitForSelector(tid("chat-item", `[data-chat-id="${one}"][data-linked="true"]`), { timeout: 15_000 });
+      assert.equal(await page().locator(tid("item-folder")).count(), 0, "one chat: its row is marked linked, and no folder yet");
       const open1 = (await api(page(), "item_open", { itemId: ITEM })) as { chatId?: string };
       assert.equal(open1.chatId, one);
       // The turn's tokens and reported cost are recorded, from usage shaped as the real CLI sends it.
@@ -105,7 +105,7 @@ describe("the plan-usage meter, Settings → Usage and item links", { timeout: 1
       await until("the second link", async () => ((await links()).length === 2 ? true : undefined));
       await page().waitForSelector(tid("item-folder"), { timeout: 15_000 });
       assert.match((await page().textContent(tid("item-folder"))) ?? "", /Linked item.*2/);
-      assert.equal(await page().locator(tid("item-chip")).count(), 0, "inside a folder the folder names the item");
+      assert.equal((await page().getAttribute(tid("chat-item", `[data-chat-id="${one}"]`), "data-linked")), null, "inside a folder the folder names the item, and the row stops marking itself");
       assert.ok((await page().locator(tid("chat-item", `[data-chat-id="${one}"]`)).count()) === 1);
       assert.ok((await page().locator(tid("chat-item", `[data-chat-id="${two}"]`)).count()) === 1);
 

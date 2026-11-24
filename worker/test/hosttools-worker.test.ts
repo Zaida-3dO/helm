@@ -362,7 +362,7 @@ test("the landing guard asks the host before Bash and MCP calls, and fails close
   }
 });
 
-test("a chat lists only the core host tools; the rest are found by group and called through app_mcp_call, old names included", async () => {
+test("a Claude chat lists every host tool it may call; a local chat lists only the core ones; old names are never listed", async () => {
   const { HostToolServer } = await import("../src/hosttools/server.ts");
   const tool = (name: string, extra: Json = {}) => ({ name, description: `${name} does one thing. More text.`, inputSchema: { type: "object" }, requestLimitBytes: 8192, timeoutMs: 20000, children: false, mutating: false, ...extra });
   const hostTools = [
@@ -376,8 +376,12 @@ test("a chat lists only the core host tools; the rest are found by group and cal
   const channel = { call: async (name: string) => (sent.push(name), { ok: true as const, result: { name } }) } as never;
   const s = new HostToolServer({ hostTools, channel });
   const rpc = async (name: string, args: Json) => (((await s.handle({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }, { child: false })) as Json).result as Json).structuredContent as Json;
-  const listed = ((((await s.handle({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { child: false })) as Json).result as Json).tools as Json[]).map((t) => t.name);
-  assert.deepEqual(listed, ["app_list_chats", "app_older", "app_list_tools", "app_mcp_call"], "core tools, one without the field (an older catalogue), and the compat tools; no alias");
+  const listed = async (server: typeof s) => ((((await server.handle({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { child: false })) as Json).result as Json).tools as Json[]).map((t) => t.name);
+  // A Claude chat: every tool but an old name, so a call naming one is dispatched and runs.
+  assert.deepEqual(await listed(s), ["app_list_chats", "app_show_images", "app_schedule", "app_older", "app_list_tools", "app_mcp_call"]);
+  // A local chat: every listed schema rides every request, so it keeps the core list; one without
+  // the field (an older catalogue) counts as core.
+  assert.deepEqual(await listed(new HostToolServer({ hostTools, channel, local: true })), ["app_list_chats", "app_older", "app_list_tools", "app_mcp_call"]);
   // Every tool, an old name included, answers through app_mcp_call.
   for (const name of ["app_show_images", "app_create_schedule", "app_schedule"]) assert.equal((await s.call("app_mcp_call", { name, arguments: {} }, { child: false })).ok, true, name);
   assert.deepEqual(sent, ["app_show_images", "app_create_schedule", "app_schedule"], "the calls reached the host channel under the names used");
@@ -397,6 +401,34 @@ test("a chat lists only the core host tools; the rest are found by group and cal
   const renamed = await rpc("app_list_tools", { query: "app_create_schedule" });
   assert.deepEqual(renamed.renamed, { from: "app_create_schedule", to: "app_schedule", action: "create", note: 'app_create_schedule still works; app_schedule {"action": "create"} does the same.' });
   assert.deepEqual((renamed.tools as Json[]).map((t) => t.name), ["app_schedule"]);
+});
+
+test("a real host tool called directly runs through the channel; a name that exists nowhere gets a clean error both ways in", async () => {
+  const { HostToolServer } = await import("../src/hosttools/server.ts");
+  const tool = (name: string, extra: Json = {}) => ({ name, description: `${name} does one thing.`, inputSchema: { type: "object" }, requestLimitBytes: 8192, timeoutMs: 20000, children: false, mutating: false, ...extra });
+  // `app_stage_settings` is not core: a chat was never shown it as a declared tool.
+  const hostTools = [tool("app_list_chats", { core: true }), tool("app_stage_settings", { core: false, mutating: true })];
+  const sent: { name: string; args: Json }[] = [];
+  const channel = { call: async (name: string, args: Json) => (sent.push({ name, args }), { ok: true as const, result: { staged: 1 } }) } as never;
+  const s = new HostToolServer({ hostTools, channel });
+  // Called by its own name: it reaches the host and the staged answer comes back whole.
+  const r = (await s.handle({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "app_stage_settings", arguments: { changes: { hubAddress: "h" } } } }, { child: false })) as Json;
+  assert.equal(((r.result as Json).isError ?? false), false, "runs, no error flag");
+  assert.deepEqual((r.result as Json).structuredContent, { staged: 1 });
+  assert.deepEqual(sent, [{ name: "app_stage_settings", args: { changes: { hubAddress: "h" } } }]);
+  // A name that exists nowhere: a clean is_error result, worded the same through both doors.
+  const missing = "app_stage_settingz";
+  const direct = (await s.call(missing, {}, { child: false })) as { ok: boolean; error: string; changed: string };
+  assert.equal(direct.ok, false);
+  assert.match(
+    direct.error,
+    new RegExp(`^No such tool in this chat: ${missing}\\. Tools found with app_list_tools must be called through app_mcp_call\\. Nothing changed\\.$`),
+  );
+  assert.equal(direct.changed, "no");
+  const via = (await s.call("app_mcp_call", { name: missing }, { child: false })) as { ok: boolean; error: string };
+  assert.equal(via.ok, false);
+  assert.ok(via.error.startsWith(`No such tool in this chat: ${missing}.`), via.error);
+  assert.deepEqual(sent.length, 1, "the missing names never reached the host");
 });
 
 test("every chat is told where the rest of Helm's tools are", async () => {

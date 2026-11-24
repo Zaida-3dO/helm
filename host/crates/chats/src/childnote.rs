@@ -119,12 +119,115 @@ pub fn turn_why(tx: &Transaction<'_>, chat: &str) -> rusqlite::Result<Option<Unf
     })
 }
 
-/// The text of the printed call, when the chat's just-ended turn ends with one: the markup a
-/// tool name can be read out of.
+/// The text of a tool call written as text in the chat's just-ended turn, newest reply first:
+/// the markup a tool name can be read out of. Markup in the last reply counts on its own — the
+/// turn ended on a call nobody ran. Markup earlier in the turn counts when it names a real tool
+/// and is not quoted: a model can print a call, watch nothing happen, go on to run real calls
+/// and close with words, and the call it printed still changed nothing and is worth telling it
+/// about. Quoted markup (in code, introduced as an example) and markup naming nothing are prose.
 pub fn printed_call_text(tx: &Transaction<'_>, chat: &str) -> rusqlite::Result<Option<String>> {
-    Ok(last_step(tx, chat)?
-        .filter(|(role, text)| role == "assistant" && looks_like_unrun_tool_call(text))
-        .map(|(_, text)| text))
+    if let Some((role, text)) = last_step(tx, chat)? {
+        if role == "assistant" && looks_like_unrun_tool_call(&text) && !quoted_example(&text) {
+            return Ok(Some(text));
+        }
+    }
+    let run_start = run_start(tx, chat)?;
+    let mut stmt = tx.prepare(
+        "SELECT text FROM messages
+         WHERE chat_id = ?1 AND active = 1 AND timestamp >= ?2 AND role = 'assistant'
+         ORDER BY id DESC",
+    )?;
+    let mut rows = stmt.query(rusqlite::params![chat, run_start])?;
+    while let Some(row) = rows.next()? {
+        let text: String = row.get(0)?;
+        if looks_like_unrun_tool_call(&text) && call_names_a_tool(&text) && !quoted_example(&text) {
+            return Ok(Some(text));
+        }
+    }
+    Ok(None)
+}
+
+/// Words that introduce tool-call markup as something being shown rather than written: an
+/// example, an explanation, a warning. Checked in the words just before the markup.
+const EXAMPLE_MARKERS: &[&str] = &[
+    "for example",
+    "for instance",
+    "e.g.",
+    "such as",
+    "as an example",
+    "example:",
+    "like this",
+    "never write",
+    "don't write",
+    "do not write",
+    "instead of running",
+    "not a real call",
+];
+
+/// A tool name that is a stand-in in shown markup, not a real call: `...`, `NAME`, one letter.
+fn placeholder_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.len() < 2
+        || matches!(
+            n.as_str(),
+            "name"
+                | "tool"
+                | "toolname"
+                | "tool_name"
+                | "function"
+                | "call"
+                | "example"
+                | "placeholder"
+                | "foo"
+                | "bar"
+        )
+}
+
+/// Whether the markup names a tool a call could really have been meant for.
+fn call_names_a_tool(text: &str) -> bool {
+    named_tool(text).is_some_and(|n| !placeholder_name(&n))
+}
+
+/// True when every piece of tool-call markup in the reply is quoted: inside a fence or a
+/// backticked span, or introduced as an example. A model writing a call for real puts it bare
+/// in the reply. A reply without markup is not an example either.
+fn quoted_example(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let mut seen = false;
+    for frag in TOOL_CALL_MARKUP {
+        let mut from = 0;
+        while let Some(rel) = lower[from..].find(frag) {
+            let at = from + rel;
+            from = at + frag.len();
+            seen = true;
+            if in_code(&lower, at) {
+                continue;
+            }
+            let before = &lower[..at];
+            let cut = {
+                let mut i = before.len().saturating_sub(64);
+                while i > 0 && !before.is_char_boundary(i) {
+                    i += 1;
+                }
+                i
+            };
+            if EXAMPLE_MARKERS.iter().any(|m| before[cut..].contains(m)) {
+                continue;
+            }
+            return false;
+        }
+    }
+    seen
+}
+
+/// Whether the markup at `at` sits inside a fenced block or a single-backtick span. Counting
+/// the fences and backticks before it answers this without parsing the whole reply.
+fn in_code(lower: &str, at: usize) -> bool {
+    let before = &lower[..at];
+    if before.matches("```").count() % 2 == 1 {
+        return true;
+    }
+    before.replace("```", "").matches('`').count() % 2 == 1
 }
 
 /// The tool a printed call names, when the markup carries one: `<function=Name>`, an
@@ -181,17 +284,21 @@ pub fn named_tool(text: &str) -> Option<String> {
     None
 }
 
+/// The start of the chat's latest run, 0 when it has never had one.
+fn run_start(tx: &Transaction<'_>, chat: &str) -> rusqlite::Result<i64> {
+    tx.query_row(
+        "SELECT started_at FROM runs WHERE chat_id = ?1 ORDER BY started_at DESC, rowid DESC
+         LIMIT 1",
+        [chat],
+        |r| r.get(0),
+    )
+    .optional()
+    .map(|v| v.unwrap_or(0))
+}
+
 /// The turn's newest step that is not a person's message or a note, of the chat's latest run.
 fn last_step(tx: &Transaction<'_>, chat: &str) -> rusqlite::Result<Option<(String, String)>> {
-    let run_start: i64 = tx
-        .query_row(
-            "SELECT started_at FROM runs WHERE chat_id = ?1 ORDER BY started_at DESC, rowid DESC
-             LIMIT 1",
-            [chat],
-            |r| r.get(0),
-        )
-        .optional()?
-        .unwrap_or(0);
+    let run_start = run_start(tx, chat)?;
     tx.query_row(
         "SELECT role, text FROM messages
          WHERE chat_id = ?1 AND active = 1 AND timestamp >= ?2
@@ -424,6 +531,107 @@ mod tests {
                 ))
                 .unwrap()
                 .as_deref(),
+                want_name,
+                "{label}: name"
+            );
+        }
+    }
+
+    /// A printed call is caught wherever it sits in the turn, not only at its end: a model can
+    /// print one, go on to run real calls, and close with words. Quoted markup — inside code,
+    /// introduced as an example, or naming nothing real — never counts.
+    #[test]
+    fn a_printed_call_counts_anywhere_in_the_turn_never_when_quoted() {
+        const STAGE: &str = "<function=mcp__helm__app_stage_settings>\n<parameter=changes>{\"hubAddress\":\"x\"}</parameter>\n</function>";
+        let calling = format!("Calling it.\n{STAGE}");
+        let calling2 = format!("Calling.\n{STAGE}");
+        // (label, the turn's replies in order, whether a printed call is found, its tool name)
+        type Row<'a> = (&'a str, Vec<(&'a str, &'a str)>, bool, Option<&'a str>);
+        let rows: Vec<Row> = vec![
+            (
+                "printed between real calls",
+                vec![
+                    ("assistant", calling.as_str()),
+                    ("toolResult", "ok"),
+                    ("assistant", "Done: staged."),
+                ],
+                true,
+                Some("mcp__helm__app_stage_settings"),
+            ),
+            (
+                "quoted in a span mid-turn",
+                vec![
+                    ("assistant", "Never write `<function=mcp__helm__app_stage_settings>` by hand."),
+                    ("assistant", "I called it properly instead."),
+                ],
+                false,
+                None,
+            ),
+            (
+                "shown as an example mid-turn",
+                vec![
+                    ("assistant", "For example:\n<tool_call>{\"name\": \"Bash\"}</tool_call>\nI will not do that."),
+                    ("assistant", "Done."),
+                ],
+                false,
+                None,
+            ),
+            (
+                "fenced mid-turn",
+                vec![
+                    (
+                        "assistant",
+                        "```<function_calls><invoke name=\"mcp__helm__app_stage_settings\">```",
+                    ),
+                    ("assistant", "That is the shape you must not write."),
+                ],
+                false,
+                None,
+            ),
+            (
+                "nameless markup mid-turn",
+                vec![
+                    ("assistant", "<tool_call>\nnot json at all\n</tool_call>"),
+                    ("assistant", "Closing words."),
+                ],
+                false,
+                None,
+            ),
+            (
+                "a real print before an example that ends the turn",
+                vec![
+                    ("assistant", calling2.as_str()),
+                    ("toolResult", "ok"),
+                    ("assistant", "Note: never write <function=Read> as text."),
+                ],
+                true,
+                Some("mcp__helm__app_stage_settings"),
+            ),
+        ];
+        for (label, steps, want_found, want_name) in rows {
+            let (_d, db) = crate::schema::tests::temp_db();
+            db.write(|tx| {
+                tx.execute_batch(
+                    "INSERT INTO projects (id, name, created_at) VALUES ('p', 'P', 1);
+                     INSERT INTO chats (id, project_id, title, status, created_at, updated_at)
+                     VALUES ('solo', 'p', 'Solo', 'idle', 1, 1);
+                     INSERT INTO runs (id, chat_id, status, started_at)
+                     VALUES ('r', 'solo', 'complete', 100);",
+                )?;
+                for (i, (role, text)) in steps.iter().enumerate() {
+                    tx.execute(
+                        "INSERT INTO messages (chat_id, source_key, role, text, timestamp)
+                         VALUES ('solo', ?1, ?2, ?3, ?4)",
+                        rusqlite::params![format!("m{i}"), role, text, 150 + i as i64],
+                    )?;
+                }
+                Ok::<_, rusqlite::Error>(())
+            })
+            .unwrap();
+            let got = db.snapshot(|tx| printed_call_text(tx, "solo")).unwrap();
+            assert_eq!(got.is_some(), want_found, "{label}");
+            assert_eq!(
+                got.as_deref().and_then(named_tool).as_deref(),
                 want_name,
                 "{label}: name"
             );

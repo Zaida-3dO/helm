@@ -49,7 +49,8 @@ button.msg-image:hover {
   padding: 4px;
 }
 
-/* The image viewer (ImageViewer.tsx): the dialog sizes itself to the picture it shows. */
+/* The image viewer (ImageViewer.tsx): the dialog keeps one fixed box for the whole viewing, so
+   stepping between pictures of different aspect ratios never resizes it. */
 .ui-dialog.image-viewer {
   width: auto;
   min-width: min(340px, 100%);
@@ -63,11 +64,11 @@ button.msg-image:hover {
   padding: 0 20px 14px;
 }
 
+/* The fixed picture frame: sized by ImageViewer's viewerFrame, never by the picture inside it. */
 .image-viewer-stage {
   display: flex;
   align-items: center;
   justify-content: center;
-  align-self: stretch;
   min-height: 120px;
 }
 
@@ -79,9 +80,10 @@ button.msg-image:hover {
   background: var(--surface-alt);
 }
 
-/* Until its size is known the picture is kept within the window by CSS alone. */
+/* Until its size is known the picture is kept inside the fixed frame by CSS alone. */
 .image-viewer-unsized {
-  max-height: 60vh;
+  max-width: 100%;
+  max-height: 100%;
 }
 
 /* A thumbnail stands in until the full image arrives. */
