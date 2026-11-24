@@ -12,7 +12,9 @@
 //! | `workmode_set` | `{scope, boardId?, mode, chatId?}` | `scope` is `app` or `board`; `mode` is `run`, `check_in` or `null` (clear: the app's default, or the app's mode for a board); answers with the view. Busy chats whose mode changed get one note from Helm |
 //!
 //! Every change also pushes a `gate` event carrying the ask id, the chat and what changed
-//! (`workmode` for the working mode). No agent tool reads or writes the working mode.
+//! (`workmode` for the working mode). A chat reads the working mode and may stage a change to it
+//! through the `workmode` settings key ([`crate::wmode_ext`]); it writes it only when the user
+//! approves the card.
 
 use crate::service::GateService;
 use crate::settings::{self, GateSettings};

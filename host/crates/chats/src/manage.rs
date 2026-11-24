@@ -91,7 +91,7 @@ pub(crate) const ARCHIVED_PROJECT: &str =
     "This chat's project is archived; restore the project first.";
 
 /// Emit the chat's `chat` event and republish attention; returns the record.
-fn changed(ctx: &OpCtx, chat_id: &str) -> Result<ChatRecord, ApiError> {
+pub(crate) fn changed(ctx: &OpCtx, chat_id: &str) -> Result<ChatRecord, ApiError> {
     let db = ctx.services.need::<Database>()?;
     let rev = ctx.services.need::<Clock>()?.next();
     let chat = db

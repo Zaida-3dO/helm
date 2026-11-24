@@ -692,8 +692,10 @@ describe("visual sweep", { timeout: 20 * 60_000 }, () => {
     // At 760 x 700: a real toast (archiving a chat) is up while Settings opens; its close button takes
     // the click, and the toast and the dialog do not overlap at all (a short window put it over the foot).
     await page().setViewportSize({ width: 1280, height: 800 }).catch(() => undefined);
-    // The bar's chat actions show on hover; a DOM click needs none.
-    await page().locator(tid("topbar-archive")).dispatchEvent("click");
+    // Archive left the top bar: open the row menu of a sidebar chat and pick Archive there.
+    await page().locator(tid("chat-item")).first().click({ button: "right" });
+    await page().waitForSelector(tid("sidebar-menu"), { timeout: 5_000 });
+    await page().locator(`${tid("sidebar-menu")} [data-item="archive"]`).click();
     await page().setViewportSize({ width: 760, height: 700 }).catch(() => undefined);
     await page().keyboard.press("Control+Comma");
     await page().waitForSelector(tid("settings"), { timeout: 10_000 });

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Recall, recallPrompts } from './recall.ts';
-import { rankSkills, skillQuery } from './skills.ts';
+import { applySlash, HELM_COMMANDS, rankSkills, skillQuery, slashAt } from './skills.ts';
 import { quoteForDraft } from '../transcript/selection.ts';
 
 test('recall steps back and forth and ends on any other edit', () => {
@@ -47,6 +47,29 @@ test('skills complete from a bare "/prefix" and rank exact, prefix, word, substr
   assert.deepEqual(rankSkills(list, 'review').map((s) => s.name), ['review', 'reviewer', 'code-review', 'prereview', 'deploy']);
 });
 
+test('Helm’s own commands are the priority skills: they lead a bare "/" menu', () => {
+  const list = [
+    { name: 'attach', description: '' },
+    { name: 'fork', description: '', scope: 'helm' },
+    { name: 'code-review', description: '' },
+  ];
+  assert.deepEqual(rankSkills(list, '', 12).map((s) => s.name), ['fork', 'attach', 'code-review'], 'Helm’s first, then by name');
+  assert.deepEqual(HELM_COMMANDS.map((c) => c.name), ['rollover', 'fork', 'pin', 'archive']);
+});
+
+test('a "/" mid-sentence opens the menu at the caret, and a pick replaces only that word', () => {
+  assert.deepEqual(slashAt('/rev', 4), { start: 0, end: 4, query: 'rev' }, 'at the draft start it behaves as before');
+  assert.deepEqual(slashAt('go /', 4), { start: 3, end: 4, query: '' }, 'a bare slash after a space opens it');
+  assert.deepEqual(slashAt('fix this /pin now', 13), { start: 9, end: 13, query: 'pin' }, 'caret at the word end');
+  assert.deepEqual(slashAt('fix /pin now', 8), { start: 4, end: 8, query: 'pin' }, 'the caret just past the word');
+  assert.deepEqual(slashAt('fix /pin now', 6), { start: 4, end: 8, query: 'p' }, 'a caret inside the word covers the word whole');
+  assert.equal(slashAt('a/x here', 8), null, 'a slash after a letter (a path) does not open it');
+  assert.equal(slashAt('hello', 5), null);
+  assert.equal(slashAt('x', 9), null, 'a caret outside the draft');
+  assert.deepEqual(applySlash('fix this /pi now', { start: 9, end: 12 }, 'pin'), { text: 'fix this /pin now', caret: 13 }, 'the space that was there is not doubled');
+  assert.deepEqual(applySlash('go /', { start: 3, end: 4 }, 'pin'), { text: 'go /pin ', caret: 8 }, 'a word at the end gets its separating space');
+});
+
 test('a quote goes into the draft as a block quote', () => {
   assert.equal(quoteForDraft('a\n\nb'), '> a\n>\n> b\n\n');
 });
@@ -90,7 +113,7 @@ test('the / menu stays open with the chosen command while its arguments are type
   // they are spaced; only a whole draft naming one runs it.
   const { helmCommand, withHelmCommands, SCOPE_LABEL } = await import('./skills.ts');
   const all = withHelmCommands([...list, { name: 'roll-over', description: 'a CLI skill' }]);
-  assert.deepEqual(all.map((s) => s.name), ['rollover', 'review', 'reviewer', 'deploy']);
+  assert.deepEqual(all.map((s) => s.name), ['rollover', 'fork', 'pin', 'archive', 'review', 'reviewer', 'deploy']);
   assert.equal(SCOPE_LABEL[all[0]!.scope!], 'Helm command');
   for (const typed of ['/roll', '/rollover', '/roll-over', '/roll-o', '/roll over', '/Roll Over', '/roll ']) {
     assert.deepEqual(skillMenu(typed, all)?.items.map((s) => s.name), ['rollover'], typed);

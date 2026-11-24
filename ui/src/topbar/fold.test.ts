@@ -6,7 +6,7 @@ test('the title room is the breadcrumb width, less its fixed parts and any overf
   assert.equal(titleRoom(225, 0, 1120, 1120), 225);
   assert.equal(titleRoom(0, 0, 1000, 740), -260);
   assert.equal(titleRoom(40, 0, 739, 740), 40, 'no overflow counts as none');
-  assert.equal(titleRoom(225, 106, 1120, 1120), 119, 'the folder glyph, chevron and local-model chip are not room for the title');
+  assert.equal(titleRoom(225, 106, 1120, 1120), 119, 'the project pill, muted mark and local-model chip are not room for the title');
   assert.equal(titleRoom(225, 106, 1150, 1120), 89);
 });
 

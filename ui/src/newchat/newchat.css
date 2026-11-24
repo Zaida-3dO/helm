@@ -23,10 +23,11 @@
 
 /* The intro sits in the same column as the composer dock below it (same offset, width and
    gutters), so the heading, the picker and the box share one centre line at every window width.
-   It sits just above the box, not in the middle of the page: the auto margin pushes it down, and
-   unlike centring it never clips the top in a short window. */
+   Auto margins top and bottom centre it in the space above the box: auto margins (unlike a centred
+   justify) collapse to nothing in a short window, so the top of the block stays reachable. */
 .nc-column {
   margin-top: auto;
+  margin-bottom: auto;
   width: 100%;
   max-width: calc(var(--chat-column) + 2 * 33px);
   margin-left: var(--nc-offset);

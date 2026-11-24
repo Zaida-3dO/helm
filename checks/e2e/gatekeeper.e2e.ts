@@ -178,7 +178,9 @@ describe("The working mode: the chip, the nudged stop, the counted blocker and t
     ((await api(page2(), "gate_list", { filter })) as { rows: Json[] }).rows;
   const needsYou2 = async (chatId: string): Promise<boolean> =>
     ((await api(page2(), "attention_get", {})) as { needsYou: { chatId: string }[] }).needsYou.some((r) => r.chatId === chatId);
-  const chip = () => page2().locator(tid("workmode-chip"));
+  // The working mode has no top-bar control any more (it lives in Settings → Chat & agents);
+  // the test switches it through the same op the settings page uses.
+  const modeView = async () => (await api(page2(), "workmode_get", {})) as { app: string; effective: string };
   const sendText2 = async (text: string): Promise<void> => {
     await typeMessage(page2(), text);
     await page2().locator(tid("send")).dispatchEvent("click");
@@ -186,14 +188,10 @@ describe("The working mode: the chip, the nudged stop, the counted blocker and t
 
   test("W1: run mode turns an asked stop into a nudge, records it, and Change answer reaches the chat", async () => {
     try {
-      // The mode is check-in by default: the chip says so, and the popover switches the app.
-      await chip().waitFor({ timeout: 20_000 });
-      assert.equal(await chip().getAttribute("data-mode"), "check_in", "the app starts on check in");
-      await chip().click();
-      await page2().waitForSelector(tid("workmode-pop"), { timeout: 10_000 });
-      await page2().locator(`${tid("workmode-pop")} ${tid("workmode-app")} [data-tab="run"]`).click();
-      await until("the chip reads run", async () => (await chip().getAttribute("data-mode")) === "run");
-      await page2().keyboard.press("Escape");
+      // The mode is check-in by default; switch the app to run through the settings' own op.
+      assert.equal((await modeView()).app, "check_in", "the app starts on check in");
+      await api(page2(), "workmode_set", { scope: "app", mode: "run" });
+      await until("the app reads run", async () => (await modeView()).app === "run");
 
       const chat = await newChat(page2(), work2);
       // The checking line lives only while the stop is being judged, which is a moment, and

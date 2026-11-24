@@ -171,6 +171,13 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     if let Some(store) = services.get::<helm_mcp::McpStore>() {
         extensions.push(helm_mcp::unencrypted::settings_extension(store));
     }
+    // The working mode: chats read it and may stage a change; only the user's approval writes it.
+    if let Some(db) = services.get::<helm_core::db::Database>() {
+        extensions.push(helm_gatekeeper::wmode_ext::extension(
+            db,
+            services.get::<helm_chats::ChatRuntime>(),
+        ));
+    }
     // The Telegram new-chat defaults: chats read the whole policy, change only model and effort.
     if let Some(profile) = services.get::<helm_core::profile::Profile>() {
         extensions.push(helm_relay::settings_extension(&profile.dir));
@@ -299,6 +306,7 @@ pub fn host_tools() -> helm_hosttools::HostToolRegistry {
     helm_relay::register_host_tools(&mut reg);
     helm_waits::register_host_tools(&mut reg);
     helm_usage::register_host_tools(&mut reg);
+    helm_localmodels::register_host_tools(&mut reg);
     helm_webtools::register_host_tools(&mut reg);
     helm_skills::register_host_tools(&mut reg);
     helm_dictation::register_host_tools(&mut reg);

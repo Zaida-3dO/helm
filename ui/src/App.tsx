@@ -9,7 +9,7 @@ import { CheckpointSlot } from './checkpoints/index.ts';
 import { ClaudeChatViewer } from './claudechats/index.ts';
 import { SearchDialog } from './search/index.ts';
 import { chatOps, type ChatOps } from './api/ops.ts';
-import { ChatMenu, ProjectTags, Sidebar } from './sidebar/index.ts';
+import { Sidebar } from './sidebar/index.ts';
 import { ChatView } from './ChatView.tsx';
 import { applyPanelOpen, openInPanel, panelStore, SidePanel, registerLinkRoute } from './panel/index.ts';
 import { showSlot } from './panel/registry.ts';
@@ -290,7 +290,7 @@ function Frame({ flushers }: { flushers: Flushers }) {
         <SidebarResizer />
       </aside>
       <main className="shell-main">
-        <TopBar actionRow={<ActionRow chatId={chatId} />} chatMenu={<ChatMenu chatId={chatId} />} tags={<ProjectTags chatId={chatId} />} />
+        <TopBar actionRow={<ActionRow chatId={chatId} />} />
         <div className="shell-chat">
           <ErrorBoundary name="chat" resetKey={chatId}>
             {chatId ? (
