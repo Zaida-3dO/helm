@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PREVIEW_SOURCE, stripMarkdown, thinkingPreview } from './thinking.ts';
+const PREVIEW_LIMIT = 240;
 
 test('markdown is stripped', () => {
   assert.equal(stripMarkdown('## Plan\n- **read** the `file` [here](http://x)'), 'Plan read the file here');
@@ -13,4 +14,9 @@ test('the preview shows the latest sentence and only reads the tail', () => {
   assert.ok(!p.includes('Old sentence'));
   assert.ok(p.endsWith('Latest one.'));
   assert.ok(p.length <= 241);
+  // A preview cut to length starts at a word boundary with an ellipsis, never mid-word.
+  const words = thinkingPreview('abcdefgh '.repeat(100));
+  assert.ok(words.startsWith('…abcdefgh '), `cut mid-word: ${words.slice(0, 12)}`);
+  // A single word longer than the limit is kept whole rather than chopped to exactly the limit.
+  assert.ok(thinkingPreview('z'.repeat(PREVIEW_LIMIT + 50)).startsWith('…zzz'));
 });

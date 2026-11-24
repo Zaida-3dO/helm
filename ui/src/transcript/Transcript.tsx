@@ -10,7 +10,7 @@ import { QueueItem, inFlightItems } from '../composer/QueueList.tsx';
 import { FoldRow, Row, type RowContext } from './Rows.tsx';
 import { VirtualList } from './VirtualList.tsx';
 import { skillsByReply, turnTimes } from './rowMeta.ts';
-import { estimateItem, layout, revealKey, type Item } from './workBlocks.ts';
+import { estimateItem, layout, opensTurn, revealKey, type Item } from './workBlocks.ts';
 import { AgentGroup } from './subagents/AgentGroup.tsx';
 
 export interface TranscriptProps {
@@ -92,7 +92,7 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
     const at = rows.findIndex((r) => r.id === jumpToRowId);
     for (let j = at; j >= 0; j--) {
       const r = rows[j]!;
-      if (r.role === 'user' && r.details?.mode !== 'steer') {
+      if (opensTurn(r)) {
         const turn = revealKey(r.sourceKey);
         setExpanded((s) => (s.has(turn) ? s : new Set(s).add(turn)));
         return;
@@ -167,6 +167,8 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
             elapsedMs={item.elapsedMs}
             failed={item.failed}
             open={item.open}
+            live={item.live}
+            working={item.working}
             onToggle={() => toggleFold(item.key, item.turnKey)}
           />
         );

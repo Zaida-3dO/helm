@@ -1,17 +1,24 @@
-// Turn work blocks. A turn starts at a user row (a steer read mid-turn does not
-// start one, and is always shown); the agent activity after it is its work. Every consecutive run
-// of tool calls, thinking blocks and message cards folds behind its own compact row — "12 tool
-// calls", expandable — so the reader never sees a row of loose tool calls, and nothing hides a
-// failed call differently from a passed one. Notes the agent wrote between the calls, the subagent
-// cards, errors, interruptions, retries, context rows and the turn's final reply stay in the flow,
-// and so do the cards an agent puts in the chat (a gallery of pictures, an option board) and
-// messages the person sent themselves (a typed steer, an action button): those speak to the user,
-// so they are never folded. A note's own thinking stays with its row, folded by its own toggle:
-// collapsed, but always reachable. Consecutive Agent calls are drawn as one group of cards.
+// Turn work blocks. A turn opens only at a message the person sent (typed, voice, Telegram or an
+// action button): a steer they read mid-turn stays inside the running turn, and nothing else ever
+// splits one — messages from other chats, saved schedules and notes the app wrote for the agent
+// keep the current turn going, exactly as the agent experiences them.
 //
-// A live turn folds as it goes: only its newest activity stays open, either the running tool or the
-// text written since the last tool, so at settle nothing but that last piece folds and the
-// transcript does not jump.
+// A turn shows as: the person's message, then every message meant for the reader, in order — notes
+// the agent wrote, the person's own mid-turn steers, relayed user actions, the subagent cards,
+// errors, interruptions, retries, context rows, the cards an agent puts in the chat (a gallery of
+// pictures, an option board) — and the turn's final reply with its recap. Under all of that sits
+// ONE collapsed work group holding the turn's whole working life: every tool call (failed calls
+// fold like passed ones), the blank messages tool calls are saved under, thinking blocks with no
+// text of their own, the compact cards of messages from other chats, schedules or the app, and the
+// agent's short aside notes ("(Correct)") with their thinking. Those internal rows gathered from
+// between the visible messages all fold into that one group, wherever they arrived, so the reader
+// sees the thread of what was said without a row of loose tool calls breaking it up. A note's own
+// thinking stays with its row, folded by its own toggle: collapsed, but always reachable.
+// Consecutive Agent calls are drawn as one group of cards.
+//
+// Live, that bottom group is the working indicator: its header names what the agent is doing now
+// and counts the work folded under it, and the transcript does not jump at settle — only the
+// header's "what it is doing now" word changes.
 //
 // A row with nothing to show — the empty message each tool call is saved under — is never drawn at
 // all, closed or opened: hidden tool activity takes no space rather than leaving an empty gap.
@@ -20,7 +27,7 @@ import type { MessageRow } from '../api/types.ts';
 import { isCardRow } from './cards.ts';
 import { buildRecap, type Recap } from './recap.ts';
 import { agentNote } from './agentNote.ts';
-import { isHelmNote, isQuietReply } from './origin.ts';
+import { isHelmNote, isQuietReply, isUserAction, pageMessage } from './origin.ts';
 import { isAgentRow } from './subagents/model.ts';
 import { toolStatus } from './toolKinds.ts';
 import { ESTIMATE, estimateHeight, type EstimateInput } from './virtual.ts';
@@ -60,6 +67,10 @@ export type Item =
       messages: number;
       /** The reader has opened this group, so its rows follow the header. */
       open: boolean;
+      /** The turn is still running: the header carries the working line. */
+      live: boolean;
+      /** While live: a few words on what the agent is doing now. */
+      working: string;
     }
   // Agent calls that follow one another, drawn as one header over a grid of subagent cards.
   | { kind: 'agents'; key: string; rows: MessageRow[]; flags: RowFlags[] }
@@ -71,9 +82,10 @@ export function revealKey(turnKey: string): string {
   return `turn:${turnKey}`;
 }
 
-/** The group header's words: what the run holds and how long it took. */
-export function foldLabel(g: { tools: number; thoughts: number; messages: number; elapsedMs: number }): string {
+/** The group header's words: what it holds, how long it took, and (live) what it is doing now. */
+export function foldLabel(g: { tools: number; thoughts: number; messages: number; elapsedMs: number; working?: string }): string {
   const parts: string[] = [];
+  if (g.working) parts.push(g.working);
   if (g.tools > 0) parts.push(`${g.tools} tool call${g.tools === 1 ? '' : 's'}`);
   if (g.thoughts > 0) parts.push(`${g.thoughts} thought${g.thoughts === 1 ? '' : 's'}`);
   if (g.messages > 0) parts.push(`${g.messages} message${g.messages === 1 ? '' : 's'}`);
@@ -81,9 +93,14 @@ export function foldLabel(g: { tools: number; thoughts: number; messages: number
   return parts.join(' · ');
 }
 
-/** A steer read mid-turn belongs to the running turn; only other user rows open a new turn. */
-function opensTurn(r: MessageRow): boolean {
-  return r.role === 'user' && r.details?.mode !== 'steer';
+/**
+ * Only a message from the person opens a turn. A steer they read mid-turn belongs to the running
+ * turn, and an agent's or the app's message never opens one: it keeps the turn it landed in, the
+ * way it reads to the agent.
+ */
+export function opensTurn(r: MessageRow): boolean {
+  if (r.role !== 'user' || r.details?.mode === 'steer') return false;
+  return !isHelmNote(r) && !agentNote(r) && !pageMessage(r);
 }
 
 /** A notice row: what a refusal or a give-back leaves in the transcript (the default kind). */
@@ -119,16 +136,29 @@ function isNote(r: MessageRow): boolean {
 }
 
 /**
- * A row that belongs in a work group rather than standing in the flow on its own: tool calls
- * (passed and failed alike), the blank messages tool calls are saved under, thinking blocks with
- * no text of their own, and the compact cards of messages that came from another chat, a schedule
- * or the app. The person's own rows (a typed or action-button send, Telegram), gallery and option
- * cards, subagent calls, notes, context rows, stopped calls and failures stay visible.
+ * An aside note: its whole text is one parenthesised or bracketed run ("(Correct)", "[skipped]"),
+ * or it carries no letter or digit at all. Shape decides, not length: a short aside folds into the
+ * work group with its thinking, while a note that speaks to the reader stays in the flow.
+ */
+function isStubNote(r: MessageRow): boolean {
+  if (r.role !== 'assistant' || alwaysShown(r) || isQuietReply(r)) return false;
+  const t = r.text.trim();
+  if (!t) return false;
+  return /^[([][\s\S]*[)\]]$/.test(t) || !/[\p{L}\p{N}]/u.test(t);
+}
+
+/**
+ * A row that belongs in the turn's work group rather than standing in the flow on its own: tool
+ * calls (passed and failed alike), the blank messages tool calls are saved under, thinking blocks
+ * with no text of their own, short aside notes, and the compact cards of messages that came from
+ * another chat, a schedule or the app. The person's own rows (a typed or action-button send,
+ * Telegram, a mid-turn steer, a relayed user action), gallery and option cards, subagent calls,
+ * notes, context rows, stopped calls and failures stay visible.
  */
 function groupable(r: MessageRow): boolean {
-  if (r.role === 'user') return !isHelmNote(r) && !!agentNote(r);
+  if (r.role === 'user') return !!agentNote(r) && !isHelmNote(r) && !isUserAction(r);
   if (r.role === 'toolResult') return r.status !== 'interrupted' && !isCardRow(r) && !isAgentRow(r);
-  if (r.role === 'assistant') return !alwaysShown(r) && !isQuietReply(r) && (isBlank(r) || (!!r.thinking.trim() && !isNote(r)));
+  if (r.role === 'assistant') return !alwaysShown(r) && !isQuietReply(r) && (isBlank(r) || (!!r.thinking.trim() && !isNote(r)) || isStubNote(r));
   return false;
 }
 
@@ -181,9 +211,9 @@ function groupAgents(items: Item[]): Item[] {
 
 /**
  * Lay out rows as items. `live` says whether the newest turn is still running; `expanded` lists
- * the group keys the reader has opened (plus a turn's `revealKey`, which opens every group in it);
- * `dividers` names the older session at each roll-over boundary (keyed by that session's id) so
- * the meeting of two sessions gets a divider row.
+ * the group keys the reader has opened (a turn's `revealKey` opens its group); `dividers` names
+ * the older session at each roll-over boundary (keyed by that session's id) so the meeting of two
+ * sessions gets a divider row.
  */
 export function layout(
   rows: MessageRow[],
@@ -225,103 +255,97 @@ export function layout(
     const isLast = i >= rows.length;
     const turnKey = user.sourceKey;
     const revealed = expanded.has(revealKey(turnKey));
-    // The final reply: the last assistant row with text.
+    // The final reply: the last assistant row with text that is not just an aside.
     let reply = -1;
     for (let j = work.length - 1; j >= 0; j--) {
-      if (work[j]!.role === 'assistant' && work[j]!.text.trim() && !isQuietReply(work[j]!)) {
+      const r = work[j]!;
+      if (r.role === 'assistant' && r.text.trim() && !isQuietReply(r) && !isStubNote(r)) {
         reply = j;
         break;
       }
     }
     const settled = !(isLast && live);
     const hadTools = work.some((r) => r.role === 'toolResult');
-    // While live, the open part is the newest activity: the running tool if a tool is the newest
-    // row, else everything written since the last tool. Settled, it is the final reply.
-    let openFrom = work.length;
-    if (!settled) {
-      let lastTool = -1;
-      for (let j = work.length - 1; j >= 0; j--) {
-        if (work[j]!.role === 'toolResult') {
-          lastTool = j;
-          break;
-        }
-      }
-      openFrom = lastTool < 0 ? work.length - 1 : lastTool === work.length - 1 ? lastTool : lastTool + 1;
-    }
-    const open = (j: number) => (settled ? j === reply : j >= openFrom);
+    // One work group per turn, under the whole turn: every groupable row of it in time order,
+    // however scattered it arrived among the visible rows. A run of nothing but the blank
+    // messages tool calls hide under is no work to show: no header over those alone.
+    const group: number[] = [];
+    for (let j = 0; j < work.length; j++) if (groupable(work[j]!)) group.push(j);
+    const hasWork = group.some((j) => !isBlank(work[j]!));
+    const groupKey = hasWork ? `cg:${turnKey}:${work[group[0]!]!.id}` : '';
+    const groupOpen = hasWork && (revealed || expanded.has(groupKey));
     const recap = settled && reply >= 0 ? recapFor(work[reply]!, work) : null;
-    // Consecutive groupable runs become one group each; anything visible splits a run. While live
-    // the open part stays out of every group, so a run folds up to the newest activity only.
-    const runs: number[][] = [];
-    let run: number[] = [];
-    const flushRun = (): void => {
-      // A run of nothing but the blank messages tool calls hide under is no work to show: while
-      // live it would only put a header over the first call before anything real folds.
-      if (run.some((j) => !isBlank(work[j]!))) runs.push(run);
-      run = [];
-    };
-    for (let j = 0; j < work.length; j++) {
-      if (open(j) || !groupable(work[j]!)) flushRun();
-      else run.push(j);
+    // Live, the group's header is the working indicator: a few words on the newest internal row.
+    let working = '';
+    if (!settled && hasWork) {
+      const last = work[group[group.length - 1]!]!;
+      if (last.role === 'toolResult' && last.status === 'streaming') working = last.details?.toolSummary || last.toolName || 'Working';
+      else if (last.role === 'assistant' && !last.text.trim() && last.thinking.trim()) working = 'Thinking';
+      else working = 'Working';
     }
-    flushRun();
-    const groupOf = new Map<number, number>();
-    runs.forEach((g, gi) => g.forEach((j) => groupOf.set(j, gi)));
-    const groupKey = (gi: number) => `cg:${turnKey}:${work[runs[gi]![0]!]!.id}`;
-    const groupOpen = (gi: number) => revealed || expanded.has(groupKey(gi));
-    // A work row is on screen when its group is open or it is in the live open part.
-    const drawn = (j: number) => open(j) || (groupOf.has(j) && groupOpen(groupOf.get(j)!));
-    // The next row that will actually be drawn, skipping the blank messages tool calls hide under.
-    const nextDrawn = (j: number) => {
-      for (let k = j + 1; k < work.length; k++) if (!undrawn(work[k]!) && drawn(k)) return work[k]!;
+    // The visible rows first, in time order; the group follows them as one item.
+    let prevShown: MessageRow | undefined;
+    const nextShown = (j: number) => {
+      for (let k = j + 1; k < work.length; k++) if (!groupable(work[k]!) && !undrawn(work[k]!)) return work[k]!;
       return undefined;
     };
-    const push = (r: MessageRow, j: number, indent: boolean) => {
-      if (undrawn(r)) return;
-      const prev = j > 0 ? work[j - 1] : user;
-      const last = items[items.length - 1];
-      const next = nextDrawn(j);
+    for (let j = 0; j < work.length; j++) {
+      const r = work[j]!;
+      if (groupable(r) || undrawn(r)) continue;
+      const next = nextShown(j);
       items.push({
         kind: 'row',
         row: r,
         ...(recap && j === reply ? { recap } : {}),
         // Live, the reply being written after the last tool already wears its final look, so
         // settling changes nothing about it.
-        final: j === reply && hadTools && open(j),
-        afterTool: prev?.role === 'toolResult',
-        indent,
-        afterFold: last?.kind === 'fold' && !last.open,
+        final: j === reply && hadTools,
+        afterTool: prevShown?.role === 'toolResult',
+        indent: false,
+        afterFold: false,
         beforeTool: next !== undefined && next.role === 'toolResult' && !isAgentRow(next),
       });
-    };
-    if (runs.length === 0) {
-      work.forEach((r, j) => push(r, j, false));
-      continue;
+      prevShown = r;
     }
-    for (let j = 0; j < work.length; j++) {
-      const gi = groupOf.get(j);
-      if (gi === undefined) {
-        push(work[j]!, j, false);
-        continue;
+    if (hasWork) {
+      const grp = group.map((j) => work[j]!);
+      items.push({
+        kind: 'fold',
+        key: groupKey,
+        turnKey,
+        rows: grp,
+        elapsedMs: Math.max(0, grp[grp.length - 1]!.timestamp - grp[0]!.timestamp),
+        failed: grp.filter((r) => r.role === 'toolResult' && toolStatus(r) === 'failed').length,
+        tools: grp.filter((r) => !isBlank(r) && r.role === 'toolResult').length,
+        thoughts: grp.filter((r) => !isBlank(r) && r.role === 'assistant' && r.thinking.trim() !== '').length,
+        messages: grp.filter((r) => !isBlank(r) && r.role === 'user').length,
+        open: groupOpen,
+        live: !settled,
+        working,
+      });
+      if (groupOpen) {
+        // Opened: the group's rows follow the header, in time order, under its rule.
+        let prevGroup: MessageRow | undefined;
+        for (let k = 0; k < grp.length; k++) {
+          const r = grp[k]!;
+          if (undrawn(r)) continue;
+          let nextGroup: MessageRow | undefined;
+          for (let m = k + 1; m < grp.length; m++) {
+            if (!undrawn(grp[m]!)) {
+              nextGroup = grp[m]!;
+              break;
+            }
+          }
+          items.push({
+            kind: 'row',
+            row: r,
+            indent: true,
+            afterTool: prevGroup?.role === 'toolResult',
+            beforeTool: nextGroup !== undefined && nextGroup.role === 'toolResult' && !isAgentRow(nextGroup),
+          });
+          prevGroup = r;
+        }
       }
-      const g = runs[gi]!;
-      if (g[0] === j) {
-        const grp = g.map((k) => work[k]!);
-        const visible = grp.filter((r) => !isBlank(r));
-        items.push({
-          kind: 'fold',
-          key: groupKey(gi),
-          turnKey,
-          rows: grp,
-          elapsedMs: Math.max(0, grp[grp.length - 1]!.timestamp - grp[0]!.timestamp),
-          failed: grp.filter((r) => r.role === 'toolResult' && toolStatus(r) === 'failed').length,
-          tools: visible.filter((r) => r.role === 'toolResult').length,
-          thoughts: visible.filter((r) => r.role === 'assistant' && r.thinking.trim() !== '').length,
-          messages: visible.filter((r) => r.role === 'user').length,
-          open: groupOpen(gi),
-        });
-      }
-      if (groupOpen(gi)) push(work[j]!, j, true);
     }
   }
   const laid = groupAgents(items);

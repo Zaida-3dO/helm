@@ -238,7 +238,7 @@ function NoteCard({ note, ctx, rowId }: { note: AgentNote; ctx: RowContext; rowI
           </>
         )}
       </div>
-      {note.digest && <div className="note-card-digest" data-testid="note-card-digest">{note.digest}</div>}
+      {note.digest && !open && <div className="note-card-digest" data-testid="note-card-digest">{note.digest}</div>}
       {open && (
         <>
           {/* The summary stays first when the card opens, so opening never loses the one line
@@ -409,11 +409,12 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
   );
 });
 
-/** One compact row per run of work: what it holds, and how many calls failed inside it. */
-export function FoldRow({ tools, thoughts, messages, elapsedMs, failed, open, onToggle }: { tools: number; thoughts: number; messages: number; elapsedMs: number; failed: number; open: boolean; onToggle: () => void }) {
-  const label = foldLabel({ tools, thoughts, messages, elapsedMs });
+/** The turn's one work group: what it holds, how many calls failed inside it, and while the turn
+ *  runs, a short line naming what the agent is doing now — the transcript's working indicator. */
+export function FoldRow({ tools, thoughts, messages, elapsedMs, failed, open, live, working, onToggle }: { tools: number; thoughts: number; messages: number; elapsedMs: number; failed: number; open: boolean; live: boolean; working: string; onToggle: () => void }) {
+  const label = foldLabel({ tools, thoughts, messages, elapsedMs, ...(live ? { working: working || 'Working' } : {}) });
   return (
-    <div className={`row row-fold${open ? ' open' : ''}`}>
+    <div className={`row row-fold${open ? ' open' : ''}${live ? ' live' : ''}`} data-testid="work-fold-live" data-live={live ? 'true' : undefined}>
       <button
         type="button"
         className="fold-toggle"

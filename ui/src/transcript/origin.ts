@@ -46,16 +46,12 @@ export const KIND_TAG: Record<string, string> = {
 };
 
 /**
- * The kinds an agent sends, so a message of one of these counts as agent thinking and is eligible
- * to collapse alongside thinking blocks and tool calls. The relayed user action is the one kind
- * that does not.
+ * A relayed user action stays in the flow wherever it lands: it tells the reader what the person
+ * did, so it is never folded into a turn's work group, unlike the other between-chat kinds (a
+ * steer, an update, a report), which are agent-to-agent traffic and fold.
  */
-export const THINKING_KINDS = new Set(['initial-prompt', 'steer', 'nudge', 'update', 'completed']);
-
-/** True when this message's kind is one an agent sent: eligible for the thinking collapse. */
-export function isThinkingKind(row: MessageRow): boolean {
-  const kind = row.details?.kind;
-  return kind != null && THINKING_KINDS.has(kind);
+export function isUserAction(row: MessageRow): boolean {
+  return row.role === 'user' && row.details?.kind === 'user-action';
 }
 
 export interface WaitFinished {
