@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { MessageRow } from '../api/types.ts';
-import { bubbleText, fromSpeaker, fromTelegram, fromVoice, isHelmNote, isQuietReply, isThinkingKind, KIND_TAG, pageMessage, peerMessage, THINKING_KINDS, typedOn, waitFinished } from './origin.ts';
+import { bubbleText, fromSpeaker, fromTelegram, fromVoice, isHelmNote, isQuietReply, isUserAction, KIND_TAG, pageMessage, peerMessage, typedOn, waitFinished } from './origin.ts';
 
 const NOTE = '[Sent from Telegram: answer briefly in plain text, with no tables or long code. Offer choices as a numbered list. Only the final message of each turn reaches the user\'s phone, so make that message stand on its own. The user can reply "more" for detail.]';
 
@@ -144,18 +144,18 @@ test('a stamped note renders instead of hiding; the kind words and thinking flag
   assert.equal(isHelmNote(stamp('wait-finished')), false);
   assert.equal(isHelmNote(stamp('request-expired')), false);
   assert.equal(isHelmNote(row('[Wait finished] The build is done.', 'app')), true);
-  // Every kind an agent sends counts as thinking; the relayed user action and Helm's own notes do not.
+  // Every kind the host or an agent stamps has a tag line; the relayed user action is the one
+  // that stands in the flow rather than folding into the turn's work group.
   type Kind = 'initial-prompt' | 'steer' | 'nudge' | 'update' | 'completed' | 'user-action' | 'wait-finished';
   const thinking = (kind: Kind): MessageRow => ({ ...row('x', 'other_chat'), details: { origin: 'other_chat', kind } });
   const agentKinds = ['initial-prompt', 'steer', 'nudge', 'update', 'completed'] as const;
   for (const k of agentKinds) {
-    assert.equal(isThinkingKind(thinking(k)), true, k);
+    assert.equal(isUserAction(thinking(k)), false, k);
     assert.ok(KIND_TAG[k], `the tag line for ${k}`);
   }
-  assert.equal(isThinkingKind(thinking('user-action')), false);
-  assert.equal(isThinkingKind(thinking('wait-finished')), false);
-  assert.equal(isThinkingKind(row('no kind at all', 'other_chat')), false);
-  assert.deepEqual([...THINKING_KINDS].sort(), ['completed', 'initial-prompt', 'nudge', 'steer', 'update']);
+  assert.equal(isUserAction(thinking('user-action')), true);
+  assert.equal(isUserAction(thinking('wait-finished')), false);
+  assert.equal(isUserAction(row('no kind at all', 'other_chat')), false);
 });
 
 test('a finished wait parses into its watched thing and outcome; anything else does not', () => {

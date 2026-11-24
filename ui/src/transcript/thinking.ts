@@ -28,5 +28,9 @@ export function thinkingPreview(thinking: string): string {
     out = next;
   }
   out = out.trim();
-  return out.length > PREVIEW_MAX ? '…' + out.slice(-PREVIEW_MAX) : out;
+  if (out.length <= PREVIEW_MAX) return out;
+  // Clip at a word boundary, not mid-word: drop the partial word the cut landed in.
+  const tail = out.slice(-PREVIEW_MAX);
+  const sp = tail.indexOf(' ');
+  return '…' + (sp >= 0 ? tail.slice(sp + 1) : tail);
 }
