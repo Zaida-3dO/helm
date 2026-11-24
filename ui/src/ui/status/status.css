@@ -135,6 +135,33 @@
   display: inline-flex;
   flex: none;
 }
+/* The row-size wheel: flat strokes, wood and brass, tuned per theme so the rim and handles hold on
+   either page colour. */
+.ui-wheel-simple {
+  --wheel-wood: #a35a17;
+  --wheel-handle: #c27120;
+  --wheel-hub: #d9a43c;
+  --wheel-hub-edge: #7a4d10;
+}
+:root[data-theme='dark'] .ui-wheel-simple {
+  --wheel-wood: #d08a38;
+  --wheel-handle: #e6a04a;
+  --wheel-hub: #f0c060;
+  --wheel-hub-edge: #8a5a14;
+}
+.ui-wheel-simple .wm-rim {
+  stroke: var(--wheel-wood);
+}
+.ui-wheel-simple .wm-spoke {
+  stroke: var(--wheel-wood);
+}
+.ui-wheel-simple .wm-handle {
+  stroke: var(--wheel-handle);
+}
+.ui-wheel-simple .wm-hub {
+  fill: var(--wheel-hub);
+  stroke: var(--wheel-hub-edge);
+}
 /* As a chat's activity mark: stopping and background work are dimmed. */
 .ui-wheel-stopping {
   opacity: 0.55;
