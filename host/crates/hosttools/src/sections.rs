@@ -2,6 +2,8 @@
 //!
 //! - `verbosity` (order 10): how long replies should be: the chat's own level, else the user-only
 //!   `responseVerbosity` (low by default; high adds nothing).
+//! - `prose` (order 12): the work shows as collapsible records, so visible prose should not narrate
+//!   it; always on.
 //! - `links` (order 20): the link teaching (vault notes and `file:line`, the panel crate's
 //!   fragment), adopted unchanged through [`AdoptedSection`] so it is taught once.
 
@@ -13,6 +15,10 @@ use std::sync::Arc;
 
 pub const VERBOSITY_LOW: &str = "Reply length: keep answers short. Lead with the result in one or two sentences, use a short list only when it helps, and leave out preamble, restating the question and closing summaries. Give more detail only when the user asks for it.";
 pub const VERBOSITY_MEDIUM: &str = "Reply length: be reasonably concise. Lead with the result, then the detail that matters; leave out preamble and recaps.";
+
+/// The `prose` section (order 12): the work itself is shown to the user as collapsible records,
+/// so the agent's visible prose should not narrate it. One line, harness-neutral, always on.
+pub const PROSE_ADDENDUM: &str = "Prose: your reasoning and tool activity already reach the user as collapsible records. Keep user-visible text to results and the few words that carry them: do not narrate each tool call, restate what a call returned, or think out loud in the reply.";
 
 /// The stored verbosity, `low` when unset or unknown.
 pub fn verbosity(db: &Database) -> String {

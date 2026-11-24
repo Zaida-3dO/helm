@@ -521,6 +521,13 @@ pub fn launch_contributors(
     a.register_section(Arc::new(helm_hosttools::sections::VerbositySection {
         db: db.clone(),
     }))
+    // The tool runs and thinking are already shown as collapsible records; this says the reply's
+    // prose should not narrate them as well.
+    .register_section(Arc::new(helm_hosttools::StaticSection {
+        id: "prose",
+        order: 12,
+        text: helm_hosttools::sections::PROSE_ADDENDUM,
+    }))
     .register_section(Arc::new(helm_hosttools::sections::AdoptedSection {
         id: "links",
         order: 20,
