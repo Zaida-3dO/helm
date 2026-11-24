@@ -7,9 +7,9 @@ import { SidebarData } from './data.ts';
 import { toast } from '../ui/toasts.ts';
 import { SidebarActions, type ActionDeps } from './actions.ts';
 import { UndoStack } from './undo.ts';
-import { badgeOrder, buildList, chatAncestors, headerSubtitle, HEIGHTS, nestRows, showsCalmWheel, stepChat, visibleChatOrder, type ListItem } from './model.ts';
+import { buildList, chatAncestors, groupStatus, headerSubtitle, HEIGHTS, nestRows, rightCluster, stepChat, titleCluster, visibleChatOrder, type ListItem } from './model.ts';
 import { loadMore, readBudget, type PageResult } from './paging.ts';
-import { age, needsYouLabel, rowAttention, rowStateLabel, rowStatusLabel, trailingIndicator } from './status.ts';
+import { age, foldStatus, needsYouLabel, rowStateLabel, rowStatusLabel, type FoldSignals } from './status.ts';
 import { layout, visibleRange } from './virtual.ts';
 import { DEFAULT_VIEW_ORDER, mergeOrder, moveView, orderViews, readOrder, slotsFit, splitViews, touchView, writeOrder } from './tiles.ts';
 
@@ -84,16 +84,18 @@ function boardProject(id: string, completed: boolean, over: Partial<ProjectNode>
   return project(id, { kind: 'board', path: null, ...over, board: { ...board, ...over.board } });
 }
 
-test('status priority: running > unread > lingering > interrupted > pinned', () => {
-  const base = { status: 'idle' as const, unread: false, lingering: false, pinned: false };
-  assert.equal(rowAttention({ ...base, status: 'stopping', unread: true, lingering: true, pinned: true }), 'running');
-  assert.equal(rowAttention({ ...base, status: 'interrupted', unread: true, lingering: true, pinned: true }), 'unread');
-  assert.equal(rowAttention({ ...base, status: 'interrupted', lingering: true, pinned: true }), 'lingering');
-  assert.equal(rowAttention({ ...base, status: 'interrupted', pinned: true }), 'interrupted');
-  assert.equal(rowAttention({ ...base, pinned: true }), 'pinned');
-  assert.equal(rowAttention(base), null);
-  assert.equal(trailingIndicator('lingering'), true);
-  assert.equal(trailingIndicator('interrupted'), false);
+test('one status per row: priority running > flagged > draft > done > lingering > interrupted > pinned > unread', () => {
+  const none: FoldSignals = { running: false, flagged: false, draft: false, done: false, lingering: false, interrupted: false, pinned: false, unread: false };
+  assert.equal(foldStatus({ ...none }), null, 'a plain row shows no status at all');
+  // Each state is the answer when nothing outranks it, and every earlier one outranks it.
+  assert.equal(foldStatus({ ...none, running: true, flagged: true, draft: true, done: true, lingering: true, interrupted: true, pinned: true, unread: true }), 'running');
+  assert.equal(foldStatus({ ...none, flagged: true, draft: true, done: true, lingering: true, interrupted: true, pinned: true, unread: true }), 'flagged');
+  assert.equal(foldStatus({ ...none, draft: true, done: true, lingering: true, interrupted: true, pinned: true, unread: true }), 'draft');
+  assert.equal(foldStatus({ ...none, done: true, lingering: true, interrupted: true, pinned: true, unread: true }), 'done');
+  assert.equal(foldStatus({ ...none, lingering: true, interrupted: true, pinned: true, unread: true }), 'lingering');
+  assert.equal(foldStatus({ ...none, interrupted: true, pinned: true, unread: true }), 'interrupted');
+  assert.equal(foldStatus({ ...none, pinned: true, unread: true }), 'pinned');
+  assert.equal(foldStatus({ ...none, unread: true }), 'unread');
   // The flag on a chat waiting on an answer says so.
   assert.deepEqual(['question', 'plan', 'approval', 'triage', undefined].map((k) => needsYouLabel(k as never)), ['Answer question', 'Answer question', 'Answer question', 'Needs you', 'Needs you']);
   // A running local chat's wording speaks in halves of the wait at the model server (which
@@ -115,22 +117,20 @@ test('status priority: running > unread > lingering > interrupted > pinned', () 
   assert.equal(rowStateLabel(null), null);
 });
 
-test('chat row trailing marks: one order for every row, age always last', () => {
-  const none = { flag: false, chip: false, muted: false, shared: false, children: 0, expanded: false, childRunning: false, childFlagged: false, itemChip: false, draft: false };
-  // Everything at once reads in one fixed order.
-  assert.deepEqual(
-    badgeOrder({ flag: true, chip: true, muted: true, shared: true, children: 3, expanded: false, childRunning: true, childFlagged: true, itemChip: true, draft: true }),
-    ['flag', 'chip', 'mute', 'shared', 'children', 'child-running', 'child-flag', 'item', 'draft', 'age'],
-  );
-  assert.deepEqual(badgeOrder(none), ['age'], 'a plain row is just its age');
-  // The flag takes one slot whether the chat waits on you or the idle check only thinks it might.
-  assert.deepEqual(badgeOrder({ ...none, flag: true }), ['flag', 'age']);
-  // An expanded parent reaches its children through the chevron instead: no count, no riding-up marks.
-  assert.deepEqual(badgeOrder({ ...none, children: 3, expanded: true, childRunning: true, childFlagged: true }), ['age']);
-  // A collapsed parent shows its count, plus the wheel if any runs, the flag if any may need you.
-  assert.deepEqual(badgeOrder({ ...none, children: 2, childRunning: true }), ['children', 'child-running', 'age']);
-  assert.deepEqual(badgeOrder({ ...none, children: 2, childFlagged: true }), ['children', 'child-flag', 'age']);
-  assert.deepEqual(badgeOrder({ ...none, children: 2 }), ['children', 'age'], 'idle children: just the count');
+test('chat row clusters: title marks right after the title, and the far-right cluster with age always last', () => {
+  // The title line: the muted bell right after the title, then the children count (collapsed
+  // parents only), then the shared-from disc. An expanded parent reaches its children through
+  // the chevron instead, so no count rides.
+  assert.deepEqual(titleCluster({ muted: true, shared: true, children: 3, expanded: false }), ['mute', 'children', 'shared']);
+  assert.deepEqual(titleCluster({ muted: false, shared: false, children: 0, expanded: false }), [], 'a plain row carries nothing after its title');
+  assert.deepEqual(titleCluster({ muted: false, shared: false, children: 3, expanded: true }), [], 'expanded: no count');
+  // The far-right cluster, left to right: state word, queue, the one status icon, age hard right.
+  assert.deepEqual(rightCluster({ chip: true, queue: true, status: true }), ['chip', 'queue', 'status', 'age']);
+  assert.deepEqual(rightCluster({ chip: false, queue: false, status: false }), ['age'], 'age sits hard right; no icon pushes it in');
+  // No status icon: the queue takes the status slot, right beside the age.
+  assert.deepEqual(rightCluster({ chip: false, queue: true, status: false }), ['queue', 'age']);
+  // A tool name or "Quiet" stays a word; a queue wait is no longer a text tag.
+  assert.deepEqual(rightCluster({ chip: true, queue: false, status: true }), ['chip', 'status', 'age']);
 });
 
 test('age is relative: now, minutes, hours, days', () => {
@@ -156,27 +156,35 @@ test('a collapsed group totals the running and unread chats inside it and its ne
   const rows = [row('r1', 'a', { status: 'running' }), row('u1', 'a', { unread: true }), row('i1', 'a'), row('r2', 'kid', { status: 'starting' }), row('o1', 'open', { status: 'running' })];
   const header = (items: ListItem[], id: string) => items.find((i): i is Extract<ListItem, { kind: 'header' }> => i.kind === 'header' && i.project.id === id)!;
   const items = buildList(projects, rows, opts);
-  assert.deepEqual(header(items, 'a').marks, { running: 2, unread: 1, flagged: 0, lingering: 0 });
+  assert.deepEqual(header(items, 'a').marks, { running: 2, unread: 1, flagged: 0, draft: 0, done: 0, lingering: 0 });
   assert.equal(header(items, 'open').marks, null, 'an expanded group shows its own rows instead');
   assert.equal(header(buildList([project('b', { collapsed: true, chatCount: 1 })], [row('x', 'b')], opts), 'b').marks, null, 'nothing going on, no marks');
   // A waiting or flagged chat inside a collapsed group is counted on its header.
-  assert.deepEqual(header(buildList(projects, rows, { ...opts, flagged: new Set(['i1', 'r2']) }), 'a').marks, { running: 2, unread: 1, flagged: 2, lingering: 0 });
+  assert.deepEqual(header(buildList(projects, rows, { ...opts, flagged: new Set(['i1', 'r2']) }), 'a').marks, { running: 2, unread: 1, flagged: 2, draft: 0, done: 0, lingering: 0 });
   // The same rule at every depth: a collapsed project inside an open one marks its own header too.
   const deep = [project('outer', { chatCount: 1 }), project('mid', { parentId: 'outer', collapsed: true, chatCount: 1 }), project('inner', { parentId: 'mid', chatCount: 1 })];
   const deepItems = buildList(deep, [row('r', 'inner', { status: 'running' })], opts);
-  assert.deepEqual(header(deepItems, 'mid').marks, { running: 1, unread: 0, flagged: 0, lingering: 0 });
+  assert.deepEqual(header(deepItems, 'mid').marks, { running: 1, unread: 0, flagged: 0, draft: 0, done: 0, lingering: 0 });
   assert.equal(header(deepItems, 'outer').marks, null, 'an open group shows its rows instead of marks');
 
-  // Background work only: the header carries the calm wheel, unless a chat inside runs (running wins).
+  // Background work only: the header folds to the calm wheel, unless a chat inside runs (running wins).
   const held = (extra: SidebarRow[]) => header(buildList([project('bg', { collapsed: true, chatCount: 3 })], [row('l1', 'bg', { attention: 'lingering' }), row('q1', 'bg'), ...extra], opts), 'bg').marks;
-  const cases: [string, SidebarRow[], boolean][] = [
-    ['background work only', [], true],
-    ['plus a running chat', [row('r1', 'bg', { status: 'running', attention: 'running' })], false],
-    ['plus an unread one', [row('u1', 'bg', { unread: true, attention: 'unread' })], true],
+  const cases: [string, SidebarRow[], 'running' | 'lingering'][] = [
+    ['background work only', [], 'lingering'],
+    ['plus a running chat', [row('r1', 'bg', { status: 'running', attention: 'running' })], 'running'],
+    ['plus an unread one', [row('u1', 'bg', { unread: true, attention: 'unread' })], 'lingering'],
   ];
-  for (const [what, extra, calm] of cases) assert.equal(showsCalmWheel(held(extra)!), calm, what);
+  for (const [what, extra, want] of cases) assert.equal(groupStatus(held(extra)!), want, what);
   assert.equal(held([])?.lingering, 1);
   assert.equal(header(buildList([project('bg', { collapsed: true, chatCount: 1 })], [row('q1', 'bg')], opts), 'bg').marks, null, 'nothing going on: no mark');
+
+  // Drafts and unread completions ride up too, and fold at the same priority as a chat row.
+  const foldHead = (over: Partial<ProjectNode> = {}, rs: SidebarRow[] = [row('f', 'p', { hasDraft: true }), row('d', 'p')]) =>
+    header(buildList([project('p', { collapsed: true, chatCount: 2, ...over })], rs, { ...opts, finished: new Set(['d']) }), 'p').marks;
+  assert.deepEqual(foldHead(), { running: 0, unread: 0, flagged: 0, draft: 1, done: 1, lingering: 0 });
+  assert.equal(groupStatus(foldHead()!), 'draft', 'a held draft outranks an unread completion');
+  assert.equal(groupStatus(foldHead({}, [row('d', 'p')])!), 'done', 'alone, the unread completion is done');
+  assert.equal(groupStatus(foldHead({}, [row('r', 'p', { status: 'running' })])!), 'running');
 });
 
 test('chats in a closed project are never drawn, not even as loose rows, in any view', () => {
@@ -238,7 +246,7 @@ test('a missing parent draws at the top level and a collapsed group hides its co
   const shut = buildList(projects, rows, { ...opts, selectedChatId: 'x', keptShut: new Set(['b']) });
   assert.deepEqual(shape(shut), ['H0:a', 'H0:b']);
   const head = shut[1] as Extract<ListItem, { kind: 'header' }>;
-  assert.deepEqual([head.collapsed, head.marks], [true, { running: 1, unread: 0, flagged: 0, lingering: 0 }]);
+  assert.deepEqual([head.collapsed, head.marks], [true, { running: 1, unread: 0, flagged: 0, draft: 0, done: 0, lingering: 0 }]);
   // Collapsing the inner project shuts only that one; the project it sits in stays open around it.
   assert.deepEqual(shape(buildList(deep, rows, { ...opts, selectedChatId: 'y', keptShut: new Set(['c']) })), ['H0:a', 'H0:b', 'H1:c', 'C0:x']);
 });
@@ -322,23 +330,25 @@ test('chats nest under held parents in the same group, capped at depth 2, collap
   const rows = [
     row('a', 'g'),
     row('b', 'g', { parentChatId: 'a', status: 'running', attention: 'running' }),
-    row('c', 'g', { parentChatId: 'b' }),
+    row('c', 'g', { parentChatId: 'b', hasDraft: true }),
     row('d', 'g', { parentChatId: 'c' }), // a deeper record renders at depth 2
     row('e', 'g', { parentChatId: 'nope' }), // parent not held: top level
     row('f', 'other', { parentChatId: 'a' }), // parent in another group: top level there
   ];
   const all = new Set(['a', 'b', 'c']);
-  const items = buildList([project('g'), project('other')], rows, { ...opts, expandedChats: all, flagged: new Set(['c']) });
+  const items = buildList([project('g'), project('other')], rows, { ...opts, expandedChats: all, flagged: new Set(['c']), finished: new Set(['c']) });
   assert.deepEqual(shape(items), ['H0:g', 'C0:a', 'C1:b', 'C2:c', 'C2:d', 'C0:e', 'H0:other', 'C0:f']);
   // Collapsing the parent hides every descendant.
-  const collapsed = buildList([project('g')], rows.slice(0, 3), { ...opts, flagged: new Set(['c']) });
+  const collapsed = buildList([project('g')], rows.slice(0, 3), { ...opts, flagged: new Set(['c']), finished: new Set(['c']) });
   assert.deepEqual(shape(collapsed), ['H0:g', 'C0:a']);
   const a = collapsed[1] as Extract<ListItem, { kind: 'chat' }>;
   assert.equal(a.children, 1);
   assert.equal(a.expanded, false);
-  // Running and may-need-you ride up from any depth to the collapsed parent's marks; idle ones do not.
-  assert.deepEqual([a.childRunning, a.childFlagged], [1, 1]);
+  // Running, may-need-you, a held draft and an unread completion ride up from any depth to the
+  // collapsed parent's marks; idle ones do not.
+  assert.deepEqual([a.childRunning, a.childFlagged, a.childDraft, a.childDone], [1, 1, 1, 1]);
   const chat = (items: ListItem[], id: string) => items.find((i): i is Extract<ListItem, { kind: 'chat' }> => i.kind === 'chat' && i.row.chatId === id)!;
+  assert.equal(chat(items, 'c').finished, true, 'a finished row carries its own done flag');
   assert.deepEqual([chat(items, 'b').childRunning, chat(items, 'b').childFlagged], [0, 1], 'b carries its flagged child up too');
   assert.deepEqual([chat(items, 'c').childRunning, chat(items, 'c').childFlagged], [0, 0], 'idle children ride nothing up, even two levels');
   assert.equal(chat(items, 'f').childRunning, undefined, 'a leaf carries nothing');
@@ -357,7 +367,7 @@ test('chats in a group follow the host order: pinned first, then dragged positio
 
 test('a chat cycle is cut rather than looping', () => {
   const { order, childMarks } = nestRows([row('a', 'g', { parentChatId: 'b' }), row('b', 'g', { parentChatId: 'a' })], new Set(['a', 'b']));
-  assert.deepEqual(childMarks.get('a'), { running: 0, flagged: 0 }, 'a cut cycle carries nothing under either row');
+  assert.deepEqual(childMarks.get('a'), { running: 0, flagged: 0, draft: 0, done: 0 }, 'a cut cycle carries nothing under either row');
   assert.deepEqual(
     order.map((o) => [o.row.chatId, o.depth]),
     [
@@ -636,7 +646,7 @@ test('the tile row: how many tiles fit, what goes under More, and the most-recen
   assert.doesNotThrow(() => writeOrder(['x'], { getItem: () => null, setItem: () => { throw new Error('full'); } }));
 });
 
-test('the collapse chevron sits in its own space left of the title, with or without a trailing mark', () => {
+test('the collapse chevron sits in its own gutter left of the title, in every state', () => {
   const css = readFileSync(new URL('./sidebar.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
   const rules = css.split('}').map((chunk) => {
     const [selector = '', body = ''] = chunk.split('{');
@@ -650,21 +660,40 @@ test('the collapse chevron sits in its own space left of the title, with or with
     }
     throw new Error(`${selector} has no ${prop} in px`);
   };
+  // The title starts at one fixed padding; the gutter to its left belongs to the chevron alone.
   const padLeft = Number(/padding:\s*0 [\d.]+px 0 ([\d.]+)px/.exec(rules.find((r) => r.selector === '.sb-root .sb-chat')?.body ?? '')?.[1]);
-  const slot = px('.sb-ind', 'width');
-  const gap = px('.sb-root .sb-chat', 'gap');
-  const titleLeft = padLeft + slot + gap;
-
-  // Idle row: the status slot sits before the title. Trailing row: the slot moves to the far edge
-  // and the text's own margin stands in for it, so the title's left edge is the same.
-  assert.equal(px('.sb-chat-wrap[data-trailing=\'true\'] .sb-chat-text', 'margin-left') + padLeft, titleLeft);
-
-  // The chevron is one fixed span in the left gutter, and ends before the title starts.
   const left = px('.sb-root .sb-children', 'left');
-  assert.ok(left + px('.sb-root .sb-children', 'width') <= titleLeft, 'the chevron ends before the title starts');
-  assert.ok(left >= padLeft - slot, 'the chevron starts inside the row, left of the title');
+  assert.ok(left >= 0, 'the chevron starts inside the row');
+  assert.ok(left + px('.sb-root .sb-children', 'width') <= padLeft, 'the chevron ends before the title starts');
 
-  // No state moves the chevron: nothing but the base rule sets its left edge.
+  // No state moves the chevron or the title's left edge: only these two base rules exist.
   const movers = rules.filter((r) => /\.sb-children\b/.test(r.selector) && /(^|[;\s])(left|margin-left|transform|translate):/.test(r.body));
   assert.deepEqual(movers.map((r) => r.selector), ['.sb-root .sb-children']);
+  // Only the base rule and the activity view (flat, no chevron) set the title's left edge.
+  const indents = rules.filter((r) => /\.sb-chat(?![\w-])/.test(r.selector) && /(^|[;\s])padding(-left)?:/.test(r.body));
+  assert.deepEqual(indents.map((r) => r.selector), ['.sb-root .sb-chat', ".sb-root[data-view='activity'] .sb-chat"]);
+});
+
+test('hover actions join the row line instead of covering it: age and status give way, the queue stays', () => {
+  const css = readFileSync(new URL('./sidebar.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules = css.split('}').map((chunk) => {
+    const [selector = '', body = ''] = chunk.split('{');
+    return { selector: selector.trim().replace(/\s+/g, ' '), body };
+  });
+  // The action buttons are in-flow members of the row: nothing floats, so nothing can overlap.
+  const actions = rules.find((r) => r.selector === '.sb-row-actions');
+  assert.ok(actions, 'the row has an actions group');
+  assert.ok(!/position:\s*absolute/.test(actions.body), 'the buttons do not float over the row');
+  assert.ok(!/(^|[;\s])right:/.test(actions.body) && !/(^|[;\s])padding-right:\s*\d/.test(rules.find((r) => r.selector === '.sb-root .sb-chat')?.body ?? ''), 'no reserved padding stands in for them either');
+  // What hover hides: the time and status make room; the queue holds its place.
+  const hidden = new Set<string>();
+  for (const rule of rules) {
+    if (!/display:\s*none/.test(rule.body)) continue;
+    for (const sel of rule.selector.split(',')) {
+      if (!/\.sb-chat-wrap:(hover|focus-within)/.test(sel)) continue;
+      for (const m of sel.matchAll(/\.(sb-[a-z-]+)(?![\w-])/g)) if (m[1] !== 'sb-chat-wrap') hidden.add(m[1]);
+    }
+  }
+  assert.deepEqual([...hidden].sort(), ['sb-age', 'sb-chip', 'sb-status']);
+  assert.ok(!hidden.has('sb-queue'), 'the queue stays through hover');
 });

@@ -540,12 +540,10 @@
   color: var(--sb-muted);
 }
 
+/* The project's chat count wears the same pill as a collapsed chat's children count. */
 .sb-count {
   flex: none;
-  font-size: 11px;
   font-weight: 400;
-  font-variant-numeric: tabular-nums;
-  color: color-mix(in srgb, var(--group-colour, var(--sb-secondary)) 55%, var(--sb-muted));
 }
 
 .sb-subtitle {
@@ -580,8 +578,7 @@
   color: var(--sb-muted);
 }
 
-.sb-actions,
-.sb-row-actions {
+.sb-actions {
   display: flex;
   gap: 2px;
   opacity: 0;
@@ -607,9 +604,15 @@
 
 /* ---- chat row ---- */
 
+/* The row is a flex line: the openable button (title plus its marks plus the far-right cluster),
+   then the hover action buttons. Nothing overlaps: the actions are in the line, and the title —
+   which carries min-width 0 — is the only thing that gives. */
 .sb-chat-wrap {
   position: relative;
   height: var(--sb-chat-h);
+  display: flex;
+  align-items: center;
+  gap: 2px;
   border-radius: 6px;
 }
 
@@ -619,12 +622,14 @@
 
 .sb-root .sb-chat {
   position: relative;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   height: var(--sb-chat-h);
   display: flex;
   align-items: center;
   gap: 9px;
-  padding: 0 9px 0 27.5px;
+  /* The left gutter belongs to the collapse chevron; the title starts clear of it in every row. */
+  padding: 0 9px 0 30px;
   border-radius: 6px;
   color: var(--sb-secondary);
   text-align: left;
@@ -671,10 +676,22 @@
   height: calc(var(--sb-chat-h) + 20px);
 }
 
-.sb-ind {
+/* The far-right cluster: state word, queue, the one status icon, and the age hard right. On
+   hover the age, status and state word hide and the row's action buttons take their place;
+   the queue stays, moving left with the buttons. */
+.sb-right {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The row's one status icon, folded from the row and (when collapsed) its children. */
+.sb-status {
   width: 13px;
   height: 13px;
   flex: none;
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -682,23 +699,10 @@
   color: var(--sb-muted);
 }
 
-/* Running, unread and lingering marks move to the trailing edge; the title keeps its alignment. */
-.sb-chat-wrap[data-trailing='true'] .sb-ind {
-  order: 1;
-}
-
-.sb-chat-wrap[data-trailing='true'] .sb-chat-text {
-  margin-left: 22px;
-}
-
-.sb-ind {
-  position: relative;
-}
-
 /* Still status shapes from the kit: the wheel (20 px) and the star (26 px) are
    centred on the 13 px slot. */
-.sb-ind-wheel,
-.sb-ind-star {
+.sb-status .sb-ind-wheel,
+.sb-status .sb-ind-star {
   position: absolute;
   left: 50%;
   top: 50%;
@@ -708,11 +712,11 @@
   translate: -50% -50%;
 }
 
-.sb-root[data-compact='true'] .sb-ind-wheel {
+.sb-root[data-compact='true'] .sb-status .sb-ind-wheel {
   scale: 0.85;
 }
 
-.sb-ind-interrupted::before {
+.sb-status[data-kind='interrupted']::before {
   content: '';
   width: 4px;
   height: 4px;
@@ -720,30 +724,31 @@
   background: var(--interrupted, #be9562);
 }
 
-/* The wheel beside a collapsed chat's children count: a status-mark slot of its own, so it keeps
-   its place in the row's mark order even when the row's own mark moves to the trailing edge. */
-.sb-child-mark {
-  width: 13px;
-  height: 13px;
-  flex: none;
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+/* The flag's three shades: a chat waiting on an answer, the idle check's quiet hunch, and what
+   rides up from the chats under a collapsed parent. */
+.sb-status[data-kind='flagged'] {
+  color: var(--warning-text, var(--sb-secondary));
+}
+.sb-status[data-kind='flagged'][data-flag-kind='quiet'] {
+  color: var(--att-triage, var(--sb-secondary));
+}
+.sb-status[data-kind='flagged'][data-flag-kind='under'] {
+  color: var(--att-triage, var(--sb-secondary));
 }
 
-.sb-group-marks {
+/* The queue: a pause mark and how many stand ahead, in place of the old "Queued N" tag. */
+.sb-queue {
+  flex: none;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  margin-left: 6px;
-  flex: none;
+  gap: 3px;
+  color: var(--att-triage, var(--warning-text, var(--sb-muted)));
 }
 
-.sb-draft {
-  flex: none;
-  display: inline-flex;
-  color: var(--sb-muted);
+.sb-queue-n {
+  font-size: 10.5px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
 }
 
 .sb-age {
@@ -766,14 +771,14 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* The collapse chevron sits just left of the title, at the title's indent (the title's left edge
-   is fixed: left padding + the status slot + the flex gap, and a trailing mark leaves that edge
-   where it is), so the chevron stays put and never moves onto the title. It never shifts the title: rows with and without children keep their titles on
+/* The collapse chevron sits in its own gutter at the row's left edge: it spans 6–23 px and the
+   title always starts at the 30 px padding, clear of it — in every state, with or without a
+   trailing icon. It never shifts the title: rows with and without children keep their titles on
    the level's left edge, and each nesting level's step carries the chevron in with it. */
 .sb-root .sb-children {
   position: absolute;
   z-index: 4;
-  left: 30.5px;
+  left: 6px;
   top: calc((var(--sb-chat-h) - 22px) / 2);
   width: 17px;
   height: 22px;
@@ -787,13 +792,13 @@
 }
 
 /* Unread result: a quiet cue next to the open chat's card. No fill and no ring, only a full-colour
-   semibold title (the trailing unread mark does the rest), so the open chat is the one row that
-   looks like a card. */
-.sb-chat-wrap:has(.sb-ind-unread) .sb-chat {
+   semibold title (the unread mark at the row's right does the rest), so the open chat is the one
+   row that looks like a card. */
+.sb-chat-wrap[data-unread='true'] .sb-chat {
   color: var(--sb-text);
 }
 
-.sb-chat-wrap:has(.sb-ind-unread) .sb-chat-title {
+.sb-chat-wrap[data-unread='true'] .sb-chat-title {
   font-weight: 600;
   color: var(--sb-text);
 }
@@ -853,14 +858,19 @@
   outline-offset: -2px;
 }
 
-/* Hover actions and keep-clear rules: actions never cover the status indicator,
-   a flag or the title's text. */
+/* Hover actions: the menu and archive buttons join the row's flex line — they sit in it, never
+   over it, so nothing can overlap at any width. Archive is the far-right item, the menu just
+   left of it, where the age and status stood; those hide on hover and the queue stays. */
 .sb-row-actions {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  right: 6px;
+  display: none;
+  flex: none;
   align-items: center;
+  gap: 2px;
+}
+
+.sb-chat-wrap:hover .sb-row-actions,
+.sb-chat-wrap:focus-within .sb-row-actions {
+  display: flex;
 }
 
 .sb-root .sb-row-actions .sb-act {
@@ -875,50 +885,14 @@
   color: var(--sb-text);
 }
 
-.sb-chat-wrap:hover .sb-row-actions,
-.sb-chat-wrap:focus-within .sb-row-actions {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-/* Idle row: reserve 59 px on the right; age and the collapsed-children aggregate give way. */
-.sb-chat-wrap:not([data-trailing='true']):hover .sb-chat,
-.sb-chat-wrap:not([data-trailing='true']):focus-within .sb-chat {
-  padding-right: 59px;
-}
-
-/* A linked chat has a third action (open the linked item): 25 px more room. */
-.sb-chat-wrap[data-linked='true']:not([data-trailing='true']):hover .sb-chat,
-.sb-chat-wrap[data-linked='true']:not([data-trailing='true']):focus-within .sb-chat {
-  padding-right: 84px;
-}
-
+/* On hover the age and the status give way to the actions; the queue (and the state word) do not. */
 .sb-chat-wrap:hover .sb-age,
 .sb-chat-wrap:focus-within .sb-age,
-.sb-chat-wrap:hover .sb-draft,
-.sb-chat-wrap:focus-within .sb-draft,
-.sb-chat-wrap:hover .sb-item-chip,
-.sb-chat-wrap:focus-within .sb-item-chip,
-.sb-chat-wrap:hover .sb-agg,
-.sb-chat-wrap:focus-within .sb-agg {
+.sb-chat-wrap:hover .sb-status,
+.sb-chat-wrap:focus-within .sb-status,
+.sb-chat-wrap:hover .sb-chip,
+.sb-chat-wrap:focus-within .sb-chip {
   display: none;
-}
-
-/* Busy row: the actions shift 35 px left so the trailing indicator stays visible to their right,
-   and the title reserves 57 px. */
-.sb-chat-wrap[data-trailing='true']:hover .sb-row-actions,
-.sb-chat-wrap[data-trailing='true']:focus-within .sb-row-actions {
-  right: 35px;
-}
-
-.sb-chat-wrap[data-trailing='true']:hover .sb-chat-text,
-.sb-chat-wrap[data-trailing='true']:focus-within .sb-chat-text {
-  margin-right: 57px;
-}
-
-.sb-chat-wrap[data-linked='true'][data-trailing='true']:hover .sb-chat-text,
-.sb-chat-wrap[data-linked='true'][data-trailing='true']:focus-within .sb-chat-text {
-  margin-right: 82px;
 }
 
 /* ---- footer ---- */
@@ -960,35 +934,17 @@
   color: var(--sb-muted);
 }
 
-/* ---- quiet row marks: flag, muted, stalled ---- */
+/* ---- quiet row marks: muted, stalled ---- */
 
-.sb-flag {
-  flex: none;
-  display: inline-flex;
-  margin: 0 3px;
-  font-size: 12px;
-  color: var(--warning-text, var(--sb-secondary));
-}
-
-/* The idle check's flag: a quiet chat that may still need you, in the triage colour. */
-.sb-flag[data-kind='quiet'] {
-  color: var(--att-triage, var(--sb-secondary));
-}
-
+/* The muted bell sits right after the title and stays put on hover. */
 .sb-muted {
   flex: none;
   display: inline-flex;
-  margin: 0 3px;
   color: var(--sb-muted);
 }
 
-.sb-chat-wrap:hover .sb-muted,
-.sb-chat-wrap:focus-within .sb-muted {
-  display: none;
-}
-
 /* Running with no output for a while: the wheel dims (no glyph of its own). */
-.sb-ind[data-stalled='true'] .sb-ind-wheel {
+.sb-status[data-stalled='true'] .sb-ind-wheel {
   opacity: 0.5;
 }
 
@@ -1013,26 +969,11 @@
   color: var(--warning-text, var(--sb-secondary));
 }
 
-/* A flagged busy row: the 57 px reserve moves from the title to after the flag, so the flag stays
-   visible just left of the actions. */
-.sb-chat-wrap[data-trailing='true'][data-flagged='true']:hover .sb-chat-text,
-.sb-chat-wrap[data-trailing='true'][data-flagged='true']:focus-within .sb-chat-text {
-  margin-right: 0;
-}
-
-.sb-chat-wrap[data-trailing='true'][data-flagged='true']:hover .sb-flag:not([data-kind='under']),
-.sb-chat-wrap[data-trailing='true'][data-flagged='true']:focus-within .sb-flag:not([data-kind='under']) {
-  margin-right: 57px;
-}
-
-/* A linked row also shows the open-item button, so the reserve is wider. */
-.sb-chat-wrap[data-trailing='true'][data-flagged='true'][data-linked='true']:hover .sb-flag:not([data-kind='under']),
-.sb-chat-wrap[data-trailing='true'][data-flagged='true'][data-linked='true']:focus-within .sb-flag:not([data-kind='under']) {
-  margin-right: 82px;
-}
-
 /* No hover actions while dragging. */
-.sb-root[data-dragging='true'] .sb-row-actions,
+.sb-root[data-dragging='true'] .sb-row-actions {
+  display: none;
+}
+
 .sb-root[data-dragging='true'] .sb-actions {
   opacity: 0;
   pointer-events: none;
@@ -1378,11 +1319,10 @@
   opacity: 0.6;
 }
 
-/* The owner of a chat shared with the active profile. */
+/* The owner of a chat shared with the active profile; sits after the title and counts. */
 .sb-shared-from {
   flex: none;
   display: inline-flex;
-  margin: 0 3px;
 }
 
 /* The profile item above Settings keeps its disc square. */

@@ -133,8 +133,11 @@ test('the chat menu follows state: archive or restore and delete, stop first whi
   share.find((i) => i.id === 'share')?.submenu?.[0]?.onSelect?.();
   assert.deepEqual(shared, ['p2']);
   assert.equal(share[share.findIndex((i) => i.id === 'profile') + 1]?.id, 'share');
+  // Pin leads the menu and Archive closes it: the two switches people reach for sit at the ends.
   const order = share.map((i) => i.id);
-  assert.equal(order[order.indexOf('pin') + 1], 'mute', 'Mute stays in the list right after Pin');
+  assert.equal(order[0], 'pin');
+  assert.equal(order[order.length - 1], 'archive');
+  assert.equal(ids(row('a', { archived: true })).at(-1), 'delete', 'an archived chat ends on Delete permanently');
   // Cost is there for every chat, archived or busy too.
   assert.ok(ids(row('a', { archived: true })).includes('cost') && ids(row('a', { status: 'running' })).includes('cost'));
   // Compact context: offered on an idle chat, not while it runs or once archived.

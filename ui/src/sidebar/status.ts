@@ -1,21 +1,25 @@
-// The one mark a chat row shows, by priority: running > unread > lingering >
-// interrupted > pinned. Unread comes from the attention summary and lingering
-// from the live thread's background work; the host row carries what the database knows.
+// The one status icon a row shows. Every row carries at most one, resolved from
+// the row's own signals plus, for a collapsed parent, what rides up from its sub-chats.
+// Priority: running, flagged, draft, done, then the quieter states, with unread last.
+// A "done" row finished a reply the person has not opened yet (the attention summary);
+// plain unread is a manual mark — the two get different icons, and done animates.
 
 import type { ChatState, ChatStatus } from '../api/types.ts';
 import type { RowAttention } from '../api/projects.ts';
 import type { AttentionKind } from '../api/generated/AttentionKind.ts';
 import { LOCAL_WORKING_LABEL, localWaitLabel } from '../state/localModel.ts';
 
+export function isBusy(status: ChatStatus): boolean {
+  return status === 'starting' || status === 'running' || status === 'stopping';
+}
+
+/** What the database row and live signals say about a chat, before the sidebar folds them
+ *  into marks: used where a row is built (the local snapshot, the remote device list). */
 export interface RowSignals {
   status: ChatStatus;
   unread: boolean;
   lingering: boolean;
   pinned: boolean;
-}
-
-export function isBusy(status: ChatStatus): boolean {
-  return status === 'starting' || status === 'running' || status === 'stopping';
 }
 
 export function rowAttention(s: RowSignals): RowAttention | null {
@@ -27,9 +31,40 @@ export function rowAttention(s: RowSignals): RowAttention | null {
   return null;
 }
 
-/** Running, unread and lingering marks sit at the row's trailing edge. */
-export function trailingIndicator(a: RowAttention | null): boolean {
-  return a === 'running' || a === 'unread' || a === 'lingering';
+export const ATTENTION_LABEL: Record<RowAttention, string> = {
+  running: 'Task running',
+  unread: 'Unread result',
+  lingering: 'Background work running',
+  interrupted: 'Interrupted',
+  pinned: 'Pinned',
+};
+
+export type RowStatus = 'running' | 'flagged' | 'draft' | 'done' | 'lingering' | 'interrupted' | 'pinned' | 'unread';
+
+/** The signals one row folds into its status: the row's own, with counts already
+ *  OR-ed in from its sub-chats when the parent is collapsed. */
+export interface FoldSignals {
+  running: boolean;
+  flagged: boolean;
+  draft: boolean;
+  done: boolean;
+  lingering: boolean;
+  interrupted: boolean;
+  pinned: boolean;
+  unread: boolean;
+}
+
+/** The single status a row shows, or null when it is plain. */
+export function foldStatus(s: FoldSignals): RowStatus | null {
+  if (s.running) return 'running';
+  if (s.flagged) return 'flagged';
+  if (s.draft) return 'draft';
+  if (s.done) return 'done';
+  if (s.lingering) return 'lingering';
+  if (s.interrupted) return 'interrupted';
+  if (s.pinned) return 'pinned';
+  if (s.unread) return 'unread';
+  return null;
 }
 
 /** Relative age: "now" under a minute, then "Nm", "Nh", "Nd". */
@@ -43,12 +78,15 @@ export function age(updatedAt: number, now: number): string {
   return `${Math.floor(h / 24)}d`;
 }
 
-export const ATTENTION_LABEL: Record<RowAttention, string> = {
+export const STATUS_LABEL: Record<RowStatus, string> = {
   running: 'Task running',
-  unread: 'Unread result',
+  flagged: 'May need you',
+  draft: 'Unsent draft',
+  done: 'Finished, unread',
   lingering: 'Background work running',
   interrupted: 'Interrupted',
   pinned: 'Pinned',
+  unread: 'Unread result',
 };
 
 /** The running mark's wording: a local chat says whether the model is queued behind other work
