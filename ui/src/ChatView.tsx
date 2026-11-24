@@ -141,7 +141,10 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
         const picks = autoOpenPicks(e.rows as MessageRow[], { after: readUpTo.current, done: acted.current, remote: isRemote.current });
         // A window nobody is looking at opens nothing; the rows are spent all the same.
         if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-        if (picks.panel) void handleLink(picks.panel.ref.target, { chatId });
+        // A local chat's panel opens arrive as `panel_open` events, which reach their own chat's
+        // panel whether or not it is in view. A chat running on another PC has no such event on
+        // this PC: it opens from its rows while it is in view here.
+        if (picks.panel && isRemote.current) void handleLink(picks.panel.ref.target, { chatId });
         if (picks.forward) forwardHere(picks.forward.ref);
       }),
     [shell, chatId, forwardHere],

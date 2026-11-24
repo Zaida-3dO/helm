@@ -22,4 +22,6 @@ export {
 export type { PanelKind, PanelSlot, TabContext } from './registry.ts';
 export type { CloseReason, Intent, PanelTab, SlotId } from './model.ts';
 export { gateTarget, handleLink, registerLinkRoute, registerWebRoute } from './links.ts';
+export { applyPanelOpen } from './push.ts';
+export type { PanelOpenDeps } from './push.ts';
 export type { GateResult, LinkContext, LinkOutcome } from './links.ts';
