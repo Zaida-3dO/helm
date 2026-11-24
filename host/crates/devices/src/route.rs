@@ -1811,16 +1811,20 @@ impl RemoteChats for Mirror {
     fn set_model(&self, a: ChatSetModelArgs) -> Fut<Res> {
         let m = self.clone();
         Box::pin(async move {
-            let Some(model) = a.model.clone() else {
-                return Err(ApiError::bad_args("Pick a model."));
-            };
-            let mut args = json!({ "chatId": a.chat_id, "model": model });
+            // Either part may be absent — the picker's effort/thinking row changes only the
+            // effort, and the model row only the model, as a chat that runs here takes them.
+            let mut args = json!({ "chatId": a.chat_id });
+            if let Some(model) = &a.model {
+                args["model"] = json!(model);
+            }
             if let Some(e) = &a.effort {
                 args["effort"] = json!(e);
             }
-            let effort = a.effort.clone();
+            let (model, effort) = (a.model.clone(), a.effort.clone());
             m.change(&a.chat_id, "set_model", args, move |rec| {
-                rec.insert("model".into(), json!(model));
+                if let Some(model) = model {
+                    rec.insert("model".into(), json!(model));
+                }
                 if let Some(e) = effort {
                     rec.insert("effort".into(), json!(e));
                 }
