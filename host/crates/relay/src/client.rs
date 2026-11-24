@@ -616,11 +616,15 @@ pub struct Client {
 const MAX_FILES: usize = 10;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
-/// The hub drops a line that sends nothing for 90 s, and not every proxy carries WebSocket
-/// pings across — so the PC says something itself every [`KEEPALIVE_EVERY`], well inside that
-/// window, and reads its own sent frame as the line being alive in both directions.
+/// How long the line may go with nothing coming down it — a hub frame, its own ping, or the
+/// answer to its probe — before the line is treated as dead. What this side manages to *write*
+/// is no proof: after a laptop sleeps the socket can stay half-open, taking writes that never
+/// reach anyone, and the app would sit "connected" to nothing forever. The hub pings every 30 s
+/// and always answers the probe, so a live line feeds this window easily; a silent one is
+/// dropped and re-made with a catch-up subscribe.
 const SILENCE: Duration = Duration::from_secs(100);
-/// A third of the hub's 90-second silence window.
+/// A third of the hub's 90-second silence window: how often the PC says something itself, so
+/// the hub does not drop a line that is idle but alive.
 const KEEPALIVE_EVERY: Duration = Duration::from_secs(30);
 /// The most one frame from the hub may hold: a Telegram message can carry up to 50 MB of files,
 /// which is a third larger as base64, plus its text.
@@ -1028,14 +1032,23 @@ impl Client {
                 // An idle line still has to reach the hub inside its silence window. A
                 // WebSocket ping is not enough: a proxy in between may answer it itself and
                 // never pass it on. The household switches are a frame the hub already
-                // takes, and re-sending what it already has is harmless.
+                // takes, and re-sending what it already has is harmless. Along with them goes
+                // a question the hub always answers about the household: what matters for
+                // liveness is not that a write left this side (a socket left half-open by a
+                // sleep swallows writes that never reach anyone, and the app sits
+                // "connected" to nothing) but that something came back down the line — this
+                // probe's answer, or the hub's own ping. Only an arriving frame resets the
+                // silence timer.
                 _ = keepalive.tick() => {
                     let frame = self.sharing().frame();
                     if sink_ws.send(Message::Text(frame.to_string().into())).await.is_err() { break; }
-                    // A frame the hub took is proof the line lives; its own pings may be
-                    // stopped by the same proxy, so waiting for one to arrive cannot be the
-                    // only liveness check.
-                    silence.as_mut().reset(tokio::time::Instant::now() + silence_every);
+                    let probe = json!({
+                        "type": "peer",
+                        "id": uuid::Uuid::new_v4().simple().to_string(),
+                        "op": "people",
+                        "args": {},
+                    });
+                    if sink_ws.send(Message::Text(probe.to_string().into())).await.is_err() { break; }
                 }
                 _ = &mut silence => break,
                 _ = self.reconfigured.notified() => break,
@@ -2331,21 +2344,35 @@ mod tests {
             .unwrap()
             .unwrap();
         let mut ws = tokio_tungstenite::accept_async(s).await.unwrap();
-        // A hub that reads nothing for 180 ms (three keepalives) drops the line, as the
-        // real one does. The hub itself sends nothing down, so the line also has to stay
-        // up without ever seeing a frame from the hub.
+        // A hub that reads nothing for 180 ms (three keepalives) drops the line, as the real
+        // one does. It sends nothing down itself — no ping gets through, as behind a proxy
+        // that answers them — so the line stays up only because the hub answers its probe.
         let window = Duration::from_millis(180);
         let started = Instant::now();
         let mut keepalives = 0;
+        let mut answers = 0;
         while started.elapsed() < Duration::from_millis(1200) {
             match tokio::time::timeout(window, ws.next()).await {
                 Ok(Some(Ok(Message::Text(t)))) => {
                     let v: Value = serde_json::from_str(t.as_str()).unwrap();
-                    assert_eq!(
-                        v["type"], "sharing",
-                        "the keepalive is a frame the hub takes"
-                    );
-                    keepalives += 1;
+                    match v["type"].as_str() {
+                        // The keepalive is a frame the hub already takes.
+                        Some("sharing") => keepalives += 1,
+                        // And each keepalive asks something the hub always answers: the
+                        // answer coming back is the line's proof of living both ways.
+                        Some("peer") => {
+                            assert_eq!(v["op"], "people");
+                            ws.send(Message::Text(
+                                json!({"type": "peer_result", "id": v["id"], "ok": true, "result": []})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await
+                            .unwrap();
+                            answers += 1;
+                        }
+                        other => panic!("unexpected frame from the line: {other:?}"),
+                    }
                 }
                 // The hub's window passed with nothing from the line: it would have said
                 // "line silent, dropping it".
@@ -2355,10 +2382,83 @@ mod tests {
             }
         }
         assert!(keepalives >= 12, "a frame about every 60 ms: {keepalives}");
+        assert!(answers >= 12, "a probe with each keepalive: {answers}");
         assert_eq!(
             c.handle().state(),
             LineState::Online,
             "the line is not dropped from the PC side either"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_line_that_stops_hearing_from_the_hub_is_remade_on_its_own() {
+        // A PC that wakes onto a half-open link: the old socket still takes writes that never
+        // reach anyone, so the app must notice that nothing comes back down and make a new
+        // line by itself — no user input, no window focus.
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/relay", l.local_addr().unwrap());
+        let devices = Arc::new(Devices::default());
+        let c = client(
+            (&url, ""),
+            Arc::new(Exec::default()),
+            Arc::new(Sink::default()),
+        );
+        c.attach_devices(devices.clone());
+        // Silence after 600 ms of nothing arriving; keepalive (and probe) every 60 ms.
+        c.set_intervals(Duration::from_millis(60), Duration::from_millis(600));
+        let task = tokio::spawn(c.clone().run());
+        let (s, _) = tokio::time::timeout(Duration::from_secs(10), l.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut ws = tokio_tungstenite::accept_async(s).await.unwrap();
+        assert_eq!(next(&mut ws).await["type"], "sharing");
+        assert_eq!(c.handle().state(), LineState::Online);
+        // The far end goes dead without closing: it keeps taking frames (the socket buffers
+        // them) and answers none. A write-only keepalive would sit Online forever; the
+        // unanswered probe has to break the line inside the silence window.
+        let first = Instant::now();
+        for _ in 0..200 {
+            if c.handle().state() != LineState::Online {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_ne!(
+            c.handle().state(),
+            LineState::Online,
+            "the dead line is noticed"
+        );
+        assert!(
+            first.elapsed() < Duration::from_millis(1500),
+            "inside a scaled silence window plus slack"
+        );
+        assert_eq!(*devices.downs.lock().unwrap(), 1, "the device is told");
+        drop(ws);
+        // And the line is re-made by itself, on the line's own retry — where the catch-up
+        // subscribe then replays whatever the copy missed.
+        let (s, _) = tokio::time::timeout(Duration::from_secs(10), l.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut ws = tokio_tungstenite::accept_async(s).await.unwrap();
+        assert_eq!(next(&mut ws).await["type"], "sharing");
+        for _ in 0..200 {
+            if c.handle().state() == LineState::Online {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            c.handle().state(),
+            LineState::Online,
+            "online again unasked"
+        );
+        assert_eq!(
+            *devices.ups.lock().unwrap(),
+            2,
+            "the device sees the new line"
         );
         task.abort();
     }
