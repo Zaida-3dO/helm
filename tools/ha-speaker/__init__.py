@@ -1,35 +1,56 @@
-"""Helm Speaker: lets a Home Assistant voice pipeline talk to a Helm hub.
+"""Helm Speaker: a Home Assistant voice pipeline with its own small brain.
 
-One config entry describes one hub. The entry carries the hub address, the
-speaker's token and a few optional labels. Everything that actually talks to
-the hub lives in ``hubapi.py``; this file only wires it to Home Assistant:
-an aiohttp transport, a device entry for the bridge, and — if the user named
-one — a light entity that is coloured while the hub session is unlocked and
-put back the way it was when the unlock ends.
+One config entry carries a model endpoint (the conversation agent calls it
+directly) and optionally a Helm hub (escalation of personal or long things,
+plus best-effort records). This file wires the pieces together: an aiohttp
+transport shared by model and hub, the active model profile built from
+entry data + options, per-device turn history, and a service to switch
+profiles without a restart. The hub parts still live in ``hubapi.py``; the
+thinking lives in ``agent_core.py``.
 """
 
 import asyncio
 import logging
 
 import aiohttp
+import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import Context, HomeAssistant
+from homeassistant.core import Context, HomeAssistant, ServiceCall
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_interval
 
-from .const import CONF_LED, DOMAIN, LED_POLL_SECONDS, LED_RGB
+from .const import (
+    CONF_LED,
+    CONF_TOKEN,
+    CONF_URL,
+    DOMAIN,
+    LED_POLL_SECONDS,
+    LED_RGB,
+    PROFILES,
+)
 from .hubapi import HubApi, TransportError, session_elevated
+from .profiles import build_model_config, profiles_from_entry, redact
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = ["conversation", "stt"]
+# the stt entity exists only to send captures through the hub; a
+# model-only entry does not want it (it would never answer anyway)
+PLATFORMS = ["conversation"]
+HUB_PLATFORMS = ["stt"]
+
+# Only one entry per hub install is allowed (the config flow enforces it),
+# so the service needs no entry selector.
+SET_PROFILE_SCHEMA = vol.Schema({
+    vol.Required("profile"): vol.In(list(PROFILES)),
+})
 
 
 class AiohttpTransport:
     """The aiohttp-backed implementation of the small transport interface
-    ``hubapi`` expects: ``request(method, url, headers, data, timeout)``
-    returns ``(status, body_bytes)`` or raises ``TransportError``."""
+    ``hubapi`` and ``agent_core`` expect: ``request(method, url, headers,
+    data, timeout)`` returns ``(status, body_bytes)`` or raises
+    ``TransportError``."""
 
     def __init__(self, session):
         self.session = session
@@ -48,7 +69,11 @@ class AiohttpTransport:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up from the config UI. No YAML for this integration."""
     session = async_get_clientsession(hass)
-    api = HubApi(entry.data["url"], entry.data["token"], AiohttpTransport(session))
+    transport = AiohttpTransport(session)
+
+    hub_url = (entry.data.get(CONF_URL) or "").strip()
+    token = entry.data.get(CONF_TOKEN) or ""
+    api = HubApi(hub_url, token, transport) if hub_url and token else None
 
     devices = dr.async_get(hass)
     devices.async_get_or_create(
@@ -60,16 +85,63 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     led = LedWatch(hass, api, entry.data.get(CONF_LED))
-    entry.runtime_data = {"api": api, "session": session, "led": led}
+    entry.runtime_data = {
+        "api": api,
+        "session": session,
+        "transport": transport,
+        "model_cfg": build_model_config(entry.data, entry.options),
+        "platforms": PLATFORMS + (HUB_PLATFORMS if api else []),
+        "history": {},  # device id -> recent spoken exchanges, per turn ctx
+        "led": led,
+    }
 
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    hass.services.async_register(
+        DOMAIN, "set_profile", _make_set_profile_service(hass, entry),
+        schema=SET_PROFILE_SCHEMA)
+
+    platforms = PLATFORMS + (HUB_PLATFORMS if api else [])
+    await hass.config_entries.async_forward_entry_setups(entry, platforms)
     led.start()
+
+    # Optional benchmark hooks: stages.py (timings joiner and replay service)
+    # starts here when the module is present; missing it must not break setup.
+    try:
+        from . import stages  # noqa: PLC0415 - optional companion module
+    except ImportError:
+        pass
+    else:
+        if hasattr(stages, "start"):
+            stages.start(hass, entry)
+
+    _LOGGER.info("helm_speaker set up (model=%s, hub=%s)",
+                 redact(profiles_from_entry(entry.data, entry.options)[
+                     entry.options.get("profile") or "path_a"])["model_name"],
+                 "yes" if api else "no")
     return True
 
 
+def _make_set_profile_service(hass: HomeAssistant, entry: ConfigEntry):
+    async def handle(call: ServiceCall) -> None:
+        profile = call.data["profile"]
+        options = dict(entry.options or {})
+        options["profile"] = profile
+        # keep the stored profiles next to the switch so a reload agrees
+        options.setdefault("profiles", profiles_from_entry(entry.data, options))
+        hass.config_entries.async_update_entry(entry, options=options)
+        # apply it now: the conversation agent reads model_cfg per turn, so
+        # the switch takes effect without a reload
+        entry.runtime_data["model_cfg"] = build_model_config(
+            entry.data, options)
+        _LOGGER.info("helm_speaker switched to profile %s (%s)",
+                     profile, redact(options["profiles"][profile]))
+    return handle
+
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unload_ok = await hass.config_entries.async_unload_platforms(
+        entry, entry.runtime_data.get("platforms", PLATFORMS))
     if unload_ok:
+        hass.services.async_remove(DOMAIN, "set_profile")
         data = entry.runtime_data
         data["led"].stop()
     return unload_ok
@@ -80,9 +152,10 @@ class LedWatch:
 
     While the hub session is raised by a passcode, the chosen light entity
     glows in a fixed colour; when the unlock ends it is put back the way it
-    was. If the entity does not exist or refuses the call, nothing else is
-    affected: the indicator is decoration, not function. A single poll
-    interval keeps this simple; a status call every half minute is cheap.
+    was. If there is no hub at all (model-only entry) this simply idles. If
+    the entity does not exist or refuses the call, nothing else is affected:
+    the indicator is decoration, not function. A single poll interval keeps
+    this simple; a status call every half minute is cheap.
     """
 
     def __init__(self, hass, api, entity_id):
@@ -94,7 +167,7 @@ class LedWatch:
         self._saved = None  # attributes to restore, captured once
 
     def start(self):
-        if not self.entity_id:
+        if not self.entity_id or self.api is None:
             return
         self._unsub = async_track_time_interval(
             self.hass, self._tick, LED_POLL_SECONDS)

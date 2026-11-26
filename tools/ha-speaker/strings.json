@@ -2,27 +2,50 @@
   "config": {
     "step": {
       "user": {
-        "title": "Connect to Helm",
-        "description": "Point this speaker at your Helm hub.",
+        "title": "Set up the speaker",
+        "description": "The model endpoint answers at home; a Helm hub is optional and only takes personal or long requests.",
         "data": {
-          "url": "Hub address (for example http://hub.example:8480)",
-          "token": "Speaker token from Helm",
+          "model_url": "Model address (OpenAI-style chat completions)",
+          "model_name": "Model name",
+          "model_api_key": "Model key (optional, kept secret)",
+          "thinking": "Model thinking on",
+          "extra_headers_json": "Extra headers as JSON, e.g. for a priority lane (optional)",
+          "extra_body_json": "Extra body keys as JSON, e.g. thinking switches (optional)",
+          "timeout_s": "Seconds to wait for the model",
+          "url": "Hub address (optional, for escalation and records)",
+          "token": "Speaker token from Helm (optional)",
           "room": "Room label (optional)",
           "hint": "Identity hint for a second wake word (optional, not used yet)",
           "led_entity": "Light entity to colour while unlocked (optional)",
-          "allow_plain_http": "Allow plain http: the token is sent unencrypted on my network"
+          "allow_plain_http": "Allow plain http hub: the token is sent unencrypted on my network"
+        }
+      },
+      "init": {
+        "title": "Model profiles",
+        "description": "Edit a profile and switch which one answers. Changes apply immediately.",
+        "data": {
+          "show_profile": "Profile to edit and set active",
+          "model_url": "Model address",
+          "model_name": "Model name",
+          "model_api_key": "Model key (blank keeps the stored one)",
+          "thinking": "Model thinking on",
+          "extra_headers_json": "Extra headers as JSON",
+          "extra_body_json": "Extra body keys as JSON",
+          "timeout_s": "Seconds to wait for the model"
         }
       }
     },
     "error": {
       "cannot_connect": "Could not reach that address.",
-      "plain_http": "That address is plain http, so the token would cross the network readable. Use https, or tick the box to allow it.",
+      "plain_http": "That hub address is plain http, so the token would cross the network readable. Use https, or tick the box to allow it.",
+      "model_plain_http": "The model address is plain http, so what you say travels unencrypted on my network. Tick the box below if that is intended (a local model endpoint usually is).",
       "bad_auth": "The hub refused that token.",
-      "bad_response": "The hub answered, but not in the expected way.",
-      "already_configured": "This hub is already set up."
+      "bad_json": "That box must hold a JSON object, like {\"X-Header\": \"now\"}.",
+      "json_too_long": "That JSON box is too big.",
+      "already_configured": "This speaker is already set up."
     },
     "abort": {
-      "already_configured": "This hub is already set up."
+      "already_configured": "This speaker is already set up."
     }
   }
 }
