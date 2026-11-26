@@ -58,7 +58,7 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
     () => new Map((sessionMarks ?? []).map((m) => [m.sessionId, { title: m.title, rolledOverAt: m.rolledOverAt }])),
     [sessionMarks],
   );
-  const items = useMemo(() => layout(rows, live, expanded, dividers), [rows, live, expanded, dividers]);
+  const items = useMemo(() => layout(rows, live, expanded, dividers, !hasOlder), [rows, live, expanded, dividers, hasOlder]);
   // A row inside a subagent group is found under the group's key.
   const byKey = useMemo(() => {
     const m = new Map<string, Item>();
