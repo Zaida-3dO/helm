@@ -2,15 +2,18 @@
 //! chat on a local model would reload the model server and spoil it (a benchmark run, say).
 //!
 //! The person is warned, not stopped: while a hold is set the composer of every local-model chat
-//! says why and asks once before the first send. Another chat is stopped: `app_send_message` to a
-//! chat on a local model and `app_create_chat` on a local model are refused with the reason and
-//! the time the hold ends. Schedules and wait deliveries are not held. The lock in
-//! [`crate::lock`] is the one that refuses loads. A hold ends by itself: two hours by default, eight at most, or when the same tool clears it. It
-//! lives in memory, so a restart of Helm drops it.
+//! says why and asks once before the first send. Nothing else wakes the card: a message from a
+//! schedule, a wait or another chat to a local-model chat is saved but not handed over until the
+//! hold ends, and a new local-model chat waits for its first message the same way. The lock in
+//! [`crate::lock`] is the one that refuses loads outright. A hold has an owner: only the chat that
+//! set it (or the person, from the app) clears it, and a hold whose owner ended or was archived is
+//! dropped. It ends by itself too: two hours by default, eight at most. The hold lives in one row
+//! of its own table, so it survives a restart of Helm; its end time still counts after one.
 
 use crate::service::LocalService;
 use crate::types::LockView;
-use serde::Deserialize;
+use rusqlite::{OptionalExtension, Transaction};
+use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
 /// How long a hold lasts when the caller names no time, and the longest one it may ask for.
@@ -25,6 +28,9 @@ pub struct Hold {
     pub reason: String,
     /// When it ends by itself, in ms since the epoch.
     pub until: i64,
+    /// The chat that set the hold; `None` for one the person set from the app. Only the owner
+    /// (or the person) clears it, and a hold whose owner ended or was archived is dropped.
+    pub owner: Option<String>,
 }
 
 /// The arguments of `local_hold_set`.
@@ -34,6 +40,19 @@ pub struct HoldArgs {
     pub reason: String,
     #[serde(default)]
     pub hours: Option<f64>,
+    /// The chat making the call, passed by the tool layer; never typed by an agent. `None` means
+    /// the person set it from the app.
+    #[serde(default)]
+    pub owner_chat_id: Option<String>,
+}
+
+/// The arguments of `local_hold_clear`.
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClearArgs {
+    /// The chat making the call, passed by the tool layer; `None` means the person cleared it.
+    #[serde(default)]
+    pub by_chat_id: Option<String>,
 }
 
 /// The reason as one plain line, or why it cannot be used.
@@ -63,7 +82,7 @@ pub fn expiry(hours: Option<f64>, now: i64) -> Result<i64, String> {
     Ok(now + (h.min(MAX_HOURS) * 3_600_000.0) as i64)
 }
 
-/// The one hold there can be.
+/// The one hold there can be, as the service keeps it in memory.
 #[derive(Default)]
 pub struct HoldCell(Mutex<Option<Hold>>);
 
@@ -81,6 +100,11 @@ impl HoldCell {
         self.slot().take().is_some()
     }
 
+    /// The stored hold even if its time has run out: whether there is anything at all to tidy.
+    pub fn peek(&self) -> Option<Hold> {
+        self.slot().clone()
+    }
+
     /// The hold in force at `now`; one that has run out is dropped.
     pub fn current(&self, now: i64) -> Option<Hold> {
         let mut slot = self.slot();
@@ -91,25 +115,109 @@ impl HoldCell {
     }
 }
 
+// ---- the one row that keeps a hold across a restart -----------------------------------------
+
+/// The stored form: `{reason, until, ownerChatId?}`.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Stored {
+    reason: String,
+    until: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner_chat_id: Option<String>,
+}
+
+pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS local_model_hold (
+             id     INTEGER PRIMARY KEY CHECK (id = 1),
+             value  TEXT NOT NULL
+         );",
+    )
+}
+
+/// The stored hold, if one is waiting out its time. A row that cannot be read counts as no hold:
+/// with a hold whose meaning is unknown, the card should not stay reserved for ever.
+pub fn load(tx: &Transaction<'_>) -> rusqlite::Result<Option<Hold>> {
+    let raw: Option<String> = tx
+        .query_row("SELECT value FROM local_model_hold WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    let Some(raw) = raw else { return Ok(None) };
+    Ok(serde_json::from_str::<Stored>(&raw).ok().map(|s| Hold {
+        reason: s.reason,
+        until: s.until,
+        owner: s.owner_chat_id,
+    }))
+}
+
+pub fn store(tx: &Transaction<'_>, hold: Option<&Hold>) -> rusqlite::Result<()> {
+    let Some(h) = hold else {
+        tx.execute("DELETE FROM local_model_hold WHERE id = 1", [])?;
+        return Ok(());
+    };
+    let v = serde_json::to_string(&Stored {
+        reason: h.reason.clone(),
+        until: h.until,
+        owner_chat_id: h.owner.clone(),
+    })
+    .expect("the hold serialises");
+    tx.execute(
+        "INSERT INTO local_model_hold (id, value) VALUES (1, ?1)
+         ON CONFLICT(id) DO UPDATE SET value = excluded.value",
+        [v],
+    )?;
+    Ok(())
+}
+
 impl LocalService {
-    /// Set the hold, replacing any earlier one. Answers the lock view with the hold in it.
-    pub fn set_hold(&self, reason: &str, hours: Option<f64>) -> Result<LockView, String> {
+    /// Set the hold for `owner` (`None`: the person set it from the app), replacing any earlier
+    /// one, and store it so it outlives a restart. Answers the lock view with the hold in it.
+    pub fn set_hold(
+        &self,
+        reason: &str,
+        hours: Option<f64>,
+        owner: Option<String>,
+    ) -> Result<LockView, String> {
         let now = helm_core::now_ms();
         let hold = Hold {
             reason: clean_reason(reason)?,
             until: expiry(hours, now)?,
+            owner,
         };
-        self.hold.set(hold);
+        self.hold.set(hold.clone());
+        if let Err(e) = self.db.write(|tx| store(tx, Some(&hold))) {
+            log::warn!("the GPU hold could not be stored: {e}");
+        }
         self.emit_lock();
         Ok(self.lock_view())
     }
 
-    /// Clear the hold; clearing none is not an error.
-    pub fn clear_hold(&self) -> LockView {
-        if self.hold.clear() {
-            self.emit_lock();
+    /// Clear the hold; clearing none is not an error. `by` is the chat asked (from the tool
+    /// layer); `None` means the person did it from the app and any hold may be cleared. A hold
+    /// with an owner belongs to that chat alone: another chat cannot end its work.
+    pub fn clear_hold(&self, by: Option<&str>) -> Result<LockView, String> {
+        if let Some(h) = self.hold.current(helm_core::now_ms()) {
+            if let (Some(o), Some(by)) = (h.owner.as_deref(), by) {
+                if o != by {
+                    return Err(
+                        "that hold was set by another chat: only that chat, or the user from \
+                         the app, can clear it; it ends by itself when its time comes."
+                            .into(),
+                    );
+                }
+            }
         }
-        self.lock_view()
+        if self.hold.clear() {
+            if let Err(e) = self.db.write(|tx| store(tx, None)) {
+                log::warn!("the GPU hold could not be cleared in storage: {e}");
+            }
+            self.emit_lock();
+            // Whatever waited for the card can go now.
+            self.dispatch_held();
+        }
+        Ok(self.lock_view())
     }
 }
 
@@ -143,13 +251,54 @@ mod tests {
         let hold = Hold {
             reason: "Benchmark running".into(),
             until: 1_000,
+            owner: Some("chat-1".into()),
         };
         cell.set(hold.clone());
         assert_eq!(cell.current(999), Some(hold.clone()));
+        // peek sees an ended hold too: the service still has a row to remove.
+        assert_eq!(cell.peek(), Some(hold.clone()));
         assert_eq!(cell.current(1_000), None, "ends at its time");
         assert_eq!(cell.current(0), None, "and stays ended");
         cell.set(hold);
         assert!(cell.clear());
         assert_eq!(cell.current(0), None);
+    }
+
+    #[test]
+    fn a_hold_round_trips_through_storage_and_its_owner_with_it() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        init(&tx).unwrap();
+        assert_eq!(load(&tx).unwrap(), None);
+        store(
+            &tx,
+            Some(&Hold {
+                reason: "Soak test".into(),
+                until: 9_000,
+                owner: Some("chat-9".into()),
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            load(&tx).unwrap(),
+            Some(Hold {
+                reason: "Soak test".into(),
+                until: 9_000,
+                owner: Some("chat-9".into()),
+            })
+        );
+        // A hold with no owner (the person set it) round-trips as one without.
+        store(
+            &tx,
+            Some(&Hold {
+                reason: "Family movie night".into(),
+                until: 4_000,
+                owner: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(load(&tx).unwrap().unwrap().owner, None);
+        store(&tx, None).unwrap();
+        assert_eq!(load(&tx).unwrap(), None);
     }
 }

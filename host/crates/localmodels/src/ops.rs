@@ -18,7 +18,7 @@
 //! only ops that contact a server, and they do so only when called. An unload stores the lock and
 //! returns at once; the unloading runs off the op, and the `local_lock` event says when it is done.
 
-use crate::hold::HoldArgs;
+use crate::hold::{ClearArgs, HoldArgs};
 use crate::service::LocalService;
 use crate::settings::Changes;
 use crate::types::{KeyArgs, RefreshResult, ServerIdArgs};
@@ -94,9 +94,19 @@ pub fn register_ops(reg: &mut OpRegistry) {
     })
     .blocking("local_hold_set", OpClass::Blocking, |ctx, args| {
         let a: HoldArgs = parse(args, "local_hold_set")?;
-        to_value(&svc(ctx)?.set_hold(&a.reason, a.hours).map_err(refused)?)
+        to_value(
+            &svc(ctx)?
+                .set_hold(&a.reason, a.hours, a.owner_chat_id)
+                .map_err(refused)?,
+        )
     })
-    .blocking("local_hold_clear", OpClass::Blocking, |ctx, _| {
-        to_value(&svc(ctx)?.clear_hold())
+    .blocking("local_hold_clear", OpClass::Blocking, |ctx, args| {
+        // An agent call comes through the tool layer with its own chat id; the app sends none.
+        let a: ClearArgs = parse(args, "local_hold_clear")?;
+        to_value(
+            &svc(ctx)?
+                .clear_hold(a.by_chat_id.as_deref())
+                .map_err(refused)?,
+        )
     });
 }
