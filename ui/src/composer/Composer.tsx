@@ -16,6 +16,7 @@ import { IconAttach, IconBolt, IconChat, IconFileText as IconFile, IconFolder, I
 import { remoteChatOps } from '../api/devices.ts';
 import { fastModeShown, fastModeTitle, fastModeVisible } from './fastMode.ts';
 import { SetupBanner, useRuntimeCheck } from './SetupBanner.tsx';
+import { useGpuHold } from './GpuHold.tsx';
 import { ContextStatus, ContextStatusRemote } from './ContextStatus.tsx';
 import { useShell } from '../shell/context.ts';
 import { addRef, dropLandsIn, parseFileDrop, pathName, roomLeft, type AttachedRef } from './refs.ts';
@@ -156,6 +157,8 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   // Send waits while Claude Code cannot be found, while the app is still checking for it at
   // start-up, and while the agent starts with nothing in flight.
   const runtime = useRuntimeCheck();
+  // A note from a chat that the card is in use: a send to a local model would reload it, so it is asked once.
+  const gpuHold = useGpuHold(isLocalModel(chat.model) && !remote);
   const checking = !runtime.checked;
   const starting = chat.status === 'starting' && pending.length === 0;
   // An archived chat cannot be sent to; restoring it (the banner above the box) is the way back.
@@ -545,6 +548,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
         }
         return;
       }
+      if (!(await gpuHold.confirmSend())) return;
       if (away && remote) {
         // The device is only away: the message waits here (its draft is already saved) and goes
         // once, under this id, when the device is back. Pressing Send again replaces the wait.
@@ -827,7 +831,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
       // this to once between turns, at most once every five minutes); a later send joins it. A
       // chat that runs on another PC warms the model there — the loading note shows from its
       // own state, and a refusal (switch off, device down) is not worth showing while typing.
-      if (!prevText.current.trim() && text.trim() && isLocalModel(chat.model)) {
+      if (!prevText.current.trim() && text.trim() && isLocalModel(chat.model) && !gpuHold.hold) {
         void ops.warm(chat.id).catch(() => undefined);
       }
       prevText.current = text;
@@ -838,7 +842,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
       setMention(caret == null ? null : mentionAt(text, caret));
       setSlash(caret == null ? null : slashAt(text, caret));
     },
-    [saver, chat.id, chat.model, ops, remote],
+    [saver, chat.id, chat.model, ops, remote, gpuHold.hold],
   );
 
   const actx: AccessoryContext = { chat, thread, busy, draftEmpty: empty };
@@ -878,6 +882,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
         </div>
       )}
       <SetupBanner check={runtime} onRetry={runtime.retry} />
+      {gpuHold.notice}
       {error && (
         <div className="composer-error error" data-testid="composer-error">
           {error}

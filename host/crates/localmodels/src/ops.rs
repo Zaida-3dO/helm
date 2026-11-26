@@ -11,11 +11,14 @@
 //! | `local_lock_state` | blocking | none | `LockView` |
 //! | `local_unload` | blocking | none | `LockView` with `working` true; refused when local models are already unloaded |
 //! | `local_reload` | blocking | none | `LockView` |
+//! | `local_hold_set` | blocking | `{reason, hours?}` | `LockView` with the hold in it |
+//! | `local_hold_clear` | blocking | none | `LockView` |
 //!
 //! No op returns a key: the state only says whether one is set. Test, refresh and unload are the
 //! only ops that contact a server, and they do so only when called. An unload stores the lock and
 //! returns at once; the unloading runs off the op, and the `local_lock` event says when it is done.
 
+use crate::hold::HoldArgs;
 use crate::service::LocalService;
 use crate::settings::Changes;
 use crate::types::{KeyArgs, RefreshResult, ServerIdArgs};
@@ -88,5 +91,12 @@ pub fn register_ops(reg: &mut OpRegistry) {
     })
     .blocking("local_reload", OpClass::Blocking, |ctx, _| {
         to_value(&svc(ctx)?.reload())
+    })
+    .blocking("local_hold_set", OpClass::Blocking, |ctx, args| {
+        let a: HoldArgs = parse(args, "local_hold_set")?;
+        to_value(&svc(ctx)?.set_hold(&a.reason, a.hours).map_err(refused)?)
+    })
+    .blocking("local_hold_clear", OpClass::Blocking, |ctx, _| {
+        to_value(&svc(ctx)?.clear_hold())
     });
 }

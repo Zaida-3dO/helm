@@ -211,3 +211,18 @@ test('the composer waits for the first runtime check, and the scroll-on-send set
     assert.equal(parseScrollOnSend(stored), on, String(stored));
   }
 });
+
+test('the graphics-card hold shows only while it is set and not run out, and says what a send will do', async () => {
+  const { activeHold, holdSentence } = await import('./gpuHold.ts');
+  const hold = { holdReason: 'Benchmark running', holdUntil: 5_000 };
+  const rows: [string, Parameters<typeof activeHold>[0], number, boolean][] = [
+    ['no view yet', null, 0, false],
+    ['no hold set', {}, 0, false],
+    ['a reason without an end', { holdReason: 'Benchmark running' }, 0, false],
+    ['set and in force', hold, 4_999, true],
+    ['ends at its time', hold, 5_000, false],
+    ['long gone', hold, 9_000, false],
+  ];
+  for (const [name, view, now, on] of rows) assert.equal(activeHold(view, now) !== null, on, name);
+  assert.equal(holdSentence({ reason: 'Benchmark running', until: 5_000 }), 'Benchmark running: sending will reload the local model');
+});

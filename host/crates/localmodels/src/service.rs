@@ -198,6 +198,8 @@ pub struct LocalService {
     speech_in_use: Mutex<Option<SpeechProbe>>,
     /// The graphics-card lock as stored; every load path reads this copy.
     gpu_lock: Arc<Mutex<LockState>>,
+    /// The warning a chat set that the card is in use (see `hold`); it refuses nothing.
+    pub(crate) hold: crate::hold::HoldCell,
     /// Held for reading by a request that loads a model or launches a server, from its lock check
     /// to the end of that request. An unload takes it once for writing after the lock is set, so
     /// no load that passed its check earlier is still on its way when the unloading starts.
@@ -260,6 +262,7 @@ impl LocalService {
             starting: Mutex::new(()),
             speech_in_use: Mutex::new(None),
             gpu_lock: Arc::new(Mutex::new(stored)),
+            hold: Default::default(),
             gate: Arc::new(RwLock::new(())),
             work: Mutex::new(()),
             progress: Mutex::new(Progress::default()),
@@ -1286,6 +1289,7 @@ impl LocalService {
                     .get(&s.id)
                     .is_some_and(|v| !v.models.is_empty())
         });
+        let hold = self.hold.current(helm_core::now_ms());
         let p = lock(&self.progress);
         LockView {
             state: match state {
@@ -1300,10 +1304,12 @@ impl LocalService {
             any_local,
             lift_minutes: st.game_lift_minutes,
             restart_task: st.restart_task.clone(),
+            hold_reason: hold.as_ref().map(|h| h.reason.clone()),
+            hold_until: hold.map(|h| h.until),
         }
     }
 
-    fn emit_lock(&self) {
+    pub(crate) fn emit_lock(&self) {
         self.events.emit(AppEvent::new(LOCK_EVENT));
         // The picker's rows change with the lock.
         self.emit();

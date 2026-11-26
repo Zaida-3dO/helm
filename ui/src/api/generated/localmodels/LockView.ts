@@ -32,4 +32,12 @@ liftMinutes: number,
 /**
  * The restart task that is paused while local models are unloaded, if one is set.
  */
-restartTask?: string, };
+restartTask?: string, 
+/**
+ * Why a chat says the card is in use, while it does: sending to a local-model chat would reload the model server.
+ */
+holdReason?: string, 
+/**
+ * When that note ends by itself, in ms since the epoch.
+ */
+holdUntil?: number, };
