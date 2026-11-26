@@ -84,6 +84,12 @@ pub fn restore_in_tx(
                 "UPDATE chats SET archived = 0, updated_at = ?1 WHERE id = ?2",
                 params![now, chat_id],
             )?;
+            // A chat restored is no longer one the finished-chat sweep archived: if it is
+            // archived by hand later, it stays archived.
+            tx.execute(
+                "UPDATE chat_finished_sweep SET archived_at = 0 WHERE chat_id = ?1",
+                [chat_id],
+            )?;
             Ok(Ok(true))
         }
     }

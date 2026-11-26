@@ -1369,8 +1369,31 @@ async fn send_message(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRe
         .filter(|r| r.owns(&to).is_some());
     match remote {
         Some(r) => send_to_mirror_chat(&ctx, r, &to, &body, kind, &limits, &a).await,
-        None => send_local_message(&ctx, &to, &body, kind, &limits, &a),
+        None => {
+            restore_swept(&ctx, &to).await?;
+            send_local_message(&ctx, &to, &body, kind, &limits, &a)
+        }
     }
+}
+
+/// A chat the finished-chat sweep archived (and nobody has restored or archived since) is brought
+/// back when another chat writes to it, so a late report or a follow-up is not lost. A chat the
+/// person archived by hand is left as it is and the send is refused as before.
+async fn restore_swept(ctx: &ToolCtx, id: &str) -> Result<(), ToolError> {
+    let swept: bool = db(ctx)?
+        .snapshot(|tx| {
+            tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM chat_finished_sweep w JOIN chats c ON c.id = w.chat_id
+                               WHERE w.chat_id = ?1 AND c.archived = 1 AND w.archived_at > 0)",
+                [id],
+                |r| r.get(0),
+            )
+        })
+        .map_err(|e| ToolError::maybe(e.to_string()))?;
+    if swept {
+        ctx.op("chat_restore", json!({"chatId": id})).await?;
+    }
+    Ok(())
 }
 
 /// Where a roll-over chat carries on: the newest session of its stack, if that is not the chat
@@ -2768,7 +2791,11 @@ mod tests {
         // b1 -> b2 -> b3: two hops, still followed.
         // c1 -> c2 -> c3 (all archived): the third hop is not followed.
         // lone: archived with no successor.
-        let (a1, a2, b1, b2, b3, c1, c2, c3, lone) = (
+        // swept: archived by the finished-chat sweep; hand: archived by the person after the
+        // sweep's chat was restored once.
+        let (a1, a2, b1, b2, b3, c1, c2, c3, lone, swept, hand) = (
+            h.create().await,
+            h.create().await,
             h.create().await,
             h.create().await,
             h.create().await,
@@ -2800,9 +2827,13 @@ mod tests {
                 "UPDATE chats SET stack_id = ?1, prev_session_id = ?2 WHERE id = ?3",
                 params![b1, b2, b3],
             )?;
-            for id in [&a1, &b1, &b2, &c1, &c2, &c3, &lone] {
+            for id in [&a1, &b1, &b2, &c1, &c2, &c3, &lone, &swept, &hand] {
                 tx.execute("UPDATE chats SET archived = 1 WHERE id = ?1", [id])?;
             }
+            tx.execute(
+                "INSERT INTO chat_finished_sweep(chat_id, handed_over_at, archived_at) VALUES (?1, 5, 6), (?2, 5, 0)",
+                [&swept, &hand],
+            )?;
             Ok::<_, rusqlite::Error>(())
         })
         .unwrap();
@@ -2862,6 +2893,34 @@ mod tests {
         assert!(
             r["error"].as_str().unwrap_or_default().contains("archived"),
             "{r}"
+        );
+        // A chat the sweep archived is restored and gets the message; one the person archived
+        // by hand (after a restore) stays archived and refuses it.
+        let r = call(
+            &h,
+            &tools,
+            &maker,
+            "app_send_message",
+            json!({"chatId": hand, "message": "by hand", "kind": "update", "mode": "steer"}),
+        )
+        .await;
+        assert!(
+            r["error"].as_str().unwrap_or_default().contains("archived"),
+            "{r}"
+        );
+        let r = call(
+            &h,
+            &tools,
+            &maker,
+            "app_send_message",
+            json!({"chatId": swept, "message": "late report", "kind": "update", "mode": "steer"}),
+        )
+        .await;
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["result"]["chatId"], swept.as_str());
+        assert_eq!(
+            h.col(&format!("SELECT archived FROM chats WHERE id = '{swept}'")),
+            ["0"]
         );
         // A live chat is untouched: no redirect key in its result.
         let r = call(

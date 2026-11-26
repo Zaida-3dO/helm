@@ -1,28 +1,33 @@
 //! Finished chats archive themselves.
 //!
 //! A chat that has sent its hand-over (an `app_send_message` of kind `completed`) and has gone
-//! quiet since is finished work. This sweep archives such a chat, through the same op the
-//! `app_chat` archive action uses, once it has stood quiet for [`IDLE_GRACE_MS`]. It is on by
+//! quiet since is finished work. This sweep archives such a chat, through the same archive step
+//! the `app_chat` archive action uses, once it has stood quiet for [`IDLE_GRACE_MS`]. It is on by
 //! default and switched by the `archiveFinishedChats` preference.
 //!
 //! The chat that *receives* the hand-over (usually the one that started the work) is never
 //! touched: only the sender is finished. A chat that waits on something else is left alone
 //! ([`decide`], one table-driven test): a turn or a queued message in flight, a worker's
-//! background job or running subagent, an open wait or a working chat of its own, a question or
-//! approval waiting on the person, a flag it raised for them, a message that arrived after the
-//! hand-over (the person typing included), a draft in its composer, a pinned chat, a side chat,
-//! and the chat the person has open. Each chat is archived once per hand-over: a chat the person
-//! restores stays restored until it hands over again.
+//! background job or running subagent, an open wait or a working chat of its own, a chat it
+//! started that has not yet sent it a completed report, a restart or a stop check still owed to
+//! it, a question or approval waiting on the person, a flag it raised for them, a message that
+//! arrived after the hand-over (the person typing included), a draft in its composer, a pinned
+//! chat, a side chat, and the chat the person has open. Each chat is archived once per
+//! hand-over: a chat the person restores stays restored until it hands over again. A message
+//! another chat sends to a chat the sweep archived restores it and is delivered; a chat the
+//! person archived by hand stays archived.
 //!
-//! What the sweep did is written into the chat as a plain transcript line before it archives.
-//! One chat is archived per maintenance tick.
+//! The first time the sweep runs it notes the time, and hand-overs from before that are never
+//! looked at: turning it on does not archive what was handed over earlier. The decision and the
+//! archive happen in one database write, which looks at the chat's facts again, so a message
+//! that lands in between keeps the chat. What the sweep did is written into the chat as a plain
+//! transcript line once it is archived. One chat is archived per maintenance tick.
 
 use crate::attention::Needs;
 use crate::runtime::{ChatRuntime, Shared};
 use crate::types::*;
 use helm_core::prefs::ARCHIVE_FINISHED_CHATS;
 use rusqlite::{params, OptionalExtension, Transaction};
-use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -41,8 +46,22 @@ pub(crate) fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              chat_id         TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
              handed_over_at  INTEGER NOT NULL,
              archived_at     INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS chat_finished_sweep_start (
+             id            INTEGER PRIMARY KEY CHECK (id = 1),
+             first_ran_at  INTEGER NOT NULL
          );",
     )
+}
+
+/// When the sweep first ran, if it has.
+fn first_ran(tx: &Transaction<'_>) -> rusqlite::Result<Option<i64>> {
+    tx.query_row(
+        "SELECT first_ran_at FROM chat_finished_sweep_start WHERE id = 1",
+        [],
+        |r| r.get(0),
+    )
+    .optional()
 }
 
 /// Whether the sweep is switched on (on when the preference is missing).
@@ -64,6 +83,10 @@ pub struct Cand {
     pub background: bool,
     /// An open wait, or a chat it started that is working.
     pub helpers: bool,
+    /// A chat it started (and that is still around) has not yet sent it a completed report.
+    pub reports_owed: bool,
+    /// A restart continuation or a stop check is still owed to it.
+    pub continuing: bool,
     /// An approval, question or plan waits on the person.
     pub waiting: bool,
     /// The chat's agent flagged something for the person.
@@ -90,6 +113,8 @@ pub enum Skip {
     Queued,
     Background,
     Helpers,
+    Reports,
+    Continuing,
     Waiting,
     Flagged,
     NewerMessage,
@@ -115,6 +140,10 @@ pub fn decide(c: &Cand, now: i64) -> Result<(), Skip> {
         Err(Skip::Background)
     } else if c.helpers {
         Err(Skip::Helpers)
+    } else if c.reports_owed {
+        Err(Skip::Reports)
+    } else if c.continuing {
+        Err(Skip::Continuing)
     } else if c.waiting {
         Err(Skip::Waiting)
     } else if c.flagged {
@@ -153,7 +182,8 @@ fn handovers(tx: &Transaction<'_>, now: i64) -> rusqlite::Result<HashMap<String,
          WHERE m.kind = 'completed' AND m.origin = 'other_chat' AND s.created_at > ?1
          ORDER BY s.created_at DESC LIMIT ?2",
     )?;
-    let rows = st.query_map(params![now - WINDOW_MS, MAX_HANDOVERS], |r| {
+    let since = (now - WINDOW_MS).max(first_ran(tx)?.unwrap_or(i64::MIN));
+    let rows = st.query_map(params![since, MAX_HANDOVERS], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
     })?;
     let mut out: HashMap<String, i64> = HashMap::new();
@@ -167,6 +197,74 @@ fn handovers(tx: &Transaction<'_>, now: i64) -> rusqlite::Result<HashMap<String,
     Ok(out)
 }
 
+/// The test "this message was sent by the chat `k`": the first line of a chat-to-chat message names
+/// its sender and ends in `(<id>)]`. Only the first line counts, so a body cannot pass for it.
+const SENT_BY_K: &str = "substr(substr(s.text, 1, instr(s.text || char(10), char(10)) - 1), -(length(k.id) + 3)) = '(' || k.id || ')]'";
+
+/// Everything the database says about one chat that handed over at `at`; the live parts of the
+/// decision (`needs`, `background`, `open`) come from the caller. `None` when the chat is gone.
+fn candidate(
+    tx: &Transaction<'_>,
+    id: &str,
+    at: i64,
+    needs: &Needs,
+    background: &HashSet<String>,
+    open: Option<&str>,
+) -> rusqlite::Result<Option<Cand>> {
+    let mut st = tx.prepare_cached(&format!(
+        "SELECT c.status, c.archived, c.side_source_id IS NOT NULL, c.pinned,
+                EXISTS(SELECT 1 FROM submissions q WHERE q.chat_id = c.id
+                       AND q.state IN ('saved', 'dispatching', 'accepted', 'delivered')),
+                EXISTS(SELECT 1 FROM chat_flags f WHERE f.chat_id = c.id),
+                EXISTS(SELECT 1 FROM submissions q WHERE q.chat_id = c.id AND q.created_at > ?2
+                       AND q.state NOT IN ('withdrawn', 'rejected', 'superseded')),
+                trim(c.draft) <> '',
+                EXISTS(SELECT 1 FROM chat_finished_sweep w WHERE w.chat_id = c.id
+                       AND w.handed_over_at >= ?2),
+                MAX(c.updated_at, COALESCE(a.last_activity_at, 0)),
+                EXISTS(SELECT 1 FROM chats k
+                       WHERE k.archived = 0 AND (k.parent_chat_id = c.id OR k.created_by_chat = c.id)
+                         AND NOT EXISTS(SELECT 1 FROM submissions s
+                                        JOIN submission_meta m ON m.submission_id = s.id
+                                        WHERE s.chat_id = c.id AND m.kind = 'completed'
+                                          AND m.origin = 'other_chat' AND s.created_at >= k.created_at
+                                          AND {SENT_BY_K})),
+                EXISTS(SELECT 1 FROM restart_continuations r WHERE r.chat_id = c.id)
+                  OR EXISTS(SELECT 1 FROM chat_stop_holds h WHERE h.chat_id = c.id)
+         FROM chats c LEFT JOIN chat_activity a ON a.chat_id = c.id
+         WHERE c.id = ?1"
+    ))?;
+    let facts = st
+        .query_row(params![id, at], |r| {
+            Ok(Cand {
+                busy: ChatStatus::parse(&r.get::<_, String>(0)?) != ChatStatus::Idle,
+                archived: r.get(1)?,
+                side: r.get(2)?,
+                pinned: r.get(3)?,
+                queued: r.get(4)?,
+                flagged: r.get(5)?,
+                newer_message: r.get(6)?,
+                has_draft: r.get(7)?,
+                swept: r.get(8)?,
+                stamp: r.get(9)?,
+                reports_owed: r.get(10)?,
+                continuing: r.get(11)?,
+                ..Cand::default()
+            })
+        })
+        .optional()?;
+    let Some(mut c) = facts else {
+        return Ok(None);
+    };
+    c.helpers = crate::triage::helpers_working(tx, id)?;
+    c.waiting = needs.contains_key(id);
+    c.background = background.contains(id);
+    c.open = open == Some(id);
+    c.handed_over_at = at;
+    c.id = id.to_owned();
+    Ok(Some(c))
+}
+
 /// The finished chats the sweep may archive now, each with the time of its hand-over, oldest
 /// first. `needs` and `background` hold what only the running actors know (approvals, background
 /// jobs, subagents); `open` is the chat the person has open, if any.
@@ -178,45 +276,10 @@ pub fn due(
     now: i64,
 ) -> rusqlite::Result<Vec<(String, i64)>> {
     let mut out: Vec<(i64, String)> = Vec::new();
-    let mut st = tx.prepare(
-        "SELECT c.status, c.archived, c.side_source_id IS NOT NULL, c.pinned,
-                EXISTS(SELECT 1 FROM submissions q WHERE q.chat_id = c.id
-                       AND q.state IN ('saved', 'dispatching', 'accepted', 'delivered')),
-                EXISTS(SELECT 1 FROM chat_flags f WHERE f.chat_id = c.id),
-                EXISTS(SELECT 1 FROM submissions q WHERE q.chat_id = c.id AND q.created_at > ?2
-                       AND q.state NOT IN ('withdrawn', 'rejected', 'superseded')),
-                trim(c.draft) <> '',
-                EXISTS(SELECT 1 FROM chat_finished_sweep w WHERE w.chat_id = c.id
-                       AND w.handed_over_at >= ?2),
-                MAX(c.updated_at, COALESCE(a.last_activity_at, 0))
-         FROM chats c LEFT JOIN chat_activity a ON a.chat_id = c.id
-         WHERE c.id = ?1",
-    )?;
     for (id, at) in handovers(tx, now)? {
-        let facts = st
-            .query_row(params![id, at], |r| {
-                Ok(Cand {
-                    busy: ChatStatus::parse(&r.get::<_, String>(0)?) != ChatStatus::Idle,
-                    archived: r.get(1)?,
-                    side: r.get(2)?,
-                    pinned: r.get(3)?,
-                    queued: r.get(4)?,
-                    flagged: r.get(5)?,
-                    newer_message: r.get(6)?,
-                    has_draft: r.get(7)?,
-                    swept: r.get(8)?,
-                    stamp: r.get(9)?,
-                    ..Cand::default()
-                })
-            })
-            .optional()?;
-        let Some(mut c) = facts else { continue };
-        c.helpers = crate::triage::helpers_working(tx, &id)?;
-        c.waiting = needs.contains_key(&id);
-        c.background = background.contains(&id);
-        c.open = open == Some(id.as_str());
-        c.handed_over_at = at;
-        c.id = id;
+        let Some(c) = candidate(tx, &id, at, needs, background, open)? else {
+            continue;
+        };
         if decide(&c, now).is_ok() {
             out.push((at, c.id));
         }
@@ -256,19 +319,36 @@ fn note() -> String {
     )
 }
 
-/// One maintenance-tick pass: archive the longest-finished chat that is due, if any. The chat is
-/// marked as swept for its hand-over first, so a failed archive is not tried again every tick.
+/// One maintenance-tick pass: archive the longest-finished chat that is due, if any. The choice
+/// is made again inside the write that archives, so a chat that has just started working, or
+/// was sent something, since the pick is left alone. The claim (this hand-over is dealt with, so
+/// it is not tried again) and the archive are one write.
 pub(crate) fn pass(sh: &Arc<Shared>) {
-    let Some(seam) = sh.host.get().cloned() else {
-        return;
-    };
     let now = helm_core::now_ms();
+    let started = sh.db.snapshot(|tx| {
+        Ok::<_, rusqlite::Error>(if enabled(tx) {
+            Some(first_ran(tx)?.is_some())
+        } else {
+            None
+        })
+    });
+    match started {
+        Ok(Some(true)) => {}
+        Ok(Some(false)) => {
+            // The first run only notes the time: nothing handed over before it is archived.
+            let _ = sh.db.write(|tx| {
+                tx.execute(
+                    "INSERT OR IGNORE INTO chat_finished_sweep_start(id, first_ran_at) VALUES (1, ?1)",
+                    [now],
+                )
+            });
+            return;
+        }
+        _ => return,
+    }
     let needs = crate::attention::live_needs(sh);
     let background = background_chats(sh);
     let picked = sh.db.snapshot(|tx| {
-        if !enabled(tx) {
-            return Ok(None);
-        }
         let open = open_chat(tx);
         Ok::<_, rusqlite::Error>(
             due(tx, &needs, &background, open.as_deref(), now)?
@@ -279,19 +359,41 @@ pub(crate) fn pass(sh: &Arc<Shared>) {
     let Ok(Some((id, at))) = picked else {
         return;
     };
-    let claimed = sh.db.write(|tx| {
+    let archived = sh.db.write(|tx| {
+        let open = open_chat(tx);
+        let Some(c) = candidate(tx, &id, at, &needs, &background, open.as_deref())? else {
+            return Ok(false);
+        };
+        if decide(&c, now).is_err() {
+            return Ok(false);
+        }
+        if !matches!(crate::archive::archive_in_tx(tx, &id, now)?, Ok(true)) {
+            return Ok(false);
+        }
         tx.execute(
             "INSERT INTO chat_finished_sweep(chat_id, handed_over_at, archived_at) VALUES (?1, ?2, ?3)
              ON CONFLICT(chat_id) DO UPDATE SET handed_over_at = ?2, archived_at = ?3",
             params![id, at, now],
-        )
+        )?;
+        Ok::<_, rusqlite::Error>(true)
     });
-    if claimed.is_err() {
-        return;
-    }
-    ChatRuntime { sh: sh.clone() }.add_context_row(&id, ContextKind::Notice, &note());
-    if let Err(e) = crate::manage::chat_archive(&seam.ctx, json!({"chatId": id})) {
-        log::warn!("finished chat {id} was not archived: {}", e.message);
+    match archived {
+        Ok(true) => {
+            // The line goes in first, so it is in the transcript before the worker is let go.
+            let rt = ChatRuntime { sh: sh.clone() };
+            rt.add_context_row(&id, ContextKind::Notice, &note());
+            rt.archived(&id);
+            if let Some(seam) = sh.host.get() {
+                if let Err(e) = crate::manage::changed(&seam.ctx, &id) {
+                    log::warn!(
+                        "finished chat {id} was archived, but its update was not sent: {}",
+                        e.message
+                    );
+                }
+            }
+        }
+        Ok(false) => {}
+        Err(e) => log::warn!("finished chat {id} was not archived: {e}"),
     }
 }
 
@@ -314,7 +416,7 @@ mod tests {
     #[test]
     fn a_finished_chat_is_archived_only_when_nothing_else_holds_it() {
         type Edit = fn(&mut Cand);
-        let rows: [(&str, Edit, Result<(), Skip>); 17] = [
+        let rows: [(&str, Edit, Result<(), Skip>); 19] = [
             ("quiet past the grace", |_| {}, Ok(())),
             ("archived", |c| c.archived = true, Err(Skip::Archived)),
             ("side chat", |c| c.side = true, Err(Skip::Side)),
@@ -330,6 +432,16 @@ mod tests {
                 "open wait or working child",
                 |c| c.helpers = true,
                 Err(Skip::Helpers),
+            ),
+            (
+                "a chat it started has not reported",
+                |c| c.reports_owed = true,
+                Err(Skip::Reports),
+            ),
+            (
+                "restart continuation or stop check owed",
+                |c| c.continuing = true,
+                Err(Skip::Continuing),
             ),
             ("approval waiting", |c| c.waiting = true, Err(Skip::Waiting)),
             (
@@ -449,5 +561,43 @@ mod tests {
             .snapshot(|tx| due(tx, &Needs::new(), &HashSet::new(), None, far))
             .unwrap()
             .is_empty());
+
+        // A chat the kid started, and that has not reported, holds the kid; a restart
+        // continuation owed to a chat holds that one.
+        db.write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO chats (id, project_id, title, status, created_at, updated_at, created_by_chat)
+                   VALUES ('sub', 'p', 'Sub', 'idle', 2, 2, 'kid');
+                 INSERT INTO restart_continuations (chat_id, created_at) VALUES ('again', 1);",
+            )
+        })
+        .unwrap();
+        assert!(ids(due_now(None)).is_empty());
+        // A message whose header names someone else, and only mentions the sub chat further
+        // down, is not the sub chat's report.
+        db.write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO submissions (id, chat_id, text, state, created_at)
+                   VALUES ('fake', 'kid', '[Message from another chat: \"T\" (zzz)]\n(sub)]', 'complete', 5);
+                 INSERT INTO submission_meta (submission_id, origin, kind) VALUES ('fake', 'other_chat', 'completed');",
+            )
+        })
+        .unwrap();
+        assert!(ids(due_now(None)).is_empty());
+        // Its own report, from before the kid's hand-over, frees the kid (and, having handed
+        // over itself, it is due too).
+        db.write(|tx| tx.execute_batch(&hand("sub", "kid", "h6", NOW - 110 * 60_000)))
+            .unwrap();
+        assert_eq!(ids(due_now(None)), ["sub", "kid"]);
+
+        // The first run's time bounds the window: nothing handed over before it is looked at.
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO chat_finished_sweep_start (id, first_ran_at) VALUES (1, ?1)",
+                [NOW - 105 * 60_000],
+            )
+        })
+        .unwrap();
+        assert_eq!(ids(due_now(None)), ["kid"]);
     }
 }

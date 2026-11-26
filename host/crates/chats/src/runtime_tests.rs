@@ -8237,7 +8237,7 @@ async fn the_auto_roll_over_trigger_checks_every_case_in_one_pass() {
 }
 
 /// The finished-chat sweep through its tick pass: it archives the chat that sent a completed
-/// report once it has been quiet past the grace, writes a line in the chat first, leaves the chat
+/// report once it has been quiet past the grace, writes a line in the chat, leaves the chat
 /// that received the report alone, does nothing while the setting is off, and does not archive a
 /// chat the person restored again for the same report.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -8283,6 +8283,21 @@ All done."),
     assert!(!archived(&h, &kid), "switched off");
     h.db.write(|tx| helm_core::prefs::set_generic(tx, "archiveFinishedChats", &json!(true)))
         .unwrap();
+    // The first run only notes the time: a hand-over from before it is not archived.
+    crate::finished::pass(&h.rt.sh);
+    assert!(!archived(&h, &kid), "the first run archives nothing");
+    assert_eq!(
+        h.col("SELECT COUNT(*) FROM chat_finished_sweep_start"),
+        ["1"],
+        "the first run is noted"
+    );
+    h.db.write(|tx| {
+        tx.execute(
+            "UPDATE chat_finished_sweep_start SET first_ran_at = ?1",
+            [sent - 3_600_000],
+        )
+    })
+    .unwrap();
     crate::finished::pass(&h.rt.sh);
     assert!(archived(&h, &kid), "the sender of the report is archived");
     assert!(!archived(&h, &boss), "the chat that got the report is not");
