@@ -37,9 +37,15 @@ async fn gpu(ctx: ToolCtx, a: Value) -> ToolResult {
             if let Some(h) = a.get("hours") {
                 args["hours"] = h.clone();
             }
+            // The hold belongs to the chat that set it: the tool layer says so, and an agent
+            // cannot name another chat.
+            args["ownerChatId"] = json!(ctx.caller_chat_id);
             ctx.op("local_hold_set", args).await
         }
-        "release" => ctx.op("local_hold_clear", json!({})).await,
+        "release" => {
+            ctx.op("local_hold_clear", json!({"byChatId": ctx.caller_chat_id}))
+                .await
+        }
         other => Err(ToolError::refused(format!(
             "\"{other}\" is not an action: use status, unload, reload, hold or release."
         ))),
@@ -59,11 +65,11 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                     "action": {"type": "string", "enum": ["status", "unload", "reload", "hold", "release"]},
                     "reason": {
                         "type": "string",
-                        "description": "With hold: one short line the composers show before \"sending will reload the local model\", for example \"Benchmark running\"."
+                        "description": "With hold: one short line the composers show, such as \"Benchmark running\"."
                     },
                     "hours": {
                         "type": "number",
-                        "description": "With hold: how long the warning lasts, in hours; 2 when left out, 8 at most."
+                        "description": "With hold: hours the note lasts; 2 when left out, 8 at most."
                     },
                     "confirm": {
                         "type": "boolean",
@@ -86,11 +92,13 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
              hold: while you use the card for something a model load would spoil (a benchmark, a \
              long GPU job), set a hold with a short reason. Every composer of a local-model chat \
              shows the reason with \"sending will reload the local model\" and asks once before \
-             the first send; app_send_message to a local-model chat and app_create_chat on a \
-             local model are refused, with the reason and the time it ends, until the hold ends. \
-             It ends by itself after hours (2 by default, 8 at most). Call release as soon as you are done. Chats on Claude models are not \
-             affected.\n\
-             release: clears the hold now.\n\
+             the first send; a message from a schedule, a wait or another chat to a local-model \
+             chat is saved and waits until the hold ends instead of waking the model, and so does \
+             the first message of a new local-model chat. The hold belongs to your chat: only you \
+             can release it, and it lifts by itself after hours (2 by default, 8 at most) or when \
+             your chat ends.\n\
+             release: clears your own hold now; another chat's hold is refused. Chats on Claude \
+             models are never held.\n\
              Never unload on your own: it takes the card away from other working chats.",
         ),
         gpu,
@@ -207,7 +215,16 @@ mod tests {
                 "local_hold_clear"
             ]
         );
-        assert_eq!(got[3].1, json!({"reason": "Benchmark running"}));
-        assert_eq!(got[4].1, json!({"reason": "Soak test", "hours": 4}));
+        // The hold's owner and the releasing chat ride along with the calls: the tool layer says
+        // who is calling, and an agent cannot name a different chat.
+        assert_eq!(
+            got[3].1,
+            json!({"reason": "Benchmark running", "ownerChatId": "me"})
+        );
+        assert_eq!(
+            got[4].1,
+            json!({"reason": "Soak test", "hours": 4, "ownerChatId": "me"})
+        );
+        assert_eq!(got[5].1, json!({"byChatId": "me"}));
     }
 }

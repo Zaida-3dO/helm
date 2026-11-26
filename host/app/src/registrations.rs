@@ -874,12 +874,17 @@ mod surface_tests {
     /// What a chat pays for Helm's tools. A chat's own list holds only the core tools; the rest are
     /// found by group, and families are merged. The caps leave a little room: a tool added to the
     /// core list, or a description grown past its cap, fails here.
+    ///
+    /// Raised once for two additions every chat pays for: the progress-line tool and the
+    /// graphics-card hold actions on `app_gpu` (what a hold does now belongs in its guidelines,
+    /// not in the one-line description). The list was trimmed where it was wordy, but not by
+    /// enough to keep the old caps without cutting teaching agents need.
     #[test]
     fn a_chats_own_tool_list_stays_small_and_every_description_stays_short() {
         let reg = super::host_tools();
         for (label, keys, listed_cap, visible_cap) in [
-            ("default", LaunchKeys::default(), 10_500, 47),
-            ("everything on", everything_on(), 11_500, 59),
+            ("default", LaunchKeys::default(), 12_000, 49),
+            ("everything on", everything_on(), 13_000, 61),
         ] {
             let all = reg.for_launch(&keys);
             let visible: Vec<_> = all.iter().filter(|e| e.alias_of.is_none()).collect();

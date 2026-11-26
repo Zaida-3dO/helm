@@ -324,6 +324,14 @@ impl crate::service::ChatControl for TestChats {
     fn stop_limit(&self) -> Duration {
         Duration::from_secs(2)
     }
+    /// A GPU hold ended: the stand-in only records that messages waiting for the card were told
+    /// to go over.
+    fn dispatch_held(&self) {
+        self.stops
+            .lock()
+            .unwrap()
+            .push(("flush".into(), "-".into()));
+    }
 }
 
 /// A fake process list.
@@ -1696,4 +1704,106 @@ fn a_models_default_name_drops_what_does_not_tell_it_apart() {
         default_aliases(&["qwen3:8b", "qwen3:8b"]),
         ["Qwen 3 8B", "Qwen 3 8B"]
     );
+}
+
+/// The graphics-card hold belongs to the chat that set it: another chat cannot clear it, a restart
+/// brings it back with its owner and end time, and the watch's tidy lifts it when its owner ends
+/// or its time passes — handing over whatever waited for the card.
+#[test]
+fn a_gpu_hold_has_an_owner_survives_a_restart_and_lifts_on_its_own() {
+    let r = rig();
+    let chats = Arc::new(TestChats {
+        db: r.db.clone(),
+        stops: Mutex::new(Vec::new()),
+    });
+    r.svc().attach_chats(chats.clone());
+    let made_chat = |id: &str| {
+        r.db.write(|tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO projects(id, name, created_at) VALUES ('p', 'P', 1)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO chats(id, project_id, title, status, created_at, updated_at)
+                     VALUES (?1, 'p', ?2, 'idle', 1, 1)",
+                rusqlite::params![id, id],
+            )
+        })
+        .unwrap();
+    };
+
+    // A hold set by a chat belongs to it: the view shows the owner and no other chat can clear it.
+    made_chat("owner-1");
+    let view = r
+        .svc()
+        .set_hold("Benchmark running", Some(2.0), Some("owner-1".into()))
+        .unwrap();
+    assert_eq!(view.hold_reason.as_deref(), Some("Benchmark running"));
+    assert_eq!(
+        r.svc().gpu_hold().unwrap().owner.as_deref(),
+        Some("owner-1")
+    );
+    assert!(
+        r.svc()
+            .clear_hold(Some("some-other-chat"))
+            .unwrap_err()
+            .contains("another chat"),
+        "a stranger cannot end another chat's work"
+    );
+    assert_eq!(r.svc().gpu_hold().unwrap().reason, "Benchmark running");
+
+    // A restart: a fresh service over the same database reads the hold back, owner and all.
+    let svc2 = r.service();
+    svc2.attach_chats(chats.clone());
+    let held = svc2.gpu_hold().expect("the hold outlives the restart");
+    assert_eq!(held.reason, "Benchmark running");
+    assert_eq!(held.owner.as_deref(), Some("owner-1"));
+    // A tidy while all is well changes nothing.
+    svc2.hold_tick(helm_core::now_ms());
+    assert!(svc2.gpu_hold().is_some());
+
+    // The owner's chat is archived: the next tidy lifts the hold, clears the row for good, and
+    // tells the chats to hand over what waited.
+    r.db.write(|tx| tx.execute("UPDATE chats SET archived = 1 WHERE id = 'owner-1'", []))
+        .unwrap();
+    svc2.hold_tick(helm_core::now_ms());
+    assert!(
+        svc2.gpu_hold().is_none(),
+        "a hold whose owner ended is gone"
+    );
+    assert_eq!(
+        *chats.stops.lock().unwrap(),
+        vec![("flush".into(), "-".into())]
+    );
+    let svc3 = r.service();
+    assert_eq!(svc3.hold.peek(), None, "and its stored row went with it");
+
+    // A hold the person set (no owner) may be cleared by any release.
+    let svc4 = r.service();
+    svc4.attach_chats(chats.clone());
+    svc4.set_hold("Movie night", None, None).unwrap();
+    assert!(svc4.gpu_hold().unwrap().owner.is_none());
+    svc4.clear_hold(Some("any-chat")).unwrap();
+    assert!(svc4.gpu_hold().is_none());
+
+    // Time passing lifts a hold the same way, even if nothing read it since it ran out.
+    made_chat("owner-2");
+    svc4.set_hold("Soak test", Some(0.5), Some("owner-2".into()))
+        .unwrap();
+    assert!(svc4.gpu_hold().is_some());
+    svc4.hold_tick(helm_core::now_ms() + 3_600_000);
+    assert!(svc4.gpu_hold().is_none(), "the two-hour note ran out");
+    let svc5 = r.service();
+    assert_eq!(svc5.hold.peek(), None, "its row is cleared as well");
+
+    // A hold whose owner vanished from the table reads as no hold at once (not only at a tidy).
+    made_chat("owner-3");
+    svc4.set_hold("Deep clean", Some(1.0), Some("owner-3".into()))
+        .unwrap();
+    r.db.write(|tx| tx.execute("DELETE FROM chats WHERE id = 'owner-3'", []))
+        .unwrap();
+    assert!(svc4.gpu_hold().is_none());
+    svc4.hold_tick(helm_core::now_ms());
+    let svc6 = r.service();
+    assert_eq!(svc6.hold.peek(), None);
 }

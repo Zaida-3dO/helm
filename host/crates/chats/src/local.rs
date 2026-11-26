@@ -143,6 +143,9 @@ pub struct GpuHold {
     pub reason: String,
     /// When it ends by itself, in ms since the epoch.
     pub until: i64,
+    /// The chat that set it (`None`: the person set it from the app). Only the owner may clear
+    /// it, and a hold whose owner ended is lifted on its own.
+    pub owner: Option<String>,
 }
 
 impl GpuHold {

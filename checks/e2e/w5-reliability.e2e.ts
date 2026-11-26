@@ -122,6 +122,10 @@ describe("failure modes in the running app", { timeout: 10 * 60_000 }, () => {
     app = await launchApp(profile);
     const running = await newChat(page(), work);
     await send(page(), "[E8-run] keep working");
+    // The turn's tool cards sit in its work group, which starts folded even while it runs: open
+    // the group first (its line appears once the turn takes its first step), then look for the card.
+    await page().waitForSelector('[data-testid="work-fold-live"]', { timeout: 20_000 });
+    await unfoldAll(page());
     await page().waitForSelector(tid("tool-card", '[data-status="running"]'), { timeout: 20_000 });
     // Sent mid-turn it goes to Claude at once and waits there, unread, as pending.
     await send(page(), "unread across a crash");

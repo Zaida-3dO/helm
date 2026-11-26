@@ -69,7 +69,8 @@ pub fn register_migrations(reg: &mut helm_core::db::MigrationRegistry) {
     reg.initializer("local-models", |tx| {
         settings::init(tx)?;
         variants::init(tx)?;
-        lock::init(tx)
+        lock::init(tx)?;
+        hold::init(tx)
     });
 }
 
@@ -140,6 +141,11 @@ impl ChatControl for RuntimeChats {
 
     fn stop_limit(&self) -> std::time::Duration {
         self.rt.limits().stop + std::time::Duration::from_secs(5)
+    }
+
+    /// A GPU hold has ended: hand the messages that waited for the card over to their chats.
+    fn dispatch_held(&self) {
+        helm_chats::submit::flush_held(&self.rt);
     }
 }
 

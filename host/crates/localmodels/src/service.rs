@@ -73,6 +73,9 @@ pub trait ChatControl: Send + Sync {
     fn stop(&self, chat_id: &str, note: &str);
     /// How long a stop may take before the chat's worker is closed.
     fn stop_limit(&self) -> Duration;
+    /// A GPU hold has ended: hand over to their chats the messages that waited for it. Returns
+    /// at once; the work runs where chats run.
+    fn dispatch_held(&self);
 }
 
 /// What the last unload or turn back on did, and how many are still running.
@@ -246,7 +249,13 @@ impl LocalService {
             log::warn!("the local model lock could not be read: {e}");
             LockState::On
         });
-        Self {
+        // A hold the last run left behind comes back with it, past its time or not: the watch
+        // thread's first tidy removes what has ended, and readers ignore it meanwhile either way.
+        let held = db.snapshot(crate::hold::load).unwrap_or_else(|e| {
+            log::warn!("the local model hold could not be read: {e}");
+            None
+        });
+        let svc = Self {
             db,
             creds,
             events,
@@ -269,7 +278,11 @@ impl LocalService {
             task: None,
             chats: Mutex::new(None),
             watch: Mutex::new(Watch::default()),
+        };
+        if let Some(h) = held {
+            svc.hold.set(h);
         }
+        svc
     }
 
     /// Say how to tell whether speech-to-text is set up. Until this is called, and whenever it
@@ -1302,7 +1315,7 @@ impl LocalService {
                     .get(&s.id)
                     .is_some_and(|v| !v.models.is_empty())
         });
-        let hold = self.hold.current(helm_core::now_ms());
+        let hold = self.hold_now();
         let p = lock(&self.progress);
         LockView {
             state: match state {
@@ -1326,6 +1339,54 @@ impl LocalService {
         self.events.emit(AppEvent::new(LOCK_EVENT));
         // The picker's rows change with the lock.
         self.emit();
+    }
+
+    /// Whether the chat that set a hold is gone or archived (a `None` owner — a hold the person
+    /// set from the app — never counts as gone). Read-only: what it finds, [`Self::hold_tick`]
+    /// clears soon after.
+    fn owner_gone(&self, owner: Option<&str>) -> bool {
+        let Some(o) = owner else { return false };
+        !self
+            .db
+            .snapshot(|tx| {
+                tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM chats WHERE id = ?1 AND archived = 0)",
+                    [o],
+                    |r| r.get::<_, bool>(0),
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    /// The hold in force right now: still inside its time and, if a chat set it, that chat is
+    /// still alive. A hold found ended here is not written away — the watch thread's next tidy
+    /// does that once, and hands over what waited for the card.
+    fn hold_now(&self) -> Option<crate::hold::Hold> {
+        let h = self.hold.current(helm_core::now_ms())?;
+        (!self.owner_gone(h.owner.as_deref())).then_some(h)
+    }
+
+    /// The watch thread's tidy for the card note: a hold whose time has run out or whose owner
+    /// ended or was archived is removed (memory and stored row), and whatever waited for the
+    /// card goes to its chats. Nothing else here touches the hold, so one pass per poll is enough.
+    pub(crate) fn hold_tick(&self, now: i64) {
+        let Some(raw) = self.hold.peek() else { return };
+        if raw.until > now && !self.owner_gone(raw.owner.as_deref()) {
+            return;
+        }
+        self.hold.clear();
+        if let Err(e) = self.db.write(|tx| crate::hold::store(tx, None)) {
+            log::warn!("the ended GPU hold could not be removed from storage: {e}");
+        }
+        self.emit_lock();
+        self.dispatch_held();
+    }
+
+    /// Tell the chats (when attached) to hand over messages that waited for the card.
+    pub(crate) fn dispatch_held(&self) {
+        if let Some(c) = lock(&self.chats).clone() {
+            c.dispatch_held();
+        }
     }
 
     fn begin_work(&self) {
@@ -1674,8 +1735,12 @@ impl LocalService {
             .name("local-models-watch".into())
             .spawn(move || {
                 me.resume();
+                // The first pass also tidies the card note a previous run left behind (an ended
+                // or ownerless hold) and hands over whatever waited for it.
+                me.hold_tick(helm_core::now_ms());
                 loop {
                     me.game_tick(&*procs, helm_core::now_ms());
+                    me.hold_tick(helm_core::now_ms());
                     std::thread::sleep(games::POLL);
                 }
             });
@@ -1729,12 +1794,11 @@ fn strata_sentence(
 
 impl LocalModels for LocalService {
     fn gpu_hold(&self) -> Option<helm_chats::local::GpuHold> {
-        self.hold
-            .current(helm_core::now_ms())
-            .map(|h| helm_chats::local::GpuHold {
-                reason: h.reason,
-                until: h.until,
-            })
+        self.hold_now().map(|h| helm_chats::local::GpuHold {
+            reason: h.reason,
+            until: h.until,
+            owner: h.owner,
+        })
     }
 
     fn knows(&self, server_id: &str) -> bool {

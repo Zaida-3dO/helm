@@ -1376,73 +1376,6 @@ async fn send_message(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRe
     }
 }
 
-/// The refusal for waking a local model while a GPU hold is on: `Some` when a hold is set and
-/// `wakes_local` says this send or new chat would load a model on the local server.
-fn gpu_hold_refusal(ctx: &ToolCtx, wakes_local: impl FnOnce() -> bool) -> Option<ToolError> {
-    let hold = rt(ctx).ok()?.local_models()?.gpu_hold()?;
-    wakes_local().then(|| refuse(hold.refusal()))
-}
-
-/// Whether a new chat that asks for `model` (or, unasked, gets the new-chat default) would run on
-/// a local model server that can be used.
-fn starts_locally(ctx: &ToolCtx, model: Option<&str>) -> bool {
-    let model = match model {
-        Some(m) => Some(m.to_owned()),
-        None => db(ctx)
-            .ok()
-            .and_then(|store| {
-                store
-                    .snapshot(|tx| {
-                        // The new chat will belong to the caller's profile, so those are its defaults.
-                        let who = tx
-                            .query_row(
-                                "SELECT NULLIF(profile_id, '') FROM chats WHERE id = ?1",
-                                [&ctx.caller_chat_id],
-                                |r| r.get::<_, Option<String>>(0),
-                            )
-                            .optional()?
-                            .flatten()
-                            .or_else(|| helm_core::prefs::acting_profile(tx));
-                        Ok::<_, rusqlite::Error>(
-                            crate::runtime_settings::new_chat_defaults_for(tx, who.as_deref()).0,
-                        )
-                    })
-                    .ok()
-            })
-            .flatten(),
-    };
-    let Some(model) = model.filter(|m| m.starts_with(crate::local::PREFIX)) else {
-        return false;
-    };
-    // A default whose server is gone or off starts on Claude instead; a named model is checked
-    // (and refused) when the chat is made.
-    rt(ctx)
-        .ok()
-        .and_then(|rt| rt.local_models())
-        .zip(crate::local::split(&model))
-        .is_none_or(|(l, (server, _))| l.available(server))
-}
-
-/// Whether the chat runs on a local model server.
-fn runs_locally(ctx: &ToolCtx, id: &str) -> bool {
-    db(ctx)
-        .and_then(|store| {
-            store
-                .snapshot(|tx| {
-                    tx.query_row(
-                        "SELECT provider IS NOT NULL AND provider != '' FROM chats WHERE id = ?1",
-                        [id],
-                        |r| r.get::<_, bool>(0),
-                    )
-                    .optional()
-                })
-                .map_err(|e| ToolError::maybe(e.to_string()))
-        })
-        .ok()
-        .flatten()
-        .unwrap_or(false)
-}
-
 /// A chat the finished-chat sweep archived (and nobody has restored or archived since) is brought
 /// back when another chat writes to it, so a late report or a follow-up is not lost. A chat the
 /// person archived by hand is left as it is and the send is refused as before.
@@ -1522,9 +1455,8 @@ fn send_local_message(
     if to == ctx.caller_chat_id {
         return Err(refuse("A chat cannot message itself."));
     }
-    if let Some(held) = gpu_hold_refusal(ctx, || runs_locally(ctx, &to)) {
-        return Err(held);
-    }
+    // A chat on a local model server is not woken while a GPU hold runs: the host-send path
+    // saves the message and answers why it waits; it goes over when the hold ends.
     limits.admit(&ctx.caller_chat_id, Some(to.as_str()), Instant::now())?;
     let sent = send_framed(ctx, &to, body, kind)?;
     let (title, _) = cut_bytes(target["title"].as_str().unwrap_or(""), 512);
@@ -1536,6 +1468,9 @@ fn send_local_message(
         "link": chat_link(&to, None),
         "title": title,
     });
+    if let Some(why) = &sent.held_reason {
+        out["held"] = json!(why);
+    }
     if let Some(old) = redirected_from {
         out["redirectedFrom"] = json!(old);
     }
@@ -2133,9 +2068,8 @@ async fn create_chat(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRes
             )
         })
         .map_err(|e| ToolError::maybe(e.to_string()))??;
-    if let Some(held) = gpu_hold_refusal(&ctx, || starts_locally(&ctx, str_arg(&a, "model"))) {
-        return Err(held);
-    }
+    // A new chat on a local model may be made during a GPU hold: its first message waits for the
+    // card like any other host send, and starts the chat when the hold ends.
     limits.admit(&ctx.caller_chat_id, None, Instant::now())?;
     // `chat_create` writes the board row; the folder project is found or added for `cwd`.
     let mut args = json!({"cwd": placed.cwd, "boardId": placed.board});
@@ -2207,13 +2141,20 @@ async fn create_chat(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRes
             return Err(e);
         }
     }
-    if let Err(e) = send_framed(&ctx, &id, &body, MessageKind::InitialPrompt) {
-        // The first message failed: discard the untouched chat.
-        let _ = ctx.op("chat_archive", json!({"chatId": id})).await;
-        let _ = ctx.op("chat_delete", json!({"chatId": id})).await;
-        return Err(e);
-    }
+    let sent = match send_framed(&ctx, &id, &body, MessageKind::InitialPrompt) {
+        Ok(s) => s,
+        Err(e) => {
+            // The first message failed: discard the untouched chat.
+            let _ = ctx.op("chat_archive", json!({"chatId": id})).await;
+            let _ = ctx.op("chat_delete", json!({"chatId": id})).await;
+            return Err(e);
+        }
+    };
     let mut made = meta(&ctx, &id)?;
+    // A chat on a local model whose first message waits for the card: say so in the answer.
+    if let Some(why) = &sent.held_reason {
+        made["held"] = json!(why);
+    }
     if watch {
         made["watch"] = watch_new_chat(&ctx, &id, &made);
     }
@@ -4305,15 +4246,16 @@ mod tests {
         }
     }
 
-    /// While a GPU hold is on, another chat cannot wake a local model: a send to a chat on one
-    /// and a new chat on one are refused with the reason and the end time; a chat on Claude is
-    /// not affected, and the same send goes through once the hold is gone.
+    /// While a GPU hold is on, no other chat wakes a local model: a message to a chat on one is
+    /// saved and waits (the answer says why and the new chat's first message waits too), a chat
+    /// on Claude sends through, and when the hold lifts the waiting messages go over.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_gpu_hold_refuses_waking_a_local_model_from_another_chat() {
+    async fn a_gpu_hold_parks_local_model_chats_until_it_lifts() {
         let (h, fake) = gated();
         let held = Arc::new(HeldCard(Mutex::new(Some(crate::local::GpuHold {
             reason: "Benchmark running".into(),
             until: helm_core::now_ms() + 3_600_000,
+            owner: None,
         }))));
         h.rt.set_local_models(held.clone());
         let t = tools(&h);
@@ -4344,45 +4286,60 @@ mod tests {
             .insert(maker.clone(), "b-home".into());
         let send =
             |to: &str| json!({"chatId": to, "message": "go", "kind": "update", "mode": "steer"});
-        for (label, op, args, refused) in [
-            (
-                "send to a local chat",
-                "app_send_message",
-                send(&local),
-                true,
-            ),
-            (
-                "send to a Claude chat",
-                "app_send_message",
-                send(&claude),
-                false,
-            ),
-            (
-                "a new local chat",
-                "app_create_chat",
-                json!({"message": "Start here.", "model": "local/ollama/qwen3:8b"}),
-                true,
-            ),
-        ] {
-            let r = call(&h, &t, &maker, op, args).await;
-            if refused {
-                let why = r["error"].as_str().unwrap_or_default();
-                assert!(
-                    why.contains("a GPU hold is on: Benchmark running, until ")
-                        && why.contains("retry after it ends"),
-                    "{label}: {r}"
-                );
-            } else {
-                assert_eq!(r["ok"], true, "{label}: {r}");
-            }
-        }
-        // The hold over, the same send to the local chat is no longer refused for it.
-        *held.0.lock().unwrap() = None;
-        let r = call(&h, &t, &maker, "app_send_message", send(&local)).await;
-        assert!(
-            !r["error"].as_str().unwrap_or_default().contains("GPU hold"),
-            "{r}"
+        // A message to the local chat is saved but kept from its chat: the answer says why.
+        let r_local = call(&h, &t, &maker, "app_send_message", send(&local)).await;
+        assert_eq!(r_local["ok"], true, "{r_local}");
+        assert_eq!(
+            r_local["result"]["delivered"], false,
+            "saved, not handed over: {r_local}"
         );
+        let why = r_local["result"]["held"].as_str().unwrap_or_default();
+        assert!(
+            why.contains("a GPU hold is on: Benchmark running")
+                && why.contains("retry after it ends"),
+            "{why}"
+        );
+        // A chat on Claude is not affected.
+        let r_claude = call(&h, &t, &maker, "app_send_message", send(&claude)).await;
+        assert_eq!(r_claude["result"]["delivered"], true, "{r_claude}");
+        assert!(r_claude["result"].get("held").is_none(), "{r_claude}");
+        // A new chat on a local model is made anyway: its first message waits for the card.
+        let r_make = create(&h, &t, &maker, json!({"model": "local/ollama/qwen3:8b"})).await;
+        assert_eq!(r_make["ok"], true, "{r_make}");
+        assert!(
+            r_make["result"]["held"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("GPU hold"),
+            "{r_make}"
+        );
+        let fresh = r_make["result"]["chatId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        // Both local chats carry exactly one saved-and-waiting message.
+        let saved = |id: &str| {
+            h.col(&format!(
+                "SELECT count(*) FROM submissions WHERE chat_id = '{id}' AND state = 'saved'"
+            ))[0]
+                .clone()
+        };
+        assert_eq!(saved(&local), "1", "the message waits in the database");
+        assert_eq!(saved(&fresh), "1", "and so does the new chat's first one");
+        // The hold lifts: what waited goes over.
+        *held.0.lock().unwrap() = None;
+        assert!(
+            crate::submit::flush_held(&h.rt) >= 2,
+            "both waiting messages move"
+        );
+        for _ in 0..50 {
+            if saved(&local) == "0" && saved(&fresh) == "0" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(saved(&local), "0", "the parked message reached its chat");
+        assert_eq!(saved(&fresh), "0", "and so did the new chat's");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
