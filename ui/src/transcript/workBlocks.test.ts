@@ -541,12 +541,64 @@ test('turns without a typed opener, helm notes, replaced progress lines and sett
   const blank = (id: number, ts: number) => row({ id, role: 'assistant', text: '', timestamp: ts });
   const note = (id: number, text: string, ts: number) => row({ id, role: 'assistant', text, timestamp: ts });
   const helmNote = (id: number) => row({ id, role: 'user', text: '[Attention] something finished', details: { origin: 'app' } });
+  const scheduled = (id: number) =>
+    row({ id, role: 'user', text: '[Scheduled prompt] "Nightly"\nA saved schedule sent this.\n\nCheck the build.', details: { origin: 'schedule' } });
+  const fromApp = (id: number) => row({ id, role: 'user', text: 'Forward the port when the bridge is up.', details: { origin: 'app' } });
   const pageSend = (id: number) => row({ id, role: 'user', text: 'Run it', details: { origin: 'page', pageTitle: 'Board' } });
-  const cases: { name: string; rows: MessageRow[]; live?: boolean; want: (string | number)[] }[] = [
+  const cases: { name: string; rows: MessageRow[]; live?: boolean; atStart?: boolean; want: (string | number)[] }[] = [
     {
-      name: 'a chat started by another chat has no typed message: its leading rows are one turn with one group',
+      name: "a chat started by another chat has no typed message: its first message stays in the flow, and the rest of the leading rows are one turn with one group",
       rows: [peer(1), blank(2, 1000), call(3, 2000), blank(4, 3000), call(5, 4000), note(6, 'All done.', 5000)],
-      want: [6, 'fold[1,2,3,4,5]'],
+      want: [1, 6, 'fold[2,3,4,5]'],
+    },
+    {
+      name: 'a typed opener is the turn opener as ever; an agent message that comes later still folds',
+      rows: [row({ id: 1, role: 'user', timestamp: 0 }), call(2, 1000), peer(3), note(4, 'ok', 2000)],
+      want: [1, 4, 'fold[2,3]'],
+    },
+    {
+      name: 'an opener from a schedule or the app stays visible too',
+      rows: [scheduled(1), call(2, 1000), note(3, 'Ran it.', 2000)],
+      want: [1, 3, 'fold[2]'],
+    },
+    {
+      name: 'an app-written opener stays visible, and a second message of that kind folds',
+      rows: [fromApp(1), call(2, 1000), fromApp(3), note(4, 'Done.', 2000)],
+      want: [1, 4, 'fold[2,3]'],
+    },
+    {
+      name: 'a chat with only its opener shows it and nothing else',
+      rows: [peer(1)],
+      want: [1],
+    },
+    {
+      name: 'an opener followed by tool work and no reply yet: the opener shows and the work is the one group',
+      rows: [peer(1), call(2, 1000), call(3, 2000)],
+      live: true,
+      want: [1, 'fold[2,3]'],
+    },
+    {
+      name: 'a page that does not reach the chat start folds a leading agent message as before',
+      rows: [peer(1), call(2, 1000), note(3, 'Done.', 2000)],
+      atStart: false,
+      want: [3, 'fold[1,2]'],
+    },
+    {
+      name: 'rows that begin with work are no opener: a later agent message folds',
+      rows: [call(1, 0), peer(2), note(3, 'Done.', 2000)],
+      want: [3, 'fold[1,2]'],
+    },
+    {
+      name: 'a rolled-over chat: only the first session\'s first message is kept out of the group',
+      rows: [
+        { ...peer(1), chatId: 'c1' },
+        { ...call(2, 1000), chatId: 'c1' },
+        { ...note(3, 'Paused.', 2000), chatId: 'c1' },
+        { ...fromApp(4), chatId: 'c2' },
+        { ...call(5, 3000), chatId: 'c2' },
+        { ...note(6, 'Resumed.', 4000), chatId: 'c2' },
+      ],
+      want: [1, 3, 6, 'fold[2,4,5]'],
     },
     {
       name: 'a page that starts mid-turn folds that turn too, and the next typed message opens the next turn',
@@ -586,5 +638,5 @@ test('turns without a typed opener, helm notes, replaced progress lines and sett
       want: [1, 'fold[2]', 'progress'],
     },
   ];
-  for (const c of cases) assert.deepEqual(shape(layout(c.rows, c.live ?? false)), c.want, c.name);
+  for (const c of cases) assert.deepEqual(shape(layout(c.rows, c.live ?? false, new Set(), new Map(), c.atStart ?? true)), c.want, c.name);
 });
