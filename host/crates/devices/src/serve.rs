@@ -373,10 +373,11 @@ pub trait ChatPort: Send + Sync {
     fn item_links(&self, chat_ids: Vec<String>) -> BoxFut<'_, PortResult<Value>>;
     fn snooze(&self, a: SnoozeArgs) -> BoxFut<'_, PortResult<()>>;
     fn address(&self, chat_id: String) -> BoxFut<'_, PortResult<()>>;
-    /// The three fields of this install's new-chat defaults that the model picker shows.
-    fn defaults_get(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>>;
-    /// Save those three defaults here.
-    fn defaults_set(&self, a: DefaultsArgs) -> BoxFut<'_, PortResult<Value>>;
+    /// The three fields of the new-chat defaults that the model picker shows, as they are for
+    /// hub person `person_id`'s profile on this PC (the profile acting here when they have none).
+    fn defaults_get(&self, person_id: String, chat_id: String) -> BoxFut<'_, PortResult<Value>>;
+    /// Save those three defaults here, for that person's profile.
+    fn defaults_set(&self, person_id: String, a: DefaultsArgs) -> BoxFut<'_, PortResult<Value>>;
     /// Make a project here: a board when a task board is connected, else a folder.
     fn project_create(&self, a: ProjectCreateArgs) -> BoxFut<'_, PortResult<Value>>;
     /// Pin a project here, or point a board at one of this install's folder projects.
@@ -1270,14 +1271,19 @@ impl Inner {
                 self.port.address(a.chat_id).await?;
                 done(json!({}))
             }
-            Op::DefaultsGet(a) => done(self.port.defaults_get(a.chat_id).await?),
+            Op::DefaultsGet(a) => {
+                // The defaults read are the asking person's own on this PC.
+                let person = from.person_id.clone().unwrap_or_default();
+                done(self.port.defaults_get(person, a.chat_id).await?)
+            }
             Op::DefaultsSet(a) => {
                 // The new-chat defaults include the default permission mode, which grants
                 // authority: they are this PC's own person's pick.
                 if matches!(asker, Asker::Household { .. }) {
                     return Err(WireError::not_allowed());
                 }
-                done(self.port.defaults_set(a).await?)
+                let person = from.person_id.clone().unwrap_or_default();
+                done(self.port.defaults_set(person, a).await?)
             }
             Op::ProjectCreate(a) => done(self.port.project_create(a).await?),
             Op::ProjectSet(a) => {

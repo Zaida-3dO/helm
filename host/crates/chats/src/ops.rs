@@ -2,7 +2,7 @@
 //!
 //! | op | class | args → result |
 //! |---|---|---|
-//! | `chat_create` | maintenance | [`ChatCreateArgs`] → [`ChatRecord`] (optional `projectId`: that exact folder project, or a board to show it under; optional `boardId`; with neither board, the board over its folder or the default board) |
+//! | `chat_create` | maintenance | [`ChatCreateArgs`] → [`ChatRecord`] (optional `projectId`: that exact folder project, or a board to show it under; optional `boardId`; with neither board, the board over its folder or the default board; optional `profileId`: whose new-chat defaults apply, the acting profile's when unset) |
 //! | `chat_list` | blocking | `{}` → `ChatRecord[]` |
 //! | `chat_get` | blocking | [`ChatIdArgs`] → [`ChatGetResult`] |
 //! | `transcript_page` | heavy | [`TranscriptPageArgs`] → [`TranscriptPage`] |
@@ -644,9 +644,23 @@ pub(crate) fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         }
     }
     let db = ctx.services.need::<Database>()?;
-    // An unset model and effort come from Settings → Runtime's defaults.
+    // An unset model and effort come from Settings → Runtime's defaults: those of the profile the
+    // chat is made for, the one named, else the one acting.
+    let owner = a
+        .profile_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
     let (default_model, default_effort) = db
-        .snapshot(|tx| Ok::<_, rusqlite::Error>(crate::runtime_settings::new_chat_defaults(tx)))
+        .snapshot(|tx| {
+            let who = owner
+                .map(str::to_owned)
+                .or_else(|| helm_core::prefs::acting_profile(tx));
+            Ok::<_, rusqlite::Error>(crate::runtime_settings::new_chat_defaults_for(
+                tx,
+                who.as_deref(),
+            ))
+        })
         .map_err(sql)?;
     let effort = a.effort.unwrap_or(default_effort);
     let mut model = a.model.clone().or(default_model);

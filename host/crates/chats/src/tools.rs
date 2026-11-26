@@ -1393,7 +1393,19 @@ fn starts_locally(ctx: &ToolCtx, model: Option<&str>) -> bool {
             .and_then(|store| {
                 store
                     .snapshot(|tx| {
-                        Ok::<_, rusqlite::Error>(crate::runtime_settings::new_chat_defaults(tx).0)
+                        // The new chat will belong to the caller's profile, so those are its defaults.
+                        let who = tx
+                            .query_row(
+                                "SELECT NULLIF(profile_id, '') FROM chats WHERE id = ?1",
+                                [&ctx.caller_chat_id],
+                                |r| r.get::<_, Option<String>>(0),
+                            )
+                            .optional()?
+                            .flatten()
+                            .or_else(|| helm_core::prefs::acting_profile(tx));
+                        Ok::<_, rusqlite::Error>(
+                            crate::runtime_settings::new_chat_defaults_for(tx, who.as_deref()).0,
+                        )
                     })
                     .ok()
             })
@@ -2134,6 +2146,22 @@ async fn create_chat(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRes
         if let Some(v) = str_arg(&a, k) {
             args[k] = json!(v);
         }
+    }
+    // The new chat belongs to the caller's profile, so it starts on that profile's defaults.
+    let owner = db
+        .snapshot(|tx| {
+            tx.query_row(
+                "SELECT NULLIF(profile_id, '') FROM chats WHERE id = ?1",
+                [&ctx.caller_chat_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()
+        })
+        .ok()
+        .flatten()
+        .flatten();
+    if let Some(p) = owner {
+        args["profileId"] = json!(p);
     }
     let chat = ctx.op("chat_create", args).await?;
     let id = chat["id"].as_str().unwrap_or_default().to_owned();

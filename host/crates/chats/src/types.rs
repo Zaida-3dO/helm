@@ -1500,6 +1500,12 @@ pub struct ChatCreateArgs {
     #[serde(default)]
     #[ts(optional)]
     pub start_in_last_mode: Option<bool>,
+    /// The profile the chat is being made for, when it is not the one acting now (a chat made on
+    /// behalf of another profile): the model and effort it starts with are that profile's own
+    /// defaults. The caller assigns the chat to the profile.
+    #[serde(default)]
+    #[ts(optional)]
+    pub profile_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]

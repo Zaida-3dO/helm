@@ -70,6 +70,12 @@ function defaultsAsSettings(d: { model?: string | null; effort?: string; respons
   return { model: d.model ?? null, effort: d.effort ?? null, responseVerbosity: d.responseVerbosity ?? null } as RuntimeSettings;
 }
 
+/** The profile a chat belongs to, for the calls that read or save its new-chat defaults; a chat with
+ *  no profile leaves the host to use the one acting now. */
+function ownerArgs(chat: ChatRecord): { profileId?: string } {
+  return chat.profileId ? { profileId: chat.profileId } : {};
+}
+
 /** The chat's model and effort picker. A chat can change its model at any time; where the host
  *  says the conversation will not fit the chosen model's window, the offer beside the error rolls
  *  the chat over into it. */
@@ -90,12 +96,12 @@ export function ModelPicker({ chat, ops, loading = false, deviceUid }: { chat: C
       ? remoteChatOps(shell.api)
           .composerDefaults(chat.id)
           .then((d) => defaultsAsSettings(d))
-      : shell.api<RuntimeSettings>('runtime_settings_get', {});
+      : shell.api<RuntimeSettings>('runtime_settings_get', ownerArgs(chat));
     readSaved.then((s) => live && setSaved(s)).catch(() => undefined);
     return () => {
       live = false;
     };
-  }, [shell, chat.id, deviceUid]);
+  }, [shell, chat.id, chat.profileId, deviceUid]);
   const isDefault =
     !!saved &&
     !!chat.model &&
@@ -115,7 +121,8 @@ export function ModelPicker({ chat, ops, loading = false, deviceUid }: { chat: C
       ? {
           isDefault,
           // "Set as default for new chats" changes the default on the PC that runs the chat,
-          // not on this one.
+          // not on this one, and for the profile the chat belongs to (on another PC, the person
+          // acting there).
           save: () => {
             const patch = {
               ...(chat.model ? { model: chat.model } : {}),
@@ -126,7 +133,7 @@ export function ModelPicker({ chat, ops, loading = false, deviceUid }: { chat: C
               ? remoteChatOps(shell.api)
                   .composerDefaults(chat.id, patch)
                   .then((d) => setSaved(defaultsAsSettings(d)))
-              : shell.api<RuntimeSettings>('runtime_settings_save', patch).then(setSaved);
+              : shell.api<RuntimeSettings>('runtime_settings_save', { ...patch, ...ownerArgs(chat) }).then(setSaved);
           },
         }
       : undefined,

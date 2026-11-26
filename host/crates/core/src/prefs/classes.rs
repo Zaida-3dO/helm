@@ -121,6 +121,10 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
     ("selection", Internal),
     // The profile whose chats the sidebar shows (a profile id, or "all").
     ("activeProfile", Internal),
+    // The model, effort and reply length new chats start with, kept per profile
+    // (`{profileId: {model, effort, responseVerbosity}}`); `newChat` and `responseVerbosity`
+    // are what a profile with no entry of its own falls back to.
+    ("profileDefaults", Internal),
     // The device whose chats New creates and the sidebar toggle shows (a device uid); unset is
     // this device.
     ("selectedDevice", Internal),
