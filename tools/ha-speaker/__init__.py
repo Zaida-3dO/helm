@@ -113,6 +113,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if hasattr(stages, "start"):
             stages.start(hass, entry)
 
+    # benchmark replay door (helm_speaker.replay); same optional-module rule
+    try:
+        from . import replay  # noqa: PLC0415
+    except ImportError:
+        pass
+    else:
+        if hasattr(replay, "register_service"):
+            replay.register_service(hass, entry)
+
     _LOGGER.info("helm_speaker set up (model=%s, hub=%s)",
                  redact(profiles_from_entry(entry.data, entry.options)[
                      entry.options.get("profile") or "path_a"])["model_name"],
@@ -142,6 +151,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry, entry.runtime_data.get("platforms", PLATFORMS))
     if unload_ok:
         hass.services.async_remove(DOMAIN, "set_profile")
+        try:
+            hass.services.async_remove(DOMAIN, "replay")
+        except Exception:  # noqa: BLE001 - the replay module may not be loaded
+            pass
         data = entry.runtime_data
         data["led"].stop()
     return unload_ok

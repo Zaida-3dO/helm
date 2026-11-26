@@ -1,0 +1,8 @@
+{"id": "lights-on", "text": "turn on the kitchen lights", "expect": {"tool": "light", "args": {"action": "on"}}}
+{"id": "lights-off", "text": "switch off the kitchen lights", "expect": {"tool": "light", "args": {"action": "off"}}}
+{"id": "dim-sofa", "text": "set the sofa lamp to 40 percent", "expect": {"tool": "light", "args": {"action": "set"}}}
+{"id": "warm-colour", "text": "make the sofa lamp warm white", "expect": {"tool": "light", "args": {"action": "set"}}}
+{"id": "radiator-up", "text": "set the kitchen radiator to 21 degrees", "expect": {"tool": "climate", "args": {"action": "set"}}}
+{"id": "radiator-status", "text": "what is the kitchen radiator set to?", "expect": {"tool": "home_state"}}
+{"id": "timer", "text": "set a timer for ten minutes", "expect": {"tool": "timer", "args": {"action": "start"}}}
+{"id": "personal", "text": "what did I promise Tom about the garage on Saturday?", "expect": {"tool": "ask_helm"}}

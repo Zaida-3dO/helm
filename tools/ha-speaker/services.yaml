@@ -1,0 +1,38 @@
+set_profile:
+  fields:
+    profile:
+      required: true
+      selector:
+        select:
+          options:
+            - path_a
+            - path_b
+replay:
+  fields:
+    path:
+      required: true
+      example: helm_speaker/replay-set.jsonl
+      selector:
+        text:
+    act:
+      default: false
+      selector:
+        boolean:
+    repeat:
+      default: 1
+      selector:
+        number:
+          minimum: 1
+          maximum: 20
+    burst:
+      default: 1
+      selector:
+        number:
+          minimum: 1
+          maximum: 50
+    gap_ms:
+      default: 0
+      selector:
+        number:
+          minimum: 0
+          maximum: 60000

@@ -89,7 +89,7 @@ class HelmSpeakerAgent(ConversationEntity):
         key = device_id or self.entry.entry_id
 
         backend = HaBackend(self.hass, satellite_device_id=device_id)
-        control = HomeControl(backend)
+        control = HomeControl(backend, dry=bool(runtime.get("control_dry")))
         ctx = await self._ctx(backend, device_id, runtime["history"].setdefault(key, []))
         result = await agent_core.run_turn(
             cfg, runtime["transport"], control, ctx, text,
@@ -118,6 +118,16 @@ class HelmSpeakerAgent(ConversationEntity):
         _LOGGER.info(
             "helm_speaker timing: turn %s answered in %.2f s (%s, model=%s)",
             turn_id[:8], time.monotonic() - started, kind, result.model_used)
+
+        try:
+            from . import stages  # noqa: PLC0415 - optional benchmark hook
+        except ImportError:
+            pass
+        else:
+            if hasattr(stages, "note_turn"):
+                stages.note_turn(self.hass, self.entry, device_id=device_id,
+                                 turn_id=turn_id, text_in=text,
+                                 text_out=spoken, kind=kind, result=result)
 
         api = runtime.get("api")
         if api is not None and getattr(api, "record", None) is not None \

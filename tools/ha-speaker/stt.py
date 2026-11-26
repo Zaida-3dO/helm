@@ -67,6 +67,7 @@ class HelmSpeechToText(SpeechToTextEntity):
     _attr_name = "Helm speaker"
 
     def __init__(self, entry: ConfigEntry, api: HubApi, room=None, hint=None):
+        self.entry = entry  # for the stage timings hand-off
         self.api = api
         self.room = room
         self.hint = hint
@@ -120,12 +121,25 @@ class HelmSpeechToText(SpeechToTextEntity):
         result = await self.api.transcribe(wav_from_pcm(bytes(pcm[:cap]), rate),
                                            room=self.room, hint=self.hint)
         done = time.monotonic()
+        wall = time.time()
         # Stage timings, so a slow answer can be pinned on a stage: how long the speaker talked
         # (audio plus the pipeline's silence wait), then the hub's transcription call.
         _LOGGER.info(
             "helm_speaker timing: stt heard %.1f s of audio over %.2f s, hub transcribed in %.2f s (%s)",
             len(pcm) / (2 * rate), collected - started, done - collected, result.get("kind"),
         )
+        # Hand the same numbers to stages.py (wall-clock stamps so the turn
+        # can join them later); one slot, newest capture wins.
+        try:
+            self.entry.runtime_data["stt_last"] = {
+                "listen_start_ts": wall - (done - started),
+                "collected_ts": wall - (done - collected),
+                "done_ts": wall,
+                "listened_s": collected - started,
+                "stt_ms": done - collected,
+            }
+        except (AttributeError, KeyError, TypeError):
+            pass  # entry torn down or no runtime yet: the log line already told it
         if result.get("kind") == KIND_ANSWER:
             return SpeechResult(result["text"], SpeechResultState.SUCCESS)
         if result.get("kind") != KIND_EMPTY:
