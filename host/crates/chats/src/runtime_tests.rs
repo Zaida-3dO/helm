@@ -8400,6 +8400,8 @@ impl crate::local::LocalModels for FakeLocal {
             server: "Ollama".into(),
             kind: crate::types::LocalServerKind::Ollama,
             context_tokens: Some(65_536),
+            comfort_tokens: None,
+            step_up: None,
             size_bytes: None,
             loaded: Some(false),
             reachable: true,

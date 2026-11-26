@@ -1457,6 +1457,16 @@ pub struct LocalModelInfo {
     #[ts(optional, type = "number")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_tokens: Option<u64>,
+    /// The chat size the user says this model works well up to, in tokens. None means nobody
+    /// said; the app then falls back to a share of `context_tokens`.
+    #[ts(optional, type = "number")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comfort_tokens: Option<u64>,
+    /// The other local model the user wants suggested when a chat outgrows this one, as its id.
+    /// None means no suggestion: set by hand only, never guessed.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_up: Option<String>,
     #[ts(optional, type = "number")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<u64>,

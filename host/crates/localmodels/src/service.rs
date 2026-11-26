@@ -436,6 +436,8 @@ impl LocalService {
                 .into_iter()
                 .map(|(server, model, id, default_name)| ModelNameView {
                     alias: s.aliases.get(&id).cloned(),
+                    comfort_tokens: s.comfort.get(&id).copied(),
+                    step_up: s.step_up.get(&id).cloned(),
                     id,
                     model,
                     server,
@@ -443,6 +445,13 @@ impl LocalService {
                 })
                 .collect(),
             alias_max: settings::MAX_ALIAS as u32,
+            // Clearing a model's comfort size is not a number the field can hold; 0 in the state
+            // just marks "no default": the app falls back to 70% of the window.
+            comfort_range: range(
+                settings::MIN_COMFORT as u32,
+                settings::MAX_COMFORT as u32,
+                0,
+            ),
             restart_task: s.restart_task.clone(),
             pause_file: s.pause_file.clone(),
         }
@@ -847,25 +856,29 @@ impl LocalService {
                 let (aliases, defaults) = (&st.aliases, &defaults);
                 last.into_iter()
                     .flat_map(move |l| l.models.iter())
-                    .map(move |m| LocalModelInfo {
-                        id: helm_chats::local::id(&s.id, &m.model),
-                        name: {
-                            let id = helm_chats::local::id(&s.id, &m.model);
-                            aliases
+                    .map(move |m| {
+                        let id = helm_chats::local::id(&s.id, &m.model);
+                        LocalModelInfo {
+                            id: id.clone(),
+                            name: aliases
                                 .get(&id)
                                 .or_else(|| defaults.get(&id))
                                 .cloned()
-                                .unwrap_or_else(|| m.model.clone())
-                        },
-                        model: m.model.clone(),
-                        server: s.name.clone(),
-                        kind: s.kind,
-                        context_tokens: m.context_tokens,
-                        size_bytes: m.size_bytes,
-                        loaded: if locked { Some(false) } else { m.loaded },
-                        reachable,
-                        // A Strata that did not answer but starts when used: the picker can offer it.
-                        startable: !reachable && self.can_start(s),
+                                .unwrap_or_else(|| m.model.clone()),
+                            model: m.model.clone(),
+                            server: s.name.clone(),
+                            kind: s.kind,
+                            // What the server last said (window) and what the user set beside
+                            // this row (comfort size, suggested step-up).
+                            context_tokens: m.context_tokens,
+                            comfort_tokens: st.comfort.get(&id).copied(),
+                            step_up: st.step_up.get(&id).cloned(),
+                            size_bytes: m.size_bytes,
+                            loaded: if locked { Some(false) } else { m.loaded },
+                            reachable,
+                            // A Strata that did not answer but starts when used: the picker can offer it.
+                            startable: !reachable && self.can_start(s),
+                        }
                     })
             })
             .collect()

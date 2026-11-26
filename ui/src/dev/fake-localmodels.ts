@@ -46,12 +46,16 @@ export function localModelsFakeOps(): { prefixes: string[]; handler: FakeOpHandl
   const settings = { ollamaContext: 65536, keepAliveMinutes: 15, strataNeedGb: 12, tools: 'lean' as const, compareWith: 'sonnet' as 'opus' | 'sonnet' | 'haiku', games: [] as string[], gameLiftMinutes: 5, restartTask: undefined as string | undefined, pauseFile: undefined as string | undefined };
   /** The names the user gave models, by id. */
   const aliases = new Map<string, string>();
+  /** What each model works well up to (tokens), and which model to suggest when a chat outgrows it; both only as the user set them. */
+  const comfort = new Map<string, number>();
+  const stepUp = new Map<string, string>();
   const ranges = {
     chatCapRange: { min: 0, max: 12, default: 3 },
     ollamaContextRange: { min: 8192, max: 262144, default: 65536 },
     keepAliveRange: { min: 1, max: 240, default: 15 },
     strataNeedRange: { min: 4, max: 48, default: 12 },
     gameLiftRange: { min: 1, max: 60, default: 5 },
+    comfortRange: { min: 1000, max: 2000000, default: 0 },
   };
   /** Which servers have been asked, and what they said; empty until a refresh or a test. */
   const asked = new Map<string, boolean>();
@@ -64,7 +68,7 @@ export function localModelsFakeOps(): { prefixes: string[]; handler: FakeOpHandl
     }),
     ...settings,
     ...ranges,
-    modelNames: allRows().map((m) => ({ id: m.id, model: m.model, server: m.server, defaultName: SHELF[m.id.split('/')[1]!]?.models.find((x) => x.id === m.id)?.name ?? m.model, ...(aliases.has(m.id) ? { alias: aliases.get(m.id)! } : {}) })),
+    modelNames: allRows().map((m) => ({ id: m.id, model: m.model, server: m.server, defaultName: SHELF[m.id.split('/')[1]!]?.models.find((x) => x.id === m.id)?.name ?? m.model, ...(aliases.has(m.id) ? { alias: aliases.get(m.id)! } : {}), ...(comfort.has(m.id) ? { comfortTokens: comfort.get(m.id)! } : {}), ...(stepUp.has(m.id) ? { stepUp: stepUp.get(m.id)! } : {}) })),
     aliasMax: 40,
   });
 
@@ -76,6 +80,8 @@ export function localModelsFakeOps(): { prefixes: string[]; handler: FakeOpHandl
       .flatMap((s) =>
         (SHELF[s.id]?.models ?? []).map((m) => ({
           ...m,
+          ...(comfort.has(m.id) ? { comfortTokens: comfort.get(m.id)! } : {}),
+          ...(stepUp.has(m.id) ? { stepUp: stepUp.get(m.id)! } : {}),
           name: aliases.get(m.id) ?? m.name,
           server: s.name,
           kind: s.kind,
@@ -143,6 +149,27 @@ export function localModelsFakeOps(): { prefixes: string[]; handler: FakeOpHandl
             if (name.length > 40) throw new ApiError('refused', "A model's name must be one line of text, up to 40 characters.");
             if (name) aliases.set(id, name);
             else aliases.delete(id);
+          }
+          cached = cached.length ? rows() : cached;
+        }
+        if (a.comfort && typeof a.comfort === 'object') {
+          for (const [id, v] of Object.entries(a.comfort as Record<string, unknown>)) {
+            const n = Number(v);
+            if (!id.startsWith('local/')) throw new ApiError('refused', 'That is not a local model.');
+            if (!Number.isInteger(n) || (n !== 0 && (n < 1000 || n > 2000000))) throw new ApiError('refused', 'The size a model works well up to must be between 1000 and 2000000 (0 clears it).');
+            if (n === 0) comfort.delete(id);
+            else comfort.set(id, n);
+          }
+          cached = cached.length ? rows() : cached;
+        }
+        if (a.stepUp && typeof a.stepUp === 'object') {
+          for (const [id, t] of Object.entries(a.stepUp as Record<string, unknown>)) {
+            const target = String(t).trim();
+            if (!id.startsWith('local/')) throw new ApiError('refused', 'That is not a local model.');
+            if (target && !target.startsWith('local/')) throw new ApiError('refused', 'A suggested model must be a local model id, like local/<server>/<model>.');
+            if (target === id) throw new ApiError('refused', 'A model cannot be suggested in place of itself.');
+            if (target) stepUp.set(id, target);
+            else stepUp.delete(id);
           }
           cached = cached.length ? rows() : cached;
         }

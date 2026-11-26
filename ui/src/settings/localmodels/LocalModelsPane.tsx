@@ -4,7 +4,7 @@
 // write-only (set, replace, forget; it is never shown).
 // Server fields are drafts until Save; the settings below the list save as they change.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useGpuActions, useLockView } from '../../gpu/GpuControl.tsx';
 import { lockSentence } from '../../gpu/model.ts';
 import { useShell } from '../../shell/context.ts';
@@ -21,6 +21,7 @@ import {
   rangeText,
   reachText,
   sameDrafts,
+  stepUpOptions,
   TOOLS_OPTIONS,
   toDraft,
   type CompareModel,
@@ -355,6 +356,42 @@ export function LocalModelsPane() {
         ))}
       </section>
 
+      <section className="lm-section" data-testid="localmodels-fit">
+        <h3>When a chat outgrows its model</h3>
+        <p className="lm-help">
+          A small local model slows and loses track of the thread well before its window is full. Set how large a chat each model still works well with; until you set it, Helm takes 70% of the model's window. Name another listed model to suggest in its place, and a chat that passes the size offers "Switch to" that model first — keeping the conversation — then Roll over. Suggestion is never guessed: only what you name here is offered.
+        </p>
+        {(s?.modelNames ?? []).length === 0 && <p className="lm-help">No models listed yet.</p>}
+        {(s?.modelNames ?? []).map((m) => (
+          <Fragment key={m.id}>
+            <ComfortRow
+              testId={`localmodels-comfort-${m.id}`}
+              title={`${m.model} works well up to`}
+              description={`${m.server}: the chat size this model handles well.`}
+              value={m.comfortTokens}
+              range={s?.comfortRange}
+              busy={busy || !s}
+              onSave={(n) => void saveSettings({ comfort: { [m.id]: n } })}
+            />
+            <SettingRow
+              testId={`localmodels-step-up-${m.id}`}
+              title={`Suggest instead for ${m.model}`}
+              description="The model offered when a chat on this one passes its size. Unset offers no switch, only Roll over."
+            >
+              <Picker
+                settings
+                label={`Model suggested when ${m.model} is outgrown`}
+                testId={`localmodels-step-up-${m.id}-picker`}
+                value={m.stepUp ?? ''}
+                options={[{ value: '', title: 'None' }, ...stepUpOptions(s?.modelNames ?? [], m.id)]}
+                disabled={!s || busy}
+                onChange={(v: string) => void saveSettings({ stepUp: { [m.id]: v } })}
+              />
+            </SettingRow>
+          </Fragment>
+        ))}
+      </section>
+
       <section className="lm-section" data-testid="localmodels-gpu">
         <h3>Graphics card</h3>
         <p className="lm-help">
@@ -612,6 +649,61 @@ function NumberRow({
         }}
       />
       <span className="lm-unit">{unit}</span>
+    </SettingRow>
+  );
+}
+
+/** A per-model comfort size: typed, kept inside its range when committed; leaving the field empty
+ * clears it again, so the model falls back to 70% of its window. */
+function ComfortRow({
+  testId,
+  title,
+  description,
+  value,
+  range,
+  busy,
+  onSave,
+}: {
+  testId: string;
+  title: string;
+  description: string;
+  value: number | undefined;
+  range: Range | undefined;
+  busy: boolean;
+  onSave: (n: number) => void;
+}) {
+  const [text, setText] = useState<string | null>(null);
+  const shown = text ?? (value === undefined ? '' : String(value));
+  const commit = () => {
+    if (text === null || !range) return;
+    const trimmed = text.trim();
+    setText(null);
+    if (!trimmed) {
+      if (value !== undefined) onSave(0);
+      return;
+    }
+    const n = clampTo(range, trimmed);
+    if (n !== null && n !== value) onSave(n);
+  };
+  return (
+    <SettingRow testId={testId} title={title} description={`${description}${range ? ` ${rangeText(range)}.` : ''}`}>
+      <TextInput
+        className="lm-number"
+        inputMode="numeric"
+        spellCheck={false}
+        placeholder="70% of the window"
+        aria-label={`${title} (tokens)`}
+        data-testid={`${testId}-input`}
+        disabled={busy}
+        value={shown}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') commit();
+          if (e.key === 'Escape') setText(null);
+        }}
+      />
+      <span className="lm-unit">tokens</span>
     </SettingRow>
   );
 }

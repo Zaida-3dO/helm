@@ -44,13 +44,14 @@ fn chat_context_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
     let db = ctx.services.need::<Database>()?;
     let lw = crate::summary::local_windows(&ctx.services);
-    let (_model_id, _provider, context) = crate::summary::chat_context(&db, &a.chat_id, &lw)
+    let lf = crate::summary::local_fit(&ctx.services);
+    let (_model_id, _provider, context) = crate::summary::chat_context(&db, &a.chat_id, &lw, &lf)
         .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => {
-                ApiError::bad_args("There is no chat with that id.")
-            }
-            e => ApiError::internal(e.to_string()),
-        })?;
+        rusqlite::Error::QueryReturnedNoRows => {
+            ApiError::bad_args("There is no chat with that id.")
+        }
+        e => ApiError::internal(e.to_string()),
+    })?;
     Ok(context)
 }
 

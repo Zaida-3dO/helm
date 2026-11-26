@@ -17,6 +17,7 @@ import type { SendShortcut } from './composer/keymap.ts';
 import { claudeHold, holdLine, waitReason } from './composer/inFlight.ts';
 import { QueueList } from './composer/QueueList.tsx';
 import { LOCAL_WORKING_LABEL, isLocalModelId, localWaitLabel } from './state/localModel.ts';
+import { useModelDisplayName } from './state/modelNames.ts';
 import type { Flushers } from './shell/quit.ts';
 import type { ChatStore } from './state/store.ts';
 import { ActivityDock } from './transcript/ActivityDock.tsx';
@@ -271,6 +272,32 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
     };
   }, [chatId, busy, chat?.model, shell, remote]);
 
+  // The names the too-big banner shows, as the model picker displays them (plain ids until the
+  // labels arrive). A step-up is only ever the model the user named in Settings → Local models.
+  const modelName = useModelDisplayName(shell.api, shell.bus, chat?.model ?? null);
+  const stepUpName = useModelDisplayName(shell.api, shell.bus, ctxRead?.suggestModel ?? null);
+  // The banner's first button: move this chat to the suggested model, conversation and all. When
+  // the host measures it against the new window and refuses as too large, the way in is a roll
+  // over into that model — the same shape the composer's picker offers.
+  const switchChatModel = useCallback(
+    (target: string) => {
+      void ops.setModel(chatId, target).catch((e: unknown) => {
+        if ((e as { code?: unknown })?.code === 'too_large') {
+          setRollConfirm({
+            title: 'Roll over into this model?',
+            body:
+              `The conversation is larger than ${stepUpName ?? target} can take into its window. The agent writes a short hand-off, ` +
+              'a new chat on that model starts from it, and this chat is archived. Running work in this chat is not carried over.',
+            confirm: 'Roll over',
+            onConfirm: () => rollOverChat(ops, chatId, (m) => setNotice(m), target),
+          });
+        } else {
+          setNotice(`Could not switch model: ${String((e as Error).message ?? e)}`);
+        }
+      });
+    },
+    [ops, chatId, stepUpName],
+  );
   const stopTool = useCallback(
     (toolCallId: string) => {
       void ops.stopTool(chatId, toolCallId).catch(() => undefined);
@@ -583,6 +610,9 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
         hasNewer={view.hasNewer}
         busy={busy}
         onRollOver={() => setRollConfirm(rollOverConfirm(chat.title, () => rollOverChat(ops, chatId, (m) => setNotice(m))))}
+        onSwitchModel={switchChatModel}
+        modelLabel={modelName}
+        suggestLabel={stepUpName}
       />
       {/* Allow cards show on every device that has the chat open, the home PC included; on a
           mirrored chat the answer travels to the PC that runs it, and the first answer wins. */}

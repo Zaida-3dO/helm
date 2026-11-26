@@ -23,4 +23,14 @@ defaultName: string,
 /**
  * The name the user gave it, when there is one.
  */
-alias?: string, };
+alias?: string,
+/**
+ * The chat size the user says this model works well up to, in tokens; absent means unset,
+ * and the app falls back to a share of the model's window.
+ */
+comfortTokens?: number,
+/**
+ * The other local model suggested when a chat outgrows this one, as its id; absent means no
+ * suggestion.
+ */
+stepUp?: string, };

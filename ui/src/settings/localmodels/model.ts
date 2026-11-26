@@ -2,10 +2,16 @@
 // and the pure helpers the pane renders with. The key of a server is write-only: `ServerView` only
 // says whether one is set.
 
-import type { CompareModel, LocalModelsState, Range, ServerView, ToolsSetup } from '../../api/generated/localmodels/index.ts';
+import type { CompareModel, LocalModelsState, ModelNameView, Range, ServerView, ToolsSetup } from '../../api/generated/localmodels/index.ts';
 
-export type { CompareModel, LocalModelsState, Range, ServerView, ToolsSetup };
+export type { CompareModel, LocalModelsState, ModelNameView, Range, ServerView, ToolsSetup };
 export type { RefreshResult, TestResult } from '../../api/generated/localmodels/index.ts';
+
+/** The "Suggest instead" pick for one model: every other listed model by its display name. A
+ * step-up is a choice the user makes here — nothing else in Helm suggests one. */
+export function stepUpOptions(models: readonly ModelNameView[], excludeId: string): { value: string; title: string }[] {
+  return models.filter((m) => m.id !== excludeId).map((m) => ({ value: m.id, title: `${m.alias ?? m.defaultName} (${m.server})` }));
+}
 
 export const TOOLS_OPTIONS: { value: ToolsSetup; title: string; subtitle: string }[] = [
   { value: 'lean', title: 'Lean', subtitle: "Helm's own tools only; your Claude Code MCP servers stay off" },

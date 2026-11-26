@@ -389,6 +389,9 @@ pub struct DigestEnv<'a> {
     pub local_offset_ms: i64,
     pub weekly: Option<(f64, i64)>,
     pub local_window: &'a dyn Fn(&str) -> Option<u64>,
+    /// What the user said each local model works well up to (tokens) and which model it suggests
+    /// in its place: (comfort, step-up), both None when unset.
+    pub local_fit: &'a dyn Fn(&str) -> (Option<u64>, Option<String>),
 }
 
 /// Build the digest.
@@ -503,11 +506,15 @@ pub fn digest(db: &Database, a: &Value, compare: &str, env: &DigestEnv) -> ToolR
 /// figure for a Claude model id, the size the local server last reported for a local id. It comes
 /// with the model id (one string; a local chat's carries its server) and provider. This one
 /// reading backs both the digest's `chat` block and the `chat_context` op that feeds the chat's
-/// context line, so the two never disagree.
+/// context line, so the two never disagree. For a local chat the measured reading also carries
+/// `comfortTokens` (the size the user says this model works well up to — the setting, else 70%
+/// of the window) and `suggestModel` (the other local model Settings names in its place, null
+/// when nobody named one); a Claude chat gets null for both.
 pub fn chat_context(
     db: &Database,
     chat_id: &str,
     local_window: &dyn Fn(&str) -> Option<u64>,
+    local_fit: &dyn Fn(&str) -> (Option<u64>, Option<String>),
 ) -> Result<(String, Option<String>, Value), rusqlite::Error> {
     let (model_id, provider, ctx) = db.snapshot::<_, rusqlite::Error>(|tx| {
         let (model_id, provider): (String, Option<String>) = tx.query_row(
@@ -536,6 +543,18 @@ pub fn chat_context(
             "the size the local model server last reported".to_owned(),
         ),
     };
+    // How well this model is set up to carry a chat: what the user says it works well up to, else
+    // 70% of its window (where today's line calls a local chat large), and the step-up model
+    // named in Settings. A Claude chat has neither; unset means unknown, never guessed.
+    let fit = match &provider {
+        None => (None, None),
+        Some(_) => local_fit(&model_id),
+    };
+    let comfort = if provider.is_some() {
+        fit.0.or_else(|| window.map(|w| w.saturating_mul(7) / 10))
+    } else {
+        None
+    };
     let context = match ctx {
         Some((tokens, at)) => {
             let pct = window.map(|w| (tokens as f64 * 100.0 / w as f64 * 100.0).round() / 100.0);
@@ -545,7 +564,10 @@ pub fn chat_context(
                 "windowTokens": window,
                 "windowPct": pct,
                 "windowSource": window_source,
-                "notes": "The conversation this chat's newest recorded turn reported in its context: the input, cache-read and cache-write tokens held at that moment, the same reading the chat's token chip shows. windowPct is that over the model's window (over 100 means it no longer fits).",
+                // Both are null for a Claude chat: `fit` is only asked on a local one.
+                "comfortTokens": comfort,
+                "suggestModel": fit.1,
+                "notes": "The conversation this chat's newest recorded turn reported in its context: the input, cache-read and cache-write tokens held at that moment, the same reading the chat's token chip shows. windowPct is that over the model's window (over 100 means it no longer fits). comfortTokens is the size a local model works well up to (its setting, else 70% of its window), and suggestModel the other local model named for chats outgrown; both are null on a Claude chat.",
             })
         }
         None => json!({
@@ -589,8 +611,9 @@ fn chat_block(
             )
         })
         .map_err(|e| refuse(format!("The usage records could not be read: {e}")))?;
-    let (model_id, provider, context) = chat_context(db, &scope.primary, env.local_window)
-        .map_err(|e| refuse(format!("The usage records could not be read: {e}")))?;
+    let (model_id, provider, context) =
+        chat_context(db, &scope.primary, env.local_window, env.local_fit)
+            .map_err(|e| refuse(format!("The usage records could not be read: {e}")))?;
 
     let mut notes = scope.notes.clone();
 
@@ -1047,6 +1070,23 @@ pub(crate) fn local_windows(services: &helm_ipc::Services) -> impl Fn(&str) -> O
     }
 }
 
+/// Where to look up what a local model is set up to carry, by its one-string id: the chat size the
+/// user says it works well up to and the other local model named for chats that outgrow it. Both
+/// are None when unset or unknown — a step-up is only ever what the user set, never guessed.
+pub(crate) fn local_fit(
+    services: &helm_ipc::Services,
+) -> impl Fn(&str) -> (Option<u64>, Option<String>) {
+    let rt = services.get::<helm_chats::ChatRuntime>();
+    move |model_id| match rt
+        .as_ref()
+        .and_then(|r| r.local_models())
+        .and_then(|l| l.catalogue(false).into_iter().find(|m| m.id == model_id))
+    {
+        Some(m) => (m.comfort_tokens, m.step_up),
+        None => (None, None),
+    }
+}
+
 pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::read(
@@ -1094,11 +1134,13 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                 Some((w.pct?, w.resets_at?))
             });
             let lw = local_windows(&ctx.services);
+            let lf = local_fit(&ctx.services);
             let env = DigestEnv {
                 now,
                 local_offset_ms: local_offset_ms(),
                 weekly,
                 local_window: &lw,
+                local_fit: &lf,
             };
             let mut out = digest(&db, &a, &compare, &env)?;
             if fresh || a.get("plan").and_then(Value::as_bool).unwrap_or(false) {
@@ -1123,6 +1165,11 @@ mod tests {
 
     fn no_window(_id: &str) -> Option<u64> {
         None
+    }
+
+    /// Nothing has been said about any local model's fit: no comfort size, no suggested step-up.
+    fn no_fit(_id: &str) -> (Option<u64>, Option<String>) {
+        (None, None)
     }
 
     /// A local stub answering for the fixture's one local chat, and nothing for other ids.
@@ -1200,7 +1247,17 @@ mod tests {
             "local/strata/qwen" | "local/strata/big" => Some(262_144),
             _ => None,
         };
-        // (chat, context tokens, window tokens, percent, the model id the reading comes with)
+        // What the user set per model: qwen works well up to 100k; big has no size but suggests
+        // a step-up; nothing for the rest.
+        let fit = |id: &str| -> (Option<u64>, Option<String>) {
+            match id {
+                "local/strata/qwen" => (Some(100_000), None),
+                "local/strata/big" => (None, Some("local/strata/faster".to_owned())),
+                _ => (None, None),
+            }
+        };
+        // (chat, context tokens, window tokens, percent, the model id, comfort tokens, suggested
+        // step-up — Claude rows and an unset-and-windowless local row carry neither)
         let cases = [
             (
                 "strata",
@@ -1208,34 +1265,51 @@ mod tests {
                 Some(262_144),
                 Some(87.74),
                 "local/strata/qwen",
+                Some(100_000),
+                None,
             ),
             (
+                // No size set: 70% of the window answers; the suggestion rides along.
                 "big",
                 Some(300_000),
                 Some(262_144),
                 Some(114.44),
                 "local/strata/big",
+                Some(183_500),
+                Some("local/strata/faster"),
             ),
-            ("tiny", Some(6_002), None, None, "local/strata/no-size"),
+            (
+                "tiny",
+                Some(6_002),
+                None,
+                None,
+                "local/strata/no-size",
+                None,
+                None,
+            ),
             (
                 "opus",
                 Some(150_020),
                 Some(200_000),
                 Some(75.01),
                 "claude-opus-4-5",
+                None,
+                None,
             ),
-            ("lonely", None, None, None, "opus"),
+            ("lonely", None, None, None, "opus", None, None),
         ];
-        for (chat, tokens, win, pct, model_id) in cases {
-            let (got_id, _provider, ctx) = chat_context(&db, chat, &window).unwrap();
+        for (chat, tokens, win, pct, model_id, comfort, suggest) in cases {
+            let (got_id, _provider, ctx) = chat_context(&db, chat, &window, &fit).unwrap();
             assert_eq!(got_id, model_id, "{chat} model id");
             assert_eq!(ctx["contextTokens"].as_u64(), tokens, "{chat} context");
             assert_eq!(ctx["windowTokens"].as_u64(), win, "{chat} window");
             assert_eq!(ctx["windowPct"].as_f64(), pct, "{chat} percent");
+            assert_eq!(ctx["comfortTokens"].as_u64(), comfort, "{chat} comfort");
+            assert_eq!(ctx["suggestModel"].as_str(), suggest, "{chat} step-up");
         }
         // A chat that does not exist: the op maps this to a plain "no chat with that id" answer.
         assert!(matches!(
-            chat_context(&db, "nobody", &window),
+            chat_context(&db, "nobody", &window, &fit),
             Err(rusqlite::Error::QueryReturnedNoRows)
         ));
     }
@@ -1432,6 +1506,7 @@ mod tests {
             local_offset_ms: 0,
             weekly: None,
             local_window: &no_window,
+            local_fit: &no_fit,
         };
         let all = digest(&db, &json!({"range": "7d"}), "sonnet", &env).unwrap();
         // s:6 is outside seven days; the fork's inherited s:7 is its source's.
@@ -1594,6 +1669,7 @@ mod tests {
             local_offset_ms: 0,
             weekly: None,
             local_window: &no_window,
+            local_fit: &no_fit,
         };
         for (arg, turns) in [
             (json!({"range": "today"}), 2),
@@ -1696,6 +1772,7 @@ mod tests {
             local_offset_ms: 2 * HOUR_MS,
             weekly: None,
             local_window: &no_window,
+            local_fit: &no_fit,
         };
         let today = digest(&db, &json!({"range": "today"}), "sonnet", &east).unwrap();
         assert_eq!(today["total"]["turns"], 5, "a, kid, frk and both ses turns");
@@ -1721,6 +1798,7 @@ mod tests {
             local_offset_ms: -2 * HOUR_MS,
             weekly: None,
             local_window: &no_window,
+            local_fit: &no_fit,
         };
         let west_a = digest(
             &db,
@@ -1744,6 +1822,7 @@ mod tests {
             local_offset_ms: 0,
             weekly: Some((40.0, clock + 2 * DAY_MS)),
             local_window: &stub_window,
+            local_fit: &no_fit,
         };
         let one = digest(&db, &json!({"range": "all", "chatId": "a"}), "sonnet", &env).unwrap();
         assert_eq!(one["forChat"], "a");
@@ -1798,6 +1877,7 @@ mod tests {
             local_offset_ms: 0,
             weekly: None,
             local_window: &no_window,
+            local_fit: &no_fit,
         };
         let one = digest(db, &json!({"range": "all", "chatId": "b"}), "sonnet", &env).unwrap();
         one.get("local").is_none()

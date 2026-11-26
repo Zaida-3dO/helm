@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { agoText, compactCount, contextSize, messageTimeFull, messageTimeLabel, messageTimeShort, contextTokens, formatTurnTime, isTooLargeRefusal, newTokens, parseRolloverTokens, tokenChip, turnTimes, skillsByReply, chatRefOpens, ROLL_OVER_TOKENS } from './rowMeta.ts';
+import { agoText, compactCount, contextSize, contextVerdict, messageTimeFull, messageTimeLabel, messageTimeShort, contextTokens, formatTurnTime, isTooLargeRefusal, newTokens, parseRolloverTokens, tokenChip, turnTimes, skillsByReply, chatRefOpens, ROLL_OVER_TOKENS, type ChatContextReading } from './rowMeta.ts';
 
 const usage = { inputTokens: 1200, outputTokens: 300, cacheReadTokens: 40_000, cacheWriteTokens: 500, costUsd: 0 };
 
@@ -98,6 +98,38 @@ test('the shown context size follows the last measured call and the model\'s rea
   // Nothing measured anywhere: nothing to show.
   assert.equal(contextSize([], null), null);
   assert.equal(contextSize([], host(null, null)), null);
+});
+
+test('the verdict: quiet under the window, large near it, and outgrown only past a size the user set with a model to suggest', () => {
+  const reading = (contextTokens: number | null, windowTokens: number | null, comfortTokens?: number | null, suggestModel?: string | null): ChatContextReading => ({
+    contextTokens,
+    windowTokens,
+    ...(comfortTokens !== undefined ? { comfortTokens } : {}),
+    ...(suggestModel !== undefined ? { suggestModel } : {}),
+  });
+  // (label, size tokens/window, reading, isLocal, rollOverAt, expected kind and fields)
+  const cases: [string, number, number | null, ChatContextReading | null, boolean, number, { kind: string; comfort?: number; suggest?: string }][] = [
+    // A Claude chat never gets a comfort size or a suggestion.
+    ['claude at 60% of its window says nothing', 120_000, 200_000, reading(120_000, 200_000), false, 300_000, { kind: 'small' }],
+    ['claude at 95% earns the Roll over bar', 190_000, 200_000, reading(190_000, 200_000), false, 300_000, { kind: 'large' }],
+    // A local chat follows the same rules when nobody set a comfort size or suggested anything.
+    ['local at 75% of the window is large', 75_000, 100_000, reading(75_000, 100_000), true, 300_000, { kind: 'large' }],
+    ['a comfort size alone changes nothing without a suggestion', 80_000, 200_000, reading(80_000, 200_000, 60_000), true, 300_000, { kind: 'small' }],
+    // Out of the comfort with a suggestion named: Switch first, and the banner carries both.
+    ['past its comfort it names the step-up', 80_000, 200_000, reading(80_000, 200_000, 60_000, 'local/ollama/big'), true, 300_000, { kind: 'tooBig', comfort: 60_000, suggest: 'local/ollama/big' }],
+    // At the size itself it has outgrown what works well.
+    ['right at the comfort counts as outgrown', 60_000, 200_000, reading(60_000, 200_000, 60_000, 'local/ollama/big'), true, 300_000, { kind: 'tooBig', comfort: 60_000, suggest: 'local/ollama/big' }],
+    // No size set but a suggestion: the fallback is 70% of the window (the host answers the same).
+    ['unset falls back to 70% of the window', 71_000, 100_000, reading(71_000, 100_000, null, 'local/ollama/big'), true, 300_000, { kind: 'tooBig', comfort: 70_000, suggest: 'local/ollama/big' }],
+    ['under that fallback stays quiet', 69_000, 100_000, reading(69_000, 100_000, null, 'local/ollama/big'), true, 300_000, { kind: 'small' }],
+    // With no window stated the old token threshold still answers.
+    ['no window, over the roll-over size', 320_000, null, reading(320_000, null), false, 300_000, { kind: 'large' }],
+    ['no window, under it', 100_000, null, reading(100_000, null), false, 300_000, { kind: 'small' }],
+  ];
+  for (const [label, tokens, window, host, isLocal, rollOverAt, want] of cases) {
+    const size = { tokens, window, pct: window === null ? null : Math.round((tokens / window) * 10000) / 100 };
+    assert.deepEqual(contextVerdict(size, host, isLocal, rollOverAt), want, label);
+  }
 });
 
 test('the roll-over threshold: the default constant, and the setting read through parse', () => {
