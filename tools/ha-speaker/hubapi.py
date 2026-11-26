@@ -50,6 +50,65 @@ REQUEST_TIMEOUT = 12  # seconds for the short calls (status, stt)
 
 MAX_BODY_BYTES = SAMPLE_RATE * 2 * (MAX_STT_SECONDS + 5)  # wav sanity guard
 
+# Records and escalation context: bounded payloads, always plain summaries.
+MAX_RECORD_BYTES = 32 * 1024   # a record POST is shrunk to fit under this
+MAX_CONTEXT_BYTES = 2048       # context carried when escalating a turn
+_RECORD_KEEP = 20              # tool calls kept when shrinking a record
+
+# A hub without the /speaker/record route answers 404; remembering that for
+# the life of the process keeps every later turn from poking it again.
+_RECORD_UNSUPPORTED = False
+
+
+def _json_bytes(obj):
+    return len(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+
+
+def _clip_json(obj, limit):
+    """Shrink a dict until its JSON form fits under limit bytes: long
+    strings first, then the tail of lists. Keys survive where possible."""
+    if _json_bytes(obj) <= limit:
+        return obj
+
+    def shorten(value, budget):
+        if isinstance(value, str):
+            return value[:max(40, budget)]
+        if isinstance(value, dict):
+            return {k: shorten(v, budget // max(1, len(value)))
+                    for k, v in value.items()}
+        if isinstance(value, list):
+            return [shorten(v, budget // max(1, len(value))) for v in value[:8]]
+        return value
+
+    clipped = shorten(obj, limit)
+    while _json_bytes(clipped) > limit and isinstance(clipped, dict):
+        if not clipped:
+            break
+        clipped.pop(next(reversed(list(clipped))), None)
+    return clipped
+
+
+def _shrink_record(body, limit):
+    """Trim a record POST until it fits under limit bytes."""
+    if _json_bytes(body) <= limit:
+        return body
+    for key in ("timings", "tags"):
+        if key in body:
+            body[key] = {k: v for k, v in list(body[key].items())[:8]} \
+                if isinstance(body.get(key), dict) else body.get(key)
+    while _json_bytes(body) > limit and body.get("tool_calls"):
+        body["tool_calls"] = [
+            {"name": c.get("name"), "ok": c.get("ok")}
+            for c in body["tool_calls"][:_RECORD_KEEP]]
+        break
+    if _json_bytes(body) > limit:
+        body.pop("timings", None)
+        body["tool_calls"] = []
+    for key in ("text", "answer"):
+        if _json_bytes(body) > limit and isinstance(body.get(key), str):
+            body[key] = body[key][:600]
+    return body
+
 
 class TransportError(Exception):
     """The request never reached the hub (DNS, refused, timeout)."""
@@ -207,7 +266,8 @@ class HubApi:
 
     async def run_turn(self, text, turn_id, device=None, room=None, area=None,
                        hint=None, presence=None, budget=TURN_BUDGET_SECONDS,
-                       first_wait=FIRST_TURN_WAIT, poll_wait=POLL_WAIT):
+                       first_wait=FIRST_TURN_WAIT, poll_wait=POLL_WAIT,
+                       context=None, escalation=False):
         """Ask the hub one turn and return
         ``{"kind": "answer", "text": ..., "session": ...}``, or one of the
         fixed-sentence kinds (``offline``, ``error``, ``timeout``). Unknown
@@ -227,6 +287,12 @@ class HubApi:
             body["hint"] = str(hint)
         if presence:
             body["presence"] = presence
+        if context is not None:
+            # what the little brain knew locally (room facts, last few
+            # exchanges); clipped so an escalation never carries a blob
+            body["context"] = _clip_json(context, MAX_CONTEXT_BYTES)
+        if escalation:
+            body["origin"] = "escalation"
         headers = self._auth()
         headers["Content-Type"] = "application/json"
         try:
@@ -287,3 +353,44 @@ class HubApi:
             return {"kind": KIND_ERROR}
         return {"kind": KIND_ANSWER, "text": text.strip(),
                 "session": data.get("session")}
+
+    async def record(self, *, turn_id, device=None, room=None, area=None,
+                     text=None, answer=None, kind=None, tool_calls=None,
+                     timings=None, model=None, tags=None):
+        """Best-effort turn record for the hub's benchmark store (R1). A
+        turn id makes retries idempotent. This route may not exist: a 404
+        switches us off for the process, and nothing here ever raises -
+        speech already happened; the record is decoration."""
+        global _RECORD_UNSUPPORTED  # noqa: PLW0603 - one switch per process
+        if _RECORD_UNSUPPORTED or not turn_id:
+            return {"kind": "unsupported"}
+        body = {"turn_id": turn_id, "ts": round(time.time(), 3)}
+        for key, value in (("device", device), ("room", room), ("area", area),
+                           ("text", text), ("answer", answer), ("kind", kind),
+                           ("model", model)):
+            if value is not None:
+                body[key] = value
+        if tool_calls:
+            body["tool_calls"] = list(tool_calls)[:_RECORD_KEEP * 2]
+        if timings:
+            body["timings"] = timings
+        if tags:
+            body["tags"] = tags
+        _shrink_record(body, MAX_RECORD_BYTES)
+        headers = self._auth()
+        headers["Content-Type"] = "application/json"
+        try:
+            status, _raw = await self.transport.request(
+                "POST", self._url("/speaker/record"),
+                headers=headers, data=json.dumps(body).encode("utf-8"),
+                timeout=REQUEST_TIMEOUT)
+        except TransportError:
+            return {"kind": KIND_OFFLINE}
+        if status == 404:
+            _RECORD_UNSUPPORTED = True
+            return {"kind": "unsupported"}
+        if status in (401, 403):
+            return {"kind": KIND_BAD_AUTH}
+        if status != 200:
+            return {"kind": KIND_ERROR}
+        return {"kind": KIND_OK}

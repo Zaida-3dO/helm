@@ -102,7 +102,8 @@ class HelmSpeakerAgent(ConversationEntity):
             record_kind = "escalated"
             api = runtime.get("api")
             if api is not None:
-                hub = await self._escalate(api, device_id, result.escalate_text or text)
+                hub = await self._escalate(api, device_id,
+                                           result.escalate_text or text, ctx)
                 spoken = hub["text"]
             else:
                 spoken = ERROR_TEXT
@@ -172,14 +173,22 @@ class HelmSpeakerAgent(ConversationEntity):
                 tags[name] = value
         return tags or None
 
-    async def _escalate(self, api: HubApi, device_id, ask_text):
-        """Send the personal/long request to the hub; speak its short answer."""
+    async def _escalate(self, api: HubApi, device_id, ask_text, ctx=None):
+        """Send the personal/long request to the hub; speak its short answer.
+
+        The turn carries origin=escalation plus what the little brain knew
+        locally (room facts and the last few exchanges); hubapi clips it."""
         area_name, presence = self._room_facts(device_id)
+        recent = [{"ask": h.get("user"), "said": h.get("spoken")}
+                  for h in (ctx or {}).get("history", [])[-4:]]
+        context = {"areas": (ctx or {}).get("areas"), "recent": recent}
+        context = {k: v for k, v in context.items() if v} or None
         result = await api.run_turn(
             text=ask_text, turn_id=uuid.uuid4().hex,
             device=device_id or self.entry.entry_id,
             room=self.entry.data.get(CONF_ROOM), area=area_name,
-            hint=self.entry.data.get(CONF_HINT), presence=presence)
+            hint=self.entry.data.get(CONF_HINT), presence=presence,
+            context=context, escalation=True)
         kind = result.get("kind")
         if kind == KIND_ANSWER:
             return {"text": result["text"]}
