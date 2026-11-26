@@ -31,7 +31,7 @@
 //! | Helm → hub | `telegram_notify` | `text`, `personId` (optional): a message Helm starts (an alert), sent as a new message; the live status is left alone |
 //! | Helm → hub | `telegram_ask` | `id` (16-32 lowercase hex), `text`, `options` (1-4 strings), `personId` (optional): a new message with one button per option |
 //! | Helm → hub | `telegram_ask_done` | `id`, `text`, `personId` (optional): the ask was settled in Helm; its message gains `text` and loses its buttons |
-//! | hub → Helm | `voice` | `id` (the turn), `personId` (whose voice line this is, when the hub knows), `mode` (`conversation` or `chat`), `text` (at most 8000 characters), `source` (`speech` or `typed`), `sentAt` (ms), `ageMinutes` (null when fresh), `continues` (a turn id or null). One turn for the voice chat; sent again every 45 s until `voice_ack` |
+//! | hub → Helm | `voice` | `id` (the turn), `personId` (whose voice line this is, when the hub knows), `mode` (`conversation` or `chat`), `text` (at most 8000 characters), `source` (`speech` or `typed`), `sentAt` (ms), `ageMinutes` (null when fresh), `continues` (a turn id or null), `urgency` (`quick`, `deep` or null: the lane the phone or speaker asked for, read by Helm, never by the hub). One turn for the voice chat; sent again every 45 s until `voice_ack` |
 //! | hub → Helm | `voice_stop` | `turn`, `personId` (optional): the phone cancelled a turn Helm may already have taken |
 //! | hub → Helm | `voice_heard` | `reports`, `personId` (optional): what the phone did and did not play (see `voice.rs`) |
 //! | hub → Helm | `voice_presence` | `live`, `mode`, `personId` (optional): whether the phone's talk screen is open, and in which mode |

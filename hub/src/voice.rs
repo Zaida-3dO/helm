@@ -614,6 +614,9 @@ pub struct NewTurn {
     pub continues: Option<String>,
     /// `Some` for a typed turn; `None` for a recording that is about to be transcribed.
     pub text: Option<String>,
+    /// The lane the phone asked for: `quick` or `deep`. `None`: it did not say, which today and
+    /// on any older phone means the deep lane. The hub does not read it; it rides along to Helm.
+    pub urgency: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -679,6 +682,8 @@ struct TurnRec {
     id: String,
     mode: Mode,
     continues: Option<String>,
+    /// The lane the phone asked for (`quick` or `deep`); sent down to Helm unchanged.
+    urgency: Option<String>,
     typed: bool,
     text: String,
     /// When the hub got it.
@@ -1116,6 +1121,7 @@ impl Person {
                             "sentAt": t.at,
                             "ageMinutes": if age >= 1 { json!(age) } else { Value::Null },
                             "continues": t.continues,
+                            "urgency": t.urgency,
                         });
                         if line.send(&frame) {
                             t.sent = Some((gen, now));
@@ -1439,6 +1445,7 @@ impl VoiceBridge {
                     id: t.id.clone(),
                     mode: t.mode,
                     continues: t.continues.clone(),
+                    urgency: t.urgency.clone(),
                     typed,
                     text: text.unwrap_or_default(),
                     at: now,
@@ -2027,6 +2034,7 @@ mod tests {
             mode: Mode::Conversation,
             continues: None,
             text: Some(text.into()),
+            urgency: None,
         }
     }
 
@@ -2297,6 +2305,7 @@ mod tests {
         }
         let second = NewTurn {
             continues: Some(id(1)),
+            urgency: Some("quick".into()),
             ..typed(2, "Second.")
         };
         let begin = r.bridge.begin_turn(PERSON, second, T0 + 1);
@@ -2325,7 +2334,9 @@ mod tests {
         assert_eq!(down[1]["source"], "typed");
         assert_eq!(down[1]["ageMinutes"], 2);
         assert_eq!(down[1]["continues"], Value::Null);
+        assert_eq!(down[1]["urgency"], Value::Null);
         assert_eq!(down[2]["continues"], json!(id(1)));
+        assert_eq!(down[2]["urgency"], json!("quick"));
         assert_eq!(down[2]["sentAt"], T0 + 1);
 
         // A full queue with Helm online says so: Helm has not taken the two yet.

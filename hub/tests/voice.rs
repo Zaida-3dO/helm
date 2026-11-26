@@ -602,6 +602,22 @@ async fn a_turn_is_accepted_or_refused_with_the_statuses_of_the_protocol() {
             json!("carries on"),
         ),
         (
+            "an urgency that is neither quick nor deep",
+            "/voice/turn?turn=turn-0100&mode=chat&urgency=hasty".into(),
+            app_json,
+            typed("hi"),
+            400,
+            json!("quick or deep"),
+        ),
+        (
+            "an empty urgency",
+            "/voice/turn?turn=turn-0100&mode=chat&urgency=".into(),
+            app_json,
+            typed("hi"),
+            400,
+            json!("quick or deep"),
+        ),
+        (
             "131 seconds of audio",
             "/voice/turn?turn=turn-0100&mode=conversation".into(),
             "audio/ogg",
@@ -703,6 +719,8 @@ async fn a_turn_is_accepted_or_refused_with_the_statuses_of_the_protocol() {
     assert_eq!(r.status, 202);
     let r = http(&bare, "GET", "/voice/status", Some(PHONE), "", &[]).await;
     assert_eq!(r.body["stt"], false);
+    // The status says this hub takes an urgency on each turn.
+    assert_eq!(r.body["urgency"], json!(true));
 
     // Recordings waiting to be transcribed share one budget for the whole hub: one that does not
     // fit is refused at once, and a recording gives its share back once it is transcribed.
@@ -757,7 +775,8 @@ async fn a_spoken_turn_goes_to_helm_and_the_answer_comes_back() {
     // The recording is transcribed, the transcript told to the phone and the turn sent to Helm.
     hub.stt.says(200, "Synthetic question one.");
     let t1 = id("turn", 1);
-    let r = post_turn(&hub, &t1, "", "audio/ogg", &ogg(3)).await;
+    // This one asks for the quick lane: the hub keeps it and passes it down to Helm.
+    let r = post_turn(&hub, &t1, "&urgency=quick", "audio/ogg", &ogg(3)).await;
     assert_eq!(r.status, 202);
     assert_eq!(
         r.body,
@@ -783,8 +802,8 @@ async fn a_spoken_turn_goes_to_helm_and_the_answer_comes_back() {
         )
     );
     assert_eq!(
-        (&v["ageMinutes"], &v["continues"]),
-        (&Value::Null, &Value::Null)
+        (&v["ageMinutes"], &v["continues"], &v["urgency"]),
+        (&Value::Null, &Value::Null, &json!("quick"))
     );
     assert!(v["sentAt"].as_i64().unwrap() > 0);
 

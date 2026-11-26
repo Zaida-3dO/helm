@@ -97,6 +97,9 @@ async fn get_status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
         "helm": out.helm,
         "stt": out.stt,
         "session": out.session,
+        // This hub takes an urgency on each turn. A speaker offers the quick/deep choice only
+        // when it sees this; an older hub has no such field at all.
+        "urgency": true,
     }))
 }
 
@@ -197,6 +200,18 @@ fn turn_body(raw: &[u8]) -> Result<TurnBody, Box<Response>> {
             )))
         }
     };
+    // The lane the speaker asks for. Absent means deep (an older speaker sends no urgency); any
+    // other value is refused, never guessed at. The hub does not read it: it rides along to Helm.
+    let urgency = match field("urgency").as_deref() {
+        None => None,
+        Some(u @ ("quick" | "deep")) => Some(u.to_owned()),
+        Some(_) => {
+            return Err(Box::new(refused(
+                StatusCode::BAD_REQUEST,
+                "the urgency must be quick or deep, or left out",
+            )))
+        }
+    };
     let wait = value
         .get("wait")
         .and_then(|v| {
@@ -216,6 +231,7 @@ fn turn_body(raw: &[u8]) -> Result<TurnBody, Box<Response>> {
             presence: value.get("presence").cloned().filter(Value::is_object),
             context,
             origin,
+            urgency,
         },
     })
 }
