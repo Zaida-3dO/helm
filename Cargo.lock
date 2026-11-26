@@ -1754,7 +1754,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "helm-actions"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "helm-core",
  "helm-ipc",
@@ -1767,7 +1767,7 @@ dependencies = [
 
 [[package]]
 name = "helm-afk"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "chrono",
  "helm-chats",
@@ -1787,7 +1787,7 @@ dependencies = [
 
 [[package]]
 name = "helm-app"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "env_logger",
  "helm-actions",
@@ -1841,7 +1841,7 @@ dependencies = [
 
 [[package]]
 name = "helm-backup"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "chrono",
  "helm-core",
@@ -1857,7 +1857,7 @@ dependencies = [
 
 [[package]]
 name = "helm-chats"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1881,7 +1881,7 @@ dependencies = [
 
 [[package]]
 name = "helm-claudechats"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "chrono",
  "helm-chats",
@@ -1898,7 +1898,7 @@ dependencies = [
 
 [[package]]
 name = "helm-consent"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "helm-chats",
  "helm-core",
@@ -1918,7 +1918,7 @@ dependencies = [
 
 [[package]]
 name = "helm-core"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "aes-gcm",
  "getrandom 0.3.4",
@@ -1939,7 +1939,7 @@ dependencies = [
 
 [[package]]
 name = "helm-devices"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.3.4",
@@ -1964,7 +1964,7 @@ dependencies = [
 
 [[package]]
 name = "helm-dictation"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "base64 0.22.1",
  "helm-chats",
@@ -1987,7 +1987,7 @@ dependencies = [
 
 [[package]]
 name = "helm-gatekeeper"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "helm-chats",
  "helm-core",
@@ -2010,7 +2010,7 @@ dependencies = [
 
 [[package]]
 name = "helm-github"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "base64 0.22.1",
  "helm-core",
@@ -2026,7 +2026,7 @@ dependencies = [
 
 [[package]]
 name = "helm-gitshim"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "helm-worktrees",
  "tempfile",
@@ -2034,7 +2034,7 @@ dependencies = [
 
 [[package]]
 name = "helm-governor"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "helm-chats",
  "helm-core",
@@ -2053,7 +2053,7 @@ dependencies = [
 
 [[package]]
 name = "helm-hosttools"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "chrono",
  "helm-core",
@@ -2069,7 +2069,7 @@ dependencies = [
 
 [[package]]
 name = "helm-ipc"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "log",
  "serde",
@@ -2081,7 +2081,7 @@ dependencies = [
 
 [[package]]
 name = "helm-itemlinks"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "helm-core",
  "helm-hosttools",
@@ -2097,7 +2097,7 @@ dependencies = [
 
 [[package]]
 name = "helm-launcher"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "futures-util",
  "helm-core",
@@ -2115,7 +2115,7 @@ dependencies = [
 
 [[package]]
 name = "helm-localmodels"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "helm-chats",
  "helm-core",
@@ -2136,7 +2136,7 @@ dependencies = [
 
 [[package]]
 name = "helm-mcp"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.3.4",
@@ -2162,7 +2162,7 @@ dependencies = [
 
 [[package]]
 name = "helm-memindex"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2188,7 +2188,7 @@ dependencies = [
 
 [[package]]
 name = "helm-pages"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "base64 0.22.1",
  "helm-core",
@@ -2204,7 +2204,7 @@ dependencies = [
 
 [[package]]
 name = "helm-panel"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "base64 0.22.1",
  "helm-chats",
@@ -2226,7 +2226,7 @@ dependencies = [
 
 [[package]]
 name = "helm-platform"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "keyring",
  "log",
@@ -2240,7 +2240,7 @@ dependencies = [
 
 [[package]]
 name = "helm-profiles"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "helm-chats",
  "helm-core",
@@ -2259,7 +2259,7 @@ dependencies = [
 
 [[package]]
 name = "helm-projects"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "base64 0.22.1",
  "helm-chats",
@@ -2285,7 +2285,7 @@ dependencies = [
 
 [[package]]
 name = "helm-relay"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -2317,7 +2317,7 @@ dependencies = [
 
 [[package]]
 name = "helm-saved"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "helm-chats",
  "helm-core",
@@ -2333,7 +2333,7 @@ dependencies = [
 
 [[package]]
 name = "helm-schedules"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "chrono",
  "helm-chats",
@@ -2352,7 +2352,7 @@ dependencies = [
 
 [[package]]
 name = "helm-search"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "helm-chats",
  "helm-core",
@@ -2366,7 +2366,7 @@ dependencies = [
 
 [[package]]
 name = "helm-shell"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "helm-chats",
  "helm-core",
@@ -2384,7 +2384,7 @@ dependencies = [
 
 [[package]]
 name = "helm-skills"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "helm-consent",
  "helm-core",
@@ -2407,7 +2407,7 @@ dependencies = [
 
 [[package]]
 name = "helm-standup"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "log",
  "serde",
@@ -2417,7 +2417,7 @@ dependencies = [
 
 [[package]]
 name = "helm-terminal"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "helm-core",
  "helm-ipc",
@@ -2436,7 +2436,7 @@ dependencies = [
 
 [[package]]
 name = "helm-updates"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "helm-core",
  "helm-ipc",
@@ -2451,7 +2451,7 @@ dependencies = [
 
 [[package]]
 name = "helm-usage"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "chrono",
  "helm-chats",
@@ -2469,7 +2469,7 @@ dependencies = [
 
 [[package]]
 name = "helm-waits"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "chrono",
  "helm-chats",
@@ -2489,7 +2489,7 @@ dependencies = [
 
 [[package]]
 name = "helm-webtools"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "helm-core",
  "helm-hosttools",
@@ -2505,7 +2505,7 @@ dependencies = [
 
 [[package]]
 name = "helm-workers"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "helm-core",
  "hex",
@@ -2524,7 +2524,7 @@ dependencies = [
 
 [[package]]
 name = "helm-workflow"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "helm-chats",
  "helm-consent",
@@ -2550,7 +2550,7 @@ dependencies = [
 
 [[package]]
 name = "helm-worktrees"
-version = "2.4.11"
+version = "2.4.12"
 dependencies = [
  "helm-platform",
  "tempfile",
