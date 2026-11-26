@@ -306,7 +306,15 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
         "inspectorWidth" => int_in(280, 4096, "must be 280 to 4096"),
         "terminalHeight" => int_in(80, 4096, "must be 80 to 4096"),
         "stallMinutes" => int_in(1, 1440, "must be 1 to 1440"),
-        "rolloverTokens" => int_in(0, 2_000_000, "must be 0 to 2000000 (0 switches it off)"),
+        // Below the context a fresh chat starts with, a chat would roll over every other turn.
+        "rolloverTokens" => match value.as_i64() {
+            Some(0) => Ok(()),
+            _ => int_in(
+                50_000,
+                2_000_000,
+                "must be 0 (switched off) or 50000 to 2000000",
+            ),
+        },
         "localChatCap" => int_in(0, 12, "must be 0 to 12"),
         "claudeHoldPct" => int_in(0, 100, "must be 0 to 100 (0 switches it off)"),
         "autocomplete" => match value.as_object() {
@@ -796,6 +804,8 @@ mod tests {
             ("archiveFinishedChats", json!(false), json!("no")),
             ("rolloverTokens", json!(180_000), json!("soon")),
             ("rolloverTokens", json!(0), json!(2_000_001)),
+            ("rolloverTokens", json!(50_000), json!(49_999)),
+            ("rolloverTokens", json!(0), json!(1)),
             (
                 "fontSizes",
                 json!({"interface": 14, "response": 16}),
