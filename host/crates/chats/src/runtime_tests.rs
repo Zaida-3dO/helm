@@ -19,6 +19,8 @@ struct FakeLink {
     terminated: AtomicBool,
     /// How many processes this worker's group reports (the worker and the CLI make two).
     tree: Arc<AtomicU32>,
+    /// A worker that ignores `terminate`, as one that cannot be killed would.
+    survives: bool,
 }
 
 impl WorkerLink for FakeLink {
@@ -30,6 +32,9 @@ impl WorkerLink for FakeLink {
         self.cmds.send(command.clone()).is_ok()
     }
     fn terminate(&self) {
+        if self.survives {
+            return;
+        }
         if !self.terminated.swap(true, Ordering::SeqCst) {
             let _ = self.out.try_send(WorkerOutput::Exited {
                 code: Some(1),
@@ -162,6 +167,8 @@ pub struct FakeSpawner {
     pub triage_jobs: Mutex<Vec<Value>>,
     /// The group size a worker reports when it starts.
     pub tree_at_launch: AtomicU32,
+    /// Workers started from now on ignore `terminate`.
+    pub survive_terminate: AtomicBool,
 }
 
 impl Spawner for FakeSpawner {
@@ -177,6 +184,7 @@ impl Spawner for FakeSpawner {
             out: otx.clone(),
             terminated: AtomicBool::new(false),
             tree: tree.clone(),
+            survives: self.survive_terminate.load(Ordering::SeqCst),
         });
         // A test that has already finished no longer listens; that is not this test's failure.
         let _ = self.tx.send(FakeWorker {
@@ -252,6 +260,8 @@ pub fn limits() -> Limits {
         stop_deadline: Duration::from_secs(10),
         // Tests start workers by the dozen and never wait on one another's spread.
         start_stagger: Duration::ZERO,
+        // Like the others: wide, and a test of the start deadline shortens it.
+        start_ready: Duration::from_secs(30),
     }
 }
 
@@ -287,6 +297,7 @@ pub fn harness_with_services(limits: Limits, extra: impl FnOnce(&mut Services)) 
         triage: Mutex::new(Err("no triage in this test".into())),
         triage_jobs: Mutex::new(Vec::new()),
         tree_at_launch: AtomicU32::new(2),
+        survive_terminate: AtomicBool::new(false),
     });
     let rt = ChatRuntime::new(
         db.clone(),
@@ -769,6 +780,96 @@ async fn a_failed_turn_leaves_nothing_held() {
     let (next, _) = h.send(&chat, "try again", "default").await;
     let p = w.expect("prompt").await;
     assert_eq!(p["submissionId"], next.as_str());
+}
+
+/// A chat whose worker never shows Claude Code read the opening message is ended with a plain
+/// error once the start limit passes, and its worker is closed so the next send starts a new one;
+/// a worker that does show it (the turn opens) is left alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_that_never_gets_going_is_ended_and_its_worker_closed() {
+    // (the worker reads the message, the chat's status at the end)
+    for (reads, want) in [(false, "interrupted"), (true, "running")] {
+        let mut h = harness_with(Limits {
+            start_ready: Duration::from_millis(1500),
+            ..limits()
+        });
+        let chat = h.create().await;
+        let (sid, _) = h.send(&chat, "start", "default").await;
+        let mut w = h.worker().await;
+        w.ready().await;
+        let p = w.expect("prompt").await;
+        ack(&w, &p).await;
+        if reads {
+            w.emit(json!({"type": "agent_start"})).await;
+            h.until("running", |h| h.status(&chat) == "running").await;
+            tokio::time::sleep(Duration::from_millis(2200)).await;
+        } else {
+            h.until("the start was ended", |h| h.status(&chat) == "interrupted")
+                .await;
+        }
+        assert_eq!(h.status(&chat), want, "reads: {reads}");
+        let error = h.col(&format!("SELECT error FROM chats WHERE id = '{chat}'"));
+        if reads {
+            assert_eq!(error, ["NULL"], "nothing is said when the start is fine");
+            continue;
+        }
+        assert!(
+            error[0].starts_with("Claude Code did not start within"),
+            "{error:?}"
+        );
+        // The worker was closed (its exit marked the unanswered message), the run is closed as
+        // failed, and the chat's next message starts a worker of its own.
+        h.until("the message is unknown", |h| h.state(&sid) == "uncertain")
+            .await;
+        assert_eq!(h.col("SELECT status FROM runs"), ["failed"]);
+        h.send(&chat, "again", "default").await;
+        let mut again = h.worker().await;
+        again.ready().await;
+        again.expect("prompt").await;
+    }
+}
+
+/// A Stop on a chat whose turn never began closes the worker instead of asking it to abort, and
+/// answers `stopped` once the worker is gone. A worker that cannot be closed is given up on after
+/// the stop limit with a plain failure, and the chat's next message starts a new worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_before_the_turn_began_closes_the_worker() {
+    // (the worker ignores the close, the stop's answer, the chat's status, the error's start)
+    for (survives, answer, status, error) in [
+        (false, "stopped", "stopped", "NULL"),
+        (
+            true,
+            "interrupted",
+            "interrupted",
+            "The worker did not close when Helm stopped it.",
+        ),
+    ] {
+        let mut h = harness();
+        h.spawner
+            .survive_terminate
+            .store(survives, Ordering::SeqCst);
+        let chat = h.create().await;
+        let (sid, _) = h.send(&chat, "start", "default").await;
+        let mut w = h.worker().await;
+        w.ready().await;
+        let p = w.expect("prompt").await;
+        ack(&w, &p).await;
+        h.until("accepted", |h| h.state(&sid) == "accepted").await;
+        let r = h.call("chat_stop", json!({"chatId": chat})).await.unwrap();
+        assert_eq!(r["status"], answer, "survives: {survives}");
+        assert_eq!(h.status(&chat), status, "survives: {survives}");
+        let err = h.col(&format!("SELECT error FROM chats WHERE id = '{chat}'"));
+        assert!(err[0].starts_with(error), "survives: {survives}: {err:?}");
+        while let Some(c) = w.no_command_for(Duration::from_millis(150)).await {
+            assert_ne!(c["type"], "abort", "the worker is closed, not asked");
+        }
+        // Either way the chat is free to start again, on a worker of its own.
+        h.spawner.survive_terminate.store(false, Ordering::SeqCst);
+        h.send(&chat, "again", "default").await;
+        let mut again = h.worker().await;
+        again.ready().await;
+        again.expect("prompt").await;
+    }
 }
 
 /// A worker that does not settle within the stop limit is closed, and the run is interrupted.

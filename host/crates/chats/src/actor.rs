@@ -155,6 +155,17 @@ pub(crate) const ACK_TIMEOUT_ERROR: &str =
     "Claude Code did not confirm the message in time. It was not sent again; recover it if it is missing.";
 pub(crate) const MODEL_ACK_ERROR: &str =
     "Claude Code did not confirm the model or effort change within 10 seconds.";
+/// Why a stop that could not close its worker was ended anyway.
+pub(crate) const STOP_KILL_FAILED_ERROR: &str =
+    "The worker did not close when Helm stopped it. The chat was released; the next message starts a new worker.";
+
+/// Why a chat's start was ended: Claude Code never showed any sign of reading the message.
+pub(crate) fn start_timeout_error(limit: std::time::Duration) -> String {
+    format!(
+        "Claude Code did not start within {} seconds, so Helm closed it. The message was not sent again; send it again to try once more.",
+        limit.as_secs()
+    )
+}
 
 enum Pending {
     Ready,
@@ -185,6 +196,8 @@ enum Pending {
 enum Timer {
     Ack(String),
     ModelAck(String),
+    /// A turn's opening message went to the worker, and nothing yet shows Claude Code read it.
+    StartReady,
     StopDeadline,
     WaitLimit(String),
     /// A held question-card's hold ends: the card becomes a normal card. One per held card.
@@ -222,6 +235,9 @@ struct StopState {
     /// Unread messages go to Claude again once the stop settles. Any stop that asks for no resend
     /// turns it off for all the stops waiting on this one.
     resend: bool,
+    /// The turn never began, so the worker is closed rather than asked to abort: a worker that
+    /// never got going cannot be trusted to say it has stopped.
+    close_worker: bool,
 }
 
 struct Actor {
@@ -271,6 +287,9 @@ struct Actor {
     /// A Stop ended this run, so an exit before the next run is one Helm asked for, even once
     /// `stopping` has been settled (a worker that ends itself after an interrupt).
     stop_ended: bool,
+    /// The worker has been told to close for the stop under way and the stop limit has since
+    /// run out at least once, so the next expiry gives up on the worker rather than waiting on.
+    stop_close_sent: bool,
     stream: HashMap<String, LiveMsg>,
     dirty: BTreeSet<String>,
     /// Streaming rows whose database copy is behind what the UI was sent.
@@ -478,6 +497,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         switch_restart: None,
         stopping: None,
         stop_ended: false,
+        stop_close_sent: false,
         stream: HashMap::new(),
         dirty: BTreeSet::new(),
         db_behind: BTreeSet::new(),
@@ -1640,8 +1660,10 @@ impl Actor {
             // Written before the status, so no reader sees `interrupted` while they still look in
             // flight (see `mark_in_flight_uncertain`).
             self.mark_in_flight_uncertain();
-            if self.archived {
-                // The archive stopped it: not a crash, so nothing to resume or explain.
+            // A stop that closed a worker whose turn never began is a stop that worked.
+            let closed_for_stop = self.stopping.as_ref().is_some_and(|s| s.close_worker);
+            if self.archived || closed_for_stop {
+                // The archive or the stop ended it: not a crash, so nothing to resume or explain.
                 self.end_run(ChatStatus::Stopped, None, "stopped");
             } else {
                 self.end_run(ChatStatus::Interrupted, Some(&error), "interrupted");
@@ -1652,8 +1674,13 @@ impl Actor {
                 // dropped, as it is when the stop ends the turn quietly.
                 crate::rollover::turn_stopped(&self.chat_id);
                 self.settle_dropped(s.resend);
+                let answer = if s.close_worker {
+                    ChatStatus::Stopped
+                } else {
+                    ChatStatus::Interrupted
+                };
                 for r in s.replies {
-                    let _ = r.send(ChatStatus::Interrupted);
+                    let _ = r.send(answer);
                 }
             }
         }
@@ -1803,7 +1830,7 @@ impl Actor {
             live.thread.loading = None;
         }
         // Held cards went with them: no hold timer may fire for a card that no longer exists.
-        self.clear_timer(|t| matches!(t, Timer::GateDeadline(_)));
+        self.clear_timer(|t| matches!(t, Timer::GateDeadline(_) | Timer::StartReady));
         self.set_status(status, error);
         self.save_binding();
         self.emit_thread();
@@ -2986,6 +3013,14 @@ impl Actor {
         );
         let lim = self.sh.cfg.limits.ack;
         self.add_timer(lim, Timer::Ack(id));
+        if !busy {
+            // The turn is opening: Claude Code has this long to show any sign of reading the
+            // message. Without it a worker that never gets going holds the chat at "starting"
+            // (and its place in the queue) for ever.
+            let lim = self.sh.cfg.limits.start_ready;
+            self.clear_timer(|t| *t == Timer::StartReady);
+            self.add_timer(lim, Timer::StartReady);
+        }
         self.emit_pending();
     }
 
@@ -3645,16 +3680,32 @@ impl Actor {
             s.resend &= resend;
             return;
         }
+        // The opening message went to the worker and nothing shows Claude Code read it: the
+        // turn never began, and a worker that never got going cannot be trusted to say it has
+        // stopped. It is closed instead of asked, and the stop is reported once it is gone.
+        let never_began =
+            self.link.is_some() && self.timers.iter().any(|(_, t)| *t == Timer::StartReady);
         self.stopping = Some(StopState {
             replies: vec![reply],
             resend,
+            close_worker: never_began,
         });
+        self.stop_close_sent = false;
         self.set_status(ChatStatus::Stopping, None);
         let lim = self.sh.cfg.limits.stop;
         self.add_timer(lim, Timer::StopDeadline);
         if self.link.is_none() {
             // Nothing is running behind the status: settle at once.
             self.settle("stopped", None);
+            return;
+        }
+        if never_began {
+            self.clear_timer(|t| *t == Timer::StartReady);
+            self.stop_close_sent = true;
+            self.link_closing = true;
+            if let Some(l) = &self.link {
+                l.terminate();
+            }
             return;
         }
         self.request(json!({"type": "abort"}), Pending::Abort);
@@ -3773,6 +3824,23 @@ impl Actor {
                         }
                     }
                 }
+                Timer::StartReady => {
+                    // Still at "starting": Claude Code never showed it read the message. End the
+                    // start with a plain error and close the worker, so the chat's place goes to
+                    // the ones queued behind it. A stop under way has its own deadline.
+                    if self.status() == ChatStatus::Starting && self.stopping.is_none() {
+                        let error = start_timeout_error(self.sh.cfg.limits.start_ready);
+                        log::error!("chat {}: {error}", self.chat_id);
+                        self.worker_error = Some(error.clone());
+                        self.end_run(ChatStatus::Interrupted, Some(&error), "failed");
+                        self.emit_pending();
+                        if let Some(l) = &self.link {
+                            // Even if it outlives the kill, the next send must not reuse it.
+                            self.link_closing = true;
+                            l.terminate();
+                        }
+                    }
+                }
                 Timer::StopDeadline => {
                     if self.stopping.is_some() {
                         // A line the worker already sent outranks the deadline: the kill cures a
@@ -3801,6 +3869,22 @@ impl Actor {
                         self.worker_error = Some(why.into());
                         if let Some(l) = &self.link {
                             l.terminate();
+                            if self.stop_close_sent {
+                                // Closed a whole stop limit ago and still there: say so, and
+                                // let the chat go. The next send starts a new worker.
+                                self.link_closing = true;
+                                self.worker_error = Some(STOP_KILL_FAILED_ERROR.into());
+                                self.settle("interrupted", Some(STOP_KILL_FAILED_ERROR.into()));
+                            } else {
+                                // Wait once more for the exit to arrive before giving up.
+                                self.stop_close_sent = true;
+                                let lim = if self.archived {
+                                    self.sh.cfg.limits.archive_stop
+                                } else {
+                                    self.sh.cfg.limits.stop
+                                };
+                                self.add_timer(lim, Timer::StopDeadline);
+                            }
                         } else {
                             self.settle("interrupted", Some(why.into()));
                         }
@@ -3960,6 +4044,7 @@ impl Actor {
         match kind {
             "response" => self.on_response(r),
             "agent_start" => {
+                self.clear_timer(|t| *t == Timer::StartReady);
                 if self.status() != ChatStatus::Stopping {
                     self.open_run();
                     if self.status() != ChatStatus::Running {
@@ -4180,6 +4265,8 @@ impl Actor {
                 self.save_binding();
             }
             "submission_delivered" => {
+                // Claude Code read the message: the start is under way.
+                self.clear_timer(|t| *t == Timer::StartReady);
                 if let Some(sid) = str_of(&v, "submissionId") {
                     let sub = self
                         .submission(&sid)
