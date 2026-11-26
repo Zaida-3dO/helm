@@ -355,6 +355,7 @@ fn budget_view(data: &Path, layer: &Layer) -> Value {
                 is_home: false,
             }),
             project_id: None,
+            ..ChatKnowledge::default()
         },
     };
     let (used, cap) = launch::rules_budget(data, &who);

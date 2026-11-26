@@ -4,8 +4,9 @@
 //! it applies, straight from the layers (never a copy, so an edit shows at once). Both answer for
 //! the chat that asks: its person's layer and, for skills, its project's linked folders.
 
-use crate::launch::{rule_groups, ChatKnowledge, ChatLookup};
+use crate::launch::{rule_groups, shown_at_launch, ChatKnowledge, ChatLookup};
 use crate::plugins;
+use crate::triggers::Facts;
 use helm_hosttools::help::{HelpProvider, HelpProviders, MAX_SUMMARY_CHARS};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -37,11 +38,15 @@ impl HelpProvider for RuleHelp {
         "The rules that apply to you, in full (the prompt lists the long ones by a line)"
     }
 
+    /// The index lists only the rules this chat was actually shown at launch (whole or on a
+    /// line); one its trigger keeps back stays out of the list. `topic` still reads it.
     fn index(&self, chat_id: &str) -> Vec<(String, String)> {
         let who = self.lookup.of_chat(chat_id);
+        let facts = Facts::of(&who, None);
         rule_groups(&self.profile_dir, &who)
             .into_iter()
             .flat_map(|(_, rules)| rules)
+            .filter(|r| shown_at_launch(r, &facts))
             .map(|r| {
                 (
                     r.topic.clone(),
@@ -184,6 +189,12 @@ mod tests {
                 "Body text goes on. ".repeat(60)
             ),
         );
+        // A chat with no folder and no orchestrator is a household chat, so this coding-only
+        // rule is kept back: out of the prompt and the index, still readable by topic.
+        write(
+            &root.join("rules/work-only.md"),
+            "---\nkinds: coding\n---\n# Work only\n\nRead the diff first.\n",
+        );
         let who = ChatKnowledge {
             profile: Some(ProfileRef {
                 id: "p1".into(),
@@ -191,6 +202,7 @@ mod tests {
                 is_home: true,
             }),
             project_id: None,
+            ..ChatKnowledge::default()
         };
         let text = crate::launch::rules_text(dir.path(), &who, crate::launch::RULES_PROMPT_CAP);
         assert!(
@@ -206,6 +218,11 @@ mod tests {
             text.contains("- Long one: Start here. More words follow. More words follow. (app_help rule/long)"),
             "{text}"
         );
+        // The coding-only trigger hides it from this household chat's prompt…
+        assert!(
+            !text.contains("Work only") && text.contains(crate::launch::HELD_BACK),
+            "{text}"
+        );
         // The same rules answer app_help, whole.
         let help = RuleHelp {
             profile_dir: dir.path().to_owned(),
@@ -215,6 +232,12 @@ mod tests {
         assert!(index
             .iter()
             .any(|(n, s)| n == "long" && s.starts_with("Long one: Start here.")));
+        // …and from the index, yet it stays readable by topic.
+        assert!(!index.iter().any(|(n, _)| n == "work-only"), "{index:?}");
+        assert!(help
+            .topic("c", "work-only")
+            .unwrap()
+            .contains("Read the diff first."));
         assert!(help
             .topic("c", "long")
             .unwrap()
@@ -226,6 +249,7 @@ mod tests {
             Some("rules/pinned.md"),
             "Pinned",
             "New body.",
+            None,
             None,
             None,
             4096,
@@ -245,6 +269,7 @@ mod tests {
             "Still a line rule.",
             None,
             None,
+            None,
             4096,
         )
         .unwrap();
@@ -261,6 +286,7 @@ mod tests {
             "Carried whole now.",
             None,
             Some(true),
+            None,
             4096,
         )
         .unwrap();
@@ -277,6 +303,7 @@ mod tests {
             "Back to a line.",
             None,
             Some(false),
+            None,
             4096,
         )
         .unwrap();

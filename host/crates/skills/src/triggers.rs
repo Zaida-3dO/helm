@@ -66,6 +66,99 @@ pub struct Facts {
     pub today: NaiveDate,
 }
 
+impl Facts {
+    /// The facts of one chat from what its lookup knows plus the launch folder. `cwd_override`
+    /// wins over the recorded folder when given (the worker reports the real one). The kind is
+    /// derived: orchestrating when the Orchestrator is in effect for the chat, coding when its
+    /// folder sits inside a git work tree, household otherwise. A caller that must force
+    /// `household` (a chat that came in through a channel, say) keeps `cwd` unset and
+    /// `orchestrating` false.
+    pub fn of(who: &crate::launch::ChatKnowledge, cwd_override: Option<&Path>) -> Facts {
+        let cwd = cwd_override.map(PathBuf::from).or_else(|| {
+            who.cwd
+                .as_deref()
+                .map(PathBuf::from)
+                .filter(|p| !p.as_os_str().is_empty())
+        });
+        let kind = if who.orchestrating {
+            ChatKind::Orchestrating
+        } else if cwd.as_deref().is_some_and(in_git_tree) {
+            ChatKind::Coding
+        } else {
+            ChatKind::Household
+        };
+        Facts {
+            cwd,
+            kind,
+            person: who.profile.as_ref().map(|p| p.name.clone()),
+            pc: pc_name(),
+            today: chrono::Local::now().date_naive(),
+        }
+    }
+}
+
+/// This machine's PC name (the `pcs:` key is compared to it, ignoring case).
+fn pc_name() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_default()
+}
+
+/// How far above a folder the git walk looks for `.git`, and how long a result is reused. The
+/// launch of several chats in one folder should not stat the parents over and over.
+const GIT_WALK_PARENTS: usize = 12;
+const GIT_CACHE_SECS: u64 = 10;
+
+static GIT_TREES: Mutex<Option<HashMap<String, (std::time::Instant, bool)>>> = Mutex::new(None);
+
+/// True when the folder or any of up to `GIT_WALK_PARENTS` parents holds a `.git`. Cached per
+/// starting folder for a few seconds.
+fn in_git_tree(dir: &Path) -> bool {
+    let key = dir.to_string_lossy().to_lowercase();
+    let mut guard = GIT_TREES.lock().unwrap_or_else(|p| p.into_inner());
+    let map = guard.get_or_insert_with(HashMap::new);
+    if let Some((at, hit)) = map.get(&key) {
+        if at.elapsed().as_secs() < GIT_CACHE_SECS {
+            return *hit;
+        }
+    }
+    let mut hit = false;
+    let mut cur = Some(dir);
+    for _ in 0..=GIT_WALK_PARENTS {
+        let Some(d) = cur else { break };
+        if d.join(".git").exists() {
+            hit = true;
+            break;
+        }
+        cur = d.parent();
+    }
+    map.insert(key, (std::time::Instant::now(), hit));
+    hit
+}
+
+/// A `tools:` glob as a Claude Code hook matcher alternative: `*` becomes `.*`, the rest is
+/// quoted, and a name without `__` is anchored so it matches the whole of a bare tool or the
+/// last part of an `mcp__<server>__<name>` one. Patterns holding `__` match the whole name.
+pub fn glob_to_regex(pattern: &str) -> String {
+    let pat = pattern.trim();
+    let mut re = String::new();
+    for c in pat.chars() {
+        match c {
+            '*' => re.push_str(".*"),
+            c if !(c.is_ascii_alphanumeric() || c == '_' || c == '-') => {
+                re.push('\\');
+                re.push(c);
+            }
+            c => re.push(c),
+        }
+    }
+    if pat.contains("__") {
+        re
+    } else {
+        format!("(^|__){re}$")
+    }
+}
+
 /// One tool call, as far as triggers look. `inner` carries the tool named inside a proxy call
 /// (the `name` of an mcp proxy line) so patterns can match it too.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -972,5 +1065,46 @@ mod tests {
             "taskkill",
             "first\r\nsecond\n& taskkill /IM x"
         ));
+
+        // Globs become hook matcher alternatives: bare names anchor to the whole name or its
+        // last `__`-part, patterns holding `__` match the whole name, and regex characters are
+        // quoted.
+        assert_eq!(glob_to_regex("app_save_rule"), "(^|__)app_save_rule$");
+        assert_eq!(glob_to_regex("mcp__*browser*"), "mcp__.*browser.*");
+        assert_eq!(glob_to_regex("git.push"), "git\\.push");
+    }
+
+    #[test]
+    fn the_kind_of_a_chat_comes_from_the_orchestrator_then_its_folder() {
+        use crate::launch::ChatKnowledge;
+        use std::fs;
+        let base = tempfile::tempdir().unwrap();
+        // No folder, no orchestrator: household.
+        assert_eq!(
+            Facts::of(&ChatKnowledge::default(), None).kind,
+            ChatKind::Household
+        );
+        // The orchestrator flag wins over everything.
+        let who = ChatKnowledge {
+            orchestrating: true,
+            ..ChatKnowledge::default()
+        };
+        assert_eq!(Facts::of(&who, None).kind, ChatKind::Orchestrating);
+        // A folder inside a git work tree (marked by `.git` in it or above it) is coding…
+        let repo = base.path().join("wt/work");
+        fs::create_dir_all(base.path().join(".git")).unwrap();
+        fs::create_dir_all(&repo).unwrap();
+        assert_eq!(
+            Facts::of(&ChatKnowledge::default(), Some(&repo)).kind,
+            ChatKind::Coding,
+            "the walk looks at parents too"
+        );
+        // …and a plain folder is household.
+        let plain = base.path().join("plain");
+        fs::create_dir_all(&plain).unwrap();
+        assert_eq!(
+            Facts::of(&ChatKnowledge::default(), Some(&plain)).kind,
+            ChatKind::Household
+        );
     }
 }

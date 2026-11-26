@@ -79,6 +79,7 @@ impl Person {
                 is_home: false,
             }),
             project_id: None,
+            ..ChatKnowledge::default()
         }
     }
 }
