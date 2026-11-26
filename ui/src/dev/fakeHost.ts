@@ -1174,7 +1174,8 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     }),
     runtime_settings_get: () => ({ ...runtimeSettings }),
     runtime_settings_save: (a) => {
-      Object.assign(runtimeSettings, a, 'model' in a ? { model: a.model ? String(a.model) : null } : {});
+      const { profileId: _profileId, ...patch } = a;
+      Object.assign(runtimeSettings, patch, 'model' in patch ? { model: patch.model ? String(patch.model) : null } : {});
       return { ...runtimeSettings };
     },
     // A chat's own reply length; a chat without one follows the new-chat default.

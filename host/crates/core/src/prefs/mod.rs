@@ -163,6 +163,69 @@ pub const GENERIC_ALLOWLIST: &[PrefKey] = &[
     DESKTOP_PET,
 ];
 
+/// Settings > Runtime: the model, effort and reply length new chats start with, per profile:
+/// `{profileId: {model, effort, responseVerbosity}}`, each field optional. A field a profile has
+/// not set reads from `newChat` and `responseVerbosity`, which stay as the install-wide fallback.
+pub const PROFILE_DEFAULTS: PrefKey = PrefKey::classified("profileDefaults");
+
+/// Whether `id` can key a profile's entry: 1 to 64 visible bytes.
+fn usable_profile_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && !crate::hidden::has_hidden(id)
+}
+
+/// The profile a new chat and the Runtime settings belong to right now: the one the sidebar
+/// shows, else the home profile (while it shows all of them). `None` before profiles exist.
+pub fn acting_profile(conn: &Connection) -> Option<String> {
+    match read(conn, "activeProfile") {
+        Some(Value::String(id)) if id != "all" && usable_profile_id(&id) => Some(id),
+        _ => conn
+            .query_row("SELECT id FROM profiles WHERE is_home = 1", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()
+            .ok()
+            .flatten()
+            .filter(|id| usable_profile_id(id)),
+    }
+}
+
+/// One field of a profile's entry in [`PROFILE_DEFAULTS`], when that profile has set it. A stored
+/// `null` is a choice too (a model of "Claude Code's own default"), so it is returned as `Some`.
+pub fn profile_default(conn: &Connection, profile: Option<&str>, field: &str) -> Option<Value> {
+    read(conn, PROFILE_DEFAULTS.name())?
+        .get(profile?)?
+        .get(field)
+        .cloned()
+}
+
+/// Save fields of one profile's entry in [`PROFILE_DEFAULTS`]: its other fields and every other
+/// profile's entry stay as they are.
+pub fn set_profile_defaults(
+    tx: &Transaction<'_>,
+    profile: &str,
+    fields: &[(&str, Value)],
+) -> Result<(), PrefError> {
+    if !usable_profile_id(profile) {
+        return Err(PrefError::Invalid {
+            key: "profileDefaults",
+            why: "profile keys must be 1 to 64 visible bytes",
+        });
+    }
+    let mut all = match read(tx, PROFILE_DEFAULTS.name()) {
+        Some(Value::Object(m)) => m,
+        _ => serde_json::Map::new(),
+    };
+    let mut entry = match all.remove(profile) {
+        Some(Value::Object(e)) => e,
+        _ => serde_json::Map::new(),
+    };
+    for (k, v) in fields {
+        entry.insert((*k).to_owned(), v.clone());
+    }
+    all.insert(profile.to_owned(), Value::Object(entry));
+    set(tx, PROFILE_DEFAULTS, &Value::Object(all))
+}
+
 /// The theme effects `themeEffects` can switch, by id.
 pub const THEME_EFFECT_IDS: &[&str] = &[
     "trail",
@@ -460,6 +523,7 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
             }
         }
         "customColours" => validate_custom_colours(value),
+        "profileDefaults" => validate_profile_defaults(value),
         "desktopPet" => validate_desktop_pet(value),
         "keybindings" => validate_keybindings(value),
         _ => Ok(()),
@@ -540,6 +604,49 @@ fn validate_custom_colours(value: &Value) -> Result<(), PrefError> {
             if !ok {
                 return Err(bad(
                     "accentHue is 0 to 359 or null, tint is none, soft or strong, contrast is standard or more",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `profileDefaults`: at most 16 entries keyed by a profile id of 1 to 64 bytes; each entry holds
+/// only `model` (a name of at most 200 bytes, or null for Claude Code's own default), `effort` (a
+/// word of at most 16 bytes) and `responseVerbosity` (low, medium or high). The host checks an
+/// effort against the catalogue when it saves one.
+fn validate_profile_defaults(value: &Value) -> Result<(), PrefError> {
+    let bad = |why: &'static str| PrefError::Invalid {
+        key: "profileDefaults",
+        why,
+    };
+    let Some(map) = value.as_object() else {
+        return Err(bad("must be an object keyed by profile"));
+    };
+    if map.len() > 16 {
+        return Err(bad("has more than 16 entries"));
+    }
+    for (profile, entry) in map {
+        if !usable_profile_id(profile) {
+            return Err(bad("profile keys must be 1 to 64 visible bytes"));
+        }
+        let Some(fields) = entry.as_object() else {
+            return Err(bad("each entry must be {model, effort, responseVerbosity}"));
+        };
+        for (name, v) in fields {
+            let ok = match name.as_str() {
+                "model" => {
+                    v.is_null()
+                        || v.as_str()
+                            .is_some_and(|m| m.len() <= 200 && !m.chars().any(char::is_control))
+                }
+                "effort" => v.as_str().is_some_and(|e| !e.is_empty() && e.len() <= 16),
+                "responseVerbosity" => matches!(v.as_str(), Some("low" | "medium" | "high")),
+                _ => return Err(bad("an entry has only model, effort and responseVerbosity")),
+            };
+            if !ok {
+                return Err(bad(
+                    "model is a name or null, effort is a short word, responseVerbosity is low, medium or high",
                 ));
             }
         }
@@ -897,6 +1004,74 @@ mod tests {
             .snapshot(|tx| Ok::<_, rusqlite::Error>(read(tx, "zoomLevel")))
             .unwrap();
         assert_eq!(z, Some(json!(130)));
+    }
+
+    #[test]
+    fn profile_defaults_are_kept_per_profile_and_validated() {
+        let (_d, db) = temp_db(&MigrationRegistry::new());
+        let acting = || {
+            db.snapshot(|tx| Ok::<_, rusqlite::Error>(acting_profile(tx)))
+                .unwrap()
+        };
+        let field = |p: Option<&str>, f: &str| {
+            db.snapshot(|tx| Ok::<_, rusqlite::Error>(profile_default(tx, p, f)))
+                .unwrap()
+        };
+        // No profiles table and none chosen: nobody is acting, so nothing is per profile.
+        assert_eq!(acting(), None);
+        db.write(|tx| {
+            tx.execute_batch(
+                "CREATE TABLE profiles (id TEXT PRIMARY KEY, is_home INTEGER NOT NULL DEFAULT 0);
+                 INSERT INTO profiles(id, is_home) VALUES ('home', 1), ('other', 0);",
+            )
+        })
+        .unwrap();
+        assert_eq!(acting().as_deref(), Some("home"));
+        for (chosen, want) in [("other", "other"), ("all", "home"), ("", "home")] {
+            db.write(|tx| set_raw(tx, "activeProfile", &json!(chosen)))
+                .unwrap();
+            assert_eq!(acting().as_deref(), Some(want), "{chosen:?}");
+        }
+        // Saving one profile's field keeps its other fields and the other profiles' entries.
+        db.write(|tx| {
+            set_profile_defaults(
+                tx,
+                "home",
+                &[("model", json!("opus")), ("effort", json!("high"))],
+            )?;
+            set_profile_defaults(tx, "other", &[("model", Value::Null)])?;
+            set_profile_defaults(tx, "home", &[("responseVerbosity", json!("high"))])
+        })
+        .unwrap();
+        assert_eq!(field(Some("home"), "model"), Some(json!("opus")));
+        assert_eq!(field(Some("home"), "effort"), Some(json!("high")));
+        assert_eq!(
+            field(Some("home"), "responseVerbosity"),
+            Some(json!("high"))
+        );
+        assert_eq!(
+            field(Some("other"), "model"),
+            Some(Value::Null),
+            "a chosen default is kept"
+        );
+        assert_eq!(field(Some("other"), "effort"), None);
+        assert_eq!(field(Some("nobody"), "model"), None);
+        assert_eq!(field(None, "model"), None);
+        // The shape is checked.
+        for bad in [
+            json!([]),
+            json!({"p": "opus"}),
+            json!({"p": {"colour": "red"}}),
+            json!({"p": {"effort": ""}}),
+            json!({"p": {"responseVerbosity": "loud"}}),
+            json!({"p": {"model": 3}}),
+            json!({"": {"model": "opus"}}),
+        ] {
+            let r = db.write(|tx| set(tx, PROFILE_DEFAULTS, &bad));
+            assert!(matches!(r, Err(PrefError::Invalid { .. })), "{bad}");
+        }
+        let r = db.write(|tx| set_profile_defaults(tx, &"p".repeat(65), &[("model", json!("a"))]));
+        assert!(matches!(r, Err(PrefError::Invalid { .. })));
     }
 
     #[test]

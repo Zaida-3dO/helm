@@ -392,6 +392,22 @@ impl HostPort {
         found.ok_or_else(WireError::not_found)
     }
 
+    /// `args` for a settings call made for `person_id`: it names the profile linked to that person
+    /// on this PC, so the new-chat defaults read or saved are theirs. A person with no profile
+    /// here (or none named) leaves the call to the profile acting on this PC.
+    fn defaults_args(&self, person_id: &str, mut args: Value) -> PortResult<Value> {
+        if !person_id.is_empty() {
+            let profile = self
+                .db()?
+                .snapshot(|tx| profile_of_person(tx, person_id))
+                .map_err(db_err)?;
+            if let Some(p) = profile {
+                args["profileId"] = json!(p);
+            }
+        }
+        Ok(args)
+    }
+
     /// A device switch in Settings > Devices; on when never set.
     fn switch(&self, key: &str) -> bool {
         self.db()
@@ -1427,7 +1443,8 @@ impl ChatPort for HostPort {
                 }
             })?;
             // A board is where the chat is shown; it runs in the board's own folder.
-            let mut args = json!({ "cwd": path, "projectId": a.project_id });
+            // It starts on the defaults of the person it is made for, not of whoever is acting here.
+            let mut args = json!({ "cwd": path, "projectId": a.project_id, "profileId": profile });
             if let Some(m) = &a.model {
                 args["model"] = json!(m);
             }
@@ -2172,10 +2189,15 @@ impl ChatPort for HostPort {
         })
     }
 
-    fn defaults_get(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+    fn defaults_get(&self, person_id: String, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
         Box::pin(async move {
             self.here(&chat_id)?;
-            let all = self.op("runtime_settings_get", json!({})).await?;
+            let all = self
+                .op(
+                    "runtime_settings_get",
+                    self.defaults_args(&person_id, json!({}))?,
+                )
+                .await?;
             let mut out = serde_json::Map::new();
             // `fastMode` rides along: a mirrored chat's lightning toggle needs this PC's default
             // to show its pressed state.
@@ -2188,7 +2210,7 @@ impl ChatPort for HostPort {
         })
     }
 
-    fn defaults_set(&self, a: DefaultsArgs) -> BoxFut<'_, PortResult<Value>> {
+    fn defaults_set(&self, person_id: String, a: DefaultsArgs) -> BoxFut<'_, PortResult<Value>> {
         Box::pin(async move {
             self.here(&a.chat_id)?;
             if let Some(v) = &a.response_verbosity {
@@ -2207,7 +2229,11 @@ impl ChatPort for HostPort {
             if let Some(v) = &a.response_verbosity {
                 patch["responseVerbosity"] = json!(v);
             }
-            self.op("runtime_settings_save", patch).await
+            self.op(
+                "runtime_settings_save",
+                self.defaults_args(&person_id, patch)?,
+            )
+            .await
         })
     }
 

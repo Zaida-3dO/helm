@@ -286,7 +286,7 @@ export function RuntimePane() {
         <h3>New chats</h3>
         <SettingRow
           title="Model and effort"
-          description="The model, how hard it thinks and how long its replies are for a new chat. Change them for one chat from its composer."
+          description="The model, how hard it thinks and how long its replies are for a new chat, for the profile you are in. Change them for one chat from its composer."
         >
           <DefaultModelPicker ops={shell.ops} settings={s} save={saveNow} />
         </SettingRow>

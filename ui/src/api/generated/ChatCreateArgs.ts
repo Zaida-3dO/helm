@@ -15,4 +15,10 @@ boardId?: string, model?: string, effort?: string,
  * The new-chat page: start in the permission mode the user last picked with a chat's chip.
  * Unset for chats that agents, crews, roll overs, other devices and Telegram start.
  */
-startInLastMode?: boolean, };
+startInLastMode?: boolean, 
+/**
+ * The profile the chat is being made for, when it is not the one acting now (a chat made on
+ * behalf of another profile): the model and effort it starts with are that profile's own
+ * defaults. The caller assigns the chat to the profile.
+ */
+profileId?: string, };

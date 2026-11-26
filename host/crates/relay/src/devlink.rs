@@ -402,11 +402,15 @@ impl ChatPort for ChannelPort {
     fn address(&self, chat_id: String) -> BoxFut<'_, PortResult<()>> {
         self.port.address(chat_id)
     }
-    fn defaults_get(&self, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
-        self.port.defaults_get(chat_id)
+    fn defaults_get(&self, person_id: String, chat_id: String) -> BoxFut<'_, PortResult<Value>> {
+        self.port.defaults_get(person_id, chat_id)
     }
-    fn defaults_set(&self, a: helm_devices::wire::DefaultsArgs) -> BoxFut<'_, PortResult<Value>> {
-        self.port.defaults_set(a)
+    fn defaults_set(
+        &self,
+        person_id: String,
+        a: helm_devices::wire::DefaultsArgs,
+    ) -> BoxFut<'_, PortResult<Value>> {
+        self.port.defaults_set(person_id, a)
     }
     fn project_create(
         &self,

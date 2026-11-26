@@ -1,7 +1,8 @@
 //! The addendum sections Helm registers itself.
 //!
-//! - `verbosity` (order 10): how long replies should be: the chat's own level, else the user-only
-//!   `responseVerbosity` (low by default; high adds nothing).
+//! - `verbosity` (order 10): how long replies should be: the chat's own level, else its profile's
+//!   choice for new chats, else the install-wide `responseVerbosity` (low by default; high adds
+//!   nothing).
 //! - `prose` (order 12): the work shows as collapsible records, so visible prose should not narrate
 //!   it; always on.
 //! - `progress` (order 13): the progress heartbeat is a tool call, not prose; always on.
@@ -26,16 +27,38 @@ pub const PROSE_ADDENDUM: &str = "Prose: your reasoning and tool activity alread
 /// teaching is the same for both. One heartbeat tool, one line of rules about it.
 pub const PROGRESS_ADDENDUM: &str = "Progress: to say where you are while you work, call app_progress with one short line; it shows as a single live line for the turn, replaced by the next one and never kept as a message, so the reader may not see it at all. Never make it the only place a fact appears, and write the final reply to stand on its own, as if the reader saw no progress line. Real messages to the user stay milestones only: raise the bar for between-steps prose.";
 
-/// The stored verbosity, `low` when unset or unknown.
-pub fn verbosity(db: &Database) -> String {
-    db.snapshot(|tx| Ok::<_, rusqlite::Error>(helm_core::prefs::read(tx, "responseVerbosity")))
-        .ok()
-        .flatten()
-        .and_then(|v| match v {
-            Value::String(s) if matches!(s.as_str(), "low" | "medium" | "high") => Some(s),
-            _ => None,
-        })
-        .unwrap_or_else(|| "low".into())
+/// The reply length a chat follows when it has none of its own: the one its profile chose for new
+/// chats (the profile acting now, for a chat with no owner), else the install-wide one, `low`
+/// when unset or unknown.
+pub fn verbosity(db: &Database, chat_id: &str) -> String {
+    let valid = |v: &Value| match v {
+        Value::String(s) if matches!(s.as_str(), "low" | "medium" | "high") => Some(s.clone()),
+        _ => None,
+    };
+    db.snapshot(|tx| {
+        let owner = tx
+            .query_row(
+                "SELECT NULLIF(profile_id, '') FROM chats WHERE id = ?1",
+                [chat_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+            .or_else(|| helm_core::prefs::acting_profile(tx));
+        Ok::<_, rusqlite::Error>(
+            helm_core::prefs::profile_default(tx, owner.as_deref(), "responseVerbosity")
+                .as_ref()
+                .and_then(valid)
+                .or_else(|| {
+                    helm_core::prefs::read(tx, "responseVerbosity")
+                        .as_ref()
+                        .and_then(valid)
+                }),
+        )
+    })
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| "low".into())
 }
 
 pub struct VerbositySection {

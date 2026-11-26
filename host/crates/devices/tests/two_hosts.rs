@@ -876,6 +876,9 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         assert_eq!(st.snoozed[0].until, Some(123));
         assert_eq!(st.addressed, ["c1"]);
         assert_eq!(st.defaults_saved.as_ref().unwrap()["model"], "opus");
+        // The defaults were read and saved for the person asking, the same one both times.
+        assert_eq!(st.defaults_people.len(), 2);
+        assert_eq!(st.defaults_people[0], st.defaults_people[1]);
     }
     // A queued action other than withdraw or recover is refused at the wire.
     let e = b

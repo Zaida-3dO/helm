@@ -1,6 +1,7 @@
 //! How long one chat's replies should be.
 //!
-//! The new-chat default is the user-only `responseVerbosity` preference. A chat can have its own
+//! The new-chat default is the `responseVerbosity` preference, kept per profile (the chat's owner's
+//! own choice, else the install-wide one). A chat can have its own
 //! level, set from the model and effort picker. It is kept apart from the chat record, and a chat
 //! with no row follows the default. A row goes with its chat (`ON DELETE CASCADE`).
 //!
@@ -48,9 +49,9 @@ fn own_of(db: &Database, chat_id: &str) -> Option<String> {
         .flatten()
 }
 
-/// The level in force for a chat: its own, else the new-chat default (`low` when unset).
+/// The level in force for a chat: its own, else its profile's new-chat default (`low` when unset).
 pub fn level_for(db: &Database, chat_id: &str) -> String {
-    own_of(db, chat_id).unwrap_or_else(|| crate::sections::verbosity(db))
+    own_of(db, chat_id).unwrap_or_else(|| crate::sections::verbosity(db, chat_id))
 }
 
 #[derive(serde::Deserialize)]
@@ -72,7 +73,7 @@ fn parse<T: for<'de> serde::Deserialize<'de>>(args: Value) -> Result<T, ApiError
 
 fn answer(db: &Database, chat_id: &str) -> Value {
     let mine = own_of(db, chat_id);
-    let default = crate::sections::verbosity(db);
+    let default = crate::sections::verbosity(db, chat_id);
     json!({
         "level": mine.clone().unwrap_or_else(|| default.clone()),
         "own": mine.is_some(),
@@ -178,6 +179,24 @@ mod tests {
         );
         let a = set(&ctx, json!({"chatId": "c1", "level": null})).unwrap();
         assert_eq!(a["own"], false);
+        // The default is the acting profile's own choice for new chats; a profile with none
+        // follows the install-wide one.
+        db.write(|tx| {
+            helm_core::prefs::set_profile_defaults(
+                tx,
+                "pa",
+                &[("responseVerbosity", json!("medium"))],
+            )?;
+            helm_core::prefs::set_raw(tx, "activeProfile", &json!("pa"))
+        })
+        .unwrap();
+        assert_eq!(
+            get(&ctx, json!({"chatId": "c1"})).unwrap(),
+            json!({"level": "medium", "own": false, "default": "medium"})
+        );
+        db.write(|tx| helm_core::prefs::set_raw(tx, "activeProfile", &json!("pb")))
+            .unwrap();
+        assert_eq!(level_for(&db, "c1"), "low");
         for bad in [
             json!({"chatId": "c1", "level": "loud"}),
             json!({"chatId": ""}),
