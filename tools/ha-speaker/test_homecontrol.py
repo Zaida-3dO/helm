@@ -26,7 +26,8 @@ EXPOSED = {
                    ("Reading lamp", "light.reading")],
         "climates": [("Living Room Thermostat", "climate.lr_therm")]},
     "Bedroom": {"lights": [("Bed light", "light.bed"),
-                           ("Desk light", "light.pendant")],
+                           ("Desk light", "light.pendant"),
+                           ("Bath bulb", "light.ctlamp")],
                 "climates": []},
     "Study": {"lights": [("Desk light", "light.desk2")], "climates": []},
 }
@@ -51,6 +52,10 @@ STATES = {
     "light.desk2": {"state": "off", "attributes": {
         "friendly_name": "Desk light",
         "supported_color_modes": ["onoff"]}},
+    "light.ctlamp": {"state": "off", "attributes": {
+        "friendly_name": "Bath bulb",
+        "supported_color_modes": ["color_temp"],
+        "min_color_temp_kelvin": 2700, "max_color_temp_kelvin": 6500}},
     "climate.kitchen_rad": {"state": "heat", "attributes": {
         "friendly_name": "Kitchen Radiator", "hvac_modes": ["off", "heat"],
         "min_temp": 7, "max_temp": 27, "target_temp_step": 0.5,
@@ -193,6 +198,80 @@ class LightTest(unittest.TestCase):
         self.assertIn("only change 12 at once", r[0]["error"])
 
 
+    def test_on_with_brightness_and_colour_rides_one_turn_on(self):
+        # the review bug: brightness was dropped by a second bare turn_on
+        _, b = run([("light", {"target": "Sofa lamp", "action": "on",
+                               "brightness_pct": 60, "color": "warm white"})])
+        self.assertEqual(len(b.service_calls), 1)
+        domain, service, data = b.service_calls[0]
+        self.assertEqual((domain, service), ("light", "turn_on"))
+        self.assertEqual(data["entity_id"], ["light.sofa"])
+        self.assertEqual(data["brightness"], int(round(60 * 255 / 100)))
+        self.assertEqual(data["rgb_color"], [255, 197, 143])
+
+    def test_service_style_argument_names_are_accepted(self):
+        # a model trained on HA service data writes these names
+        _, b = run([("light", {"target": "Bath bulb", "action": "set",
+                               "color_temp_kelvin": 5000}),
+                    ("climate", {"target": "Kitchen Radiator", "action": "set",
+                                 "hvac_mode": "heat"})])
+        kelvin = [c[2].get("color_temp_kelvin") for c in b.service_calls]
+        self.assertIn(5000, kelvin)
+        modes = [c[2].get("hvac_mode") for c in b.service_calls
+                 if c[1] == "set_hvac_mode"]
+        self.assertEqual(modes, ["heat"])
+
+    def test_colour_word_only_needs_rgb_support(self):
+        # a colour-temperature-only bulb takes warm/cool words, not red
+        r, b = run([("light", {"target": "Bath bulb", "action": "set",
+                               "color": "red"})])
+        self.assertFalse(r[0]["ok"])
+        self.assertIn("cannot change colour", r[0]["error"])
+        r2, _ = run([("light", {"target": "Bath bulb", "action": "set",
+                                "color_temp": "warm"})])
+        self.assertTrue(r2[0]["ok"])
+
+    def test_zero_brightness_means_off(self):
+        _, b = run([("light", {"target": "kitchen", "action": "on",
+                               "brightness_pct": 0})])
+        self.assertEqual([(d, s) for d, s, _ in b.service_calls],
+                         [("light", "turn_off")])
+
+    def test_turn_budget_counts_the_whole_spoken_ask(self):
+        # one HomeControl instance = one spoken ask: devices touched by any
+        # call count against 12, and the fifth write call is refused outright
+        fixture = {
+            "Attic": {"lights": [("Bulb %d" % i, "light.b%d" % i)
+                                 for i in range(12)], "climates": []},
+            "Hall": {"lights": [("Hall %d" % i, "light.h%d" % i)
+                                for i in range(5)], "climates": []},
+        }
+
+        async def go(control):
+            out = []
+            # Hall 0 is outside Attic: the second call alone would pass,
+            # but together they reach for thirteen devices in one ask
+            out.append(await control.execute("light", {"target": "Hall 0",
+                                                       "action": "on"}))
+            out.append(await control.execute("light", {"target": "Attic",
+                                                       "action": "on"}))
+            control.reset_budget()  # the person asked again in a new breath
+            for i in range(5):      # same five devices: calls, not devices, run out
+                out.append(await control.execute("light",
+                                                 {"target": "Hall %d" % i,
+                                                  "action": "on"}))
+            return out
+
+        control = homecontrol.HomeControl(FakeBackend(fixture))
+        r = asyncio.run(go(control))
+        self.assertTrue(r[0]["ok"])
+        self.assertFalse(r[1]["ok"])
+        self.assertIn("more than 12 devices", r[1]["error"])
+        for call in r[2:6]:  # four write calls fit after the reset
+            self.assertTrue(call["ok"], call)
+        self.assertFalse(r[6]["ok"])   # the fifth write in one ask
+        self.assertIn("changes per ask", r[6]["error"])
+
 class ClimateTimerTest(unittest.TestCase):
     def test_setpoint_out_of_range_refused(self):
         r, b = run([("climate", {"target": "Kitchen Radiator", "action": "set",
@@ -271,6 +350,8 @@ class DryAndSchemaTest(unittest.TestCase):
         self.assertEqual(golden, json.loads(json.dumps(homecontrol.SCHEMAS)))
         compact = json.dumps(homecontrol.SCHEMAS, separators=(",", ":"))
         self.assertLess(max(1, len(compact) // 4), 450)
+        # the review's tight proxy: tool definitions alone must stay small
+        self.assertLess(len(compact) // 3, 550)
 
     def test_ask_helm_is_not_this_modules_business(self):
         r, b = run([("ask_helm", {"text": "anything"})])

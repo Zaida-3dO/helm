@@ -1,127 +1,129 @@
 [
   {
+    "type": "function",
     "function": {
-      "description": "Turn or set lights; status reads them.",
       "name": "light",
+      "description": "Turn or set lights; status reads them.",
       "parameters": {
+        "type": "object",
         "properties": {
+          "target": {
+            "type": "string",
+            "description": "area or light name"
+          },
           "action": {
+            "type": "string",
             "enum": [
               "on",
               "off",
               "toggle",
               "set",
               "status"
-            ],
-            "type": "string"
-          },
-          "brightness_change_pct": {
-            "description": "-100..100, brighter/dimmer",
-            "type": "number"
+            ]
           },
           "brightness_pct": {
-            "description": "0-100",
-            "type": "number"
+            "type": "number",
+            "description": "0-100"
+          },
+          "brightness_change_pct": {
+            "type": "number",
+            "description": "-100..100, brighter/dimmer"
           },
           "color": {
-            "description": "colour word or r,g,b",
-            "type": "string"
+            "type": "string",
+            "description": "colour word or r,g,b"
           },
           "color_temp": {
-            "description": "warm, neutral, cool or kelvin",
-            "type": "string"
-          },
-          "target": {
-            "description": "area or light name",
-            "type": "string"
+            "type": "string",
+            "description": "warm, neutral, cool or kelvin"
           }
         },
         "required": [
           "target",
           "action"
-        ],
-        "type": "object"
+        ]
       }
-    },
-    "type": "function"
+    }
   },
   {
+    "type": "function",
     "function": {
-      "description": "Set heating; status reads it.",
       "name": "climate",
+      "description": "Set heating; status reads it.",
       "parameters": {
+        "type": "object",
         "properties": {
+          "target": {
+            "type": "string",
+            "description": "area or heater name"
+          },
           "action": {
+            "type": "string",
             "enum": [
               "set",
               "status"
-            ],
-            "type": "string"
-          },
-          "mode": {
-            "type": "string"
-          },
-          "target": {
-            "description": "area or heater name",
-            "type": "string"
+            ]
           },
           "temperature": {
             "type": "number"
+          },
+          "mode": {
+            "type": "string"
           }
         },
         "required": [
           "target",
           "action"
-        ],
-        "type": "object"
+        ]
       }
-    },
-    "type": "function"
+    }
   },
   {
+    "type": "function",
     "function": {
-      "description": "Voice timer: start, cancel or status.",
       "name": "timer",
+      "description": "Voice timer: start, cancel or status.",
       "parameters": {
+        "type": "object",
         "properties": {
           "action": {
+            "type": "string",
             "enum": [
               "start",
               "cancel",
               "status"
-            ],
-            "type": "string"
-          },
-          "label": {
-            "type": "string"
+            ]
           },
           "minutes": {
             "type": "number"
+          },
+          "label": {
+            "type": "string"
           }
         },
         "required": [
           "action"
-        ],
-        "type": "object"
+        ]
       }
-    },
-    "type": "function"
+    }
   },
   {
+    "type": "function",
     "function": {
-      "description": "Read one room: what is on, temperatures.",
       "name": "home_state",
+      "description": "Read one room: what is on, temperatures.",
       "parameters": {
+        "type": "object",
         "properties": {
           "target": {
-            "description": "area name",
-            "type": "string"
+            "type": "string",
+            "description": "area name"
           }
         },
-        "required": [],
-        "type": "object"
+        "required": [
+          "target"
+        ]
       }
-    },
-    "type": "function"
+    }
   }
 ]

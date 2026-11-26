@@ -46,6 +46,27 @@ class ProfilesTest(unittest.TestCase):
         self.assertEqual(cfg.model_name, "qwen3.5:4b")
         self.assertEqual(cfg.timeout_s, 30)
         self.assertTrue(cfg.thinking)
+        # the checkbox has to arrive somewhere real: it travels as the
+        # request body's think switch unless the body box spells it already
+        self.assertIs(cfg.extra_body.get("think"), True)
+        cfg_off = build_model_config(base_data(thinking=False, body={}), {})
+        # off adds nothing: strict endpoints reject unknown fields, and the
+        # server default already means off for most models
+        self.assertNotIn("think", cfg_off.extra_body)
+        cfg_own = build_model_config(base_data(body={"reasoning": True}), {})
+        self.assertEqual(cfg_own.extra_body, {"reasoning": True, "think": True})
+
+    def test_logging_view_masks_header_secrets_too(self):
+        prof = {"model_url": "http://model.example/v1/chat",
+                "model_name": "m", "api_key": "sk-live-secret",
+                "extra_headers": {"X-Strata-Priority": "now",
+                                  "Authorization": "Bearer abc",
+                                  "X-Api-Key": "zzz"}}
+        safe = str(redact(prof))
+        self.assertNotIn("sk-live-secret", safe)
+        self.assertNotIn("Bearer abc", safe)
+        self.assertNotIn("zzz", safe)
+        self.assertIn("now", safe)  # a priority lane is not a secret
 
     def test_profile_switch_changes_endpoint_not_code(self):
         options = {"profile": "path_b", "profiles": {
