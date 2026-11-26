@@ -148,6 +148,50 @@ fn the_small_rules() {
             "{chosen} on {system} with {supported:?}"
         );
     }
+    // The languages a session tries, best first: the pick, other tags of the chosen language,
+    // then Windows' own; never the same tag twice, whatever its case.
+    for (chosen, system, supported, want) in [
+        (
+            Some("en"),
+            Some("en-GB"),
+            &["en-GB", "en-US"][..],
+            &["en-GB", "en-US"][..],
+        ),
+        (
+            Some("en-US"),
+            Some("en-GB"),
+            &["en-GB", "en-US"][..],
+            &["en-US", "en-GB"][..],
+        ),
+        (Some("fr"), Some("en-GB"), &["en-GB"][..], &["en-GB"][..]),
+        (
+            Some("pt"),
+            Some("en-GB"),
+            &["en-GB", "pt-BR", "pt-PT"][..],
+            &["pt-BR", "pt-PT", "en-GB"][..],
+        ),
+        (None, Some("en-GB"), &["en-GB", "en-US"][..], &["en-GB"][..]),
+        (Some("en"), None, &["EN-us"][..], &["EN-us"][..]),
+        (None, None, &[][..], &[][..]),
+    ] {
+        let supported: Vec<String> = supported.iter().map(|t| (*t).to_owned()).collect();
+        assert_eq!(
+            crate::live::speech_candidates(chosen, system, &supported),
+            want,
+            "{chosen:?} on {system:?} with {supported:?}"
+        );
+    }
+    // The way dictation goes first: live unless the user picked recording; nothing else is a mode.
+    for (mode, ok) in [
+        ("live", true),
+        ("record", true),
+        ("Live", false),
+        ("both", false),
+        ("", false),
+    ] {
+        assert_eq!(settings::mode_ok(mode), ok, "mode {mode:?}");
+    }
+    assert_eq!(settings::Settings::default().mode, "live");
     // A reply is plain text, or JSON with a text field, or a JSON string.
     for (reply, want) in [
         ("hello there\n", "hello there"),
@@ -415,6 +459,12 @@ fn a_recording_goes_to_the_server_and_text_comes_back() {
     assert_eq!(view["language"], json!("en"));
     assert_eq!(view["model"], json!("large-v3-turbo"));
     assert_eq!(view["speechReserveGb"], json!(2));
+    // Live is the way dictation goes first; the view also says why live cannot run, when it cannot.
+    assert_eq!(view["mode"], json!("live"));
+    assert_eq!(
+        view["liveAvailable"].as_bool().unwrap(),
+        view["liveUnavailable"].is_null()
+    );
     assert_eq!(code_of(say(json!({"wavBase64": wav_b64()}))), "not_set_up");
     assert!(seen.lock().unwrap().is_empty());
 
@@ -428,6 +478,7 @@ fn a_recording_goes_to_the_server_and_text_comes_back() {
         (json!({"sttUrl": "https://127.0.0.1:8000"}), "http://"),
         (json!({"sttUrl": "http://192.168.1.20:8000"}), "Tick"),
         (json!({"language": "english"}), "language"),
+        (json!({"mode": "both"}), "live or record"),
         (json!({"model": "two words"}), "model"),
         (json!({"speechReserveGb": 99}), "from 0 to 24"),
         (json!({"surprise": 1}), "Expected"),
@@ -440,6 +491,11 @@ fn a_recording_goes_to_the_server_and_text_comes_back() {
     assert_eq!(view["sttUrl"], json!(server));
     assert_eq!(view["configured"], json!(true));
     assert_eq!(view["speechReserveGb"], json!(4));
+    assert_eq!(
+        set(json!({"mode": "record"})).unwrap()["mode"],
+        json!("record")
+    );
+    assert_eq!(set(json!({"mode": "live"})).unwrap()["mode"], json!("live"));
     assert_eq!(env.models.settings().speech_reserve_gb, 4);
     assert!(env.sink.kinds().contains(&"dictation".to_owned()));
     // A network address needs the tick, and the tick cannot be taken back while one is saved.
@@ -859,6 +915,12 @@ fn a_service_that_refuses_to_open_is_explained_in_one_line() {
     // The consent gate and the missing language model say where to click.
     assert!(start_failure(&err(0x8004_5509)).contains("Privacy & security"));
     assert!(start_failure(&err(0x8004_5004)).contains("no model for your Windows language"));
+    // The generic invalid-operation code says what to check instead of showing the raw number.
+    let invalid = start_failure(&err(0x8013_1509));
+    assert!(
+        invalid.contains("would not start") && !invalid.contains("0x8013"),
+        "{invalid}"
+    );
     // Anything else at least names the culprit.
     let odd = start_failure(&err(0x8007_0005));
     assert!(

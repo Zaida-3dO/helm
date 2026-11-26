@@ -31,8 +31,12 @@ pub struct View {
     /// model, from Local models. It is only waited for after something was unloaded.
     pub speech_reserve_gb: u32,
     pub speech_reserve_max_gb: u32,
-    /// The Windows speech service can run here: the composer dictates live instead of recording.
+    /// The Windows speech service can run here: the composer can dictate live.
     pub live_available: bool,
+    /// Why it cannot, in one plain line, when `live_available` is false.
+    pub live_unavailable: Option<String>,
+    /// `live` or `record`: which way dictation goes first when both are possible.
+    pub mode: String,
 }
 
 fn db(ctx: &OpCtx) -> Result<Arc<Database>, ApiError> {
@@ -45,6 +49,7 @@ fn load(db: &Database) -> Settings {
 }
 
 fn view(ctx: &OpCtx, s: &Settings) -> View {
+    let (live_available, live_unavailable) = crate::live::available();
     let configured = s
         .stt_url
         .as_deref()
@@ -62,7 +67,9 @@ fn view(ctx: &OpCtx, s: &Settings) -> View {
                 l.settings().speech_reserve_gb
             }),
         speech_reserve_max_gb: local::MAX_SPEECH_RESERVE_GB,
-        live_available: crate::live::available().0,
+        live_available,
+        live_unavailable,
+        mode: s.mode.clone(),
     }
 }
 
@@ -92,6 +99,8 @@ struct SetArgs {
     #[serde(default)]
     language: Option<String>,
     #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
     speech_reserve_gb: Option<u32>,
 }
 
@@ -116,7 +125,7 @@ pub(crate) fn get(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
 pub(crate) fn set(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
     let a: SetArgs = args(
         v,
-        "sttUrl, allowPrivateNetwork, model, language, speechReserveGb (all optional)",
+        "sttUrl, allowPrivateNetwork, model, language, mode, speechReserveGb (all optional)",
     )?;
     let db = db(ctx)?;
     let mut s = load(&db);
@@ -137,6 +146,13 @@ pub(crate) fn set(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
             ));
         }
         s.language = l;
+    }
+    if let Some(m) = a.mode {
+        let m = m.trim().to_owned();
+        if !settings::mode_ok(&m) {
+            return Err(ApiError::bad_args("The dictation mode is live or record."));
+        }
+        s.mode = m;
     }
     if let Some(on) = a.allow_private_network {
         s.allow_private_network = on;

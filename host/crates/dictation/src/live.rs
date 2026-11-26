@@ -25,7 +25,7 @@
 
 use helm_ipc::{ApiError, AppEvent, EventSink};
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TryRecvError};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -75,16 +75,31 @@ pub trait EngineFactory: Send + Sync {
     fn create(&self, language: Option<&str>) -> Result<Box<dyn Engine>, String>;
 }
 
-/// Whether a live session can run here, and why not when it cannot. Answered once per process:
-/// probing activates the speech service, which is not free.
+/// How long a "cannot run here" answer stands before the service is asked again (a language
+/// pack or the privacy switch may have been turned on since).
+const RETRY_AFTER: Duration = Duration::from_secs(30);
+
+/// Whether a live session can run here, and why not when it cannot. A yes is kept for the life
+/// of the process: probing activates the speech service, which is not free. A no is asked again
+/// after [`RETRY_AFTER`], so fixing the cause in Windows Settings does not need a restart.
 pub fn available() -> (bool, Option<String>) {
-    static CACHE: OnceLock<(bool, Option<String>)> = OnceLock::new();
-    CACHE.get_or_init(probe).clone()
+    static CACHE: Mutex<Option<(Instant, (bool, Option<String>))>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some((at, answer)) = cache.as_ref() {
+        if answer.0 || at.elapsed() < RETRY_AFTER {
+            return answer.clone();
+        }
+    }
+    let answer = probe();
+    *cache = Some((Instant::now(), answer.clone()));
+    answer
 }
 
 #[cfg(windows)]
 fn probe() -> (bool, Option<String>) {
-    // A thread of its own: the probe activates the speech service and leaves again.
+    // A thread of its own: the probe activates the speech service and leaves again. It builds a
+    // recognizer the way a session does (the same languages, in the same order), so a yes here
+    // means a session can open one.
     std::thread::spawn(|| {
         let rt = unsafe {
             windows::Win32::System::WinRT::RoInitialize(
@@ -97,12 +112,30 @@ fn probe() -> (bool, Option<String>) {
                 Some("Windows speech recognition could not start on this PC.".to_owned()),
             );
         }
-        let out = match windows::Media::SpeechRecognition::SpeechRecognizer::new() {
-            Ok(_recognizer) => (true, None),
-            Err(e) => (false, Some(start_failure(&e))),
-        };
-        unsafe { windows::Win32::System::WinRT::RoUninitialize() };
-        out
+        // Balances the RoInitialize above after every recognizer below is gone.
+        let _apartment = UninitializeOnDrop;
+        let mut first_failure: Option<String> = None;
+        for tag in candidate_languages(None) {
+            match create_recognizer(tag.as_deref()) {
+                Ok(recognizer) => {
+                    recognizer.Close().ok();
+                    return (true, None);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "live dictation probe: {} failed: {e}",
+                        tag.as_deref().unwrap_or("the default language")
+                    );
+                    first_failure.get_or_insert_with(|| start_failure(&e));
+                }
+            }
+        }
+        (
+            false,
+            Some(first_failure.unwrap_or_else(|| {
+                "Windows speech recognition could not start on this PC.".to_owned()
+            })),
+        )
     })
     .join()
     .unwrap_or((
@@ -391,6 +424,44 @@ pub(crate) fn pick_speech_tag(chosen: &str, system: &str, supported: &[String]) 
         .cloned()
 }
 
+/// The speech languages worth trying for one session, best first: the one `pick_speech_tag`
+/// lands on, any other supported tag of the language the user chose, then Windows' own speech
+/// language. A session tries them in turn, because a language Windows lists is not always one it
+/// can open (a pack half installed, a model still downloading). Windows' own default is always
+/// the last try, after these.
+pub(crate) fn speech_candidates(
+    chosen: Option<&str>,
+    system: Option<&str>,
+    supported: &[String],
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |tag: &str| {
+        if !tag.is_empty() && !out.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+            out.push(tag.to_owned());
+        }
+    };
+    if let Some(chosen) = chosen {
+        if let Some(tag) = pick_speech_tag(chosen, system.unwrap_or(""), supported) {
+            add(&tag);
+        }
+        let prefix = chosen.split('-').next().unwrap_or(chosen);
+        for tag in supported {
+            if tag
+                .split('-')
+                .next()
+                .unwrap_or(tag)
+                .eq_ignore_ascii_case(prefix)
+            {
+                add(tag);
+            }
+        }
+    }
+    if let Some(system) = system {
+        add(system);
+    }
+    out
+}
+
 // ---- the Windows speech service --------------------------------------------------------------
 
 /// The speech service is spoken to from the session thread only, on a Runtime apartment of its
@@ -403,6 +474,9 @@ struct WinRtEngine {
     /// The speech language the user asked for, if any; `None` leaves it to Windows.
     language: Option<String>,
     inner: Option<Windows>,
+    /// Balances the `RoInitialize` this session opened. Declared after `inner` so it drops after
+    /// every interface: the Runtime must stay initialised until the last one is released.
+    apartment: Option<UninitializeOnDrop>,
 }
 
 #[cfg(windows)]
@@ -413,12 +487,9 @@ struct Windows {
     completed_token: i64,
     hypothesis_token: i64,
     started: bool,
-    /// Balances the `RoInitialize` this session opened. Declared last so it drops after every
-    /// interface: the Runtime must stay initialised until the last one is released.
-    _apartment: UninitializeOnDrop,
 }
 
-/// Releases the Runtime apartment when it drops. Only ever used as the last field of `Windows`.
+/// Releases the Runtime apartment when it drops.
 #[cfg(windows)]
 struct UninitializeOnDrop;
 
@@ -438,25 +509,162 @@ impl WinRtEngine {
             rx,
             language,
             inner: None,
+            apartment: None,
         }
     }
+}
+
+/// Windows' own speech language and the topic languages its service lists. Either is empty when
+/// Windows will not say.
+#[cfg(windows)]
+fn speech_languages() -> (Option<String>, Vec<String>) {
+    use windows::Media::SpeechRecognition::SpeechRecognizer;
+    let system = SpeechRecognizer::SystemSpeechLanguage()
+        .and_then(|l| l.LanguageTag())
+        .map(|t| t.to_string())
+        .ok();
+    let mut supported: Vec<String> = Vec::new();
+    if let Ok(view) = SpeechRecognizer::SupportedTopicLanguages() {
+        for i in 0..view.Size().unwrap_or(0) {
+            if let Some(tag) = view
+                .GetAt(i)
+                .and_then(|l| l.LanguageTag())
+                .ok()
+                .map(|t| t.to_string())
+            {
+                supported.push(tag);
+            }
+        }
+    }
+    (system, supported)
+}
+
+/// Every way to ask Windows for a recognizer, best first: the languages [`speech_candidates`]
+/// picks, then Windows' own default (`None`). A session tries them in turn until one opens.
+#[cfg(windows)]
+fn candidate_languages(chosen: Option<&str>) -> Vec<Option<String>> {
+    let (system, supported) = speech_languages();
+    let mut out: Vec<Option<String>> = speech_candidates(chosen, system.as_deref(), &supported)
+        .into_iter()
+        .map(Some)
+        .collect();
+    out.push(None);
+    out
+}
+
+/// One recognizer: in the named language, or in Windows' own default for `None`.
+#[cfg(windows)]
+fn create_recognizer(
+    tag: Option<&str>,
+) -> windows::core::Result<windows::Media::SpeechRecognition::SpeechRecognizer> {
+    use windows::core::HSTRING;
+    use windows::Media::SpeechRecognition::SpeechRecognizer;
+    match tag {
+        Some(tag) => {
+            let lang = windows::Globalization::Language::CreateLanguage(&HSTRING::from(tag))?;
+            SpeechRecognizer::Create(&lang)
+        }
+        None => SpeechRecognizer::new(),
+    }
+}
+
+/// Give `recognizer` its dictation model and start a continuous session on it. The three
+/// events post into `tx`.
+#[cfg(windows)]
+fn open_session(
+    tx: &Sender<LiveMsg>,
+    recognizer: &windows::Media::SpeechRecognition::SpeechRecognizer,
+) -> windows::core::Result<Windows> {
+    use windows::core::{Error as WError, Ref, HSTRING};
+    use windows::Foundation::TypedEventHandler;
+    use windows::Media::SpeechRecognition::{
+        SpeechContinuousRecognitionCompletedEventArgs,
+        SpeechContinuousRecognitionResultGeneratedEventArgs, SpeechContinuousRecognitionSession,
+        SpeechRecognitionHypothesisGeneratedEventArgs, SpeechRecognitionResultStatus,
+        SpeechRecognitionScenario, SpeechRecognitionTopicConstraint, SpeechRecognizer,
+    };
+
+    let hint = HSTRING::from("helm dictation");
+    let constraint =
+        SpeechRecognitionTopicConstraint::Create(SpeechRecognitionScenario::Dictation, &hint)?;
+    recognizer.Constraints()?.Append(&constraint)?;
+    let compiled = wait_op(
+        &recognizer.CompileConstraintsAsync()?,
+        Duration::from_secs(15),
+    )?;
+    if compiled.Status()? != SpeechRecognitionResultStatus::Success {
+        return Err(WError::new(
+            windows::core::HRESULT(0x8004_5000u32 as i32),
+            "Windows speech recognition could not load its dictation model.",
+        ));
+    }
+    let session = recognizer.ContinuousRecognitionSession()?;
+
+    let result_tx = tx.clone();
+    let result_handler = TypedEventHandler::new(
+        move |_s: Ref<SpeechContinuousRecognitionSession>,
+              args: Ref<SpeechContinuousRecognitionResultGeneratedEventArgs>|
+              -> windows::core::Result<()> {
+            // A settled sentence; an empty one (nothing heard in this pause) still goes, so the
+            // session clears the in-progress text of the dropped phrase.
+            let text = args.ok()?.Result()?.Text()?;
+            let _ = result_tx.send(LiveMsg::Final(text.to_string()));
+            Ok(())
+        },
+    );
+    let result_token = session.ResultGenerated(&result_handler)?;
+    let completed_tx = tx.clone();
+    let completed_handler = TypedEventHandler::new(
+        move |_s: Ref<SpeechContinuousRecognitionSession>,
+              args: Ref<SpeechContinuousRecognitionCompletedEventArgs>|
+              -> windows::core::Result<()> {
+            let status = args.ok()?.Status()?;
+            let msg = if status == SpeechRecognitionResultStatus::Success
+                || status == SpeechRecognitionResultStatus::UserCanceled
+            {
+                LiveMsg::Ended
+            } else {
+                LiveMsg::Failed(end_message(status))
+            };
+            let _ = completed_tx.send(msg);
+            Ok(())
+        },
+    );
+    let completed_token = session.Completed(&completed_handler)?;
+    let hypothesis_tx = tx.clone();
+    let hypothesis_handler = TypedEventHandler::new(
+        move |_s: Ref<SpeechRecognizer>,
+              args: Ref<SpeechRecognitionHypothesisGeneratedEventArgs>|
+              -> windows::core::Result<()> {
+            // Words as they are heard, for the sentence in progress. The service re-states the
+            // whole sentence on every hypothesis, never just the new words, so every hypothesis
+            // replaces the one before it: no shared state, nothing the thread ordering can
+            // double up or drop.
+            let text = args.ok()?.Hypothesis()?.Text()?;
+            let t = text.to_string();
+            if !t.trim().is_empty() {
+                let _ = hypothesis_tx.send(LiveMsg::Replace(t));
+            }
+            Ok(())
+        },
+    );
+    let hypothesis_token = recognizer.HypothesisGenerated(&hypothesis_handler)?;
+    wait_action(&session.StartAsync()?, Duration::from_secs(10))?;
+    Ok(Windows {
+        recognizer: recognizer.clone(),
+        session,
+        result_token,
+        completed_token,
+        hypothesis_token,
+        started: true,
+    })
 }
 
 #[cfg(windows)]
 impl Engine for WinRtEngine {
     fn start(&mut self) -> Result<(), String> {
-        use windows::core::{Ref, HSTRING};
-        use windows::Foundation::TypedEventHandler;
-        use windows::Media::SpeechRecognition::{
-            SpeechContinuousRecognitionCompletedEventArgs,
-            SpeechContinuousRecognitionResultGeneratedEventArgs,
-            SpeechContinuousRecognitionSession, SpeechRecognitionHypothesisGeneratedEventArgs,
-            SpeechRecognitionResultStatus, SpeechRecognitionScenario,
-            SpeechRecognitionTopicConstraint, SpeechRecognizer,
-        };
-
-        // SAFETY: this thread is owned by the session; RoInitialize runs once on it and
-        // RoUninitialize runs in Drop after every interface is released. The recogniser is
+        // SAFETY: this thread is owned by the session; RoInitialize runs once on it and the
+        // guard below runs RoUninitialize after every interface is released. The recogniser is
         // agile, so the multithreaded apartment never shares COM pointers with other threads.
         unsafe {
             windows::Win32::System::WinRT::RoInitialize(
@@ -464,124 +672,43 @@ impl Engine for WinRtEngine {
             )
             .map_err(|e| start_failure(&e))?;
         }
-        let built = (|| -> windows::core::Result<Windows> {
-            {
-                use windows::core::Error as WError;
-                // The user's language when they named one, brought back to a tag this PC's
-                // speech service really has (a bare `en` is not one of those); Windows' own
-                // speech language when they named none or nothing fits.
-                let recognizer = match self.language.as_deref() {
-                    Some(tag) => {
-                        let fallback = SpeechRecognizer::new()?;
-                        let system = fallback.CurrentLanguage()?.LanguageTag()?.to_string();
-                        let view = SpeechRecognizer::SupportedTopicLanguages()?;
-                        let mut supported: Vec<String> = Vec::new();
-                        for i in 0..view.Size()? {
-                            supported.push(view.GetAt(i)?.LanguageTag()?.to_string());
-                        }
-                        match pick_speech_tag(tag, &system, &supported) {
-                            Some(chosen) => {
-                                fallback.Close().ok();
-                                let lang = windows::Globalization::Language::CreateLanguage(
-                                    &HSTRING::from(chosen),
-                                )?;
-                                SpeechRecognizer::Create(&lang)?
-                            }
-                            None => fallback,
-                        }
-                    }
-                    None => SpeechRecognizer::new()?,
-                };
-                let hint = HSTRING::from("helm dictation");
-                let constraint = SpeechRecognitionTopicConstraint::Create(
-                    SpeechRecognitionScenario::Dictation,
-                    &hint,
-                )?;
-                recognizer.Constraints()?.Append(&constraint)?;
-                let compiled = wait_op(
-                    &recognizer.CompileConstraintsAsync()?,
-                    Duration::from_secs(15),
-                )?;
-                if compiled.Status()? != SpeechRecognitionResultStatus::Success {
-                    return Err(WError::new(
-                        windows::core::HRESULT(0x8004_5000u32 as i32),
-                        "Windows speech recognition could not load its dictation model.",
-                    ));
-                }
-                let session = recognizer.ContinuousRecognitionSession()?;
+        // Declared before anything that needs the Runtime: it drops after all of it, on every
+        // way out of this function. On success it moves into the engine.
+        let apartment = UninitializeOnDrop;
 
-                let tx = self.tx.clone();
-                let result_handler = TypedEventHandler::new(
-                    move |_s: Ref<SpeechContinuousRecognitionSession>,
-                          args: Ref<SpeechContinuousRecognitionResultGeneratedEventArgs>|
-                          -> windows::core::Result<()> {
-                        // A settled sentence; an empty one (nothing heard in this pause) still
-                        // goes, so the session clears the in-progress text of the dropped phrase.
-                        let text = args.ok()?.Result()?.Text()?;
-                        let _ = tx.send(LiveMsg::Final(text.to_string()));
-                        Ok(())
-                    },
-                );
-                let result_token = session.ResultGenerated(&result_handler)?;
-                let tx = self.tx.clone();
-                let completed_handler = TypedEventHandler::new(
-                    move |_s: Ref<SpeechContinuousRecognitionSession>,
-                          args: Ref<SpeechContinuousRecognitionCompletedEventArgs>|
-                          -> windows::core::Result<()> {
-                        let status = args.ok()?.Status()?;
-                        let msg = if status == SpeechRecognitionResultStatus::Success
-                            || status == SpeechRecognitionResultStatus::UserCanceled
-                        {
-                            LiveMsg::Ended
-                        } else {
-                            LiveMsg::Failed(end_message(status))
-                        };
-                        let _ = tx.send(msg);
-                        Ok(())
-                    },
-                );
-                let completed_token = session.Completed(&completed_handler)?;
-                let tx = self.tx.clone();
-                let hypothesis_handler = TypedEventHandler::new(
-                    move |_s: Ref<SpeechRecognizer>,
-                          args: Ref<SpeechRecognitionHypothesisGeneratedEventArgs>|
-                          -> windows::core::Result<()> {
-                        // Words as they are heard, for the sentence in progress. The service
-                        // re-states the whole sentence on every hypothesis, never just the new
-                        // words, so every hypothesis replaces the one before it — no shared
-                        // state, nothing the thread ordering can double up or drop.
-                        let text = args.ok()?.Hypothesis()?.Text()?;
-                        let t = text.to_string();
-                        if !t.trim().is_empty() {
-                            let _ = tx.send(LiveMsg::Replace(t));
-                        }
-                        Ok(())
-                    },
-                );
-                let hypothesis_token = recognizer.HypothesisGenerated(&hypothesis_handler)?;
-                wait_action(&session.StartAsync()?, Duration::from_secs(10))?;
-                Ok(Windows {
-                    recognizer,
-                    session,
-                    result_token,
-                    completed_token,
-                    hypothesis_token,
-                    started: true,
-                    _apartment: UninitializeOnDrop,
-                })
-            }
-        })();
-        match built {
-            Ok(inner) => {
-                self.inner = Some(inner);
-                Ok(())
-            }
-            Err(e) => {
-                // The apartment was opened; the thread is leaving, so balance it here.
-                unsafe { windows::Win32::System::WinRT::RoUninitialize() };
-                Err(start_failure(&e))
+        // The user's language when they named one, brought back to a tag this PC's speech
+        // service really has (a bare `en` is not one of those), then the other tags of that
+        // language, then Windows' own. The first that opens, compiles and starts wins; when none
+        // does, the first failure is the one the user is told, because it is about the language
+        // they asked for.
+        let mut first_failure: Option<windows::core::Error> = None;
+        for tag in candidate_languages(self.language.as_deref()) {
+            let label = tag.as_deref().unwrap_or("the default language");
+            let recognizer = match create_recognizer(tag.as_deref()) {
+                Ok(r) => r,
+                Err(e) => {
+                    log::warn!("live dictation: opening {label} failed: {e}");
+                    first_failure.get_or_insert(e);
+                    continue;
+                }
+            };
+            match open_session(&self.tx, &recognizer) {
+                Ok(inner) => {
+                    self.inner = Some(inner);
+                    self.apartment = Some(apartment);
+                    return Ok(());
+                }
+                Err(e) => {
+                    log::warn!("live dictation: starting {label} failed: {e}");
+                    recognizer.Close().ok();
+                    first_failure.get_or_insert(e);
+                }
             }
         }
+        Err(first_failure.map_or_else(
+            || "Windows speech recognition could not start on this PC.".to_owned(),
+            |e| start_failure(&e),
+        ))
     }
 
     fn next(&mut self, wait: Duration) -> Option<LiveMsg> {
@@ -625,7 +752,8 @@ impl Drop for Windows {
             self.session.CancelAsync().ok();
         }
         self.recognizer.Close().ok();
-        // The apartment is uninitialised by the `_apartment` field, which drops after this one.
+        // The apartment is uninitialised by the engine's `apartment` field, which drops after
+        // this one.
     }
 }
 
@@ -700,6 +828,12 @@ pub(crate) fn start_failure(e: &windows::core::Error) -> String {
         // Windows that is the Speech page in Settings, the same switch dictation obeys.
         0x8004_5509 => {
             "Windows speech recognition hasn't been allowed to listen yet. Turn it on in Windows Settings, under Privacy & security → Speech.".to_owned()
+        }
+        // The generic "invalid operation" Windows answers when the speech service is there but
+        // will not open a recogniser: in practice a speech language that is not installed (or
+        // only half installed), or online speech recognition switched off.
+        0x8013_1509 => {
+            "Windows speech recognition would not start. Check that a speech language is installed in Windows Settings, under Time & language → Speech, and that online speech recognition is on under Privacy & security → Speech.".to_owned()
         }
         0x8004_5000..=0x8004_5fff => {
             "Windows speech recognition has no model for your Windows language. Add one in Windows Settings, under Time & language.".to_owned()

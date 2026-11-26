@@ -2,7 +2,7 @@
 //!
 //! Where a recording of the user's voice is sent decides who hears it, so a chat reads the
 //! setting and stages a change (`app_stage_settings`) for the user to approve. The value is
-//! `{sttUrl, allowPrivateNetwork, model, language}`; a staged value names only the fields to
+//! `{sttUrl, allowPrivateNetwork, model, language, mode}`; a staged value names only the fields to
 //! change, and the result passes the same address rule as the Settings page.
 
 use crate::settings::{self, Settings};
@@ -27,6 +27,7 @@ fn as_json(s: &Settings) -> Value {
         "allowPrivateNetwork": s.allow_private_network,
         "model": s.model,
         "language": s.language,
+        "mode": s.mode,
     })
 }
 
@@ -68,6 +69,13 @@ fn patched(s: &Settings, patch: &Value) -> Result<Settings, String> {
                 }
                 out.language = l.to_owned();
             }
+            "mode" => {
+                let m = v.as_str().map(str::trim).unwrap_or_default();
+                if !settings::mode_ok(m) {
+                    return Err("mode is live or record.".into());
+                }
+                out.mode = m.to_owned();
+            }
             other => {
                 return Err(format!(
                     "{KEY} has no field called \"{}\".",
@@ -107,7 +115,7 @@ impl SettingsExtension for DictationKey {
                 "type": "object",
                 "merge": true,
                 "default": as_json(&Settings::default()),
-                "about": "Settings > Shell > Dictation: where the microphone button sends a recording to be turned into text. sttUrl is the speech-to-text server's address (http://, on this computer, or on the user's own network when allowPrivateNetwork is true; null for none), model and language are what it is asked for. Send only the fields to change.",
+                "about": "Settings > Shell > Dictation: where the microphone button sends a recording to be turned into text. sttUrl is the speech-to-text server's address (http://, on this computer, or on the user's own network when allowPrivateNetwork is true; null for none), model and language are what it is asked for. mode is live (words as you speak, using Windows' own speech service when it can start, the server otherwise) or record (record, then send to the server). Send only the fields to change.",
             })
         })
     }
@@ -161,6 +169,9 @@ mod tests {
             (after["model"].clone(), after["language"].clone()),
             (json!("tiny"), json!("en"))
         );
+        assert_eq!(after["mode"], "live", "live is the default way");
+        let (_, rec) = go(json!({"mode": "record"})).unwrap();
+        assert_eq!(rec["mode"], "record");
         // The address rule is the page's: a public or unticked network address is refused.
         for (patch, part) in [
             (json!({"sttUrl": "http://8.8.8.8:8000"}), "network"),
@@ -168,6 +179,7 @@ mod tests {
             (json!({"sttUrl": "https://127.0.0.1"}), "http://"),
             (json!({"model": "bad model"}), "letters"),
             (json!({"language": "English"}), "code"),
+            (json!({"mode": "loud"}), "live or record"),
             (json!({"allowPrivateNetwork": "yes"}), "true or false"),
             (json!({"loud": 1}), "no field"),
             (json!(5), "only the fields to change"),
