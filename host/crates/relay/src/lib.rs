@@ -91,6 +91,7 @@ pub mod household;
 pub mod hub_view;
 pub mod index_line;
 pub mod knowledge_line;
+pub mod lean;
 pub mod notify;
 pub mod pair;
 pub mod people;
@@ -194,6 +195,27 @@ pub fn register_services(services: &mut Services, events: &Arc<dyn EventSink>) {
     let index = index_line::IndexLine::new(client.handle());
     client.attach_index(Arc::new(index_line::IndexSinkHandle(index.clone())));
     services.insert(index);
+    // A lean speaker chat reaches Helm's MCP client's Home Assistant server alone; every other
+    // chat keeps the filter that was there.
+    if let (Some(db), Some(store)) = (
+        services.get::<helm_core::db::Database>(),
+        services.get::<helm_mcp::McpStore>(),
+    ) {
+        let inner = services
+            .get::<helm_hosttools::McpServerFilterGate>()
+            .map(|g| g.0.clone());
+        services.insert(Arc::new(helm_hosttools::McpServerFilterGate(Arc::new(
+            lean::LeanServers {
+                inner,
+                section: channel::ChannelSection {
+                    db: db.clone(),
+                    profile_dir: profile.dir.clone(),
+                },
+                db,
+                store,
+            },
+        ))));
+    }
     services.insert(sink);
     services.insert(voice.shown());
     services.insert(voice);

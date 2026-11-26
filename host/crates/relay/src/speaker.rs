@@ -141,7 +141,8 @@ impl PolicyFile {
     }
 }
 
-/// One profile's speaker files: its policy and its talk list, and the folder its chats start in.
+/// One profile's speaker files: its policy and its talk list, and the folder its chats start in
+/// (`speaker/<profileId>`, which is how a chat there is known for a speaker chat of that profile).
 #[derive(Clone)]
 pub struct Paths {
     pub policy: PathBuf,
@@ -213,7 +214,7 @@ pub fn paths(profile_dir: &Path, profile_id: &str) -> Paths {
     Paths {
         policy: dir.join("speaker-policy.json"),
         chats: dir.join("speaker-chats.json"),
-        folder: crate::channel::speaker_folder(profile_dir),
+        folder: crate::channel::speaker_folder(profile_dir).join(profile_id),
     }
 }
 

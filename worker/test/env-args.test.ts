@@ -169,6 +169,14 @@ test("stream-json both ways, partial messages, replayed user messages, stdio per
   assert.equal(flag(a, "--setting-sources"), "user,project,local");
   // A chat for someone other than the PC's own person leaves the owner's personal settings out.
   assert.equal(flag(buildClaudeArgs({ settingSources: ["project", "local"] }), "--setting-sources"), "project,local");
+  // A lean chat: built-in tools off, its own system prompt in place of Claude Code's, and nothing
+  // appended to it (not the launch's addendum, not the worker's own rule).
+  const lean = buildClaudeArgs({ lean: true, systemPrompt: "Persona.", appendSystemPrompt: "rules" }, { promptRule: "the rule", appendFile: "rules.txt" });
+  assert.equal(flag(lean, "--tools"), "");
+  assert.equal(flag(lean, "--system-prompt"), "Persona.");
+  assert.ok(!lean.includes("--append-system-prompt") && !lean.includes("--append-system-prompt-file"));
+  const normal = buildClaudeArgs({ appendSystemPrompt: "rules" });
+  assert.ok(!normal.includes("--tools") && !normal.includes("--system-prompt"), "an ordinary chat keeps Claude Code's own tools and prompt");
 });
 
 test("effort defaults to xhigh; haiku gets none; an unknown effort falls back to the default", () => {
