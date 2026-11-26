@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { carryOnRollOver, decideOpen, openTarget } from './follow.ts';
+import { carryDraft, carryOnRollOver, decideOpen, followRollOver, mergedDraft, openTarget } from './follow.ts';
 
 // (event, chat on screen, expected decision): the window follows when the host names no guard
 // or the user is still looking at the guarded chat; otherwise the user only gets a notice.
@@ -48,4 +48,51 @@ test('the side panel goes with a roll over, and only with one', async () => {
   assert.equal(await carryOnRollOver({ ifViewing: 'c1' }, successor, carry), false);
   assert.equal(await carryOnRollOver({ chatId: 'c2', ifViewing: 'c1' }, async () => Promise.reject(new Error('gone')), carry), false);
   assert.equal(moved.length, 1);
+});
+
+// The window following a roll over: the panel carry and the draft carry are one step, and both
+// happen only for a real roll over, and after the composers have saved what was typed.
+test('following a roll over carries the panel, saves the composers, then carries typed text', async () => {
+  const chats: Record<string, { prevSessionId: string | null; draft: string; draftRevision: number }> = {
+    c1: { prevSessionId: null, draft: 'typed after the move', draftRevision: 50 },
+    c2: { prevSessionId: 'c1', draft: '', draftRevision: 40 },
+  };
+  const log: string[] = [];
+  const deps = {
+    loadChat: async (id: string) => chats[id]!,
+    carryPanel: (from: string, to: string) => void log.push(`panel ${from}>${to}`),
+    flush: async () => void log.push('flush'),
+    saveDraft: async (id: string, text: string, rev: number) => void log.push(`save ${id} "${text}" ${rev > 50 ? 'newer' : 'older'}`),
+  };
+  assert.equal(await followRollOver({ chatId: 'c2', ifViewing: 'c1' }, deps), true);
+  assert.deepEqual(log, ['panel c1>c2', 'flush', 'save c2 "typed after the move" newer', 'save c1 "" newer']);
+  // Not a roll over: nothing moves.
+  log.length = 0;
+  assert.equal(await followRollOver({ chatId: 'c1', ifViewing: 'c2' }, deps), false);
+  assert.deepEqual(log, []);
+});
+
+test('typed text carries to the successor without overwriting what it holds', async () => {
+  // [old draft, successor draft, what is saved to the successor (null: nothing is)]
+  const cases: [string, string, string | null][] = [
+    ['typed', '', 'typed'], // an empty successor takes it
+    ['carried and more', 'carried', 'carried and more'], // the later part of the same text
+    ['carried', 'carried and more', null], // the successor already holds more
+    ['typed', 'something else', 'something else\n\ntyped'], // different text: both kept, nothing overwritten
+    ['  ', 'kept', null], // nothing typed in the old one
+  ];
+  for (const [oldDraft, successor, want] of cases) {
+    const saved: [string, string, number][] = [];
+    const draft = (d: string, draftRevision: number) => async () => ({ draft: d, draftRevision });
+    const holders: Record<string, () => Promise<{ draft: string; draftRevision: number }>> = { old: draft(oldDraft, 10), new: draft(successor, 20) };
+    const done = await carryDraft('old', 'new', (id) => holders[id]!(), async (id, text, rev) => void saved.push([id, text, rev]), () => 5);
+    const toNew = saved.find((s) => s[0] === 'new');
+    assert.equal(toNew?.[1] ?? null, want, JSON.stringify([oldDraft, successor]));
+    if (toNew) assert.equal(toNew[2], 21, 'newer than what the successor holds');
+    assert.equal(done, oldDraft.trim() !== '');
+    assert.deepEqual(saved.filter((s) => s[0] === 'old'), oldDraft.trim() !== '' ? [['old', '', 11]] : []);
+  }
+  assert.equal(mergedDraft('a b', ''), 'a b');
+  // A failing read or save carries nothing and says so.
+  assert.equal(await carryDraft('old', 'new', async () => Promise.reject(new Error('gone')), async () => undefined), false);
 });

@@ -5,6 +5,7 @@ import {
   currentLayer,
   defaultLayer,
   layerLabel,
+  layerNote,
   layerOptions,
   moveTargets,
   projectsLabel,
@@ -47,6 +48,17 @@ test('layers: the opening layer, the shown layer and the move targets', () => {
   assert.equal(currentLayer(options, null, 'profile:p-alex'), 'profile:p-alex');
   assert.deepEqual(moveTargets(options, 'profile:p-alex').map((o) => o.key), ['everyone', 'profile:p-sam']);
   assert.equal(layerLabel(options, 'profile:p-sam'), 'Sam');
+  // [layer, own profile's layer, text starts with, another person's list]
+  for (const [layer, own, starts, other] of [
+    ['everyone', 'profile:p-alex', 'Loaded into every chat', false],
+    ['profile:p-alex', 'profile:p-alex', "Loaded into Alex's chats only", false],
+    ['profile:p-sam', 'profile:p-alex', "This is Sam's list, not yours", true],
+    ['profile:p-sam', null, "Loaded into Sam's chats only", false],
+  ] as const) {
+    const note = layerNote(options, layer, own);
+    assert.ok(note.text.startsWith(starts), `${layer}/${own}: ${note.text}`);
+    assert.equal(note.other, other, `${layer}/${own}`);
+  }
   assert.equal(layerLabel(options, 'profile:deleted'), 'a removed profile');
 });
 

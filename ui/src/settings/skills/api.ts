@@ -154,6 +154,9 @@ export function knowledgeOps(api: Api) {
       api<KnowledgeLayer>('knowledge_delete', { layer, kind, name }),
     move: (kind: KnowledgeKind, name: string, from: string, to: string) =>
       api<{ moved: string }>('knowledge_move', { kind, name, from, to }),
+    /** Copy an item into another list and leave the original: how a rule becomes a variant for someone else. */
+    copy: (kind: KnowledgeKind, name: string, from: string, to: string) =>
+      api<{ copied: string }>('knowledge_copy', { kind, name, from, to }),
     reveal: (layer: string, kind?: KnowledgeKind) =>
       api<{ revealed: boolean }>('knowledge_reveal', kind ? { layer, kind } : { layer }),
     /**

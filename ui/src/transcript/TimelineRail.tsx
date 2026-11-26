@@ -11,6 +11,7 @@ import type { MessageRow } from '../api/types.ts';
 import { CHECKPOINT_ACTION_ID } from '../checkpoints/CheckpointSlot.tsx';
 import { IconAlert, IconChat, IconCheck, IconClock, IconEdit, IconFilePlus, IconTerminal, IconUndo, type IconProps } from '../ui/icons.tsx';
 import { messageActionsFor } from './slots.ts';
+import { slotContextFor } from './session.ts';
 import { compactCount, newTokens } from './rowMeta.ts';
 import { hasWork, railMarkers, timelineEvents, visibleSpan, type EventKind, type RailMarker } from './timeline.ts';
 
@@ -196,7 +197,7 @@ export function TimelineRail({ rows, onJump, container }: TimelineRailProps) {
           data-testid="timeline-history"
           title="Go back to before this message"
           aria-label="Go back to before this message"
-          onClick={() => goBack.run(goBackRow, { chatId: goBackRow.chatId, sessionId: goBackRow.chatId, isLatestAssistant: false, running: false, interactionOpen: false })}
+          onClick={() => goBack.run(goBackRow, slotContextFor(goBackRow, { chatId: goBackRow.chatId, latestAssistantId: null, running: false, interactionOpen: false }))}
         >
           <IconUndo size={13} />
         </button>

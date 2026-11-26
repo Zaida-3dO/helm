@@ -503,6 +503,7 @@ mod tests {
             error: None,
             rolls_to: None,
             helpers: false,
+            background_jobs: 0,
             finished_turn: false,
             unreported: false,
         }
@@ -997,7 +998,7 @@ mod tests {
         assert!(open.contains(&"e1".to_string()) && open.contains(&"p1".to_string()));
 
         // A running chat reads as busy while its turn lasts; messages never hold it open.
-        let real = crate::probes::RealProbes { db: db.clone() };
+        let real = crate::probes::RealProbes::new(db.clone());
         assert!(!real.chat("c7").unwrap().unwrap().busy);
         // A turn end the stop judge is still checking reads as busy while the hold is recent, and
         // not once it is old (a crash could leave one behind) or gone.
@@ -1123,6 +1124,7 @@ mod tests {
             "watcher".into(),
             ChatObs {
                 helpers: true, // watcher itself is busy behind its helpers
+                background_jobs: 0,
                 ..idle()
             },
         );
@@ -1130,6 +1132,7 @@ mod tests {
             "crew".into(),
             ChatObs {
                 helpers: true,
+                background_jobs: 0,
                 finished_turn: true,
                 unreported: true,
                 ..idle()

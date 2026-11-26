@@ -1,7 +1,9 @@
 //! `app_gpu`: the graphics card as an agent tool — read the card's lock (status), unload the
 //! local models to free the card (unload), and bring them back (reload).
 //!
-//! The three actions are exactly the ops the Settings > Local models card uses, so the tool adds
+//! `hold` and `release` set and clear the graphics-card hold (see `hold`): a note that makes the
+//! composers of local-model chats warn before a send reloads the model server. The first three
+//! actions are exactly the ops the Settings > Local models card uses, so the tool adds
 //! no path of its own: the ops already refuse an unload when nothing is loaded and a reload when
 //! the models are already on. Unload is the one with a consequence — it stops the chats running
 //! on local models and keeps new ones from loading until a reload — so it asks for an explicit
@@ -24,8 +26,22 @@ async fn gpu(ctx: ToolCtx, a: Value) -> ToolResult {
             ctx.op("local_unload", json!({})).await
         }
         "reload" => ctx.op("local_reload", json!({})).await,
+        "hold" => {
+            let reason = a.get("reason").and_then(Value::as_str).unwrap_or("");
+            if reason.trim().is_empty() {
+                return Err(ToolError::refused(
+                    "hold needs a reason: one short line the composers show, such as \"Benchmark running\".",
+                ));
+            }
+            let mut args = json!({"reason": reason});
+            if let Some(h) = a.get("hours") {
+                args["hours"] = h.clone();
+            }
+            ctx.op("local_hold_set", args).await
+        }
+        "release" => ctx.op("local_hold_clear", json!({})).await,
         other => Err(ToolError::refused(format!(
-            "\"{other}\" is not an action: use status, unload or reload."
+            "\"{other}\" is not an action: use status, unload, reload, hold or release."
         ))),
     }
 }
@@ -35,11 +51,20 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
         ToolSpec::write(
             "app_gpu",
             "Share the graphics card with the local model server: read the lock (status), unload \
-             the loaded models to free the card (unload), or bring them back (reload).",
+             the loaded models to free the card (unload), bring them back (reload), or put a warning on \
+             sending to local-model chats while you use the card (hold, release).",
             json!({
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["status", "unload", "reload"]},
+                    "action": {"type": "string", "enum": ["status", "unload", "reload", "hold", "release"]},
+                    "reason": {
+                        "type": "string",
+                        "description": "With hold: one short line the composers show before \"sending will reload the local model\", for example \"Benchmark running\"."
+                    },
+                    "hours": {
+                        "type": "number",
+                        "description": "With hold: how long the warning lasts, in hours; 2 when left out, 8 at most."
+                    },
                     "confirm": {
                         "type": "boolean",
                         "description": "With unload: true when the user asked to free the card."
@@ -58,6 +83,13 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
              card's state in Settings follows.\n\
              reload: brings the models back after an unload; safe, and refused when they are \
              already on.\n\
+             hold: while you use the card for something a model load would spoil (a benchmark, a \
+             long GPU job), set a hold with a short reason. It refuses nothing: every composer of a \
+             local-model chat shows the reason with \"sending will reload the local model\" and \
+             asks once before the first send. It ends by itself after hours (2 by default, 8 at \
+             most). Call release as soon as you are done. Chats on Claude models are not \
+             affected.\n\
+             release: clears the hold now.\n\
              Never unload on your own: it takes the card away from other working chats.",
         ),
         gpu,
@@ -84,6 +116,8 @@ mod tests {
                 "local_lock_state" => Ok(json!({"state": "on", "working": false})),
                 "local_unload" => Ok(json!({"state": "manual", "working": true})),
                 "local_reload" => Ok(json!({"state": "on", "working": false})),
+                "local_hold_set" => Ok(json!({"state": "on", "holdReason": args["reason"]})),
+                "local_hold_clear" => Ok(json!({"state": "on"})),
                 other => Err(helm_ipc::ApiError::new("not_found", other.to_owned())),
             };
             Box::pin(async move { out })
@@ -134,11 +168,45 @@ mod tests {
             .await
             .unwrap_err()
             .public;
-        assert!(why.contains("status, unload or reload"), "{why}");
+        assert!(
+            why.contains("status, unload, reload, hold or release"),
+            "{why}"
+        );
+        // A hold needs a reason before it reaches the op, and passes the hours on only when given.
+        let why = f(ctx(&ops), json!({"action": "hold", "reason": "  "}))
+            .await
+            .unwrap_err()
+            .public;
+        assert!(why.contains("needs a reason"), "{why}");
+        assert_eq!(
+            f(
+                ctx(&ops),
+                json!({"action": "hold", "reason": "Benchmark running"})
+            )
+            .await
+            .unwrap()["holdReason"],
+            "Benchmark running"
+        );
+        f(
+            ctx(&ops),
+            json!({"action": "hold", "reason": "Soak test", "hours": 4}),
+        )
+        .await
+        .unwrap();
+        f(ctx(&ops), json!({"action": "release"})).await.unwrap();
         let got = ops.0.lock().unwrap().clone();
         assert_eq!(
             got.iter().map(|(o, _)| o.as_str()).collect::<Vec<_>>(),
-            vec!["local_lock_state", "local_unload", "local_reload"]
+            vec![
+                "local_lock_state",
+                "local_unload",
+                "local_reload",
+                "local_hold_set",
+                "local_hold_set",
+                "local_hold_clear"
+            ]
         );
+        assert_eq!(got[3].1, json!({"reason": "Benchmark running"}));
+        assert_eq!(got[4].1, json!({"reason": "Soak test", "hours": 4}));
     }
 }

@@ -11,6 +11,7 @@
 //! | `knowledge_rule_write` | maintenance | `{layer, path?, title, text, revision?}` → `{rule}`; a stale `revision` is a conflict |
 //! | `knowledge_delete` | maintenance | `{layer, kind: rule\|skill\|agent, name}` → the layer as `knowledge_get` |
 //! | `knowledge_move` | maintenance | `{kind, name, from, to}` → `{moved}`; refused when the name is taken there |
+//! | `knowledge_copy` | maintenance | `{kind, name, from, to}` → `{copied}`; as a move, but the original stays |
 //! | `knowledge_reveal` | blocking | `{layer, kind?}` → `{revealed}` |
 //! | `knowledge_skill_read` | blocking | `{layer, name}` → `{text}` (the skill's `SKILL.md`; `file_read` refuses Helm's data folder) |
 //! | `knowledge_memories_list` | blocking | `{layer}` → `{memories: [{id, title, owner, layer}]}` from the hub; code `unavailable` when it is not connected |
@@ -19,7 +20,8 @@
 //! | `skill_sources_save` | maintenance | `{source, revision?}` → `{sources, revision}` |
 //! | `skill_sources_remove` | maintenance | `{id, revision?}` → `{sources, revision}` |
 //!
-//! A layer is `everyone` or `profile:<profileId>`. Every change emits `knowledge-changed {layer}`
+//! A layer is `everyone` or `profile:<profileId>`. Any profile on this PC may be named, so one
+//! person can look after another's list; an id with no profile here is refused. Every change emits `knowledge-changed {layer}`
 //! (and the older `skills-changed` or `agents-changed` for the older ops).
 
 use crate::launch::{self, ChatKnowledge, ProfileRef};
@@ -30,6 +32,7 @@ use crate::undo::item_path;
 use crate::{agents, examples, plugins, rules, SkillEntry};
 use helm_core::profile::Profile;
 use helm_ipc::{ApiError, AppEvent, OpClass, OpCtx, OpRegistry};
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::{self, ErrorKind};
@@ -164,10 +167,32 @@ fn kind_of(raw: &str) -> Result<Kind, ApiError> {
     Kind::parse(raw).ok_or_else(|| ApiError::bad_args("The kind is `rule`, `skill` or `agent`."))
 }
 
+/// A person's layer must belong to a profile on this PC: a made-up or removed id is refused, and
+/// no folder is made for it.
+fn layer_exists(ctx: &OpCtx, layer: &Layer) -> Result<(), ApiError> {
+    let Layer::Profile(id) = layer else {
+        return Ok(());
+    };
+    let db = ctx
+        .services
+        .need::<helm_core::db::Database>()
+        .map_err(|_| ApiError::internal("Helm has no database."))?;
+    let found = db
+        .snapshot(|tx| {
+            tx.query_row("SELECT 1 FROM profiles WHERE id = ?1", [id], |_| Ok(()))
+                .optional()
+        })
+        .map_err(|_| ApiError::internal("The profiles could not be read."))?;
+    found
+        .map(|_| ())
+        .ok_or_else(|| ApiError::bad_args("No profile on this PC has that list."))
+}
+
 /// The profile folder, the layer an op names and its root; the examples are offered first.
 fn layer_root(ctx: &OpCtx, raw: Option<&str>) -> Result<(PathBuf, Layer, PathBuf), ApiError> {
     let data = profile(ctx)?;
     let layer = layer_of(raw)?;
+    layer_exists(ctx, &layer)?;
     examples::seed(&data);
     let root = layer.root(&data);
     Ok((data, layer, root))
@@ -399,6 +424,16 @@ fn knowledge_delete(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
 /// Copy one item to another layer, then remove it from the first. Nothing already in the second
 /// layer is overwritten.
 fn knowledge_move(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
+    transfer(ctx, v, true).map(|name| json!({ "moved": name }))
+}
+
+/// Copy one item to another layer and leave the original where it is: how one person's rule
+/// becomes a variant in someone else's list. Nothing already in the second layer is overwritten.
+fn knowledge_copy(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
+    transfer(ctx, v, false).map(|name| json!({ "copied": name }))
+}
+
+fn transfer(ctx: &OpCtx, v: Value, remove_original: bool) -> Result<String, ApiError> {
     let a: MoveArgs = parse(v, "a kind, a name and two layers")?;
     let kind = kind_of(&a.kind)?;
     let data = profile(ctx)?;
@@ -406,6 +441,8 @@ fn knowledge_move(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
     if from == to {
         return Err(ApiError::bad_args("Pick a different layer to move it to."));
     }
+    layer_exists(ctx, &from)?;
+    layer_exists(ctx, &to)?;
     let src = item_path(&data, &from, kind, &a.name)
         .map_err(|e| api_error(e, "That item could not be found."))?;
     let dest = item_path(&data, &to, kind, &a.name)
@@ -418,7 +455,7 @@ fn knowledge_move(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
             "The other layer already has one of that name.",
         ));
     }
-    let moved = if kind == Kind::Skill {
+    let copied = if kind == Kind::Skill {
         crate::install_dir(&src, &dest)
     } else {
         let cap = rules::MAX_RULE_FILE.max(agents::MAX_AGENT_FILE);
@@ -429,17 +466,20 @@ fn knowledge_move(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
             helm_core::privfs::write_atomic(&dest, &bytes)
         })
     };
-    moved.map_err(|e| api_error(e, "The item could not be copied."))?;
-    let removed = if kind == Kind::Skill {
-        std::fs::remove_dir_all(&src)
-    } else {
-        std::fs::remove_file(&src)
-    };
-    removed
-        .map_err(|_| ApiError::internal("It was copied, but the original could not be removed."))?;
-    knowledge_changed(ctx, &from);
+    copied.map_err(|e| api_error(e, "The item could not be copied."))?;
+    if remove_original {
+        let removed = if kind == Kind::Skill {
+            std::fs::remove_dir_all(&src)
+        } else {
+            std::fs::remove_file(&src)
+        };
+        removed.map_err(|_| {
+            ApiError::internal("It was copied, but the original could not be removed.")
+        })?;
+        knowledge_changed(ctx, &from);
+    }
     knowledge_changed(ctx, &to);
-    Ok(json!({ "moved": a.name }))
+    Ok(a.name)
 }
 
 fn knowledge_reveal(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
@@ -639,6 +679,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
         )
         .blocking("knowledge_delete", OpClass::Maintenance, knowledge_delete)
         .blocking("knowledge_move", OpClass::Maintenance, knowledge_move)
+        .blocking("knowledge_copy", OpClass::Maintenance, knowledge_copy)
         .blocking("knowledge_reveal", OpClass::Blocking, knowledge_reveal)
         .blocking(
             "knowledge_skill_read",
@@ -666,4 +707,136 @@ pub fn register_ops(reg: &mut OpRegistry) {
             OpClass::Maintenance,
             skill_sources_remove,
         );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use helm_core::db::{Database, MigrationRegistry};
+    use std::sync::Arc;
+
+    fn profiles_table(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+        tx.execute_batch(
+            "CREATE TABLE profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL, hub_person_id TEXT,
+                                    is_home INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO profiles(id, name, is_home) VALUES ('alex', 'Alex', 1), ('sam', 'Sam', 0);",
+        )
+    }
+
+    /// One person can see and look after another's list: every op takes any profile on this PC,
+    /// a copy leaves the original, and a profile that is not here is refused with nothing made.
+    #[test]
+    fn another_persons_list_can_be_read_edited_and_copied_to() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let mut dbreg = MigrationRegistry::new();
+        dbreg.initializer("profiles-test", profiles_table);
+        let db: Arc<Database> = Arc::new(Database::open(&data.join("t.db"), &dbreg).unwrap());
+        let mut services = helm_ipc::Services::new();
+        services.insert(db);
+        services.insert(Arc::new(Profile {
+            dir: data.clone(),
+            hash: String::new(),
+        }));
+        let ctx = OpCtx {
+            services: Arc::new(services),
+            events: Arc::new(helm_ipc::NullSink),
+        };
+        let alex = "profile:alex";
+        let sam = "profile:sam";
+        let titles = |layer: &str| -> Vec<String> {
+            let v = knowledge_get(&ctx, json!({ "layer": layer })).unwrap();
+            v["rules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["path"].as_str().unwrap().to_owned())
+                .collect()
+        };
+
+        // Write into Sam's list (a new rule), read it back, then edit it at the revision read.
+        let made = knowledge_rule_write(
+            &ctx,
+            json!({"layer": sam, "title": "Quiet hours", "text": "No loud tools after ten."}),
+        )
+        .unwrap();
+        let path = made["rule"]["path"].as_str().unwrap().to_owned();
+        assert_eq!(path, "rules/quiet-hours.md");
+        assert_eq!(titles(sam), [path.clone()]);
+        assert!(titles(alex).is_empty(), "Alex's own list is untouched");
+        let read = knowledge_rule_read(&ctx, json!({"layer": sam, "path": path})).unwrap();
+        assert_eq!(read["text"], "No loud tools after ten.");
+        let revision = read["rule"]["revision"].as_str().unwrap().to_owned();
+        knowledge_rule_write(
+            &ctx,
+            json!({"layer": sam, "path": path, "title": "Quiet hours", "text": "Nothing loud.", "revision": revision}),
+        )
+        .unwrap();
+        let stale = knowledge_rule_write(
+            &ctx,
+            json!({"layer": sam, "path": path, "title": "Quiet hours", "text": "Again.", "revision": revision}),
+        )
+        .unwrap_err();
+        assert_eq!(stale.code, "conflict");
+
+        // A copy keeps the original and lands in the other list; a taken name is refused; a move
+        // removes the original.
+        let copy = |from: &str, to: &str| {
+            knowledge_copy(
+                &ctx,
+                json!({"kind": "rule", "name": path, "from": from, "to": to}),
+            )
+        };
+        assert_eq!(copy(sam, alex).unwrap()["copied"], path);
+        assert_eq!(titles(sam), [path.clone()]);
+        assert_eq!(titles(alex), [path.clone()]);
+        assert_eq!(
+            knowledge_rule_read(&ctx, json!({"layer": alex, "path": path})).unwrap()["text"],
+            "Nothing loud."
+        );
+        assert_eq!(copy(sam, alex).unwrap_err().code, "conflict");
+        knowledge_move(
+            &ctx,
+            json!({"kind": "rule", "name": path, "from": sam, "to": "everyone"}),
+        )
+        .unwrap();
+        assert!(titles(sam).is_empty());
+        assert_eq!(titles("everyone"), [path.clone()]);
+
+        // Delete from the other person's list.
+        let left =
+            knowledge_delete(&ctx, json!({"layer": alex, "kind": "rule", "name": path})).unwrap();
+        assert!(left["rules"].as_array().unwrap().is_empty());
+
+        // A profile that is not on this PC is refused by every op, and no folder is made for it.
+        let ghost = "profile:ghost";
+        let refusals: Vec<(&str, ApiError)> = vec![
+            (
+                "get",
+                knowledge_get(&ctx, json!({"layer": ghost})).unwrap_err(),
+            ),
+            (
+                "read",
+                knowledge_rule_read(&ctx, json!({"layer": ghost, "path": path})).unwrap_err(),
+            ),
+            (
+                "write",
+                knowledge_rule_write(&ctx, json!({"layer": ghost, "title": "T", "text": "x"}))
+                    .unwrap_err(),
+            ),
+            (
+                "delete",
+                knowledge_delete(&ctx, json!({"layer": ghost, "kind": "rule", "name": path}))
+                    .unwrap_err(),
+            ),
+            ("copy to", copy("everyone", ghost).unwrap_err()),
+            ("copy from", copy(ghost, "everyone").unwrap_err()),
+            ("same layer", copy(alex, alex).unwrap_err()),
+        ];
+        for (what, err) in refusals {
+            assert_eq!(err.code, "bad_args", "{what}: {err}");
+        }
+        assert!(!data.join("knowledge/people/ghost").exists());
+    }
 }

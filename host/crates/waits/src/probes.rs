@@ -9,7 +9,7 @@ use crate::model::{ChatObs, Check, FileObs, PrObs, ProcessObs};
 use helm_core::db::Database;
 use rusqlite::OptionalExtension;
 use serde_json::Value;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 /// How long one `gh` call may take.
@@ -34,6 +34,32 @@ pub trait Probes: Send + Sync {
 
 pub struct RealProbes {
     pub db: Arc<Database>,
+    /// The chat runtime, once it exists: the only place a chat's running background jobs are
+    /// known, since they are never written to the database.
+    runtime: OnceLock<helm_chats::ChatRuntime>,
+}
+
+impl RealProbes {
+    pub fn new(db: Arc<Database>) -> Self {
+        Self {
+            db,
+            runtime: OnceLock::new(),
+        }
+    }
+
+    /// Where the live chats are read from; set once the chat runtime exists.
+    pub fn set_runtime(&self, runtime: helm_chats::ChatRuntime) {
+        let _ = self.runtime.set(runtime);
+    }
+
+    /// The background jobs a chat has running: shell commands moved to the background and
+    /// sub-agents that are still working. A chat with no live worker has none.
+    fn background_jobs(&self, chat_id: &str) -> u32 {
+        let Some(t) = self.runtime.get().and_then(|rt| rt.live_thread(chat_id)) else {
+            return 0;
+        };
+        t.background_tasks.len() as u32 + t.subagents_running
+    }
 }
 
 impl Probes for RealProbes {
@@ -56,6 +82,7 @@ impl Probes for RealProbes {
                                 error: r.get(2)?,
                                 rolls_to: None,
                                 helpers: false,
+                                background_jobs: 0,
                                 finished_turn: false,
                                 unreported: false,
                             })
@@ -153,6 +180,12 @@ impl Probes for RealProbes {
                 }))
             })
             .map_err(|e: rusqlite::Error| e.to_string())
+            .map(|obs| {
+                obs.map(|mut o| {
+                    o.background_jobs = self.background_jobs(chat_id);
+                    o
+                })
+            })
     }
 
     fn process(&self, pid: u32) -> ProcessObs {

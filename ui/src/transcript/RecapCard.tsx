@@ -9,7 +9,7 @@ import { IconCheck } from '../ui/icons.tsx';
 import { Glyph } from './icons.tsx';
 import { ShownThumb } from './GalleryCard.tsx';
 import { ChecklistSteps } from './LiveChecklist.tsx';
-import { pictureCount, type Recap } from './recap.ts';
+import { pictureCount, recapPictureChat, type Recap } from './recap.ts';
 import { recapLine } from './recapText.ts';
 import { ShownViewer } from './ShownViewer.tsx';
 import { recapSectionsFor, type SlotContext } from './slots.ts';
@@ -56,7 +56,7 @@ export function RecapCard({ recap, row, ctx }: { recap: Recap; row: MessageRow; 
           {thumbs.shown.map((t) => (
             <ShownThumb
               key={`${t.galleryId}/${t.index}`}
-              chatId={ctx.sessionId}
+              chatId={recapPictureChat(ctx)}
               galleryId={t.galleryId}
               index={t.index}
               label={`Open picture ${t.index + 1} full size`}
@@ -72,7 +72,7 @@ export function RecapCard({ recap, row, ctx }: { recap: Recap; row: MessageRow; 
           {s.render(row, ctx)}
         </div>
       ))}
-      {viewing && <ShownViewer chatId={ctx.sessionId} galleryId={viewing.galleryId} pictures={pictures} index={viewing.index} onIndex={(index) => setViewing({ ...viewing, index })} onClose={() => setViewing(null)} />}
+      {viewing && <ShownViewer chatId={recapPictureChat(ctx)} galleryId={viewing.galleryId} pictures={pictures} index={viewing.index} onIndex={(index) => setViewing({ ...viewing, index })} onClose={() => setViewing(null)} />}
     </div>
   );
 }

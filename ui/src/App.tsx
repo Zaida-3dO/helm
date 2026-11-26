@@ -53,7 +53,7 @@ import { TopBar } from './topbar/TopBar.tsx';
 import { EmptyMain } from './shell/EmptyMain.tsx';
 import { ShellShortcuts } from './shell/Shortcuts.tsx';
 import { SidebarResizer } from './shell/SidebarResizer.tsx';
-import { carryOnRollOver, decideOpen, openTarget, type OpenEvent } from './shell/follow.ts';
+import { decideOpen, followRollOver, openTarget, type OpenEvent } from './shell/follow.ts';
 import { SIDEBAR_VISIBLE_PREF, SIDEBAR_WIDTH_PREF, sidebarLayout } from './shell/layout.ts';
 import { TerminalDock } from './terminal/TerminalDock.tsx';
 import { SavedDueNotice } from './saved/SavedDueNotice.tsx';
@@ -114,9 +114,15 @@ export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers:
       bus.on('shell_open_chat', (e) => {
         const d = decideOpen(e as OpenEvent, shell.selection.chatId);
         if (!d) return;
-        // A roll over's successor takes over the old session's side panel before the window
-        // moves, so the reader finds the panel as they left it, whether or not they follow now.
-        const carried = carryOnRollOver(e as OpenEvent, async (id) => (await ops.get(id)).chat, (from, to) => panelStore.carry(from, to));
+        // A roll over's successor takes over the old session's side panel, and any text typed in
+        // its composer since the host moved the draft, before the window moves, so the reader
+        // finds both as they left them, whether or not they follow now.
+        const carried = followRollOver(e as OpenEvent, {
+          loadChat: async (id) => (await ops.get(id)).chat,
+          carryPanel: (from, to) => panelStore.carry(from, to),
+          flush: () => flushers.flushAll(),
+          saveDraft: (id, text, revision) => ops.saveDraft(id, text, revision),
+        });
         if (d.kind === 'select') {
           void carried.then(() => openChatWindow(ops, shell, d.chatId, d.messageId));
           return;
@@ -128,7 +134,7 @@ export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers:
           ttlMs: 8000,
         });
       }),
-    [bus, ops, shell],
+    [bus, ops, shell, flushers],
   );
   // A roll over that could not finish says why (the old chat is left as it was).
   useEffect(

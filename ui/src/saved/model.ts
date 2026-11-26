@@ -3,6 +3,7 @@
 // the one-line "Due in …" label.
 
 import type { Api } from '../api/client.ts';
+import type { SlotContext } from '../transcript/slots.ts';
 
 export type SavedState = 'saved' | 'filed' | 'done' | 'dismissed';
 
@@ -114,4 +115,13 @@ export function dueLabel(item: Pick<SavedItem, 'remindAt' | 'remindedAt'>, now: 
 /** The text a "Start a task" send puts in the new chat's draft. */
 export function draftFromItem(item: SavedItem): string {
   return `Picking this back up:\n${item.title}\n\n${item.body}`;
+}
+
+/**
+ * What "Save for later" on a message saves: the message under the session that holds it, since a
+ * chat that rolled over shows the rows of its earlier sessions too and the host keeps the saved
+ * copy beside the session that wrote it.
+ */
+export function savedFromRow(row: { id: number; text: string }, ctx: Pick<SlotContext, 'sessionId'>): { chatId: string; messageId: number; title: string; body: string } {
+  return { chatId: ctx.sessionId, messageId: row.id, ...savedFromText(row.text) };
 }
