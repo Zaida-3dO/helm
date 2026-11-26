@@ -13,7 +13,7 @@ import { registerRecapSection, registerRowFooter } from '../../transcript/slots.
 import { IconChevronDown, IconFileDiff, IconMaximize, IconMinimize } from '../../ui/icons.tsx';
 import { openInPanel, panelStore } from '../registry.ts';
 import { displayPath, pathKey } from '../viewer/paths.ts';
-import { TurnLoader } from './loader.ts';
+import { TurnLoader, turnCardTarget } from './loader.ts';
 import { openTurnReview } from './review.ts';
 import './turns.css';
 
@@ -166,10 +166,10 @@ registerRowFooter({
   id: 'turn-changes',
   // Every settled assistant reply asks; the host answers only for a completed turn's last reply.
   appliesTo: (row, ctx) => row.role === 'assistant' && row.status === 'complete' && !(ctx.running && ctx.isLatestAssistant) && !ctx.hasRecap,
-  render: (row, ctx) => <TurnCard chatId={ctx.sessionId} messageId={row.id} revision={row.revision} />,
+  render: (row, ctx) => <TurnCard {...turnCardTarget(row, ctx)} />,
 });
 
 registerRecapSection({
   id: 'turn-changes',
-  render: (row, ctx) => <TurnCard chatId={ctx.sessionId} messageId={row.id} revision={row.revision} />,
+  render: (row, ctx) => <TurnCard {...turnCardTarget(row, ctx)} />,
 });

@@ -8,7 +8,7 @@ import type { ChatRecord, SendAction, Submission, ThreadState } from '../api/typ
 import { HOME_SEND_BEHAVIOR } from '../api/types.ts';
 import type { Flushers } from '../shell/quit.ts';
 import { playCue } from '../shell/sounds.ts';
-import { DraftSaver } from './drafts.ts';
+import { DraftSaver, takeHostDraft } from './drafts.ts';
 import { Editor, type EditorHandle } from './Editor.tsx';
 import { resolveKey, sendLabel, sendTooltip, stopTooltip, type KeyContext, type SendShortcut } from './keymap.ts';
 import { Button } from '../ui/controls.tsx';
@@ -190,14 +190,17 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
     };
   }, [saver, flushers]);
 
-  // A newer draft from the host (Recover to draft, Withdraw) replaces the editor's text.
+  // A newer draft from the host (Recover to draft, Withdraw) replaces the editor's text. Not
+  // when the chat has just rolled over and the reader typed in the last moments before the host
+  // moved the draft on: that text is kept and saved as newer than the host's revision, and the
+  // window carries it to the successor as it follows.
   useEffect(() => {
-    if (chat.draftRevision > saver.revision) {
-      saver.revision = chat.draftRevision;
-      editor.current?.setText(chat.draft);
-      setEmpty(!chat.draft);
+    const shown = takeHostDraft(saver, { draft: chat.draft, draftRevision: chat.draftRevision, nextSessionId: chat.nextSessionId });
+    if (shown !== null) {
+      editor.current?.setText(shown);
+      setEmpty(!shown);
     }
-  }, [chat.draft, chat.draftRevision, saver]);
+  }, [chat.draft, chat.draftRevision, chat.nextSessionId, saver]);
 
   useEffect(() => {
     const insert = (text: string) => {

@@ -197,6 +197,7 @@ pub fn chat_send(
         Repeat(Submission),
         New(Submission, bool, Option<(bool, crate::titles::Parked)>),
     }
+    let mut cleared: Vec<String> = Vec::new();
     let out = rt
         .db()
         .write(|tx| {
@@ -321,6 +322,10 @@ pub fn chat_send(
                      WHERE id = ?2 AND draft_revision <= ?3",
                     params![now, a.chat_id, a.draft_revision],
                 )?;
+                // A roll over hands the unsent draft to the successor. Words sent from this chat
+                // after that must not stay behind there as a second copy: the carried draft goes
+                // when it is the very text just sent.
+                cleared = clear_carried_draft(tx, &a.chat_id, &a.text, now)?;
             }
             let sub = store::get_submission(tx, &sid)?.expect("just inserted");
             Ok(Ok(Out::New(sub, true, title_job)))
@@ -382,8 +387,43 @@ pub fn chat_send(
             s
         }
     };
+    for id in &cleared {
+        emit_chat(rt, id);
+    }
     let chat = emit_chat(rt, &a.chat_id).ok_or_else(crate::ops::not_found)?;
     Ok(ChatSendResult { submission, chat })
+}
+
+/// Empty the draft that a roll over carried from `chat` to its successor when it is exactly
+/// the text `chat` has just sent (ignoring the blank space around it). Returns the successors
+/// whose draft was emptied.
+pub(crate) fn clear_carried_draft(
+    tx: &Transaction<'_>,
+    chat: &str,
+    sent: &str,
+    now: i64,
+) -> rusqlite::Result<Vec<String>> {
+    let held: Vec<(String, String)> = {
+        let mut st = tx.prepare(
+            "SELECT c.id, c.draft FROM chats c
+             JOIN chat_succession s ON s.chat_id = c.id
+             WHERE s.predecessor_id = ?1 AND c.draft <> ''",
+        )?;
+        let rows = st.query_map([chat], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    let mut cleared = Vec::new();
+    for (id, draft) in held {
+        if draft.trim() == sent.trim() {
+            tx.execute(
+                "UPDATE chats SET draft = '', draft_revision = max(?1, draft_revision + 1), updated_at = ?1
+                 WHERE id = ?2",
+                params![now, id],
+            )?;
+            cleared.push(id);
+        }
+    }
+    Ok(cleared)
 }
 
 /// A send made by the host for something other than the user's own typing: a cross-chat message
