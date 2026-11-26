@@ -41,7 +41,9 @@
 //! lost connection, a failing service), the exchange stays open with a line saying so, and the
 //! continued turn's answer is the one that goes up.
 
-use crate::client::{BoxFut, LineHandle, ServiceOutage, TelegramMessage, TelegramSink};
+use crate::client::{
+    BoxFut, LineHandle, ServiceOutage, ServiceRecovered, TelegramMessage, TelegramSink,
+};
 use crate::exec::AppExecutor;
 use crate::telegram::{self, ChatFacts, ChatPort, TagPolicy, TELEGRAM_ORIGIN};
 use helm_chats::submit::{
@@ -817,6 +819,52 @@ pub(crate) fn open_repair_chat(c: &Ctx, o: &ServiceOutage, now: i64) -> Result<S
     }
 }
 
+/// Tell the repair chat the hub opened for a service that the outage is over (blocking), so the
+/// alert closes itself instead of leaving a repair chat chasing a dead alarm. A service with no
+/// repair chat here answers `Ok` having done nothing.
+pub(crate) fn stand_down_repair_chat(
+    c: &Ctx,
+    chats: &Arc<Mutex<HashMap<String, String>>>,
+    b: &ServiceRecovered,
+) -> Result<(), String> {
+    // One stand-down per repair chat: the entry goes with it, so a later outage's recovery (a
+    // throttled one the PC never heard of, one days later, every flap of a flapping server)
+    // cannot wake the same finished chat again.
+    let chat = chats
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&b.service);
+    let Some(chat) = chat else {
+        return Ok(());
+    };
+    let words = service_words(&b.service);
+    let since = b.since.as_deref().unwrap_or("a while");
+    let text = format!(
+        "The {words} service answers the hub's health probe again (back at {}; it was \
+         unreachable since {}). If it checks out, say it is back and close this out.",
+        b.back, since
+    );
+    let sid = telegram::submission_id(&format!(
+        "repair-up/{}/{c}",
+        b.service,
+        c = helm_core::now_ms()
+    ));
+    host_send(
+        &c.rt,
+        HostSend {
+            chat_id: &chat,
+            submission_id: &sid,
+            text: &text,
+            origin: helm_chats::types::SubmissionOrigin::App,
+            page: None,
+            kind: None,
+            wait: None,
+        },
+    )
+    .map(|_| ())
+    .map_err(|e| e.message)
+}
+
 /// Put one message into its chat (blocking). `Err` leaves it unacknowledged at the hub.
 pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String> {
     let sid = telegram::submission_id(&msg.id);
@@ -1307,6 +1355,9 @@ pub struct ChatSink {
     pub asks: crate::approve::Asks,
     /// When each hub service's last repair chat was opened, so a standing outage gets one an hour.
     repair: Mutex<HashMap<String, i64>>,
+    /// The repair chat last opened for each hub service, so a `service_up` report can tell it
+    /// the outage ended instead of leaving it chasing a dead alarm.
+    repair_chats: Arc<Mutex<HashMap<String, String>>>,
 }
 
 /// A path the worker can be started in: without Windows' verbatim prefix.
@@ -1330,6 +1381,7 @@ impl ChatSink {
             asks: crate::approve::Asks::default(),
             watching: Mutex::new(HashMap::new()),
             repair: Mutex::new(HashMap::new()),
+            repair_chats: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -1714,8 +1766,36 @@ impl TelegramSink for ChatSink {
                 .map_err(|_| "The repair chat did not finish.".to_owned())
                 .and_then(|r| r);
             match opened {
-                Ok(id) => log::info!("relay: opened chat {id} to fix the {service} service"),
+                Ok(id) => {
+                    self.repair_chats
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .insert(service.clone(), id.clone());
+                    log::info!("relay: opened chat {id} to fix the {service} service");
+                }
                 Err(e) => log::warn!("relay: no repair chat for the {service} service: {e}"),
+            }
+        })
+    }
+
+    fn service_up<'a>(&'a self, b: ServiceRecovered) -> BoxFut<'a, ()> {
+        Box::pin(async move {
+            let Ok(c) = self.ctx(b.person.as_deref()) else {
+                log::info!("relay: a service recovery named no profile that runs a channel here");
+                return;
+            };
+            let service = b.service.clone();
+            let chats = self.repair_chats.clone();
+            let told = tokio::task::spawn_blocking(move || stand_down_repair_chat(&c, &chats, &b))
+                .await
+                .unwrap_or_else(|_| Err("the stand-down did not finish.".to_owned()));
+            match told {
+                Ok(()) => {
+                    log::info!("relay: stood down the repair watch for the {service} service")
+                }
+                Err(e) => log::warn!(
+                    "relay: the repair chat for the {service} service was not told it is back: {e}"
+                ),
             }
         })
     }

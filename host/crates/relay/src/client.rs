@@ -137,6 +137,21 @@ pub struct ServiceOutage {
     pub detail: Option<String>,
 }
 
+/// A service the hub could not reach is answering again, as its `service_up` frame carries it:
+/// one per outage, so an alert the PC raised for it can be closed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServiceRecovered {
+    /// The hub person whose PC this is for, verified by the hub. `None`: an older hub, which
+    /// means the PC's own (home) person.
+    pub person: Option<String>,
+    /// Which service, hub words for it: `stt` is the speech-to-text server.
+    pub service: String,
+    /// When the outage began, as the hub's wall clock: "HH:MM". `None`: an older hub.
+    pub since: Option<String>,
+    /// When the hub's probe saw it answering, as its wall clock: "HH:MM".
+    pub back: String,
+}
+
 /// Where Telegram messages go on the PC.
 pub trait TelegramSink: Send + Sync {
     /// `Ok` once the message is safely in Helm (it is then acknowledged to the hub).
@@ -148,6 +163,11 @@ pub trait TelegramSink: Send + Sync {
     /// The hub says one of its own services is down and asks the PC to deal with it. A PC that
     /// has no answer for it does nothing.
     fn service_down<'a>(&'a self, _outage: ServiceOutage) -> BoxFut<'a, ()> {
+        Box::pin(async {})
+    }
+    /// The hub says a service it had reported down is answering again. A PC that has no answer
+    /// for it does nothing.
+    fn service_up<'a>(&'a self, _back: ServiceRecovered) -> BoxFut<'a, ()> {
         Box::pin(async {})
     }
 }
@@ -1269,6 +1289,25 @@ impl Client {
                     sink.service_down(outage).await;
                 });
             }
+            Some("service_up") => {
+                let Some(service) = s("service") else {
+                    return;
+                };
+                let Ok(person) = self.frame_person(&v) else {
+                    log::info!("relay: a service_up frame named a person this PC does not act for");
+                    return;
+                };
+                let back = ServiceRecovered {
+                    person,
+                    service: service.to_owned(),
+                    since: s("since"),
+                    back: s("back").unwrap_or_else(|| "now".to_owned()),
+                };
+                let sink = self.sink.clone();
+                tokio::spawn(async move {
+                    sink.service_up(back).await;
+                });
+            }
             Some("voice") => {
                 let (Some(id), Some(text)) = (s("id"), s("text")) else {
                     return;
@@ -1463,6 +1502,7 @@ mod tests {
         got: Mutex<Vec<TelegramMessage>>,
         stops: Mutex<usize>,
         down: Mutex<Vec<ServiceOutage>>,
+        up: Mutex<Vec<ServiceRecovered>>,
         refuse: bool,
     }
     impl TelegramSink for Sink {
@@ -1489,6 +1529,10 @@ mod tests {
         }
         fn service_down<'a>(&'a self, outage: ServiceOutage) -> BoxFut<'a, ()> {
             self.down.lock().unwrap().push(outage);
+            Box::pin(async {})
+        }
+        fn service_up<'a>(&'a self, back: ServiceRecovered) -> BoxFut<'a, ()> {
+            self.up.lock().unwrap().push(back);
             Box::pin(async {})
         }
     }
@@ -1759,6 +1803,29 @@ mod tests {
                 service: "stt".into(),
                 since: "09:12".into(),
                 detail: Some("its health address does not answer".into()),
+            }]
+        );
+        // And its recovery report, so the PC can close the alert.
+        ws.send(Message::Text(
+            json!({"type": "service_up", "service": "stt", "since": "09:12", "back": "10:05"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        for _ in 0..100 {
+            if !sink.up.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            &*sink.up.lock().unwrap(),
+            &[ServiceRecovered {
+                person: None,
+                service: "stt".into(),
+                since: Some("09:12".into()),
+                back: "10:05".into(),
             }]
         );
         ws.send(Message::Text(

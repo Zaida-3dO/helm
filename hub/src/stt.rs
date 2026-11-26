@@ -34,6 +34,10 @@ pub const STT_RETRY_AFTER: Duration = Duration::from_secs(3);
 pub const HEALTH_PROBE: Duration = Duration::from_secs(60);
 /// How long one health probe may take.
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
+/// A failing health probe is confirmed with one more after this before it opens an outage: the
+/// probe path (hub to PC) drops a single request now and then while the server is fine, and one
+/// missed probe must not raise an alarm.
+pub const HEALTH_RETRY_AFTER: Duration = Duration::from_secs(10);
 
 /// What kind of failure the speech-to-text server gave, so the caller can tell one that is worth
 /// trying again from one that is not.
@@ -207,24 +211,28 @@ pub fn spawn_health(stt_url: &str, health: Arc<SttHealth>) {
     tokio::spawn(async move {
         let mut was_ok = true;
         loop {
-            let agent = agent.clone();
-            let url = url.clone();
-            let probe = blocking_typed(
-                move || match agent.get(&url).call() {
-                    Ok(r) => Ok(r.status().as_u16()),
-                    Err(e) => Err(stt_failed(e, 1)),
-                },
-                SttError::plain,
-            )
-            .await;
-            let ok = matches!(probe, Ok(s) if health_answer_ok(s));
+            let probe = || {
+                let agent = agent.clone();
+                let url = url.clone();
+                blocking_typed(
+                    move || match agent.get(&url).call() {
+                        Ok(r) => Ok(r.status().as_u16()),
+                        Err(e) => Err(stt_failed(e, 1)),
+                    },
+                    SttError::plain,
+                )
+            };
+            let (answer, missed_once) = probe_health(probe, HEALTH_RETRY_AFTER).await;
+            let ok = matches!(answer, Ok(s) if health_answer_ok(s));
             if ok {
                 h.note_ok(crate::telegram::now_ms());
                 if !was_ok {
                     eprintln!("stt: the speech server answers /health again");
+                } else if missed_once {
+                    eprintln!("stt: one /health probe missed but the confirming one answered");
                 }
             } else {
-                let detail = match probe {
+                let detail = match answer {
                     Ok(s) => format!("its health address answered HTTP {s}"),
                     Err(e) => match e.kind {
                         SttFailure::ReadTimeout => {
@@ -242,6 +250,22 @@ pub fn spawn_health(stt_url: &str, health: Arc<SttHealth>) {
             tokio::time::sleep(HEALTH_PROBE).await;
         }
     });
+}
+
+/// One health probe run, confirmed if it fails: a second probe goes out after `retry_after` and
+/// only the second answer counts as the server's state. A lone miss on the probe path is a blip,
+/// not an outage. `Ok` answer, and whether the first probe missed (the blip, worth a log line).
+pub(crate) async fn probe_health<F, Fut>(mut probe: F, retry_after: Duration) -> (Fut::Output, bool)
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<u16, SttError>>,
+{
+    let first = probe().await;
+    if matches!(first, Ok(s) if health_answer_ok(s)) {
+        return (first, false);
+    }
+    tokio::time::sleep(retry_after).await;
+    (probe().await, true)
 }
 
 /// The OpenAI-compatible speech-to-text server recordings go to.
@@ -639,6 +663,52 @@ mod tests {
             t.why,
             "the speech-to-text server did not finish within 10 minutes"
         );
+    }
+
+    #[tokio::test]
+    async fn a_lone_failed_probe_is_confirmed_before_it_counts() {
+        // First probe misses, the confirming one answers: a blip on the probe path, not an outage.
+        let n = AtomicUsize::new(0);
+        let (answer, missed_once) = probe_health(
+            || {
+                let ok = n.fetch_add(1, Ordering::SeqCst) > 0;
+                async move {
+                    if ok {
+                        Ok(200)
+                    } else {
+                        Err(SttError {
+                            kind: SttFailure::ReadTimeout,
+                            why: "slow".into(),
+                        })
+                    }
+                }
+            },
+            Duration::from_millis(1),
+        )
+        .await;
+        assert_eq!(answer, Ok(200), "the confirming probe decides");
+        assert!(missed_once, "the blip is worth a log line");
+        // Both miss: the outage stands, and it carries the second failure.
+        let (answer, missed_once) = probe_health(
+            || async { Err(SttError::plain("still nothing")) },
+            Duration::from_millis(1),
+        )
+        .await;
+        assert!(missed_once);
+        assert_eq!(answer.unwrap_err().why, "still nothing");
+        // A first probe that answers costs no confirming one.
+        let n2 = AtomicUsize::new(0);
+        let (answer, missed_once) = probe_health(
+            || {
+                n2.fetch_add(1, Ordering::SeqCst);
+                async { Ok(404) }
+            },
+            Duration::from_millis(1),
+        )
+        .await;
+        assert_eq!(answer, Ok(404));
+        assert!(!missed_once);
+        assert_eq!(n2.load(Ordering::SeqCst), 1, "a good probe is not repeated");
     }
 
     #[test]

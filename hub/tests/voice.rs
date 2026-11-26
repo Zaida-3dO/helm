@@ -1057,14 +1057,20 @@ async fn the_speech_outage_names_itself_to_the_pc_once_an_hour() {
         drain(&mut pc, 50).await.is_empty(),
         "not twice inside the hour"
     );
-    // Past the hour: one more, and the recovery edge asks the bridge for its held notes.
+    // Past the hour: one more. The recovery edge asks the bridge for its held notes and tells
+    // the PC the outage is over, so the alert closes itself.
     heal.tick(t + FRAME_GAP_MS + 1);
     next_where(&mut pc, "service_down again", is("service_down")).await;
     health.note_ok(t + FRAME_GAP_MS + 2);
     heal.tick(t + FRAME_GAP_MS + 2);
+    let up = next_where(&mut pc, "service_up", is("service_up")).await;
+    assert_eq!(up["service"].as_str(), Some(SERVICE));
+    assert_eq!(up["personId"].as_str(), Some("1"));
+    assert_eq!(up["since"].as_str().unwrap().len(), 5, "{up}");
+    assert_eq!(up["back"].as_str().unwrap().len(), 5, "{up}");
     assert!(
         drain(&mut pc, 50).await.is_empty(),
-        "the recovery sends no frame"
+        "one recovery frame per outage"
     );
 }
 
