@@ -1,0 +1,14 @@
+.composer-dock .composer-gpu-hold {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning-text, #b45309) 40%, var(--line));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--warning-text, #b45309) 7%, var(--surface));
+  font-size: 12px;
+}
+.composer-gpu-hold > .ui-icon {
+  flex: none;
+  color: var(--warning-text, #b45309);
+}
