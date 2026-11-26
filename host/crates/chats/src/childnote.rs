@@ -2,43 +2,19 @@
 //!
 //! The silent-chat note (see `notify_parent_silent` in the actor) covers a child whose turn is
 //! open and quiet. It cannot cover a child that *ends* its turn early: that chat is idle, not
-//! silent, and an idle parent was never going to be told. A local model that prints a tool call
-//! as plain text, say, ends its turn on the spot with nothing run.
+//! silent, and an idle parent was never going to be told.
 //!
 //! This module answers the one question the actor asks when a child's turn ends: did the turn
 //! end unfinished, and has the parent not heard from the child since the child was last written
-//! to? A turn counts as unfinished when its last reply looks like a tool call that was never
-//! run, or when it has no closing reply at all (the turn's last step was a tool, or its text is
-//! blank). A child that wrote its parent a message after the message it last received is
-//! reporting, whatever its last words were.
+//! to? A turn counts as unfinished when it has no closing reply at all (the turn's last step was
+//! a tool, or its text is blank). A child that wrote its parent a message after the message it
+//! last received is reporting, whatever its last words were.
 
 use rusqlite::{OptionalExtension, Transaction};
-
-/// Fragments that, in a reply's text, mean a tool call was printed instead of run. Lower case.
-const TOOL_CALL_MARKUP: &[&str] = &[
-    "<tool_call",
-    "</tool_call",
-    "<function=",
-    "<function_call",
-    "<function_calls",
-    "<invoke ",
-    "<invoke>",
-    "<|tool_call",
-    "[tool_calls]",
-    "<|python_tag|>",
-];
-
-/// Whether this reply text looks like a tool call that was printed rather than executed.
-pub fn looks_like_unrun_tool_call(text: &str) -> bool {
-    let t = text.to_ascii_lowercase();
-    TOOL_CALL_MARKUP.iter().any(|m| t.contains(m))
-}
 
 /// Why a child's turn counts as ended without reporting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unfinished {
-    /// The last reply holds a tool call as text.
-    PrintedToolCall,
     /// The turn has no closing reply: its last step was a tool call, or its text is blank.
     NoReport,
 }
@@ -106,182 +82,14 @@ pub fn unreported_turn(
     Ok(turn_why(tx, child)?.map(|why| (parent, why)))
 }
 
-/// Why the chat's just-ended turn closed, read from the turn shape alone: a tool call printed
-/// as text, no closing reply, or `None` when it closed with words. It says nothing about
-/// parents or reports, so a chat that has none can ask it too.
+/// Why the chat's just-ended turn closed, read from the turn shape alone: no closing reply, or
+/// `None` when it closed with words. It says nothing about parents or reports, so a chat that
+/// has none can ask it too.
 pub fn turn_why(tx: &Transaction<'_>, chat: &str) -> rusqlite::Result<Option<Unfinished>> {
     Ok(match last_step(tx, chat)? {
-        Some((role, text)) if role == "assistant" && looks_like_unrun_tool_call(&text) => {
-            Some(Unfinished::PrintedToolCall)
-        }
         Some((role, text)) if role == "assistant" && !text.trim().is_empty() => None,
         _ => Some(Unfinished::NoReport),
     })
-}
-
-/// The text of a tool call written as text in the chat's just-ended turn, newest reply first:
-/// the markup a tool name can be read out of. Markup in the last reply counts on its own — the
-/// turn ended on a call nobody ran. Markup earlier in the turn counts when it names a real tool
-/// and is not quoted: a model can print a call, watch nothing happen, go on to run real calls
-/// and close with words, and the call it printed still changed nothing and is worth telling it
-/// about. Quoted markup (in code, introduced as an example) and markup naming nothing are prose.
-pub fn printed_call_text(tx: &Transaction<'_>, chat: &str) -> rusqlite::Result<Option<String>> {
-    if let Some((role, text)) = last_step(tx, chat)? {
-        if role == "assistant" && looks_like_unrun_tool_call(&text) && !quoted_example(&text) {
-            return Ok(Some(text));
-        }
-    }
-    let run_start = run_start(tx, chat)?;
-    let mut stmt = tx.prepare(
-        "SELECT text FROM messages
-         WHERE chat_id = ?1 AND active = 1 AND timestamp >= ?2 AND role = 'assistant'
-         ORDER BY id DESC",
-    )?;
-    let mut rows = stmt.query(rusqlite::params![chat, run_start])?;
-    while let Some(row) = rows.next()? {
-        let text: String = row.get(0)?;
-        if looks_like_unrun_tool_call(&text) && call_names_a_tool(&text) && !quoted_example(&text) {
-            return Ok(Some(text));
-        }
-    }
-    Ok(None)
-}
-
-/// Words that introduce tool-call markup as something being shown rather than written: an
-/// example, an explanation, a warning. Checked in the words just before the markup.
-const EXAMPLE_MARKERS: &[&str] = &[
-    "for example",
-    "for instance",
-    "e.g.",
-    "such as",
-    "as an example",
-    "example:",
-    "like this",
-    "never write",
-    "don't write",
-    "do not write",
-    "instead of running",
-    "not a real call",
-];
-
-/// A tool name that is a stand-in in shown markup, not a real call: `...`, `NAME`, one letter.
-fn placeholder_name(name: &str) -> bool {
-    let n = name.to_ascii_lowercase();
-    n.len() < 2
-        || matches!(
-            n.as_str(),
-            "name"
-                | "tool"
-                | "toolname"
-                | "tool_name"
-                | "function"
-                | "call"
-                | "example"
-                | "placeholder"
-                | "foo"
-                | "bar"
-        )
-}
-
-/// Whether the markup names a tool a call could really have been meant for.
-fn call_names_a_tool(text: &str) -> bool {
-    named_tool(text).is_some_and(|n| !placeholder_name(&n))
-}
-
-/// True when every piece of tool-call markup in the reply is quoted: inside a fence or a
-/// backticked span, or introduced as an example. A model writing a call for real puts it bare
-/// in the reply. A reply without markup is not an example either.
-fn quoted_example(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    let mut seen = false;
-    for frag in TOOL_CALL_MARKUP {
-        let mut from = 0;
-        while let Some(rel) = lower[from..].find(frag) {
-            let at = from + rel;
-            from = at + frag.len();
-            seen = true;
-            if in_code(&lower, at) {
-                continue;
-            }
-            let before = &lower[..at];
-            let cut = {
-                let mut i = before.len().saturating_sub(64);
-                while i > 0 && !before.is_char_boundary(i) {
-                    i += 1;
-                }
-                i
-            };
-            if EXAMPLE_MARKERS.iter().any(|m| before[cut..].contains(m)) {
-                continue;
-            }
-            return false;
-        }
-    }
-    seen
-}
-
-/// Whether the markup at `at` sits inside a fenced block or a single-backtick span. Counting
-/// the fences and backticks before it answers this without parsing the whole reply.
-fn in_code(lower: &str, at: usize) -> bool {
-    let before = &lower[..at];
-    if before.matches("```").count() % 2 == 1 {
-        return true;
-    }
-    before.replace("```", "").matches('`').count() % 2 == 1
-}
-
-/// The tool a printed call names, when the markup carries one: `<function=Name>`, an
-/// `invoke name="Name"` or a `"name": "Name"` field. `None` when the markup names nothing.
-pub fn named_tool(text: &str) -> Option<String> {
-    /// Read an identifier (the characters a tool name is made of) from the front of `s`.
-    fn ident(s: &str) -> Option<String> {
-        let end = s
-            .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':')))
-            .unwrap_or(s.len());
-        let name: String = s.chars().take(end.min(64)).collect();
-        (!name.is_empty()).then_some(name)
-    }
-    let lower = text.to_ascii_lowercase();
-    if let Some(i) = lower.find("<function=") {
-        if let Some(name) = ident(&text[i + "<function=".len()..]) {
-            return Some(name);
-        }
-    }
-    let b = lower.as_bytes();
-    let mut from = 0;
-    while let Some(rel) = lower[from..].find("name") {
-        let start = from + rel;
-        let at = start + 4;
-        from = at;
-        // Not the tail of a longer word (`username`, `rename`), and followed by `=` or `:`
-        // (through a closing quote), not just the word.
-        if start > 0 && {
-            let prev = b[start - 1];
-            prev.is_ascii_alphanumeric() || prev == b'_'
-        } {
-            continue;
-        }
-        let mut j = at;
-        while j < b.len() && (b[j] as char).is_whitespace() {
-            j += 1;
-        }
-        if j < b.len() && b[j] == b'"' {
-            j += 1;
-        }
-        if !(j < b.len() && (b[j] == b'=' || b[j] == b':')) {
-            continue;
-        }
-        j += 1;
-        while j < b.len() && ((b[j] as char).is_whitespace() || b[j] == b'"' || b[j] == b'\'') {
-            j += 1;
-        }
-        if j < text.len() {
-            if let Some(name) = ident(&text[j..]) {
-                return Some(name);
-            }
-        }
-    }
-    None
 }
 
 /// The start of the chat's latest run, 0 when it has never had one.
@@ -313,9 +121,6 @@ fn last_step(tx: &Transaction<'_>, chat: &str) -> rusqlite::Result<Option<(Strin
 /// The note the parent gets.
 pub fn note_text(title: &str, why: Unfinished) -> String {
     let what = match why {
-        Unfinished::PrintedToolCall => {
-            "its last reply is a tool call printed as text, so nothing ran"
-        }
         Unfinished::NoReport => "its last step has no closing reply",
     };
     format!(
@@ -329,25 +134,10 @@ pub fn note_text(title: &str, why: Unfinished) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn printed_tool_calls_are_told_from_prose() {
-        for (text, want) in [
-            ("<tool_call>\n{\"name\": \"Bash\"}\n</tool_call>", true),
-            ("I will run it.\n<function=Read>\n<parameter=path>x", true),
-            ("<function_calls><invoke name=\"Bash\">", true),
-            ("[TOOL_CALLS][{\"name\": \"x\"}]", true),
-            ("All done. Tests pass: 12 of 12.", false),
-            ("Use the tool_call field of the config.", false),
-            ("", false),
-        ] {
-            assert_eq!(looks_like_unrun_tool_call(text), want, "{text}");
-        }
-    }
-
     /// A child under a parent, a turn of replies, and what the parent was sent, as one table.
     #[test]
     fn a_turn_is_unreported_only_when_unfinished_and_unheard_from() {
-        const CALL: &str = "<tool_call>{\"name\":\"Bash\"}</tool_call>";
+        const BLANK: &str = "  ";
         // (name, last step role and text, parent heard from the child after its last message,
         // parent archived, want)
         type Row = (
@@ -358,15 +148,7 @@ mod tests {
             bool,
             Option<Unfinished>,
         );
-        let rows: [Row; 8] = [
-            (
-                "printed call",
-                "assistant",
-                CALL,
-                false,
-                false,
-                Some(Unfinished::PrintedToolCall),
-            ),
+        let rows: [Row; 7] = [
             (
                 "blank closing reply",
                 "assistant",
@@ -387,12 +169,12 @@ mod tests {
             (
                 "reported before ending",
                 "assistant",
-                CALL,
+                BLANK,
                 true,
                 false,
                 None,
             ),
-            ("parent archived", "assistant", CALL, false, true, None),
+            ("parent archived", "assistant", BLANK, false, true, None),
             (
                 "no turn rows",
                 "none",
@@ -463,41 +245,17 @@ mod tests {
         assert_eq!(db.snapshot(|tx| unreported_turn(tx, "solo")).unwrap(), None);
     }
 
-    /// The turn-shape question stands on its own, so a chat with no parent can ask it too; the
-    /// printed markup then gives up the tool it names.
+    /// The turn-shape question stands on its own, so a chat with no parent can ask it too.
     #[test]
     fn a_parentless_chat_can_ask_why_its_turn_closed() {
-        // (last step role and text, why the turn closed, the tool the markup names)
-        let rows: [(&str, &str, Option<Unfinished>, Option<&str>); 7] = [
-            (
-                "assistant",
-                "<tool_call>{\"name\": \"Bash\"}</tool_call>",
-                Some(Unfinished::PrintedToolCall),
-                Some("Bash"),
-            ),
-            (
-                "assistant",
-                "I will run it.\n<function=Read>\n<parameter=path>x",
-                Some(Unfinished::PrintedToolCall),
-                Some("Read"),
-            ),
-            (
-                "assistant",
-                "<function_calls><invoke name=\"mcp__search__find\">",
-                Some(Unfinished::PrintedToolCall),
-                Some("mcp__search__find"),
-            ),
-            (
-                "assistant",
-                "Done: tests pass, twelve of twelve.",
-                None,
-                None,
-            ),
-            ("assistant", "  ", Some(Unfinished::NoReport), None),
-            ("toolResult", "ok", Some(Unfinished::NoReport), None),
-            ("none", "", Some(Unfinished::NoReport), None),
+        // (last step role and text, why the turn closed)
+        let rows: [(&str, &str, Option<Unfinished>); 4] = [
+            ("assistant", "Done: tests pass, twelve of twelve.", None),
+            ("assistant", "  ", Some(Unfinished::NoReport)),
+            ("toolResult", "ok", Some(Unfinished::NoReport)),
+            ("none", "", Some(Unfinished::NoReport)),
         ];
-        for (role, text, want_why, want_name) in rows {
+        for (role, text, want_why) in rows {
             let (_d, db) = crate::schema::tests::temp_db();
             db.write(|tx| {
                 tx.execute_batch(
@@ -517,146 +275,18 @@ mod tests {
                 Ok::<_, rusqlite::Error>(())
             })
             .unwrap();
-            let label = "{role}: {text}";
+            let label = format!("{role}: {text}");
             assert_eq!(
                 db.snapshot(|tx| turn_why(tx, "solo")).unwrap(),
                 want_why,
                 "{label}"
             );
-            assert_eq!(
-                db.snapshot(|tx| Ok::<_, rusqlite::Error>(
-                    printed_call_text(tx, "solo")?
-                        .as_deref()
-                        .and_then(named_tool)
-                ))
-                .unwrap()
-                .as_deref(),
-                want_name,
-                "{label}: name"
-            );
-        }
-    }
-
-    /// A printed call is caught wherever it sits in the turn, not only at its end: a model can
-    /// print one, go on to run real calls, and close with words. Quoted markup — inside code,
-    /// introduced as an example, or naming nothing real — never counts.
-    #[test]
-    fn a_printed_call_counts_anywhere_in_the_turn_never_when_quoted() {
-        const STAGE: &str = "<function=mcp__helm__app_stage_settings>\n<parameter=changes>{\"hubAddress\":\"x\"}</parameter>\n</function>";
-        let calling = format!("Calling it.\n{STAGE}");
-        let calling2 = format!("Calling.\n{STAGE}");
-        // (label, the turn's replies in order, whether a printed call is found, its tool name)
-        type Row<'a> = (&'a str, Vec<(&'a str, &'a str)>, bool, Option<&'a str>);
-        let rows: Vec<Row> = vec![
-            (
-                "printed between real calls",
-                vec![
-                    ("assistant", calling.as_str()),
-                    ("toolResult", "ok"),
-                    ("assistant", "Done: staged."),
-                ],
-                true,
-                Some("mcp__helm__app_stage_settings"),
-            ),
-            (
-                "quoted in a span mid-turn",
-                vec![
-                    ("assistant", "Never write `<function=mcp__helm__app_stage_settings>` by hand."),
-                    ("assistant", "I called it properly instead."),
-                ],
-                false,
-                None,
-            ),
-            (
-                "shown as an example mid-turn",
-                vec![
-                    ("assistant", "For example:\n<tool_call>{\"name\": \"Bash\"}</tool_call>\nI will not do that."),
-                    ("assistant", "Done."),
-                ],
-                false,
-                None,
-            ),
-            (
-                "fenced mid-turn",
-                vec![
-                    (
-                        "assistant",
-                        "```<function_calls><invoke name=\"mcp__helm__app_stage_settings\">```",
-                    ),
-                    ("assistant", "That is the shape you must not write."),
-                ],
-                false,
-                None,
-            ),
-            (
-                "nameless markup mid-turn",
-                vec![
-                    ("assistant", "<tool_call>\nnot json at all\n</tool_call>"),
-                    ("assistant", "Closing words."),
-                ],
-                false,
-                None,
-            ),
-            (
-                "a real print before an example that ends the turn",
-                vec![
-                    ("assistant", calling2.as_str()),
-                    ("toolResult", "ok"),
-                    ("assistant", "Note: never write <function=Read> as text."),
-                ],
-                true,
-                Some("mcp__helm__app_stage_settings"),
-            ),
-        ];
-        for (label, steps, want_found, want_name) in rows {
-            let (_d, db) = crate::schema::tests::temp_db();
-            db.write(|tx| {
-                tx.execute_batch(
-                    "INSERT INTO projects (id, name, created_at) VALUES ('p', 'P', 1);
-                     INSERT INTO chats (id, project_id, title, status, created_at, updated_at)
-                     VALUES ('solo', 'p', 'Solo', 'idle', 1, 1);
-                     INSERT INTO runs (id, chat_id, status, started_at)
-                     VALUES ('r', 'solo', 'complete', 100);",
-                )?;
-                for (i, (role, text)) in steps.iter().enumerate() {
-                    tx.execute(
-                        "INSERT INTO messages (chat_id, source_key, role, text, timestamp)
-                         VALUES ('solo', ?1, ?2, ?3, ?4)",
-                        rusqlite::params![format!("m{i}"), role, text, 150 + i as i64],
-                    )?;
-                }
-                Ok::<_, rusqlite::Error>(())
-            })
-            .unwrap();
-            let got = db.snapshot(|tx| printed_call_text(tx, "solo")).unwrap();
-            assert_eq!(got.is_some(), want_found, "{label}");
-            assert_eq!(
-                got.as_deref().and_then(named_tool).as_deref(),
-                want_name,
-                "{label}: name"
-            );
-        }
-    }
-
-    /// A name is read from the markup, not from prose: the word alone, or inside a longer
-    /// word, names nothing.
-    #[test]
-    fn the_markup_gives_up_its_tool_name() {
-        for (text, want) in [
-            ("[TOOL_CALLS][{\"name\": \"x\"}]", Some("x")),
-            ("<function=Bash >", Some("Bash")),
-            ("<tool_call>no name here</tool_call>", None),
-            ("username: bob. named tools are fine.", None),
-            ("", None),
-        ] {
-            assert_eq!(named_tool(text).as_deref(), want, "{text}");
         }
     }
 
     #[test]
     fn the_note_names_the_chat_and_the_reason() {
-        let t = note_text("Doc builder", Unfinished::PrintedToolCall);
-        assert!(t.contains("\"Doc builder\"") && t.contains("printed as text"));
-        assert!(note_text("X", Unfinished::NoReport).contains("no closing reply"));
+        let t = note_text("Doc builder", Unfinished::NoReport);
+        assert!(t.contains("\"Doc builder\"") && t.contains("no closing reply"));
     }
 }

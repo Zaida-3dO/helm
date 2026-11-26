@@ -71,6 +71,10 @@ pub struct Limits {
     /// that burst, capped at ten times it. Many Claude Code processes starting at once on one
     /// sign-in race to refresh its token. Zero turns it off.
     pub start_stagger: Duration,
+    /// How long a chat may sit at "starting" after its message went to the worker before Claude
+    /// Code shows any sign of reading it (see [`START_READY`]). Past it the start is ended with
+    /// an error and the worker is closed, so the chat's place goes to the ones queued behind it.
+    pub start_ready: Duration,
 }
 
 impl Default for Limits {
@@ -96,9 +100,15 @@ impl Default for Limits {
             .unwrap_or(GATE_HOLD),
             stop_deadline: STOP_HOLD,
             start_stagger: Duration::from_millis(400),
+            start_ready: START_READY,
         }
     }
 }
+
+/// How long a started chat waits for Claude Code to show any sign of having read its message
+/// (the worker saying the message was read, or the turn opening) by default. A worker whose
+/// Claude Code never gets that far would otherwise keep the chat at "starting" for ever.
+pub const START_READY: Duration = Duration::from_secs(90);
 
 /// How long the question gate holds a card by default.
 pub const GATE_HOLD: Duration = Duration::from_secs(75);

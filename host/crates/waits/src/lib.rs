@@ -57,7 +57,7 @@ pub fn start(runtime: &helm_chats::ChatRuntime, services: &Services) {
     let Some(svc) = services.get::<WaitsService>() else {
         return;
     };
-    svc.set_sink(Arc::new(service::RuntimeSink(runtime.clone())));
+    svc.set_sink(Arc::new(service::RuntimeSink::new(runtime.clone())));
     if let Some(probes) = services.get::<probes::RealProbes>() {
         probes.set_runtime(runtime.clone());
     }

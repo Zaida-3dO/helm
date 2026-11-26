@@ -19,6 +19,8 @@ struct FakeLink {
     terminated: AtomicBool,
     /// How many processes this worker's group reports (the worker and the CLI make two).
     tree: Arc<AtomicU32>,
+    /// A worker that ignores `terminate`, as one that cannot be killed would.
+    survives: bool,
 }
 
 impl WorkerLink for FakeLink {
@@ -30,6 +32,9 @@ impl WorkerLink for FakeLink {
         self.cmds.send(command.clone()).is_ok()
     }
     fn terminate(&self) {
+        if self.survives {
+            return;
+        }
         if !self.terminated.swap(true, Ordering::SeqCst) {
             let _ = self.out.try_send(WorkerOutput::Exited {
                 code: Some(1),
@@ -162,6 +167,8 @@ pub struct FakeSpawner {
     pub triage_jobs: Mutex<Vec<Value>>,
     /// The group size a worker reports when it starts.
     pub tree_at_launch: AtomicU32,
+    /// Workers started from now on ignore `terminate`.
+    pub survive_terminate: AtomicBool,
 }
 
 impl Spawner for FakeSpawner {
@@ -177,6 +184,7 @@ impl Spawner for FakeSpawner {
             out: otx.clone(),
             terminated: AtomicBool::new(false),
             tree: tree.clone(),
+            survives: self.survive_terminate.load(Ordering::SeqCst),
         });
         // A test that has already finished no longer listens; that is not this test's failure.
         let _ = self.tx.send(FakeWorker {
@@ -252,6 +260,8 @@ pub fn limits() -> Limits {
         stop_deadline: Duration::from_secs(10),
         // Tests start workers by the dozen and never wait on one another's spread.
         start_stagger: Duration::ZERO,
+        // Like the others: wide, and a test of the start deadline shortens it.
+        start_ready: Duration::from_secs(30),
     }
 }
 
@@ -287,6 +297,7 @@ pub fn harness_with_services(limits: Limits, extra: impl FnOnce(&mut Services)) 
         triage: Mutex::new(Err("no triage in this test".into())),
         triage_jobs: Mutex::new(Vec::new()),
         tree_at_launch: AtomicU32::new(2),
+        survive_terminate: AtomicBool::new(false),
     });
     let rt = ChatRuntime::new(
         db.clone(),
@@ -769,6 +780,96 @@ async fn a_failed_turn_leaves_nothing_held() {
     let (next, _) = h.send(&chat, "try again", "default").await;
     let p = w.expect("prompt").await;
     assert_eq!(p["submissionId"], next.as_str());
+}
+
+/// A chat whose worker never shows Claude Code read the opening message is ended with a plain
+/// error once the start limit passes, and its worker is closed so the next send starts a new one;
+/// a worker that does show it (the turn opens) is left alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_that_never_gets_going_is_ended_and_its_worker_closed() {
+    // (the worker reads the message, the chat's status at the end)
+    for (reads, want) in [(false, "interrupted"), (true, "running")] {
+        let mut h = harness_with(Limits {
+            start_ready: Duration::from_millis(1500),
+            ..limits()
+        });
+        let chat = h.create().await;
+        let (sid, _) = h.send(&chat, "start", "default").await;
+        let mut w = h.worker().await;
+        w.ready().await;
+        let p = w.expect("prompt").await;
+        ack(&w, &p).await;
+        if reads {
+            w.emit(json!({"type": "agent_start"})).await;
+            h.until("running", |h| h.status(&chat) == "running").await;
+            tokio::time::sleep(Duration::from_millis(2200)).await;
+        } else {
+            h.until("the start was ended", |h| h.status(&chat) == "interrupted")
+                .await;
+        }
+        assert_eq!(h.status(&chat), want, "reads: {reads}");
+        let error = h.col(&format!("SELECT error FROM chats WHERE id = '{chat}'"));
+        if reads {
+            assert_eq!(error, ["NULL"], "nothing is said when the start is fine");
+            continue;
+        }
+        assert!(
+            error[0].starts_with("Claude Code did not start within"),
+            "{error:?}"
+        );
+        // The worker was closed (its exit marked the unanswered message), the run is closed as
+        // failed, and the chat's next message starts a worker of its own.
+        h.until("the message is unknown", |h| h.state(&sid) == "uncertain")
+            .await;
+        assert_eq!(h.col("SELECT status FROM runs"), ["failed"]);
+        h.send(&chat, "again", "default").await;
+        let mut again = h.worker().await;
+        again.ready().await;
+        again.expect("prompt").await;
+    }
+}
+
+/// A Stop on a chat whose turn never began closes the worker instead of asking it to abort, and
+/// answers `stopped` once the worker is gone. A worker that cannot be closed is given up on after
+/// the stop limit with a plain failure, and the chat's next message starts a new worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_before_the_turn_began_closes_the_worker() {
+    // (the worker ignores the close, the stop's answer, the chat's status, the error's start)
+    for (survives, answer, status, error) in [
+        (false, "stopped", "stopped", "NULL"),
+        (
+            true,
+            "interrupted",
+            "interrupted",
+            "The worker did not close when Helm stopped it.",
+        ),
+    ] {
+        let mut h = harness();
+        h.spawner
+            .survive_terminate
+            .store(survives, Ordering::SeqCst);
+        let chat = h.create().await;
+        let (sid, _) = h.send(&chat, "start", "default").await;
+        let mut w = h.worker().await;
+        w.ready().await;
+        let p = w.expect("prompt").await;
+        ack(&w, &p).await;
+        h.until("accepted", |h| h.state(&sid) == "accepted").await;
+        let r = h.call("chat_stop", json!({"chatId": chat})).await.unwrap();
+        assert_eq!(r["status"], answer, "survives: {survives}");
+        assert_eq!(h.status(&chat), status, "survives: {survives}");
+        let err = h.col(&format!("SELECT error FROM chats WHERE id = '{chat}'"));
+        assert!(err[0].starts_with(error), "survives: {survives}: {err:?}");
+        while let Some(c) = w.no_command_for(Duration::from_millis(150)).await {
+            assert_ne!(c["type"], "abort", "the worker is closed, not asked");
+        }
+        // Either way the chat is free to start again, on a worker of its own.
+        h.spawner.survive_terminate.store(false, Ordering::SeqCst);
+        h.send(&chat, "again", "default").await;
+        let mut again = h.worker().await;
+        again.ready().await;
+        again.expect("prompt").await;
+    }
 }
 
 /// A worker that does not settle within the stop limit is closed, and the run is interrupted.
@@ -4053,16 +4154,16 @@ async fn a_child_that_ends_its_turn_unfinished_tells_its_parent_once_per_spell()
             "SELECT text FROM submissions WHERE chat_id = '{parent}'              AND text LIKE 'Helm noticed:%ended its turn without reporting%'"
         ))
     };
-    // The first turn ends on a printed tool call: the idle parent is told, once.
+    // The first turn ends with a blank reply: the idle parent is told, once.
     w.emit(json!({"type": "message_start", "message": {"id": "m1", "role": "assistant", "content": []}}))
         .await;
-    w.emit(json!({"type": "message_end", "message": {"id": "m1", "role": "assistant", "content": [{"type": "text", "text": "<tool_call>{\"name\": \"Bash\"}</tool_call>"}], "status": "complete"}}))
+    w.emit(json!({"type": "message_end", "message": {"id": "m1", "role": "assistant", "content": [{"type": "text", "text": "  "}], "status": "complete"}}))
         .await;
     w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
         .await;
     h.until("the parent was told", |h| notes(h).len() == 1)
         .await;
-    assert!(notes(&h)[0].contains("printed as text"), "{:?}", notes(&h));
+    assert!(notes(&h)[0].contains("no closing reply"), "{:?}", notes(&h));
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(notes(&h).len(), 1, "once per spell");
     // A turn that closes with words says nothing.
@@ -4070,102 +4171,8 @@ async fn a_child_that_ends_its_turn_unfinished_tells_its_parent_once_per_spell()
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(notes(&h).len(), 1, "a normal close is not reported");
     // The next unfinished turn is a new spell.
-    finished_turn(&h, &mut w, &child, "once more", "m3", "<function=Read>").await;
+    finished_turn(&h, &mut w, &child, "once more", "m3", "  ").await;
     h.until("a second note", |h| notes(h).len() == 2).await;
-}
-
-/// A chat on a local model whose reply prints a tool call as text gets one corrective message
-/// from Helm, naming the tool; its next such turn is put in front of the person as a flag
-/// instead of nudged again. A Claude-model chat ending the same way gets neither: its harness
-/// runs that markup for real.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_local_chat_that_prints_tool_calls_is_nudged_once_then_flagged() {
-    async fn printed_call(w: &mut FakeWorker, mid: &str) {
-        w.emit(json!({"type": "message_start", "message": {"id": mid, "role": "assistant", "content": []}}))
-            .await;
-        w.emit(json!({"type": "message_end", "message": {"id": mid, "role": "assistant", "content": [{"type": "text", "text": "<tool_call>{\"name\": \"Bash\"}</tool_call>"}], "status": "complete"}}))
-            .await;
-        w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
-            .await;
-    }
-    let mut h = harness();
-    let local = Arc::new(FakeLocal {
-        turns: Mutex::new(Vec::new()),
-        outcome: Mutex::new(Ok("qwen3:8b-helm-64k".into())),
-        gate: Mutex::new(None),
-        held_outcome: Mutex::new(None),
-        finished: Mutex::new(Vec::new()),
-        refreshed: Mutex::new(Vec::new()),
-        queue: Mutex::new(None),
-    });
-    h.rt.set_local_models(local.clone());
-    let made = h
-        .call(
-            "chat_create",
-            json!({"cwd": h.work.to_string_lossy(), "model": "local/strata/x"}),
-        )
-        .await
-        .unwrap();
-    let chat = made["id"].as_str().unwrap().to_owned();
-    let nudges = |h: &H| {
-        h.col(&format!(
-            "SELECT text FROM submissions WHERE chat_id = '{chat}' AND text LIKE '%wrote a tool call as text%'"
-        ))
-    };
-    let flagged = |h: &H| {
-        h.col(&format!(
-            "SELECT question || ':' || reason FROM chat_flags WHERE chat_id = '{chat}'"
-        ))
-    };
-    h.send(&chat, "start", "default").await;
-    let mut w = h.worker().await;
-    w.ready().await;
-    let p = w.expect("prompt").await;
-    ack(&w, &p).await;
-    // The first printed call: one corrective message back into the chat, naming the tool.
-    printed_call(&mut w, "m1").await;
-    h.until("nudged", |h| nudges(h).len() == 1).await;
-    assert!(nudges(&h)[0].contains("named \"Bash\""), "{:?}", nudges(&h));
-    // The nudge opened the next turn; it ends on a printed call again. Now the person is
-    // flagged and the chat is left alone.
-    let p2 = w.expect("prompt").await;
-    assert!(
-        p2["text"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("wrote a tool call"),
-        "the nudge itself is the next prompt"
-    );
-    ack(&w, &p2).await;
-    printed_call(&mut w, "m2").await;
-    h.until("flagged", |h| !flagged(h).is_empty()).await;
-    assert!(
-        flagged(&h)[0].contains("switch this chat to a Claude model"),
-        "{:?}",
-        flagged(&h)
-    );
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(nudges(&h).len(), 1, "the nudge never repeats");
-    // A Claude-model chat ending on the same markup gets neither nudge nor flag.
-    let (claude, _, mut wc) = running_turn(&mut h).await;
-    printed_call(&mut wc, "m3").await;
-    h.until("claude idle again", |h| h.status(&claude) == "idle")
-        .await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(
-        h.col(&format!(
-            "SELECT count(*) FROM submissions WHERE chat_id = '{claude}' AND text LIKE '%wrote a tool call as text%'"
-        )),
-        ["0"],
-        "a Claude chat is not nudged"
-    );
-    assert!(
-        h.col(&format!(
-            "SELECT question FROM chat_flags WHERE chat_id = '{claude}'"
-        ))
-        .is_empty(),
-        "a Claude chat is not flagged"
-    );
 }
 
 /// A muted chat leaves the badge and every group, but keep-awake still counts it.
