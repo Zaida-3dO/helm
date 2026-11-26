@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveKey, sendTooltip, stopTooltip, type KeyContext, type KeyShape } from './keymap.ts';
-import { DRAFT_DEBOUNCE_MS, DraftSaver, nextRevision, type Timers } from './drafts.ts';
+import { DRAFT_DEBOUNCE_MS, DraftSaver, nextRevision, takeHostDraft, type Timers } from './drafts.ts';
 import { claudeHold, holdLine, inFlightView, waitReason } from './inFlight.ts';
 import { row, submission } from '../dev/fixtures.ts';
 import type { MessageRow } from '../api/types.ts';
@@ -113,6 +113,29 @@ test('a send clears the draft unless a newer revision was written since it began
   const token3 = d.beginSend();
   d.edit('typed during the send');
   assert.equal(d.sent(token3, true), true);
+});
+
+test('a newer host draft replaces the editor, except typing a rolled-over chat has not saved yet', async () => {
+  const t = fakeTimers();
+  const saves: Array<[string, number]> = [];
+  const d = new DraftSaver('', 0, async (text, rev) => void saves.push([text, rev]), t);
+  assert.equal(d.unsaved(), null);
+  // Nothing newer than the composer's own revision: the editor is left alone.
+  assert.equal(takeHostDraft(d, { draft: 'x', draftRevision: 0, nextSessionId: null }), null);
+  // Recover to draft on an ordinary chat replaces what is shown, typed or not.
+  d.edit('typing');
+  assert.equal(takeHostDraft(d, { draft: 'recovered', draftRevision: 5_000_000_000_000, nextSessionId: null }), 'recovered');
+  await d.flush();
+  // The chat rolled over and the host moved the draft on while the reader had unsaved text: the
+  // text stays and is saved under a revision newer than the host's.
+  d.edit('half a thought, and a bit more');
+  const host = 9_000_000_000_000;
+  assert.equal(takeHostDraft(d, { draft: '', draftRevision: host, nextSessionId: 'next' }), null);
+  assert.ok(d.revision > host);
+  await d.flush();
+  assert.deepEqual(saves.at(-1), ['half a thought, and a bit more', d.revision]);
+  // Text already saved is not unsaved: the host's empty draft simply replaces it.
+  assert.equal(takeHostDraft(d, { draft: '', draftRevision: host + 1_000_000_000_000, nextSessionId: 'next' }), '');
 });
 
 test('in flight: order, states, labels, tones and actions in one list', () => {

@@ -3,6 +3,7 @@
 // Answers are cached per (chat, message, revision), so a re-render never asks again.
 
 import type { TurnChanges } from '../../api/panel.ts';
+import type { SlotContext } from '../../transcript/slots.ts';
 
 export const BATCH_MS = 150;
 export const MAX_IDS = 600;
@@ -76,4 +77,9 @@ export class TurnLoader {
       if (p.ids.size > 0) this.schedule(chatId, p);
     }
   }
+}
+
+/** The turn a card under a reply asks about: the reply's own session holds its turn changes. */
+export function turnCardTarget(row: { id: number; revision: number }, ctx: Pick<SlotContext, 'sessionId'>): { chatId: string; messageId: number; revision: number } {
+  return { chatId: ctx.sessionId, messageId: row.id, revision: row.revision };
 }
