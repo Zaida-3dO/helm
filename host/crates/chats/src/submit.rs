@@ -456,8 +456,85 @@ fn clip(s: &str, chars: usize) -> String {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostSent {
-    /// Saved, and handed to the chat now (idle: a prompt; busy: a steer).
+    /// Saved, and handed to the chat now (idle: a prompt; busy: a steer). `false` with a
+    /// [`Self::held_reason`] means it is saved but waiting.
     pub delivered: bool,
+    /// `Some` when the message was saved but kept from its chat on purpose: one sentence saying
+    /// why (today: a graphics-card hold has this chat's model busy). It goes over by itself when
+    /// that reason passes — see [`flush_held`].
+    pub held_reason: Option<String>,
+}
+
+/// Whether a GPU hold is on right now. A chat on a local model server must not be woken while
+/// one runs: its message is saved and waits, and the `helm-localmodels` service hands it over
+/// when the hold ends (released, run out, or its owner's chat ended).
+pub(crate) fn gpu_hold_on(rt: &ChatRuntime) -> bool {
+    rt.local_models().is_some_and(|l| l.gpu_hold().is_some())
+}
+
+/// The sentence for a host send that must wait: `Some` when `chat_id` runs on a local model
+/// server and a GPU hold is on. Only host sends are asked (a typed send warns the person instead,
+/// in the composer).
+fn hold_waiting(rt: &ChatRuntime, chat_id: &str) -> Option<String> {
+    let hold = rt.local_models()?.gpu_hold()?;
+    let local = rt
+        .db()
+        .snapshot(|tx| {
+            tx.query_row(
+                "SELECT COALESCE(provider, '') <> '' FROM chats WHERE id = ?1",
+                [chat_id],
+                |r| r.get::<_, bool>(0),
+            )
+            .optional()
+        })
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+    local.then_some(hold.refusal())
+}
+
+/// Hand over everything a GPU hold kept from its chat: saved submissions of local-model chats,
+/// oldest first, one chat's at a time. Never runs while a hold is on — the `helm-localmodels`
+/// service calls it when one ends. Asking for a second hand-over of a message is harmless: the
+/// actor only sends a row still saved. Returns how many were handed over.
+pub fn flush_held(rt: &ChatRuntime) -> usize {
+    if gpu_hold_on(rt) {
+        return 0;
+    }
+    let rows = match rt.db().write(|tx| {
+        // Exactly what the host-send and start-up gates leave behind: saved messages of chats on
+        // local servers. Any other saved row of such a chat (a send cut off by a shutdown) was
+        // waiting for a hand-over anyway, so it goes too.
+        let mut st = tx.prepare(
+            "SELECT s.chat_id, s.id FROM submissions s
+             JOIN chats c ON c.id = s.chat_id
+             WHERE s.state = 'saved' AND c.archived = 0
+               AND COALESCE(c.provider, '') <> ''
+             ORDER BY s.chat_id, s.created_at, s.id",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok::<_, rusqlite::Error>(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }) {
+        Ok(rows) => rows,
+        Err(e) => {
+            log::warn!("held messages could not be listed for the card: {e}");
+            return 0;
+        }
+    };
+    let mut chats: Vec<String> = Vec::new();
+    let handed_over = rows.len();
+    for (chat, sid) in rows {
+        if let Err(e) = rt.command(&chat, Cmd::Dispatch(sid)) {
+            log::error!("chat {chat}: a message held for the card was not delivered: {e}");
+        }
+        if !chats.contains(&chat) {
+            chats.push(chat);
+        }
+    }
+    for chat in &chats {
+        emit_pending(rt, chat);
+    }
+    handed_over
 }
 
 /// One picture sent with a host send (a photo from the phone): checked and stored exactly like an
@@ -682,6 +759,10 @@ fn host_send_inner(
         return Err(ApiError::new("too_large", "The message is too large."));
     }
     let now = helm_core::now_ms();
+    // Look up the card's hold once: when this chat must wait for it, everything is still saved,
+    // only not handed over. (A hold set between here and the write loses this send by a moment;
+    // the next one is held. The actor takes what is saved anyway.)
+    let waiting = hold_waiting(rt, s.chat_id);
     let dir = rt.sh.cfg.profile_dir.join("attachments");
     sweep_once(rt, &dir);
     // Look first, with nothing written: a send that is refused as it stands, or already stored (the
@@ -822,25 +903,39 @@ fn host_send_inner(
         remove_stored_files(&dir, &staged_ids(&staged_images, &staged_files));
     }
     let out = written.map_err(sql)??;
-    let (dispatch, fresh) = out;
+    let (_, fresh) = out;
+    // A chat on a local model server is not woken while a GPU hold runs on the card: the message
+    // is stored and waits, and goes over when the hold ends. The person's own sends are not
+    // gated — the composer warns them instead.
     if fresh {
-        rt.command(s.chat_id, Cmd::Dispatch(s.submission_id.to_owned()))?;
-        emit_pending(rt, s.chat_id);
-        emit_chat(rt, s.chat_id);
-        if let (Some((forked, parked)), true) = (title_job.get(), stored_by_this_send.get()) {
-            // As in a typed send: a retry reads the conversation so far, not this host-made
-            // message's words alone.
-            let body = match parked {
-                crate::titles::Parked::None => {
-                    crate::titles::job(crate::titles::unframed(s.text), None, forked)
+        match waiting.as_ref() {
+            None => {
+                rt.command(s.chat_id, Cmd::Dispatch(s.submission_id.to_owned()))?;
+                emit_pending(rt, s.chat_id);
+                emit_chat(rt, s.chat_id);
+                if let (Some((forked, parked)), true) = (title_job.get(), stored_by_this_send.get())
+                {
+                    // As in a typed send: a retry reads the conversation so far, not this
+                    // host-made message's words alone.
+                    let body = match parked {
+                        crate::titles::Parked::None => {
+                            crate::titles::job(crate::titles::unframed(s.text), None, forked)
+                        }
+                        _ => crate::titles::retry_job(rt, s.chat_id, s.text, forked),
+                    };
+                    crate::titles::start(rt, s.chat_id, body);
                 }
-                _ => crate::titles::retry_job(rt, s.chat_id, s.text, forked),
-            };
-            crate::titles::start(rt, s.chat_id, body);
+            }
+            // The chat shows the message as waiting; the composer's hold line says why.
+            Some(_) => emit_pending(rt, s.chat_id),
         }
     }
+    // As before: a stored send counts as delivered unless this one is left waiting for the card.
+    // A resend of a message the chat already took is not "held" — it went over.
+    let held = if fresh { waiting } else { None };
     Ok(HostSent {
-        delivered: dispatch,
+        delivered: held.is_none(),
+        held_reason: held,
     })
 }
 
@@ -948,6 +1043,13 @@ pub fn continuation(rt: &ChatRuntime, chat_id: &str) -> Result<(), ApiError> {
         })
         .map_err(sql)?;
     match dispatch {
+        // A chat on a local server is not woken in the middle of a GPU hold: its continuation
+        // stays saved and goes over with the other waiting messages when the hold ends.
+        Some(()) if hold_waiting(rt, chat_id).is_some() => {
+            log::info!("chat {chat_id}: restart continuation waits for the graphics card");
+            emit_pending(rt, chat_id);
+            Ok(())
+        }
         Some(()) => rt.command(chat_id, Cmd::Dispatch(sid)),
         None => Ok(()),
     }

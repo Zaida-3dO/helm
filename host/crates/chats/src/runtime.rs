@@ -1541,29 +1541,47 @@ impl ChatRuntime {
         self.deliver_left_unsent(left, &continued);
     }
 
-    /// Every message a shutdown left unsent, oldest first, one chat's messages together. Rows
-    /// still in the retired `queued` state (left by an older version) count too.
-    fn left_unsent(&self) -> Vec<(String, String)> {
+    /// Every message a shutdown left unsent, oldest first, one chat's messages together, with
+    /// whether that chat runs on a local model server. Rows still in the retired `queued` state
+    /// (left by an older version) count too.
+    fn left_unsent(&self) -> Vec<(String, String, bool)> {
         self.sh
             .db
             .snapshot(|tx| {
                 let mut st = tx.prepare(
-                    "SELECT s.chat_id, s.id FROM submissions s
+                    "SELECT s.chat_id, s.id, COALESCE(c.provider, '') <> '' FROM submissions s
                      JOIN chats c ON c.id = s.chat_id
                      WHERE s.state IN ('saved', 'queued') AND c.archived = 0
                      ORDER BY s.chat_id, s.created_at, s.id",
                 )?;
-                let rows =
-                    st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-                rows.collect::<rusqlite::Result<Vec<(String, String)>>>()
+                let rows = st.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, bool>(2)?,
+                    ))
+                })?;
+                rows.collect::<rusqlite::Result<Vec<(String, String, bool)>>>()
             })
             .unwrap_or_default()
     }
 
     /// At start, hand over everything a shutdown left unsent ([`Self::left_unsent`]), in order:
     /// the first of a chat's messages opens its turn, the rest are steered in. `continued` are
-    /// chats whose continuation prompt is already on its way and opens the turn instead.
-    fn deliver_left_unsent(&self, rows: Vec<(String, String)>, continued: &[String]) {
+    /// chats whose continuation prompt is already on its way and opens the turn instead. What a
+    /// GPU hold still owes (a saved message of a local-server chat while the hold runs) stays
+    /// where it is; it goes over when the hold ends, as before the restart.
+    fn deliver_left_unsent(&self, rows: Vec<(String, String, bool)>, continued: &[String]) {
+        let held = crate::submit::gpu_hold_on(self);
+        let kept = rows.iter().filter(|(_, _, local)| held && *local).count();
+        if kept > 0 {
+            log::info!("chats: {kept} unsent message(s) wait for the graphics card");
+        }
+        let rows: Vec<(String, String)> = rows
+            .into_iter()
+            .filter(|(_, _, local)| !(held && *local))
+            .map(|(chat, sid, _)| (chat, sid))
+            .collect();
         let sends = self.sh.db.write(|tx| {
             let mut seen: Vec<&str> = Vec::new();
             for (chat, sid) in &rows {
