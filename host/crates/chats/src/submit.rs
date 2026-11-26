@@ -186,6 +186,10 @@ pub fn chat_send(
         .map_err(sql)?;
     let now = helm_core::now_ms();
     let gen = rt.context_gen(&a.chat_id);
+    // What the chat should hear since its start: rules that arrived, changed or stopped applying.
+    // This is a peek (it marks nothing) and it reads files, so it runs before the write lock;
+    // `mark_message_sent` follows only once this send's write commits.
+    let rule_note = helm_skills::triggers::message_note(&rt.sh.cfg.profile_dir, &a.chat_id, gen.0, now);
     let payload = a
         .context
         .as_ref()
@@ -297,8 +301,12 @@ pub fn chat_send(
                 crate::attachments::refs_for(tx, &sid)?
             };
             let startup = startup_context(rt, tx, &a.chat_id, &sid, now)?;
+            if let Some(n) = &rule_note {
+                rules_row(tx, rt, &a.chat_id, &sid, &n.row, now)?;
+            }
             let context_text: Vec<String> = [
                 startup,
+                rule_note.as_ref().map(|n| n.context.clone()),
                 block.map(|b| b.text),
                 crate::attachments::refs_section(&refs),
             ]
@@ -385,6 +393,10 @@ pub fn chat_send(
                     _ => crate::titles::retry_job(rt, &a.chat_id, &s.text, forked),
                 };
                 crate::titles::start(rt, &a.chat_id, body);
+            }
+            if let Some(n) = &rule_note {
+                // The write committed and the send went over: those rules will not ride again.
+                helm_skills::triggers::mark_message_sent(&a.chat_id, n);
             }
             s
         }
@@ -876,6 +888,11 @@ fn host_send_inner(
         return Err(ApiError::new("too_large", "The message is too large."));
     }
     let now = helm_core::now_ms();
+    // Rules that arrived, changed or stopped applying since this chat's start ride the message as
+    // hidden context, as in a typed send. `context_gen` locks the actor map, so it is read here,
+    // never inside the writer lock; and the note is only consumed once the write below commits.
+    let gen = rt.context_gen(s.chat_id);
+    let rule_note = helm_skills::triggers::message_note(&rt.sh.cfg.profile_dir, s.chat_id, gen.0, now);
     // Look up the card's hold once: when this chat must wait for it, everything is still saved,
     // only not handed over. (A hold set between here and the write loses this send by a moment;
     // the next one is held. The actor takes what is saved anyway.)
@@ -997,7 +1014,14 @@ fn host_send_inner(
         // The project's startup instructions, then the files listed for the agent beside the
         // prompt, as data.
         let startup = startup_context(rt, tx, s.chat_id, s.submission_id, now)?;
-        let context_text: Vec<String> = [startup, crate::attachments::refs_section(&refs)]
+        if let Some(n) = &rule_note {
+            rules_row(tx, rt, s.chat_id, s.submission_id, &n.row, now)?;
+        }
+        let context_text: Vec<String> = [
+            startup,
+            rule_note.as_ref().map(|n| n.context.clone()),
+            crate::attachments::refs_section(&refs),
+        ]
             .into_iter()
             .flatten()
             .collect();
@@ -1021,6 +1045,12 @@ fn host_send_inner(
     }
     let out = written.map_err(sql)??;
     let (_, fresh) = out;
+    if stored_by_this_send.get() {
+        if let Some(n) = &rule_note {
+            // The write committed: this note is spent for the chat's current context.
+            helm_skills::triggers::mark_message_sent(s.chat_id, n);
+        }
+    }
     // A chat on a local model server is not woken while a GPU hold runs on the card: the message
     // is stored and waits, and goes over when the hold ends. The person's own sends are not
     // gated — the composer warns them instead.
@@ -1106,6 +1136,34 @@ fn startup_context(
     };
     session_log::upsert_row(tx, &rt.sh.cfg.artifacts(), chat_id, &row, rt.clock().next())?;
     Ok(Some(inj.context))
+}
+
+/// The visible line naming a rule note: written the way [`startup_context`] writes its own, so the
+/// transcript shows which rules arrived with this message and which stopped applying. The hidden
+/// text itself rides the message in `submission_context`.
+fn rules_row(
+    tx: &Transaction<'_>,
+    rt: &ChatRuntime,
+    chat_id: &str,
+    submission_id: &str,
+    text: &str,
+    now: i64,
+) -> rusqlite::Result<()> {
+    let row = RowWrite {
+        source_key: format!("c:rules:{submission_id}"),
+        role: "context",
+        text: text.to_owned(),
+        thinking: String::new(),
+        tool_name: None,
+        tool_call_id: None,
+        status: "complete",
+        timestamp: now,
+        details: json!({"contextKind": ContextKind::Rules}),
+        entry_id: None,
+        parent_id: None,
+    };
+    session_log::upsert_row(tx, &rt.sh.cfg.artifacts(), chat_id, &row, rt.clock().next())?;
+    Ok(())
 }
 
 /// Send the restart continuation (origin `harness`, a plain prompt: it never interrupts and never
