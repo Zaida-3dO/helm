@@ -1,0 +1,127 @@
+[
+  {
+    "function": {
+      "description": "Turn or set lights; status reads them.",
+      "name": "light",
+      "parameters": {
+        "properties": {
+          "action": {
+            "enum": [
+              "on",
+              "off",
+              "toggle",
+              "set",
+              "status"
+            ],
+            "type": "string"
+          },
+          "brightness_change_pct": {
+            "description": "-100..100, brighter/dimmer",
+            "type": "number"
+          },
+          "brightness_pct": {
+            "description": "0-100",
+            "type": "number"
+          },
+          "color": {
+            "description": "colour word or r,g,b",
+            "type": "string"
+          },
+          "color_temp": {
+            "description": "warm, neutral, cool or kelvin",
+            "type": "string"
+          },
+          "target": {
+            "description": "area or light name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "action"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Set heating; status reads it.",
+      "name": "climate",
+      "parameters": {
+        "properties": {
+          "action": {
+            "enum": [
+              "set",
+              "status"
+            ],
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "target": {
+            "description": "area or heater name",
+            "type": "string"
+          },
+          "temperature": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "target",
+          "action"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Voice timer: start, cancel or status.",
+      "name": "timer",
+      "parameters": {
+        "properties": {
+          "action": {
+            "enum": [
+              "start",
+              "cancel",
+              "status"
+            ],
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "minutes": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Read one room: what is on, temperatures.",
+      "name": "home_state",
+      "parameters": {
+        "properties": {
+          "target": {
+            "description": "area name",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  }
+]
