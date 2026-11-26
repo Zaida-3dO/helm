@@ -1,8 +1,9 @@
 //! Approving from Telegram.
 //!
 //! Off unless the user turns it on in Settings → Hub. Then a permission prompt or a plan approval
-//! that waits in a chat (while the user is away, or in the Telegram chat itself) goes to Telegram
-//! as a message with one button per option, and a tap answers it as the card in Helm would.
+//! waiting in a chat can go to Telegram as a message with one button per option, and a tap answers
+//! it as the card in Helm would — but only when Telegram is where that person can answer: an ask
+//! never mirrors to every surface at once ([`on_telegram`]).
 //!
 //! - **Only a tap counts.** Telegram tells the hub which account tapped; the hub passes on a tap
 //!   only from the allowed user in a private chat; Helm accepts it only for an ask id it issued,
@@ -12,6 +13,11 @@
 //! - **Nothing allowed unseen.** When the details are too long to show in full on the phone, the
 //!   ask offers only the options that allow nothing (Deny, Stop turn, Keep planning) and says to
 //!   open Helm to allow it.
+//! - **Which surface asks.** [`on_telegram`] is the one decision every ask kind reads: the person's
+//!   own Telegram chat, a voice conversation (the phone app or a room speaker), a stated away —
+//!   AFK set by hand, screen locked, machine asleep — or their last Telegram message beating any
+//!   keyboard input on this PC and staying recent. A chat started at this PC whose person is at
+//!   the keys waits for its card in Helm; an idle mouse alone never sends one to the phone.
 //! - **Kept in step.** A request answered in Helm, withdrawn or ended has its buttons taken down.
 //!   The asks live in memory: after a restart a tap on an old one says it is no longer waiting.
 //! - **Every Allow card.** A card that only grants a chat permission (it changes nothing itself)
@@ -19,14 +25,17 @@
 //!   for, as the card in Helm does by default.
 //! - **Staged settings changes too.** A request a chat staged for Helm to apply (the card that
 //!   says Approve and lists every change) is asked with Approve and Deny when approving from
-//!   Telegram is on and the user is away or talking to Helm over Telegram or voice. The tap goes
+//!   Telegram is on and [`on_telegram`] picks the phone for it. The tap goes
 //!   through the same one decision as the card in Helm, so whichever answers first wins and the
 //!   other is closed. The ask is Helm-issued, single use, expires with the request, and is
 //!   accepted only from the account of the person who owns the chat. When the lines do not fit in
 //!   one message only Deny is offered, with a note to open Helm.
 //! - **A chat may ask too.** `app_telegram_ask` puts a chat's own question to the user with
-//!   buttons ("May I merge and redeploy?"); the tapped option comes back to that chat as a note
-//!   from Helm saying it was tapped on the user's own Telegram account.
+//!   buttons ("May I merge and redeploy?") — only when [`on_telegram`] says Telegram is where they
+//!   are; otherwise it is refused with nothing asked, and belongs in the chat itself. The tapped
+//!   option comes back to that chat as a note from Helm saying it was tapped on the user's own
+//!   Telegram account. An untouched question has its buttons taken down once it waits past
+//!   [`QUESTION_TTL_MS`], so an old card never lingers.
 
 use helm_chats::types::{Interaction, InteractionAttention, InteractionMethod};
 use helm_consent::{ConsentRequest, RequestState};
@@ -36,6 +45,92 @@ use std::sync::Mutex;
 
 /// Telegram shows at most this many buttons for one ask.
 pub const MAX_OPTIONS: usize = 4;
+
+/// How long a chat's own question keeps its buttons before they come down as no longer current.
+pub const QUESTION_TTL_MS: i64 = 6 * 60 * 60 * 1000;
+
+/// The surface a request came from — where its answer belongs unless the person is known to be
+/// somewhere else right now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Surface {
+    /// A chat on this PC, raised while working at Helm.
+    Pc,
+    /// The channel's own Telegram chat: the request came over Telegram.
+    Telegram,
+    /// A voice conversation: the phone app or a room speaker.
+    Voice,
+}
+
+/// How long ago a person may have last shown up over Telegram for it to still count as where
+/// they are. Kept generous so an answer typed there keeps asks flowing there; kept bounded so a
+/// message from yesterday does not put tonight's approval cards on the phone.
+pub const TELEGRAM_ACTIVE_MS: i64 = 15 * 60 * 1000;
+
+/// What one look knows about where the user last showed up. `None` is unknown, not never: no
+/// message since this Helm started, or no readable input clock (off Windows).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Presence {
+    /// When a Telegram message, an ask tap or a stop last came in on that person's channel.
+    pub telegram_at: Option<i64>,
+    /// When keyboard or pointer input last moved anywhere on this PC.
+    pub desktop_at: Option<i64>,
+}
+
+/// Whether an ask waiting in a chat should also reach Telegram now — the one decision every ask
+/// kind reads, so nothing mirrors to more than where the person actually is.
+///
+/// - A voice conversation, and any AFK span that states the person left this PC — set by hand,
+///   screen locked, machine asleep: nobody can answer at this screen, so the phone is the place.
+/// - Being idle is deliberately not enough on its own. An untouched mouse only says nobody has
+///   clicked lately; sending an ask to the phone for every quiet minute is how approval cards
+///   piled up over nights spent watching one chat in Helm and answering its cards there.
+/// - Otherwise Telegram gets it only when it can be sure the person is there: their last Telegram
+///   message must beat any desktop input (typing into Helm, that channel's own chat included)
+///   and stay inside [`TELEGRAM_ACTIVE_MS`]. At the keys, or with nobody known to be anywhere
+///   recently, the ask waits for its card in Helm.
+pub fn on_telegram(origin: Surface, presence: &Presence, away_declared: bool, now: i64) -> bool {
+    if origin == Surface::Voice || away_declared {
+        return true;
+    }
+    let Some(at) = presence.telegram_at else {
+        return false;
+    };
+    now - at <= TELEGRAM_ACTIVE_MS && presence.desktop_at.is_none_or(|d| at > d)
+}
+
+/// The moment each profile's person last showed up over Telegram, as the sink remembers it. In
+/// memory only: after a restart Helm believes Telegram again once one message or tap arrives.
+#[derive(Default)]
+pub struct Seen(Mutex<HashMap<String, i64>>);
+
+impl Seen {
+    /// A message, an ask tap or a stop came in on that profile's channel at `at`.
+    pub fn note(&self, profile_id: &str, at: i64) {
+        let mut m = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let e = m.entry(profile_id.to_owned()).or_insert(at);
+        if at > *e {
+            *e = at;
+        }
+    }
+
+    pub fn at(&self, profile_id: &str) -> Option<i64> {
+        self.0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(profile_id)
+            .copied()
+    }
+
+    /// A snapshot for one watcher look.
+    pub fn snapshot(&self) -> HashMap<String, i64> {
+        self.0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
+    }
+}
 
 /// One ask on Telegram: the request it answers and the buttons it offered.
 #[derive(Clone, Debug, PartialEq)]
@@ -353,8 +448,9 @@ impl Asks {
     }
 
     /// One look at what waits now: ask what is new, take down asks whose request no longer
-    /// waits. `new_id` makes a fresh, unguessable id.
-    pub fn step(&self, waiting: &[Waiting], mut new_id: impl FnMut() -> String) -> Step {
+    /// waits, and take down a chat's own questions that waited past [`QUESTION_TTL_MS`].
+    /// `new_id` makes a fresh, unguessable id.
+    pub fn step(&self, waiting: &[Waiting], now: i64, mut new_id: impl FnMut() -> String) -> Step {
         let mut m = self.map();
         let mut step = Step::default();
         let live: Vec<(&str, &str)> = waiting
@@ -376,6 +472,19 @@ impl Asks {
                 id,
                 person,
                 "No longer waiting: answered in Helm, or withdrawn.".into(),
+            ));
+        }
+        let stale_q: Vec<(String, String)> = m
+            .iter()
+            .filter(|(_, a)| a.question.is_some() && a.expires_at.is_some_and(|e| e <= now))
+            .map(|(id, a)| (id.clone(), a.person.clone()))
+            .collect();
+        for (id, person) in stale_q {
+            m.remove(&id);
+            step.done.push((
+                id,
+                person,
+                "No longer current: this question waited too long for an answer.".into(),
             ));
         }
         for w in waiting.iter().filter(|w| askable(&w.interaction)) {
@@ -452,7 +561,9 @@ impl Asks {
             .collect()
     }
 
-    /// A chat's own question, put to the user with buttons. Kept until a tap or a restart.
+    /// A chat's own question, put to the user with buttons. Kept until a tap, a restart, or
+    /// [`QUESTION_TTL_MS`] has passed — so an old card never lingers as a duplicate when its
+    /// answer landed elsewhere.
     pub fn add_question(
         &self,
         id: &str,
@@ -473,7 +584,7 @@ impl Asks {
                 yes: None,
                 question: Some(question.to_owned()),
                 consent: false,
-                expires_at: None,
+                expires_at: Some(helm_core::now_ms() + QUESTION_TTL_MS),
             },
         );
     }
@@ -674,7 +785,7 @@ mod tests {
         let mut long = approval.clone();
         long.id = "r9".into();
         long.context.as_mut().unwrap()[0].text = "x".repeat(401);
-        let s = Asks::default().step(&[waiting(long)], new_id);
+        let s = Asks::default().step(&[waiting(long)], 0, new_id);
         assert_eq!(s.ask[0].1, "p7", "the ask carries the chat owner's person");
         assert_eq!(s.ask[0].3, ["Deny", "Stop turn"]);
         assert!(
@@ -691,12 +802,12 @@ mod tests {
         };
         let plan = interaction("r2", Plan, Confirm, &[]);
         let both = [waiting(approval.clone()), waiting(plan.clone())];
-        let s = asks.step(&both, &mut id);
+        let s = asks.step(&both, 0, &mut id);
         assert_eq!(s.ask.len(), 2);
         assert_eq!(s.ask[1].3, ["Approve plan", "Keep planning"]);
-        assert!(asks.step(&both, &mut id).ask.is_empty(), "asked once");
+        assert!(asks.step(&both, 0, &mut id).ask.is_empty(), "asked once");
         // The plan was answered in Helm: its buttons come down.
-        let s = asks.step(&[waiting(approval.clone())], &mut id);
+        let s = asks.step(&[waiting(approval.clone())], 0, &mut id);
         assert_eq!(s.done.len(), 1);
         assert_eq!(s.done[0].0, "ask2");
         // A tap: an index past the buttons answers nothing; a good one answers once.
@@ -743,11 +854,161 @@ mod tests {
             "Merge and redeploy?",
             vec!["Yes".into(), "No".into()],
         );
-        assert!(asks.step(&[], new_id).done.is_empty());
+        assert!(asks.step(&[], helm_core::now_ms(), new_id).done.is_empty());
         assert!(asks.clear(false).is_empty());
-        let q = take(&asks, "q1", 0).unwrap();
-        assert_eq!(q.question.as_deref(), Some("Merge and redeploy?"));
-        assert!(answer_note("q1", "Merge and redeploy?", "Yes").contains("tapped \"Yes\""));
+        // A question nobody answered comes down when its window passes, so the card cannot
+        // linger as a duplicate of an answer that landed elsewhere.
+        let late = helm_core::now_ms() + QUESTION_TTL_MS + 1_000;
+        let s = asks.step(&[], late, String::new);
+        assert_eq!(s.done.len(), 1);
+        assert_eq!(s.done[0].0, "q1");
+        assert_eq!(s.done[0].1, "p7");
+        assert!(
+            s.done[0].2.starts_with("No longer current"),
+            "{}",
+            s.done[0].2
+        );
+        let asks = Asks::default();
+        asks.add_question("q2", "c9", "p7", "Merge?", vec!["Yes".into(), "No".into()]);
+        let q = take(&asks, "q2", 0).unwrap();
+        assert_eq!(q.question.as_deref(), Some("Merge?"));
+        assert!(answer_note("q2", "Merge?", "Yes").contains("tapped \"Yes\""));
+    }
+
+    /// One routing table for every ask kind: the request follows the person to the place they
+    /// are, never to every surface at once. `now` is a fixed epoch far from any constant.
+    #[test]
+    fn an_ask_goes_to_the_surface_the_user_is_on() {
+        struct Row {
+            case: &'static str,
+            origin: Surface,
+            telegram_at: Option<i64>,
+            desktop_at: Option<i64>,
+            away_declared: bool,
+            want: bool,
+        }
+        let t0: i64 = 1_800_000_000_000;
+        let min = 60_000;
+        let rows = [
+            Row {
+                case: "nobody known anywhere recent",
+                origin: Surface::Pc,
+                telegram_at: None,
+                desktop_at: Some(t0 - 40 * min),
+                away_declared: false,
+                want: false,
+            },
+            Row {
+                case: "an idle mouse at the screen is not being away",
+                origin: Surface::Pc,
+                telegram_at: None,
+                desktop_at: Some(t0 - TELEGRAM_ACTIVE_MS - min),
+                away_declared: false,
+                want: false,
+            },
+            Row {
+                case: "AFK set by hand / screen locked / machine asleep",
+                origin: Surface::Pc,
+                telegram_at: None,
+                desktop_at: Some(t0 - min),
+                away_declared: true,
+                want: true,
+            },
+            Row {
+                case: "a phone or speaker conversation asks",
+                origin: Surface::Voice,
+                telegram_at: None,
+                desktop_at: Some(t0 - min),
+                away_declared: false,
+                want: true,
+            },
+            Row {
+                // The night case: the person typed into their own Telegram chat in Helm and is
+                // answering its cards there. Last surface is the keyboard: nothing mirrors.
+                case: "their own Telegram chat, answered at the keys",
+                origin: Surface::Telegram,
+                telegram_at: Some(t0 - min),
+                desktop_at: Some(t0 - 20_000),
+                away_declared: false,
+                want: false,
+            },
+            Row {
+                case: "their own Telegram chat over the phone",
+                origin: Surface::Telegram,
+                telegram_at: Some(t0 - min),
+                desktop_at: Some(t0 - 4 * 60 * min),
+                away_declared: false,
+                want: true,
+            },
+            Row {
+                case: "a coding chat while they work over Telegram",
+                origin: Surface::Pc,
+                telegram_at: Some(t0 - 2 * min),
+                desktop_at: Some(t0 - 3 * 60 * min),
+                away_declared: false,
+                want: true,
+            },
+            Row {
+                case: "a quick Telegram look, then back to the keyboard",
+                origin: Surface::Pc,
+                telegram_at: Some(t0 - 2 * min),
+                desktop_at: Some(t0 - 10_000),
+                away_declared: false,
+                want: false,
+            },
+            Row {
+                case: "the last Telegram message is too old to mean here",
+                origin: Surface::Pc,
+                telegram_at: Some(t0 - TELEGRAM_ACTIVE_MS - min),
+                desktop_at: Some(t0 - 8 * 60 * min),
+                away_declared: false,
+                want: false,
+            },
+            Row {
+                case: "no desktop clock, but they just wrote on Telegram",
+                origin: Surface::Pc,
+                telegram_at: Some(t0 - min),
+                desktop_at: None,
+                away_declared: false,
+                want: true,
+            },
+            Row {
+                case: "a tie goes to the keyboard",
+                origin: Surface::Pc,
+                telegram_at: Some(t0 - 30_000),
+                desktop_at: Some(t0 - 30_000),
+                away_declared: false,
+                want: false,
+            },
+        ];
+        for row in rows {
+            let p = Presence {
+                telegram_at: row.telegram_at,
+                desktop_at: row.desktop_at,
+            };
+            assert_eq!(
+                on_telegram(row.origin, &p, row.away_declared, t0),
+                row.want,
+                "{}",
+                row.case
+            );
+        }
+    }
+
+    /// The sink's memory of where each profile last showed up over Telegram.
+    #[test]
+    fn seen_keeps_the_last_telegram_touch_per_profile() {
+        let seen = Seen::default();
+        assert_eq!(seen.at("p1"), None);
+        seen.note("p1", 10);
+        seen.note("p2", 5);
+        seen.note("p1", 7); // an older touch (a resend) does not move the clock back
+        seen.note("p1", 12);
+        assert_eq!(seen.at("p1"), Some(12));
+        assert_eq!(seen.at("p2"), Some(5));
+        let snap = seen.snapshot();
+        assert_eq!(snap.get("p1").copied(), Some(12));
+        assert_eq!(snap.len(), 2);
     }
 
     struct Recorder(Mutex<Vec<String>>);
