@@ -1768,7 +1768,7 @@ impl TelegramSink for ChatSink {
                     self.repair_chats
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
-                        .insert(o.service.clone(), id.clone());
+                        .insert(service.clone(), id.clone());
                     log::info!("relay: opened chat {id} to fix the {service} service");
                 }
                 Err(e) => log::warn!("relay: no repair chat for the {service} service: {e}"),

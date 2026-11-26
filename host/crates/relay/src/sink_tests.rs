@@ -768,7 +768,12 @@ async fn the_hub_recovery_tells_the_repair_chat_it_opened() {
         since: "09:12".into(),
         detail: Some("its health address does not answer".into()),
     };
-    let chat = open_repair_chat(&e.ctx, &down, T0).unwrap();
+    // Both helpers block on the runtime handle, so they run off the async thread.
+    let c = e.ctx.clone();
+    let chat = tokio::task::spawn_blocking(move || open_repair_chat(&c, &down, T0))
+        .await
+        .unwrap()
+        .unwrap();
     let chats: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
     chats.lock().unwrap().insert("stt".into(), chat.clone());
     let back = ServiceRecovered {
@@ -777,7 +782,11 @@ async fn the_hub_recovery_tells_the_repair_chat_it_opened() {
         since: Some("09:12".into()),
         back: "10:05".into(),
     };
-    stand_down_repair_chat(&e.ctx, &chats, &back).unwrap();
+    let (c2, chats2, back2) = (e.ctx.clone(), chats.clone(), back.clone());
+    tokio::task::spawn_blocking(move || stand_down_repair_chat(&c2, &chats2, &back2))
+        .await
+        .unwrap()
+        .unwrap();
     let s = subs(&e.db, &chat);
     assert_eq!(s.len(), 2, "the recovery is the repair chat's second message");
     assert_eq!(s[1].4,
