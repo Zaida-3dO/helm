@@ -45,8 +45,9 @@ pub fn register_services(services: &mut Services, _events: &Arc<dyn EventSink>) 
     let Some(db) = services.get::<Database>() else {
         return;
     };
-    let probes = Arc::new(probes::RealProbes { db: db.clone() });
-    let svc = Arc::new(WaitsService::new(db, probes));
+    let probes = Arc::new(probes::RealProbes::new(db.clone()));
+    let svc = Arc::new(WaitsService::new(db, probes.clone()));
+    services.insert(probes);
     services.insert(Arc::new(helm_chats::seams::ChildWatcher(svc.clone())));
     services.insert(svc);
 }
@@ -57,6 +58,9 @@ pub fn start(runtime: &helm_chats::ChatRuntime, services: &Services) {
         return;
     };
     svc.set_sink(Arc::new(service::RuntimeSink(runtime.clone())));
+    if let Some(probes) = services.get::<probes::RealProbes>() {
+        probes.set_runtime(runtime.clone());
+    }
     let local = svc.clone();
     runtime.handle().spawn(async move {
         let mut every =
