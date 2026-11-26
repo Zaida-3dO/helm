@@ -606,13 +606,29 @@ fn speaker_get(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
 }
 
 fn speaker_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
-    let f: speaker::PolicyFile = serde_json::from_value(without_profile(&args)).map_err(|_| {
-        ApiError::bad_args("Expected model, effort, takeSpeaker and previousHours (0 to 72).")
+    let wanted = without_profile(&args);
+    let mut f: speaker::PolicyFile = serde_json::from_value(wanted.clone()).map_err(|_| {
+        ApiError::bad_args(
+            "Expected model, effort, takeSpeaker, previousHours (0 to 72), lean and boardId.",
+        )
     })?;
-    f.check().map_err(ApiError::bad_args)?;
     let profile = ctx.services.need::<Profile>()?;
     let pid = channel_profile(ctx, &args)?;
-    let took = speaker::load_file(&speaker::paths(&profile.dir, &pid).policy).take_speaker;
+    let before = speaker::load_file(&speaker::paths(&profile.dir, &pid).policy);
+    // A save that does not mention lean or the board (a window from before they existed) leaves
+    // them as they were.
+    if wanted.get("lean").is_none() {
+        f.lean = before.lean;
+    }
+    if wanted.get("boardId").is_none() {
+        f.board_id = before.board_id.clone();
+    }
+    // A blank board is no board.
+    if f.board_id.as_deref().is_some_and(|b| b.trim().is_empty()) {
+        f.board_id = None;
+    }
+    f.check().map_err(ApiError::bad_args)?;
+    let took = before.take_speaker;
     let takes = f.take_speaker;
     speaker_sink::save(&profile.dir, &pid, &f).map_err(ApiError::internal)?;
     if took != takes {

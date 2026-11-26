@@ -497,8 +497,9 @@ fn speaker_json(f: &crate::speaker::PolicyFile) -> Value {
 
 /// The speaker policy as a value, or a sentence naming what is wrong with it.
 fn speaker_from_json(v: &Value) -> Result<crate::speaker::PolicyFile, String> {
-    serde_json::from_value(v.clone())
-        .map_err(|e| format!("Expected model, effort, takeSpeaker and previousHours: {e}"))
+    serde_json::from_value(v.clone()).map_err(|e| {
+        format!("Expected model, effort, takeSpeaker, previousHours, lean and boardId: {e}")
+    })
 }
 
 /// The two fields a chat may set, checked; a sentence naming the problem, if any.
@@ -543,6 +544,8 @@ fn speaker_options() -> Value {
             "effort": {"type": "enum", "allowed": helm_chats::catalogue::EFFORTS, "blankAllowed": true, "nullable": true, "about": "The effort a new room-speaker chat opens with; blank: the app's usual new-chat effort; null: the default."},
             "takeSpeaker": {"type": "boolean", "nullable": true, "about": "Whether this PC takes its person's room speakers. null: the default, on for the home profile and off for the others."},
             "previousHours": {"type": "integer", "min": 0, "max": 72, "about": "How long a talk that just ended may be named to the next one on that speaker; 0 never names it."},
+            "lean": {"type": "boolean", "about": "Lean speaker chats: a thin system prompt (a short persona and the speaker prompt) and only the Home Assistant server and the tool that sends a message to the phone. Applies to chats started after the change. The user's to change."},
+            "boardId": {"type": "string", "nullable": true, "about": "The board a new speaker chat is shown on; unset leaves it to the app. The user's to change."},
         },
     })
 }

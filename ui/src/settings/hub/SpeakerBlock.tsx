@@ -1,10 +1,11 @@
 // Settings → Hub's Speakers block: the chats the house's room speakers talk to, the model and
-// effort a new one starts with, whether this PC takes them, and how long a talk that ended may be
-// named to the next one. It reads and saves through the host's speaker ops; the hub line is set
-// above it in the same pane.
+// effort a new one starts with, the board they are shown on, whether they run lean, whether this
+// PC takes them, and how long a talk that ended may be named to the next one. It reads and saves
+// through the host's speaker ops; the hub line is set above it in the same pane.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { LocalModelInfo } from '../../api/types.ts';
+import type { ProjectNode } from '../../api/generated/projects/ProjectNode.ts';
 import { hubOps, type SpeakerSettings } from '../../api/hub.ts';
 import { localModelChoices } from '../../composer/modelEffort.ts';
 import { useShell } from '../../shell/context.ts';
@@ -34,6 +35,16 @@ function modelChoices(models: { id: string; name: string; description?: string }
   return out;
 }
 
+/** The app's own choice first, then each board; a saved board the list lacks still shows. */
+function boardChoices(boards: { id: string; name: string }[], saved: string): Choice[] {
+  const out: Choice[] = [
+    { value: '', title: 'App default', subtitle: 'Where any other new chat in this folder is shown' },
+    ...boards.map((b) => ({ value: b.id, title: b.name || b.id })),
+  ];
+  if (saved && !out.some((o) => o.value === saved)) out.push({ value: saved, title: saved });
+  return out;
+}
+
 function effortChoices(saved: string): Choice[] {
   const out: Choice[] = [
     { value: '', title: 'App default', subtitle: 'The same effort any other new chat starts with' },
@@ -49,6 +60,7 @@ export function SpeakerBlock({ profileId }: { profileId: string | null }) {
   const [speaker, setSpeaker] = useState<SpeakerSettings | null>(null);
   const [previous, setPrevious] = useState('');
   const [models, setModels] = useState<{ id: string; name: string; description?: string }[]>([]);
+  const [boards, setBoards] = useState<{ id: string; name: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -69,6 +81,10 @@ export function SpeakerBlock({ profileId }: { profileId: string | null }) {
     void shell
       .api<{ models: { id: string; name: string; description?: string }[]; local?: LocalModelInfo[] }>('model_catalogue', { harness: 'claude' })
       .then((c) => live && setModels([...c.models, ...localModelChoices(c.local)]))
+      .catch(() => undefined);
+    void shell
+      .api<ProjectNode[]>('project_list', {})
+      .then((p) => live && setBoards(p.filter((x) => x.kind === 'board').map((x) => ({ id: x.id, name: x.name }))))
       .catch(() => undefined);
     // A chat that changes the policy through its settings tools: re-read so the pickers follow.
     const off = shell.bus.on('relay_speaker', read);
@@ -98,6 +114,7 @@ export function SpeakerBlock({ profileId }: { profileId: string | null }) {
   const previousValid = Number.isInteger(hours) && hours >= PREVIOUS_MIN && hours <= PREVIOUS_MAX;
   const previousChanged = speaker !== null && hours !== speaker.previousHours;
   const modelOptions = useMemo(() => modelChoices(models, speaker?.model ?? ''), [models, speaker?.model]);
+  const boardOptions = useMemo(() => boardChoices(boards, speaker?.boardId ?? ''), [boards, speaker?.boardId]);
 
   return (
     <div data-testid="hub-speaker">
@@ -165,6 +182,38 @@ export function SpeakerBlock({ profileId }: { profileId: string | null }) {
             options={effortChoices(speaker.effort)}
             disabled={busy}
             onChange={(v) => save({ effort: v })}
+          />
+        </SettingRow>
+      )}
+      {speaker && (
+        <SettingRow
+          title="Board for new speaker chats"
+          description="Where a new room-speaker chat is shown, so what the house talked about with nobody at the screen can be found. App default leaves it to the same rules as any other new chat."
+        >
+          <Picker
+            settings
+            label="Board for new speaker chats"
+            testId="hub-speaker-board"
+            value={speaker.boardId}
+            options={boardOptions}
+            searchable
+            disabled={busy}
+            onChange={(v) => save({ boardId: v })}
+          />
+        </SettingRow>
+      )}
+      {speaker && (
+        <SettingRow
+          testId="hub-speaker-lean"
+          title="Lean speaker chats"
+          description="A new room-speaker chat gets a short persona and the speaker prompt as its whole system prompt, and only the Home Assistant server and the tool that sends a message to your phone. Faster for a small model; the chat can do less. Chats already open keep how they started."
+        >
+          <Checkbox
+            checked={speaker.lean}
+            disabled={busy}
+            aria-label="Lean speaker chats"
+            data-testid="hub-speaker-lean-box"
+            onChange={(on) => save({ lean: on })}
           />
         </SettingRow>
       )}
