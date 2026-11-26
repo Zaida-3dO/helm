@@ -29,10 +29,13 @@ import time
 from dataclasses import dataclass, field
 
 
-# Same contract as hubapi.TransportError; repeated here so this module imports
-# nothing outside the standard library (a caller may pass either class).
-class TransportError(Exception):
-    """The request never reached the model endpoint."""
+try:  # inside the package (Home Assistant) or a test package
+    from .errors import RequestTimeout, TransportError
+except ImportError:  # run as plain modules from this folder (unit tests)
+    from errors import RequestTimeout, TransportError
+# noqa: F401 - re-exported:
+# every transport in this package raises these exact classes (see errors.py);
+# the name stays reachable as agent_core.TransportError for callers.
 
 
 # Answer kinds a caller switches on. "escalate" means: not ours to answer -
@@ -70,20 +73,27 @@ ASK_HELM_SCHEMA = {
     },
 }
 
-PROMPT_VERSION = "lean-v1"
+PROMPT_VERSION = "lean-v2"
 
 # The whole persona and behaviour rules. Deliberately tiny: a small model
 # follows short instructions better than long ones. A test pins this under
-# 250 estimated tokens; the assembled prompt stays under 1,200 with context
-# and the four house tools plus ask_helm.
+# 250 estimated tokens; the assembled prompt stays inside its budget with
+# context and the four house tools (see the fixture budget test).
 SYSTEM_PROMPT = """You are the house voice assistant. Answer by speech only.
 
 Rules:
 - Answer first, in one to three short spoken sentences. Plain words. No markdown, no lists, no urls, no entity ids. Say numbers as a person would.
 - Ask a question back only when you truly cannot act without it.
 - Anything about the house (lights, heating, timers, what is on): use the tools. Never claim you did something a tool did not do.
-- Personal things (my calendar, my messages), reminders, money, or anything that needs a long answer: call ask_helm. Do not guess at them yourself.
+- If no room is named in a request, use the asking room.
 - If a tool fails or cannot do it, say so in one short sentence."""
+
+# Only added when an ask_helm tool was actually handed to the model; with no
+# hub configured the tool and this line are both absent, so the model never
+# reaches for something that would only speak an error.
+ASK_HELM_RULE = ("- My calendar, my messages, reminders, money, or anything"
+                 " that needs a long answer: call ask_helm. Do not guess at"
+                 " those yourself.")
 
 
 def estimate_tokens(text):
@@ -123,6 +133,8 @@ class TurnResult:
     prompt_hash: str = None        # sha256 over version + system text + tool defs
     tags: dict = None              # caller's labels, carried through verbatim
     escalate_text: str = None      # set when kind == escalate: what to ask Helm
+    empty_final: bool = False      # tools worked but the model said nothing;
+                                   # we spoke the tool's own sentence instead
 
 
 # --------------------------------------------------------------------------
@@ -263,27 +275,58 @@ def _now_text(ctx, clock):
     return time.strftime("%Y-%m-%d %H:%M (%A)", time.localtime(clock()))
 
 
+PROMPT_NAME_CAP = 8       # names per area per kind in the prompt line
+PROMPT_NAME_LEN = 40      # a renamed device never makes the prompt long
+
+
+def _safe_name(value):
+    """One house name destined for the prompt: no newlines, capped length.
+
+    Entity names arrive json.dumps-escaped; room and area labels do not, so
+    they are flattened here - a guest who renames a device cannot inject
+    lines into our own rule text."""
+    return " ".join(str(value).split())[:PROMPT_NAME_LEN]
+
+
+def _fmt_names(names):
+    """A list of house names for the prompt line. Plain words are written
+    bare; only names that would read ambiguously get quoted. json.dumps on
+    every name costs a real token per light, and a forty-light house pays it."""
+    parts = [n if not any(c in n for c in ',;:"') else json.dumps(n)
+             for n in names]
+    return "[" + ", ".join(parts) + "]"
+
+
 def build_context(ctx, cfg, clock=time.time):
     """The minimised per-turn context: date/time, asking room, one compact line
-    per area listing only exposed light and climate names. No entity ids, no
-    states, no attributes - the house has a hundred lights and most are noise
-    for speech. History is added separately."""
+    per area listing only exposed light and climate names (capped, with a
+    "(+N more)" tail). No entity ids, no states, no attributes - the live house
+    exposes about forty speakable lights and most are noise for speech. The
+    "Unassigned" bucket never shows: it is noise as a spoken target, while the
+    tools still resolve those names. History is added separately."""
     ctx = ctx or {}
     lines = ["Time: " + _now_text(ctx, clock)]
-    if ctx.get("room"):
-        lines.append("Asking room: " + str(ctx["room"]))
+    room = _safe_name(ctx.get("room") or "")
+    if room:
+        lines.append("Asking room: " + room)
     areas = ctx.get("areas") or {}
     for name in sorted(areas, key=str):
+        label = _safe_name(name)
+        if not label or label.lower() == "unassigned":
+            continue
         entry = areas[name] or {}
         parts = []
-        lights = [str(n) for n in (entry.get("lights") or []) if str(n).strip()]
-        climates = [str(n) for n in (entry.get("climates") or []) if str(n).strip()]
-        if lights:
-            parts.append("lights " + json.dumps(lights))
-        if climates:
-            parts.append("heating " + json.dumps(climates))
+        for kind, word in (("lights", "lights"), ("climates", "heating")):
+            names = sorted(n for n in (_safe_name(x)
+                                       for x in (entry.get(kind) or [])) if n)
+            if not names:
+                continue
+            shown = names[:PROMPT_NAME_CAP]
+            tail = len(names) - len(shown)
+            parts.append("%s %s%s" % (word, _fmt_names(shown),
+                                      " (+%d more)" % tail if tail else ""))
         if parts:
-            lines.append("%s: %s" % (name, "; ".join(parts)))
+            lines.append("%s: %s" % (label, "; ".join(parts)))
     lines.append("If the house is not named here, it is hidden from voice.")
     return "\n".join(lines)
 
@@ -351,11 +394,13 @@ async def _chat(cfg, transport, url, messages, schemas, model, timings):
         status, raw = await transport.request(
             "POST", url, headers=_headers(cfg), data=data,
             timeout=cfg.timeout_s + 5)
-    except TransportError:
-        return {"state": "offline"}
-    except TimeoutError:
+    except (RequestTimeout, TimeoutError):
+        # RequestTimeout first: it is a TransportError subclass, and a slow
+        # model must be spoken as a timeout, never dressed up as offline
         timings["model_ms"].append(round((time.monotonic() - started) * 1000))
         return {"state": "timeout"}
+    except TransportError:
+        return {"state": "offline"}
     timings["model_ms"].append(round((time.monotonic() - started) * 1000))
     if status != 200:
         return {"state": "error"}
@@ -418,7 +463,10 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
     timings = {"prompt_ms": 0, "model_ms": [], "tool_ms": [], "total_ms": 0}
 
     house_schemas = list(getattr(tools, "schemas", None) or [])
-    schemas = house_schemas + [ASK_HELM_SCHEMA]
+    # a hub-less entry hands over no ask_helm tool and says nothing about it:
+    # the model then answers or declines by itself instead of speaking an error
+    ask_enabled = bool(getattr(tools, "ask_enabled", True))
+    schemas = house_schemas + ([ASK_HELM_SCHEMA] if ask_enabled else [])
     known_names = set()
     for schema in house_schemas:
         fn = schema.get("function") if isinstance(schema, dict) else None
@@ -427,21 +475,24 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
 
     t_prompt = time.monotonic()
     system_text = build_context(ctx, cfg, clock)
+    rules = SYSTEM_PROMPT + ("\n" + ASK_HELM_RULE if ask_enabled else "")
     timings["prompt_ms"] = round((time.monotonic() - t_prompt) * 1000)
-    p_hash = prompt_hash(system_text, schemas)
+    p_hash = prompt_hash(rules + "\n\n" + system_text, schemas)
     base_messages = (
-        [{"role": "system", "content": SYSTEM_PROMPT + "\n\n" + system_text}]
+        [{"role": "system", "content": rules + "\n\n" + system_text}]
         + _history_messages(ctx, cfg, clock)
         + [{"role": "user", "content": str(text)}])
 
     collected = []  # every tool attempt this turn: {name, args, ok, ms}
 
-    def result(kind, sentence, escalate_text=None, model_used=cfg.model_name):
+    def result(kind, sentence, escalate_text=None, model_used=cfg.model_name,
+               empty_final=False):
         timings["total_ms"] = round((time.monotonic() - started) * 1000)
         return TurnResult(text=sentence, kind=kind, tool_calls=collected,
                           timings=timings, model_used=model_used,
                           prompt_hash=p_hash, tags=dict(tags or {}),
-                          escalate_text=escalate_text)
+                          escalate_text=escalate_text,
+                          empty_final=empty_final)
 
     def give_up(state, used):
         sentence = {KIND_OFFLINE: OFFLINE_TEXT, KIND_TIMEOUT: TIMEOUT_TEXT,
@@ -457,6 +508,7 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
         msgs = [dict(m) for m in base_messages]
         bad_rounds = 0
         capped = False
+        last_ok_text = None  # the sentence the last succeeding tool returned
         for round_no in range(int(cfg.max_tool_rounds) + 1):
             resp = await _chat(cfg, transport, url, msgs, schemas, model_name, timings)
             if resp["state"] in ("offline", "timeout"):
@@ -487,6 +539,13 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
                 reply = clean_reply(content)
                 if reply:
                     return {"state": "answer", "reply": reply}
+                if any(c["ok"] for c in collected):
+                    # The house action already succeeded; a model that then
+                    # says nothing (thinking ate the token budget) must not
+                    # deny something that worked. Speak the tool's own line.
+                    spoken = clean_reply(last_ok_text or "") or "Done."
+                    return {"state": "answer", "reply": spoken,
+                            "empty_final": True}
                 # empty answer (possibly only thinking): retrying locally is
                 # exactly what the escalation endpoint is for; do not spin.
                 return {"state": "empty", "capped": capped}
@@ -495,6 +554,10 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
                 # still calling tools past the budget: judge any text once and
                 # stop rather than looping forever.
                 reply = clean_reply(content)
+                if not reply and any(c["ok"] for c in collected):
+                    spoken = clean_reply(last_ok_text or "") or "Done."
+                    return {"state": "answer", "reply": spoken,
+                            "empty_final": True}
                 return ({"state": "answer", "reply": reply} if reply
                         else {"state": "rounds"})
             assistant_calls, tool_msgs, was_bad = [], [], False
@@ -524,9 +587,13 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
                         # must still survive and speak a plain sentence
                         outcome = {"ok": False, "error": "the tool itself failed"}
                     ms = round((time.monotonic() - t_tool) * 1000)
+                    ok_now = bool(isinstance(outcome, dict)
+                                  and outcome.get("ok") is True)
+                    if ok_now and isinstance(outcome.get("text"), str) \
+                            and outcome["text"].strip():
+                        last_ok_text = outcome["text"]
                     collected.append({"name": name, "args": args,
-                                      "ok": bool(isinstance(outcome, dict)
-                                                 and outcome.get("ok") is True), "ms": ms})
+                                      "ok": ok_now, "ms": ms})
                     timings["tool_ms"].append(ms)
                     tool_msgs.append({"role": "tool", "tool_call_id": call_id,
                                       "content": json.dumps(_brief(outcome))})
@@ -540,7 +607,8 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
 
     state = await attempt(cfg.model_url, cfg.model_name)
     if state["state"] == "answer":
-        return result(KIND_ANSWER, state["reply"], model_used=cfg.model_name)
+        return result(KIND_ANSWER, state["reply"], model_used=cfg.model_name,
+                      empty_final=bool(state.get("empty_final")))
     if state["state"] == KIND_ESCALATE:
         return result(KIND_ESCALATE, "", escalate_text=state["text"],
                       model_used=cfg.model_name)
@@ -553,7 +621,8 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
         fb_name = cfg.escalate_model or cfg.model_name
         state = await attempt(cfg.escalate_url, fb_name)
         if state["state"] == "answer":
-            return result(KIND_ANSWER, state["reply"], model_used="escalate")
+            return result(KIND_ANSWER, state["reply"], model_used="escalate",
+                          empty_final=bool(state.get("empty_final")))
         if state["state"] == KIND_ESCALATE:
             return result(KIND_ESCALATE, "", escalate_text=state["text"],
                           model_used="escalate")

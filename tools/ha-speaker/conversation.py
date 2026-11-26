@@ -32,9 +32,10 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import intent
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.util import dt as dt_util
 
 from . import agent_core
-from .const import CONF_HINT, CONF_ROOM, DOMAIN
+from .const import CONF_DRY, CONF_HINT, CONF_ROOM, DOMAIN
 from .ha_backend import HaBackend
 from .homecontrol import HomeControl
 from .hubapi import (
@@ -51,6 +52,13 @@ _LOGGER = logging.getLogger(__name__)
 # Benchmark-only convenience: a helper text entity may carry tags like
 # "arm=A run=3"; they ride into every timing/record line unchanged.
 TAGS_ENTITY = "input_text.helm_speaker_tags"
+
+# Escalation happens while a person is standing at the speaker waiting: the
+# whole hub round gets a short budget (the model turn already had its own),
+# and when it runs out the fixed sentence goes instead of an open-ended wait.
+ESCALATION_BUDGET_S = 18
+ESCALATION_FIRST_WAIT = 15
+NO_HUB_TEXT = "I can't do that one from here."
 
 
 async def async_setup_entry(
@@ -89,11 +97,21 @@ class HelmSpeakerAgent(ConversationEntity):
         key = device_id or self.entry.entry_id
 
         backend = HaBackend(self.hass, satellite_device_id=device_id)
-        control = HomeControl(backend, dry=bool(runtime.get("control_dry")))
+        has_hub = runtime.get("api") is not None
+        dry = bool(runtime.get("control_dry")) or bool(
+            (self.entry.options or {}).get(CONF_DRY))
+        # with no hub there is nobody to ask: home control stops offering the
+        # ask_helm tool and the prompt stops mentioning it
+        control = HomeControl(backend, dry=dry, ask_helm=has_hub)
         ctx = await self._ctx(backend, device_id, runtime["history"].setdefault(key, []))
-        result = await agent_core.run_turn(
-            cfg, runtime["transport"], control, ctx, text,
-            tags=self._tags(), clock=time.time)
+        try:
+            result = await agent_core.run_turn(
+                cfg, runtime["transport"], control, ctx, text,
+                tags=self._tags(), clock=time.time)
+        except Exception:  # noqa: BLE001 - nothing may escape async_process:
+            # a broken turn must still end as a spoken sentence, not a stack
+            _LOGGER.exception("helm_speaker turn %s crashed", turn_id[:8])
+            result = agent_core.TurnResult(text=ERROR_TEXT, kind="error")
 
         kind = result.kind
         spoken = result.text
@@ -106,7 +124,9 @@ class HelmSpeakerAgent(ConversationEntity):
                                            result.escalate_text or text, ctx)
                 spoken = hub["text"]
             else:
-                spoken = ERROR_TEXT
+                # without a hub ask_helm is not even offered; this only catches
+                # a model that calls it anyway - answer plainly, no fake error
+                spoken = NO_HUB_TEXT
         elif kind == agent_core.KIND_TIMEOUT:
             record_kind = "error"
         elif kind in (agent_core.KIND_OFFLINE, agent_core.KIND_ERROR):
@@ -133,8 +153,15 @@ class HelmSpeakerAgent(ConversationEntity):
         api = runtime.get("api")
         if api is not None and getattr(api, "record", None) is not None \
                 and cfg.record_text:
-            asyncio.create_task(self._record(
-                api, turn_id, device_id, text, spoken, record_kind, result))
+            # a background task owned by the entry: it dies with an unload
+            # instead of haunting a reloaded integration
+            coro = self._record(
+                api, turn_id, device_id, text, spoken, record_kind, result)
+            if hasattr(self.entry, "async_create_background_task"):
+                self.entry.async_create_background_task(
+                    self.hass, coro, "helm_speaker record " + turn_id[:8])
+            else:  # older Home Assistant: plain task still works
+                asyncio.create_task(coro)
 
         response = intent.IntentResponse(language=user_input.language)
         response.async_set_speech(spoken)
@@ -160,7 +187,10 @@ class HelmSpeakerAgent(ConversationEntity):
                 "lights": [name for name, _ in entry.get("lights") or []],
                 "climates": [name for name, _ in entry.get("climates") or []],
             }
-        return {"room": room, "areas": areas, "history": list(history)}
+        # the house clock, not the machine's UTC: a timer or "is it late"
+        # question answered in the wrong zone is wrong, not close
+        return {"room": room, "areas": areas, "history": list(history),
+                "now": dt_util.now().strftime("%Y-%m-%d %H:%M (%A)")}
 
     def _tags(self):
         state = self.hass.states.get(TAGS_ENTITY)
@@ -188,7 +218,8 @@ class HelmSpeakerAgent(ConversationEntity):
             device=device_id or self.entry.entry_id,
             room=self.entry.data.get(CONF_ROOM), area=area_name,
             hint=self.entry.data.get(CONF_HINT), presence=presence,
-            context=context, escalation=True)
+            context=context, escalation=True,
+            budget=ESCALATION_BUDGET_S, first_wait=ESCALATION_FIRST_WAIT)
         kind = result.get("kind")
         if kind == KIND_ANSWER:
             return {"text": result["text"]}

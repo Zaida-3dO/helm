@@ -94,22 +94,44 @@ def active_profile(options):
 def build_model_config(data, options):
     """The Config for the active profile. The hub fields are deliberately
     not here: escalation to a second model endpoint is only what a profile's
-    own extra settings give it; the household hub runs through hubapi."""
+    own extra settings give it; the household hub runs through hubapi.
+
+    The thinking checkbox arrives at an OpenAI-style endpoint as the request
+    body's "think" switch (Ollama reads that name) when it is on; an explicit
+    entry in the free-form body box always wins, so a different server's
+    spelling - or forcing thinking off with "think": false - can override
+    it."""
     profile = profiles_from_entry(data, options)[active_profile(options)]
+    body = dict(profile["extra_body"])
+    if profile["thinking"] and "think" not in body:
+        # only inject when on: strict endpoints reject unknown request fields,
+        # and the server default already means off for most models
+        body["think"] = True
     return Config(
         model_url=profile["model_url"],
         model_name=profile["model_name"],
         api_key=profile["api_key"] or None,
         extra_headers=dict(profile["extra_headers"]),
-        extra_body=dict(profile["extra_body"]),
+        extra_body=body,
         thinking=profile["thinking"],
         timeout_s=profile["timeout_s"],
     )
 
 
+# A header name that smells like a secret has no business in a log line.
+_SECRETISH = ("key", "token", "auth", "secret", "subscription")
+
+
 def redact(profile):
-    """A logging-safe view of a profile: the key becomes ***."""
+    """A logging-safe view of a profile: the key becomes ***, and so does any
+    header value whose *name* says auth, key or token."""
     out = dict(profile)
     if out.get("api_key"):
         out["api_key"] = "***"
+    headers = out.get("extra_headers")
+    if isinstance(headers, dict):
+        out["extra_headers"] = {
+            name: ("***" if any(word in str(name).lower() for word in _SECRETISH)
+                   else value)
+            for name, value in headers.items()}
     return out

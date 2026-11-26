@@ -23,6 +23,13 @@ import struct
 import time
 from urllib.parse import urlencode
 
+try:  # inside the package (Home Assistant)
+    from .errors import TransportError
+except ImportError:  # run as plain modules from this folder (unit tests)
+    from errors import TransportError
+# noqa: F401 - re-exported on purpose: one shared error family for every
+# transport in this package, and the name stays hubapi.TransportError.
+
 # Answer kinds every caller switches on.
 KIND_ANSWER = "answer"  # a sentence to speak
 KIND_EMPTY = "empty"  # heard nothing useful
@@ -108,10 +115,6 @@ def _shrink_record(body, limit):
         if _json_bytes(body) > limit and isinstance(body.get(key), str):
             body[key] = body[key][:600]
     return body
-
-
-class TransportError(Exception):
-    """The request never reached the hub (DNS, refused, timeout)."""
 
 
 def pcm_cap(sample_rate=SAMPLE_RATE, seconds=MAX_STT_SECONDS):

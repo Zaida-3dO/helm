@@ -11,6 +11,7 @@ thinking lives in ``agent_core.py``.
 
 import asyncio
 import logging
+from urllib.parse import urlparse
 
 import aiohttp
 import voluptuous as vol
@@ -29,8 +30,9 @@ from .const import (
     LED_RGB,
     PROFILES,
 )
-from .hubapi import HubApi, TransportError, session_elevated
-from .profiles import build_model_config, profiles_from_entry, redact
+from .errors import RequestTimeout, TransportError
+from .hubapi import HubApi, session_elevated
+from .profiles import build_model_config, profiles_from_entry
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -62,7 +64,11 @@ class AiohttpTransport:
                 timeout=aiohttp.ClientTimeout(total=timeout),
             ) as resp:
                 return resp.status, await resp.read()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+        except asyncio.TimeoutError as err:
+            # a slow endpoint is a timeout, not an offline box: the caller
+            # speaks "taking longer than expected" instead of "can't reach it"
+            raise RequestTimeout(str(err)) from err
+        except aiohttp.ClientError as err:
             raise TransportError(str(err)) from err
 
 
@@ -99,6 +105,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         DOMAIN, "set_profile", _make_set_profile_service(hass, entry),
         schema=SET_PROFILE_SCHEMA)
 
+    # an options change from the UI (profile switch, dry-run toggle) applies to
+    # the running entry too; no reload needed for model or dry settings
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+
     platforms = PLATFORMS + (HUB_PLATFORMS if api else [])
     await hass.config_entries.async_forward_entry_setups(entry, platforms)
     led.start()
@@ -123,10 +133,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             replay.register_service(hass, entry)
 
     _LOGGER.info("helm_speaker set up (model=%s, hub=%s)",
-                 redact(profiles_from_entry(entry.data, entry.options)[
-                     entry.options.get("profile") or "path_a"])["model_name"],
+                 _model_view(entry.runtime_data["model_cfg"]),
                  "yes" if api else "no")
     return True
+
+
+def _model_view(cfg):
+    """Log view of a model profile (stored dict or built Config): the model
+    name and where it lives. Never the key or other header values."""
+    get = cfg.get if isinstance(cfg, dict) else (
+        lambda key, default=None: getattr(cfg, key, default))
+    host = urlparse(get("model_url") or "").netloc or "no url"
+    return "%s at %s" % (get("model_name") or "?", host)
+
+
+def _apply_model_options(entry):
+    """Rebuild the running model config from current data + options. The
+    conversation agent reads model_cfg per turn, so this takes effect live."""
+    entry.runtime_data["model_cfg"] = build_model_config(
+        entry.data, entry.options or {})
+
+
+async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    _apply_model_options(entry)
 
 
 def _make_set_profile_service(hass: HomeAssistant, entry: ConfigEntry):
@@ -137,12 +166,11 @@ def _make_set_profile_service(hass: HomeAssistant, entry: ConfigEntry):
         # keep the stored profiles next to the switch so a reload agrees
         options.setdefault("profiles", profiles_from_entry(entry.data, options))
         hass.config_entries.async_update_entry(entry, options=options)
-        # apply it now: the conversation agent reads model_cfg per turn, so
-        # the switch takes effect without a reload
-        entry.runtime_data["model_cfg"] = build_model_config(
-            entry.data, options)
+        # apply it now too, rather than waiting for the update listener's
+        # callback to be scheduled: a follow-up turn must see the new path
+        _apply_model_options(entry)
         _LOGGER.info("helm_speaker switched to profile %s (%s)",
-                     profile, redact(options["profiles"][profile]))
+                     profile, _model_view(entry.runtime_data["model_cfg"]))
     return handle
 
 

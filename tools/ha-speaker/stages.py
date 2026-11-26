@@ -95,6 +95,11 @@ class StageLog:
             record["text_in"] = text_in
         if text_out is not None:
             record["text_out"] = text_out
+        # A5 in review terms: the model said nothing but a tool did the work,
+        # and we spoke the tool's own line - worth marking on the row so the
+        # benchmark can tell that answer apart from a generated one
+        if getattr(result, "empty_final", False):
+            record["empty_final"] = True
         self.writer.append(record)
         return record
 
@@ -138,10 +143,21 @@ def note_turn(hass, entry, *, device_id, turn_id, text_in, text_out, kind,
     options = entry.options or {}
     profile = options.get("profile") or "path_a"
     stt = take_stt(entry, time.time() - STT_FRESH_SECONDS)
-    try:
-        log.finish_turn(
-            turn_id=turn_id, device=device_id, profile=profile,
-            result=result, kind=kind, tags=getattr(result, "tags", None),
-            text_in=text_in, text_out=text_out, stt=stt)
-    except Exception:  # noqa: BLE001 - bookkeeping after speech
-        _LOGGER.exception("could not write timing record for %s", turn_id[:8])
+
+    def write():
+        try:
+            log.finish_turn(
+                turn_id=turn_id, device=device_id, profile=profile,
+                result=result, kind=kind, tags=getattr(result, "tags", None),
+                text_in=text_in, text_out=text_out, stt=stt)
+        except Exception:  # noqa: BLE001 - bookkeeping after speech
+            _LOGGER.exception("could not write timing record for %s",
+                              turn_id[:8])
+
+    if hass is not None and hasattr(hass, "async_add_executor_job"):
+        # the append is disk I/O: keep it off the event loop (Home Assistant
+        # warns loudly about blocking writes there). Fire and forget - write()
+        # swallows its own failures.
+        hass.async_add_executor_job(write)
+    else:
+        write()  # plain-python tests and replay: no loop to protect
