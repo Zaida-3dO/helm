@@ -376,6 +376,36 @@ pub fn delivery_id(wait_id: &str) -> String {
 /// How many times a refused message is sent again before the wait gives up on it.
 const MAX_RESENDS: u32 = 3;
 
+/// How many sweeps in a row a chat may turn a wait's message away with a passing problem (it is
+/// stopping, say) before the wait gives up on the message. The sweeps run every few seconds, so
+/// this is a few minutes: longer than a stop takes, short enough that a chat stuck in one state
+/// is not asked for ever.
+pub const MAX_REFUSALS: u32 = 120;
+
+/// How many sweeps in a row each message has been turned away, by submission id.
+#[derive(Default)]
+struct Refusals(Mutex<HashMap<String, u32>>);
+
+impl Refusals {
+    /// Count one more refusal of `id`. True once it has been refused `max` times in a row; the
+    /// count then starts again.
+    fn note(&self, id: &str, max: u32) -> bool {
+        let mut counts = self.0.lock().unwrap();
+        let n = counts.entry(id.to_owned()).or_insert(0);
+        *n += 1;
+        if *n >= max {
+            counts.remove(id);
+            return true;
+        }
+        false
+    }
+
+    /// The message went through (or is no longer owed): forget its refusals.
+    fn clear(&self, id: &str) {
+        self.0.lock().unwrap().remove(id);
+    }
+}
+
 /// The id for the `n`-th re-send of a message the chat refused (the same name-based form as
 /// [`delivery_id`], so a retry still can never deliver twice).
 fn resend_id(first: &str, n: u32) -> String {
@@ -395,7 +425,19 @@ fn resend_id(first: &str, n: u32) -> String {
 /// it (a local server that is down, a worker that will not start) leaves the message "not
 /// delivered", and the wait sends it again under a new id, up to a few times, rather than
 /// being used up with the agent never woken.
-pub struct RuntimeSink(pub helm_chats::ChatRuntime);
+pub struct RuntimeSink {
+    rt: helm_chats::ChatRuntime,
+    refusals: Refusals,
+}
+
+impl RuntimeSink {
+    pub fn new(rt: helm_chats::ChatRuntime) -> Self {
+        Self {
+            rt,
+            refusals: Refusals::default(),
+        }
+    }
+}
 
 impl Deliver for RuntimeSink {
     fn deliver(
@@ -407,7 +449,7 @@ impl Deliver for RuntimeSink {
     ) -> Delivery {
         use helm_chats::types::SubmissionState as S;
         let state_of = |id: &str| {
-            self.0
+            self.rt
                 .db()
                 .snapshot(|t| helm_chats::store::get_submission(t, id))
                 .ok()
@@ -458,7 +500,7 @@ impl RuntimeSink {
     ) -> Delivery {
         use helm_chats::submit::{host_send, HostSend};
         let sent = host_send(
-            &self.0,
+            &self.rt,
             HostSend {
                 chat_id,
                 submission_id,
@@ -474,15 +516,29 @@ impl RuntimeSink {
         match sent {
             // Only an accepted hand-over counts: the wait stays owed until the chat has the
             // message, so a send that died before handing it over is tried again.
-            Ok(s) if s.delivered => Delivery::Sent,
+            Ok(s) if s.delivered => {
+                self.refusals.clear(submission_id);
+                Delivery::Sent
+            }
             Ok(_) => Delivery::Retry,
             Err(e) if e.code == "not_found" || e.code == "refused" => {
+                self.refusals.clear(submission_id);
                 log::info!("wait message for {chat_id} not deliverable: {}", e.message);
                 Delivery::Gone
             }
+            // A passing refusal (the chat is stopping, say): asked again at the next sweep, but
+            // not for ever. A chat that stays in that state is given up on, and the log says why.
             Err(e) => {
-                log::warn!("wait message for {chat_id}: {}; retrying", e.message);
-                Delivery::Retry
+                if self.refusals.note(submission_id, MAX_REFUSALS) {
+                    log::warn!(
+                        "wait message for {chat_id} given up: the chat turned it away {MAX_REFUSALS} times in a row ({})",
+                        e.message
+                    );
+                    Delivery::GaveUp
+                } else {
+                    log::warn!("wait message for {chat_id}: {}; retrying", e.message);
+                    Delivery::Retry
+                }
             }
         }
     }
@@ -527,6 +583,31 @@ mod tests {
         assert_ne!(a, delivery_id("a2"));
         assert!(worker_shape(&a), "{a} must pass the worker's id check");
         assert_eq!(uuid::Uuid::parse_str(&a).unwrap().get_version_num(), 5);
+    }
+
+    /// A message a chat keeps turning away is given up on after a fixed number of tries in a
+    /// row, counted per message; a message that goes through starts its count again.
+    #[test]
+    fn a_message_the_chat_keeps_refusing_is_given_up_on() {
+        let r = Refusals::default();
+        // (message, it went through before this try, the try says give up)
+        for (id, cleared, want) in [
+            ("a", false, false),
+            ("a", false, false),
+            ("b", false, false),
+            ("a", false, true),
+            ("a", false, false),
+            ("a", true, false),
+            ("a", false, false),
+            ("a", false, true),
+            ("b", false, false),
+            ("b", false, true),
+        ] {
+            if cleared {
+                r.clear(id);
+            }
+            assert_eq!(r.note(id, 3), want, "{id} cleared {cleared}");
+        }
     }
 
     fn wait(id: &str, chat: &str, target: Target, now: i64, secs: i64) -> Wait {

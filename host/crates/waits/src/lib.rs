@@ -56,7 +56,7 @@ pub fn start(runtime: &helm_chats::ChatRuntime, services: &Services) {
     let Some(svc) = services.get::<WaitsService>() else {
         return;
     };
-    svc.set_sink(Arc::new(service::RuntimeSink(runtime.clone())));
+    svc.set_sink(Arc::new(service::RuntimeSink::new(runtime.clone())));
     let local = svc.clone();
     runtime.handle().spawn(async move {
         let mut every =
