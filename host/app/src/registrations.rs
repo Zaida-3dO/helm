@@ -150,7 +150,10 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
         helm_skills::help::register(
             &help,
             profile.dir.clone(),
-            Arc::new(helm_skills::launch::DbLookup { db: db.clone() }),
+            Arc::new(RuleFacts {
+                inner: helm_skills::launch::DbLookup { db: db.clone() },
+                profile_dir: profile.dir.clone(),
+            }),
         );
         helm_workflow::register_help(&help, db.clone());
         helm_projects::startup::register_help(&help, db);
@@ -198,7 +201,11 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     // What the generic writer cannot know about a few preference keys' values.
     let rules = crate::pref_rules::pref_rules(services, events);
     services.insert(Arc::new(rules));
-    services.insert(Arc::new(worker_lines()));
+    services.insert(Arc::new(worker_lines(
+        services
+            .get::<helm_core::profile::Profile>()
+            .map(|p| p.dir.as_path()),
+    )));
     // Other crates reach running workers through the chat runtime (helm_hosttools::lines).
     if let Some(rt) = services.get::<helm_chats::ChatRuntime>() {
         services.insert(Arc::new(helm_hosttools::LaunchRecords(rt.clone())));
@@ -322,13 +329,67 @@ pub fn host_tools() -> helm_hosttools::HostToolRegistry {
 /// The worker-message registry (plan-review change 2): handlers for worker lines the chats actor
 /// does not own, and lines each worker gets at start. Each crate adds one `register_worker_lines`
 /// line.
-pub fn worker_lines() -> helm_hosttools::WorkerLines {
+pub fn worker_lines(profile_dir: Option<&std::path::Path>) -> helm_hosttools::WorkerLines {
     let mut l = helm_hosttools::WorkerLines::new();
     helm_mcp::register_worker_lines(&mut l);
     helm_usage::register_worker_lines(&mut l);
     helm_chats::submit::register_worker_lines(&mut l);
     helm_workflow::register_worker_lines(&mut l);
+    // Rule notes: answer each worker's tool-call check and remember what it acknowledged.
+    if let Some(dir) = profile_dir {
+        helm_skills::triggers::register_worker_lines(&mut l, dir.to_path_buf());
+    }
     l
+}
+
+/// The folder compare rule triggers need: plain form, forward slashes, lower case (the profile
+/// folder is held verbatim while a chat's folder is stored plain).
+fn norm_folder(s: &str) -> String {
+    let s = s.replace('\\', "/");
+    let s = match s.strip_prefix("//?/UNC/") {
+        Some(rest) => format!("//{rest}"),
+        None => s.strip_prefix("//?/").map(str::to_owned).unwrap_or(s),
+    };
+    s.trim_end_matches('/').to_lowercase()
+}
+
+/// Who a chat is, as rule triggers see it: the plain lookup (profile, project, folder) plus what
+/// only the app can answer — whether Orchestrator is in effect for this chat, and whether the
+/// chat came in through a relay channel or runs right on the profile folder. Those two decide the
+/// kind of chat (orchestrating / household), so a home chat pointed at a git folder keeps its
+/// household rules instead of reading as a coding chat.
+struct RuleFacts {
+    inner: helm_skills::launch::DbLookup,
+    profile_dir: std::path::PathBuf,
+}
+
+impl helm_skills::launch::ChatLookup for RuleFacts {
+    fn of_chat(&self, chat_id: &str) -> helm_skills::launch::ChatKnowledge {
+        let mut who = self.inner.of_chat(chat_id);
+        who.orchestrating = self
+            .inner
+            .db
+            .snapshot(|tx| {
+                let s = helm_workflow::settings::load(tx)?;
+                helm_workflow::mode::in_effect(tx, chat_id, &s)
+            })
+            .unwrap_or(false);
+        if !who.orchestrating {
+            let home_folder = who.cwd.as_deref().is_some_and(|c| {
+                norm_folder(c) == norm_folder(&self.profile_dir.to_string_lossy())
+            });
+            if home_folder
+                || who.cwd.as_deref().is_some_and(|c| {
+                    helm_relay::channel::channel_of_folder(&self.profile_dir, c).is_some()
+                })
+            {
+                // Keep the folder out of the kind walk: the launch still sees the real folder
+                // (it prefers what the worker reports), and a tool call carries its own.
+                who.cwd = None;
+            }
+        }
+        who
+    }
 }
 
 /// Attach host tools to the chat runtime once the op dispatcher exists.
@@ -462,7 +523,13 @@ pub fn host_seam(dispatcher: &Arc<helm_ipc::Dispatcher>) -> helm_chats::HostSeam
     let lines = ctx
         .services
         .get::<helm_hosttools::WorkerLines>()
-        .unwrap_or_else(|| Arc::new(worker_lines()));
+        .unwrap_or_else(|| {
+            Arc::new(worker_lines(
+                ctx.services
+                    .get::<helm_core::profile::Profile>()
+                    .map(|p| p.dir.as_path()),
+            ))
+        });
     let ops: Arc<dyn helm_hosttools::OpInvoker> = dispatcher.clone();
     helm_chats::HostSeam {
         ctx: ctx.clone(),
@@ -562,7 +629,10 @@ pub fn launch_contributors(
     // The knowledge layers: who a chat is for (its profile and project), and the rules of everyone
     // and of that person.
     if let Some(profile_dir) = db.path().parent() {
-        let lookup = Arc::new(helm_skills::launch::DbLookup { db: db.clone() });
+        let lookup = Arc::new(RuleFacts {
+            inner: helm_skills::launch::DbLookup { db: db.clone() },
+            profile_dir: profile_dir.to_path_buf(),
+        });
         helm_skills::launch::set_lookup(lookup.clone());
         a.register_section(Arc::new(helm_relay::channel::ChannelSection {
             db: db.clone(),

@@ -189,7 +189,8 @@ pub fn chat_send(
     // What the chat should hear since its start: rules that arrived, changed or stopped applying.
     // This is a peek (it marks nothing) and it reads files, so it runs before the write lock;
     // `mark_message_sent` follows only once this send's write commits.
-    let rule_note = helm_skills::triggers::message_note(&rt.sh.cfg.profile_dir, &a.chat_id, gen.0, now);
+    let rule_note =
+        helm_skills::triggers::message_note(&rt.sh.cfg.profile_dir, &a.chat_id, gen.0, now);
     let payload = a
         .context
         .as_ref()
@@ -892,7 +893,8 @@ fn host_send_inner(
     // hidden context, as in a typed send. `context_gen` locks the actor map, so it is read here,
     // never inside the writer lock; and the note is only consumed once the write below commits.
     let gen = rt.context_gen(s.chat_id);
-    let rule_note = helm_skills::triggers::message_note(&rt.sh.cfg.profile_dir, s.chat_id, gen.0, now);
+    let rule_note =
+        helm_skills::triggers::message_note(&rt.sh.cfg.profile_dir, s.chat_id, gen.0, now);
     // Look up the card's hold once: when this chat must wait for it, everything is still saved,
     // only not handed over. (A hold set between here and the write loses this send by a moment;
     // the next one is held. The actor takes what is saved anyway.)
