@@ -66,6 +66,99 @@ pub struct Facts {
     pub today: NaiveDate,
 }
 
+impl Facts {
+    /// The facts of one chat from what its lookup knows plus the launch folder. `cwd_override`
+    /// wins over the recorded folder when given (the worker reports the real one). The kind is
+    /// derived: orchestrating when the Orchestrator is in effect for the chat, coding when its
+    /// folder sits inside a git work tree, household otherwise. A caller that must force
+    /// `household` (a chat that came in through a channel, say) keeps `cwd` unset and
+    /// `orchestrating` false.
+    pub fn of(who: &crate::launch::ChatKnowledge, cwd_override: Option<&Path>) -> Facts {
+        let cwd = cwd_override.map(PathBuf::from).or_else(|| {
+            who.cwd
+                .as_deref()
+                .map(PathBuf::from)
+                .filter(|p| !p.as_os_str().is_empty())
+        });
+        let kind = if who.orchestrating {
+            ChatKind::Orchestrating
+        } else if cwd.as_deref().is_some_and(in_git_tree) {
+            ChatKind::Coding
+        } else {
+            ChatKind::Household
+        };
+        Facts {
+            cwd,
+            kind,
+            person: who.profile.as_ref().map(|p| p.name.clone()),
+            pc: pc_name(),
+            today: chrono::Local::now().date_naive(),
+        }
+    }
+}
+
+/// This machine's PC name (the `pcs:` key is compared to it, ignoring case).
+fn pc_name() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_default()
+}
+
+/// How far above a folder the git walk looks for `.git`, and how long a result is reused. The
+/// launch of several chats in one folder should not stat the parents over and over.
+const GIT_WALK_PARENTS: usize = 12;
+const GIT_CACHE_SECS: u64 = 10;
+
+static GIT_TREES: Mutex<Option<HashMap<String, (std::time::Instant, bool)>>> = Mutex::new(None);
+
+/// True when the folder or any of up to `GIT_WALK_PARENTS` parents holds a `.git`. Cached per
+/// starting folder for a few seconds.
+fn in_git_tree(dir: &Path) -> bool {
+    let key = dir.to_string_lossy().to_lowercase();
+    let mut guard = GIT_TREES.lock().unwrap_or_else(|p| p.into_inner());
+    let map = guard.get_or_insert_with(HashMap::new);
+    if let Some((at, hit)) = map.get(&key) {
+        if at.elapsed().as_secs() < GIT_CACHE_SECS {
+            return *hit;
+        }
+    }
+    let mut hit = false;
+    let mut cur = Some(dir);
+    for _ in 0..=GIT_WALK_PARENTS {
+        let Some(d) = cur else { break };
+        if d.join(".git").exists() {
+            hit = true;
+            break;
+        }
+        cur = d.parent();
+    }
+    map.insert(key, (std::time::Instant::now(), hit));
+    hit
+}
+
+/// A `tools:` glob as a Claude Code hook matcher alternative: `*` becomes `.*`, the rest is
+/// quoted, and a name without `__` is anchored so it matches the whole of a bare tool or the
+/// last part of an `mcp__<server>__<name>` one. Patterns holding `__` match the whole name.
+pub fn glob_to_regex(pattern: &str) -> String {
+    let pat = pattern.trim();
+    let mut re = String::new();
+    for c in pat.chars() {
+        match c {
+            '*' => re.push_str(".*"),
+            c if !(c.is_ascii_alphanumeric() || c == '_' || c == '-') => {
+                re.push('\\');
+                re.push(c);
+            }
+            c => re.push(c),
+        }
+    }
+    if pat.contains("__") {
+        re
+    } else {
+        format!("(^|__){re}$")
+    }
+}
+
 /// One tool call, as far as triggers look. `inner` carries the tool named inside a proxy call
 /// (the `name` of an mcp proxy line) so patterns can match it too.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -542,6 +635,15 @@ impl SentStore {
             .insert((key.to_owned(), revision.to_owned()))
     }
 
+    /// Whether this rule's revision was already sent to a (chat, agent): read-only, so peeks
+    /// answer without consuming anything.
+    pub fn is_sent(&self, chat_id: &str, agent: &str, key: &str, revision: &str) -> bool {
+        self.chats
+            .get(chat_id)
+            .and_then(|(_, r)| r.agents.get(agent))
+            .is_some_and(|a| a.sent.contains(&(key.to_owned(), revision.to_owned())))
+    }
+
     /// True the first time this rule's one-time refusal is asked for in a (chat, agent):
     /// refuse that call; afterwards the identical call goes through.
     pub fn take_stop_turn(&mut self, chat_id: &str, agent: &str, key: &str) -> bool {
@@ -573,6 +675,355 @@ pub fn with_sent<R>(f: impl FnOnce(&mut SentStore) -> R) -> R {
 /// The launch's own call, as the rules section uses it: record what one chat's prompt showed.
 pub fn record_launch(chat_id: &str, decisions: Vec<(String, Decision, String)>) {
     with_sent(|s| s.record_launch(chat_id, decisions));
+}
+
+// ---------------------------------------------------------------------------
+// The message note: what changed for a running chat since its launch.
+
+/// A hidden-context note one message carries, plus the visible row it names.
+#[derive(Clone, Debug)]
+pub struct RuleNote {
+    /// Hidden context riding the message: whole rules that newly apply, as `[Helm rule]` blocks.
+    pub context: String,
+    /// The transcript row: which rules were added or dropped.
+    pub row: String,
+    /// The (rule key, revision) pairs this note actually carried; `mark_message_sent` records
+    /// them once the send commits, so a refused or rolled-back send does not consume the note.
+    keys: Vec<(String, String)>,
+}
+
+/// The most whole-rule bytes one message note carries; the rest degrade to one line each.
+const MSG_NOTE_CAP: usize = 6 * 1024;
+
+fn rank(d: Decision) -> u8 {
+    match d {
+        Decision::Hidden => 0,
+        Decision::Line => 1,
+        Decision::Full => 2,
+    }
+}
+
+/// The rule name for a row: the file stem from a rule key (`<layer>/<file>.md`).
+fn key_stem(key: &str) -> String {
+    let file = key.rsplit('/').next().unwrap_or(key);
+    file.strip_suffix(".md").unwrap_or(file).to_owned()
+}
+
+/// What this chat should hear since its launch: rules now shown more fully (or whole rules
+/// edited since), and rules that stopped applying or were deleted. Nothing before the chat has a
+/// launch record, so a new chat never gets its rules twice before its first prompt. This is a
+/// *peek*: it marks nothing. Call [`mark_message_sent`] only once the message write commits, so
+/// a refused or rolled-back send does not consume the note.
+pub fn message_note(profile_dir: &Path, chat_id: &str, gen: u64, _now_ms: i64) -> Option<RuleNote> {
+    let launched = with_sent(|s| {
+        if !s.has_launch(chat_id) {
+            return None;
+        }
+        s.set_gen(chat_id, gen);
+        Some(s.launch_map(chat_id)?)
+    })?;
+    let who = crate::launch::who(chat_id);
+    let facts = Facts::of(&who, None);
+
+    /// One rule as the diff sees it now.
+    struct Now {
+        key: String,
+        decision: Decision,
+        revision: String,
+        title: String,
+        body: String,
+        topic: String,
+        summary: String,
+    }
+    let current: Vec<Now> = crate::launch::rule_groups(profile_dir, &who)
+        .into_iter()
+        .flat_map(|(_, rules)| rules)
+        .map(|r| {
+            let summary = r.summary();
+            Now {
+                decision: at_launch(
+                    &r.front.when,
+                    r.front.always,
+                    r.body.chars().count(),
+                    &facts,
+                ),
+                key: r.key,
+                revision: r.entry.revision,
+                title: r.entry.title,
+                body: r.body,
+                topic: r.topic,
+                summary,
+            }
+        })
+        .collect();
+
+    let mut adds: Vec<&Now> = Vec::new();
+    for one in &current {
+        let up = match launched.get(&one.key) {
+            Some((prev, rev)) => {
+                rank(one.decision) > rank(*prev)
+                    || (one.decision == Decision::Full && *rev != one.revision)
+            }
+            None => one.decision != Decision::Hidden, // a rule added since the launch
+        };
+        if up && !with_sent(|s| s.is_sent(chat_id, "root", &one.key, &one.revision)) {
+            adds.push(one);
+        }
+    }
+    let mut gone: Vec<String> = current
+        .iter()
+        .filter_map(|one| {
+            let was = launched.get(&one.key).map(|(d, _)| *d)?;
+            (rank(was) > 0 && one.decision == Decision::Hidden).then(|| key_stem(&one.key))
+        })
+        .collect();
+    // Rules the launch showed that are not in the layers any more: deleted.
+    gone.extend(
+        launched
+            .iter()
+            .filter(|(key, (d, _))| rank(*d) > 0 && !current.iter().any(|c| c.key == **key))
+            .map(|(key, _)| key_stem(key)),
+    );
+    if adds.is_empty() && gone.is_empty() {
+        return None;
+    }
+    adds.sort_by(|a, b| a.key.cmp(&b.key));
+    gone.sort();
+    let mut context = String::new();
+    let mut keys: Vec<(String, String)> = Vec::new();
+    let mut used_full = 0usize;
+    let mut whole_count = 0usize;
+    for one in &adds {
+        if one.decision == Decision::Full
+            && whole_count < 3
+            && used_full + one.body.len() <= MSG_NOTE_CAP
+        {
+            context.push_str(&format!("\n\n[Helm rule]\n### {}\n{}", one.title, one.body));
+            used_full += one.body.len();
+            whole_count += 1;
+        } else {
+            context.push_str(&format!(
+                "\n\n[Helm rule] {}: {} (read in full with app_help rule/{})",
+                one.title, one.summary, one.topic
+            ));
+        }
+        keys.push((one.key.clone(), one.revision.clone()));
+    }
+    let mut row_parts: Vec<String> = Vec::new();
+    if !adds.is_empty() {
+        let names: Vec<&str> = adds.iter().map(|n| n.title.as_str()).collect();
+        row_parts.push(format!("Rules added: {}", names.join(", ")));
+    }
+    if !gone.is_empty() {
+        row_parts.push(format!(
+            "These rules no longer apply here: {}",
+            gone.join(", ")
+        ));
+    }
+    Some(RuleNote {
+        context: context.trim_start().to_owned(),
+        row: row_parts.join(". "),
+        keys,
+    })
+}
+
+/// Record what a message note carried, once its send has committed: those rules will not ride
+/// again in this context.
+pub fn mark_message_sent(chat_id: &str, note: &RuleNote) {
+    for (key, revision) in &note.keys {
+        with_sent(|s| {
+            s.first_note(chat_id, "root", key, revision);
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The tool-call check: a worker asks what a call touches.
+
+/// A `rule_check` line from the worker's PreToolUse hook.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuleCheck {
+    pub id: String,
+    pub tool: String,
+    #[serde(default)]
+    pub input: serde_json::Value,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// The chat's root folder; a fallback for path checks when `cwd` is absent.
+    #[serde(default)]
+    pub root: Option<String>,
+    #[serde(default)]
+    pub epoch: String,
+    /// The agent making the call ("root" for the chat itself): its notes and refusals are
+    /// tracked apart from the root's.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+}
+
+/// What a message note holds whole per call at most, and their byte cap (the rest go on one line).
+const TOOL_NOTE_WHOLE_MAX: usize = 3;
+const TOOL_NOTE_CAP: usize = 4 * 1024;
+
+/// One `rule_check` answered as the `rule_verdict` line for that worker. The store decides what
+/// this chat and agent may still hear: a whole rule launched hidden, not yet noted this epoch,
+/// that this call fires. Nothing is marked sent here — the worker's `rules_shown` acknowledgement
+/// does that, so an answer that never arrived can come again.
+pub fn check_rule_call(profile_dir: &Path, chat_id: &str, req: &RuleCheck) -> serde_json::Value {
+    let agent = req.agent_id.clone().unwrap_or_else(|| "root".to_owned());
+    let who = crate::launch::who(chat_id);
+    let cwd = req
+        .cwd
+        .clone()
+        .or_else(|| who.cwd.clone())
+        .or_else(|| req.root.clone());
+    let facts = Facts::of(
+        &who,
+        cwd.as_deref()
+            .filter(|c| !c.is_empty())
+            .map(std::path::Path::new),
+    );
+    let moment = Moment::from_call(&req.tool, &req.input, facts.cwd.as_deref());
+    if !req.epoch.is_empty() {
+        with_sent(|s| s.set_epoch(chat_id, &req.epoch));
+    }
+    let (stop, context, shown) = {
+        let mut stop = None;
+        let mut picked: Vec<(String, String, String)> = Vec::new(); // key, revision, whole text
+        let launched = with_sent(|s| s.launch_map(chat_id).unwrap_or_default());
+        for (_, rules) in crate::launch::rule_groups(profile_dir, &who) {
+            for r in rules {
+                if !r.front.when.has_moment() || !fires(&r.front.when, &facts, &moment) {
+                    continue;
+                }
+                // A rule the prompt already carried whole needs no note.
+                if launched
+                    .get(&r.key)
+                    .is_some_and(|(d, _)| *d != Decision::Hidden)
+                {
+                    continue;
+                }
+                if r.front.when.before.as_deref() == Some("stop") {
+                    // Only one refusal per call: spend a turn only while none is spent yet.
+                    if stop.is_none() && with_sent(|s| s.take_stop_turn(chat_id, &agent, &r.key)) {
+                        stop = Some(format!(
+                            "Refused by the rule \"{}\": {}",
+                            r.entry.title, r.body
+                        ));
+                    }
+                    continue;
+                }
+                let seen = with_sent(|s| s.is_sent(chat_id, &agent, &r.key, &r.entry.revision));
+                if !seen {
+                    picked.push((
+                        r.key.clone(),
+                        r.entry.revision.clone(),
+                        format!("### {}\n{}", r.entry.title, r.body),
+                    ));
+                }
+            }
+        }
+        picked.sort_by(|a, b| a.0.cmp(&b.0));
+        (stop, notes_from(picked))
+    };
+    let mut line = serde_json::json!({"type": "rule_verdict", "id": req.id});
+    if let Some(reason) = stop {
+        line["stop"] = serde_json::Value::String(reason);
+        return line;
+    }
+    let (context, shown) = build_tool_context(notes);
+    if !context.is_empty() {
+        line["context"] = serde_json::Value::String(context);
+        line["shown"] = serde_json::json!(shown);
+    }
+    line
+}
+
+/// Turn picked rules into the note text: at most TOOL_NOTE_WHOLE_MAX whole and 4 KB; the rest on
+/// one line each. Returns (context, shown keys).
+fn notes_from(picked: Vec<(String, String, String, Decision)>) -> (String, Vec<serde_json::Value>) {
+    let mut context = String::new();
+    let mut shown: Vec<serde_json::Value> = Vec::new();
+    let mut used = 0usize;
+    let mut whole = 0usize;
+    for (key, revision, text, _) in picked {
+        if whole < TOOL_NOTE_WHOLE_MAX && used + text.len() <= TOOL_NOTE_CAP {
+            context.push_str(&format!("\n\n[Helm rule]\n{text}"));
+            used += text.len();
+            whole += 1;
+        } else {
+            // No room: name the file so the chat can read it itself. Still counted as shown to
+            // stop every later call repeating it.
+            context.push_str(&format!("\n\n[Helm rule] also applies: {}", key_stem(&key)));
+        }
+        shown.push(serde_json::json!({"key": key, "revision": revision}));
+    }
+    (context.trim_start().to_owned(), shown)
+}
+
+/// Record the notes a worker acknowledged showing.
+pub fn mark_tool_notes(chat_id: &str, agent: &str, keys: &[(String, String)]) {
+    for (key, revision) in keys {
+        with_sent(|s| {
+            s.first_note(chat_id, agent, key, revision);
+        });
+    }
+}
+
+/// Hear the worker's rule lines: answer each `rule_check` off the actor thread and remember the
+/// notes it acknowledges via `rules_shown`.
+pub fn register_worker_lines(l: &mut helm_hosttools::lines::WorkerLines, profile_dir: PathBuf) {
+    l.register_worker_line("rule_check", move |ctx, v| {
+        let chat = ctx.chat_id.to_owned();
+        let services = ctx.services.clone();
+        let dir = profile_dir.clone();
+        let check: RuleCheck = match serde_json::from_value(v.clone()) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("chat {chat}: bad rule_check: {e}");
+                return;
+            }
+        };
+        let work = move || {
+            let verdict = check_rule_call(&dir, &chat, &check);
+            if let Some(b) = services.get::<helm_hosttools::lines::Broadcaster>() {
+                if !b.0.send_to_worker(&chat, &verdict) {
+                    log::debug!("chat {chat}: a rule verdict found no worker (it ended first)");
+                }
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(h) => {
+                h.spawn_blocking(work);
+            }
+            Err(_) => {
+                std::thread::spawn(work);
+            }
+        }
+    });
+    l.register_worker_line("rules_shown", |ctx, v| {
+        // The worker shows the note in its transcript; record it only now, per amendment to the
+        // design: an answer that was never acknowledged may come again. If the app's actor takes
+        // this line for its own transcript row first, call `mark_tool_notes` from there instead.
+        let Some(keys) = v.get("keys").and_then(|k| k.as_array()) else {
+            return;
+        };
+        let pairs: Vec<(String, String)> = keys
+            .iter()
+            .filter_map(|e| {
+                Some((
+                    e.get("key")?.as_str()?.to_owned(),
+                    e.get("revision")?.as_str()?.to_owned(),
+                ))
+            })
+            .collect();
+        let agent = v
+            .get("agentId")
+            .and_then(|a| a.as_str())
+            .unwrap_or("root")
+            .to_owned();
+        mark_tool_notes(ctx.chat_id, &agent, &pairs);
+    });
 }
 
 #[cfg(test)]
@@ -972,5 +1423,253 @@ mod tests {
             "taskkill",
             "first\r\nsecond\n& taskkill /IM x"
         ));
+
+        // Globs become hook matcher alternatives: bare names anchor to the whole name or its
+        // last `__`-part, patterns holding `__` match the whole name, and regex characters are
+        // quoted.
+        assert_eq!(glob_to_regex("app_save_rule"), "(^|__)app_save_rule$");
+        assert_eq!(glob_to_regex("mcp__*browser*"), "mcp__.*browser.*");
+        assert_eq!(glob_to_regex("git.push"), "git\\.push");
+    }
+
+    /// A helper writing one Everyone-layer rule and reading the crate's own decisions back.
+    fn seed_rules(dir: &Path, files: &[(&str, &str)]) {
+        let rules = crate::layers::Layer::Everyone.root(dir).join("rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        for (name, text) in files {
+            std::fs::write(rules.join(format!("{name}.md")), text).unwrap();
+        }
+        crate::launch::clear_rule_index();
+    }
+
+    fn note_chat_rules() -> [String; 3] {
+        [
+            // A plain short rule: whole at launch, and the baseline for later diffs.
+            "Be kind.\n".to_owned(),
+            // A commands rule with a one-time stop, kept back at launch.
+            [
+                "---",
+                "commands: taskkill",
+                "before: stop",
+                "---",
+                "# Kill by pid only",
+                "",
+                "Name kills take every worker down.",
+            ]
+            .join("\n"),
+            // A tools rule kept back at launch, noted when the tool is used.
+            [
+                "---",
+                "tools: Read",
+                "---",
+                "# Read carefully",
+                "",
+                "Look at what you overwrite.",
+            ]
+            .join("\n"),
+        ]
+    }
+
+    #[test]
+    fn a_tool_call_note_goes_once_and_a_stop_refuses_once_per_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let files = note_chat_rules();
+        seed_rules(
+            dir,
+            &[
+                ("kind", &files[0]),
+                ("kills", &files[1]),
+                ("reads", &files[2]),
+            ],
+        );
+        let chat = "check-chat-toolonce";
+        crate::launch::clear_rule_index();
+        record_launch(
+            chat,
+            crate::launch::launch_decisions(dir, &Default::default()),
+        );
+
+        let req = |tool: &str, input: serde_json::Value, agent: Option<&str>| RuleCheck {
+            id: "c1".into(),
+            tool: tool.into(),
+            input,
+            cwd: None,
+            root: None,
+            epoch: "s1:0".into(),
+            agent_id: agent.map(str::to_owned),
+        };
+
+        // The commands rule refuses this call once; the identical call afterwards passes.
+        let kill = || {
+            req(
+                "Bash",
+                serde_json::json!({"command": "taskkill /IM x"}),
+                None,
+            )
+        };
+        let first = check_rule_call(dir, chat, &kill());
+        assert!(
+            first["stop"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Kill by pid only"),
+            "{first}"
+        );
+        let second = check_rule_call(dir, chat, &kill());
+        assert_eq!(second["stop"], serde_json::Value::Null);
+        // A sub-agent keeps its own refusal turn.
+        let sub = check_rule_call(
+            dir,
+            chat,
+            &req(
+                "Bash",
+                serde_json::json!({"command": "taskkill /IM x"}),
+                Some("sub-1"),
+            ),
+        );
+        assert!(sub["stop"].is_string(), "{sub}");
+
+        // The tools rule notes once per ack cycle: the answer itself marks nothing.
+        let read = || req("Read", serde_json::json!({"file_path": "C:\\x\\a"}), None);
+        let noted = check_rule_call(dir, chat, &read());
+        assert!(
+            noted["context"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Read carefully"),
+            "{noted}"
+        );
+        let again = check_rule_call(dir, chat, &read());
+        assert!(again["context"].is_string(), "unacknowledged: comes again");
+        let shown = noted["shown"].as_array().unwrap().clone();
+        mark_tool_notes(
+            chat,
+            "root",
+            &shown
+                .iter()
+                .map(|e| {
+                    (
+                        e["key"].as_str().unwrap().to_owned(),
+                        e["revision"].as_str().unwrap().to_owned(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
+        let after = check_rule_call(dir, chat, &read());
+        assert_eq!(after["context"], serde_json::Value::Null);
+
+        // A new epoch resets both notes and refusals.
+        with_sent(|s| s.set_epoch(chat, "s2:0"));
+        assert!(check_rule_call(dir, chat, &kill())["stop"].is_string());
+    }
+
+    #[test]
+    fn a_message_note_carries_added_edited_and_dropped_rules_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        seed_rules(dir, &[("kind", "# Be kind\n\nBe kind.\n")]);
+        let chat = "note-chat-edits";
+        record_launch(
+            chat,
+            crate::launch::launch_decisions(dir, &Default::default()),
+        );
+
+        // Nothing has changed: no note.
+        assert!(message_note(dir, chat, 0, 0).is_none());
+
+        // A rule appears and reaches this chat: it rides the next message whole, once marked.
+        seed_rules(
+            dir,
+            &[
+                ("kind", "# Be kind\n\nBe kind.\n"),
+                ("sleep", "# Sleep tight\n\nLights out at ten.\n"),
+            ],
+        );
+        let note = message_note(dir, chat, 0, 0).expect("added rule");
+        assert!(note.context.contains("[Helm rule]\n### Sleep tight"));
+        assert_eq!(note.row, "Rules added: Sleep tight");
+        // The peek does not consume: it answers twice until marked.
+        assert!(message_note(dir, chat, 0, 0).is_some());
+        mark_message_sent(chat, &note);
+        assert!(message_note(dir, chat, 0, 0).is_none());
+
+        // Editing a whole rule sends the new text again (the revision changed).
+        seed_rules(
+            dir,
+            &[
+                ("kind", "# Be kind\n\nBe kind and brief.\n"),
+                ("sleep", "# Sleep tight\n\nLights out at ten.\n"),
+            ],
+        );
+        let note = message_note(dir, chat, 0, 0).expect("edited rule");
+        assert!(note.context.contains("Be kind and brief."), "{note:?}");
+        mark_message_sent(chat, &note);
+
+        // A rule stops applying (a kinds gate this household chat fails): the row says so.
+        seed_rules(
+            dir,
+            &[
+                ("kind", "# Be kind\n\nBe kind and brief.\n"),
+                (
+                    "sleep",
+                    "---\nkinds: coding\n---\n# Sleep tight\n\nLights out at ten.\n",
+                ),
+            ],
+        );
+        let note = message_note(dir, chat, 0, 0).expect("dropped rule");
+        assert!(
+            note.row.contains("no longer apply here: sleep"),
+            "{}",
+            note.row
+        );
+
+        // Deleting rules lands in the same row.
+        seed_rules(dir, &[("kind", "# Be kind\n\nStill brief.\n")]);
+        let note = message_note(dir, chat, 0, 0).expect("deleted and edited");
+        assert!(
+            note.row.contains("no longer apply here: sleep"),
+            "{}",
+            note.row
+        );
+
+        // A new context generation sends marked rules again.
+        seed_rules(dir, &[("kind", "# Be kind\n\nBrief always.\n")]);
+        let note = message_note(dir, chat, 7, 0).expect("after compaction");
+        assert!(note.context.contains("Brief always."), "{note:?}");
+    }
+
+    #[test]
+    fn the_kind_of_a_chat_comes_from_the_orchestrator_then_its_folder() {
+        use crate::launch::ChatKnowledge;
+        use std::fs;
+        let base = tempfile::tempdir().unwrap();
+        // No folder, no orchestrator: household.
+        assert_eq!(
+            Facts::of(&ChatKnowledge::default(), None).kind,
+            ChatKind::Household
+        );
+        // The orchestrator flag wins over everything.
+        let who = ChatKnowledge {
+            orchestrating: true,
+            ..ChatKnowledge::default()
+        };
+        assert_eq!(Facts::of(&who, None).kind, ChatKind::Orchestrating);
+        // A folder inside a git work tree (marked by `.git` in it or above it) is coding…
+        let repo = base.path().join("wt/work");
+        fs::create_dir_all(base.path().join(".git")).unwrap();
+        fs::create_dir_all(&repo).unwrap();
+        assert_eq!(
+            Facts::of(&ChatKnowledge::default(), Some(&repo)).kind,
+            ChatKind::Coding,
+            "the walk looks at parents too"
+        );
+        // …and a plain folder is household.
+        let plain = base.path().join("plain");
+        fs::create_dir_all(&plain).unwrap();
+        assert_eq!(
+            Facts::of(&ChatKnowledge::default(), Some(&plain)).kind,
+            ChatKind::Household
+        );
     }
 }

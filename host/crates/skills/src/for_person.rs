@@ -79,6 +79,7 @@ impl Person {
                 is_home: false,
             }),
             project_id: None,
+            ..ChatKnowledge::default()
         }
     }
 }
@@ -98,6 +99,10 @@ struct RuleChange {
     always: Option<bool>,
     /// The rule this one rewrites (`rules/<file>.md`), with its title and revision as read.
     replace: Option<Replaced>,
+    /// The trigger to write: `Some` replaces every trigger key (empty clears them), `None`
+    /// leaves them alone. Absent in a card filed before triggers existed.
+    #[serde(default)]
+    when: Option<crate::rules::RuleWhen>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -201,6 +206,17 @@ fn card_lines(s: &Staged) -> Result<Vec<String>, String> {
                 None => "no",
             };
             lines.push(format!("Kept whole in every chat: {always}"));
+            // The card shows when the rule will reach chats, in one wrapped summary line.
+            if let Some(w) = &r.when {
+                let s = w.summary(chrono::Local::now().date_naive());
+                if !s.is_empty() {
+                    let mut parts = wrap(&s, MAX_SUMMARY_LINE - 8);
+                    if let Some(first) = parts.first_mut() {
+                        *first = format!("When: {first}");
+                    }
+                    lines.extend(parts);
+                }
+            }
             if let Some(p) = &r.replace {
                 lines.push(format!("Replaces the rule \"{}\" ({})", p.title, p.path));
             }
@@ -403,11 +419,44 @@ pub(crate) fn stage_rule(
             .ok_or_else(|| ToolError::refused(format!("{key} is required.")))
     };
     let title = text_of("title")?.trim().to_owned();
-    let text = text_of("text")?.trim().to_owned();
     if title.is_empty() || title.chars().count() > rules::MAX_TITLE_CHARS {
         return Err(ToolError::refused("A rule's title is 1 to 120 characters."));
     }
-    if helm_core::hidden::has_hidden(&title) || hidden_in(&text) {
+    if helm_core::hidden::has_hidden(&title) {
+        return Err(ToolError::refused(
+            "The rule cannot hold control, invisible or direction-changing characters.",
+        ));
+    }
+    let data = tools::profile_dir(ctx)?;
+    let root = Layer::Profile(person.id.clone()).root(&data);
+    // A rule being replaced is read whole at stage time: its revision guards the apply, and a
+    // staged change that leaves `text` out keeps the current text (shown on the card).
+    let replace = match a.get("replace").and_then(Value::as_str) {
+        Some(path) => {
+            let (entry, current) = rules::read(&root, path).map_err(|_| {
+                ToolError::refused(format!("{} has no rule {path} to replace.", person.name))
+            })?;
+            Some((
+                Replaced {
+                    path: entry.path,
+                    title: entry.title,
+                    revision: entry.revision,
+                },
+                rules::body_of(&current),
+            ))
+        }
+        None => None,
+    };
+    let text = match (a.get("text").and_then(Value::as_str), &replace) {
+        (Some(t), _) => t.trim().to_owned(),
+        (None, Some((_, current))) => current.clone(),
+        (None, None) => {
+            return Err(ToolError::refused(
+                "text is required unless replace names a rule.",
+            ))
+        }
+    };
+    if hidden_in(&text) {
         return Err(ToolError::refused(
             "The rule cannot hold control, invisible or direction-changing characters.",
         ));
@@ -417,20 +466,20 @@ pub(crate) fn stage_rule(
             "A rule needs some text, and not too much.",
         ));
     }
-    let data = tools::profile_dir(ctx)?;
-    let root = Layer::Profile(person.id.clone()).root(&data);
-    let replace = match a.get("replace").and_then(Value::as_str) {
-        Some(path) => {
-            let (entry, _) = rules::read(&root, path).map_err(|_| {
-                ToolError::refused(format!("{} has no rule {path} to replace.", person.name))
+    let when = match a.get("when") {
+        Some(v) if v.is_object() => {
+            let mut w: rules::RuleWhen = serde_json::from_value(v.clone()).map_err(|_| {
+                ToolError::refused("when must hold trigger keys such as tools, commands or kinds.")
             })?;
-            Some(Replaced {
-                path: entry.path,
-                title: entry.title,
-                revision: entry.revision,
-            })
+            w.problems.clear();
+            Some(w)
         }
-        None => None,
+        None | Some(Value::Null) => None,
+        Some(_) => {
+            return Err(ToolError::refused(
+                "when must be an object of trigger keys.",
+            ))
+        }
     };
     let staged = Staged {
         profile_id: person.id.clone(),
@@ -441,7 +490,8 @@ pub(crate) fn stage_rule(
             title,
             text,
             always: a.get("always").and_then(Value::as_bool),
-            replace,
+            replace: replace.map(|(r, _)| r),
+            when,
         }),
         skill: None,
         memory: None,
@@ -830,6 +880,7 @@ fn apply_staged(
                 &r.text,
                 r.replace.as_ref().map(|p| p.revision.as_str()),
                 r.always,
+                r.when.as_ref(),
                 rules::MAX_AGENT_RULE_TEXT,
             );
             let entry = match written {

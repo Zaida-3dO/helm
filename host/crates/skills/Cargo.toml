@@ -16,6 +16,7 @@ helm-hosttools = { path = "../hosttools" }
 helm-mcp = { path = "../mcp" }
 rusqlite.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -26,4 +27,3 @@ ts-rs = { version = "10.1", features = ["serde-json-impl", "no-serde-warnings"] 
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio.workspace = true
