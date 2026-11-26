@@ -226,10 +226,10 @@ pub fn spawn_health(stt_url: &str, health: Arc<SttHealth>) {
             let ok = matches!(answer, Ok(s) if health_answer_ok(s));
             if ok {
                 h.note_ok(crate::telegram::now_ms());
-                if missed_once {
-                    eprintln!("stt: one /health probe missed but the confirming one answered; no outage");
-                } else if !was_ok {
+                if !was_ok {
                     eprintln!("stt: the speech server answers /health again");
+                } else if missed_once {
+                    eprintln!("stt: one /health probe missed but the confirming one answered");
                 }
             } else {
                 let detail = match answer {
@@ -694,7 +694,7 @@ mod tests {
             Duration::from_millis(1),
         )
         .await;
-        assert_eq!(missed_once, true);
+        assert!(missed_once);
         assert_eq!(answer.unwrap_err().why, "still nothing");
         // A first probe that answers costs no confirming one.
         let n2 = AtomicUsize::new(0);

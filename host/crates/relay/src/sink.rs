@@ -827,11 +827,13 @@ pub(crate) fn stand_down_repair_chat(
     chats: &Arc<Mutex<HashMap<String, String>>>,
     b: &ServiceRecovered,
 ) -> Result<(), String> {
+    // One stand-down per repair chat: the entry goes with it, so a later outage's recovery (a
+    // throttled one the PC never heard of, one days later, every flap of a flapping server)
+    // cannot wake the same finished chat again.
     let chat = chats
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .get(&b.service)
-        .cloned();
+        .remove(&b.service);
     let Some(chat) = chat else {
         return Ok(());
     };
@@ -1788,7 +1790,9 @@ impl TelegramSink for ChatSink {
                 .await
                 .unwrap_or_else(|_| Err("the stand-down did not finish.".to_owned()));
             match told {
-                Ok(()) => log::info!("relay: stood down the repair watch for the {service} service"),
+                Ok(()) => {
+                    log::info!("relay: stood down the repair watch for the {service} service")
+                }
                 Err(e) => log::warn!(
                     "relay: the repair chat for the {service} service was not told it is back: {e}"
                 ),

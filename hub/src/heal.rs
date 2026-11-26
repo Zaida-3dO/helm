@@ -6,7 +6,9 @@
 //! [`Heal`] watches the probe's state [`HEALTH_PROBE/4`] apart: while the server is down it sends
 //! the PC a `service_down` frame at most once an hour; the moment the server answers again it lets
 //! every bridge retry what it holds and sends the PC one `service_up` frame, so an alert the PC
-//! raised for the outage closes itself when the outage is seen to be over. A note held while the
+//! raised for the outage closes itself when the outage is seen to be over — retried on later
+//! healthy ticks until a line carries it, since the PC that was asleep through the outage is
+//! usually also the reason no line was up at that moment. A note held while the
 //! probe sees nothing wrong (the server answers `/health` but a transcription failed) is retried a
 //! minute after its last try, and every held note ends at its hour whether or not an outage was
 //! seen.
@@ -65,8 +67,12 @@ pub struct Heal {
     was_down: AtomicBool,
     /// When the outage the last `was_down` saw began: [`SttHealth`] clears its own `down_since`
     /// the moment the probe answers again, before the watch ticks, so the recovery frame needs
-    /// the start remembered here.
+    /// the start remembered here. It stays until a line takes the recovery (see
+    /// [`Heal::pending_back_ms`]).
     down_since_ms: AtomicI64,
+    /// A recovery frame no line would carry yet: when the server was seen answering, retried on
+    /// every healthy tick until a line takes it. `0`: nothing pending. A new outage supersedes it.
+    pending_back_ms: AtomicI64,
 }
 
 impl Heal {
@@ -79,6 +85,7 @@ impl Heal {
             last_frame_ms: AtomicI64::new(0),
             was_down: AtomicBool::new(false),
             down_since_ms: AtomicI64::new(0),
+            pending_back_ms: AtomicI64::new(0),
         }
     }
 
@@ -126,13 +133,32 @@ impl Heal {
         })
     }
 
+    /// Send the recovery frame; if no line carries it, hold it (the two atomics stay set) so a
+    /// later healthy tick tries again. A PC that was asleep through the outage is the usual case:
+    /// it is both the outage and the reason no line was up when the outage ended.
+    fn send_up(&self, since_ms: i64, back_ms: i64) {
+        if self
+            .lines
+            .send_frame(self.person, &self.up_frame(since_ms, back_ms))
+        {
+            eprintln!("stt: told the person's PC that the speech server answers again");
+        } else {
+            self.down_since_ms.store(since_ms, Ordering::Relaxed);
+            self.pending_back_ms.store(back_ms, Ordering::Relaxed);
+            eprintln!("stt: the recovery frame found no line; it will be tried again");
+        }
+    }
+
     /// One tick of the watch.
     pub fn tick(&self, now_ms: i64) {
-        if self.health.is_down() {
+        // One read of the outage state: is_down and down_since come from the same atomic, so the
+        // probe task cannot slip a note_ok between the check and the start.
+        if let Some(broke) = self.health.down_since_ms() {
             if !self.was_down.swap(true, Ordering::Relaxed) {
-                // A fresh outage seen by the watch: remember its start for the recovery frame.
-                self.down_since_ms
-                    .store(self.health.down_since_ms().unwrap_or(now_ms), Ordering::Relaxed);
+                // A fresh outage seen by the watch: remember its start for the recovery frame,
+                // and drop any recovery held over from the last one (a new outage supersedes it).
+                self.down_since_ms.store(broke, Ordering::Relaxed);
+                self.pending_back_ms.store(0, Ordering::Relaxed);
             }
             if let Some(f) = self.due_frame(now_ms) {
                 if self.lines.send_frame(self.person, &f) {
@@ -142,19 +168,33 @@ impl Heal {
             }
         } else if self.was_down.swap(false, Ordering::Relaxed) {
             // Back up: the next outage starts its frame count again, and everything held goes.
+            let told_down = self.last_frame_ms.load(Ordering::Relaxed) != 0;
             self.last_frame_ms.store(0, Ordering::Relaxed);
             let since = self.down_since_ms.swap(0, Ordering::Relaxed);
-            if since != 0 {
-                if self.lines.send_frame(self.person, &self.up_frame(since, now_ms)) {
-                    eprintln!("stt: told the person's PC that the speech server answers again");
-                }
+            // Only stand an outage down if the PC was told about it: otherwise there is no
+            // alert out there to close.
+            if since != 0 && told_down {
+                self.send_up(since, now_ms);
             }
             for h in &self.healed {
                 h.stt_back(now_ms);
             }
         } else {
-            // The server looks fine, yet a note may be held (a transcription failed between two
-            // probes): the ones that have waited a while go through again.
+            // The server looks fine. First carry any recovery no line would have taken; then a
+            // note may still be held (a transcription failed between two probes): the ones that
+            // have waited a while go through again.
+            let back = self.pending_back_ms.load(Ordering::Relaxed);
+            let since = self.down_since_ms.load(Ordering::Relaxed);
+            if back != 0
+                && since != 0
+                && self
+                    .lines
+                    .send_frame(self.person, &self.up_frame(since, back))
+            {
+                self.pending_back_ms.store(0, Ordering::Relaxed);
+                self.down_since_ms.store(0, Ordering::Relaxed);
+                eprintln!("stt: told the person's PC that the speech server answers again");
+            }
             for h in &self.healed {
                 h.stt_retry_stale(now_ms);
             }
@@ -182,10 +222,15 @@ mod tests {
     use crate::registry::Registry;
     use std::sync::Mutex;
 
-    struct Rec(Mutex<Vec<Value>>);
+    /// Recorded frames, and a switch: the next send fails once (a PC with no line up), the
+    /// ones after go through.
+    struct Rec(Mutex<Vec<Value>>, std::sync::atomic::AtomicBool);
 
     impl SendFrame for Rec {
         fn send_frame(&self, _person: i64, frame: &Value) -> bool {
+            if self.1.swap(false, Ordering::SeqCst) {
+                return false;
+            }
             self.0.lock().unwrap().push(frame.clone());
             true
         }
@@ -217,7 +262,10 @@ mod tests {
         ));
         let (lines, _up) = Lines::new(registry);
         let health = Arc::new(SttHealth::default());
-        let rec = Arc::new(Rec(Mutex::new(vec![])));
+        let rec = Arc::new(Rec(
+            Mutex::new(vec![]),
+            std::sync::atomic::AtomicBool::new(false),
+        ));
         let seen = Arc::new(Seen::default());
         let heal = Heal::new(health.clone(), Arc::new(lines), 7)
             .with_lines(rec.clone())
@@ -292,6 +340,58 @@ mod tests {
             "its health address answered HTTP 503"
         );
         assert_eq!(rec.0.lock().unwrap()[3]["type"], "service_down");
+    }
+
+    #[test]
+    fn a_recovery_no_line_would_carry_is_retried_until_a_line_takes_it() {
+        let (heal, health, rec, _seen) = hub();
+        let base = 1_763_000_000_000;
+        health.note_down(base, "its health address does not answer");
+        heal.tick(base);
+        assert_eq!(
+            rec.0.lock().unwrap().len(),
+            1,
+            "the outage opens with one frame"
+        );
+        // The PC's line is down at the recovery edge: the frame is held, not lost.
+        rec.1.store(true, Ordering::SeqCst);
+        health.note_ok(base + 60_000);
+        heal.tick(base + 60_000);
+        assert!(
+            rec.0
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|f| f["type"] != "service_up"),
+            "the recovery that failed to send is not recorded as sent"
+        );
+        // A later healthy tick carries it, and still names the edge it was seen at.
+        heal.tick(base + 75_000);
+        let frames = rec.0.lock().unwrap();
+        assert_eq!(frames.len(), 2, "the held recovery went out on the retry");
+        assert_eq!(frames[1]["type"], "service_up");
+        assert_eq!(frames[1]["back"], clock_text(base + 60_000));
+        drop(frames);
+        heal.tick(base + 90_000);
+        assert_eq!(rec.0.lock().unwrap().len(), 2, "one recovery per outage");
+    }
+
+    #[test]
+    fn no_recovery_for_an_outage_the_pc_was_never_told_about() {
+        let (heal, health, rec, _seen) = hub();
+        let base = 1_763_000_000_000;
+        // The down frame found no line either: the outage was over before the PC could hear
+        // about it, so there is no alert out there to stand down.
+        rec.1.store(true, Ordering::SeqCst);
+        health.note_down(base, "its health address does not answer");
+        heal.tick(base);
+        health.note_ok(base + 60_000);
+        heal.tick(base + 60_000);
+        heal.tick(base + 75_000);
+        assert!(
+            rec.0.lock().unwrap().is_empty(),
+            "nothing was announced, so nothing is stood down"
+        );
     }
 
     #[test]

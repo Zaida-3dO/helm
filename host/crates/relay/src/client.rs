@@ -1294,9 +1294,7 @@ impl Client {
                     return;
                 };
                 let Ok(person) = self.frame_person(&v) else {
-                    log::info!(
-                        "relay: a service_up frame named a person this PC does not act for"
-                    );
+                    log::info!("relay: a service_up frame named a person this PC does not act for");
                     return;
                 };
                 let back = ServiceRecovered {

@@ -788,10 +788,28 @@ async fn the_hub_recovery_tells_the_repair_chat_it_opened() {
         .unwrap()
         .unwrap();
     let s = subs(&e.db, &chat);
-    assert_eq!(s.len(), 2, "the recovery is the repair chat's second message");
-    assert_eq!(s[1].4,
+    assert_eq!(
+        s.len(),
+        2,
+        "the recovery is the repair chat's second message"
+    );
+    assert_eq!(
+        s[1].4,
         "The speech-to-text service answers the hub's health probe again (back at 10:05; it \
-         was unreachable since 09:12). If it checks out, say it is back and close this out.");
+         was unreachable since 09:12). If it checks out, say it is back and close this out."
+    );
+    // A second recovery for the same service (a flap, or a throttled outage the PC never got a
+    // chat for): the entry went with the first stand-down, so the old chat is not woken again.
+    let (c3, chats3, back3) = (e.ctx.clone(), chats.clone(), back.clone());
+    tokio::task::spawn_blocking(move || stand_down_repair_chat(&c3, &chats3, &back3))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        subs(&e.db, &chat).len(),
+        2,
+        "one stand-down per repair chat"
+    );
     // A service no repair chat was opened for: nothing to stand down, and nothing sent.
     let other = ServiceRecovered {
         person: None,
@@ -799,7 +817,11 @@ async fn the_hub_recovery_tells_the_repair_chat_it_opened() {
         since: None,
         back: "now".into(),
     };
-    stand_down_repair_chat(&e.ctx, &chats, &other).unwrap();
+    let (c2b, chats2b, other2) = (e.ctx.clone(), chats.clone(), other.clone());
+    tokio::task::spawn_blocking(move || stand_down_repair_chat(&c2b, &chats2b, &other2))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(subs(&e.db, &chat).len(), 2, "no stray message");
 }
 
