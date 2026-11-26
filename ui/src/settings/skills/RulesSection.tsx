@@ -7,7 +7,7 @@ import { Button, Checkbox, TextArea, TextInput, type ConfirmSpec } from '../../u
 import type { KnowledgeOps, RulesBudget, RuleRow } from './api.ts';
 import { errorCode, errorText, sizeLabel } from './common.ts';
 import { MoveTo } from './LayerPicker.tsx';
-import { rulesBudgetNote, type LayerOption } from './layers.ts';
+import { layerLabel, rulesBudgetNote, type LayerOption } from './layers.ts';
 
 export type RunAction = (action: () => Promise<string | void>) => Promise<void>;
 
@@ -18,9 +18,11 @@ interface Shared {
   busy: boolean;
   run: RunAction;
   confirm: (spec: ConfirmSpec) => void;
+  /** The name of the person whose list this is, when it is not the viewer's own; null otherwise. */
+  other: string | null;
 }
 
-function RuleEditor({ ops, layer, options, busy, run, confirm, rule, onClose }: Shared & { rule: RuleRow | null; onClose: () => void }) {
+function RuleEditor({ ops, layer, options, busy, run, confirm, other, rule, onClose }: Shared & { rule: RuleRow | null; onClose: () => void }) {
   const [title, setTitle] = useState(rule?.title ?? '');
   const [text, setText] = useState('');
   const [revision, setRevision] = useState<string | undefined>(rule?.revision);
@@ -68,7 +70,7 @@ function RuleEditor({ ops, layer, options, busy, run, confirm, rule, onClose }: 
     rule &&
     confirm({
       title: 'Delete the rule?',
-      body: `${rule.title} is removed from this list. Chats stop getting it from their next start.`,
+      body: `${rule.title} is removed from ${other ? `${other}'s` : 'this'} list. Chats stop getting it from their next start.`,
       confirm: 'Delete',
       danger: true,
       onConfirm: () =>
@@ -81,6 +83,11 @@ function RuleEditor({ ops, layer, options, busy, run, confirm, rule, onClose }: 
 
   return (
     <div className="kn-editor" data-testid="knowledge-rule-editor">
+      {other && (
+        <div className="setting-desc" data-testid="knowledge-rule-whose">
+          This rule is in {other}'s list: saving, moving or deleting it changes {other}'s profile.
+        </div>
+      )}
       {error && (
         <div className="ui-field-error" role="alert" data-testid="knowledge-rule-error">
           {error}
@@ -131,6 +138,21 @@ function RuleEditor({ ops, layer, options, busy, run, confirm, rule, onClose }: 
         </Button>
         {rule && (
           <>
+            <MoveTo
+              verb="Copy"
+              options={options}
+              from={layer}
+              what={rule.title}
+              testId="knowledge-rule-copy"
+              disabled={busy || !loaded}
+              onMove={(to) =>
+                void run(async () => {
+                  await ops.copy('rule', rule.path, layer, to);
+                  onClose();
+                  return `Copied ${rule.title} to ${layerLabel(options, to)}.`;
+                })
+              }
+            />
             <MoveTo
               options={options}
               from={layer}

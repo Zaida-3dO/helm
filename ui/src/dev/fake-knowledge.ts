@@ -156,7 +156,9 @@ export function knowledgeFakeOps(): { prefixes: string[]; handler: FakeOpHandler
         changed(key);
         return view(key);
       }
-      case 'knowledge_move': {
+      case 'knowledge_move':
+      case 'knowledge_copy': {
+        const copy = op === 'knowledge_copy';
         const from = need(String(a.from));
         const to = need(String(a.to));
         const kind = String(a.kind);
@@ -165,9 +167,9 @@ export function knowledgeFakeOps(): { prefixes: string[]; handler: FakeOpHandler
         if (i < 0) throw new ApiError('bad_args', 'There is nothing of that name to move.');
         const dest = arrayOf(to, kind);
         if (dest.some((x) => nameOf(kind, x) === a.name)) throw new ApiError('conflict', 'The other layer already has one of that name.');
-        dest.push(...src.splice(i, 1));
+        dest.push(...(copy ? [{ ...src[i] }] : src.splice(i, 1)));
         changed(String(a.from), String(a.to));
-        return { moved: String(a.name) };
+        return copy ? { copied: String(a.name) } : { moved: String(a.name) };
       }
       case 'knowledge_reveal':
       case 'helm_skills_reveal':

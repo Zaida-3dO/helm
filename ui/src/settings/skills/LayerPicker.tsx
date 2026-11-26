@@ -5,10 +5,12 @@ import { useMemo, useState } from 'react';
 import { useProfiles } from '../../profiles/hooks.ts';
 import { useShell } from '../../shell/context.ts';
 import { Picker } from '../../ui/index.ts';
-import { currentLayer, defaultLayer, layerOptions, moveTargets, type LayerOption } from './layers.ts';
+import { currentLayer, defaultLayer, layerOptions, moveTargets, profileLayer, type LayerOption } from './layers.ts';
 
 export interface KnowledgeLayerState {
   options: LayerOption[];
+  /** The layer of the profile in use, or null when none is. */
+  own: string | null;
   /** The layer being shown. */
   layer: string;
   setLayer: (key: string) => void;
@@ -22,7 +24,9 @@ export function useKnowledgeLayer(): KnowledgeLayerState {
   const options = useMemo(() => layerOptions(view?.profiles ?? []), [view]);
   const [picked, setPicked] = useState<string | null>(null);
   const fallback = defaultLayer(options, view?.activeId ?? null, view?.homeId ?? null);
-  return { options, layer: currentLayer(options, picked, fallback), setLayer: setPicked };
+  const active = view?.activeId ? profileLayer(view.activeId) : null;
+  const own = active && options.some((o) => o.key === active) ? active : null;
+  return { options, own, layer: currentLayer(options, picked, fallback), setLayer: setPicked };
 }
 
 export function LayerPicker({ state }: { state: KnowledgeLayerState }) {
@@ -45,8 +49,11 @@ export function LayerPicker({ state }: { state: KnowledgeLayerState }) {
   );
 }
 
-/** "Move to ▸": every other layer. Nothing is overwritten; a taken name is refused by the host. */
-export function MoveTo({ options, from, what, testId, disabled, onMove }: {
+/**
+ * "Move to ▸" (or "Copy to ▸", which leaves the original): every other layer. Nothing is
+ * overwritten; a taken name is refused by the host.
+ */
+export function MoveTo({ options, from, what, testId, disabled, onMove, verb = 'Move' }: {
   options: LayerOption[];
   from: string;
   /** What is being moved, for the control's name. */
@@ -54,16 +61,17 @@ export function MoveTo({ options, from, what, testId, disabled, onMove }: {
   testId: string;
   disabled?: boolean;
   onMove: (to: string) => void;
+  verb?: 'Move' | 'Copy';
 }) {
   const targets = moveTargets(options, from);
   return (
     <Picker<string>
       settings
-      label={`Move ${what} to`}
-      heading="Move to"
+      label={`${verb} ${what} to`}
+      heading={`${verb} to`}
       testId={testId}
       value={null}
-      display="Move to…"
+      display={`${verb} to…`}
       options={targets.map((t) => ({ value: t.key, title: t.label }))}
       disabled={disabled || targets.length === 0}
       onChange={(to) => onMove(to)}
