@@ -322,9 +322,11 @@ pub fn chat_send(
                      WHERE id = ?2 AND draft_revision <= ?3",
                     params![now, a.chat_id, a.draft_revision],
                 )?;
-                // A roll over hands the unsent draft to the successor. Words sent from this chat
-                // after that must not stay behind there as a second copy: the carried draft goes
-                // when it is the very text just sent.
+                // A roll over hands the unsent draft to the successor and archives the old chat,
+                // and an archived chat is refused above. So this only acts for an old session the
+                // person has restored and sends from again: the words sent must not stay behind
+                // in the successor as a second copy, so the carried draft goes when it is the
+                // very text just sent.
                 cleared = clear_carried_draft(tx, &a.chat_id, &a.text, now)?;
             }
             let sub = store::get_submission(tx, &sid)?.expect("just inserted");

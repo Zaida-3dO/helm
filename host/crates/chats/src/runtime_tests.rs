@@ -260,8 +260,9 @@ pub fn limits() -> Limits {
         stop_deadline: Duration::from_secs(10),
         // Tests start workers by the dozen and never wait on one another's spread.
         start_stagger: Duration::ZERO,
-        // Like the others: wide, and a test of the start deadline shortens it.
-        start_ready: Duration::from_secs(30),
+        // Like the others: wider than the longest wait a test makes (`until`), so a worker
+        // starved on a busy machine is not ended; a test of the start deadline shortens it.
+        start_ready: Duration::from_secs(600),
     }
 }
 
@@ -8090,7 +8091,8 @@ pub fn attach_ops_host(h: &H) {
 async fn a_chat_grown_past_the_setting_rolls_itself_over_at_its_turn_end() {
     let mut h = harness();
     attach_ops_host(&h);
-    h.db.write(|tx| helm_core::prefs::set_generic(tx, "rolloverTokens", &json!(100)))
+    // Below what the setting allows, written straight, so the tiny test usage reaches it.
+    h.db.write(|tx| helm_core::prefs::set_raw(tx, "rolloverTokens", &json!(100)))
         .unwrap();
     let chat = h.create().await;
     let (sid, _) = h.send(&chat, "build the thing", "default").await;
@@ -8130,8 +8132,8 @@ async fn a_chat_grown_past_the_setting_rolls_itself_over_at_its_turn_end() {
 }
 
 /// The automatic trigger, one pass over every case that leaves a chat alone: the setting off,
-/// context below it, no usage recorded, a side chat, an archived chat, a busy chat — and the
-/// one row that fires. The asked-again case rides the in-flight guard in the firing row: the
+/// context below it, no usage recorded, a side chat, an archived chat, a busy chat, a message
+/// on its way, a successor that has not worked on its own — and the rows that fire. The asked-again case rides the in-flight guard in the firing row: the
 /// roll over it starts is still running when its turn ends.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_auto_roll_over_trigger_checks_every_case_in_one_pass() {
@@ -8182,6 +8184,21 @@ async fn the_auto_roll_over_trigger_checks_every_case_in_one_pass() {
             "INSERT INTO chat_succession(chat_id, predecessor_id) VALUES ('{c}', 'older');",
             false,
         ),
+        (
+            "a message being handed over",
+            100,
+            999,
+            "INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES ('d-{c}', '{c}', 'next', 'dispatching', 1);",
+            false,
+        ),
+        (
+            "a successor with one complete turn of its own",
+            100,
+            999,
+            "INSERT INTO chat_succession(chat_id, predecessor_id) VALUES ('{c}', 'older');
+             INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES ('w1-{c}', '{c}', 'hand-off', 'complete', 1);",
+            false,
+        ),
         ("over the line", 100, 999, "", true),
         ("exactly at the line", 100, 100, "", true),
         (
@@ -8215,7 +8232,7 @@ async fn the_auto_roll_over_trigger_checks_every_case_in_one_pass() {
             h.db.write(|tx| tx.execute_batch(&extra.replace("{c}", &chat)))
                 .unwrap();
         }
-        h.db.write(|tx| helm_core::prefs::set_generic(tx, "rolloverTokens", &json!(pref)))
+        h.db.write(|tx| helm_core::prefs::set_raw(tx, "rolloverTokens", &json!(pref)))
             .unwrap();
         crate::rollover::on_turn_end(&h.rt.sh, &chat);
         assert_eq!(asked(&chat), expect, "{label}");

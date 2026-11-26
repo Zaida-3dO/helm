@@ -1606,6 +1606,9 @@ impl Actor {
             let mut live = self.live.lock().unwrap();
             live.has_worker = false;
             live.local_model = None;
+            // The worker's jobs went with it: a list it never got to clear would read as still
+            // running to the waits and the finished-chat sweep.
+            live.thread.background_tasks.clear();
         }
         let pending: Vec<Pending> = self.pending.drain().map(|(_, p)| p).collect();
         for p in pending {
