@@ -928,22 +928,6 @@ async fn carry_on(
             .emit(AppEvent::new("sidebar").with("chatIds", json!(changed))),
         Err(e) => log::warn!("roll over of {}: the successor kept no place: {e}", chat.id),
     }
-    // The successor's record changed under any window already holding it (it now carries the
-    // unsent draft and the open-item state): say so before the window moves over.
-    if let Ok(clock) = ctx.services.need::<Clock>() {
-        let rev = clock.next();
-        if let Ok(Some(rec)) = rt
-            .db()
-            .snapshot(|tx| crate::store::get_chat(tx, &new_id, rev))
-        {
-            ctx.events.emit(
-                ChatEvent::Chat {
-                    chat: Box::new(rec),
-                }
-                .to_app_event(),
-            );
-        }
-    }
     // Stop first: the old chat should be idle, but never archive over a working one.
     if !settled(rt, &chat.id) {
         let _ = rt
@@ -963,7 +947,7 @@ async fn carry_on(
     let stack = chat.stack_id.clone().unwrap_or_else(|| chat.id.clone());
     let archived = rt
         .db()
-        .write(|tx| link_and_archive(tx, &chat.id, &new_id, &stack, now))
+        .write(|tx| end_roll_over(tx, &chat.id, &new_id, &stack, now))
         .map_err(|e| e.to_string())?
         .map_err(|r| {
             format!(
@@ -971,6 +955,22 @@ async fn carry_on(
                 r.message
             )
         })?;
+    // The successor's record changed under any window already holding it (the archive write moved
+    // the unsent draft and the open-item state to it): say so before the window moves over.
+    if let Ok(clock) = ctx.services.need::<Clock>() {
+        let rev = clock.next();
+        if let Ok(Some(rec)) = rt
+            .db()
+            .snapshot(|tx| crate::store::get_chat(tx, &new_id, rev))
+        {
+            ctx.events.emit(
+                ChatEvent::Chat {
+                    chat: Box::new(rec),
+                }
+                .to_app_event(),
+            );
+        }
+    }
     if archived {
         // What the `chat_archive` op does after its write: retire or stop the actor, let the UI
         // hear the row change, and republish attention. The roll over has happened by now, so a
@@ -1042,7 +1042,6 @@ fn take_place(
         [old, new],
     )?;
     crate::mute::inherit(tx, old, new, now)?;
-    carry_composer(tx, old, new, now)?;
     let mut changed = vec![new.to_owned(), old.to_owned()];
     changed.extend(children);
     Ok(changed)
@@ -1093,6 +1092,24 @@ fn carry_composer(
         )?;
     }
     Ok(())
+}
+
+/// The last write of a roll over: the old chat is archived and linked to its successor, and only
+/// then does its composer (draft, staged pictures and references, open cards) move over. They are
+/// one transaction, so the composer never ends up in the successor while the user is still in an
+/// old chat that was not archived: both happen or neither does. A refused archive moves nothing.
+fn end_roll_over(
+    tx: &rusqlite::Transaction<'_>,
+    old: &str,
+    new: &str,
+    stack: &str,
+    now: i64,
+) -> rusqlite::Result<Result<bool, crate::archive::Refusal>> {
+    let archived = link_and_archive(tx, old, new, stack, now)?;
+    if archived.is_ok() {
+        carry_composer(tx, old, new, now)?;
+    }
+    Ok(archived)
 }
 
 /// The end of a roll over in one transaction: the stack links on both rows (the old session
@@ -1614,6 +1631,14 @@ mod tests {
             })
             .unwrap()
         };
+        // Taking the old chat's place does not move the composer: the old chat is still where
+        // the user is until the archive write, which carries it over in the same transaction.
+        let before = composer(&old);
+        assert_eq!((before.0.as_str(), before.1), ("half a thought", 5));
+        assert_eq!(composer(&new).0, "");
+        db.write(|tx| end_roll_over(tx, &old, &new, &old, 9))
+            .unwrap()
+            .unwrap();
         let carried = composer(&new);
         assert_eq!(carried.0, "half a thought");
         assert!(carried.1 > 5, "newer than the old draft's revision");
@@ -1627,6 +1652,20 @@ mod tests {
             (vec!["img-sent".to_owned()], 0),
             "a picture already sent stays with its message"
         );
+        // Words sent from the old chat after the hand over clear the copy the successor holds,
+        // and only when they are that very text.
+        let other = db
+            .write(|tx| crate::submit::clear_carried_draft(tx, &old, "something else", 20))
+            .unwrap();
+        assert!(other.is_empty());
+        assert_eq!(composer(&new).0, "half a thought");
+        let same = db
+            .write(|tx| crate::submit::clear_carried_draft(tx, &old, "half a thought\n", 20))
+            .unwrap();
+        assert_eq!(same, [new.clone()]);
+        let emptied = composer(&new);
+        assert_eq!(emptied.0, "");
+        assert!(emptied.1 > carried.1);
     }
 
     #[test]
@@ -1672,6 +1711,12 @@ mod tests {
             old,
             "the succession its other readers use went in with the same write"
         );
+        // A refused archive moves no composer: carrying it would fail on the missing chat, and
+        // the write would not answer at all.
+        let refused = db
+            .write(|tx| end_roll_over(tx, "gone", &new, "gone", 9))
+            .unwrap();
+        assert!(refused.is_err());
     }
 
     #[test]
