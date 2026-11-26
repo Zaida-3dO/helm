@@ -109,6 +109,8 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
     // these itself, with the Undo notice.
     ("scrollOnSend", Registry(Base)),
     ("doubleShift", Registry(Base)),
+    // Whether Helm archives a chat that has sent its completed report and gone quiet.
+    ("archiveFinishedChats", Registry(Base)),
     ("sendBehavior", Registry(Base)),
     ("responseVerbosity", Registry(Base)),
     ("notifications", Registry(Base)),

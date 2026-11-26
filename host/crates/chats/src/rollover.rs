@@ -638,36 +638,19 @@ pub(crate) fn on_turn_end(sh: &Arc<Shared>, chat_id: &str) {
         return;
     }
     let asked = PENDING.lock().unwrap().remove(chat_id);
+    // The context size an automatic roll over was started at, for the note it leaves.
+    let mut auto_tokens = None;
     if asked.is_none() {
         let over = sh
             .db
-            .snapshot(|tx| {
-                let threshold = helm_core::prefs::get_or(
-                    tx,
-                    helm_core::prefs::ROLLOVER_TOKENS,
-                    DEFAULT_ROLLOVER_TOKENS,
-                );
-                if threshold <= 0 {
-                    return Ok::<_, rusqlite::Error>(false);
-                }
-                let idle_root: bool = tx
-                    .query_row(
-                        "SELECT archived = 0 AND side_source_id IS NULL AND status = 'idle'
-                     FROM chats WHERE id = ?1",
-                        [chat_id],
-                        |r| r.get(0),
-                    )
-                    .optional()?
-                    .unwrap_or(false);
-                if !idle_root {
-                    return Ok(false);
-                }
-                Ok(crate::turn_usage::context_reported_at(tx, chat_id)
-                    .is_some_and(|(n, _)| n >= threshold as u64))
-            })
-            .unwrap_or(false);
-        if !over || !AUTO_DONE.lock().unwrap().insert(chat_id.to_owned()) {
-            return;
+            .snapshot(|tx| crate::autoroll::over_the_line(tx, chat_id))
+            .ok()
+            .flatten();
+        match over {
+            Some(n) if AUTO_DONE.lock().unwrap().insert(chat_id.to_owned()) => {
+                auto_tokens = Some(n);
+            }
+            _ => return,
         }
     }
     let rt = Arc::new(ChatRuntime { sh: sh.clone() });
@@ -700,8 +683,13 @@ pub(crate) fn on_turn_end(sh: &Arc<Shared>, chat_id: &str) {
         }
         return;
     }
-    if let Err(e) = start(&rt, &seam.ctx, &chat, None, None) {
-        log::warn!("auto roll over of {chat_id}: {}", e.message);
+    match start(&rt, &seam.ctx, &chat, None, None) {
+        Ok(()) => {
+            if let Some(n) = auto_tokens {
+                rt.add_context_row(chat_id, ContextKind::Notice, &crate::autoroll::note(n));
+            }
+        }
+        Err(e) => log::warn!("auto roll over of {chat_id}: {}", e.message),
     }
 }
 

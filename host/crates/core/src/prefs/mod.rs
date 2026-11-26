@@ -58,6 +58,9 @@ pub const IDE_CONTEXT: PrefKey = PrefKey::classified("ideContext");
 pub const SCROLL_ON_SEND: PrefKey = PrefKey::classified("scrollOnSend");
 /// Settings > Chat: whether tapping Shift twice opens Go to file (on when missing).
 pub const DOUBLE_SHIFT: PrefKey = PrefKey::classified("doubleShift");
+/// Settings > Chat: whether a chat that has sent its completed report and gone quiet is archived
+/// by Helm (on when missing).
+pub const ARCHIVE_FINISHED_CHATS: PrefKey = PrefKey::classified("archiveFinishedChats");
 /// Send behaviour. Stored as the keys that differ from the defaults, which
 /// live in `helm-chats` (`send_behavior::HOME_DEFAULTS`); validated here by shape.
 pub const SEND_BEHAVIOR: PrefKey = PrefKey::classified("sendBehavior");
@@ -136,6 +139,7 @@ pub const GENERIC_ALLOWLIST: &[PrefKey] = &[
     TITLES_LOCAL_VIA_CLAUDE,
     SCROLL_ON_SEND,
     DOUBLE_SHIFT,
+    ARCHIVE_FINISHED_CHATS,
     SEND_BEHAVIOR,
     SELECTION,
     APPEARANCE,
@@ -243,7 +247,8 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
             }
         }
         "nativeMcp" | "mcpEnabled" | "ideContext" | "titlesLocalViaClaude" | "scrollOnSend"
-        | "doubleShift" | "pauseAnimationsOnScroll" | "deviceRunFromOthers" => {
+        | "doubleShift" | "archiveFinishedChats" | "pauseAnimationsOnScroll"
+        | "deviceRunFromOthers" => {
             if value.is_boolean() {
                 Ok(())
             } else {
@@ -788,6 +793,7 @@ mod tests {
             ("titlesLocalViaClaude", json!(false), json!("no")),
             ("scrollOnSend", json!(false), json!("no")),
             ("doubleShift", json!(false), json!("no")),
+            ("archiveFinishedChats", json!(false), json!("no")),
             ("rolloverTokens", json!(180_000), json!("soon")),
             ("rolloverTokens", json!(0), json!(2_000_001)),
             (

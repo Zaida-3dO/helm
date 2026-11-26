@@ -23,6 +23,8 @@ function ChatPane() {
   // Whether agents may read the code editor's open file and selection (off by default).
   const [ide, setIde] = useState(false);
   const [localTitles, setLocalTitles] = useState(true);
+  // Whether Helm archives a chat that has sent its completed report and gone quiet (on by default).
+  const [archiveFinished, setArchiveFinished] = useState(true);
   // Read live (and updated through the preference event this page dispatches on a change).
   const scrollOnSend = useScrollOnSend();
   const doubleShift = useDoubleShift();
@@ -72,6 +74,10 @@ function ChatPane() {
     void shell
       .api<unknown>('preference_get', { key: 'titlesLocalViaClaude' })
       .then((v) => setLocalTitles(v !== false))
+      .catch(() => undefined);
+    void shell
+      .api<unknown>('preference_get', { key: 'archiveFinishedChats' })
+      .then((v) => setArchiveFinished(v !== false))
       .catch(() => undefined);
     void shell
       .api<unknown>('preference_get', { key: 'ideContext' })
@@ -331,8 +337,8 @@ function ChatPane() {
         />
       </SettingRow>
       <SettingRow
-        title="Ask a chat to roll over"
-        description="Tokens of context at which a quiet chat is asked to hand its work to a fresh chat: its agent writes a hand-off, the new chat carries on, and the old one archives. 0 never asks. The context line offers the same button at this size."
+        title="Roll a chat over by itself"
+        description="Tokens of context at which Helm rolls a chat over when its turn ends: its agent writes a hand-off, the new chat carries on, the old one archives, and a note in the old chat says so. 0 never does. The context line offers the same button at this size."
         testId="setting-rollover-tokens"
       >
         <TextInput
@@ -343,6 +349,24 @@ function ChatPane() {
           value={rollTokens}
           onChange={(e) => setRollTokens(e.target.value)}
           onBlur={saveRolloverTokens}
+        />
+      </SettingRow>
+      <SettingRow
+        title="Archive finished chats"
+        description="A chat that has sent its completed report to the chat that started it, and has then been quiet for ten minutes, is archived, with a note in the chat. Chats that are waiting on anything, pinned chats and the chat you have open are left alone."
+        testId="setting-archive-finished"
+      >
+        <Checkbox
+          checked={archiveFinished}
+          aria-label="Archive finished chats"
+          data-testid="settings-archive-finished"
+          onChange={(on) => {
+            setArchiveFinished(on);
+            void shell.api('preference', { key: 'archiveFinishedChats', value: on }).catch((err: unknown) => {
+              setArchiveFinished(!on);
+              saveError(err);
+            });
+          }}
         />
       </SettingRow>
       {ELEMENTS.map((e) => (

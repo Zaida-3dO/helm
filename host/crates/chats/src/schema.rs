@@ -14,6 +14,7 @@
 //! | `chat_stop_holds` | per chat: when its last turn end was handed to the stop judge and is still held; read by the waits watcher so a held chat reads as busy, and cleared at start-up |
 //! | `chat_triage` | per chat: the idle check's last verdict, and the activity it was made for |
 //! | `chat_shares` | the profiles besides its own that a chat is shown to; the chat row itself carries its `profile_id` and `host_device_id` |
+//! | `chat_finished_sweep` | per chat: the hand-over the finished-chat sweep last archived it for ([`crate::finished`]) |
 //! | `chat_flags` | per chat: the question its agent flagged for the user ([`crate::flags`]) |
 //! | trigger `restart_cancel_changed_chat` | drops a pending continuation on archive or a project, harness, model or effort change |
 //! | `chat_forks` | fork ids and what they were asked for, for idempotent forks |
@@ -48,6 +49,7 @@ pub fn register(reg: &mut MigrationRegistry) {
     reg.initializer("chats-side-tables", init)
         .initializer("chats-attachment-refs", crate::attachments::init)
         .initializer("chats-flags", crate::flags::init)
+        .initializer("chats-finished-sweep", crate::finished::init)
         .initializer("chats-shown-images", crate::shown_images::init)
         .initializer("chats-activity-queue", activity_queue)
         .initializer("chats-triage-tries", triage_tries)

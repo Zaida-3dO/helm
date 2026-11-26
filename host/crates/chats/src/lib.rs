@@ -25,6 +25,8 @@
 //! | [`archive`] | archive and restore inside a caller's transaction |
 //! | [`attention`] | the attention summary behind the badge, tray and row marks |
 //! | [`delete`] | hard delete and its batched, retried file cleanup |
+//! | [`autoroll`] | the checks behind the automatic roll over at a context size |
+//! | [`finished`] | finished chats (a completed report sent, then quiet) archive themselves |
 //! | [`triage`] | the idle-chat check: a quiet helper says whether a chat needs you |
 //! | [`edit`] | two-phase, crash-safe edit and resend |
 //! | [`flags`] | the agent's own attention flag: one question for the user, per chat |
@@ -55,6 +57,7 @@ pub mod archive;
 pub mod attachments;
 pub mod attention;
 pub mod autocomplete;
+pub mod autoroll;
 mod background;
 pub mod bindings;
 pub mod buildqueue;
@@ -65,6 +68,7 @@ pub mod clock;
 pub mod delete;
 pub mod edit;
 pub mod exits;
+pub mod finished;
 pub mod flags;
 pub mod fork;
 pub mod hostcalls;
