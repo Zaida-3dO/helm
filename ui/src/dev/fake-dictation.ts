@@ -5,7 +5,7 @@
 // only.
 
 import { ApiError } from '../api/client.ts';
-import type { DictationView } from '../composer/dictation.ts';
+import type { DictationMode, DictationView } from '../composer/dictation.ts';
 import type { FakeOpHandler } from './fakeHost.ts';
 
 const HEARD = 'this was dictated in the dev browser';
@@ -20,7 +20,7 @@ const LIVE_SCRIPT: Array<{ text: string; final?: boolean }> = [
 ];
 
 export function dictationFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
-  const state = { sttUrl: null as string | null, allowPrivateNetwork: false, language: 'en', model: 'large-v3-turbo', reserve: 2 };
+  const state = { sttUrl: null as string | null, allowPrivateNetwork: false, language: 'en', model: 'large-v3-turbo', reserve: 2, mode: 'live' as DictationMode };
   const view = (): DictationView => ({
     sttUrl: state.sttUrl,
     allowPrivateNetwork: state.allowPrivateNetwork,
@@ -30,6 +30,8 @@ export function dictationFakeOps(): { prefixes: string[]; handler: FakeOpHandler
     speechReserveGb: state.reserve,
     speechReserveMaxGb: 24,
     liveAvailable: true,
+    liveUnavailable: null,
+    mode: state.mode,
   });
   // One live session at a time: the pending sentence and the timer that feeds the script.
   let livePending = '';
@@ -84,6 +86,10 @@ export function dictationFakeOps(): { prefixes: string[]; handler: FakeOpHandler
         if (typeof a.language === 'string') {
           if (!/^(auto|[a-z]{2,3}(-[A-Za-z]{2,4})?)$/.test(a.language.trim())) throw new ApiError('bad_args', 'The language is a code like en or fr, or auto.');
           state.language = a.language.trim();
+        }
+        if (typeof a.mode === 'string') {
+          if (a.mode !== 'live' && a.mode !== 'record') throw new ApiError('bad_args', 'The dictation mode is live or record.');
+          state.mode = a.mode;
         }
         if (typeof a.model === 'string' && a.model.trim()) state.model = a.model.trim();
         if (typeof a.speechReserveGb === 'number') {

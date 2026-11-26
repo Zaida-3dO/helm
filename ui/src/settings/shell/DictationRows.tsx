@@ -1,12 +1,12 @@
-// Settings → Shell → Dictation: where the speech-to-text server is, whether an address on the home
-// network is allowed, the language, a Test button, and how much graphics memory a local model
-// leaves free for speech. Each control saves at once; the host refuses a bad address with a
+// Settings → Shell → Dictation: whether dictation goes live or records for the server, where the
+// speech-to-text server is, whether an address on the home network is allowed, the language, a
+// Test button, and how much graphics memory a local model leaves free for speech. Each control saves at once; the host refuses a bad address with a
 // sentence that is shown under the rows.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useShell } from '../../shell/context.ts';
-import { Button, Checkbox, SettingRow, TextInput } from '../../ui/index.ts';
-import { dictationOps, type DictationSettingsChange, type DictationView } from '../../composer/dictation.ts';
+import { Button, Checkbox, Segmented, SettingRow, TextInput } from '../../ui/index.ts';
+import { dictationOps, type DictationMode, type DictationSettingsChange, type DictationView } from '../../composer/dictation.ts';
 
 function errorText(e: unknown): string {
   return String((e as { message?: unknown })?.message ?? e);
@@ -70,14 +70,33 @@ export function DictationRows() {
     if (n !== view.speechReserveGb) save({ speechReserveGb: n });
   };
 
+  const liveNote = view.liveAvailable
+    ? 'Windows speech recognition is ready on this PC.'
+    : (view.liveUnavailable ?? "Windows speech recognition isn't available on this PC.");
   const shownUrl = url ?? view.sttUrl ?? '';
   const shownLanguage = language ?? view.language;
   const shownReserve = reserve ?? String(view.speechReserveGb);
   return (
     <div data-testid="dictation-settings">
       <SettingRow
+        title="Dictation: how it listens"
+        description={`Live: words appear as you speak, using Windows speech recognition, and the speech-to-text server below takes over if live cannot start. Record: the whole clip goes to the server when you finish, which is slower but usually more accurate. With no server set, dictation is always live. ${liveNote}`}
+        testId="setting-dictation-mode"
+      >
+        <Segmented<DictationMode>
+          label="Dictation mode"
+          testId="dictation-mode-choice"
+          value={view.mode}
+          options={[
+            { value: 'live', label: 'Live' },
+            { value: 'record', label: 'Record, then transcribe' },
+          ]}
+          onChange={(mode) => save({ mode })}
+        />
+      </SettingRow>
+      <SettingRow
         title="Dictation: speech-to-text address"
-        description="The Whisper server dictation sends a short recording to (an OpenAI-style one, on this computer unless you allow your network below). The words go into your draft; Helm never sends the message for you. Leave empty to turn dictation off."
+        description="The Whisper server dictation sends a short recording to (an OpenAI-style one, on this computer unless you allow your network below). The words go into your draft; Helm never sends the message for you. Leave empty to use live dictation only."
         testId="setting-dictation-url"
       >
         <TextInput

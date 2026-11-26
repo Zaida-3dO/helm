@@ -61,6 +61,20 @@ button.dictation-pill:hover {
 .dictation-time {
   font-variant-numeric: tabular-nums;
 }
+/* Which way dictation is going: live words, or a recording for the server. */
+.dictation-mode {
+  flex: none;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+/* Why live dictation was not used; it takes the hint's place and never wraps. */
+.dictation-note {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .dictation-hint {
   color: var(--muted);
   font-size: 11.5px;

@@ -4,11 +4,13 @@
 // release. The words land at the caret and are never sent. Esc cancels (no request is made),
 // Enter or a click finishes. The rules are in dictation.ts; this file is the screen part.
 //
-// Where the Windows speech service can run and no speech-to-text server is set up, the mic is
-// live: the host streams words while the user speaks, settled sentences land in the draft as they
-// come and the sentence in progress is handed to `onLiveText` for the editor to show. A configured
-// server wins: the user's own server and language beat the operating system's speech service.
-// There is no recording, no level bars (the engine holds the microphone) and no second wait.
+// Where the Windows speech service can run the mic is live: the host streams words while the user
+// speaks, settled sentences land in the draft as they come and the sentence in progress is handed
+// to `onLiveText` for the editor to show. There is no recording, no level bars (the engine holds
+// the microphone) and no second wait. The dictation setting can ask for recording instead (a
+// configured speech-to-text server then transcribes the whole clip at the end), and when live
+// cannot start while a server is set the recording path takes over and the pill says why. The
+// pill and the button's tooltip always say which way is in use.
 //
 // Both composers mount a mic button, but a live session has one owner: only the button that
 // started it applies its words. Pressing the mic in the other composer takes the session over —
@@ -38,12 +40,16 @@ import {
   LEVEL_BARS,
   LIVE_IDLE,
   liveStep,
+  dictationPlan,
+  fellBackNote,
+  LIVE_RETRY_MS,
   NOT_SET_UP,
   NOTHING_HEARD,
   problemOf,
   Recorder,
   releasesChord,
   spokenInsert,
+  WAY_LABEL,
   wavSeconds,
   type DictationView,
   type KeyInput,
@@ -105,6 +111,10 @@ export function MicButton({
     setStatusState(s);
   }, []);
   const [problem, setProblem] = useState<Problem | null>(null);
+  /** Why live dictation was not used for the session in progress, when it was the wish. */
+  const [note, setNote] = useState<string | null>(null);
+  /** The reason a live session recently failed to start, so the next press goes to the server. */
+  const liveFailure = useRef<{ message: string; at: number } | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [levels, setLevels] = useState<number[]>(() => Array<number>(LEVEL_BARS).fill(0));
 
@@ -126,6 +136,7 @@ export function MicButton({
   const liveStart = useRef(0);
 
   const load = useCallback(() => {
+    liveFailure.current = null; // settings or the machine may have changed: live gets another try
     ops
       .get()
       .then(setView)
@@ -269,6 +280,7 @@ export function MicButton({
       if (recorder.current !== r) return; // cancelled, or the microphone never opened
       recorder.current = null;
       keyState.current = IDLE;
+      setNote(null);
       const wav = r.finish();
       lastWav.current = wav;
       if (capped) toast.show({ kind: 'info', text: 'Dictation stopped at five minutes.' });
@@ -301,9 +313,40 @@ export function MicButton({
     recorder.current?.cancel();
     recorder.current = null;
     lastWav.current = null;
+    setNote(null);
     clearProblem();
     setStatus('idle');
   }, [clearProblem, onLiveText, ops, setStatus, giveUpLive]);
+
+  /** Record the microphone for the speech-to-text server. `why` says why this is not live. */
+  const beginRecording = useCallback(
+    (why: string | null): Promise<void> => {
+      const mine = ++generation.current;
+      const r = new Recorder();
+      recorder.current = r;
+      lastWav.current = null;
+      setNote(why);
+      setElapsed(0);
+      setStatus('listening');
+      const opened = r
+        .start(micName.current, () => void finish(true))
+        .then(() => {
+          // Cancelled while the microphone was opening: let it go again.
+          if (recorder.current !== r || mine !== generation.current) r.cancel();
+        })
+        .catch((e: unknown) => {
+          if (recorder.current === r) {
+            recorder.current = null;
+            keyState.current = IDLE;
+            setNote(null);
+            showProblem(problemOf(e));
+          }
+        });
+      ready.current = opened;
+      return opened;
+    },
+    [finish, showProblem, setStatus],
+  );
 
   /** Begin a live session on the host's speech service. The words arrive as events. */
   const startLive = useCallback(() => {
@@ -311,6 +354,7 @@ export function MicButton({
     liveMode.current = true;
     liveState.current = LIVE_IDLE;
     liveStart.current = Date.now();
+    setNote(null);
     setElapsed(0);
     setStatus('listening');
     // The claim is taken before the host answers: the host starts sending the new session's
@@ -322,17 +366,25 @@ export function MicButton({
     setLiveOwner(claim);
     ready.current = ops.live('start').then(
       () => undefined,
-      (e: unknown) => {
-        // The session never opened: let go of the claim, and the pill goes back to the microphone.
+      (e: unknown): Promise<void> | undefined => {
+        // The session never opened: let go of the claim.
         giveUpLive(claim);
-        if (alive.current && mine === generation.current && liveMode.current) {
-          liveMode.current = false;
-          keyState.current = IDLE;
-          showProblem(problemOf(e));
+        if (!alive.current || mine !== generation.current || !liveMode.current) return undefined;
+        liveMode.current = false;
+        const p = problemOf(e);
+        if (viewRef.current?.configured) {
+          // A speech-to-text server is set: never leave the user with no dictation. Record for it,
+          // say why, and do not try live again for a while.
+          liveFailure.current = { message: p.message, at: Date.now() };
+          return beginRecording(fellBackNote(p.message));
         }
+        // Nothing to fall back on: the pill goes back to the microphone with the reason.
+        keyState.current = IDLE;
+        showProblem(p);
+        return undefined;
       },
     );
-  }, [ops, showProblem, setStatus, giveUpLive]);
+  }, [ops, showProblem, setStatus, giveUpLive, beginRecording]);
 
   const start = useCallback(async () => {
     if (statusRef.current === 'transcribing') {
@@ -340,39 +392,23 @@ export function MicButton({
       return;
     }
     clearProblem();
-    // A configured speech-to-text server wins: the user's server and their language choice beat
-    // the operating system's speech service. Live dictation fills in when nothing is set up.
-    if (viewRef.current?.liveAvailable && viewRef.current?.configured !== true) {
+    // Live when it is wanted and can run; otherwise the recording goes to the speech-to-text
+    // server, and the note says why live was not used when it was the wish.
+    const recent = liveFailure.current;
+    const failure = recent && Date.now() - recent.at < LIVE_RETRY_MS ? recent.message : null;
+    const plan = dictationPlan(viewRef.current, failure);
+    if (plan.way === 'live') {
       startLive();
       await ready.current;
       return;
     }
-    if (!viewRef.current?.configured) {
+    if (plan.way === 'none') {
       keyState.current = IDLE;
       showProblem({ message: NOT_SET_UP, retry: false, settings: true });
       return;
     }
-    const mine = ++generation.current;
-    const r = new Recorder();
-    recorder.current = r;
-    lastWav.current = null;
-    setElapsed(0);
-    setStatus('listening');
-    ready.current = r
-      .start(micName.current, () => void finish(true))
-      .then(() => {
-        // Cancelled while the microphone was opening: let it go again.
-        if (recorder.current !== r || mine !== generation.current) r.cancel();
-      })
-      .catch((e: unknown) => {
-        if (recorder.current === r) {
-          recorder.current = null;
-          keyState.current = IDLE;
-          showProblem(problemOf(e));
-        }
-      });
-    await ready.current;
-  }, [clearProblem, finish, showProblem, startLive, setStatus]);
+    await beginRecording(plan.note);
+  }, [clearProblem, showProblem, startLive, beginRecording]);
 
   /** Feed one press, release or stop through the rule and do what it says. */
   const act = useCallback(
@@ -496,13 +532,16 @@ export function MicButton({
         data-state="listening"
         data-live={liveMode.current ? 'true' : undefined}
         aria-label="Listening. Finish dictation"
-        title="Esc to cancel · Enter or click to finish"
+        title={note ? `${note} Esc to cancel · Enter or click to finish` : 'Esc to cancel · Enter or click to finish'}
         onMouseDown={keepFocus}
         onPointerDown={press}
         onClick={keyboardTap}
       >
         <span className="dictation-dot" aria-hidden="true" />
         <span className="dictation-time">Listening {clock(elapsed)}</span>
+        <span className="dictation-mode" data-testid="dictation-mode">
+          {WAY_LABEL[liveMode.current ? 'live' : 'record']}
+        </span>
         {liveMode.current ? null : (
           <span className="dictation-bars" aria-hidden="true" data-still={may ? undefined : 'true'}>
             {levels.map((v, i) => (
@@ -510,7 +549,13 @@ export function MicButton({
             ))}
           </span>
         )}
-        <span className="dictation-hint">Esc to cancel · Enter or click to finish</span>
+        {note ? (
+          <span className="dictation-note" data-testid="dictation-note">
+            {note}
+          </span>
+        ) : (
+          <span className="dictation-hint">Esc to cancel · Enter or click to finish</span>
+        )}
       </button>
     );
   }
@@ -543,13 +588,20 @@ export function MicButton({
   }
   // Usable live (the Windows speech service) or batch (a configured speech-to-text server).
   const usable = view?.configured === true || view?.liveAvailable === true;
+  const plan = dictationPlan(view, liveFailure.current && Date.now() - liveFailure.current.at < LIVE_RETRY_MS ? liveFailure.current.message : null);
+  const wayHint = plan.way === 'none' ? '' : ` (${plan.way === 'live' ? 'live: words appear as you speak' : 'records, then transcribes'})`;
   return (
     <Button
       variant="icon"
       className={`composer-mic${usable ? '' : ' unconfigured'}`}
       label={usable ? 'Dictate' : 'Set up dictation'}
-      title={usable ? hintLabel('Dictate: tap to start and stop, or hold to talk', chord) : 'Set up dictation in Settings → Shell'}
+      title={
+        usable
+          ? hintLabel(`Dictate${wayHint}: tap to start and stop, or hold to talk`, chord) + (plan.note ? ` ${plan.note}` : '')
+          : 'Set up dictation in Settings → Shell'
+      }
       data-testid="composer-mic"
+      data-way={usable && plan.way !== 'none' ? plan.way : undefined}
       onMouseDown={keepFocus}
       onPointerDown={usable ? press : undefined}
       onClick={usable ? keyboardTap : openSettings}
