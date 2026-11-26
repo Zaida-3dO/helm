@@ -8,7 +8,7 @@ import { ActionsPane } from '../settings/actions/ActionsPane.tsx';
 import { registerComposerAccessory } from '../composer/slots.ts';
 import { registerSettingsPane } from '../settings/registry.ts';
 import { useShell } from '../shell/context.ts';
-import { savedFromText, savedOps } from '../saved/model.ts';
+import { savedFromRow, savedFromText, savedOps } from '../saved/model.ts';
 import { registerMessageAction, registerSelectionAction } from '../transcript/slots.ts';
 import { toast } from '../ui/index.ts';
 import { IconBookmark } from '../ui/icons.tsx';
@@ -48,9 +48,8 @@ export function LeafSlots(): null {
         order: 20,
         appliesTo: (row) => (row.role === 'assistant' || row.role === 'user') && row.text.trim() !== '',
         run: (row, ctx) => {
-          const { title, body } = savedFromText(row.text);
           savedOps(api)
-            .save({ chatId: ctx.sessionId, messageId: row.id, title, body })
+            .save(savedFromRow(row, ctx))
             .then(() => toast.show({ kind: 'info', text: 'Saved for later — open Settings → Saved to see it.' }))
             .catch((e: unknown) => toast.show({ kind: 'error', text: `Could not save: ${String((e as Error).message ?? e)}` }));
         },

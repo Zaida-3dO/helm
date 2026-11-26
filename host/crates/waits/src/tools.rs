@@ -279,7 +279,9 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                  waits; a fired or cancelled wait never fires again. A chat_idle wait on a chat \
                  that rolls over follows to the session the chat carries on in and keeps waiting; \
                  its result names both sessions. A chat idle while children or waits of its own \
-                 are working is treated as still working and keeps the wait waiting. A chat \
+                 are working is treated as still working and keeps the wait waiting; so is a chat \
+                 whose turn ended while a background shell command or sub-agent of its own \
+                 still runs, and a timeout then says those jobs were still running. A chat \
                  already idle with a closed turn is answered at once with outcome idle; a brand-\
                  new chat keeps the short grace first. The result says idleWithoutWait when the \
                  chat ended its last turn without reporting: steer it to report or to set a \
@@ -386,6 +388,7 @@ mod tests {
                 error: None,
                 rolls_to: None,
                 helpers: false,
+                background_jobs: 0,
                 finished_turn: false,
                 unreported: false,
             },
@@ -399,6 +402,7 @@ mod tests {
                 error: None,
                 rolls_to: Some(other.into()),
                 helpers: false,
+                background_jobs: 0,
                 finished_turn: false,
                 unreported: false,
             },
@@ -412,6 +416,7 @@ mod tests {
                 error: None,
                 rolls_to: None,
                 helpers: true,
+                background_jobs: 0,
                 finished_turn: true,
                 unreported: false,
             },

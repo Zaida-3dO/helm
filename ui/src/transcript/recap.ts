@@ -3,6 +3,7 @@
 // pictures it showed. A turn gets one when it kept a checklist or took three or more tool steps.
 
 import type { MessageRow } from '../api/types.ts';
+import type { SlotContext } from './slots.ts';
 import { galleryRef } from './cards.ts';
 import { stepsDone, turnChecklist } from './checklist.ts';
 import type { Todo } from './todos.ts';
@@ -55,4 +56,9 @@ export function pictureCount(recap: Pick<Recap, 'galleries'>): number {
 export function stepsLabel(recap: Pick<Recap, 'checklist' | 'toolSteps'>): string {
   if (recap.checklist) return `${stepsDone(recap.checklist)} of ${recap.checklist.length} steps`;
   return `${recap.toolSteps} ${recap.toolSteps === 1 ? 'step' : 'steps'}`;
+}
+
+/** The chat that holds a recap's pictures: the session that wrote the reply, not the window's chat. */
+export function recapPictureChat(ctx: Pick<SlotContext, 'sessionId'>): string {
+  return ctx.sessionId;
 }

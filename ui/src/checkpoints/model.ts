@@ -2,6 +2,7 @@
 // (`checkpoint_info`), who can be gone back to, and the plain sentences the confirmation shows.
 
 import type { MessageRow } from '../api/types.ts';
+import type { SlotContext } from '../transcript/slots.ts';
 
 /** The host's answer: what going back to a message means. */
 export interface CheckpointInfo {
@@ -52,4 +53,9 @@ export function filesHeading(info: CheckpointInfo): string {
 /** "and 3 more" for the files the list leaves out; empty when none. */
 export function moreFilesLine(info: CheckpointInfo): string {
   return info.moreFiles > 0 ? `and ${info.moreFiles} more` : '';
+}
+
+/** The message to go back to, under the session that holds it (an earlier session of a rolled-over chat keeps its own rows). */
+export function goBackTarget(row: MessageRow, ctx: Pick<SlotContext, 'sessionId'>): { chatId: string; row: MessageRow } {
+  return { chatId: ctx.sessionId, row };
 }

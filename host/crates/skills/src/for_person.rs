@@ -61,6 +61,28 @@ pub(crate) struct Person {
     hub_person: Option<String>,
 }
 
+impl Person {
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// This person as one of their own chats would be known, for reading what applies to them.
+    pub(crate) fn knowledge(&self) -> ChatKnowledge {
+        ChatKnowledge {
+            profile: Some(crate::launch::ProfileRef {
+                id: self.id.clone(),
+                name: self.name.clone(),
+                is_home: false,
+            }),
+            project_id: None,
+        }
+    }
+}
+
 /// Who a `person` argument names.
 pub(crate) enum Named {
     /// The chat's own profile: the same as `scope: me`.

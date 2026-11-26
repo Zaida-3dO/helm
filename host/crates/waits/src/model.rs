@@ -96,6 +96,10 @@ pub struct ChatObs {
     /// declared is still open. Such a chat has not come to an end even while it is itself
     /// idle — the helpers are still carrying its turn.
     pub helpers: bool,
+    /// How many background jobs of the chat's own are running now: a shell command it moved to
+    /// the background, a sub-agent it started. A turn can end while they run on, and the chat
+    /// goes on with their results, so such a chat has not finished.
+    pub background_jobs: u32,
     /// At least one of the chat's turns has closed. A brand-new chat has closed none, and a
     /// wait on it keeps the idle grace in case its first message has only not started yet.
     pub finished_turn: bool,
@@ -190,9 +194,29 @@ pub fn judge(w: &mut Wait, obs: &Observation, now: i64) -> Option<Outcome> {
     hit.or_else(|| {
         (now >= w.expires_at).then(|| Outcome {
             code: "timeout",
-            detail: "The wait timed out before anything happened.".into(),
+            detail: timeout_detail(w),
         })
     })
+}
+
+fn forget_background_jobs(w: &mut Wait) {
+    if let Some(map) = w.state.as_object_mut() {
+        map.remove("backgroundJobs");
+    }
+}
+
+/// The text of a timeout. A chat_idle wait that last saw the chat's turn ended with background
+/// jobs still running says so, so it does not read as a chat that never did anything.
+fn timeout_detail(w: &Wait) -> String {
+    match w.state.get("backgroundJobs").and_then(Value::as_u64) {
+        Some(n) if n > 0 && matches!(w.target, Target::ChatIdle { .. }) => format!(
+            "The wait timed out: the chat's turn ended but {n} background job{} {} still \
+             running, so it has not finished.",
+            if n == 1 { "" } else { "s" },
+            if n == 1 { "was" } else { "were" },
+        ),
+        _ => "The wait timed out before anything happened.".into(),
+    }
 }
 
 /// The first start time seen is the baseline; a different one later is another process that
@@ -236,6 +260,7 @@ fn judge_chat(w: &mut Wait, c: Option<&ChatObs>, now: i64) -> Option<Outcome> {
     }
     if c.busy {
         w.state["seenBusy"] = json!(true);
+        forget_background_jobs(w);
         return None;
     }
     if c.stopped {
@@ -248,6 +273,14 @@ fn judge_chat(w: &mut Wait, c: Option<&ChatObs>, now: i64) -> Option<Outcome> {
         w.state["seenBusy"] = json!(true);
         return None;
     }
+    if c.background_jobs > 0 {
+        // The turn ended but its background jobs run on, and the chat carries on when they
+        // report. Keep waiting; remember how many, so a timeout can say why nothing fired.
+        w.state["seenBusy"] = json!(true);
+        w.state["backgroundJobs"] = json!(c.background_jobs);
+        return None;
+    }
+    forget_background_jobs(w);
     let seen_busy = w.state["seenBusy"].as_bool().unwrap_or(false);
     if seen_busy {
         return named_follow(
@@ -478,6 +511,7 @@ mod tests {
             error: None,
             rolls_to: None,
             helpers: false,
+            background_jobs: 0,
             finished_turn: false,
             unreported: false,
         }))
@@ -492,6 +526,7 @@ mod tests {
             error: None,
             rolls_to: to.map(str::to_owned),
             helpers: false,
+            background_jobs: 0,
             finished_turn: false,
             unreported: false,
         }))
@@ -501,6 +536,16 @@ mod tests {
     fn with_helpers() -> Observation {
         Observation::Chat(Some(ChatObs {
             helpers: true,
+            background_jobs: 0,
+            finished_turn: true,
+            ..chat_obs()
+        }))
+    }
+
+    /// Its turn ended but `n` background jobs of its own are still running.
+    fn with_jobs(n: u32) -> Observation {
+        Observation::Chat(Some(ChatObs {
+            background_jobs: n,
             finished_turn: true,
             ..chat_obs()
         }))
@@ -522,6 +567,7 @@ mod tests {
             error: None,
             rolls_to: None,
             helpers: false,
+            background_jobs: 0,
             finished_turn: false,
             unreported: false,
         }
@@ -633,6 +679,32 @@ mod tests {
                 chat_id(),
                 vec![(2_000, with_helpers()), (4_000, ended(None))],
                 Some("finished"),
+            ),
+            // A turn that ended while background jobs run on has not finished: the wait stays
+            // open until they are done, and a chat already idle that way is not answered "idle".
+            (
+                "a turn ended with background jobs still running keeps waiting",
+                chat_id(),
+                vec![(2_000, chat(true)), (4_000, with_jobs(2))],
+                None,
+            ),
+            (
+                "already idle with background jobs does not answer",
+                chat_id(),
+                vec![(2_000, with_jobs(1))],
+                None,
+            ),
+            (
+                "the jobs end: the chat has finished",
+                chat_id(),
+                vec![(2_000, with_jobs(1)), (4_000, ended(None))],
+                Some("finished"),
+            ),
+            (
+                "still running jobs at the timeout",
+                chat_id(),
+                vec![(2_000, with_jobs(1)), (61_000, with_jobs(1))],
+                Some("timeout"),
             ),
             (
                 "already idle with a closed turn answers at once",
@@ -889,6 +961,29 @@ mod tests {
         );
         assert!(text.contains("chat s3"), "{text}");
         assert!(text.contains("from s1 to s3"), "{text}");
+    }
+
+    /// A timeout on a chat whose turn ended with background jobs still running says so, and
+    /// one that saw no jobs keeps the plain text.
+    #[test]
+    fn a_timeout_names_the_background_jobs_still_running() {
+        let mut w = wait(Target::ChatIdle {
+            chat_id: "other".into(),
+        });
+        assert_eq!(judge(&mut w, &with_jobs(2), 2_000), None);
+        let o = judge(&mut w, &with_jobs(2), 61_000).unwrap();
+        assert_eq!(o.code, "timeout");
+        assert!(
+            o.detail.contains("2 background jobs were still running"),
+            "{o:?}"
+        );
+        let mut w = wait(Target::ChatIdle {
+            chat_id: "other".into(),
+        });
+        assert_eq!(judge(&mut w, &with_jobs(1), 2_000), None);
+        assert_eq!(judge(&mut w, &chat(true), 3_000), None);
+        let o = judge(&mut w, &chat(true), 61_000).unwrap();
+        assert!(!o.detail.contains("background"), "{o:?}");
     }
 
     /// A turn that ended unfinished and unreported is flagged in the result, so the watcher

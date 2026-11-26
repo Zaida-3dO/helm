@@ -18,7 +18,7 @@ import { messageTimeLabel } from './rowMeta.ts';
 import { IconMonitor, IconPaperPlane } from '../ui/icons.tsx';
 import { ReplyActions, UserActions } from './MessageActions.tsx';
 import { rowFootersFor, type SlotContext } from './slots.ts';
-import { isEarlierSession } from './session.ts';
+import { canEditRow, slotContextFor } from './session.ts';
 import { Glyph } from './icons.tsx';
 import { SignInAgain } from './SignInAgain.tsx';
 import { isSignInError } from './signin.ts';
@@ -83,15 +83,7 @@ function toolAction(row: MessageRow, ctx: RowContext): ToolAction | undefined {
 }
 
 function slotContext(row: MessageRow, ctx: RowContext, hasRecap = false): SlotContext {
-  return {
-    chatId: ctx.chatId,
-    sessionId: row.chatId,
-    isLatestAssistant: row.id === ctx.latestAssistantId,
-    running: ctx.running,
-    interactionOpen: ctx.interactionOpen,
-    ...(hasRecap ? { hasRecap } : {}),
-    ...(ctx.remoteDevice ? { remote: true } : {}),
-  };
+  return slotContextFor(row, ctx, hasRecap);
 }
 
 /** Registered footers for one row (the reply's change card). */
@@ -311,7 +303,7 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
           <UserActions
             row={row}
             sctx={slotContext(row, ctx)}
-            onEdit={row.status === 'complete' && !ctx.running && !note && !page && ctx.onEdit && !isEarlierSession(row, ctx.chatId) ? () => ctx.onEdit?.(row) : undefined}
+            onEdit={canEditRow(row, ctx, { editor: !!ctx.onEdit, note: !!note, page: !!page }) ? () => ctx.onEdit?.(row) : undefined}
           />
         )}
         <Footers row={row} ctx={ctx} />

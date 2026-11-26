@@ -10,6 +10,7 @@
 //! | [`service`] | the service: keys, catalogue, test, the check and loading before a turn |
 //! | [`starter`] | starting a Strata install that is not running, when its settings allow it, and stopping it on an unload |
 //! | [`lock`] | the graphics-card lock: while it is on, nothing loads a local model |
+//! | [`hold`] | the graphics-card hold: a chat's note that the card is in use, which the composers warn about |
 //! | [`games`] | watching for a game from the user's list, which sets the lock while it runs |
 //! | [`task`] | ending and starting the user's restart task around an unload |
 //! | `ops` | the `local_*` ops for Settings > Local models and the top bar's unload control |
@@ -34,6 +35,7 @@ pub mod bindings;
 pub mod ext;
 pub mod games;
 pub mod gpu;
+pub mod hold;
 pub mod lock;
 pub mod names;
 pub mod net;

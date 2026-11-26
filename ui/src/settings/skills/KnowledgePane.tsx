@@ -11,7 +11,7 @@ import { parseNameList } from '../applied.ts';
 import { knowledgeOps, type KnowledgeLayer, type SourcesSnapshot } from './api.ts';
 import { errorText, type Notice } from './common.ts';
 import { LayerPicker, useKnowledgeLayer } from './LayerPicker.tsx';
-import { layerLabel, EVERYONE } from './layers.ts';
+import { layerLabel, layerNote } from './layers.ts';
 import { MemoriesSection } from './MemoriesSection.tsx';
 import { RulesSection, type RunAction } from './RulesSection.tsx';
 import { SkillsSection } from './SkillsSection.tsx';
@@ -22,7 +22,7 @@ export function KnowledgePane() {
   const shell = useShell();
   const ops = useMemo(() => knowledgeOps(shell.api), [shell.api]);
   const state = useKnowledgeLayer();
-  const { layer, options } = state;
+  const { layer, options, own } = state;
   const [data, setData] = useState<KnowledgeLayer | null>(null);
   const [sources, setSources] = useState<SourcesSnapshot | null>(null);
   const [projects, setProjects] = useState<ProjectChoice[]>([]);
@@ -117,8 +117,8 @@ export function KnowledgePane() {
   };
 
   const projectNames = useMemo(() => new Map(projects.map((p) => [p.id, p.name])), [projects]);
-  const shared = { ops, layer, options, busy, run, confirm: setConfirm };
-  const who = layerLabel(options, layer);
+  const note = layerNote(options, layer, own);
+  const shared = { ops, layer, options, busy, run, confirm: setConfirm, other: note.other ? layerLabel(options, layer) : null };
 
   return (
     <div className="skills-pane" data-testid="settings-knowledge">
@@ -128,8 +128,8 @@ export function KnowledgePane() {
       >
         <LayerPicker state={state} />
       </SettingRow>
-      <div className="setting-desc" data-testid="knowledge-layer-note">
-        {layer === EVERYONE ? 'Loaded into every chat on this Helm.' : `Loaded into ${who}'s chats only, on any device.`}
+      <div className="setting-desc" data-testid="knowledge-layer-note" data-other={note.other ? 'true' : undefined}>
+        {note.text}
       </div>
       {notice && (
         <div

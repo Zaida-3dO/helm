@@ -143,6 +143,14 @@ pub struct LockView {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub restart_task: Option<String>,
+    /// Why a chat says the card is in use, while it does: sending to a local-model chat would reload the model server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub hold_reason: Option<String>,
+    /// When that note ends by itself, in ms since the epoch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub hold_until: Option<i64>,
 }
 
 /// What `local_server_test` found.

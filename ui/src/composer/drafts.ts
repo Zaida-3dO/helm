@@ -64,6 +64,11 @@ export class DraftSaver {
     }
   }
 
+  /** The text typed but not yet saved, or null when everything typed is saved. */
+  unsaved(): string | null {
+    return this.dirty ? this.text : null;
+  }
+
   /** Start a send: returns a token to pass to `sent`. */
   beginSend(): number {
     return this.revision;
@@ -88,4 +93,26 @@ export class DraftSaver {
     if (this.timer !== null) this.timers.clear(this.timer);
     this.timer = null;
   }
+}
+
+/**
+ * A draft the host holds under a newer revision than the composer's own (Recover to draft,
+ * Withdraw, a roll over's hand-over). Returns the text the editor should now show, or null when
+ * the editor keeps what it has: the chat has rolled over and the reader typed in the last
+ * moments before the host moved the draft on. That text is saved again as newer than the host's
+ * revision, so it survives in the old chat for the window to carry to the successor as it
+ * follows. Nothing newer than the composer's revision: null as well.
+ */
+export function takeHostDraft(
+  saver: DraftSaver,
+  chat: { draft: string; draftRevision: number; nextSessionId: string | null },
+): string | null {
+  if (chat.draftRevision <= saver.revision) return null;
+  const typed = chat.nextSessionId ? saver.unsaved() : null;
+  saver.revision = chat.draftRevision;
+  if (typed !== null) {
+    saver.edit(typed);
+    return null;
+  }
+  return chat.draft;
 }

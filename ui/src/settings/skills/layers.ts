@@ -62,6 +62,21 @@ export function moveTargets(options: LayerOption[], from: string): LayerOption[]
   return options.filter((o) => o.key !== from);
 }
 
+/**
+ * The line under the picker: whose chats the list reaches, and, when it is another person's list,
+ * a plain warning that it is not the viewer's own and that edits land in their profile. `own` is
+ * the layer of the profile in use (null when there is none).
+ */
+export function layerNote(options: LayerOption[], layer: string, own: string | null): { text: string; other: boolean } {
+  if (layer === EVERYONE) return { text: 'Loaded into every chat on this Helm.', other: false };
+  const who = layerLabel(options, layer);
+  if (layer === own || own === null) return { text: `Loaded into ${who}'s chats only, on any device.`, other: false };
+  return {
+    text: `This is ${who}'s list, not yours. It is loaded into ${who}'s chats only, on any device, and what you change here changes their profile.`,
+    other: true,
+  };
+}
+
 export function layerLabel(options: LayerOption[], key: string): string {
   return options.find((o) => o.key === key)?.label ?? (key === EVERYONE ? 'Everyone' : 'a removed profile');
 }

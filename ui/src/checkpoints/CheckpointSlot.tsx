@@ -7,7 +7,7 @@ import { useShell } from '../shell/context.ts';
 import { registerMessageAction } from '../transcript/slots.ts';
 import { IconUndo } from '../ui/icons.tsx';
 import { CheckpointDialog } from './CheckpointDialog.tsx';
-import { canGoBackTo } from './model.ts';
+import { canGoBackTo, goBackTarget } from './model.ts';
 
 export const CHECKPOINT_ACTION_ID = 'go-back-to-here';
 
@@ -22,7 +22,7 @@ export function CheckpointSlot() {
         icon: IconUndo,
         order: 15,
         appliesTo: canGoBackTo,
-        run: (row, ctx) => setTarget({ chatId: ctx.sessionId, row }),
+        run: (row, ctx) => setTarget(goBackTarget(row, ctx)),
       }),
     [],
   );
