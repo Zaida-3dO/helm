@@ -75,6 +75,19 @@ test('the pane\'s flow against the dev host: opening asks no server, only Check 
   assert.deepEqual(saved.servers.map((s) => s.name), ['Strata', 'Spare']);
   const tuned = await ops.saveSettings({ ollamaContext: 32768, keepAliveMinutes: 30, strataNeedGb: 20, tools: 'full', compareWith: 'opus' });
   assert.deepEqual([tuned.ollamaContext, tuned.keepAliveMinutes, tuned.strataNeedGb, tuned.tools, tuned.compareWith], [32768, 30, 20, 'full', 'opus']);
+  // The per-model fit: sizes and suggestions save like names do, come back on the model rows,
+  // a self-suggestion or an out-of-range size is refused whole, and 0 / empty text clears again.
+  const fitted = await ops.saveSettings({
+    comfort: { 'local/strata/qwen3.8-coder-iq3_s': 16000 },
+    stepUp: { 'local/strata/qwen3.8-coder-iq3_s': 'local/strata/qwen3.8-flash-next-iq3_s' },
+  });
+  const coder = (st: typeof fitted) => st.modelNames.find((m) => m.id === 'local/strata/qwen3.8-coder-iq3_s');
+  assert.deepEqual([coder(fitted)?.comfortTokens, coder(fitted)?.stepUp], [16000, 'local/strata/qwen3.8-flash-next-iq3_s']);
+  await assert.rejects(ops.saveSettings({ comfort: { 'local/strata/qwen3.8-coder-iq3_s': 99 } }), /works well up to must be between/);
+  await assert.rejects(ops.saveSettings({ stepUp: { 'local/strata/qwen3.8-coder-iq3_s': 'gpt-4o' } }), /local model id/);
+  await assert.rejects(ops.saveSettings({ stepUp: { 'local/strata/qwen3.8-coder-iq3_s': 'local/strata/qwen3.8-coder-iq3_s' } }), /itself/);
+  const fitOff = await ops.saveSettings({ comfort: { 'local/strata/qwen3.8-coder-iq3_s': 0 }, stepUp: { 'local/strata/qwen3.8-coder-iq3_s': '' } });
+  assert.deepEqual([coder(fitOff)?.comfortTokens, coder(fitOff)?.stepUp], [undefined, undefined]);
   assert.equal((await ops.test('strata')).ok, true);
   assert.equal(events.every((e) => (e as { kind: string }).kind === 'local_models'), true);
 });

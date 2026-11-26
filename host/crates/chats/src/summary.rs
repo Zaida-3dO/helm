@@ -431,6 +431,8 @@ mod tests {
             server: id.split('/').nth(2).unwrap_or("?").to_owned(),
             kind,
             context_tokens: None,
+            comfort_tokens: None,
+            step_up: None,
             size_bytes,
             loaded,
             reachable,

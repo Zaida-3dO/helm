@@ -50,6 +50,14 @@ pub const MAX_ALIASES: usize = 64;
 pub const MAX_ALIAS: usize = 40;
 /// The longest a model id may be, as a key of the names.
 const MAX_MODEL_ID: usize = 300;
+/// How large a chat a model still works well with, as the user states it (tokens). A save cannot
+/// measure each model's own window here, so this is the outer bound — the same top the global
+/// roll-over size allows.
+pub const MIN_COMFORT: u64 = 1_000;
+pub const MAX_COMFORT: u64 = 2_000_000;
+/// Models that may carry a comfort size or a suggested step-up at all: the two maps each hold at
+/// most this many keys.
+pub const MAX_FIT: usize = 64;
 /// The longest a restart task name and a pause file path may be.
 pub const MAX_TASK: usize = 200;
 pub const MAX_PAUSE_FILE: usize = 500;
@@ -147,6 +155,16 @@ pub struct LocalSettings {
     /// The names the user gave models, by model id (`local/<server>/<model>`). A model with none
     /// goes by its default name (`names::default_alias`).
     pub aliases: BTreeMap<String, String>,
+    /// How large a chat each model still works well with, in tokens, by model id. Unset means 70%
+    /// of the model's window — today's rule for calling a local chat large. A value above the
+    /// model's real window only delays the banner; it never breaks anything.
+    #[serde(default)]
+    pub comfort: BTreeMap<String, u64>,
+    /// The other local model to suggest when a chat outgrows this one, by model id — set by hand,
+    /// never guessed from window sizes or display names. Unset means no suggestion: the banner
+    /// keeps Roll over only.
+    #[serde(default)]
+    pub step_up: BTreeMap<String, String>,
     /// Minutes after the last listed game closes before local models come back.
     pub game_lift_minutes: u32,
     /// A Windows scheduled task that restarts a model server: ended while local models are
@@ -358,6 +376,17 @@ fn alias_ok(a: &str) -> bool {
     plain_text(a, MAX_ALIAS)
 }
 
+/// A comfort size in its range. The window bound is kept at read and use (a value over the model's
+/// window only delays the banner); here it is the outer bound.
+fn comfort_ok(n: u64) -> bool {
+    (MIN_COMFORT..=MAX_COMFORT).contains(&n)
+}
+
+/// A step-up target: a local model id that is not the model asking for the suggestion.
+fn step_up_ok(id: &str, target: &str) -> bool {
+    alias_key_ok(target) && target != id
+}
+
 fn task_ok(t: &str) -> bool {
     plain_text(t, MAX_TASK) && !t.contains('"')
 }
@@ -476,6 +505,25 @@ pub fn read_lenient(v: &Value) -> LocalSettings {
             .map(|(k, v)| (k.to_owned(), v.to_owned()))
             .collect();
     }
+    if let Some(map) = o.get("comfort").and_then(Value::as_object) {
+        s.comfort = map
+            .iter()
+            .filter_map(|(k, v)| {
+                let n = v.as_u64()?;
+                (alias_key_ok(k) && comfort_ok(n)).then(|| (k.to_owned(), n))
+            })
+            .take(MAX_FIT)
+            .collect();
+    }
+    if let Some(map) = o.get("stepUp").and_then(Value::as_object) {
+        s.step_up = map
+            .iter()
+            .filter_map(|(k, v)| Some((k.as_str(), v.as_str()?.trim())))
+            .filter(|(k, v)| alias_key_ok(k) && step_up_ok(k, v))
+            .take(MAX_FIT)
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+    }
     if let Some(n) = o
         .get("gameLiftMinutes")
         .and_then(|v| int_in(v, MIN_GAME_LIFT, MAX_GAME_LIFT))
@@ -559,6 +607,12 @@ pub struct Changes {
     pub games: Option<Vec<String>>,
     /// Model id to name: sets those names and leaves the others. Empty text clears a name.
     pub aliases: Option<BTreeMap<String, String>>,
+    /// Model id to the chat size it works well up to, in tokens: sets those and leaves the
+    /// others. 0 clears one.
+    pub comfort: Option<BTreeMap<String, u64>>,
+    /// Model id to the other model suggested when a chat outgrows it: sets those and leaves the
+    /// others. Empty text clears one.
+    pub step_up: Option<BTreeMap<String, String>>,
     pub game_lift_minutes: Option<u32>,
     /// Empty text clears it.
     pub restart_task: Option<String>,
@@ -755,6 +809,56 @@ pub fn apply_changes(current: &LocalSettings, changes: &Changes) -> Result<Local
             ));
         }
     }
+    if let Some(map) = &changes.comfort {
+        for (id, n) in map {
+            if !alias_key_ok(id) {
+                return Err("That is not a local model.".to_owned());
+            }
+            if *n == 0 {
+                s.comfort.remove(id);
+                continue;
+            }
+            if !comfort_ok(*n) {
+                return Err(format!(
+                    "The size a model works well up to must be a whole number from {MIN_COMFORT} to {MAX_COMFORT} (0 clears it)."
+                ));
+            }
+            s.comfort.insert(id.clone(), *n);
+        }
+        if s.comfort.len() > MAX_FIT {
+            return Err(format!(
+                "At most {MAX_FIT} models can have a size they work well up to."
+            ));
+        }
+    }
+    if let Some(map) = &changes.step_up {
+        for (id, target) in map {
+            if !alias_key_ok(id) {
+                return Err("That is not a local model.".to_owned());
+            }
+            match target.trim() {
+                "" => {
+                    s.step_up.remove(id);
+                }
+                t if step_up_ok(id, t) => {
+                    s.step_up.insert(id.clone(), t.to_owned());
+                }
+                t if !alias_key_ok(t) => {
+                    return Err(format!(
+                        "A suggested model must be a local model id (local/<server>/<model>), not \"{t}\"."
+                    ));
+                }
+                _ => {
+                    return Err("A model cannot be suggested in place of itself.".to_owned());
+                }
+            }
+        }
+        if s.step_up.len() > MAX_FIT {
+            return Err(format!(
+                "At most {MAX_FIT} models can suggest a step-up model."
+            ));
+        }
+    }
     if let Some(n) = changes.game_lift_minutes {
         if !(MIN_GAME_LIFT..=MAX_GAME_LIFT).contains(&n) {
             return Err(range_err(
@@ -931,6 +1035,23 @@ mod tests {
             read_lenient(&json!({"servers": []})).servers.len(),
             0,
             "an empty list is the user's choice"
+        );
+
+        // Per-model fit: a bad key, an out-of-range size or a self-suggestion drops on its own;
+        // good ones trim in.
+        let fit = read_lenient(&json!({
+            "comfort": {"local/ollama/qwen": 20_000, "ollama/qwen": 30_000, "local/ollama/a": 999, "local/ollama/b": 50_000},
+            "stepUp": {"local/ollama/a": " local/ollama/big ", "local/ollama/b": "local/ollama/b", "local/ollama/c": "flash-next"}
+        }));
+        assert_eq!(
+            (
+                fit.comfort.get("local/ollama/qwen").copied(),
+                fit.comfort.len(),
+                fit.step_up.get("local/ollama/a").cloned(),
+                fit.step_up.len()
+            ),
+            (Some(20_000), 2, Some("local/ollama/big".to_owned()), 1),
+            "comfort sizes read, a self-suggestion and a foreign target drop"
         );
 
         // Strict saves: a new server gets an id from its name, and nothing is stored on a refusal.
@@ -1167,6 +1288,40 @@ mod tests {
                 },
                 "after a game closes",
             ),
+            (
+                Changes {
+                    comfort: Some(BTreeMap::from([("local/ollama/qwen".to_owned(), 999u64)])),
+                    ..Default::default()
+                },
+                "works well up to must be a whole number",
+            ),
+            (
+                Changes {
+                    comfort: Some(BTreeMap::from([("qwen".to_owned(), 20_000u64)])),
+                    ..Default::default()
+                },
+                "not a local model",
+            ),
+            (
+                Changes {
+                    step_up: Some(BTreeMap::from([(
+                        "local/ollama/qwen".to_owned(),
+                        "local/ollama/qwen".to_owned(),
+                    )])),
+                    ..Default::default()
+                },
+                "in place of itself",
+            ),
+            (
+                Changes {
+                    step_up: Some(BTreeMap::from([(
+                        "local/ollama/qwen".to_owned(),
+                        "flash-next".to_owned(),
+                    )])),
+                    ..Default::default()
+                },
+                "must be a local model id",
+            ),
         ] {
             let e = apply_changes(&cur, &changes).unwrap_err();
             assert!(e.contains(why), "{e}");
@@ -1215,6 +1370,46 @@ mod tests {
             ),
             (0, None, None)
         );
+        // A per-model fit saves like a name does: it sets those keys and leaves the others,
+        // 0 clears a size and empty text clears a suggestion.
+        let fitted = apply_changes(
+            &cur,
+            &Changes {
+                comfort: Some(BTreeMap::from([(
+                    "local/strata/qwen".to_owned(),
+                    16_000u64,
+                )])),
+                step_up: Some(BTreeMap::from([(
+                    "local/strata/qwen".to_owned(),
+                    "local/strata/big".to_owned(),
+                )])),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                fitted.comfort.get("local/strata/qwen").copied(),
+                fitted.step_up.get("local/strata/qwen").cloned()
+            ),
+            (Some(16_000), Some("local/strata/big".to_owned()))
+        );
+        let fit_off = apply_changes(
+            &fitted,
+            &Changes {
+                comfort: Some(BTreeMap::from([("local/strata/qwen".to_owned(), 0u64)])),
+                step_up: Some(BTreeMap::from([(
+                    "local/strata/qwen".to_owned(),
+                    " ".to_owned(),
+                )])),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            fitted.comfort.len() == 1 && fit_off.comfort.is_empty() && fit_off.step_up.is_empty(),
+            "0 and empty text clear"
+        );
         let mut bad = servers.clone();
         bad[2].base_url = "http://example.com:1".into();
         assert!(apply_changes(
@@ -1262,6 +1457,11 @@ mod tests {
             ..Default::default()
         };
         s.servers[1].enabled = false;
+        s.comfort.insert("local/ollama/qwen".to_owned(), 20_000);
+        s.step_up.insert(
+            "local/ollama/qwen".to_owned(),
+            "local/strata/big".to_owned(),
+        );
         db.write(|tx| store(tx, &s)).unwrap();
         assert_eq!(db.snapshot(load).unwrap(), s);
     }

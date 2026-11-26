@@ -68,12 +68,17 @@ export function contextTokens(rows: MessageRow[], chatId?: string): number | nul
 
 /** The host's context reading for a chat (the `chat_context` op): the context the chat's newest
  * recorded turn measured, and the model's real window. Null fields when nothing was measured or
- * no server has stated a window. */
+ * no server has stated a window. For a local chat it also carries what the user set beside that
+ * model: `comfortTokens` — how large a chat it works well up to (the setting, else 70% of the
+ * window) — and `suggestModel`, the other local model named for chats that outgrew it (null when
+ * nobody named one; never guessed). */
 export interface ChatContextReading {
   contextTokens: number | null;
   windowTokens: number | null;
   windowPct?: number | null;
   measuredAtMs?: number | null;
+  comfortTokens?: number | null;
+  suggestModel?: string | null;
 }
 
 /**
@@ -93,6 +98,42 @@ export function contextSize(
   const window = host?.windowTokens ?? null;
   const pct = window !== null ? Math.round((tokens / window) * 10000) / 100 : null;
   return { tokens, window, pct };
+}
+
+/** Below this share of the model's window the chat does not read as large. A local model slows and
+ * loses track of long contexts well before its window is full, so its line speaks up sooner. */
+const NEAR_WINDOW_PCT = 90;
+const NEAR_LOCAL_WINDOW_PCT = 70;
+
+/**
+ * What the context line makes of a measured size: say nothing ('small'), say "this chat is large"
+ * with a Roll over ('large'), or — for a local chat that has outgrown the size its model works
+ * well up to and whose Settings name another model in its place — 'tooBig', carrying that
+ * suggested id and the comfort size. A suggestion only ever comes from an explicit setting, so
+ * without one the reading stays 'large'. `rollOverAt` is the fallback when no window is known.
+ */
+export type ContextVerdict =
+  | { kind: 'small' }
+  | { kind: 'large' }
+  | { kind: 'tooBig'; comfort: number; suggest: string };
+
+export function contextVerdict(
+  size: { tokens: number; window: number | null; pct: number | null },
+  host: ChatContextReading | null,
+  isLocal: boolean,
+  rollOverAt: number,
+): ContextVerdict {
+  const comfort =
+    host?.comfortTokens ??
+    (isLocal && host?.windowTokens != null ? Math.floor((host.windowTokens * 7) / 10) : null);
+  if (isLocal && comfort !== null && host?.suggestModel && size.tokens >= comfort) {
+    return { kind: 'tooBig', comfort, suggest: host.suggestModel };
+  }
+  const large =
+    size.pct !== null
+      ? size.pct >= (isLocal ? NEAR_LOCAL_WINDOW_PCT : NEAR_WINDOW_PCT)
+      : size.tokens >= rollOverAt;
+  return large ? { kind: 'large' } : { kind: 'small' };
 }
 
 /** A compact count: 950, 1.2k, 12k, 3.4M. */

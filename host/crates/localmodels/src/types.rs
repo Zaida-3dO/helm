@@ -61,6 +61,16 @@ pub struct ModelNameView {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub alias: Option<String>,
+    /// The chat size the user says this model works well up to, in tokens; absent means unset,
+    /// and the app falls back to a share of the model's window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub comfort_tokens: Option<u64>,
+    /// The other local model suggested when a chat outgrows this one, as its id; absent means no
+    /// suggestion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub step_up: Option<String>,
 }
 
 /// The allowed range of a number setting.
@@ -99,6 +109,9 @@ pub struct LocalModelsState {
     pub model_names: Vec<ModelNameView>,
     /// The longest a model's name may be, in characters.
     pub alias_max: u32,
+    /// The range of a model's "works well up to" size (tokens): clearing one falls back to 70%
+    /// of its window.
+    pub comfort_range: Range,
     /// The scheduled task that restarts a model server, paused while local models are unloaded.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]

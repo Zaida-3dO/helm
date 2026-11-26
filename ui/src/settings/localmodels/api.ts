@@ -14,6 +14,10 @@ export interface SettingsPatch {
   games?: string[];
   /** Model id to the name the user gives it; an empty string clears that model's name. */
   aliases?: Record<string, string>;
+  /** Model id to the chat size it works well up to, in tokens; 0 clears one and falls back to 70% of its window. */
+  comfort?: Record<string, number>;
+  /** Model id to another local model id suggested when a chat outgrows it; an empty string clears one. */
+  stepUp?: Record<string, string>;
   gameLiftMinutes?: number;
   /** An empty string clears the task or the file. */
   restartTask?: string;
