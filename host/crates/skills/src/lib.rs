@@ -27,6 +27,7 @@ pub mod rules;
 pub mod sources;
 pub mod sync;
 pub mod tools;
+pub mod triggers;
 pub mod undo;
 pub use ops::register_ops;
 pub use tools::register_host_tools;
