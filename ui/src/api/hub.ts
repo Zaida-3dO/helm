@@ -142,6 +142,10 @@ export interface SpeakerSettings {
   takeSpeaker: boolean;
   /** How long a talk that just ended may be named to the next one; 0 never names it. */
   previousHours: number;
+  /** Lean speaker chats: a thin system prompt and only the Home Assistant server and the phone-message tool. */
+  lean: boolean;
+  /** The board a new speaker chat is shown on; blank: the app's own choice. */
+  boardId: string;
 }
 
 /** One channel's prompt for one profile, as the host holds it. */
@@ -221,6 +225,8 @@ export function hubOps(api: Api) {
         effort: s.effort,
         takeSpeaker: s.takeSpeaker,
         previousHours: s.previousHours,
+        lean: s.lean,
+        boardId: s.boardId,
         ...scope(s),
       }),
     /** End every talk this PC holds: each of its chats is put away, and the next word on a speaker starts a new one. */

@@ -667,6 +667,123 @@ pub fn host_send_afk_note(rt: &ChatRuntime, s: HostSend<'_>) -> Result<HostSent,
     host_send_inner(rt, s, &[], &[], true)
 }
 
+/// An exchange that already happened elsewhere, written into a chat as a plain transcript: the
+/// words that were said, the words that were said back and, if any, one line on what was done
+/// between them. Nothing is sent to Claude and no turn starts.
+pub struct Exchange<'a> {
+    pub chat_id: &'a str,
+    /// Names the exchange: the same id again writes nothing. A UUID, like any submission id.
+    pub submission_id: &'a str,
+    pub text: &'a str,
+    pub origin: SubmissionOrigin,
+    /// A note shown between the two messages, when something was done in between.
+    pub notice: Option<&'a str>,
+    /// What was said back; blank writes no reply.
+    pub reply: &'a str,
+    /// When it began; the rows follow it by a millisecond each.
+    pub at: i64,
+}
+
+/// Write an [`Exchange`] into a chat without running a model. Idempotent per `submission_id`:
+/// `Ok(true)` when the rows were written now, `Ok(false)` when they already were. The chat
+/// must exist and not be archived.
+pub fn append_exchange(rt: &ChatRuntime, x: Exchange<'_>) -> Result<bool, ApiError> {
+    if x.text.trim().is_empty() {
+        return Err(ApiError::bad_args("The message is empty."));
+    }
+    if x.text.len() > store::MAX_SUBMISSION_BYTES {
+        return Err(ApiError::new("too_large", "The message is too large."));
+    }
+    let now = helm_core::now_ms();
+    let artifacts = rt.sh.cfg.artifacts();
+    let row = |key: String, role: &'static str, text: &str, at: i64, details: serde_json::Value| {
+        RowWrite {
+            source_key: key,
+            role,
+            text: text.to_owned(),
+            thinking: String::new(),
+            tool_name: None,
+            tool_call_id: None,
+            status: "complete",
+            timestamp: at,
+            details,
+            entry_id: None,
+            parent_id: None,
+        }
+    };
+    let written = rt
+        .db()
+        .write(|tx| {
+            let Some((_, archived)) = chat_status(tx, x.chat_id)? else {
+                return Ok(Err(crate::ops::not_found()));
+            };
+            if archived {
+                return Ok(Err(ApiError::new("refused", "That chat is archived.")));
+            }
+            if store::get_submission(tx, x.submission_id)?.is_some() {
+                return Ok(Ok(false));
+            }
+            insert_submission(
+                tx,
+                &NewSubmission {
+                    id: x.submission_id,
+                    chat_id: x.chat_id,
+                    text: x.text,
+                    mode: SubmissionMode::Prompt,
+                    state: SubmissionState::Complete,
+                    origin: x.origin,
+                    priority: None,
+                    kind: None,
+                    now,
+                },
+            )?;
+            let mut rows = vec![row(
+                format!("u:{}", x.submission_id),
+                "user",
+                x.text,
+                x.at,
+                json!({"submissionId": x.submission_id, "mode": SubmissionMode::Prompt, "origin": x.origin}),
+            )];
+            if let Some(n) = x.notice.map(str::trim).filter(|n| !n.is_empty()) {
+                rows.push(row(
+                    format!("c:exchange:{}", x.submission_id),
+                    "context",
+                    n,
+                    x.at + 1,
+                    json!({"contextKind": ContextKind::Notice}),
+                ));
+            }
+            if !x.reply.trim().is_empty() {
+                rows.push(row(
+                    format!("a:exchange:{}", x.submission_id),
+                    "assistant",
+                    x.reply,
+                    x.at + 2,
+                    json!({"stopReason": "end_turn"}),
+                ));
+            }
+            for r in &rows {
+                session_log::upsert_row(tx, &artifacts, x.chat_id, r, rt.clock().next())?;
+            }
+            tx.execute(
+                "UPDATE chats SET updated_at = ?1 WHERE id = ?2",
+                params![now, x.chat_id],
+            )?;
+            Ok(Ok(true))
+        })
+        .map_err(sql)??;
+    if written {
+        rt.sh.events.emit(
+            ChatEvent::Refresh {
+                chat_id: x.chat_id.to_owned(),
+            }
+            .to_app_event(),
+        );
+        emit_chat(rt, x.chat_id);
+    }
+    Ok(written)
+}
+
 fn host_send_inner(
     rt: &ChatRuntime,
     s: HostSend<'_>,

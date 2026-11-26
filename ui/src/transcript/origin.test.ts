@@ -51,6 +51,7 @@ test('a room speaker message shows without its channel line and the pointer to t
   const cases: [MessageRow, string][] = [
     [row(`${where}what time is it`, 'speaker'), 'what time is it'],
     [row(`${where}[Previous conversation ended: HA speaker kitchen voice 2027-01-15 — It is 7:20.]\ngo on`, 'speaker'), 'go on'],
+    [row(`${where}[Said on the speaker just before: Lamp on. Done.]\nand the bedroom`, 'speaker'), 'and the bedroom'],
     [row('[Speaker · the house · speak it, short, no markup]\nhi', 'typed'), '[Speaker · the house · speak it, short, no markup]\nhi'],
     [row('a plain speaker message', 'speaker'), 'a plain speaker message'],
   ];

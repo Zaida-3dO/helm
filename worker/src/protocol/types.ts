@@ -29,6 +29,10 @@ export interface ClaudeLaunch {
   apiKeyMode?: boolean;
   resumeSessionId?: string;
   appendSystemPrompt?: string;
+  /** Replaces Claude Code's own system prompt (`--system-prompt`); a lean chat's whole prompt. */
+  systemPrompt?: string;
+  /** A lean chat: Claude Code's built-in tools are all off (`--tools ""`) and nothing is appended to its prompt. */
+  lean?: boolean;
   settings?: Json;
   /** Claude Code's fast mode, sent on every launch as `--settings {"fastMode":…}`. Only this field
    * sets it: a `fastMode` inside `settings` is dropped. Anything but `true` is off. */

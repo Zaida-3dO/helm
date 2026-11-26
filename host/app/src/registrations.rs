@@ -583,6 +583,13 @@ pub fn launch_contributors(
         db: db.clone(),
     }));
     c.add(Arc::new(a));
+    // A speaker chat the settings make lean gets a prompt and a tool list of its own.
+    if let Some(profile_dir) = db.path().parent() {
+        c.add(Arc::new(helm_relay::lean::LeanSpeaker::new(
+            db.clone(),
+            profile_dir.to_path_buf(),
+        )));
+    }
     // The workflow's dispatch and edit gates: a launch variable, only for chats they may act in.
     c.add(Arc::new(helm_workflow::GateLaunch { db: db.clone() }));
     // The git stand-in goes on a chat's PATH only while some repository has worktrees off.

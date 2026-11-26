@@ -289,6 +289,18 @@ pub fn promote_for_orchestrator(tools: &mut Value) {
     }
 }
 
+/// Cut a launch's catalogue (`hostTools[]` as JSON) to the tools named, for a chat that runs lean.
+/// Every other tool is left out: it is neither listed nor callable by that chat.
+pub fn keep_only(tools: &mut Value, names: &[String]) {
+    if let Some(list) = tools.as_array_mut() {
+        list.retain(|t| {
+            t.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|n| names.iter().any(|k| k == n))
+        });
+    }
+}
+
 /// The per-launch switches that decide which conditional tools are listed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LaunchKeys {
@@ -390,3 +402,25 @@ pub trait McpChatProblems: Send + Sync {
 /// The service wrapper for [`McpChatProblems`]. With none registered, chats get no report.
 #[derive(Clone)]
 pub struct McpChatProblemsGate(pub std::sync::Arc<dyn McpChatProblems>);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_lean_launch_keeps_only_the_tools_named() {
+        let all =
+            json!([{"name": "app_telegram_send"}, {"name": "app_schedule"}, {"name": "app_help"}]);
+        let mut tools = all.clone();
+        keep_only(&mut tools, &["app_telegram_send".to_owned()]);
+        assert_eq!(tools, json!([{"name": "app_telegram_send"}]));
+        // None named, none kept; and a catalogue that is not a list is left alone.
+        let mut none = all.clone();
+        keep_only(&mut none, &[]);
+        assert_eq!(none, json!([]));
+        let mut odd = json!({"name": "app_help"});
+        keep_only(&mut odd, &["app_help".to_owned()]);
+        assert_eq!(odd, json!({"name": "app_help"}));
+    }
+}

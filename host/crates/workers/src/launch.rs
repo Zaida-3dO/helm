@@ -25,6 +25,13 @@ pub struct ClaudeLaunch {
     /// Launch contributors' system-prompt fragments ([`crate::contrib`]); absent when none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub append_system_prompt: Option<String>,
+    /// The chat's whole system prompt, in place of Claude Code's own (a lean chat); absent for
+    /// every other chat.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    /// A lean chat: Claude Code's built-in tools are off and nothing is appended to its prompt.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub lean: bool,
     /// Claude Code's fast mode from `claude-runtime.json`; always sent (`--settings`).
     pub fast_mode: bool,
     /// Resume `resumeSessionId` as a new session (`--fork-session`); absent unless set.
@@ -315,6 +322,8 @@ pub fn claude_launch(
         skip_permissions: runtime.skip_permissions,
         resume_session_id,
         append_system_prompt: None,
+        system_prompt: None,
+        lean: false,
         fast_mode: runtime.fast_mode,
         fork_session: false,
         strict_mcp_config: false,
@@ -521,6 +530,16 @@ mod tests {
         assert!(
             !v.to_string().contains("appendSystemPrompt"),
             "absent unless a contributor adds a fragment"
+        );
+        // A lean chat's own prompt and its switch ride the launch only when it runs lean.
+        assert!(v.get("systemPrompt").is_none() && v.get("lean").is_none());
+        let mut lean = claude_launch(&off, None, None, None, None);
+        lean.system_prompt = Some("Persona.".into());
+        lean.lean = true;
+        let v = serde_json::to_value(lean).unwrap();
+        assert_eq!(
+            (v["systemPrompt"].as_str(), v["lean"].as_bool()),
+            (Some("Persona."), Some(true))
         );
         // A chat on a local model server: where it is and how far it may think, and no key.
         assert!(v.get("local").is_none(), "absent for a Claude chat");

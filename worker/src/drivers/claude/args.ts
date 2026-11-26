@@ -116,6 +116,9 @@ export function buildClaudeArgs(c: ClaudeLaunch, opts: ArgOptions = {}): string[
   // Native MCP stays on by default; Helm's server is added beside the user's own.
   if (opts.mcpConfig) args.push("--mcp-config", opts.mcpConfig, "--allowedTools", HELM_ALLOWED);
   if (c.strictMcpConfig === true) args.push("--strict-mcp-config");
+  // A lean chat has the model's tools only through Helm's server, and a prompt that is its own.
+  if (c.lean === true) args.push("--tools", "");
+  if (c.systemPrompt) args.push("--system-prompt", c.systemPrompt);
   if (c.model) args.push("--model", c.model);
   const effort = isEffort(c.effort) ? c.effort : DEFAULT_EFFORT;
   if (modelTakesEffort(c.model, c.local !== undefined)) args.push("--effort", effort);
@@ -126,7 +129,9 @@ export function buildClaudeArgs(c: ClaudeLaunch, opts: ArgOptions = {}): string[
   for (const dir of c.pluginDirs ?? []) args.push("--plugin-dir", dir);
   // Helm-managed agent definitions, by plain name: one file of them.
   if (c.agentsFile) args.push("--agents", opts.agentsArg ?? c.agentsFile);
-  if (opts.appendFile) args.push("--append-system-prompt-file", opts.appendFile);
+  if (c.lean === true) {
+    // Nothing is appended to a lean chat's prompt: it is the persona and the channel prompt alone.
+  } else if (opts.appendFile) args.push("--append-system-prompt-file", opts.appendFile);
   else {
     const append = appendText(c, opts.promptRule);
     if (append) args.push("--append-system-prompt", append);

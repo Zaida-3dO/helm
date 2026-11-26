@@ -911,6 +911,7 @@ pub fn place(c: &Ctx, turn: &VoiceTurn, notes: &[String], now: i64) -> Result<Pl
         new_chat_effort: effort.map(str::to_owned),
         ignored: std::sync::Mutex::new(None),
         profile_id: Some(c.profile_id.clone()),
+        board_id: None,
     };
     let who = profile_name(&c.db, &c.profile_id);
     let (tag, _created) = voice::active_chat(&c.tag_path, &port, &c.policy, who.as_deref(), now)?;

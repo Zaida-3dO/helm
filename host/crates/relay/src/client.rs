@@ -229,12 +229,55 @@ pub struct SpeakerTurn {
     /// The hub person this turn is for, verified by the hub. `None`: an older hub, which means
     /// the PC's own (home) person.
     pub person: Option<String>,
+    /// What the speaker said just before this turn (its last local exchanges), so a follow-up
+    /// such as "and the bedroom" makes sense. Only a turn the speaker handed over carries it.
+    pub context: Option<String>,
+    /// The speaker tried to answer this turn itself and handed it over.
+    pub escalated: bool,
+}
+
+/// One tool the speaker used while it answered by itself.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecordedTool {
+    pub name: String,
+    pub summary: String,
+    pub ok: bool,
+}
+
+/// An exchange the speaker answered by itself, which Helm only keeps (a `speaker_record` frame).
+/// It is stored as a plain transcript in the talk's chat; no model runs for it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpeakerRecord {
+    /// The speaker's id for the exchange; the hub keeps it until this PC acknowledges it.
+    pub id: String,
+    pub device: Option<String>,
+    pub room: Option<String>,
+    pub area: Option<String>,
+    /// The hub's id for the talk this exchange is part of.
+    pub session: String,
+    /// When the exchange began (epoch milliseconds, the speaker's clock).
+    pub started_at: i64,
+    /// What was asked and what was said back.
+    pub text: String,
+    pub answer: String,
+    /// `answer`, `escalated` or `error`.
+    pub kind: String,
+    pub tools: Vec<RecordedTool>,
+    /// Short notes of anything the speaker left open.
+    pub leftover: Vec<String>,
+    pub model: Option<String>,
+    pub person: Option<String>,
 }
 
 /// Where the house's room speaker sends its turns.
 pub trait SpeakerSink: Send + Sync {
     /// `Ok` once the turn is safely in Helm (it is then acknowledged to the hub).
     fn deliver<'a>(&'a self, turn: SpeakerTurn) -> BoxFut<'a, Result<(), String>>;
+    /// `Ok` once the record is safely in Helm (it is then acknowledged to the hub). A sink that
+    /// keeps no records refuses, so the hub never believes one was kept.
+    fn record<'a>(&'a self, _rec: SpeakerRecord) -> BoxFut<'a, Result<(), String>> {
+        Box::pin(async { Err("this sink keeps no speaker records".to_owned()) })
+    }
     /// The hub says one talk on a speaker has ended: the chat it worked in is closed, and the
     /// next talk starts a new one.
     fn talk_closed<'a>(&'a self, _person: Option<String>, _session: String) -> BoxFut<'a, ()> {
@@ -824,6 +867,8 @@ impl Client {
             session,
             sent_at: v.get("sentAt").and_then(Value::as_i64).unwrap_or(0),
             person,
+            context: small("context"),
+            escalated: small("origin").as_deref() == Some("escalation"),
         };
         tokio::spawn(async move {
             let r = speaker.deliver(turn).await;
@@ -841,6 +886,109 @@ impl Client {
                 }
                 // Not acknowledged: the hub keeps it and sends it again.
                 Err(e) => log::warn!("relay: a speaker turn was not delivered: {e}"),
+            }
+        });
+    }
+
+    /// A record of an exchange the speaker answered by itself: check it is this PC's business,
+    /// take it once, and acknowledge it only once the sink has stored it. The hub sends an
+    /// unacknowledged record again, so the same id must not be stored twice.
+    fn take_speaker_record(&self, v: &Value, out: mpsc::UnboundedSender<Value>) {
+        let Some(speaker) = self.speaker.get().cloned() else {
+            return;
+        };
+        let small = |k: &str| {
+            v.get(k)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        };
+        let (Some(id), Some(session), Some(text)) = (small("id"), small("session"), small("text"))
+        else {
+            log::info!("relay: a speaker record arrived without an id, a talk or words");
+            return;
+        };
+        let Ok(person) = self.frame_person(v) else {
+            log::info!("relay: a speaker record named a person this PC does not act for");
+            return;
+        };
+        let r_person = person.clone().unwrap_or_default();
+        let key = format!("speaker-record/{r_person}/{id}");
+        let delivering = self.delivering.clone();
+        if !delivering
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(key.clone())
+        {
+            return;
+        }
+        let tools = v
+            .get("toolCalls")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(|c| {
+                        Some(RecordedTool {
+                            name: c.get("name")?.as_str()?.to_owned(),
+                            summary: c
+                                .get("summary")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned(),
+                            ok: c.get("ok").and_then(Value::as_bool).unwrap_or(true),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let leftover = v
+            .get("leftover")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let rec = SpeakerRecord {
+            id: id.clone(),
+            device: small("device"),
+            room: small("room"),
+            area: small("area"),
+            session,
+            started_at: v.get("startedAt").and_then(Value::as_i64).unwrap_or(0),
+            text,
+            answer: v
+                .get("answer")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            kind: small("kind").unwrap_or_else(|| "answer".to_owned()),
+            tools,
+            leftover,
+            model: small("model"),
+            person,
+        };
+        tokio::spawn(async move {
+            let r = speaker.record(rec).await;
+            delivering
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&key);
+            match r {
+                Ok(()) => {
+                    let _ = out.send(named(
+                        "voice_ack",
+                        &r_person,
+                        json!({ "id": id, "lane": "speaker" }),
+                    ));
+                }
+                // Not acknowledged: the hub keeps it and sends it again for a while.
+                Err(e) => log::warn!("relay: a speaker record was not kept: {e}"),
             }
         });
     }
@@ -1363,6 +1511,7 @@ impl Client {
                     }
                 });
             }
+            Some("speaker_record") => self.take_speaker_record(&v, out.clone()),
             Some("speaker_session_closed") => {
                 let (Some(session), Some(speaker)) = (s("sessionId"), self.speaker.get().cloned())
                 else {
@@ -1534,6 +1683,30 @@ mod tests {
         fn service_up<'a>(&'a self, back: ServiceRecovered) -> BoxFut<'a, ()> {
             self.up.lock().unwrap().push(back);
             Box::pin(async {})
+        }
+    }
+
+    #[derive(Default)]
+    struct Speaker {
+        turns: Mutex<Vec<SpeakerTurn>>,
+        records: Mutex<Vec<SpeakerRecord>>,
+        refuse: std::sync::atomic::AtomicBool,
+    }
+    impl SpeakerSink for Speaker {
+        fn deliver<'a>(&'a self, turn: SpeakerTurn) -> BoxFut<'a, Result<(), String>> {
+            self.turns.lock().unwrap().push(turn);
+            Box::pin(async { Ok(()) })
+        }
+        fn record<'a>(&'a self, rec: SpeakerRecord) -> BoxFut<'a, Result<(), String>> {
+            self.records.lock().unwrap().push(rec);
+            let refuse = self.refuse.load(Ordering::SeqCst);
+            Box::pin(async move {
+                if refuse {
+                    Err("no".to_owned())
+                } else {
+                    Ok(())
+                }
+            })
         }
     }
 
@@ -2137,6 +2310,113 @@ mod tests {
         // The next frame up is the marker, not an ack.
         assert_eq!(next(&mut ws).await["type"], "telegram_final");
         assert_eq!(sink.got.lock().unwrap().len(), 1);
+        task.abort();
+    }
+
+    /// A speaker turn carries what was said before it and whether it was handed over; a speaker
+    /// record reaches the sink whole and is acknowledged once stored (on the speaker lane), never
+    /// when the sink refuses it, and never twice at once.
+    #[tokio::test]
+    async fn speaker_turns_and_records_reach_their_sink_and_are_acknowledged_once_stored() {
+        let (url, hub) = fake_hub().await;
+        let speaker = Arc::new(Speaker::default());
+        let c = client(
+            (&url, ""),
+            Arc::new(Exec::default()),
+            Arc::new(Sink::default()),
+        );
+        c.attach_speaker(speaker.clone());
+        let task = tokio::spawn(c.clone().run());
+        let (_, mut ws) = hub.await.unwrap();
+        assert_eq!(next(&mut ws).await["type"], "sharing");
+        let send = |v: Value| Message::Text(v.to_string().into());
+
+        ws.send(send(json!({
+            "type": "voice", "lane": "speaker", "id": "t1", "text": "and the bedroom",
+            "session": "s-1", "room": "kitchen", "context": "Lamp on. Done.",
+            "origin": "escalation", "sentAt": 5
+        })))
+        .await
+        .unwrap();
+        assert_eq!(
+            next(&mut ws).await,
+            json!({"type": "voice_ack", "id": "t1", "lane": "speaker"})
+        );
+        // A plain turn has neither.
+        ws.send(send(json!({
+            "type": "voice", "lane": "speaker", "id": "t2", "text": "hello", "session": "s-1"
+        })))
+        .await
+        .unwrap();
+        assert_eq!(next(&mut ws).await["id"], "t2");
+        {
+            let turns = speaker.turns.lock().unwrap();
+            assert_eq!(
+                (turns[0].context.as_deref(), turns[0].escalated),
+                (Some("Lamp on. Done."), true)
+            );
+            assert_eq!(
+                (turns[1].context.as_deref(), turns[1].escalated),
+                (None, false)
+            );
+        }
+
+        let record = json!({
+            "type": "speaker_record", "lane": "speaker", "id": "r1", "session": "s-1",
+            "device": "desk", "room": "kitchen", "startedAt": 7, "text": "Lamp on.",
+            "answer": "Done.", "kind": "escalated",
+            "toolCalls": [{"name": "light_on", "summary": "lamp", "ok": false}, {"summary": "no name"}],
+            "leftover": ["buy a bulb", "  "], "model": "small"
+        });
+        // Refused: nothing is acknowledged, so the hub keeps it; taken on the next try.
+        speaker.refuse.store(true, Ordering::SeqCst);
+        ws.send(send(record.clone())).await.unwrap();
+        for _ in 0..200 {
+            if !speaker.records.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        speaker.refuse.store(false, Ordering::SeqCst);
+        ws.send(send(record)).await.unwrap();
+        assert_eq!(
+            next(&mut ws).await,
+            json!({"type": "voice_ack", "id": "r1", "lane": "speaker"})
+        );
+        let got = speaker.records.lock().unwrap()[1].clone();
+        assert_eq!(
+            got,
+            SpeakerRecord {
+                id: "r1".into(),
+                device: Some("desk".into()),
+                room: Some("kitchen".into()),
+                area: None,
+                session: "s-1".into(),
+                started_at: 7,
+                text: "Lamp on.".into(),
+                answer: "Done.".into(),
+                kind: "escalated".into(),
+                tools: vec![RecordedTool {
+                    name: "light_on".into(),
+                    summary: "lamp".into(),
+                    ok: false
+                }],
+                leftover: vec!["buy a bulb".into()],
+                model: Some("small".into()),
+                person: None,
+            }
+        );
+        // A record with no talk or no words is not for a chat: dropped, never acknowledged.
+        for bad in [
+            json!({"type": "speaker_record", "lane": "speaker", "id": "r2", "text": "x"}),
+            json!({"type": "speaker_record", "lane": "speaker", "id": "r3", "session": "s-1"}),
+        ] {
+            ws.send(send(bad)).await.unwrap();
+        }
+        c.handle().telegram_final("", "marker");
+        assert_eq!(next(&mut ws).await["type"], "telegram_final");
+        assert_eq!(speaker.records.lock().unwrap().len(), 2);
         task.abort();
     }
 

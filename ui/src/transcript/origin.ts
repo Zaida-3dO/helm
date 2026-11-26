@@ -18,9 +18,11 @@ const VOICE_NOTE = /^(\[Voice chat: you are[\s\S]*?If not, answer exactly \[quie
 
 /**
  * The notes the host puts in front of a room speaker's message: the line naming the speaker and
- * its room, and a pointer to the talk that ended just before this one.
+ * its room, a pointer to the talk that ended just before this one, and what the speaker said just
+ * before a turn it handed over.
  */
-const SPEAKER_NOTE = /^\[Speaker · [^\]\n]*\]\n(\[Previous conversation ended:[^\]\n]*\]\n)?/;
+const SPEAKER_NOTE =
+  /^\[Speaker · [^\]\n]*\]\n(\[Previous conversation ended:[^\]\n]*\]\n)?(\[Said on the speaker just before:[^\]\n]*\]\n)?/;
 
 /**
  * A note Helm itself put in the chat for the agent, not something the user wrote or an agent sent:

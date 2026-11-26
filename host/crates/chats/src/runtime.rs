@@ -469,6 +469,10 @@ impl Spawner for ProcessSpawner {
                 if extras.orchestrator_on {
                     helm_hosttools::spec::promote_for_orchestrator(&mut tools);
                 }
+                // A lean chat keeps only the host tools named for it.
+                if let Some(l) = &extras.lean {
+                    helm_hosttools::spec::keep_only(&mut tools, &l.host_tools);
+                }
                 (Some(tools), Some(dir.to_string_lossy().into_owned()))
             }
             None => (None, None),
@@ -482,6 +486,18 @@ impl Spawner for ProcessSpawner {
             .is_some_and(|s| s.lean)
         {
             claude.strict_mcp_config = true;
+        }
+        // A lean chat has a prompt of its own and none of the knowledge layers or Claude Code's
+        // own settings files: nothing else reaches its system prompt. Claude Code's own MCP
+        // servers stay off (Helm's own server is not among them).
+        if let Some(l) = &extras.lean {
+            claude.system_prompt = Some(l.system_prompt.clone());
+            claude.append_system_prompt = None;
+            claude.lean = true;
+            claude.strict_mcp_config = true;
+            claude.plugin_dirs.clear();
+            claude.agents_file = None;
+            claude.setting_sources = Some(vec!["local".to_owned()]);
         }
         let launch = Launch {
             chat_id: req.chat_id.clone(),
