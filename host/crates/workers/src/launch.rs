@@ -86,6 +86,10 @@ pub struct ClaudeLaunch {
     /// skills and settings stay out of it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub setting_sources: Option<Vec<String>>,
+    /// A Claude Code hook matcher (a regex) for the tool calls a rule trigger cares about; the
+    /// worker registers its rule-note hook only when this is set. Absent when no rule needs one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_matcher: Option<String>,
 }
 
 /// Where a local chat's model lives and how far it may think. `baseUrl` is a loopback address;
@@ -340,6 +344,7 @@ pub fn claude_launch(
         plugin_dirs: Vec::new(),
         agents_file: None,
         setting_sources: None,
+        rule_matcher: None,
     };
     if let Some(t) = test {
         c.command = Some(t.command.clone());
