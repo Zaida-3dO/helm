@@ -71,11 +71,14 @@ impl Probes for Fake {
     }
 }
 
+/// What a [`Sink`] was handed: the chat, submission id, text and the optional watched chat.
+pub type Sent = Vec<(String, String, String, Option<(String, String)>)>;
+
 #[derive(Default)]
 pub struct Sink {
     /// Each delivered message: the chat, the submission id, the text, and (for a chat wait)
     /// the watched chat's id and title that rides with it.
-    pub sent: Mutex<Vec<(String, String, String, Option<(String, String)>)>>,
+    pub sent: Mutex<Sent>,
     pub fail_first: AtomicUsize,
 }
 

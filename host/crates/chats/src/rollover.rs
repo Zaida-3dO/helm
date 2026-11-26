@@ -1650,7 +1650,7 @@ mod tests {
         let same = db
             .write(|tx| crate::submit::clear_carried_draft(tx, &old, "half a thought\n", 20))
             .unwrap();
-        assert_eq!(same, [new.clone()]);
+        assert_eq!(same, [new.as_str()]);
         let emptied = composer(&new);
         assert_eq!(emptied.0, "");
         assert!(emptied.1 > carried.1);

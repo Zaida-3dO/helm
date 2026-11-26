@@ -763,7 +763,7 @@ mod tests {
         .unwrap();
         let path = made["rule"]["path"].as_str().unwrap().to_owned();
         assert_eq!(path, "rules/quiet-hours.md");
-        assert_eq!(titles(sam), [path.clone()]);
+        assert_eq!(titles(sam), [path.as_str()]);
         assert!(titles(alex).is_empty(), "Alex's own list is untouched");
         let read = knowledge_rule_read(&ctx, json!({"layer": sam, "path": path})).unwrap();
         assert_eq!(read["text"], "No loud tools after ten.");
@@ -789,8 +789,8 @@ mod tests {
             )
         };
         assert_eq!(copy(sam, alex).unwrap()["copied"], path);
-        assert_eq!(titles(sam), [path.clone()]);
-        assert_eq!(titles(alex), [path.clone()]);
+        assert_eq!(titles(sam), [path.as_str()]);
+        assert_eq!(titles(alex), [path.as_str()]);
         assert_eq!(
             knowledge_rule_read(&ctx, json!({"layer": alex, "path": path})).unwrap()["text"],
             "Nothing loud."
@@ -802,7 +802,7 @@ mod tests {
         )
         .unwrap();
         assert!(titles(sam).is_empty());
-        assert_eq!(titles("everyone"), [path.clone()]);
+        assert_eq!(titles("everyone"), [path.as_str()]);
 
         // Delete from the other person's list.
         let left =
