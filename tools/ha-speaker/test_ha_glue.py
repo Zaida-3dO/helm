@@ -1,7 +1,7 @@
 """Glue tests that need no Home Assistant: profile build, switch and
 secrecy. The HA-side acceptance (entry sets up hub-less; a processed turn
-calls the right light service) runs in the scratch HA harness - see H3's
-report - because those names only exist with HA loaded.
+calls the right light service) runs in a scratch Home Assistant install,
+because those names only exist with HA loaded.
 
 Run with either plain python or the scratch venv: profiles.py imports only
 agent_core and const.

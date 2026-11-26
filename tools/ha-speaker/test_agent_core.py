@@ -30,7 +30,7 @@ FIX_CTX = {
 
 def fixture_schemas():
     """A trimmed stand-in for homecontrol.schemas(); enough that known tool
-    names exist without importing homecontrol (H2 owns its own schema test)."""
+    names exist without importing homecontrol (homecontrol owns its own schema test)."""
     def fn(name, props):
         return {"type": "function",
                 "function": {"name": name,

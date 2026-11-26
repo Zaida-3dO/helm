@@ -201,7 +201,7 @@ class HelmSpeakerAgent(ConversationEntity):
 
     async def _record(self, api, turn_id, device_id, asked, spoken, kind, result):
         """Best effort: the hub route may not exist yet; never raise out of
-        a background task (H5's record already swallows its own failures)."""
+        a background task (the hub record call already swallows its own failures)."""
         try:
             area_name, _presence = self._room_facts(device_id)
             await api.record(
