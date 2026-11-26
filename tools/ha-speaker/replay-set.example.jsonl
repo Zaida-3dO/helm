@@ -5,4 +5,4 @@
 {"id": "radiator-up", "text": "set the kitchen radiator to 21 degrees", "expect": {"tool": "climate", "args": {"action": "set"}}}
 {"id": "radiator-status", "text": "what is the kitchen radiator set to?", "expect": {"tool": "home_state"}}
 {"id": "timer", "text": "set a timer for ten minutes", "expect": {"tool": "timer", "args": {"action": "start"}}}
-{"id": "personal", "text": "what did I promise Tom about the garage on Saturday?", "expect": {"tool": "ask_helm"}}
+{"id": "personal", "text": "what did I promise about fixing the garage door last month?", "expect": {"tool": "ask_helm"}}

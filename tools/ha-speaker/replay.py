@@ -256,7 +256,7 @@ def register_service(hass, entry):
     """helm_speaker.replay: run a JSONL set through conversation.process.
 
     Dry by default (entry.runtime_data["control_dry"]); act=true really
-    operates the house and is meant for Ope-visible benchmark runs. Tags
+    operates the house and is meant for live runs the household watches happen. Tags
     come from input_text.helm_speaker_tags (conversation reads them)."""
     import voluptuous as vol  # noqa: PLC0415 - HA-only path
     from homeassistant.core import ServiceCall  # noqa: PLC0415
