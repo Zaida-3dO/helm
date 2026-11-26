@@ -18,7 +18,7 @@ import {
   registerSendContributor,
 } from '../composer/slots.ts';
 
-const sctx = { chatId: 'c1', isLatestAssistant: true, running: false, interactionOpen: false };
+const sctx = { chatId: 'c1', sessionId: 'c1', isLatestAssistant: true, running: false, interactionOpen: false };
 
 test('message actions and footers apply by their predicates; a throwing slot is left out', () => {
   const offA = registerMessageAction({ id: 'save', label: 'Save', appliesTo: (r) => r.role === 'assistant', run: () => undefined });

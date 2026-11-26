@@ -31,7 +31,7 @@ const SHOWN_PCT = 60;
 export function ContextBar({ chat, rows, host, hasNewer, busy, onRollOver }: ContextBarProps) {
   const rollOverAt = useRolloverTokens();
   if (hasNewer || chat.archived || chat.sideSourceId) return null;
-  const size = contextSize(rows, host);
+  const size = contextSize(rows, host, chat.id);
   if (!size || (size.tokens < CONTEXT_SHOWN_TOKENS && (size.pct ?? 0) < SHOWN_PCT)) return null;
   const { tokens, window, pct } = size;
   const large = pct !== null ? pct >= (isLocalModelId(chat.model) ? NEAR_LOCAL_WINDOW_PCT : NEAR_WINDOW_PCT) : tokens >= rollOverAt;

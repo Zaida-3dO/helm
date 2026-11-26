@@ -166,10 +166,10 @@ registerRowFooter({
   id: 'turn-changes',
   // Every settled assistant reply asks; the host answers only for a completed turn's last reply.
   appliesTo: (row, ctx) => row.role === 'assistant' && row.status === 'complete' && !(ctx.running && ctx.isLatestAssistant) && !ctx.hasRecap,
-  render: (row, ctx) => <TurnCard chatId={ctx.chatId} messageId={row.id} revision={row.revision} />,
+  render: (row, ctx) => <TurnCard chatId={ctx.sessionId} messageId={row.id} revision={row.revision} />,
 });
 
 registerRecapSection({
   id: 'turn-changes',
-  render: (row, ctx) => <TurnCard chatId={ctx.chatId} messageId={row.id} revision={row.revision} />,
+  render: (row, ctx) => <TurnCard chatId={ctx.sessionId} messageId={row.id} revision={row.revision} />,
 });

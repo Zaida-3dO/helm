@@ -41,3 +41,27 @@ export function decideOpen(event: OpenEvent, currentChatId: string | null): Open
 export function openTarget(chatId: string, latestId: string | null | undefined): string {
   return typeof latestId === 'string' && latestId !== '' && latestId !== chatId ? latestId : chatId;
 }
+
+/**
+ * A roll over hands the window on from the old session to its successor, so the side panel goes
+ * with it: the tabs the reader had open, the selected one. The open event names the old chat under
+ * `ifViewing`, but an agent starting a chat names its own chat the same way, so the successor must
+ * say it came from there (`prevSessionId`) before anything moves. `carry` is told once; nothing
+ * moves for any other kind of open, or when the chat cannot be read.
+ */
+export async function carryOnRollOver(
+  event: OpenEvent,
+  loadChat: (chatId: string) => Promise<{ prevSessionId: string | null }>,
+  carry: (from: string, to: string) => void,
+): Promise<boolean> {
+  const to = typeof event.chatId === 'string' && event.chatId !== '' ? event.chatId : null;
+  const from = typeof event.ifViewing === 'string' && event.ifViewing !== '' ? event.ifViewing : null;
+  if (!to || !from || to === from) return false;
+  try {
+    if ((await loadChat(to)).prevSessionId !== from) return false;
+  } catch {
+    return false;
+  }
+  carry(from, to);
+  return true;
+}

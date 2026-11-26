@@ -9,7 +9,9 @@
 //!   image of that chat. With `thumb: true` the bytes are a small cached copy ([`crate::thumbs`])
 //!   for the bubble; without it they are the stored file, for the full-size view. Every image
 //!   belonging to the chat is served, sent or still staged in the composer (a reopened chat
-//!   shows its staged pictures too); no other chat's image ever is.
+//!   shows its staged pictures too); no other chat's image ever is. A chat that rolled over is
+//!   one window over several sessions, and each picture stays with the session that sent it, so
+//!   the transcript asks under the row's own session, not the window's.
 //! - A chat that carries a message over from another one (a fork copies the history, an edit sends
 //!   the message again) gets its own copy of the message's images, made by [`copy_file`] and
 //!   [`insert_copy`]: a new attachment row owned by the new chat, and a hard link to the stored file

@@ -15,7 +15,15 @@ import type { IconProps } from '../ui/iconBase.ts';
 
 /** What a slot sees of the transcript around a row. */
 export interface SlotContext {
+  /** The chat in the window: where a message the action sends goes. */
   chatId: string;
+  /**
+   * The session that owns the row. A chat that rolled over is one window over several sessions, and
+   * everything the host keeps about a row (its pictures, its turn changes, a fork point, a saved
+   * copy) belongs to the session that wrote it, so an action that addresses the row uses this id,
+   * not `chatId`. The two are equal for a row of the session in the window.
+   */
+  sessionId: string;
   /** True for the newest assistant row of the chat. */
   isLatestAssistant: boolean;
   /** True while the chat runs a turn. */

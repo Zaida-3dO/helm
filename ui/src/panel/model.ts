@@ -270,6 +270,35 @@ export class PanelModel {
     return best?.entry ?? null;
   }
 
+  /**
+   * A chat that rolled over carries its panel to the successor: its tabs move to the successor's
+   * set in the same order, the same tab stays selected, and the Inspector's slot choice moves too.
+   * The panel's own state (hidden, maximised, the Inspector) is already shared, so the panel looks
+   * exactly as it did. A tab the successor already has (same kind and key) stays behind. Returns
+   * how many tabs moved.
+   */
+  carry(from: string, to: string): number {
+    if (from === to || from === '' || to === '') return 0;
+    let moved = 0;
+    for (const t of this.tabs) {
+      if (t.set !== from) continue;
+      if (this.tabs.some((x) => x.set === to && x.kind === t.kind && x.key === t.key)) continue;
+      t.set = to;
+      moved++;
+    }
+    const chosen = this.selected.get(from);
+    if (chosen !== undefined && !this.selected.has(to)) {
+      this.selected.set(to, chosen);
+      this.selected.delete(from);
+    }
+    const used = this.slotUsed.get(from);
+    if (used && !this.slotUsed.has(to)) {
+      this.slotUsed.set(to, used);
+      this.slotUsed.delete(from);
+    }
+    return moved;
+  }
+
   /** Closes every tab of a set (a deleted chat); reason `evicted`. */
   dropSet(set: string): void {
     for (const t of this.tabs.filter((x) => x.set === set)) this.close(t.id, 'evicted');

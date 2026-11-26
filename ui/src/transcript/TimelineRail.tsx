@@ -196,7 +196,7 @@ export function TimelineRail({ rows, onJump, container }: TimelineRailProps) {
           data-testid="timeline-history"
           title="Go back to before this message"
           aria-label="Go back to before this message"
-          onClick={() => goBack.run(goBackRow, { chatId: goBackRow.chatId, isLatestAssistant: false, running: false, interactionOpen: false })}
+          onClick={() => goBack.run(goBackRow, { chatId: goBackRow.chatId, sessionId: goBackRow.chatId, isLatestAssistant: false, running: false, interactionOpen: false })}
         >
           <IconUndo size={13} />
         </button>

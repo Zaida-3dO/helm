@@ -52,11 +52,14 @@ export const CONTEXT_SHOWN_TOKENS = 50_000;
 
 /**
  * How much context the chat holds now: input, cache reads and cache writes of the newest reply
- * that reports usage. Null when no reply does (or the newest rows are not loaded).
+ * that reports usage. Null when no reply does (or the newest rows are not loaded). With `chatId`,
+ * only that session's replies count: a window over a rolled-over chat also holds the earlier
+ * sessions' rows, whose context is not the one the chat carries now.
  */
-export function contextTokens(rows: MessageRow[]): number | null {
+export function contextTokens(rows: MessageRow[], chatId?: string): number | null {
   for (let i = rows.length - 1; i >= 0; i--) {
     const r = rows[i]!;
+    if (chatId !== undefined && r.chatId !== chatId) continue;
     const u = r.role === 'assistant' ? r.details?.usage : undefined;
     if (u) return u.inputTokens + u.cacheReadTokens + u.cacheWriteTokens;
   }
@@ -83,8 +86,9 @@ export interface ChatContextReading {
 export function contextSize(
   rows: MessageRow[],
   host: ChatContextReading | null,
+  chatId?: string,
 ): { tokens: number; window: number | null; pct: number | null } | null {
-  const tokens = Math.max(contextTokens(rows) ?? 0, host?.contextTokens ?? 0);
+  const tokens = Math.max(contextTokens(rows, chatId) ?? 0, host?.contextTokens ?? 0);
   if (tokens === 0) return null;
   const window = host?.windowTokens ?? null;
   const pct = window !== null ? Math.round((tokens / window) * 10000) / 100 : null;

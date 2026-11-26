@@ -56,7 +56,7 @@ export function RecapCard({ recap, row, ctx }: { recap: Recap; row: MessageRow; 
           {thumbs.shown.map((t) => (
             <ShownThumb
               key={`${t.galleryId}/${t.index}`}
-              chatId={ctx.chatId}
+              chatId={ctx.sessionId}
               galleryId={t.galleryId}
               index={t.index}
               label={`Open picture ${t.index + 1} full size`}
@@ -72,7 +72,7 @@ export function RecapCard({ recap, row, ctx }: { recap: Recap; row: MessageRow; 
           {s.render(row, ctx)}
         </div>
       ))}
-      {viewing && <ShownViewer chatId={ctx.chatId} galleryId={viewing.galleryId} pictures={pictures} index={viewing.index} onIndex={(index) => setViewing({ ...viewing, index })} onClose={() => setViewing(null)} />}
+      {viewing && <ShownViewer chatId={ctx.sessionId} galleryId={viewing.galleryId} pictures={pictures} index={viewing.index} onIndex={(index) => setViewing({ ...viewing, index })} onClose={() => setViewing(null)} />}
     </div>
   );
 }

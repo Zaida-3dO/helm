@@ -58,6 +58,12 @@ test('the context size is the newest reply that reports usage: input plus cache 
   assert.equal(contextTokens(rows), 121_020);
   assert.equal(contextTokens(rows.slice(0, 1)), null);
   assert.equal(contextTokens([]), null);
+  // A window over a rolled-over chat holds the earlier session's rows too: a fresh session that has
+  // not replied yet is not as large as the one it replaced.
+  const stack = [row({ id: 2, chatId: 'old', role: 'assistant', details: { usage: usage(20, 300_000, 0) } }), row({ id: 5, chatId: 'new', role: 'user' })];
+  assert.equal(contextTokens(stack, 'new'), null);
+  assert.equal(contextTokens(stack, 'old'), 300_020);
+  assert.equal(contextSize(stack, null, 'new'), null);
 });
 
 test('the shown context size follows the last measured call and the model\'s real window', async () => {

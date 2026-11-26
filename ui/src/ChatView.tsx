@@ -54,6 +54,7 @@ import { mcpOps } from './api/mcp.ts';
 import { chatMcpNoticeText } from './settings/mcp/readiness.ts';
 import { SIDE_CHAT_KIND, setSideChatOps } from './sidechat/index.tsx';
 import { sideChatAnchor } from './sidechat/anchor.ts';
+import { anchorSession } from './transcript/session.ts';
 // Settings → Chat registers itself.
 import './settings/chat/index.tsx';
 import { parseChatElements, type ChatElements } from './settings/chat/elements.ts';
@@ -420,10 +421,12 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       run: (sel) => {
         const anchor = sideChatAnchor(rowsRef.current, sel.rowIds);
         if (anchor === null) return;
+        // The anchor reply may sit in an earlier session of the stack: that session holds it.
+        const source = anchorSession(rowsRef.current, anchor, chatId);
         ops
-          .fork(chatId, { messageId: anchor, side: true, excerpt: sel.text })
+          .fork(source, { messageId: anchor, side: true, excerpt: sel.text })
           .then((c) => {
-            if (!openInPanel(SIDE_CHAT_KIND, chatId, { chatId: c.id, sourceId: chatId }, { intent: 'user', chatId })) {
+            if (!openInPanel(SIDE_CHAT_KIND, chatId, { chatId: c.id, sourceId: source }, { intent: 'user', chatId })) {
               setNotice('The side panel has no room for the side chat.');
             }
           })

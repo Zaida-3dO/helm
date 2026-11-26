@@ -115,6 +115,11 @@ class PanelStore {
     return out;
   }
 
+  /** A chat that rolled over hands its panel (tabs and selection) to its successor. */
+  carry(from: string, to: string): void {
+    this.update((m) => m.carry(from, to));
+  }
+
   setCurrent(chatId: string | null): void {
     if (this.current === chatId) return;
     this.current = chatId;

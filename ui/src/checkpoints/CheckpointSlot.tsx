@@ -22,7 +22,7 @@ export function CheckpointSlot() {
         icon: IconUndo,
         order: 15,
         appliesTo: canGoBackTo,
-        run: (row, ctx) => setTarget({ chatId: ctx.chatId, row }),
+        run: (row, ctx) => setTarget({ chatId: ctx.sessionId, row }),
       }),
     [],
   );

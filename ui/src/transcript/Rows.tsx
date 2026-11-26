@@ -18,6 +18,7 @@ import { messageTimeLabel } from './rowMeta.ts';
 import { IconMonitor, IconPaperPlane } from '../ui/icons.tsx';
 import { ReplyActions, UserActions } from './MessageActions.tsx';
 import { rowFootersFor, type SlotContext } from './slots.ts';
+import { isEarlierSession } from './session.ts';
 import { Glyph } from './icons.tsx';
 import { SignInAgain } from './SignInAgain.tsx';
 import { isSignInError } from './signin.ts';
@@ -84,6 +85,7 @@ function toolAction(row: MessageRow, ctx: RowContext): ToolAction | undefined {
 function slotContext(row: MessageRow, ctx: RowContext, hasRecap = false): SlotContext {
   return {
     chatId: ctx.chatId,
+    sessionId: row.chatId,
     isLatestAssistant: row.id === ctx.latestAssistantId,
     running: ctx.running,
     interactionOpen: ctx.interactionOpen,
@@ -299,7 +301,7 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
           <NoteCard note={note} ctx={ctx} rowId={row.id} />
         ) : (
           <div className="bubble" title={messageTimeLabel(row.timestamp, Date.now())} data-testid="user-bubble">
-            <MessageImages chatId={ctx.chatId} images={row.details?.images} />
+            <MessageImages chatId={row.chatId} images={row.details?.images} />
             <MessageRefs refs={row.details?.refs} />
             <Markdown text={bubbleText(row)} onLink={ctx.onLink} />
           </div>
@@ -309,7 +311,7 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
           <UserActions
             row={row}
             sctx={slotContext(row, ctx)}
-            onEdit={row.status === 'complete' && !ctx.running && !note && !page && ctx.onEdit ? () => ctx.onEdit?.(row) : undefined}
+            onEdit={row.status === 'complete' && !ctx.running && !note && !page && ctx.onEdit && !isEarlierSession(row, ctx.chatId) ? () => ctx.onEdit?.(row) : undefined}
           />
         )}
         <Footers row={row} ctx={ctx} />
@@ -333,7 +335,7 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
     if (gallery || board) {
       return (
         <div className={`row row-card${place}`} {...common}>
-          {gallery ? <GalleryCard chatId={ctx.chatId} galleryId={gallery.galleryId} /> : <OptionBoardCard chatId={ctx.chatId} boardId={board!.boardId} />}
+          {gallery ? <GalleryCard chatId={row.chatId} galleryId={gallery.galleryId} /> : <OptionBoardCard chatId={row.chatId} boardId={board!.boardId} />}
         </div>
       );
     }

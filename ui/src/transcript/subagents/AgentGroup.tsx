@@ -10,7 +10,8 @@ import { subagentFor } from './model.ts';
 import './subagents.css';
 
 export function AgentGroup({ rows, flags, ctx }: { rows: MessageRow[]; flags: RowFlags[]; ctx: RowContext }) {
-  const thread = useThread(ctx.chatId);
+  // The subagents' state is kept by the session that ran them: an older session's group reads its own.
+  const thread = useThread(rows[0]?.chatId ?? ctx.chatId);
   const shown = rows.map((r, i) => ({ r, flags: flags[i], card: subagentFor(r, thread) !== null }));
   const cards = shown.filter((x) => x.card).map((x) => x.r);
   const plain = shown.filter((x) => !x.card);

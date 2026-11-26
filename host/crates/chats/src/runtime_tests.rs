@@ -4702,6 +4702,35 @@ async fn a_message_fork_is_cut_at_the_reply_and_carries_it_once() {
         .await
         .unwrap_err();
     assert_eq!(refused.code, "refused");
+    // An archived chat has to be restored before it is forked; a session that rolled over is
+    // archived too, but it is still part of the chat the reader scrolls through, so its replies
+    // stay fork points.
+    h.db.write(|tx| {
+        tx.execute(
+            "UPDATE messages SET status = 'complete' WHERE id = ?1",
+            [cut_short],
+        )?;
+        tx.execute("UPDATE chats SET archived = 1 WHERE id = ?1", [&chat])
+    })
+    .unwrap();
+    let fork_args = || json!({"chatId": chat, "forkId": uuid::Uuid::new_v4().to_string(), "messageId": cut_short});
+    let archived = h.call("chat_fork", fork_args()).await.unwrap_err();
+    assert!(
+        archived.message.contains("Restore this chat"),
+        "{}",
+        archived.message
+    );
+    h.db.write(|tx| {
+        tx.execute(
+            "UPDATE chats SET next_session_id = 'a-later-session' WHERE id = ?1",
+            [&chat],
+        )
+    })
+    .unwrap();
+    assert!(
+        h.call("chat_fork", fork_args()).await.is_ok(),
+        "a rolled-over session forks"
+    );
 }
 
 /// Placement and creation: a fork lands right below its source and later rows shift; a

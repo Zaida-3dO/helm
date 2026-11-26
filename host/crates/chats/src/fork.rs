@@ -323,12 +323,15 @@ pub fn fork(
         position: Option<i64>,
         pinned: bool,
         archived: bool,
+        /// The chat rolled over: its window lives on in a later session.
+        rolled_over: bool,
     }
     let src: Src = db
         .snapshot(|tx| {
             tx.query_row(
                 "SELECT c.title, COALESCE(p.path, ''), c.project_id, c.model, c.thinking, c.draft,
-                        c.side_source_id, c.position, c.pinned, c.archived, c.provider
+                        c.side_source_id, c.position, c.pinned, c.archived, c.provider,
+                        c.next_session_id IS NOT NULL
                  FROM chats c JOIN projects p ON p.id = c.project_id WHERE c.id = ?1",
                 [req.source],
                 |r| {
@@ -344,6 +347,7 @@ pub fn fork(
                         pinned: r.get(8)?,
                         archived: r.get(9)?,
                         provider: r.get(10)?,
+                        rolled_over: r.get(11)?,
                     })
                 },
             )
@@ -560,7 +564,9 @@ pub fn fork(
         if project_archived(tx, &src.project)? {
             return Ok(Err(refuse("This chat's project is archived; restore it first.")));
         }
-        if src.archived {
+        // A session that rolled over is archived, but it is still part of the chat the reader is
+        // scrolling through: its replies and messages stay places to fork and go back to.
+        if src.archived && !src.rolled_over {
             return Ok(Err(refuse("Restore this chat before forking it.")));
         }
         tx.execute(

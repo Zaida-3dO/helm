@@ -19,7 +19,7 @@ export function forkAction(ops: ChatOps, open: (chatId: string) => void, onError
     appliesTo: canForkAt,
     run: (row, ctx) => {
       ops
-        .fork(ctx.chatId, { messageId: row.id })
+        .fork(ctx.sessionId, { messageId: row.id })
         .then((c) => open(c.id))
         .catch((e: unknown) => onError(e instanceof Error ? e.message : String(e)));
     },

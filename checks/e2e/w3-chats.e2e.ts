@@ -1,9 +1,10 @@
-// Chats end to end with the fake claude: fork from a reply, edit and resend, mute, unread marks
-// and the attention summary, in the real debug app.
+// Chats end to end with the fake claude: fork from a reply, edit and resend, mute, unread marks,
+// the attention summary and a roll over that carries the half-written message, in the real debug app.
 //
 // Run: `npm run build:debug` at the root, then `npm run e2e -w checks`.
 
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { after, before, describe, test } from "node:test";
 import { api, dispose, launchApp, newChat, scratchDir, send, shot, tid, waitRowText, waitStatus, type App } from "./harness.ts";
 
@@ -98,6 +99,40 @@ describe("chats: fork, edit and resend, mute, unread", { timeout: 10 * 60_000 },
       const after = (await api(page(), "unread_clear", { chatId: chat, token: marked.unread.markToken })) as Chat;
       assert.ok(after.unread.markToken && after.unread.markToken !== marked.unread.markToken);
     } catch (e) {
+      throw new Error(`${(e as Error).message}\n--- app log tail ---\n${app?.log().slice(-3000)}`);
+    }
+  });
+
+  test("C4: a roll over carries the draft and staged picture, and the earlier session's picture still shows", async () => {
+    const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    try {
+      const old = await newChat(page(), scratchDir("helm-e2e-chat-"));
+      // A picture sent in the first session.
+      const sent = (await api(page(), "attachment_put", { chatId: old, name: "sent.png", mime: "image/png", bytes: png })) as { attachmentId: string };
+      await api(page(), "chat_send", { chatId: old, submissionId: randomUUID(), text: "look at the picture", action: "default", draftRevision: 0, attachments: [sent.attachmentId] });
+      await waitStatus(page(), "idle", 30_000);
+      await page().waitForSelector(tid("transcript-row", '[data-role="assistant"]'), { timeout: 20_000 });
+      // What is half done in the composer when the roll over happens: a draft and a staged picture.
+      await api(page(), "attachment_put", { chatId: old, name: "staged.png", mime: "image/png", bytes: png });
+      await api(page(), "draft_save", { chatId: old, text: "half a thought", revision: Date.now() });
+      await api(page(), "chat_roll_over", { chatId: old });
+      await page().waitForFunction(
+        (src) => {
+          const v = document.querySelector('[data-testid="chat-view"]');
+          return v && v.getAttribute("data-chat-id") !== src;
+        },
+        old,
+        { timeout: 120_000 },
+      );
+      // The window now shows the successor: its composer holds the draft and the staged picture ...
+      await page().waitForFunction(() => (document.querySelector('[data-testid="composer"]')?.textContent ?? "").includes("half a thought"), undefined, { timeout: 20_000 });
+      await page().waitForSelector(tid("attachment-thumb"), { timeout: 20_000 });
+      // ... and the first session's picture, scrolled back to, loads like any other.
+      await page().waitForSelector(tid("message-image", '[data-state="ready"]'), { timeout: 20_000 });
+      assert.equal(await page().locator(tid("message-image", '[data-state="failed"]')).count(), 0, "no picture is unavailable");
+      await shot(page(), OUT, "C4");
+    } catch (e) {
+      await shot(page(), OUT, "C4-FAILED");
       throw new Error(`${(e as Error).message}\n--- app log tail ---\n${app?.log().slice(-3000)}`);
     }
   });

@@ -282,3 +282,29 @@ test('restore brings a saved tab back as program intent in its own set, never ov
   assert.equal(m.restore('c1', 'file', 'over', {}), false);
   assert.equal(m.displayed('c1').length, SET_CAP);
 });
+
+test('a rolled-over chat carries its tabs, selection and Inspector slot to the successor', () => {
+  const { m } = setup();
+  m.open('file', 'a', {}, { intent: 'user' }, 'old');
+  const b = m.open('file', 'b', {}, { intent: 'user' }, 'old')!;
+  m.open('file', 'a', {}, { intent: 'user' }, 'other');
+  m.select(b.id, 'old');
+  assert.equal(m.visible('new'), false, 'a fresh chat shows no panel');
+  m.open('pr', 'p', {}, { intent: 'user' }, 'old');
+  m.select(b.id, 'old');
+  assert.equal(m.carry('old', 'new'), 2, 'only the chat-scope tabs move; the app tab was shared already');
+  assert.deepEqual(keys(m.displayed('new')), ['a', 'b', 'p']);
+  assert.equal(m.activeEntry('new'), b.id, 'the same tab stays selected');
+  assert.equal(m.visible('new'), true);
+  assert.deepEqual(keys(m.displayed('old')), ['p']);
+  assert.deepEqual(keys(m.displayed('other')), ['a', 'p'], 'another chat is left alone');
+  // A tab the successor already has stays behind; with a chat of its own panel nothing is replaced.
+  m.open('file', 'c', {}, { intent: 'user' }, 'old');
+  m.open('file', 'c', {}, { intent: 'user' }, 'new');
+  assert.equal(m.carry('old', 'new'), 0);
+  assert.equal(m.carry('new', 'new'), 0);
+  // The Inspector's slot choice goes too.
+  m.setInspector(true, 'files', 'old');
+  m.carry('old', 'fresh');
+  assert.equal(m.activeEntry('fresh'), 'slot:files');
+});

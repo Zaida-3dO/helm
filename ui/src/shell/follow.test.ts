@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decideOpen, openTarget } from './follow.ts';
+import { carryOnRollOver, decideOpen, openTarget } from './follow.ts';
 
 // (event, chat on screen, expected decision): the window follows when the host names no guard
 // or the user is still looking at the guarded chat; otherwise the user only gets a notice.
@@ -33,4 +33,19 @@ test('a rolled-over session id opens the newest session of its stack', () => {
     ['c1', '', 'c1'],
   ];
   for (const [chatId, latest, want] of cases) assert.equal(openTarget(chatId, latest), want, `${chatId} -> ${String(latest)}`);
+});
+
+test('the side panel goes with a roll over, and only with one', async () => {
+  const moved: string[][] = [];
+  const carry = (from: string, to: string) => void moved.push([from, to]);
+  const successor = async () => ({ prevSessionId: 'c1' });
+  assert.equal(await carryOnRollOver({ chatId: 'c2', ifViewing: 'c1' }, successor, carry), true);
+  assert.deepEqual(moved, [['c1', 'c2']]);
+  // A chat an agent started names its own chat too, but it did not come out of a roll over.
+  assert.equal(await carryOnRollOver({ chatId: 'c3', ifViewing: 'c1' }, async () => ({ prevSessionId: null }), carry), false);
+  // Nothing to carry from, nothing to carry to, or a chat that cannot be read.
+  assert.equal(await carryOnRollOver({ chatId: 'c2' }, successor, carry), false);
+  assert.equal(await carryOnRollOver({ ifViewing: 'c1' }, successor, carry), false);
+  assert.equal(await carryOnRollOver({ chatId: 'c2', ifViewing: 'c1' }, async () => Promise.reject(new Error('gone')), carry), false);
+  assert.equal(moved.length, 1);
 });

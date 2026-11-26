@@ -8,6 +8,10 @@
 //! the old chat's title and id so the two can be matched), and archives the old chat, stopping it
 //! first if it is somehow working again.
 //!
+//! The roll over is meant to be seamless, so the old chat's composer goes with the work: its
+//! unsent draft, the pictures and references staged beside it, and its open-item state move to
+//! the successor ([`carry_composer`]).
+//!
 //! The op answers at once with `{started: true}`; the rest runs in the background. When the
 //! successor exists the app sends `shell_open_chat`, naming the old chat under `ifViewing`: the
 //! window follows to the successor only while the user is still looking at the old chat;
@@ -924,6 +928,22 @@ async fn carry_on(
             .emit(AppEvent::new("sidebar").with("chatIds", json!(changed))),
         Err(e) => log::warn!("roll over of {}: the successor kept no place: {e}", chat.id),
     }
+    // The successor's record changed under any window already holding it (it now carries the
+    // unsent draft and the open-item state): say so before the window moves over.
+    if let Ok(clock) = ctx.services.need::<Clock>() {
+        let rev = clock.next();
+        if let Ok(Some(rec)) = rt
+            .db()
+            .snapshot(|tx| crate::store::get_chat(tx, &new_id, rev))
+        {
+            ctx.events.emit(
+                ChatEvent::Chat {
+                    chat: Box::new(rec),
+                }
+                .to_app_event(),
+            );
+        }
+    }
     // Stop first: the old chat should be idle, but never archive over a working one.
     if !settled(rt, &chat.id) {
         let _ = rt
@@ -1022,9 +1042,57 @@ fn take_place(
         [old, new],
     )?;
     crate::mute::inherit(tx, old, new, now)?;
+    carry_composer(tx, old, new, now)?;
     let mut changed = vec![new.to_owned(), old.to_owned()];
     changed.extend(children);
     Ok(changed)
+}
+
+/// What the user had half-done in the old chat's composer goes with the work, so a roll over is
+/// seamless: the unsent draft, the pictures and file or chat references staged beside it, and
+/// the open-item state (which transcript cards are opened, whether the sidebar row is expanded).
+/// They move rather than copy: the old session is archived and the successor is where the chat
+/// lives now, so one composer holds the draft and a restored old chat cannot send it a second
+/// time. Staged files are stored under the attachment's own id, so moving its row is enough.
+fn carry_composer(
+    tx: &rusqlite::Transaction<'_>,
+    old: &str,
+    new: &str,
+    now: i64,
+) -> rusqlite::Result<()> {
+    let (draft, revision, state): (Option<String>, i64, Option<String>) = tx.query_row(
+        "SELECT draft, draft_revision, sidebar_state FROM chats WHERE id = ?1",
+        [old],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    if let Some(text) = draft.filter(|d| !d.is_empty()) {
+        // A revision newer than either chat's, the way the composer numbers its own saves, so
+        // the successor's composer takes the text up and the old one lets it go.
+        let next = now.max(revision + 1);
+        tx.execute(
+            "UPDATE chats SET draft = ?1, draft_revision = MAX(?2, draft_revision + 1) WHERE id = ?3",
+            rusqlite::params![text, next, new],
+        )?;
+        tx.execute(
+            "UPDATE chats SET draft = '', draft_revision = ?1 WHERE id = ?2",
+            rusqlite::params![next, old],
+        )?;
+    }
+    if state.is_some() {
+        tx.execute(
+            "UPDATE chats SET sidebar_state = ?1 WHERE id = ?2",
+            rusqlite::params![state, new],
+        )?;
+    }
+    for table in ["chat_attachments", "chat_attachment_refs"] {
+        tx.execute(
+            &format!(
+                "UPDATE {table} SET chat_id = ?1 WHERE chat_id = ?2 AND submission_id IS NULL"
+            ),
+            [new, old],
+        )?;
+    }
+    Ok(())
 }
 
 /// The end of a roll over in one transaction: the stack links on both rows (the old session
@@ -1469,7 +1537,28 @@ mod tests {
                 [&old],
             )?;
             crate::mute::set_muted(tx, &old, true, 5)?;
-            crate::mute::set_created_by(tx, &old, &maker)
+            crate::mute::set_created_by(tx, &old, &maker)?;
+            // What was half-done in the old chat's composer: a draft, a staged picture, a staged
+            // reference, a picture already sent (which stays with the message it went with), and
+            // the open-item state.
+            tx.execute(
+                "UPDATE chats SET draft = 'half a thought', draft_revision = 5,
+                        sidebar_state = '{\"v\":1,\"expanded\":true,\"openCards\":[3]}' WHERE id = ?1",
+                [&old],
+            )?;
+            for (id, sub) in [("img-staged", None), ("img-sent", Some("s1"))] {
+                tx.execute(
+                    "INSERT INTO chat_attachments(id, chat_id, name, mime, bytes, width, height, submission_id, created_at)
+                     VALUES (?1, ?2, 'a.png', 'image/png', 1, 1, 1, ?3, 1)",
+                    rusqlite::params![id, &old, sub],
+                )?;
+            }
+            tx.execute(
+                "INSERT INTO chat_attachment_refs(id, chat_id, kind, target, name, created_at)
+                 VALUES ('ref-staged', ?1, 'file', 'C:/w/x.txt', 'x.txt', 1)",
+                [&old],
+            )?;
+            Ok::<_, rusqlite::Error>(())
         })
         .unwrap();
         let changed = db.write(|tx| take_place(tx, &old, &new, 9)).unwrap();
@@ -1499,8 +1588,44 @@ mod tests {
         assert_eq!(owner_and_shares, ("p-sam".to_owned(), "p-ann".to_owned()));
         assert_eq!(
             row(&kid).0,
-            Some(new),
+            Some(new.clone()),
             "the old chat's children move under the successor"
+        );
+        // The composer goes with the work: the draft (under a revision newer than the old one's,
+        // so the successor's composer takes it up), the staged attachments and the open cards.
+        let composer = |id: &str| -> (String, i64, Option<String>, Vec<String>, i64) {
+            db.snapshot(|tx| {
+                let (draft, rev, state) = tx.query_row(
+                    "SELECT draft, draft_revision, sidebar_state FROM chats WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?;
+                let mut st =
+                    tx.prepare("SELECT id FROM chat_attachments WHERE chat_id = ?1 ORDER BY id")?;
+                let held = st
+                    .query_map([id], |r| r.get(0))?
+                    .collect::<rusqlite::Result<Vec<String>>>()?;
+                let refs = tx.query_row(
+                    "SELECT count(*) FROM chat_attachment_refs WHERE chat_id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )?;
+                Ok::<_, rusqlite::Error>((draft, rev, state, held, refs))
+            })
+            .unwrap()
+        };
+        let carried = composer(&new);
+        assert_eq!(carried.0, "half a thought");
+        assert!(carried.1 > 5, "newer than the old draft's revision");
+        assert!(carried.2.as_deref().unwrap().contains("\"openCards\":[3]"));
+        assert_eq!((carried.3, carried.4), (vec!["img-staged".to_owned()], 1));
+        let left = composer(&old);
+        assert_eq!(left.0, "", "the old chat lets the draft go");
+        assert!(left.1 > 5);
+        assert_eq!(
+            (left.3, left.4),
+            (vec!["img-sent".to_owned()], 0),
+            "a picture already sent stays with its message"
         );
     }
 

@@ -50,7 +50,7 @@ export function LeafSlots(): null {
         run: (row, ctx) => {
           const { title, body } = savedFromText(row.text);
           savedOps(api)
-            .save({ chatId: ctx.chatId, messageId: row.id, title, body })
+            .save({ chatId: ctx.sessionId, messageId: row.id, title, body })
             .then(() => toast.show({ kind: 'info', text: 'Saved for later — open Settings → Saved to see it.' }))
             .catch((e: unknown) => toast.show({ kind: 'error', text: `Could not save: ${String((e as Error).message ?? e)}` }));
         },
