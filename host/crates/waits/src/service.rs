@@ -49,6 +49,11 @@ pub trait Deliver: Send + Sync {
         text: &str,
         watch: Option<(&str, &str)>,
     ) -> Delivery;
+
+    /// After a pass: these are the messages still owed. Whatever else the sink remembers about a
+    /// message (how often it was turned away) is no longer needed, because its wait ended another
+    /// way (cancelled, the chat deleted).
+    fn retain_owed(&self, _owed: &[String]) {}
 }
 
 pub struct WaitsService {
@@ -309,6 +314,7 @@ impl WaitsService {
     pub fn deliver_pending(&self) {
         let Some(sink) = self.sink.get() else { return };
         let owed = self.db.snapshot(store::undelivered).unwrap_or_default();
+        let owed_ids: Vec<String> = owed.iter().map(|(w, _)| delivery_id(&w.id)).collect();
         for (w, o) in owed {
             let text = model::framed(&w, &o);
             let sid = delivery_id(&w.id);
@@ -330,6 +336,7 @@ impl WaitsService {
                 Delivery::Retry => {}
             }
         }
+        sink.retain_owed(&owed_ids);
     }
 }
 
@@ -404,6 +411,11 @@ impl Refusals {
     fn clear(&self, id: &str) {
         self.0.lock().unwrap().remove(id);
     }
+
+    /// Forget the refusals of every message not named in `keep`.
+    fn retain(&self, keep: &[String]) {
+        self.0.lock().unwrap().retain(|id, _| keep.contains(id));
+    }
 }
 
 /// The id for the `n`-th re-send of a message the chat refused (the same name-based form as
@@ -476,7 +488,7 @@ impl Deliver for RuntimeSink {
                 }
                 // Handed over (or about to be) and not answered yet: ask again at the next sweep.
                 Some(S::Saved | S::Dispatching) | None => {
-                    return match self.hand_over(chat_id, &id, text, watch) {
+                    return match self.hand_over(chat_id, submission_id, &id, text, watch) {
                         Delivery::Sent => Delivery::Retry,
                         other => other,
                     };
@@ -486,14 +498,20 @@ impl Deliver for RuntimeSink {
         log::warn!("wait message for {chat_id} was refused every time; giving up");
         Delivery::GaveUp
     }
+
+    fn retain_owed(&self, owed: &[String]) {
+        self.refusals.retain(owed);
+    }
 }
 
 impl RuntimeSink {
     /// Save the message in the chat (or hand a saved one over again). `Sent` means the chat has
-    /// it; whether it accepts it is seen at a later sweep.
+    /// it; whether it accepts it is seen at a later sweep. `first` is the message's own id, which
+    /// its turned-away count is kept under, whichever re-send is being tried.
     fn hand_over(
         &self,
         chat_id: &str,
+        first: &str,
         submission_id: &str,
         text: &str,
         watch: Option<(&str, &str)>,
@@ -517,19 +535,19 @@ impl RuntimeSink {
             // Only an accepted hand-over counts: the wait stays owed until the chat has the
             // message, so a send that died before handing it over is tried again.
             Ok(s) if s.delivered => {
-                self.refusals.clear(submission_id);
+                self.refusals.clear(first);
                 Delivery::Sent
             }
             Ok(_) => Delivery::Retry,
             Err(e) if e.code == "not_found" || e.code == "refused" => {
-                self.refusals.clear(submission_id);
+                self.refusals.clear(first);
                 log::info!("wait message for {chat_id} not deliverable: {}", e.message);
                 Delivery::Gone
             }
             // A passing refusal (the chat is stopping, say): asked again at the next sweep, but
             // not for ever. A chat that stays in that state is given up on, and the log says why.
             Err(e) => {
-                if self.refusals.note(submission_id, MAX_REFUSALS) {
+                if self.refusals.note(first, MAX_REFUSALS) {
                     log::warn!(
                         "wait message for {chat_id} given up: the chat turned it away {MAX_REFUSALS} times in a row ({})",
                         e.message
@@ -609,6 +627,13 @@ mod tests {
             }
             assert_eq!(r.note(id, 3), want, "{id} cleared {cleared}");
         }
+        // A message whose wait ended another way is forgotten; the one still owed keeps its count.
+        for id in ["a", "a", "b", "b"] {
+            assert!(!r.note(id, 3));
+        }
+        r.retain(&["b".to_owned()]);
+        assert!(!r.note("a", 3), "a started again");
+        assert!(r.note("b", 3), "b kept its count");
     }
 
     fn wait(id: &str, chat: &str, target: Target, now: i64, secs: i64) -> Wait {
