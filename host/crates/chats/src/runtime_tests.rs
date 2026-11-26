@@ -8161,7 +8161,30 @@ async fn the_auto_roll_over_trigger_checks_every_case_in_one_pass() {
             "UPDATE chats SET status = 'running' WHERE id = '{c}';",
             false,
         ),
+        (
+            "a message queued",
+            100,
+            999,
+            "INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES ('q-{c}', '{c}', 'next', 'saved', 1);",
+            false,
+        ),
+        (
+            "a successor that has not worked yet",
+            100,
+            999,
+            "INSERT INTO chat_succession(chat_id, predecessor_id) VALUES ('{c}', 'older');",
+            false,
+        ),
         ("over the line", 100, 999, "", true),
+        ("exactly at the line", 100, 100, "", true),
+        (
+            "a successor that has worked",
+            100,
+            999,
+            "INSERT INTO chat_succession(chat_id, predecessor_id) VALUES ('{c}', 'older');
+             INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES ('w1-{c}', '{c}', 'hand-off', 'complete', 1), ('w2-{c}', '{c}', 'next', 'complete', 2);",
+            true,
+        ),
     ] {
         let chat = h.create().await;
         if tokens > 0 {
@@ -8203,6 +8226,74 @@ async fn the_auto_roll_over_trigger_checks_every_case_in_one_pass() {
         )),
         ["1"],
         "still exactly one ask"
+    );
+}
+
+/// The finished-chat sweep through its tick pass: it archives the chat that sent a completed
+/// report once it has been quiet past the grace, writes a line in the chat first, leaves the chat
+/// that received the report alone, does nothing while the setting is off, and does not archive a
+/// chat the person restored again for the same report.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_sweep_archives_a_finished_chat_once_and_not_the_one_that_got_its_report() {
+    let h = harness();
+    attach_ops_host(&h);
+    // Off while the chats are set up, so the maintenance tick cannot act on a half-made scene.
+    h.db.write(|tx| helm_core::prefs::set_generic(tx, "archiveFinishedChats", &json!(false)))
+        .unwrap();
+    let boss = h.create().await;
+    let kid = h.create().await;
+    let sent = helm_core::now_ms() - 3 * crate::finished::IDLE_GRACE_MS;
+    let quiet = |h: &H| {
+        h.db.write(|tx| {
+            tx.execute_batch(&format!(
+                "UPDATE chats SET updated_at = {} WHERE id IN ('{boss}', '{kid}');
+                 UPDATE chat_activity SET last_activity_at = 0;",
+                sent - 1_000
+            ))
+        })
+        .unwrap();
+    };
+    quiet(&h);
+    h.db.write(|tx| {
+        tx.execute(
+            "INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES ('report', ?1, ?2, 'complete', ?3)",
+            rusqlite::params![
+                &boss,
+                format!("[Message from another chat: \"Kid\" ({kid})]
+All done."),
+                sent
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO submission_meta(submission_id, origin, kind) VALUES ('report', 'other_chat', 'completed')",
+            [],
+        )
+    })
+    .unwrap();
+    let archived =
+        |h: &H, c: &str| h.col(&format!("SELECT archived FROM chats WHERE id = '{c}'")) == ["1"];
+    crate::finished::pass(&h.rt.sh);
+    assert!(!archived(&h, &kid), "switched off");
+    h.db.write(|tx| helm_core::prefs::set_generic(tx, "archiveFinishedChats", &json!(true)))
+        .unwrap();
+    crate::finished::pass(&h.rt.sh);
+    assert!(archived(&h, &kid), "the sender of the report is archived");
+    assert!(!archived(&h, &boss), "the chat that got the report is not");
+    h.until("the note is in the chat", |h| {
+        h.col(&format!(
+            "SELECT COUNT(*) FROM messages WHERE chat_id = '{kid}' AND role = 'context'"
+        )) != ["0"]
+    })
+    .await;
+    // Restored, quiet again, the same report: left alone.
+    h.db.write(|tx| crate::archive::restore_in_tx(tx, &kid, 1))
+        .unwrap()
+        .unwrap();
+    quiet(&h);
+    crate::finished::pass(&h.rt.sh);
+    assert!(
+        !archived(&h, &kid),
+        "a restored chat stays restored for the same report"
     );
 }
 

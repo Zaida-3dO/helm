@@ -519,6 +519,12 @@ fn table() -> Vec<Entry> {
             about: "Tapping Shift twice opens Go to file.",
         },
         Entry {
+            key: "archiveFinishedChats",
+            kind: Kind::Bool,
+            default: || json!(true),
+            about: "Helm archives a chat that has sent its completed report and been quiet for ten minutes. Chats waiting on anything, pinned chats and the open chat are left alone.",
+        },
+        Entry {
             key: "sendBehavior",
             kind: Kind::Fields(&[
                 ("mode", &SEND_MODE),

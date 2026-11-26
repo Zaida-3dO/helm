@@ -108,6 +108,8 @@ breaks those checks, so change them only together with the checks. Everything el
 | `dock-compacting` | The activity dock's second line while the chat compacts its conversation: what is happening and how long it has taken | |
 | `title-suggestions` / `title-suggestion` | The name suggestions under the chat title field, in the top bar's rename box and the sidebar's Rename chat dialog: the container (a loading line, then up to three options, or a line saying why there are none) and one option button; a click fills the field, which is saved only on Enter or Save | `data-state` = `loading`, `ready` or `failed` |
 | `settings-double-shift` | Settings → Chat: tap Shift twice to open Go to file | |
+| `settings-archive-finished` | Settings → Chat: archive finished chats (a chat that sent its completed report and has been quiet for ten minutes) | |
+| `settings-rollover-tokens` | Settings → Chat: the context size, in tokens, at which Helm rolls a chat over by itself when its turn ends (0 never) | |
 | `attachment-thumb` | An attached image's thumbnail in the composer: a button (click, Enter or Space) that opens the image viewer, `attachment-viewer` (its image is `image-viewer-image`); the corner button only removes | |
 | `composer-refs` | The tray of file, folder and chat chips in the composer box; each chip is `.composer-ref` | `data-kind` = `file`, `folder` or `chat` |
 | `composer-setup` / `composer-setup-details` / `composer-setup-open` | The setup card above the box while Claude Code cannot be found (Send is disabled), its details toggle and its Set up button | |

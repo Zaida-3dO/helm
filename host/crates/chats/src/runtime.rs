@@ -921,6 +921,7 @@ impl ChatRuntime {
                 }
                 crate::attention::publish(&sh);
                 crate::triage::pass(&sh);
+                crate::finished::pass(&sh);
                 ChatRuntime { sh: sh.clone() }.apply_send_behavior();
             }
         });
