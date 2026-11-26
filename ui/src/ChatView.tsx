@@ -342,8 +342,10 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
         behavior.toolStop && Boolean(thread?.capabilities.stopTool) && Boolean(row.details?.stoppable) && row.status === 'streaming',
       onStopTool: stopTool,
       // Every link click goes through the panel's gate, which validates it before acting and
-      // shows any refusal in the shell's toast slot itself.
-      onLink: (t: LinkTarget) => void handleLink(t, { chatId }),
+      // shows any refusal in the shell's toast slot itself. File and page links resolve against
+      // the session that wrote the row carrying the link — an earlier session of a roll-over
+      // window may run elsewhere than the one shown in the window; without a session it is this chat.
+      onLink: (t: LinkTarget, sessionId?: string) => void handleLink(t, { chatId: sessionId ?? chatId }),
       openCards,
       setCardOpen,
     }),

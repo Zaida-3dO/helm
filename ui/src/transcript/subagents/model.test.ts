@@ -42,7 +42,9 @@ test('a running agent comes from the thread; a settled one prefers the saved row
   const live = agent({ step: 'echo alpha', stepTool: 'Bash' });
   const t = thread({ subagents: [live], subagentsRunning: 1 });
   assert.equal(subagentFor(agentRow(), t), live);
-  assert.equal(subagentFor(agentRow({ toolCallId: 'other' }), t), null);
+  // A settled row for a call the thread does not know gets its own modest card, not the thread's.
+  const other = subagentFor(agentRow({ toolCallId: 'other' }), t);
+  assert.ok(other && other.toolCallId === 'other' && other.status === 'completed');
   // While it runs, the live state wins over any copy on the row.
   assert.equal(subagentFor(agentRow({ details: { subagent: agent({ status: 'stopped' }) } }), t), live);
   // Settled: the row's copy has the longer report and survives a restart.
@@ -51,9 +53,33 @@ test('a running agent comes from the thread; a settled one prefers the saved row
   const withSaved = agentRow({ details: { subagent: saved } });
   assert.equal(subagentFor(withSaved, thread({ subagents: [settledLive] })), saved);
   assert.equal(subagentFor(agentRow(), thread({ subagents: [settledLive] })), settledLive);
-  // After a restart the thread knows nothing; the row still does.
+  // After a restart the thread knows nothing; the row still does. A row with no copy of its own
+  // gets a derived card rather than nothing, so old sessions show cards too.
   assert.equal(subagentFor(withSaved, null), saved);
-  assert.equal(subagentFor(agentRow(), null), null);
+  const plain = subagentFor(agentRow(), null);
+  assert.ok(plain && plain.toolCallId === 'sa_1' && plain.status === 'completed');
+});
+
+test('a settled Agent row with no state of its own gets a modest card from what the row holds', () => {
+  const args = JSON.stringify({ description: 'Fix the chip ', subagent_type: 'coder', prompt: 'One\nTwo\nThree\nFour' });
+  const done = subagentFor(agentRow({ text: 'All green.', details: { toolArgs: args } }), null)!;
+  assert.deepEqual([done.name, done.agentType, done.assignment, done.status], ['Fix the chip', 'coder', 'One\nTwo\nThree', 'completed']);
+  assert.equal(done.report, 'All green.');
+  assert.equal(done.error, null);
+  assert.equal(done.durationMs, 0, 'nothing about time is invented');
+  // The output of a failed row reads as its error; a stopped row stops.
+  const bad = subagentFor(agentRow({ status: 'error', text: 'Rate limited', details: { toolArgs: args } }), null)!;
+  assert.deepEqual([bad.status, bad.error, bad.report], ['failed', 'Rate limited', null]);
+  assert.equal(subagentFor(agentRow({ status: 'interrupted' }), null)!.status, 'stopped');
+  // Old or odd arguments still make a card, just without a name.
+  const odd = subagentFor(agentRow({ details: { toolArgs: 'not json' } }), null)!;
+  assert.deepEqual([odd.name, odd.agentType], ['', '']);
+  // The whole output is capped where the saved copy caps its report.
+  const long = subagentFor(agentRow({ text: 'x'.repeat(20_000) }), null)!;
+  assert.equal(long.report?.length, 16_384);
+  assert.equal(long.reportTruncated, true);
+  // A row still streaming without a live state derives nothing: it has not settled.
+  assert.equal(subagentFor(agentRow({ status: 'streaming' }), null), null);
 });
 
 test('the preview line: the step while running, the error or the result once settled', () => {

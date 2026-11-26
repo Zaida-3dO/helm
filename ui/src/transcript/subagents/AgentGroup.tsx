@@ -1,5 +1,6 @@
 // Consecutive Agent calls in a transcript: one "N subagents" header over a grid of side-by-side
-// cards. An Agent call with no subagent state to show (an old row) falls back to its tool row.
+// cards. Only an Agent call that cannot be read as a card yet (still streaming with no live state)
+// falls back to its tool row; a settled row always shows a card, from saved state or from itself.
 
 import type { RowContext } from '../Rows.tsx';
 import { Row } from '../Rows.tsx';

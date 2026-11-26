@@ -234,3 +234,17 @@ export function chatRefOpens(chats: readonly { id: string }[], id: string): bool
   return chats.length === 0 || chats.some((c) => c.id === id);
 }
 
+/**
+ * Where a reference to a rolled-over chat goes instead of nowhere: the newest session of its
+ * roll-over stack that is still live (a later one carries on where it stopped). Null when no
+ * session of the stack is live — only then does the chip read as archived.
+ * `sessions` comes oldest first, as `chat_stack` reports it.
+ */
+export function chatChipTarget(sessions: readonly { id: string; archived: boolean }[], fromId: string): string | null {
+  for (let i = sessions.length - 1; i >= 0; i--) {
+    const s = sessions[i]!;
+    if (!s.archived && s.id !== fromId) return s.id;
+  }
+  return null;
+}
+
