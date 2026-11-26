@@ -341,9 +341,10 @@ fn read_trigger_line(w: &mut RuleWhen, key: &str, value: &str) {
                 "commands" => w.commands.extend(more),
                 "people" => w.people.extend(more),
                 _ => {
-                    let (keep, bad): (Vec<String>, Vec<String>) = more.into_iter().partition(|k| {
-                        matches!(k.as_str(), "coding" | "orchestrating" | "household")
-                    });
+                    let (keep, bad): (Vec<String>, Vec<String>) =
+                        more.into_iter().map(|k| k.to_lowercase()).partition(|k| {
+                            matches!(k.as_str(), "coding" | "orchestrating" | "household")
+                        });
                     for k in bad {
                         w.problems.push(format!(
                             "kinds: {k}: use coding, orchestrating or household"

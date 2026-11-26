@@ -940,8 +940,8 @@ mod tests {
     #[test]
     fn path_words_globs_and_command_splits_read_as_documented() {
         assert_eq!(
-            word_path("/c/Users/x/a.txt").as_deref(),
-            Some("c:/Users/x/a.txt")
+            word_path("/c/work/repo/a.txt").as_deref(),
+            Some("c:/work/repo/a.txt")
         );
         assert_eq!(word_path("/usr/bin"), None);
         assert_eq!(
