@@ -8,7 +8,8 @@
 //! | `helm_agents_list` / `_add` / `_remove` / `_reveal` | blocking / maintenance | as before, with the same optional `layer` |
 //! | `knowledge_get` | blocking | `{layer}` → `{layer, folder, rules, skills, agents, clashes, budget}` |
 //! | `knowledge_rule_read` | blocking | `{layer, path}` → `{rule, text}` (the text without its title line) |
-//! | `knowledge_rule_write` | maintenance | `{layer, path?, title, text, revision?}` → `{rule}`; a stale `revision` is a conflict |
+//! | `knowledge_rule_write` | maintenance | `{layer, path?, title, text, revision?, when?}` → `{rule}`; a stale `revision` is a conflict; `when` rewrites every trigger key (an empty one clears them) |
+//! | `knowledge_rules_preview` | blocking | `{layer, folder?, kind?, person?}` (plus optional `tool`/`command`) → `{rules: [{path, layer, title, decision, fires, why}]}` — which rules a chat there would get |
 //! | `knowledge_delete` | maintenance | `{layer, kind: rule\|skill\|agent, name}` → the layer as `knowledge_get` |
 //! | `knowledge_move` | maintenance | `{kind, name, from, to}` → `{moved}`; refused when the name is taken there |
 //! | `knowledge_copy` | maintenance | `{kind, name, from, to}` → `{copied}`; as a move, but the original stays |
@@ -28,6 +29,7 @@ use crate::launch::{self, ChatKnowledge, ProfileRef};
 use crate::layers::{Kind, Layer};
 use crate::memories::{self, HubMemory, MemError};
 use crate::sources::{self, SkillSource};
+use crate::triggers;
 use crate::undo::item_path;
 use crate::{agents, examples, plugins, rules, SkillEntry};
 use helm_core::profile::Profile;
@@ -101,6 +103,10 @@ struct RuleWriteArgs {
     /// Set or clear the header's "always include in full" flag; absent keeps it as it is.
     #[serde(default)]
     always: Option<bool>,
+    /// Rewrite every trigger key to this: `Some` replaces them (an all-empty `RuleWhen` clears
+    /// the trigger keys), `None` leaves them alone. Unknown header lines survive either way.
+    #[serde(default)]
+    when: Option<rules::RuleWhen>,
 }
 
 #[derive(Deserialize)]
@@ -394,6 +400,11 @@ fn knowledge_rule_read(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
 fn knowledge_rule_write(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
     let a: RuleWriteArgs = parse(v, "a layer, a title and the rule's text")?;
     let (_, layer, root) = layer_root(ctx, Some(&a.layer))?;
+    let mut when = a.when;
+    if let Some(w) = when.as_mut() {
+        // `problems` is read-only: what the old header could not say is not carried forward.
+        w.problems.clear();
+    }
     let rule = rules::write(
         &root,
         a.path.as_deref(),
@@ -401,11 +412,156 @@ fn knowledge_rule_write(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
         &a.text,
         a.revision.as_deref(),
         a.always,
+        when.as_ref(),
         rules::MAX_RULE_FILE as usize,
     )
     .map_err(|e| conflict_error(e, "The rule could not be saved."))?;
     knowledge_changed(ctx, &layer);
     Ok(json!({ "rule": rule }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RulesPreviewArgs {
+    layer: String,
+    /// The folder the imagined chat runs in.
+    #[serde(default)]
+    folder: Option<String>,
+    /// `coding`, `orchestrating` or `household`; derived from the folder when absent.
+    #[serde(default)]
+    kind: Option<String>,
+    /// The profile name of the imagined chat's person.
+    #[serde(default)]
+    person: Option<String>,
+    /// One tool call to test moment triggers against.
+    #[serde(default)]
+    tool: Option<String>,
+    #[serde(default)]
+    command: Option<String>,
+}
+
+/// Explain one rule's preview result in a short line the panel can show under it.
+fn preview_why(w: &rules::RuleWhen, facts: &triggers::Facts) -> String {
+    if w.is_empty() {
+        return "no When: every chat gets it".to_owned();
+    }
+    let lower = |list: &[String]| list.join(", ");
+    if !w.kinds.is_empty()
+        && !w
+            .kinds
+            .iter()
+            .any(|k| k.eq_ignore_ascii_case(facts.kind.as_str()))
+    {
+        return format!(
+            "kinds says {} — this chat is {}",
+            lower(&w.kinds),
+            facts.kind.as_str()
+        );
+    }
+    if !w.people.is_empty()
+        && !w.people.iter().any(|p| {
+            facts
+                .person
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(p))
+        })
+    {
+        return format!("people says {}", lower(&w.people));
+    }
+    if !w.pcs.is_empty() && !w.pcs.iter().any(|p| p.eq_ignore_ascii_case(&facts.pc)) {
+        return format!("pcs says {} — this PC is {}", lower(&w.pcs), facts.pc);
+    }
+    let today = facts.today.to_string();
+    if w.from.as_deref().is_some_and(|f| f > today.as_str()) {
+        return format!("starts on {}", w.from.as_deref().unwrap_or(""));
+    }
+    if w.until.as_deref().is_some_and(|u| u < today.as_str()) {
+        return format!("ended on {}", w.until.as_deref().unwrap_or(""));
+    }
+    if w.has_moment() {
+        let mut bits: Vec<String> = Vec::new();
+        for (key, list) in [
+            ("folders", &w.folders),
+            ("hosts", &w.hosts),
+            ("tools", &w.tools),
+            ("commands", &w.commands),
+        ] {
+            if !list.is_empty() {
+                bits.push(format!("{key}: {}", lower(list)));
+            }
+        }
+        return format!("waits for one of {}", bits.join(" · "));
+    }
+    "its When fits this chat".to_owned()
+}
+
+/// `knowledge_rules_preview`: which rules a chat with the given folder, kind and person would be
+/// shown at launch — and whether the named tool call would fire a moment rule. Like the budget
+/// view, a person's layer is read together with Everyone's, as a chat gets them.
+fn knowledge_rules_preview(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
+    let a: RulesPreviewArgs = parse(v, "a layer and what to imagine about the chat")?;
+    let (data, layer, _) = layer_root(ctx, Some(&a.layer))?;
+    let person_name = match (&layer, &a.person) {
+        (Layer::Profile(id), None) => id.clone(),
+        (_, Some(p)) => p.clone(),
+        (Layer::Everyone, None) => String::new(),
+    };
+    let who = ChatKnowledge {
+        profile: Some(ProfileRef {
+            id: match &layer {
+                Layer::Profile(id) => id.clone(),
+                Layer::Everyone => String::new(),
+            },
+            name: person_name,
+            is_home: false,
+        }),
+        project_id: None,
+        cwd: a.folder.clone().filter(|f| !f.trim().is_empty()),
+        orchestrating: a.kind.as_deref() == Some("orchestrating"),
+    };
+    let mut facts = triggers::Facts::of(&who, None);
+    if let Some(k) = a.kind.as_deref().and_then(triggers::ChatKind::parse) {
+        facts.kind = k;
+    }
+    let moment = a.tool.as_deref().map(|t| {
+        let input = match &a.command {
+            Some(c) => json!({"command": c}),
+            None => json!({}),
+        };
+        triggers::Moment::from_call(t, &input, facts.cwd.as_deref())
+    });
+    let mut rules_out: Vec<Value> = Vec::new();
+    for (group, items) in launch::rule_groups(&data, &who) {
+        let layer_key = if group == "Rules for everyone" {
+            "everyone".to_owned()
+        } else {
+            layer.key()
+        };
+        for r in items {
+            let decision = triggers::at_launch(
+                &r.front.when,
+                r.front.always,
+                r.body.chars().count(),
+                &facts,
+            );
+            let fires = moment
+                .as_ref()
+                .is_some_and(|m| triggers::fires(&r.front.when, &facts, m));
+            rules_out.push(json!({
+                "path": r.entry.path,
+                "layer": layer_key,
+                "title": r.entry.title,
+                "decision": match decision {
+                    triggers::Decision::Full => "full",
+                    triggers::Decision::Line => "line",
+                    triggers::Decision::Hidden => "hidden",
+                },
+                "fires": fires,
+                "why": preview_why(&r.front.when, &facts),
+            }));
+        }
+    }
+    Ok(json!({ "rules": rules_out }))
 }
 
 fn knowledge_delete(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
@@ -678,6 +834,11 @@ pub fn register_ops(reg: &mut OpRegistry) {
             OpClass::Maintenance,
             knowledge_rule_write,
         )
+        .blocking(
+            "knowledge_rules_preview",
+            OpClass::Blocking,
+            knowledge_rules_preview,
+        )
         .blocking("knowledge_delete", OpClass::Maintenance, knowledge_delete)
         .blocking("knowledge_move", OpClass::Maintenance, knowledge_move)
         .blocking("knowledge_copy", OpClass::Maintenance, knowledge_copy)
@@ -780,6 +941,50 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(stale.code, "conflict");
+
+        // A write carrying `when`: the trigger round-trips on the entry and feeds a summary.
+        let trig = knowledge_rule_write(
+            &ctx,
+            json!({
+                "layer": sam,
+                "title": "Push gates",
+                "text": "Ask before pushing.",
+                "when": {"commands": ["git push"], "kinds": ["coding"]}
+            }),
+        )
+        .unwrap();
+        let tpath = trig["rule"]["path"].as_str().unwrap().to_owned();
+        assert_eq!(tpath, "rules/push-gates.md");
+        assert_eq!(trig["rule"]["when"]["commands"][0], "git push");
+        assert_eq!(trig["rule"]["when"]["kinds"][0], "coding");
+        assert!(trig["rule"]["whenSummary"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("git push"));
+
+        // The preview answers as such a chat would see it: Sam's chats have no folder, so they
+        // are household chats — the coding gate hides the rule and the plain one comes whole.
+        let row_in = |v: &Value, p: &str| -> Value {
+            v["rules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["path"] == p)
+                .cloned()
+                .unwrap_or(Value::Null)
+        };
+        let plain_preview = knowledge_rules_preview(&ctx, json!({"layer": sam})).unwrap();
+        assert_eq!(row_in(&plain_preview, &tpath)["decision"], "hidden");
+        assert_eq!(row_in(&plain_preview, &path)["decision"], "full");
+        // An imagined coding chat running a push: the rule still waits at launch (its moment has
+        // not fired there yet — no folder in it) but the call fires it.
+        let fired = knowledge_rules_preview(
+            &ctx,
+            json!({"layer": sam, "kind": "coding", "tool": "Bash", "command": "git push origin"}),
+        )
+        .unwrap();
+        assert_eq!(row_in(&fired, &tpath)["decision"], "hidden");
+        assert_eq!(row_in(&fired, &tpath)["fires"], true);
 
         // A copy keeps the original and lands in the other list; a taken name is refused; a move
         // removes the original.

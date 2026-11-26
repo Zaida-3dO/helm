@@ -257,7 +257,7 @@ fn save_rule(ctx: &ToolCtx, mut a: Value) -> ToolResult {
         return for_person::stage_rule(ctx, &who, other, &a);
     }
     let title = str_arg(&a, "title").ok_or_else(|| ToolError::refused("title is required."))?;
-    let text = str_arg(&a, "text").ok_or_else(|| ToolError::refused("text is required."))?;
+    let text = str_arg(&a, "text");
     let data = profile_dir(ctx)?;
     let replace = str_arg(&a, "replace");
     // A replaced rule is looked for in the named layer, else the chat's own, then Everyone's.
@@ -266,6 +266,36 @@ fn save_rule(ctx: &ToolCtx, mut a: Value) -> ToolResult {
         _ => layer_of(&who, str_arg(&a, "scope"))?,
     };
     let root = layer.root(&data);
+    // With `replace` the text is optional: leaving it out keeps the rule's current text.
+    let text = match text {
+        Some(t) => t.to_owned(),
+        None => match replace {
+            Some(p) => rules::read(&root, p)
+                .map(|(_, cur)| rules::body_of(&cur))
+                .map_err(io_error)?,
+            None => {
+                return Err(ToolError::refused(
+                    "text is required unless replace names a rule.",
+                ))
+            }
+        },
+    };
+    // `when`: one object of trigger keys; the fields are read as the header would write them.
+    let when = match a.get("when") {
+        Some(v) if v.is_object() => {
+            let mut w: rules::RuleWhen = serde_json::from_value(v.clone()).map_err(|_| {
+                ToolError::refused("when must hold trigger keys such as tools, commands or kinds.")
+            })?;
+            w.problems.clear();
+            Some(w)
+        }
+        None | Some(Value::Null) => None,
+        Some(_) => {
+            return Err(ToolError::refused(
+                "when must be an object of trigger keys.",
+            ))
+        }
+    };
     let before = undo::digest(&data);
     let replaced = match replace {
         Some(p) => Some(undo::stash(&data, &layer, Kind::Rule, p).map_err(io_error)?),
@@ -276,9 +306,10 @@ fn save_rule(ctx: &ToolCtx, mut a: Value) -> ToolResult {
         &root,
         replace,
         title,
-        text,
+        &text,
         None,
         always,
+        when.as_ref(),
         rules::MAX_AGENT_RULE_TEXT,
     ) {
         Ok(e) => e,
@@ -414,7 +445,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
         ToolSpec::write(
             "app_save_rule",
             format!(
-                "Save a rule: an instruction about how to work that this chat's person (or everyone) wants every later chat to follow. Use it when the user asks you to always or never do something. A fact or lesson belongs in memory_write instead. {SCOPE_NOTE} `replace` is the path of an existing rule to rewrite (from app_list_knowledge). `always` keeps a rule whole in every chat's prompt. {PERSON_NOTE}{EXPLICIT}"
+                "Save a rule: an instruction about how to work that this chat's person (or everyone) wants every later chat to follow. Use it when the user asks you to always or never do something. A fact or lesson belongs in memory_write instead. {SCOPE_NOTE} `replace` is the path of an existing rule to rewrite (from app_list_knowledge); with `replace` a new `text` is optional — leaving it out keeps the rule's text. `always` keeps a rule whole in every chat's prompt. `when` says which chats and tool calls the rule reaches: until one matches, the chat does not see it. {PERSON_NOTE}{EXPLICIT}"
             ),
             json!({
                 "type": "object",
@@ -425,9 +456,10 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                     "person": person_schema(),
                     "reason": reason_schema(),
                     "replace": {"type": "string", "maxLength": 128, "description": "The path of the rule to rewrite, such as rules/git-habits.md."},
-                    "always": {"type": "boolean", "description": "true keeps a long rule whole in every chat's prompt instead of listing it by a line; use for short, essential rules. Omit to keep the rule's current setting."}
+                    "always": {"type": "boolean", "description": "true keeps a long rule whole in every chat's prompt instead of listing it by a line; use for short, essential rules. Omit to keep the rule's current setting."},
+                    "when": {"type": "object", "description": "Trigger keys: folders, hosts, pcs, tools, commands, kinds, people, dates."}
                 },
-                "required": ["title", "text"],
+                "required": ["title"],
                 "additionalProperties": false
             }),
         ),
@@ -533,6 +565,7 @@ mod tests {
             ChatKnowledge {
                 profile,
                 project_id: None,
+                ..ChatKnowledge::default()
             }
         }
     }
@@ -795,6 +828,39 @@ mod tests {
             .find(|r| r["path"] == "rules/pinned-rule.md")
             .unwrap();
         assert_eq!(row["always"], false);
+
+        // A `when` writes the trigger lines; leaving out `text` with `replace` keeps the rule's
+        // text, and an empty `when` clears the trigger keys again.
+        run(
+            "alex-chat",
+            "app_save_rule",
+            json!({
+                "title": "Pinned rule",
+                "replace": "rules/pinned-rule.md",
+                "when": {"tools": ["Bash"], "commands": ["git push"]}
+            }),
+        )
+        .unwrap();
+        let text = fs::read_to_string(&pinned).unwrap();
+        assert!(
+            text.contains("tools: Bash") && text.contains("commands: git push"),
+            "{text}"
+        );
+        assert!(
+            text.contains("By a line now."),
+            "text omitted with replace: the old text stays"
+        );
+        run(
+            "alex-chat",
+            "app_save_rule",
+            json!({"title": "Pinned rule", "replace": "rules/pinned-rule.md", "when": {}}),
+        )
+        .unwrap();
+        let text = fs::read_to_string(&pinned).unwrap();
+        assert!(
+            !text.contains("tools:") && text.contains("By a line now."),
+            "an empty when clears the triggers: {text}"
+        );
     }
 
     fn people_tables(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
@@ -1072,6 +1138,7 @@ mod tests {
             "Edited by Sam.",
             None,
             None,
+            None,
             rules::MAX_AGENT_RULE_TEXT,
         )
         .unwrap();
@@ -1083,6 +1150,39 @@ mod tests {
         assert!(fs::read_to_string(&sam_rule)
             .unwrap()
             .contains("Edited by Sam."));
+
+        // A staged rule carrying a When: the card states it in one line, and Approve writes the
+        // trigger keys into Sam's file.
+        let gated = run(
+            "app_save_rule",
+            json!({
+                "title": "Push carefully",
+                "text": "Ask before pushing.",
+                "person": "sam",
+                "when": {"commands": ["git push"], "kinds": ["coding"]}
+            }),
+        )
+        .unwrap();
+        let gid = gated["requestId"].as_str().unwrap().to_owned();
+        assert!(
+            card(&gid)
+                .summary
+                .lines()
+                .any(|l| l.starts_with("When:") && l.contains("git push")),
+            "{}",
+            card(&gid).summary
+        );
+        decide(&gid, helm_consent::Decision::Allow);
+        assert!(card(&gid)
+            .outcome
+            .unwrap_or_default()
+            .starts_with("Applied. Saved the rule Push carefully"));
+        let written =
+            fs::read_to_string(data.join("knowledge/people/sam/rules/push-carefully.md")).unwrap();
+        assert!(
+            written.contains("commands: git push") && written.contains("kinds: coding"),
+            "{written}"
+        );
 
         // A skill: the card shows the folder, description and file count; a folder changed in
         // between is refused, an untouched one is copied in.
