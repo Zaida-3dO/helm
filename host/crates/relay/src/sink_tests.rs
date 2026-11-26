@@ -2132,6 +2132,7 @@ fn vturn(id: &str, text: &str, mode: &str) -> VoiceTurn {
         sent_at: 0,
         age_minutes: None,
         continues: None,
+        urgency: None,
     }
 }
 
@@ -3119,6 +3120,7 @@ fn sturn(id: &str, text: &str, session: &str) -> crate::client::SpeakerTurn {
         person: None,
         context: None,
         escalated: false,
+        urgency: None,
     }
 }
 
