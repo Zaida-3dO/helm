@@ -341,15 +341,22 @@ export interface DictationView {
   configured: boolean;
   speechReserveGb: number;
   speechReserveMaxGb: number;
-  /** Windows' own speech service can run: the composer dictates live instead of recording. */
+  /** Windows' own speech service can run: the composer can dictate live. */
   liveAvailable: boolean;
+  /** Why it cannot, in one plain line, when `liveAvailable` is false. */
+  liveUnavailable: string | null;
+  /** Which way dictation goes first when both are possible: live words, or record then transcribe. */
+  mode: DictationMode;
 }
+
+export type DictationMode = 'live' | 'record';
 
 export interface DictationSettingsChange {
   sttUrl?: string;
   allowPrivateNetwork?: boolean;
   model?: string;
   language?: string;
+  mode?: DictationMode;
   speechReserveGb?: number;
 }
 
@@ -364,6 +371,44 @@ export function dictationOps(api: Api) {
     live: (action: 'start' | 'stop' | 'cancel') => api<{ ok: boolean }>('dictation_live', { action }),
   };
 }
+
+// ---- which way dictation goes ---------------------------------------------------------------
+
+export type DictationWay = 'live' | 'record' | 'none';
+
+/** How one press will dictate, and the plain reason when it is not the way the user asked for. */
+export interface DictationPlan {
+  way: DictationWay;
+  /** Why live was not used although it was asked for, with what is used instead; null otherwise. */
+  note: string | null;
+}
+
+/** A live session that failed to start is not tried again for this long. */
+export const LIVE_RETRY_MS = 120_000;
+
+/** The line for a live dictation that could not be used: why, and that the server takes over. */
+export function fellBackNote(reason: string | null): string {
+  const why = reason?.trim() || "Live dictation isn't available here.";
+  return `${/[.!?]$/.test(why) ? why : `${why}.`} Using your speech-to-text server instead.`;
+}
+
+/**
+ * The way a press dictates. Live is used when it is wanted (the setting says live, or there is no
+ * server to record for) and the host can run it; otherwise a configured server takes the
+ * recording, and when live was the wish the note says why it was not used. `liveFailure` is the
+ * reason a live session recently failed to start, which counts as live being unavailable.
+ */
+export function dictationPlan(view: DictationView | null, liveFailure: string | null = null): DictationPlan {
+  if (!view) return { way: 'none', note: null };
+  const liveWanted = view.mode !== 'record' || !view.configured;
+  const liveWorks = view.liveAvailable && liveFailure === null;
+  if (liveWanted && liveWorks) return { way: 'live', note: null };
+  if (view.configured) return { way: 'record', note: liveWanted ? fellBackNote(liveFailure ?? view.liveUnavailable) : null };
+  return { way: 'none', note: null };
+}
+
+/** What the pill and the button call each way. */
+export const WAY_LABEL: Record<DictationWay, string> = { live: 'Live', record: 'Recording', none: '' };
 
 /** What the pill says for a failure, and what the user can do about it. */
 export interface Problem {

@@ -14,6 +14,14 @@ configured: boolean,
  */
 speechReserveGb: number, speechReserveMaxGb: number, 
 /**
- * The Windows speech service can run here: the composer dictates live instead of recording.
+ * The Windows speech service can run here: the composer can dictate live.
  */
-liveAvailable: boolean, };
+liveAvailable: boolean, 
+/**
+ * Why it cannot, in one plain line, when `live_available` is false.
+ */
+liveUnavailable: string | null, 
+/**
+ * `live` or `record`: which way dictation goes first when both are possible.
+ */
+mode: string, };

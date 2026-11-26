@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { ApiError } from '../api/client.ts';
 import {
   clock,
+  dictationPlan,
   encodeWav,
   IDLE,
   keyStep,
@@ -19,6 +20,7 @@ import {
   spokenInsert,
   TAP_MS,
   wavSeconds,
+  type DictationView,
   type KeyAction,
   type KeyInput,
   type LiveEvent,
@@ -170,5 +172,44 @@ test('live words update the sentence in progress whole, and final text settles i
     s = next;
     assert.equal(s.provisional, wantProvisional, JSON.stringify(ev));
     assert.equal(settled, wantSettled, JSON.stringify(ev));
+  }
+});
+
+test('which way a press dictates, and why when live was not used', () => {
+  const view = (over: Partial<DictationView>): DictationView => ({
+    sttUrl: null,
+    allowPrivateNetwork: false,
+    model: 'm',
+    language: 'en',
+    configured: false,
+    speechReserveGb: 2,
+    speechReserveMaxGb: 24,
+    liveAvailable: true,
+    liveUnavailable: null,
+    mode: 'live',
+    ...over,
+  });
+  const server = { configured: true, sttUrl: 'http://127.0.0.1:8000' };
+  for (const [v, failure, way, note] of [
+    // Nothing loaded yet, or nothing that can dictate.
+    [null, null, 'none', null],
+    [view({ liveAvailable: false, liveUnavailable: 'No speech language.' }), null, 'none', null],
+    // Live is the first choice, with or without a server.
+    [view({}), null, 'live', null],
+    [view(server), null, 'live', null],
+    // Recording is chosen: a server records, but with no server live still dictates.
+    [view({ ...server, mode: 'record' }), null, 'record', null],
+    [view({ mode: 'record' }), null, 'live', null],
+    // Live wished for but it cannot start: the server takes over and the note says why.
+    [view({ ...server, liveAvailable: false, liveUnavailable: 'Windows has no speech language.' }), null, 'record', 'Windows has no speech language. Using your speech-to-text server instead.'],
+    [view({ ...server, liveAvailable: false }), null, 'record', "Live dictation isn't available here. Using your speech-to-text server instead."],
+    // A live session that just failed to start counts the same, with its own reason.
+    [view(server), 'It would not open', 'record', 'It would not open. Using your speech-to-text server instead.'],
+    [view({ ...server, mode: 'record' }), 'It would not open', 'record', null],
+    // No server: a failure leaves nothing to fall back on.
+    [view({}), 'It would not open', 'none', null],
+  ] as Array<[DictationView | null, string | null, string, string | null]>) {
+    const plan = dictationPlan(v, failure);
+    assert.deepEqual([plan.way, plan.note], [way, note], JSON.stringify({ v, failure }));
   }
 });

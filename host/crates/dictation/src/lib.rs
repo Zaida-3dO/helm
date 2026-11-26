@@ -24,6 +24,12 @@
 //! the page shows them as they come — nothing is recorded or sent anywhere. Where the service has
 //! no model, or no microphone, the op answers in one line and the page keeps the recording path.
 //!
+//! **Live or recorded, the user's choice.** The `mode` setting is `live` (the default) or `record`.
+//! With `live` the composer dictates live whenever the speech service can start and falls back to
+//! the speech-to-text server, when one is set, if it cannot; with `record` a configured server
+//! gets the recording, as before. With no server set, dictation is live either way. The view says
+//! whether live can run (`liveAvailable`) and, when it cannot, why (`liveUnavailable`).
+//!
 //! **Speech-to-text never unloads a local model.** A recording goes straight to the server, loaded
 //! model or not: a slower transcription costs less than a model that has to load again. The
 //! speech reserve (a setting of Local models) is still kept, but only when a local model has to
@@ -34,7 +40,7 @@
 //! | Op | Class | Args | Result |
 //! |---|---|---|---|
 //! | `dictation_settings_get` | blocking | none | [`ops::View`] |
-//! | `dictation_settings_set` | maintenance | `{sttUrl?, allowPrivateNetwork?, model?, language?, speechReserveGb?}` | [`ops::View`] |
+//! | `dictation_settings_set` | maintenance | `{sttUrl?, allowPrivateNetwork?, model?, language?, mode?, speechReserveGb?}` | [`ops::View`] |
 //! | `dictation_transcribe` | blocking | `{wavBase64}` | `{text}`, or an error whose `code` is `not_set_up`, `bad_address`, `too_big`, `bad_audio`, `unreachable`, `server` or `unreadable` |
 //! | `dictation_test` | blocking | none | `{ok, message}` (one second of silence to the server) |
 //! | `dictation_live` | blocking | `{action: start, stop or cancel}` | `{ok}`, or an error whose `code` is `not_available`. A `start` takes the microphone from any session still running. |

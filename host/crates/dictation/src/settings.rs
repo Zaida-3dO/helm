@@ -15,6 +15,12 @@ pub const DEFAULT_MODEL: &str = "large-v3-turbo";
 pub const DEFAULT_LANGUAGE: &str = "en";
 /// The language setting that leaves the choice to the server.
 pub const AUTO_LANGUAGE: &str = "auto";
+/// Dictate live with Windows' own speech service whenever it can start; the server is the
+/// fallback when it cannot.
+pub const MODE_LIVE: &str = "live";
+/// Record, then send the recording to the server (the more accurate way, with no words until the
+/// end). Without a server this still dictates live.
+pub const MODE_RECORD: &str = "record";
 
 const MAX_MODEL: usize = 100;
 
@@ -28,6 +34,8 @@ pub struct Settings {
     pub model: String,
     /// A language code like `en`, or [`AUTO_LANGUAGE`].
     pub language: String,
+    /// [`MODE_LIVE`] or [`MODE_RECORD`]: which way dictation goes first when both are possible.
+    pub mode: String,
 }
 
 impl Default for Settings {
@@ -37,6 +45,7 @@ impl Default for Settings {
             allow_private_network: false,
             model: DEFAULT_MODEL.to_owned(),
             language: DEFAULT_LANGUAGE.to_owned(),
+            mode: MODE_LIVE.to_owned(),
         }
     }
 }
@@ -80,6 +89,10 @@ pub fn load(tx: &Transaction<'_>) -> Settings {
             .as_str()
             .filter(|l| language_ok(l))
             .map_or(d.language, str::to_owned),
+        mode: v["mode"]
+            .as_str()
+            .filter(|m| mode_ok(m))
+            .map_or(d.mode, str::to_owned),
     }
 }
 
@@ -89,6 +102,7 @@ pub fn save(tx: &Transaction<'_>, s: &Settings) -> rusqlite::Result<()> {
         "allowPrivateNetwork": s.allow_private_network,
         "model": s.model,
         "language": s.language,
+        "mode": s.mode,
     });
     tx.execute(
         "INSERT INTO dictation_settings (id, value) VALUES (1, ?1)
@@ -104,6 +118,11 @@ pub fn model_ok(m: &str) -> bool {
         && m.len() <= MAX_MODEL
         && m.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._-:/".contains(&b))
+}
+
+/// `live` or `record`.
+pub fn mode_ok(m: &str) -> bool {
+    m == MODE_LIVE || m == MODE_RECORD
 }
 
 /// `auto`, or a code like `en`, `fr` or `pt-BR`.
