@@ -32,6 +32,14 @@
 //!   `speaker_session_closed {sessionId, closedAt}` so Helm can close and archive its speaker
 //!   chats; `closedAt` is when the session ran out, not when the hub noticed. The next
 //!   utterance on that speaker starts a new session with a fresh id.
+//! - **Records.** A speaker that answered by itself tells Helm so afterwards (`POST /speaker/record`)
+//!   so the exchange is kept in a chat. A record is not a turn: no answer comes back and no model
+//!   runs. It joins its own small queue, goes down the same line as a `speaker_record` frame
+//!   (one at a time, in order, sent again every [`RESEND_AFTER_MS`] until Helm answers with
+//!   `voice_ack`), and is given up on after [`RECORD_HOLD_MS`] without a line, or
+//!   [`RECORD_ABANDON_MS`] after its first send. It keeps its session open until it is settled.
+//! - **Timing.** Each turn remembers when the hub took it, sent it down the line, had it
+//!   acknowledged and had its answer, in the hub's own clock ([`SpeakerBridge::timing`]).
 //! - **Stamping.** Every turn frame carries the fields the speaker's side and Helm read. Who is
 //!   speaking, how sure the hub is of them, and what permission an action needs are not decided
 //!   here yet, so those fields carry their fixed starting values: assurance `none`, no person,
@@ -79,6 +87,13 @@ pub const MAX_STT_SECONDS: f64 = 30.0;
 pub const MIN_AUDIO_SECONDS: f64 = 0.3;
 /// The longest turn text kept.
 pub const MAX_TEXT_CHARS: usize = 8_000;
+/// Records one token may have waiting at once, and how long one waits for a line, or for Helm to
+/// acknowledge it after its first send, before it is given up on.
+pub const RECORD_CAP: usize = 50;
+pub const RECORD_HOLD_MS: i64 = 30 * 60_000;
+pub const RECORD_ABANDON_MS: i64 = 120_000;
+/// The longest escalation context kept with a turn, in bytes.
+pub const MAX_CONTEXT_BYTES: usize = 2_048;
 /// A session idles out this long, by default, and the range the setting allows.
 pub const DEFAULT_IDLE_MINUTES: u64 = 10;
 pub const IDLE_MINUTES_RANGE: std::ops::RangeInclusive<u64> = 3..=30;
@@ -164,6 +179,42 @@ struct TurnRec {
     went: Option<(i64, u64, i64)>,
     /// When this turn became the one waiting for a line.
     head_since: Option<i64>,
+    /// What the speaker said just before (its last two local exchanges), when it sent that.
+    context: Option<String>,
+    /// `escalation` when the speaker could not answer by itself and handed the turn over.
+    origin: Option<String>,
+    /// When Helm acknowledged the turn, and when its answer came in (the hub's clock).
+    acked: Option<i64>,
+    answered: Option<i64>,
+}
+
+/// Where a record stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordState {
+    /// Not sent yet: no line takes the speaker's turns.
+    Queued,
+    /// Sent down the line, waiting for `voice_ack`.
+    Sent,
+    /// Helm stored it.
+    Acked,
+    /// Given up on: no line took it in time, or Helm never acknowledged it.
+    Dropped,
+}
+
+impl RecordState {
+    fn live(self) -> bool {
+        matches!(self, RecordState::Queued | RecordState::Sent)
+    }
+}
+
+struct RecordRec {
+    rec: SpeakerRecord,
+    session: String,
+    at: i64,
+    state: RecordState,
+    changed: i64,
+    first_sent: Option<i64>,
+    went: Option<(i64, u64, i64)>,
 }
 
 /// One talk on one speaker: its clock, and the lines that carried it.
@@ -199,9 +250,13 @@ struct TokenState {
     order: VecDeque<String>,
     /// Keyed by device; the empty string when the call names none.
     sessions: HashMap<String, Session>,
-    /// Sliding-minute windows for the two rate limits.
+    /// Records the speaker made of its own answers, by their id, and their ids in upload order.
+    records: HashMap<String, RecordRec>,
+    record_order: VecDeque<String>,
+    /// Sliding-minute windows for the three rate limits.
     turn_times: VecDeque<i64>,
     stt_times: VecDeque<i64>,
+    record_times: VecDeque<i64>,
 }
 
 /// What `GET /speaker/status` answers.
@@ -274,6 +329,44 @@ pub struct SpeakerTurn {
     pub area: Option<String>,
     /// Recorded in the registry only; routing never reads it.
     pub presence: Option<Value>,
+    /// The speaker's last two local exchanges, so a handed-over turn ("and the bedroom") makes
+    /// sense; at most [`MAX_CONTEXT_BYTES`].
+    pub context: Option<String>,
+    /// `escalation` when the speaker handed the turn over after trying itself.
+    pub origin: Option<String>,
+}
+
+/// What a `/speaker/record` call carries: one exchange the speaker answered without Helm.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpeakerRecord {
+    pub id: String,
+    pub device: Option<String>,
+    pub room: Option<String>,
+    pub area: Option<String>,
+    /// When the exchange began, in epoch milliseconds.
+    pub started_at: i64,
+    /// What was asked, and what was spoken back.
+    pub text: String,
+    pub answer: String,
+    /// `answer`, `escalated` or `error`.
+    pub kind: String,
+    /// `{name, summary, ok}` for each tool the speaker used.
+    pub tool_calls: Vec<Value>,
+    /// Short notes of anything still open after the exchange.
+    pub leftover: Vec<String>,
+    pub timings: Option<Value>,
+    pub model: Option<String>,
+}
+
+/// How a `/speaker/record` call is taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordOutcome {
+    /// Taken (or already taken: the same id again is not stored twice).
+    Accepted,
+    /// Too many waiting, or too many in the last minute.
+    Rejected,
+    /// The id belongs to another speaker token's turn or record, or to one of this token's turns.
+    Conflict,
 }
 
 /// The turn frame sent down the line: the phone's `voice` frame plus the speaker's own fields.
@@ -298,6 +391,31 @@ fn turn_frame(t: &TurnRec, person: i64) -> Value {
         "person": Value::Null,
         "tier": "do",
         "until": Value::Null,
+        "context": t.context,
+        "origin": t.origin,
+    })
+}
+
+/// The record frame sent down the line: one exchange for Helm to keep, nothing to answer.
+fn record_frame(r: &RecordRec, person: i64) -> Value {
+    json!({
+        "type": "speaker_record",
+        "id": r.rec.id,
+        "personId": person.to_string(),
+        "lane": "speaker",
+        "device": r.rec.device,
+        "room": r.rec.room,
+        "area": r.rec.area,
+        "session": r.session,
+        "startedAt": r.rec.started_at,
+        "sentAt": r.at,
+        "text": r.rec.text,
+        "answer": r.rec.answer,
+        "kind": r.rec.kind,
+        "toolCalls": r.rec.tool_calls,
+        "leftover": r.rec.leftover,
+        "timings": r.rec.timings,
+        "model": r.rec.model,
     })
 }
 
@@ -451,14 +569,17 @@ impl SpeakerBridge {
         {
             let mut states = self.locked();
             // While a turn id lives at all it belongs to one token.
-            if states
-                .iter()
-                .any(|(id, s)| *id != token && s.turns.contains_key(&t.id))
-            {
+            if states.iter().any(|(id, s)| {
+                *id != token && (s.turns.contains_key(&t.id) || s.records.contains_key(&t.id))
+            }) {
                 return TurnOutcome::Conflict;
             }
             let st = states.entry(token).or_default();
             st.person = person;
+            // An id this token already used for a record is not a turn's.
+            if st.records.contains_key(&t.id) {
+                return TurnOutcome::Conflict;
+            }
             if let Some(old) = st.turns.get(&t.id) {
                 // The same id again from the same token is answered from its record, never re-run.
                 return match old.state {
@@ -478,17 +599,7 @@ impl SpeakerBridge {
                 return TurnOutcome::Rejected;
             }
             // The session: open one when this speaker has none, and mark it talking.
-            let session = st
-                .sessions
-                .entry(device.clone())
-                .or_insert_with(|| Session {
-                    id: uuid::Uuid::new_v4().simple().to_string(),
-                    started: now,
-                    last_active: now,
-                    carried: HashSet::new(),
-                });
-            session.last_active = now;
-            let session = session.id.clone();
+            let session = Self::open_session(st, &device, now);
             st.turns.insert(
                 t.id.clone(),
                 TurnRec {
@@ -505,28 +616,133 @@ impl SpeakerBridge {
                     first_sent: None,
                     went: None,
                     head_since: None,
+                    context: t.context.clone(),
+                    origin: t.origin.clone(),
+                    acked: None,
+                    answered: None,
                 },
             );
             st.order.push_back(t.id.clone());
         }
-        // The speaker registry notes what this call named, when it named a speaker at all.
-        if let Some(d) = t.device.as_deref().filter(|d| !d.is_empty()) {
-            let registry = self.lines.registry();
-            let registry = registry.lock().unwrap_or_else(|r| r.into_inner());
-            let presence = t.presence.as_ref().map(|p| p.to_string());
-            if let Err(e) = registry.upsert_speaker(
-                token,
-                d,
-                t.room.as_deref(),
-                t.area.as_deref(),
-                presence.as_deref(),
-                now,
-            ) {
-                eprintln!("speaker: the registry write failed: {e}");
-            }
-        }
+        self.note_speaker(
+            token,
+            t.device.as_deref(),
+            t.room.as_deref(),
+            t.area.as_deref(),
+            t.presence.as_ref(),
+            now,
+        );
         self.tick(now);
         self.outcome(token, &t.id)
+    }
+
+    /// The session of this speaker's device: open one when there is none, and mark it talking.
+    fn open_session(st: &mut TokenState, device: &str, now: i64) -> String {
+        let session = st
+            .sessions
+            .entry(device.to_owned())
+            .or_insert_with(|| Session {
+                id: uuid::Uuid::new_v4().simple().to_string(),
+                started: now,
+                last_active: now,
+                carried: HashSet::new(),
+            });
+        session.last_active = now;
+        session.id.clone()
+    }
+
+    /// The speaker registry notes what a call named, when it named a speaker at all.
+    fn note_speaker(
+        &self,
+        token: i64,
+        device: Option<&str>,
+        room: Option<&str>,
+        area: Option<&str>,
+        presence: Option<&Value>,
+        now: i64,
+    ) {
+        let Some(d) = device.filter(|d| !d.is_empty()) else {
+            return;
+        };
+        let registry = self.lines.registry();
+        let registry = registry.lock().unwrap_or_else(|r| r.into_inner());
+        let presence = presence.map(|p| p.to_string());
+        if let Err(e) = registry.upsert_speaker(token, d, room, area, presence.as_deref(), now) {
+            eprintln!("speaker: the registry write failed: {e}");
+        }
+    }
+
+    /// `POST /speaker/record`: an exchange the speaker answered by itself joins the token's
+    /// record queue, to be put down the line when a Helm takes it. The same id again from the
+    /// same token is taken once; the call is answered at once, whatever the line is doing.
+    pub fn begin_record(
+        &self,
+        token: i64,
+        person: i64,
+        rec: SpeakerRecord,
+        now: i64,
+    ) -> RecordOutcome {
+        let device = rec.device.clone().unwrap_or_default();
+        {
+            let mut states = self.locked();
+            if states.iter().any(|(id, s)| {
+                *id != token && (s.turns.contains_key(&rec.id) || s.records.contains_key(&rec.id))
+            }) {
+                return RecordOutcome::Conflict;
+            }
+            let st = states.entry(token).or_default();
+            st.person = person;
+            if st.turns.contains_key(&rec.id) {
+                return RecordOutcome::Conflict;
+            }
+            if st.records.contains_key(&rec.id) {
+                return RecordOutcome::Accepted;
+            }
+            if !Self::allow(&mut st.record_times, now) {
+                return RecordOutcome::Rejected;
+            }
+            if st.records.values().filter(|r| r.state.live()).count() >= RECORD_CAP {
+                return RecordOutcome::Rejected;
+            }
+            let session = Self::open_session(st, &device, now);
+            st.record_order.push_back(rec.id.clone());
+            st.records.insert(
+                rec.id.clone(),
+                RecordRec {
+                    rec: rec.clone(),
+                    session,
+                    at: now,
+                    state: RecordState::Queued,
+                    changed: now,
+                    first_sent: None,
+                    went: None,
+                },
+            );
+        }
+        self.note_speaker(
+            token,
+            rec.device.as_deref(),
+            rec.room.as_deref(),
+            rec.area.as_deref(),
+            None,
+            now,
+        );
+        self.tick(now);
+        RecordOutcome::Accepted
+    }
+
+    /// The hub's own clock for one turn, in epoch milliseconds: when it took the turn, put it
+    /// down the line, had it acknowledged and had its answer (each `null` until it happens).
+    /// `None` for a turn this token has no record of.
+    pub fn timing(&self, token: i64, id: &str) -> Option<Value> {
+        let states = self.locked();
+        let t = states.get(&token)?.turns.get(id)?;
+        Some(json!({
+            "received": t.at,
+            "delivered_to_pc": t.first_sent,
+            "acked": t.acked,
+            "answered": t.answered,
+        }))
     }
 
     /// Where a turn stands now, for the caller's wait and for `GET /speaker/turn/<id>`.
@@ -557,6 +773,18 @@ impl SpeakerBridge {
     /// Helm's speaker-tagged frame: an ack, a working line (logged only), or the answer. A
     /// reply only counts when it is tagged with the person the turn was routed to.
     pub fn on_upstream(&self, person: i64, u: Upstream, now: i64) {
+        // An ack of a record: Helm has stored the exchange.
+        if let Upstream::SpeakerAck(id) = &u {
+            let mut states = self.locked();
+            if let Some(st) = states.values_mut().find(|s| s.records.contains_key(id)) {
+                let own = st.person == person;
+                if let Some(r) = st.records.get_mut(id).filter(|r| own && r.state.live()) {
+                    r.state = RecordState::Acked;
+                    r.changed = now;
+                }
+                return;
+            }
+        }
         let (id, text, done) = match &u {
             Upstream::SpeakerAck(id) => (id.clone(), None, false),
             Upstream::SpeakerStatus { turn, .. } => {
@@ -586,10 +814,91 @@ impl SpeakerBridge {
         if done {
             t.state = TurnState::Done;
             t.answer = Some(text.unwrap_or_default());
+            t.answered = Some(now);
         } else if t.state == TurnState::Sent {
             t.state = TurnState::Working;
+            t.acked = Some(now);
         }
         t.changed = now;
+    }
+
+    /// The record queue of one token: finished records are forgotten once their idempotency
+    /// window has passed; the first live one is put down the line (and again on the resend
+    /// schedule) until Helm acknowledges it, and given up on when it waits too long.
+    fn pump_records(&self, st: &mut TokenState, now: i64) {
+        let gone: Vec<String> = st
+            .records
+            .iter()
+            .filter(|(_, r)| !r.state.live() && now - r.changed >= DONE_KEEP_MS)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in gone {
+            st.records.remove(&id);
+            st.record_order.retain(|o| *o != id);
+        }
+        for r in st.records.values_mut().filter(|r| r.state.live()) {
+            let overdue = now - r.at >= RECORD_HOLD_MS
+                || r.first_sent.is_some_and(|at| now - at >= RECORD_ABANDON_MS);
+            if overdue {
+                // Never the words: only that a record was lost.
+                eprintln!("speaker: record {} was not taken by any Helm", r.rec.id);
+                r.state = RecordState::Dropped;
+                r.changed = now;
+            }
+        }
+        let person = st.person;
+        let Some(head) = st
+            .record_order
+            .iter()
+            .find(|id| st.records.get(*id).is_some_and(|r| r.state.live()))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(r) = st.records.get_mut(&head) else {
+            return;
+        };
+        let line = match (r.state, r.went) {
+            (RecordState::Queued, _) => self
+                .lines
+                .route_for(person, Channel::Speaker)
+                .and_then(|line| line.generation().map(|g| (line, g)))
+                .map(|(line, gen)| (line, gen, true)),
+            (RecordState::Sent, Some((client, gen, at))) if now - at >= RESEND_AFTER_MS => {
+                match self
+                    .lines
+                    .get(client)
+                    .filter(|line| line.generation() == Some(gen))
+                {
+                    Some(line) => Some((line, gen, false)),
+                    None => {
+                        // The line went down with the record unacknowledged: it waits for the
+                        // next line that takes the speaker.
+                        r.state = RecordState::Queued;
+                        r.went = None;
+                        r.changed = now;
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        let Some((line, gen, first)) = line else {
+            return;
+        };
+        let client = line_client(&line).unwrap_or(0);
+        r.state = RecordState::Sent;
+        r.changed = now;
+        r.first_sent.get_or_insert(now);
+        r.went = Some((client, gen, now));
+        let frame = record_frame(r, person);
+        let session = r.session.clone();
+        if first {
+            if let Some(s) = st.sessions.values_mut().find(|s| s.id == session) {
+                s.carried.insert(client);
+            }
+        }
+        line.send(&frame);
     }
 
     /// Everything that depends on time, or on a line coming up, for every token.
@@ -609,6 +918,7 @@ impl SpeakerBridge {
                     st.turns.remove(&id);
                     st.order.retain(|o| *o != id);
                 }
+                self.pump_records(st, now);
                 // Sessions: an idle one closes, and the lines that carried it are told.
                 let idle_ms = self.cfg.idle.as_millis() as i64;
                 let idle_now: Vec<String> = st
@@ -616,10 +926,14 @@ impl SpeakerBridge {
                     .iter()
                     .filter(|(_, s)| now - s.last_active >= idle_ms)
                     .filter(|(_, s)| {
-                        // A turn still running keeps its session open.
+                        // A turn, or a record not yet taken, still running keeps its session open.
                         !st.turns
                             .values()
                             .any(|t| t.session == s.id && t.state.live())
+                            && !st
+                                .records
+                                .values()
+                                .any(|r| r.session == s.id && r.state.live())
                     })
                     .map(|(device, _)| device.clone())
                     .collect();
@@ -677,6 +991,7 @@ impl SpeakerBridge {
                                     if claimed {
                                         t.state = TurnState::Done;
                                         t.answer = Some(NEED_UPDATE.to_owned());
+                                        t.answered = Some(now);
                                     } else {
                                         t.state = TurnState::Offline;
                                     }
@@ -849,6 +1164,10 @@ mod tests {
             first_sent: None,
             went: None,
             head_since: None,
+            context: None,
+            origin: None,
+            acked: None,
+            answered: None,
         };
         let f = turn_frame(&t, 7);
         assert_eq!(f["type"], json!("voice"));
@@ -861,5 +1180,66 @@ mod tests {
         assert_eq!(f["session"], json!("s-1"));
         assert_eq!(f["room"], Value::Null);
         assert_eq!(f["area"], json!("Study"));
+        // No context and no origin: both are there, and null.
+        assert_eq!(
+            (f["context"].clone(), f["origin"].clone()),
+            (Value::Null, Value::Null)
+        );
+        // A handed-over turn carries what the speaker said just before, and says so.
+        let handed = TurnRec {
+            context: Some("lights on; and the bedroom".into()),
+            origin: Some("escalation".into()),
+            ..t
+        };
+        let f = turn_frame(&handed, 7);
+        assert_eq!(f["context"], json!("lights on; and the bedroom"));
+        assert_eq!(f["origin"], json!("escalation"));
+    }
+
+    /// A record frame is the exchange as the speaker sent it, with the session and the person
+    /// the hub decided, and it is never a `voice` frame.
+    #[test]
+    fn a_record_frame_carries_the_exchange_and_its_session() {
+        let r = RecordRec {
+            rec: SpeakerRecord {
+                id: "r-1".into(),
+                device: Some("desk".into()),
+                room: Some("Study".into()),
+                area: None,
+                started_at: 5,
+                text: "Lights on".into(),
+                answer: "Done.".into(),
+                kind: "answer".into(),
+                tool_calls: vec![json!({"name": "light", "summary": "on", "ok": true})],
+                leftover: vec!["buy bulbs".into()],
+                timings: None,
+                model: Some("small".into()),
+            },
+            session: "s-1".into(),
+            at: 10,
+            state: RecordState::Queued,
+            changed: 10,
+            first_sent: None,
+            went: None,
+        };
+        let f = record_frame(&r, 7);
+        assert_eq!(f["type"], json!("speaker_record"));
+        assert_eq!(f["lane"], json!("speaker"));
+        assert_eq!(
+            (f["id"].clone(), f["personId"].clone()),
+            (json!("r-1"), json!("7"))
+        );
+        assert_eq!(f["session"], json!("s-1"));
+        assert_eq!(f["startedAt"], json!(5));
+        assert_eq!(
+            (f["text"].clone(), f["answer"].clone()),
+            (json!("Lights on"), json!("Done."))
+        );
+        assert_eq!(f["toolCalls"][0]["name"], json!("light"));
+        assert_eq!(f["leftover"], json!(["buy bulbs"]));
+        assert_eq!(
+            (f["area"].clone(), f["timings"].clone()),
+            (Value::Null, Value::Null)
+        );
     }
 }

@@ -1,5 +1,5 @@
-//! The four HTTP routes a room speaker calls: `/speaker/status`, `/speaker/stt`,
-//! `/speaker/turn` and `/speaker/turn/<id>`.
+//! The five HTTP routes a room speaker calls: `/speaker/status`, `/speaker/stt`,
+//! `/speaker/turn`, `/speaker/turn/<id>` and `/speaker/record`.
 //!
 //! They are the speaker's whole view of the hub, and the hub's whole view of a speaker: one
 //! bearer token per speaker, of the `speaker` scope, which stands alone — it opens these routes
@@ -15,7 +15,11 @@
 
 use crate::auth::Scope;
 use crate::server::{client_of, refused, unauthorized, AppState};
-use crate::speaker::{SpeakerBridge, SpeakerTurn, SttOutcome, TurnOutcome, VERSION};
+use crate::speaker::{
+    RecordOutcome, SpeakerBridge, SpeakerRecord, SpeakerTurn, SttOutcome, TurnOutcome,
+    MAX_CONTEXT_BYTES, MAX_TEXT_CHARS, VERSION,
+};
+use crate::telegram::now_ms;
 use crate::voice::valid_id;
 use crate::voice_http::{query_value, read_capped, ReadError};
 use axum::extract::{Path, RawQuery, State};
@@ -27,8 +31,12 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// A turn call's JSON body is small: the words plus a room snapshot.
+/// A turn call's JSON body is small: the words plus a room snapshot. A record's is the same size.
 pub const MAX_TURN_BODY: usize = 32 * 1024;
+/// What a record keeps of its lists: tools used, notes left over, and the timings object.
+const MAX_RECORD_TOOLS: usize = 50;
+const MAX_RECORD_LEFTOVER: usize = 20;
+const MAX_RECORD_TIMINGS_BYTES: usize = 4 * 1024;
 /// How long a turn call or poll may hold the connection open, and the longest wait asked for.
 pub const MAX_WAIT_SECS: u64 = 25;
 pub const DEFAULT_WAIT_SECS: u64 = 20;
@@ -43,6 +51,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/speaker/stt", post(post_stt))
         .route("/speaker/turn", post(post_turn))
         .route("/speaker/turn/{id}", get(get_turn))
+        .route("/speaker/record", post(post_record))
 }
 
 /// Who is calling and the speaker line they speak to, or the answer to refuse them with: 401
@@ -173,6 +182,21 @@ fn turn_body(raw: &[u8]) -> Result<TurnBody, Box<Response>> {
             "the turn needs text",
         )));
     };
+    // The speaker's last two local exchanges: only the end of it is kept when it is too long, since
+    // the newest words are the ones a follow-up leans on.
+    let context = field("context")
+        .map(|c| tail_bytes(c.trim(), MAX_CONTEXT_BYTES).to_owned())
+        .filter(|c| !c.is_empty());
+    let origin = match field("origin").as_deref() {
+        None => None,
+        Some("escalation") => Some("escalation".to_owned()),
+        Some(_) => {
+            return Err(Box::new(refused(
+                StatusCode::BAD_REQUEST,
+                "the origin must be escalation, or left out",
+            )))
+        }
+    };
     let wait = value
         .get("wait")
         .and_then(|v| {
@@ -190,8 +214,145 @@ fn turn_body(raw: &[u8]) -> Result<TurnBody, Box<Response>> {
             room: small("room"),
             area: small("area"),
             presence: value.get("presence").cloned().filter(Value::is_object),
+            context,
+            origin,
         },
     })
+}
+
+/// The last `max` bytes of `s`, starting on a character.
+fn tail_bytes(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut at = s.len() - max;
+    while !s.is_char_boundary(at) {
+        at += 1;
+    }
+    &s[at..]
+}
+
+/// Read and check a record body. A body that is not a JSON object, or without a usable id, text
+/// or kind, is a 400. Lists are cut to their limits rather than refused: a record is the
+/// speaker's own log of what it already said, and losing a note is better than losing the record.
+fn record_body(raw: &[u8], now: i64) -> Result<SpeakerRecord, Box<Response>> {
+    let bad = |why: &'static str| Box::new(refused(StatusCode::BAD_REQUEST, why));
+    let Ok(value) = serde_json::from_slice::<Value>(raw) else {
+        return Err(bad("the record is not a JSON object"));
+    };
+    let text_of = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
+    let small = |v: &Value, k: &str, n: usize| {
+        text_of(v, k)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.chars().take(n).collect::<String>())
+    };
+    let Some(id) = text_of(&value, "turn_id") else {
+        return Err(bad("the record needs a turn_id"));
+    };
+    if !valid_id(&id) {
+        return Err(bad("the turn_id is not usable"));
+    }
+    let Some(text) = text_of(&value, "text").filter(|t| !t.trim().is_empty()) else {
+        return Err(bad("the record needs text"));
+    };
+    let answer = text_of(&value, "answer").unwrap_or_default();
+    if text.chars().count() > MAX_TEXT_CHARS || answer.chars().count() > MAX_TEXT_CHARS {
+        return Err(bad("the record's words are too long"));
+    }
+    let kind = match text_of(&value, "kind").as_deref() {
+        Some(k @ ("answer" | "escalated" | "error")) => k.to_owned(),
+        _ => return Err(bad("the kind must be answer, escalated or error")),
+    };
+    let tool_calls: Vec<Value> = value
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter(|c| c.is_object())
+                .take(MAX_RECORD_TOOLS)
+                .map(|c| {
+                    json!({
+                        "name": small(c, "name", 120).unwrap_or_default(),
+                        "summary": small(c, "summary", 300).unwrap_or_default(),
+                        "ok": c.get("ok").and_then(Value::as_bool).unwrap_or(true),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let leftover: Vec<String> = value
+        .get("leftover")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .map(|s| s.trim().chars().take(300).collect::<String>())
+                .filter(|s| !s.is_empty())
+                .take(MAX_RECORD_LEFTOVER)
+                .collect()
+        })
+        .unwrap_or_default();
+    let timings = value
+        .get("timings")
+        .filter(|t| t.is_object() && t.to_string().len() <= MAX_RECORD_TIMINGS_BYTES)
+        .cloned();
+    Ok(SpeakerRecord {
+        id,
+        device: small(&value, "device", 120),
+        room: small(&value, "room", 120),
+        area: small(&value, "area", 120),
+        started_at: value
+            .get("started_at")
+            .and_then(Value::as_i64)
+            .filter(|t| *t > 0)
+            .unwrap_or(now),
+        text,
+        answer,
+        kind,
+        tool_calls,
+        leftover,
+        timings,
+        model: small(&value, "model", 120),
+    })
+}
+
+/// `POST /speaker/record`: an exchange the speaker answered by itself, for Helm to keep. The
+/// call answers `200 {ok: true}` as soon as the hub has it; whether a Helm is up to take it
+/// is the hub's business afterwards. The same `turn_id` again is taken once.
+async fn post_record(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> Response {
+    let (token, person, bridge) = match gate(&state, &headers) {
+        Ok(g) => g,
+        Err(r) => return *r,
+    };
+    let raw = match read_capped(body, MAX_TURN_BODY).await {
+        Ok(b) => b,
+        Err(ReadError::TooBig) => {
+            return refused(StatusCode::PAYLOAD_TOO_LARGE, "the record is too big")
+        }
+        Err(ReadError::Broken) => {
+            return refused(StatusCode::BAD_REQUEST, "the upload was cut off")
+        }
+    };
+    let now = now_ms();
+    let record = match record_body(&raw, now) {
+        Ok(r) => r,
+        Err(r) => return *r,
+    };
+    match bridge.begin_record(token, person, record, now) {
+        RecordOutcome::Accepted => answer(json!({ "ok": true })),
+        RecordOutcome::Conflict => refused(
+            StatusCode::CONFLICT,
+            "that turn id belongs to another speaker, or to a turn",
+        ),
+        RecordOutcome::Rejected => refused(
+            StatusCode::TOO_MANY_REQUESTS,
+            "this speaker has more records waiting than the hub takes",
+        ),
+    }
 }
 
 /// `POST /speaker/turn`: the words go into the token's queue. The call waits up to `wait`
@@ -218,10 +379,7 @@ async fn post_turn(
         Ok(t) => t,
         Err(r) => return *r,
     };
-    let started = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
+    let started = now_ms();
     let turn_id = parsed.speaker.id.clone();
     match bridge.begin_turn(token, person, parsed.speaker, started) {
         TurnOutcome::Conflict => refused(
@@ -278,18 +436,23 @@ async fn wait_for(
         tokio::time::sleep(POLL).await;
         outcome = bridge.outcome(token, id);
     }
+    // The hub's own clock for the turn, on every answer that has a turn behind it.
+    let timing = bridge.timing(token, id).unwrap_or(Value::Null);
     match outcome {
         TurnOutcome::Answer { text, session } => answer(json!({
             "state": "answer",
             "text": text,
             "session": session,
+            "timing": timing,
         })),
-        TurnOutcome::Working => {
-            (StatusCode::ACCEPTED, Json(json!({ "state": "working" }))).into_response()
-        }
-        TurnOutcome::Offline => answer(json!({ "state": "offline" })),
+        TurnOutcome::Working => (
+            StatusCode::ACCEPTED,
+            Json(json!({ "state": "working", "timing": timing })),
+        )
+            .into_response(),
+        TurnOutcome::Offline => answer(json!({ "state": "offline", "timing": timing })),
         // The speaker side has its own fixed sentence for an error; the hub adds no words.
-        TurnOutcome::Error => answer(json!({ "state": "error" })),
+        TurnOutcome::Error => answer(json!({ "state": "error", "timing": timing })),
         TurnOutcome::Rejected => refused(
             StatusCode::TOO_MANY_REQUESTS,
             "this speaker has more turns than the hub takes",
