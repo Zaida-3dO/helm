@@ -44,6 +44,11 @@ pub struct RuleEntry {
     /// The header says `always: true`: the launch carries the whole rule into a chat's prompt,
     /// however long it is. False for a rule too large to load, whose header is never read.
     pub always: bool,
+    /// The trigger keys as the header declares them; all empty for a rule with no trigger.
+    /// Empty here as well for a rule too large to load.
+    pub when: RuleWhen,
+    /// What the trigger says in one short line for Settings; empty when there is no trigger.
+    pub when_summary: String,
 }
 
 fn invalid(why: &str) -> io::Error {
@@ -514,12 +519,20 @@ fn entry(path: &Path, file: &str) -> Option<(RuleEntry, Option<String>)> {
                 revision: String::new(),
                 too_large: true,
                 always: false,
+                when: RuleWhen::default(),
+                when_summary: String::new(),
             },
             None,
         ));
     }
     let bytes = helm_core::privfs::read_capped(path, MAX_RULE_FILE).ok()?;
     let text = String::from_utf8_lossy(&bytes).into_owned();
+    let front = split_front(&text).0;
+    let when_summary = if front.when.is_empty() {
+        String::new()
+    } else {
+        front.when.summary(chrono::Local::now().date_naive())
+    };
     Some((
         RuleEntry {
             path: format!("rules/{file}"),
@@ -527,7 +540,9 @@ fn entry(path: &Path, file: &str) -> Option<(RuleEntry, Option<String>)> {
             size: meta.len(),
             revision: helm_core::sha256_hex(&bytes),
             too_large: false,
-            always: split_front(&text).0.always,
+            when_summary,
+            always: front.always,
+            when: front.when,
         },
         Some(text),
     ))
