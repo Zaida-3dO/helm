@@ -31,7 +31,10 @@ import { foldLabel, type RowFlags } from './workBlocks.ts';
 export interface RowContext {
   canStopTool: (row: MessageRow) => boolean;
   onStopTool: (toolCallId: string) => void;
-  onLink: (target: LinkTarget) => void;
+  /** A link click. `sessionId` names the session of the row the link sits in: file and page links
+   * resolve against that chat's folder, which for an earlier session of a roll-over window may be
+   * a different place than the session shown in the window. */
+  onLink: (target: LinkTarget, sessionId?: string) => void;
   /** `owner/repo` of the chat's GitHub repository, so a bare `#12` in a reply links to its pull request. */
   mentionRepo?: string;
   /** For the transcript slots (slots.ts). */
@@ -71,7 +74,9 @@ function toolAction(row: MessageRow, ctx: RowContext): ToolAction | undefined {
       label: 'Open',
       title: panel.kind === 'page' ? `Show the page "${panel.label}" in the side panel` : `Show ${panel.label} in the side panel`,
       testId: 'tool-open-panel',
-      run: () => ctx.onLink(panel.target),
+      // Resolve against the session that wrote this row: its files live where it ran, which for
+      // an earlier session of a roll-over window can differ from the window's own chat.
+      run: () => ctx.onLink(panel.target, row.chatId),
     };
   }
   const fwd = ctx.onForward ? forwardRef(row) : null;
@@ -164,7 +169,7 @@ function PageCard({ page, row, ctx }: { page: NonNullable<ReturnType<typeof page
         <IconMonitor size={12} /> From page: {page.title || 'a page'}
       </div>
       {page.overview && !open && <div className="page-card-overview" data-testid="page-card-overview">{page.overview}</div>}
-      {open && <Markdown text={row.text} onLink={ctx.onLink} />}
+      {open && <Markdown text={row.text} onLink={(t) => ctx.onLink(t, row.chatId)} />}
       <button type="button" className="page-card-toggle" onClick={toggle} aria-expanded={open} data-testid="page-card-toggle">
         <Glyph name="chevron" size={12} className="page-card-chevron" />
         {open ? 'Hide what the agent received' : 'Show what the agent received'}
@@ -179,7 +184,7 @@ const NOTE_HEAD: Record<AgentNote['kind'], string> = { peer: 'Message from ', sc
 
 /** A message from another agent or from the app: one compact card — who sent it (linked to the
  * sending chat when a chat did) and a one-line digest, the whole text behind the chevron. */
-function NoteCard({ note, ctx, rowId }: { note: AgentNote; ctx: RowContext; rowId: number }) {
+function NoteCard({ note, ctx, rowId, sessionId }: { note: AgentNote; ctx: RowContext; rowId: number; sessionId: string }) {
   // Open state rides on the chat when the view tracks it (folded the same on every PC, and
   // it survives the row virtualizing away); otherwise the card keeps its own fold.
   const [local, setLocal] = useState(false);
@@ -243,7 +248,7 @@ function NoteCard({ note, ctx, rowId }: { note: AgentNote; ctx: RowContext; rowI
             </div>
           )}
           <div className="note-card-body" data-testid="note-card-body">
-            <Markdown text={note.body} onLink={ctx.onLink} />
+            <Markdown text={note.body} onLink={(t) => ctx.onLink(t, sessionId)} />
             <div className="note-card-note muted">{note.note}</div>
           </div>
         </>
@@ -255,12 +260,15 @@ function NoteCard({ note, ctx, rowId }: { note: AgentNote; ctx: RowContext; rowI
 function AssistantBody({ row, ctx, hideText }: { row: MessageRow; ctx: RowContext; hideText?: boolean }) {
   const streaming = row.status === 'streaming';
   const text = usePacedText(row.text, streaming);
+  // The host resolves file and page links against the session that wrote this row: an earlier
+  // session of a roll-over window may run in a different folder than the session in the window.
+  const link = (t: LinkTarget) => ctx.onLink(t, row.chatId);
   return (
     <>
       {/* A note's own thinking sits with the note, behind its own collapsed toggle: never hidden
           outright, just folded until the reader opens it. */}
-      <Thinking text={row.thinking} streaming={streaming} onLink={ctx.onLink} />
-      {text && !hideText && <Markdown text={text} streaming={streaming} interactive mentionRepo={ctx.mentionRepo} onLink={ctx.onLink} />}
+      <Thinking text={row.thinking} streaming={streaming} onLink={link} />
+      {text && !hideText && <Markdown text={text} streaming={streaming} interactive mentionRepo={ctx.mentionRepo} onLink={link} />}
     </>
   );
 }
@@ -290,12 +298,12 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
         ) : page ? (
           <PageCard page={page} row={row} ctx={ctx} />
         ) : note ? (
-          <NoteCard note={note} ctx={ctx} rowId={row.id} />
+          <NoteCard note={note} ctx={ctx} rowId={row.id} sessionId={row.chatId} />
         ) : (
           <div className="bubble" title={messageTimeLabel(row.timestamp, Date.now())} data-testid="user-bubble">
             <MessageImages chatId={row.chatId} images={row.details?.images} />
             <MessageRefs refs={row.details?.refs} />
-            <Markdown text={bubbleText(row)} onLink={ctx.onLink} />
+            <Markdown text={bubbleText(row)} onLink={(t) => ctx.onLink(t, row.chatId)} />
           </div>
         )}
         {row.status !== 'complete' && <div className="row-meta muted">{row.status}</div>}
