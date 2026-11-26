@@ -3085,6 +3085,28 @@ impl crate::speaker_sink::SpeakerUpstream for SpWire {
     }
 }
 
+fn srec(id: &str, session: &str, leftover: &[&str]) -> crate::client::SpeakerRecord {
+    crate::client::SpeakerRecord {
+        id: id.into(),
+        device: Some("desk".into()),
+        room: Some("kitchen".into()),
+        area: None,
+        session: session.into(),
+        started_at: 1_000,
+        text: "Turn the lamp on.".into(),
+        answer: "Done.".into(),
+        kind: "answer".into(),
+        tools: vec![crate::client::RecordedTool {
+            name: "light_on".into(),
+            summary: "kitchen lamp".into(),
+            ok: true,
+        }],
+        leftover: leftover.iter().map(|l| (*l).to_owned()).collect(),
+        model: Some("small".into()),
+        person: None,
+    }
+}
+
 fn sturn(id: &str, text: &str, session: &str) -> crate::client::SpeakerTurn {
     crate::client::SpeakerTurn {
         id: id.into(),
@@ -3095,6 +3117,8 @@ fn sturn(id: &str, text: &str, session: &str) -> crate::client::SpeakerTurn {
         session: session.into(),
         sent_at: 0,
         person: None,
+        context: None,
+        escalated: false,
     }
 }
 
@@ -3449,4 +3473,137 @@ fn what_a_speaker_turn_settles_on_is_said_in_words() {
         crate::speaker_sink::answer_of(&s),
         crate::voice_sink::NOTHING_TO_SAY
     );
+}
+
+/// A recorded exchange is written into its talk's chat as a transcript, with no model run and no
+/// answer sent up; the chat is made on the board the settings name; the same record twice stores
+/// one; a handed-over turn lands in the same chat with what was said before it; and a talk that
+/// left something open (a record's note, or an attention flag) is kept when it ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recorded_exchange_is_written_without_a_model_and_open_talks_are_kept() {
+    let e = env();
+    let dir = e.dir.path().join("prof");
+    let paths = crate::speaker::paths(&dir, &e.ctx.profile_id);
+    crate::speaker::save_policy(
+        &paths.policy,
+        &crate::speaker::PolicyFile {
+            board_id: Some("board-1".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let s = wired_speaker(&e);
+    s.attach_ops(e.ops.clone());
+    let wire = Arc::new(SpWire::default());
+    s.attach_line(wire.clone());
+    let transcript = |chat: &str| -> Vec<(String, String, Option<String>)> {
+        e.db.snapshot(|tx| {
+            let mut st = tx.prepare(
+                "SELECT role, text, json_extract(details, '$.origin') FROM messages
+                 WHERE chat_id = ?1 ORDER BY id",
+            )?;
+            let rows = st
+                .query_map([chat], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, rusqlite::Error>(rows)
+        })
+        .unwrap()
+    };
+    let chat_of = |session: &str| crate::speaker::find(&paths.chats, session).unwrap().chat_id;
+
+    s.record(srec("r1", "s-1", &[])).await.unwrap();
+    let chat = chat_of("s-1");
+    let made = e
+        .ops
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .rfind(|(o, _)| o == "chat_create")
+        .unwrap()
+        .1
+        .clone();
+    assert_eq!(
+        made["boardId"], "board-1",
+        "the chosen board takes the chat"
+    );
+    // The question as a speaker message, a line on what was done, the spoken answer: no run, so
+    // nothing is said up the line and no worker was asked.
+    let rows = transcript(&chat);
+    let roles: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+    assert_eq!(roles, ["user", "context", "assistant"], "{rows:?}");
+    assert!(rows[0].1.starts_with("[Speaker · kitchen · "), "{rows:?}");
+    assert!(rows[0].1.ends_with("Turn the lamp on."), "{rows:?}");
+    assert_eq!(rows[0].2.as_deref(), Some("speaker"), "never as typed");
+    assert_eq!(rows[1].1, "The speaker used: kitchen lamp.");
+    assert_eq!(rows[2].1, "Done.");
+    let stored = subs(&e.db, &chat);
+    assert_eq!((stored.len(), stored[0].1.as_str()), (1, "speaker"));
+    assert_eq!(stored[0].3, "complete");
+    assert!(wire.sent.lock().unwrap().is_empty());
+
+    // The hub sends it again (its acknowledgement was lost): nothing is written twice. A second
+    // record of the same talk joins the same chat.
+    s.record(srec("r1", "s-1", &[])).await.unwrap();
+    assert_eq!(transcript(&chat).len(), 3);
+    s.record(srec("r2", "s-1", &[])).await.unwrap();
+    assert_eq!(transcript(&chat).len(), 6);
+    assert_eq!(chat_of("s-1"), chat);
+
+    // A turn the speaker handed over lands in that same chat, with what it said just before.
+    let mut handed = sturn("t1", "And the bedroom?", "s-1");
+    handed.context = Some("Turn the lamp on. Done.".into());
+    handed.escalated = true;
+    s.deliver(handed).await.unwrap();
+    let said = subs(&e.db, &chat);
+    assert_eq!(said.len(), 3, "{said:?}");
+    assert!(
+        said[2].4.contains(
+            "[Said on the speaker just before: Turn the lamp on. Done.]\nAnd the bedroom?"
+        ),
+        "{:?}",
+        said[2].4
+    );
+
+    // The talk ends with nothing open: its chat is put away.
+    s.talk_closed(None, "s-1".to_owned()).await;
+    let archived = |chat: &str| {
+        e.ops
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(o, a)| o == "chat_archive" && a["chatId"] == chat)
+    };
+    assert!(archived(&chat));
+
+    // A record that left something open keeps its chat, and says what is open.
+    s.record(srec("r3", "s-2", &["Buy a new bulb"]))
+        .await
+        .unwrap();
+    let kept = chat_of("s-2");
+    assert!(transcript(&kept)[1]
+        .1
+        .ends_with("Left open: Buy a new bulb."));
+    s.talk_closed(None, "s-2".to_owned()).await;
+    assert!(!archived(&kept), "a talk with something left open stays");
+    assert!(
+        crate::speaker::find(&paths.chats, "s-2").is_none(),
+        "the talk itself is over"
+    );
+
+    // So does a chat whose agent flagged something for the user.
+    s.record(srec("r4", "s-3", &[])).await.unwrap();
+    let flagged = chat_of("s-3");
+    sql(
+        &e.db,
+        "INSERT INTO chat_flags(chat_id, question, reason, created_at) VALUES (?1, 'Which bulb?', 'asked', 1)",
+        &[&flagged],
+    );
+    s.talk_closed(None, "s-3".to_owned()).await;
+    assert!(!archived(&flagged), "an open flag keeps the chat");
+
+    // The settings view tells Settings what is chosen.
+    let view = crate::speaker_sink::speaker_view(&e.db, &dir, &e.ctx.profile_id);
+    assert_eq!((view.board_id.as_str(), view.lean), ("board-1", false));
 }

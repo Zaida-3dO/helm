@@ -19,6 +19,16 @@ pub struct LaunchCtx<'a> {
     pub cwd: &'a str,
 }
 
+/// A chat that runs lean: its own short system prompt in place of Claude Code's, Claude Code's
+/// built-in tools and native MCP servers off, and Helm's own tools cut to the ones named.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LeanLaunch {
+    /// The chat's whole system prompt.
+    pub system_prompt: String,
+    /// The host tools the chat keeps (by name); every other host tool is left out of its list.
+    pub host_tools: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LaunchExtras {
     /// Folders put in front of the worker's `PATH`, in order.
@@ -30,6 +40,8 @@ pub struct LaunchExtras {
     /// Orchestrator is on for this chat. Settings that apply only to such chats (the sub-agent
     /// limits) read it; any contributor may say so.
     pub orchestrator_on: bool,
+    /// This chat runs lean. The last contributor to say so wins.
+    pub lean: Option<LeanLaunch>,
 }
 
 impl LaunchExtras {
@@ -38,6 +50,7 @@ impl LaunchExtras {
             && self.env.is_empty()
             && self.system_prompt.is_empty()
             && !self.orchestrator_on
+            && self.lean.is_none()
     }
 }
 
@@ -77,6 +90,9 @@ impl LaunchContributors {
             out.path_prepend.extend(e.path_prepend);
             out.env.extend(e.env);
             out.orchestrator_on |= e.orchestrator_on;
+            if e.lean.is_some() {
+                out.lean = e.lean;
+            }
             out.system_prompt
                 .extend(e.system_prompt.into_iter().filter(|s| !s.trim().is_empty()));
         }
@@ -155,12 +171,17 @@ mod tests {
             ],
             system_prompt: vec!["one".into()],
             orchestrator_on: false,
+            lean: None,
         })))
         .add(Arc::new(Fixed(LaunchExtras {
             path_prepend: vec![PathBuf::from("C:/two")],
             env: vec![],
             system_prompt: vec!["  ".into(), "two".into()],
             orchestrator_on: true,
+            lean: Some(LeanLaunch {
+                system_prompt: "Lean.".into(),
+                host_tools: vec!["app_telegram_send".into()],
+            }),
         })));
         let extras = list.collect(&ctx());
         let mut env = EnvMap::default();
@@ -175,5 +196,10 @@ mod tests {
         assert_eq!(env.get(WORKER_CHAT_ID), Some("c"));
         assert_eq!(system_prompt(&extras).as_deref(), Some("one\n\ntwo"));
         assert!(extras.orchestrator_on, "any contributor may mark the chat");
+        assert_eq!(
+            extras.lean.map(|l| l.host_tools),
+            Some(vec!["app_telegram_send".to_owned()]),
+            "so may any say the chat runs lean"
+        );
     }
 }

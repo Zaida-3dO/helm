@@ -25,8 +25,9 @@
 //!   fork. Only the text comes back; pictures on the message do not. Project files are never
 //!   touched (see [`crate::checkpoint`] for what the chat tells the user about them).
 //! - **Creation and placement.** Same folder project, model and effort; titled "Fork · <source>"
-//!   with no stacked prefix; placed directly below the source when the source has a position
-//!   (later rows shift by one, and a `sidebar` signal names every row that moved). A whole-chat
+//!   with no stacked prefix; placed directly below the source when the source has a position —
+//!   for an earlier session of a roll-over chain, below its chain's newest session, which is
+//!   where the chat shows in the sidebar (later rows shift by one, and a `sidebar` signal names every row that moved). A whole-chat
 //!   fork copies the draft; a message fork starts empty.
 //! - **Side chats** (`side: true` plus an `excerpt` of 1–16,000 characters): a message fork whose
 //!   draft is a short lead-in and the excerpt as a block quote, marked with `side_source_id` so it
@@ -173,6 +174,45 @@ pub struct Forked {
 
 fn refuse(msg: &str) -> Refusal {
     Refusal::new("refused", msg)
+}
+
+/// How far a roll-over chain is walked when looking for the session the sidebar shows. Long
+/// chains of one chat are rare; this only bounds a broken cycle.
+const ANCHOR_HOPS: usize = 32;
+
+/// The row the sidebar shows for a rolled-over session's chain: walk to its newest session and
+/// read where that sits today (its project, position and pin can have moved since). `None` when
+/// the last session's row is gone. A fork made from an earlier session belongs beside this row,
+/// not under the archived one's stale position — the archived row left the sidebar when its
+/// place was handed to the successor.
+fn chain_anchor(
+    tx: &Transaction<'_>,
+    source: &str,
+) -> rusqlite::Result<Option<(Option<i64>, bool, String)>> {
+    let mut cur = source.to_owned();
+    for _ in 0..ANCHOR_HOPS {
+        let next: Option<String> = tx
+            .query_row(
+                "SELECT next_session_id FROM chats WHERE id = ?1",
+                [&cur],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        match next {
+            Some(n) => cur = n,
+            None => break,
+        }
+    }
+    if cur == source {
+        return Ok(None);
+    }
+    tx.query_row(
+        "SELECT position, pinned, project_id FROM chats WHERE id = ?1",
+        [&cur],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .optional()
 }
 
 /// Read the source log's entries; a missing log is an empty history.
@@ -618,9 +658,15 @@ pub fn fork(
         for e in &entries {
             session_log::project(tx, &artifacts, &fork_id_chat, e, rev)?;
         }
-        // Placement: directly below an unpinned source that has a position.
+        // Placement: directly below the source's row in the sidebar — for a rolled-over
+        // session, below its chain's newest session, which is the row that actually shows.
         let mut moved = Vec::new();
-        if let (false, false, Some(pos)) = (req.side, src.pinned, src.position) {
+        let (pos, pinned) = match chain_anchor(tx, req.source)? {
+            Some((p @ Some(_), pin, _)) => (p, pin),
+            // No chain, or its newest session has no position: the old rule — below this very row.
+            _ => (src.position, src.pinned),
+        };
+        if let (false, false, Some(pos)) = (req.side, pinned, pos) {
             let shifted: Vec<String> = {
                 let mut st = tx.prepare(
                     "SELECT id FROM chats WHERE project_id = ?1 AND pinned = 0 AND position > ?2 AND id != ?3",

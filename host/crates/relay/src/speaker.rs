@@ -12,7 +12,11 @@
 //!   it never counts as consent and no approval, plan or trust prompt is answered by it.
 //! - **The policy** ([`PolicyFile`], `relay/people/<profileId>/speaker-policy.json`) is read
 //!   again on every delivery: the model and effort a new speaker chat opens with (the sink hands
-//!   them at the first send), and whether this PC takes its person's speaker at all.
+//!   them at the first send), whether this PC takes its person's speaker at all, the board a new
+//!   speaker chat is shown on, and whether speaker chats run lean (a thin prompt and few tools).
+//! - **Records.** An exchange the speaker answered by itself arrives as a record. It is written
+//!   into its talk's chat as a plain transcript (origin [`SPEAKER_ORIGIN`]) with no model run,
+//!   and a talk that left something open ([`Talk::leftover`]) is not archived when it ends.
 //! - **The words.** How the answer is heard comes from the chat's system prompt (the `channel`
 //!   section, [`crate::channel`]); every message carries a one-line note naming the room it came
 //!   from, which the transcript hides, and a new talk may be told which talk came before it.
@@ -41,6 +45,8 @@ pub const TALKS_KEPT: usize = 32;
 pub const MAX_TEXT_CHARS: usize = 8_000;
 /// How much of the talk before is quoted to a new one.
 pub const PREVIOUS_NOTE_MAX_CHARS: usize = 300;
+/// How much of what the speaker said just before a handed-over turn is kept.
+pub const MAX_CONTEXT_CHARS: usize = 2_048;
 
 /// The model a new speaker chat opens with, until the person picks another in Settings: a small
 /// local model, because a spoken answer has to come back in seconds.
@@ -64,6 +70,15 @@ pub struct PolicyFile {
     /// How long a talk that just ended may be named to the next one.
     #[serde(default = "default_previous")]
     pub previous_hours: i64,
+    /// Lean speaker chats: the system prompt is a thin persona plus the speaker's channel prompt
+    /// alone, and the chat's tools are the Home Assistant server and the one that sends a
+    /// message to the phone. A chat started under another setting keeps what it started with.
+    #[serde(default)]
+    pub lean: bool,
+    /// The board a new speaker chat is shown on; `None` leaves it to the app (the board over the
+    /// speaker folder, else the default board).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_id: Option<String>,
 }
 
 fn default_model() -> String {
@@ -83,6 +98,8 @@ impl Default for PolicyFile {
             effort: default_effort(),
             take_speaker: None,
             previous_hours: default_previous(),
+            lean: false,
+            board_id: None,
         }
     }
 }
@@ -99,7 +116,20 @@ impl PolicyFile {
         if !PREVIOUS_HOURS.contains(&self.previous_hours) {
             return Err("How long a finished talk may be named must be 0 to 72 hours.".into());
         }
+        if self.board_id.as_deref().is_some_and(|b| {
+            b.trim().is_empty() || b.chars().count() > 120 || b.chars().any(char::is_control)
+        }) {
+            return Err("The board must be a board id, or left unset.".into());
+        }
         Ok(())
+    }
+
+    /// The board a new speaker chat is shown on, if one is chosen.
+    pub fn board(&self) -> Option<&str> {
+        self.board_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
     }
 
     /// The model and effort to hand a new speaker chat, or `None` for each when blank.
@@ -111,7 +141,8 @@ impl PolicyFile {
     }
 }
 
-/// One profile's speaker files: its policy and its talk list, and the folder its chats start in.
+/// One profile's speaker files: its policy and its talk list, and the folder its chats start in
+/// (`speaker/<profileId>`, which is how a chat there is known for a speaker chat of that profile).
 #[derive(Clone)]
 pub struct Paths {
     pub policy: PathBuf,
@@ -150,6 +181,10 @@ pub struct Talk {
     pub started_at: i64,
     /// What the speaker called its room, for the chat's title and for each message's note.
     pub room: Option<String>,
+    /// The speaker left something open in this talk (a record said so): the chat is kept, not
+    /// archived, when the talk ends.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub leftover: bool,
 }
 
 /// The talks this profile has open, oldest first, plus the one that ended last.
@@ -179,7 +214,7 @@ pub fn paths(profile_dir: &Path, profile_id: &str) -> Paths {
     Paths {
         policy: dir.join("speaker-policy.json"),
         chats: dir.join("speaker-chats.json"),
-        folder: crate::channel::speaker_folder(profile_dir),
+        folder: crate::channel::speaker_folder(profile_dir).join(profile_id),
     }
 }
 
@@ -219,6 +254,7 @@ pub fn talk_chat(
         chat_id,
         started_at: now,
         room: room.map(str::to_owned),
+        leftover: false,
     };
     talks.talks.push(talk.clone());
     while talks.talks.len() > TALKS_KEPT {
@@ -252,6 +288,17 @@ pub fn end_talk(
     }
     let _ = save_talks(path, &talks);
     Some(talk)
+}
+
+/// Note that the talk left something open, so its chat outlives the talk. `false` when this PC
+/// has no such talk.
+pub fn mark_leftover(path: &Path, session: &str) -> bool {
+    let mut talks = load_talks(path);
+    let Some(t) = talks.talks.iter_mut().find(|t| t.session == session) else {
+        return false;
+    };
+    t.leftover = true;
+    save_talks(path, &talks).is_ok()
 }
 
 /// The talk tagged for `session`, if this PC has one.
@@ -296,6 +343,16 @@ pub fn submission_id(turn: &str) -> String {
     uuid::Uuid::new_v8(b).to_string()
 }
 
+/// The submission id of a record from the hub: its own namespace, so a record and a turn that
+/// share an id never share a submission, and the same record delivered twice is stored once.
+pub fn record_submission_id(record: &str) -> String {
+    use sha2::Digest;
+    let h = sha2::Sha256::digest(format!("helm-speaker-record/{record}"));
+    let mut b = [0u8; 16];
+    b.copy_from_slice(&h[..16]);
+    uuid::Uuid::new_v8(b).to_string()
+}
+
 /// The room/area a speaker device names itself by, fit for the one-line note: cleaned like a
 /// chat title (control characters out, capped short) and with the bracket characters out too —
 /// the note is one line inside its own brackets, and a `]` from a device would close it early.
@@ -316,12 +373,25 @@ pub fn channel_note(room: Option<&str>, area: Option<&str>) -> String {
     format!("[Speaker · {where_} · speak it, short, no markup]")
 }
 
+/// What the speaker said just before a turn it handed over, as one bracketed line: line breaks
+/// and brackets out, so a `]` inside it cannot close the note early.
+pub fn context_line(context: &str) -> Option<String> {
+    let flat = context
+        .replace(['[', ']'], "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let flat: String = flat.chars().take(MAX_CONTEXT_CHARS).collect();
+    (!flat.is_empty()).then(|| format!("[Said on the speaker just before: {flat}]"))
+}
+
 /// What a speaker message is stored with: the channel note, a pointer to the talk that just
-/// ended, then the words.
+/// ended, what was said just before (for a turn the speaker handed over), then the words.
 pub fn delivered_text(
     room: Option<&str>,
     area: Option<&str>,
     previous: Option<&str>,
+    context: Option<&str>,
     text: &str,
 ) -> String {
     let mut out = channel_note(room, area);
@@ -329,8 +399,46 @@ pub fn delivered_text(
     if let Some(p) = previous {
         out.push_str(&format!("[Previous conversation ended: {p}]\n"));
     }
+    if let Some(line) = context.and_then(context_line) {
+        out.push_str(&line);
+        out.push('\n');
+    }
     out.push_str(text.trim());
     out
+}
+
+/// The line between a recorded question and answer: what the speaker did to answer, what it
+/// passed on or could not do, and what it left open. `None` when there is nothing to say.
+pub fn record_notice(rec: &crate::client::SpeakerRecord) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if !rec.tools.is_empty() {
+        let used: Vec<String> = rec
+            .tools
+            .iter()
+            .map(|t| {
+                let what = if t.summary.trim().is_empty() {
+                    t.name.as_str()
+                } else {
+                    t.summary.trim()
+                };
+                if t.ok {
+                    what.to_owned()
+                } else {
+                    format!("{what} (did not work)")
+                }
+            })
+            .collect();
+        parts.push(format!("The speaker used: {}.", used.join("; ")));
+    }
+    match rec.kind.as_str() {
+        "escalated" => parts.push("The speaker passed this on to Helm.".to_owned()),
+        "error" => parts.push("The speaker could not answer this.".to_owned()),
+        _ => {}
+    }
+    if !rec.leftover.is_empty() {
+        parts.push(format!("Left open: {}.", rec.leftover.join("; ")));
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
 }
 
 /// The line that names the talk before: its title, and what was last said there.
@@ -407,13 +515,76 @@ mod tests {
             "a name left empty after cleaning falls back to the house"
         );
         assert_eq!(
-            delivered_text(Some("study"), None, None, "  What time is it?  "),
+            delivered_text(Some("study"), None, None, None, "  What time is it?  "),
             "[Speaker · study · speak it, short, no markup]\nWhat time is it?"
         );
         assert!(
-            delivered_text(None, None, Some("Kitchen voice — 7:20"), "go on")
+            delivered_text(None, None, Some("Kitchen voice — 7:20"), None, "go on")
                 .contains("[Previous conversation ended: Kitchen voice — 7:20]")
         );
+        // What the speaker said just before a handed-over turn rides in one line, whatever it
+        // held; a blank context adds nothing.
+        assert_eq!(
+            delivered_text(
+                None,
+                None,
+                None,
+                Some("Lamp on.\n[Done]\n  Thanks"),
+                "and the bedroom"
+            ),
+            "[Speaker · the house · speak it, short, no markup]\n[Said on the speaker just before: Lamp on. Done Thanks]\nand the bedroom"
+        );
+        assert_eq!(context_line(" \n "), None);
+        // A record is stored under its own id, never a turn's.
+        assert_eq!(record_submission_id("r-1"), record_submission_id("r-1"));
+        assert_ne!(record_submission_id("r-1"), submission_id("r-1"));
+        let rec = |kind: &str, ok: bool, leftover: &[&str]| crate::client::SpeakerRecord {
+            id: "r-1".into(),
+            device: None,
+            room: None,
+            area: None,
+            session: "s-1".into(),
+            started_at: 1,
+            text: "Lights".into(),
+            answer: "Done.".into(),
+            kind: kind.into(),
+            tools: vec![
+                crate::client::RecordedTool {
+                    name: "light_on".into(),
+                    summary: "bedroom lamp".into(),
+                    ok: true,
+                },
+                crate::client::RecordedTool {
+                    name: "heat".into(),
+                    summary: String::new(),
+                    ok,
+                },
+            ],
+            leftover: leftover.iter().map(|s| (*s).to_owned()).collect(),
+            model: None,
+            person: None,
+        };
+        assert_eq!(
+            record_notice(&rec("answer", true, &[])).as_deref(),
+            Some("The speaker used: bedroom lamp; heat.")
+        );
+        assert_eq!(
+            record_notice(&rec("escalated", false, &["buy bulbs", "call Sam"])).as_deref(),
+            Some("The speaker used: bedroom lamp; heat (did not work). The speaker passed this on to Helm. Left open: buy bulbs; call Sam.")
+        );
+        let bare = crate::client::SpeakerRecord {
+            tools: vec![],
+            ..rec("error", true, &[])
+        };
+        assert_eq!(
+            record_notice(&bare).as_deref(),
+            Some("The speaker could not answer this.")
+        );
+        let plain = crate::client::SpeakerRecord {
+            kind: "answer".into(),
+            ..bare
+        };
+        assert_eq!(record_notice(&plain), None);
         // A turn id always maps to the same submission, and never to the phone's turn with the
         // same id.
         assert_eq!(submission_id("t-1"), submission_id("t-1"));
@@ -472,9 +643,14 @@ mod tests {
             ..PolicyFile::default()
         };
         assert!(!previous_usable(&prev, &off, T0 + 60 * MINUTE_MS));
+        // A talk that left something open says so, and keeps saying so; one this PC never made
+        // cannot be marked.
+        assert!(mark_leftover(&file, "s-2") && !mark_leftover(&file, "s-9"));
+        assert!(find(&file, "s-2").unwrap().leftover);
         // Reset empties the list and hands back the chats to archive.
         let all = take_all(&file);
         assert_eq!(all.len(), 1);
+        assert!(all[0].leftover);
         assert!(load_talks(&file).talks.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -486,6 +662,18 @@ mod tests {
         assert_eq!(f.new_chat(), (Some(DEFAULT_MODEL), Some("low")));
         assert!(f.check().is_ok());
         assert!(takes_speaker(&f, true) && !takes_speaker(&f, false));
+        // Lean is off and no board is chosen until Settings says so; a chosen board is trimmed.
+        assert!(!f.lean && f.board().is_none());
+        let chosen = PolicyFile {
+            lean: true,
+            board_id: Some(" board-1 ".into()),
+            ..PolicyFile::default()
+        };
+        assert!(chosen.check().is_ok() && chosen.board() == Some("board-1"));
+        // An older settings file with neither field still loads, and writes neither back.
+        let old: PolicyFile = serde_json::from_str(r#"{"model":"m","effort":"low"}"#).unwrap();
+        assert!(!old.lean && old.board_id.is_none());
+        assert!(!serde_json::to_string(&old).unwrap().contains("boardId"));
         let switched = PolicyFile {
             take_speaker: Some(false),
             ..PolicyFile::default()
@@ -502,6 +690,14 @@ mod tests {
             },
             PolicyFile {
                 previous_hours: 73,
+                ..PolicyFile::default()
+            },
+            PolicyFile {
+                board_id: Some("  ".into()),
+                ..PolicyFile::default()
+            },
+            PolicyFile {
+                board_id: Some("b\nad".into()),
                 ..PolicyFile::default()
             },
         ] {

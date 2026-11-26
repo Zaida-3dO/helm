@@ -12,12 +12,61 @@ export function isAgentRow(row: MessageRow): boolean {
 /**
  * The subagent behind an Agent tool row: the live one on the thread while it runs; once settled,
  * the state saved on the row (it has the longer report and survives a restart), else the live one.
+ * A settled row that carries neither — written before Helm kept subagent state, or by a session
+ * that ended without one last write — gets a modest card made from the row itself below, so an
+ * earlier session shows the same cards as the live one rather than bare tool rows.
  */
 export function subagentFor(row: MessageRow, thread: ThreadState | null | undefined): Subagent | null {
   if (!isAgentRow(row) || !row.toolCallId) return null;
   const live = thread?.subagents?.find((s) => s.toolCallId === row.toolCallId);
   if (live?.status === 'running') return live;
-  return row.details?.subagent ?? live ?? null;
+  const saved = row.details?.subagent ?? live;
+  return saved ?? subagentFromRow(row);
+}
+
+/** What a tool call's whole output may show on a derived card: the cap the saved copy uses. */
+const DERIVED_REPORT_BYTES = 16_384;
+
+/**
+ * A settled Agent row with no saved or live subagent state, read back from the row itself: its
+ * name and assignment from the call's arguments, its status and result from what the tool
+ * returned. Nothing is invented beyond the row — durations and tokens stay unknown — so the card
+ * reads like the settled cards elsewhere while honestly lacking their detail. A streaming row
+ * without a live state derives nothing: calling it settled would be wrong.
+ */
+function subagentFromRow(row: MessageRow): Subagent | null {
+  if (row.status === 'streaming') return null;
+  let name = '';
+  let agentType = '';
+  let assignment = '';
+  try {
+    const args = JSON.parse(String(row.details?.toolArgs ?? '')) as Record<string, unknown>;
+    if (typeof args.description === 'string') name = args.description.trim();
+    if (typeof args.subagent_type === 'string') agentType = args.subagent_type.trim();
+    if (typeof args.prompt === 'string') assignment = args.prompt.split('\n').slice(0, 3).join('\n');
+  } catch {
+    // Old or odd rows carry no readable arguments: the card still opens on what it has.
+  }
+  const status: SubagentStatus = row.status === 'error' ? 'failed' : row.status === 'interrupted' ? 'stopped' : 'completed';
+  const out = row.text.trim();
+  return {
+    toolCallId: row.toolCallId ?? '',
+    agentType,
+    name,
+    description: name,
+    assignment,
+    status,
+    stepTool: null,
+    step: null,
+    startedAt: row.timestamp,
+    endedAt: row.timestamp,
+    durationMs: 0,
+    tokens: null,
+    toolUses: null,
+    error: status === 'failed' ? out || null : null,
+    report: status === 'failed' ? null : out.length > DERIVED_REPORT_BYTES ? out.slice(0, DERIVED_REPORT_BYTES) : out || null,
+    reportTruncated: out.length > DERIVED_REPORT_BYTES,
+  };
 }
 
 export const STATUS_LABEL: Record<SubagentStatus, string> = {

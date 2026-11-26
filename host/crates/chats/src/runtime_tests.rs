@@ -4768,6 +4768,37 @@ async fn forks_are_placed_below_the_source_and_side_chats_stay_hidden() {
     );
     let sidebar = h.events("sidebar");
     assert_eq!(sidebar.last().unwrap()["chatIds"], json!([b, fork]));
+    // A fork made from an earlier session of a roll-over chain: the archived row left the
+    // sidebar when its place went to the successor, so the fork belongs beside the newest
+    // session of the chain — not under the archived one's stale position.
+    let (old, succ, after) = (h.create().await, h.create().await, h.create().await);
+    h.db.write(|tx| {
+        tx.execute(
+            "UPDATE chats SET archived = 1, stack_id = ?1, next_session_id = ?2, position = 20 WHERE id = ?1",
+            [&old, &succ],
+        )?;
+        tx.execute("UPDATE chats SET stack_id = ?1, prev_session_id = ?2, position = 30 WHERE id = ?3", [&old, &old, &succ])?;
+        tx.execute("UPDATE chats SET position = 31 WHERE id = ?1", [&after])
+    })
+    .unwrap();
+    let rf = h
+        .call(
+            "chat_fork",
+            json!({"chatId": old, "forkId": uuid::Uuid::new_v4().to_string()}),
+        )
+        .await
+        .unwrap();
+    let rolled_fork = rf["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        h.col("SELECT id FROM chats WHERE position >= 20 ORDER BY position"),
+        [
+            old.clone(),
+            succ.clone(),
+            rolled_fork.clone(),
+            after.clone()
+        ],
+        "below the chain's live session, with the next row shifted"
+    );
     let mid: i64 = h.col(&format!(
         "SELECT id FROM messages WHERE chat_id = '{a}' AND source_key LIKE 'm:%:m1'"
     ))[0]

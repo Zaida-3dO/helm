@@ -310,6 +310,17 @@ fn turn_body(turn: &str, text: &str, wait: u64, room: Option<&str>) -> Vec<u8> {
     b.to_string().into_bytes()
 }
 
+/// A record body: one exchange the speaker answered itself.
+fn record_body(id: &str) -> Value {
+    json!({
+        "turn_id": id, "device": "speaker-desk", "room": "bedroom", "area": "Bedroom",
+        "started_at": now_ms() - 3_000, "text": "Lights on.", "answer": "Done.",
+        "kind": "answer", "model": "small-model",
+        "tool_calls": [{"name": "light_turn_on", "summary": "bedroom lamp", "ok": true}],
+        "leftover": ["Buy a new bulb"], "timings": {"stt_ms": 40},
+    })
+}
+
 fn final_answer(turn: &str, text: &str) -> Value {
     json!({
         "type": "voice_final", "id": format!("reply-{turn}"), "turn": turn,
@@ -329,7 +340,8 @@ async fn every_speaker_route_needs_a_speaker_token_and_other_routes_refuse_it() 
     let stt_body = wav(2_000);
     let turn = turn_body("turn-0001", "Synthetic hello.", 0, None);
     // (method, target, content type, body, what a speaker token is allowed to get)
-    let routes: [(&str, &str, &str, Vec<u8>, u16); 4] = [
+    let record = record_body("record-0001").to_string().into_bytes();
+    let routes: [(&str, &str, &str, Vec<u8>, u16); 5] = [
         ("GET", "/speaker/status", "", vec![], 200),
         ("POST", "/speaker/stt", "audio/wav", stt_body.clone(), 200),
         (
@@ -340,6 +352,13 @@ async fn every_speaker_route_needs_a_speaker_token_and_other_routes_refuse_it() 
             202,
         ),
         ("GET", "/speaker/turn/turn-0001?wait=0", "", vec![], 202),
+        (
+            "POST",
+            "/speaker/record",
+            "application/json",
+            record.clone(),
+            200,
+        ),
     ];
     for (method, target, ctype, body, allowed) in &routes {
         for (token, want) in [
@@ -401,6 +420,7 @@ async fn every_speaker_route_needs_a_speaker_token_and_other_routes_refuse_it() 
         ("GET", "/speaker/status", "", vec![] as Vec<u8>),
         ("POST", "/speaker/stt", "audio/wav", stt_body),
         ("POST", "/speaker/turn", "application/json", turn),
+        ("POST", "/speaker/record", "application/json", record),
     ] {
         let r = http(&off, method, target, Some(BEDROOM), ctype, &body).await;
         assert_eq!(r.status, 404, "{method} {target}");
@@ -465,10 +485,29 @@ async fn a_spoken_turn_travels_the_lane_and_comes_back_once() {
         "/speaker/turn",
         Some(BEDROOM),
         "application/json",
-        &turn_body("turn-0001", "What time is it?", 0, Some("bedroom")),
+        &{
+            let mut b: Value = serde_json::from_slice(&turn_body(
+                "turn-0001",
+                "What time is it?",
+                0,
+                Some("bedroom"),
+            ))
+            .unwrap();
+            // The speaker's last exchanges ride along, and it says it handed the turn over.
+            b["context"] = json!("Turn the lamp on. Done.");
+            b["origin"] = json!("escalation");
+            b.to_string().into_bytes()
+        },
     )
     .await;
     assert_eq!((r.status, r.body["state"].as_str()), (202, Some("working")));
+    // Even a turn still working carries the hub's own clock: taken, and not yet anything else.
+    assert!(
+        r.body["timing"]["received"].as_i64().unwrap() > 0,
+        "{}",
+        r.body
+    );
+    assert!(r.body["timing"]["answered"].is_null());
 
     // The frame the PC sees: the phone's voice frame with the speaker's fields beside it.
     let frame = next_where(&mut ws, "the speaker turn", |f| {
@@ -486,6 +525,8 @@ async fn a_spoken_turn_travels_the_lane_and_comes_back_once() {
     assert_eq!(frame["person"], Value::Null);
     assert_eq!(frame["tier"], json!("do"));
     assert_eq!(frame["until"], Value::Null);
+    assert_eq!(frame["context"], json!("Turn the lamp on. Done."));
+    assert_eq!(frame["origin"], json!("escalation"));
     let session = frame["session"].as_str().unwrap().to_owned();
     assert!(!session.is_empty());
 
@@ -533,6 +574,15 @@ async fn a_spoken_turn_travels_the_lane_and_comes_back_once() {
     assert_eq!(r.body["session"]["id"], json!(session));
     assert_eq!(r.body["session"]["assurance"], json!("none"));
     assert_eq!(r.body["session"]["elevated"], json!(false));
+    // The hub's own milliseconds for each hop, in order; the poll and the first call agree.
+    let t = &r.body["timing"];
+    let ms = |k: &str| {
+        t[k].as_i64()
+            .unwrap_or_else(|| panic!("{k} missing in {t}"))
+    };
+    assert!(ms("received") <= ms("delivered_to_pc"), "{t}");
+    assert!(ms("delivered_to_pc") <= ms("acked"), "{t}");
+    assert!(ms("acked") <= ms("answered"), "{t}");
 
     // The same turn id from the same speaker is answered from the record: no new frame, and the
     // status keeps the session.
@@ -590,6 +640,46 @@ async fn a_spoken_turn_travels_the_lane_and_comes_back_once() {
     })
     .await;
     assert_ne!(frame["session"].as_str().unwrap(), session);
+    assert!(frame["context"].is_null() && frame["origin"].is_null());
+
+    // An origin other than escalation, or a context that is too long (the end of it is kept), is
+    // handled before anything runs.
+    let mut bad: Value =
+        serde_json::from_slice(&turn_body("turn-0003", "Words.", 0, None)).unwrap();
+    bad["origin"] = json!("shouting");
+    let r = http(
+        &hub,
+        "POST",
+        "/speaker/turn",
+        Some(BEDROOM),
+        "application/json",
+        bad.to_string().as_bytes(),
+    )
+    .await;
+    assert_eq!(r.status, 400);
+    let mut long: Value =
+        serde_json::from_slice(&turn_body("turn-0004", "Words.", 0, None)).unwrap();
+    long["context"] = json!(format!("{}END", "x".repeat(5_000)));
+    let r = http(
+        &hub,
+        "POST",
+        "/speaker/turn",
+        Some(BEDROOM),
+        "application/json",
+        long.to_string().as_bytes(),
+    )
+    .await;
+    assert_eq!(r.status, 202);
+    let frame = next_where(&mut ws, "the long-context turn", |f| {
+        f["type"] == "voice" && f["id"] == "turn-0004"
+    })
+    .await;
+    let kept = frame["context"].as_str().unwrap();
+    assert!(
+        kept.len() <= 2_048 && kept.ends_with("END"),
+        "{}",
+        kept.len()
+    );
 }
 
 /// A turn with no Helm to take it: a person with no line at all waits the longer wait and is
@@ -777,6 +867,138 @@ async fn a_talk_stays_one_session_until_it_idles_out() {
     })
     .await;
     assert_ne!(fresh["session"].as_str().unwrap(), session);
+}
+
+/// A record travels the lane like a turn but wants no answer: it is taken at once, sent again
+/// until Helm acknowledges it, waits for a line when none is up, keeps its talk open until it is
+/// taken, and the same id is never stored twice.
+#[tokio::test]
+async fn a_record_is_taken_at_once_and_reaches_helm_once() {
+    let idle = Duration::from_secs(600);
+    let hub = start(Opts {
+        idle,
+        ..Opts::default()
+    })
+    .await;
+    let post = |token: &'static str, body: Value| {
+        let hub = &hub;
+        async move {
+            http(
+                hub,
+                "POST",
+                "/speaker/record",
+                Some(token),
+                "application/json",
+                body.to_string().as_bytes(),
+            )
+            .await
+        }
+    };
+
+    // No Helm yet: the hub still says yes, and holds the record for a line that takes the speaker.
+    let r = post(BEDROOM, record_body("record-0001")).await;
+    assert_eq!((r.status, r.body["ok"].as_bool()), (200, Some(true)));
+    let mut ws = pc(&hub, (true, true, true)).await;
+    hub.bridge().tick(now_ms());
+    let frame = next_where(&mut ws, "the record", is("speaker_record")).await;
+    assert_eq!(
+        (frame["id"].clone(), frame["lane"].clone()),
+        (json!("record-0001"), json!("speaker"))
+    );
+    assert_eq!(frame["personId"], json!("1"));
+    assert_eq!(frame["device"], json!("speaker-desk"));
+    assert_eq!(frame["room"], json!("bedroom"));
+    assert_eq!(frame["text"], json!("Lights on."));
+    assert_eq!(frame["answer"], json!("Done."));
+    assert_eq!(frame["kind"], json!("answer"));
+    assert_eq!(frame["model"], json!("small-model"));
+    assert_eq!(frame["toolCalls"][0]["name"], json!("light_turn_on"));
+    assert_eq!(frame["toolCalls"][0]["ok"], json!(true));
+    assert_eq!(frame["leftover"], json!(["Buy a new bulb"]));
+    assert_eq!(frame["timings"]["stt_ms"], json!(40));
+    let session = frame["session"].as_str().unwrap().to_owned();
+
+    // Unacknowledged, it goes again on the resend schedule; once acknowledged it never does.
+    hub.bridge().tick(now_ms() + 11_000);
+    let again = next_where(&mut ws, "the resent record", is("speaker_record")).await;
+    assert_eq!(again["id"], json!("record-0001"));
+    send(
+        &mut ws,
+        json!({"type": "voice_ack", "id": "record-0001", "lane": "speaker", "personId": "1"}),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    hub.bridge().tick(now_ms() + 25_000);
+    assert!(
+        drain(&mut ws, 300)
+            .await
+            .iter()
+            .all(|f| f["type"] != "speaker_record"),
+        "an acknowledged record is not sent again"
+    );
+
+    // The same id again is taken, not stored twice; another speaker's use of it, or a turn's, is a 409.
+    assert_eq!(post(BEDROOM, record_body("record-0001")).await.status, 200);
+    assert_eq!(post(KITCHEN, record_body("record-0001")).await.status, 409);
+    let r = http(
+        &hub,
+        "POST",
+        "/speaker/turn",
+        Some(BEDROOM),
+        "application/json",
+        &turn_body("record-0001", "Words.", 0, None),
+    )
+    .await;
+    assert_eq!(r.status, 409);
+    hub.bridge().tick(now_ms() + 26_000);
+    assert!(drain(&mut ws, 300)
+        .await
+        .iter()
+        .all(|f| f["type"] != "speaker_record"));
+
+    // What a record must carry, and its limits: a missing id, words or kind is a 400, a body over
+    // 32 KiB a 413; long lists are cut, not refused.
+    for (what, patch) in [
+        ("no id", json!({"turn_id": null})),
+        ("a bad id", json!({"turn_id": "a b"})),
+        ("no words", json!({"text": "  "})),
+        ("a kind of its own", json!({"kind": "chat"})),
+    ] {
+        let mut b = record_body("record-0002");
+        for (k, v) in patch.as_object().unwrap() {
+            b[k] = v.clone();
+        }
+        assert_eq!(post(BEDROOM, b).await.status, 400, "{what}");
+    }
+    let mut big = record_body("record-0002");
+    big["answer"] = json!("x".repeat(33 * 1024));
+    assert_eq!(post(BEDROOM, big).await.status, 413);
+    let mut long = record_body("record-0003");
+    long["leftover"] = json!((0..40).map(|n| format!("note {n}")).collect::<Vec<_>>());
+    long["tool_calls"] = json!((0..80)
+        .map(|n| json!({"name": format!("t{n}")}))
+        .collect::<Vec<_>>());
+    assert_eq!(post(BEDROOM, long).await.status, 200);
+    let cut = next_where(&mut ws, "the long record", |f| f["id"] == "record-0003").await;
+    assert_eq!(cut["leftover"].as_array().unwrap().len(), 20);
+    assert_eq!(cut["toolCalls"].as_array().unwrap().len(), 50);
+    assert_eq!(
+        cut["toolCalls"][0]["ok"],
+        json!(true),
+        "ok defaults to true"
+    );
+    send(
+        &mut ws,
+        json!({"type": "voice_ack", "id": "record-0003", "lane": "speaker", "personId": "1"}),
+    )
+    .await;
+
+    // The talk the records opened closes with the idle, and Helm is told which one it was.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    hub.bridge()
+        .tick(now_ms() + idle.as_millis() as i64 + 1_000);
+    let closed = next_where(&mut ws, "the session close", is("speaker_session_closed")).await;
+    assert_eq!(closed["sessionId"], json!(session));
 }
 
 /// More than four live turns is refused, and a turn Helm never takes is finished off as an

@@ -397,6 +397,10 @@ pub(crate) struct RealPort<'a> {
     pub(crate) ignored: Mutex<Option<String>>,
     /// The profile a new chat is kept to, once created. `None` leaves it unassigned.
     pub(crate) profile_id: Option<String>,
+    /// The board a new chat is shown on. `None` names none, so the chat goes where the app puts
+    /// it (the board over the folder, else the default board). A board that cannot take the chat
+    /// (gone, archived, closed) is left out and the chat opens as it would have without one.
+    pub(crate) board_id: Option<String>,
 }
 
 /// Whether the chat is archived and the tokens it has used; `None` when it no longer exists.
@@ -547,6 +551,9 @@ impl ChatPort for RealPort<'_> {
         // A saved local model whose server is set up but switched off would be accepted here and
         // then refuse every turn, leaving the phone with no reason: it is left out, and the chat
         // opens on the app default (the effort, if any, is kept).
+        if let Some(b) = &self.board_id {
+            args["boardId"] = json!(b);
+        }
         let model = self.new_chat_model.as_deref().filter(|m| {
             let usable = self.model_usable(m);
             if !usable {
@@ -568,7 +575,25 @@ impl ChatPort for RealPort<'_> {
             args["effort"] = json!(e);
         }
         let asked = self.new_chat_model.is_some() || self.new_chat_effort.is_some();
-        let chat = match self.handle.block_on(self.ops.invoke("chat_create", args)) {
+        let first = self
+            .handle
+            .block_on(self.ops.invoke("chat_create", args.clone()));
+        // A board that refuses the chat must not leave the channel dark: try again with none.
+        let first = match first {
+            Err(e) if self.board_id.is_some() => {
+                log::warn!(
+                    "relay: the board chosen for new {} chats refused ({}); opening on the app's own board",
+                    self.label,
+                    e.message
+                );
+                if let Some(o) = args.as_object_mut() {
+                    o.remove("boardId");
+                }
+                self.handle.block_on(self.ops.invoke("chat_create", args))
+            }
+            other => other,
+        };
+        let chat = match first {
             Ok(chat) => chat,
             Err(e) if !asked => return Err(e.message),
             Err(e) => {
@@ -917,6 +942,7 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
         new_chat_effort: c.new_chat_effort.clone(),
         ignored: Mutex::new(None),
         profile_id: Some(c.profile_id.clone()),
+        board_id: None,
     };
     let who = profile_name(&c.db, &c.profile_id);
     let (chat, _created) =

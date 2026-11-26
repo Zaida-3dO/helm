@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { agoText, compactCount, contextSize, contextVerdict, messageTimeFull, messageTimeLabel, messageTimeShort, contextTokens, formatTurnTime, isTooLargeRefusal, newTokens, parseRolloverTokens, tokenChip, turnTimes, skillsByReply, chatRefOpens, ROLL_OVER_TOKENS, type ChatContextReading } from './rowMeta.ts';
+import { agoText, compactCount, contextSize, contextVerdict, messageTimeFull, messageTimeLabel, messageTimeShort, contextTokens, formatTurnTime, isTooLargeRefusal, newTokens, parseRolloverTokens, tokenChip, turnTimes, skillsByReply, chatRefOpens, chatChipTarget, ROLL_OVER_TOKENS, type ChatContextReading } from './rowMeta.ts';
 
 const usage = { inputTokens: 1200, outputTokens: 300, cacheReadTokens: 40_000, cacheWriteTokens: 500, costUsd: 0 };
 
@@ -221,5 +221,15 @@ test('the skills of a turn sit on its last reply, once each; chat chips open onl
   assert.equal(chatRefOpens([], 'x'), true, 'a list that has not loaded says nothing');
   assert.equal(chatRefOpens([{ id: 'a' }], 'a'), true);
   assert.equal(chatRefOpens([{ id: 'a' }], 'gone'), false);
+  // A reference to a rolled-over session follows the stack to its newest live session.
+  const stack = [
+    { id: 's1', archived: true },
+    { id: 's2', archived: true },
+    { id: 's3', archived: false },
+  ];
+  assert.equal(chatChipTarget(stack, 's1'), 's3', 'the newest live session wins');
+  assert.equal(chatChipTarget(stack, 's3'), null, 'a live session with no later one has nowhere to follow');
+  assert.equal(chatChipTarget([{ id: 's1', archived: true }], 's1'), null, 'a fully archived stack has nowhere to go');
+  assert.equal(chatChipTarget([], 's1'), null);
 });
 

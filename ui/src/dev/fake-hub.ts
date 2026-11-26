@@ -35,7 +35,7 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
       p = {
         tg: { chat: null, maxAgeHours: 24, maxTokens: 400_000, awayAlerts: true, approvals: false, remoteAnswers: false, model: null, effort: null, takeTelegram: id === 'home' },
         voice: { chat: null, model: 'claude-sonnet-5-5', effort: 'low', idleMinutes: 240, maxAgeHours: 24, maxTokens: 300_000, watch: 'flags', takeVoice: id === 'home' },
-        speaker: { talks: [], model: 'local/strata/qwen3.8-flash-next-iq3_s', effort: 'low', takeSpeaker: id === 'home', previousHours: 12 },
+        speaker: { talks: [], model: 'local/strata/qwen3.8-flash-next-iq3_s', effort: 'low', takeSpeaker: id === 'home', previousHours: 12, lean: false, boardId: '' },
         linked: false,
         pinned: [],
         prompts: {},
@@ -147,6 +147,8 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         sp.effort = typeof a.effort === 'string' ? a.effort.trim() : '';
         if (typeof a.takeSpeaker === 'boolean') sp.takeSpeaker = a.takeSpeaker;
         sp.previousHours = Number(a.previousHours) || 0;
+        if (typeof a.lean === 'boolean') sp.lean = a.lean;
+        if (typeof a.boardId === 'string') sp.boardId = a.boardId.trim();
         return sp;
       }
       case 'relay_speaker_reset': {

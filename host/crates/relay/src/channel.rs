@@ -202,24 +202,16 @@ pub struct ChannelSection {
     pub profile_dir: PathBuf,
 }
 
-impl AddendumSection for ChannelSection {
-    fn id(&self) -> &'static str {
-        "channel"
-    }
-    fn order(&self) -> i32 {
-        12
-    }
-    fn text(&self, ctx: &LaunchCtx<'_>) -> Option<String> {
-        let (channel, named) = channel_of_folder(&self.profile_dir, ctx.cwd)?;
-        // The person whose override applies: the one named in the folder when it is a real
-        // profile, else the profile the chat belongs to.
+impl ChannelSection {
+    /// The channel a chat's folder says it is in, and the profile whose prompt applies to it:
+    /// the one named in the folder when it is a real profile, else the profile the chat belongs
+    /// to. `None` for a chat that is in no channel's folder.
+    pub fn resolve(&self, chat_id: &str, cwd: &str) -> Option<(Channel, Option<String>)> {
+        let (channel, named) = channel_of_folder(&self.profile_dir, cwd)?;
         let owned = || {
             self.db
                 .snapshot(|tx| {
-                    Ok::<_, rusqlite::Error>(helm_profiles::store::chat_owner_profile(
-                        tx,
-                        ctx.chat_id,
-                    ))
+                    Ok::<_, rusqlite::Error>(helm_profiles::store::chat_owner_profile(tx, chat_id))
                 })
                 .ok()
                 .flatten()
@@ -234,6 +226,19 @@ impl AddendumSection for ChannelSection {
                     .map(|p| p.id)
             })
             .or_else(owned);
+        Some((channel, person))
+    }
+}
+
+impl AddendumSection for ChannelSection {
+    fn id(&self) -> &'static str {
+        "channel"
+    }
+    fn order(&self) -> i32 {
+        12
+    }
+    fn text(&self, ctx: &LaunchCtx<'_>) -> Option<String> {
+        let (channel, person) = self.resolve(ctx.chat_id, ctx.cwd)?;
         Some(match person {
             Some(p) => effective(&self.profile_dir, &p, channel),
             None => channel.default_text().to_owned(),

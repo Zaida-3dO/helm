@@ -570,7 +570,7 @@ settings, never in the repo or the chat.
 ## The speaker line
 
 A room speaker — a Home Assistant voice satellite — reaches a person's Helm the way a phone's
-voice line does, but over four short HTTP calls instead of a socket: Home Assistant sends the
+voice line does, but over five short HTTP calls instead of a socket: Home Assistant sends the
 audio, the hub turns the words into a turn down the person's relay line, and the answer comes back
 as one sentence to be spoken. Each speaker has a token of the `speaker` scope
 (`helm-hub client add --person Sam --machine speaker-kitchen --scopes speaker`, or a `HUB_TOKENS`
@@ -587,8 +587,9 @@ which speaks exactly these routes.
 |---|---|
 | `GET /speaker/status` | `200 {"ok": true, "version": 1, "helm": "online"\|"offline", "stt": true\|false, "session": {…}\|null}`. `helm` is `online` only while a line of that person both is up and has announced that it takes speaker turns. `session` is the newest talk this speaker had, with `id`, `startedAt`, `lastActiveAt` (milliseconds) and `assurance`, `person`, `elevated`, `elevatedUntil` (`"none"`, `null`, `false`, `null` today). Proves the address and the token; never touches speech-to-text |
 | `POST /speaker/stt[?device=…&room=…&hint=…]` | One capture in as `audio/wav`, 1.5 MiB and 30 s at most: `200 {"text": "…"}`, or `{"state": "empty"}` for a clip under 0.3 s or one heard as blank, `{"state": "error"}` when the speech server failed and `{"state": "offline"}` when the hub has no speech server (no `HUB_TELEGRAM_STT_URL`). 413 for a bigger or longer clip, before the server is asked; 429 past the rate limit. The speaker's clip is asked at the speech server with `X-Priority: interactive`, so a spoken word waits behind bulk transcription but not long |
-| `POST /speaker/turn` | `{"turn_id", "text", "wait", "device"?, "room"?, "area"?, "hint"?, "presence"?}`, at most 32 KiB. `turn_id` is the speaker's own (8-64 of `A-Za-z0-9_-`), so a retry is safe: the same id from the same token is answered from its record and never run twice; from another token it is 409. The call waits `wait` seconds (clamped 0-25, default 20) and answers `200 {"state": "answer", "text", "session"}`, `200 {"state": "offline"}`, `200 {"state": "error"}` or `202 {"state": "working"}`. 400 for a bad id or text, 413 over the cap, 429 when this speaker already has four turns live or has made thirty past minute |
+| `POST /speaker/turn` | `{"turn_id", "text", "wait", "device"?, "room"?, "area"?, "hint"?, "presence"?, "context"?, "origin"?}`, at most 32 KiB. `context` is up to 2 KiB of what the speaker said just before (its last two local exchanges, so "and the bedroom" makes sense to the chat); a longer one keeps its end. `origin` is `"escalation"` when the speaker tried by itself first and handed the turn over; any other value is 400. Both go down the line with the turn. `turn_id` is the speaker's own (8-64 of `A-Za-z0-9_-`), so a retry is safe: the same id from the same token is answered from its record and never run twice; from another token it is 409. The call waits `wait` seconds (clamped 0-25, default 20) and answers `200 {"state": "answer", "text", "session", "timing"}`, `200 {"state": "offline"}`, `200 {"state": "error"}` or `202 {"state": "working"}`; each of them carries `timing` (below). 400 for a bad id or text, 413 over the cap, 429 when this speaker already has four turns live or has made thirty past minute |
 | `GET /speaker/turn/<id>?wait=N` | The same answer, for a caller following a 202. An id the hub does not know is 404, and a hub that forgot a turn never runs it again |
+| `POST /speaker/record` | `{"turn_id", "device"?, "room"?, "area"?, "started_at"? (ms), "text", "answer", "kind": "answer"\|"escalated"\|"error", "tool_calls"?: [{"name", "summary", "ok"}], "leftover"?: ["short text", …], "timings"?: {…}, "model"?}`, at most 32 KiB: an exchange the speaker answered by itself, for Helm to keep as a chat. `200 {"ok": true}` as soon as the hub has it; Helm is not asked for an answer and no model runs. `turn_id` works as it does for a turn: the same id from the same token is taken once, from another token (or one already used for a turn) it is 409. 400 for a missing or bad id, empty text or an unknown kind, 413 over the cap, 429 past thirty records a minute or fifty waiting. Over-long lists are cut (fifty tools, twenty leftover notes of 300 characters) rather than refused |
 
 **Who takes the turn.** A turn goes down a line only while that PC's last `device` frame said it
 takes this person's speaker turns (`people[].speaker: true`, see "Devices"). A person whose PCs are
@@ -606,9 +607,13 @@ fields — `assurance`, `person`, `tier`, `until` — at their starting values (
 speaker records (`room`, `area`, `presence`) routes anything yet: `helm-hub speaker list` shows
 what the hub has heard of, and the last time each spoke.
 
+**Timing.** Every turn answer, and the poll's, carries `"timing": {"received", "delivered_to_pc", "acked", "answered"}`: the hub's own clock in milliseconds since the epoch, for when it took the turn, put it down a line, had Helm's acknowledgement and had the answer. A step that has not happened (or never will, as for an acknowledgement the answer overtook) is `null`; the differences between neighbours are the hops, whatever the clocks of the speaker and the PC say.
+
+**Records.** `POST /speaker/record` is for exchanges that never needed Helm. The hub puts each one down the person's line as a `speaker_record` frame (`"lane": "speaker"`, with the fields above, the talk's `session` and `personId`), one at a time in order, to a line that takes the speaker, and sends it again every 10 s until Helm answers with a speaker `voice_ack` carrying the record's id. A record waits up to 30 minutes for such a line and is given up on 2 minutes after it first went out unacknowledged; it holds its talk open until then. Helm keeps the exchange as a plain transcript in the talk's chat, never as something the person typed.
+
 **Talks.** One per (speaker token, device named by its calls). A talk ends
-`HUB_SPEAKER_IDLE_MINUTES` after its last turn (a turn still running holds it open), and every line
-that carried one of its turns is sent `speaker_session_closed {sessionId, closedAt}` so Helm can
+`HUB_SPEAKER_IDLE_MINUTES` after its last turn or record (a turn still running, or a record not yet taken, holds it open), and every line
+that carried one of its turns or records is sent `speaker_session_closed {sessionId, closedAt}` so Helm can
 close and archive the chat it was working in; `closedAt` is when the talk ran out, not when the hub
 noticed. The next utterance starts a new one with a fresh id. Everything here is in memory: a
 hub restart drops the turns and the talks, and the speaker's next call is told so.
