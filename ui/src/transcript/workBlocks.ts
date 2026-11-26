@@ -25,6 +25,10 @@
 // as a thought-style row; when the person speaks mid-turn, the line that was current at that
 // moment stays in the flow above their message, as the mark of where the agent was.
 //
+// The chat's first message is never folded, whoever sent it: an opener written by another chat, a
+// schedule or the app stands in the flow as its card, so the reader can always see what the chat
+// was asked to do. Only the first one: later messages of that kind fold as above.
+//
 // A row with nothing to show — the empty message each tool call is saved under — is never drawn at
 // all, closed or opened: hidden tool activity takes no space rather than leaving an empty gap.
 
@@ -173,6 +177,19 @@ function groupable(r: MessageRow): boolean {
   return false;
 }
 
+/**
+ * The chat's first message when it did not come from the person (another chat, a schedule or the
+ * app wrote it): the first message row, provided the agent had not yet answered or worked. Null
+ * when the person opened the chat, or when this page does not begin at the chat's start.
+ */
+function chatOpener(rows: MessageRow[]): MessageRow | undefined {
+  for (const r of rows) {
+    if (r.role === 'assistant' || r.role === 'toolResult') return undefined;
+    if (r.role === 'user') return groupable(r) ? r : undefined;
+  }
+  return undefined;
+}
+
 const recaps = new WeakMap<MessageRow, { rows: number; recap: Recap | null }>();
 
 /** A settled turn's recap, remembered per final reply so a long transcript is not re-scanned on every update. */
@@ -224,15 +241,20 @@ function groupAgents(items: Item[]): Item[] {
  * Lay out rows as items. `live` says whether the newest turn is still running; `expanded` lists
  * the group keys the reader has opened (a turn's `revealKey` opens its group); `dividers` names
  * the older session at each roll-over boundary (keyed by that session's id) so the meeting of two
- * sessions gets a divider row.
+ * sessions gets a divider row. `startsChat` says the rows begin at the chat's own beginning (no
+ * older page is waiting to load), so its first message, if it did not come from the person, is
+ * kept out of the work group.
  */
 export function layout(
   rows: MessageRow[],
   live: boolean,
   expanded: ReadonlySet<string> = new Set(),
   dividers: ReadonlyMap<string, { title: string; rolledOverAt: number }> = new Map(),
+  startsChat = true,
 ): Item[] {
   const items: Item[] = [];
+  const opener = startsChat ? chatOpener(rows) : undefined;
+  const folds = (r: MessageRow): boolean => r !== opener && groupable(r);
   let i = 0;
   // A page read across a roll-over stack: where the rows change session, put up a divider naming
   // the older session the reader meets going up.
@@ -289,7 +311,7 @@ export function layout(
       if (progressText(r)) {
         latestProg = j;
         lastUnpinned = j;
-      } else if (r.role === 'user' && !groupable(r) && !isHelmNote(r) && lastUnpinned >= 0) {
+      } else if (r.role === 'user' && !folds(r) && !isHelmNote(r) && lastUnpinned >= 0) {
         pinned.add(lastUnpinned);
         lastUnpinned = -1;
       } else if (isNote(r) && !isStubNote(r) && !isQuietReply(r)) {
@@ -305,7 +327,7 @@ export function layout(
     // messages tool calls hide under is no work to show: no header over those alone.
     const group: number[] = [];
     for (let j = 0; j < work.length; j++) {
-      if (groupable(work[j]!) && j !== currentProg && !pinned.has(j)) group.push(j);
+      if (folds(work[j]!) && j !== currentProg && !pinned.has(j)) group.push(j);
     }
     const hasWork = group.some((j) => !isBlank(work[j]!));
     const groupKey = hasWork ? `cg:${turnKey}:${work[group[0]!]!.id}` : '';
@@ -323,7 +345,7 @@ export function layout(
     let prevShown: MessageRow | undefined;
     const nextShown = (j: number) => {
       for (let k = j + 1; k < work.length; k++) {
-        if (!groupable(work[k]!) && !undrawn(work[k]!) && !pinned.has(k) && k !== currentProg) return work[k]!;
+        if (!folds(work[k]!) && !undrawn(work[k]!) && !pinned.has(k) && k !== currentProg) return work[k]!;
       }
       return undefined;
     };
@@ -335,7 +357,7 @@ export function layout(
         items.push({ kind: 'progress', key: `prog:${r.id}`, row: r, text: progressText(r), pinned: true });
         continue;
       }
-      if (j === currentProg || groupable(r) || undrawn(r)) continue;
+      if (j === currentProg || folds(r) || undrawn(r)) continue;
       const next = nextShown(j);
       items.push({
         kind: 'row',
