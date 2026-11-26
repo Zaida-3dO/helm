@@ -14,12 +14,24 @@ the real satellite device.
 """
 
 import logging
+import time
 
-from homeassistant.components.stt import Provider, SpeechResult, SpeechSettings
+from homeassistant.components.stt import (
+    AudioBitRates,
+    AudioChannels,
+    AudioCodecs,
+    AudioFormats,
+    AudioSampleRates,
+    SpeechMetadata,
+    SpeechResult,
+    SpeechResultState,
+    SpeechToTextEntity,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
 
-from .const import CONF_HINT, CONF_ROOM
+from .const import CONF_HINT, CONF_ROOM, DOMAIN
 from .hubapi import (
     KIND_ANSWER,
     KIND_EMPTY,
@@ -32,6 +44,10 @@ from .hubapi import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# The hub's model decides the language; Home Assistant only needs the pipeline's own language
+# to appear in this list.
+LANGUAGES = ["en", "en-GB", "en-US", "en-AU", "en-IE", "en-CA", "en-NZ", "en-ZA", "en-IN"]
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -40,43 +56,78 @@ async def async_setup_entry(
 ) -> None:
     api = config_entry.runtime_data["api"]
     async_add_entities(
-        [HelmSpeechToText(api, config_entry.data.get(CONF_ROOM),
+        [HelmSpeechToText(config_entry, api, config_entry.data.get(CONF_ROOM),
                           config_entry.data.get(CONF_HINT))])
 
 
-class HelmSpeechToText(Provider):
-    """One STT provider for the entry's hub. `supported_languages` is left
-    unset, so the pipeline lets any language through: the hub's model
-    decides."""
+class HelmSpeechToText(SpeechToTextEntity):
+    """One speech-to-text entity for the entry's hub."""
 
-    def __init__(self, api: HubApi, room=None, hint=None):
+    _attr_has_entity_name = False
+    _attr_name = "Helm speaker"
+
+    def __init__(self, entry: ConfigEntry, api: HubApi, room=None, hint=None):
         self.api = api
         self.room = room
         self.hint = hint
+        self._attr_unique_id = f"{entry.entry_id}-stt"
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry.entry_id)})
+
+    @property
+    def supported_languages(self):
+        return LANGUAGES
+
+    @property
+    def supported_formats(self):
+        return [AudioFormats.WAV]
+
+    @property
+    def supported_codecs(self):
+        return [AudioCodecs.PCM]
+
+    @property
+    def supported_bit_rates(self):
+        return [AudioBitRates.BITRATE_16]
+
+    @property
+    def supported_sample_rates(self):
+        return [AudioSampleRates.SAMPLERATE_16000]
+
+    @property
+    def supported_channels(self):
+        return [AudioChannels.CHANNEL_MONO]
 
     async def async_process_audio_stream(
-        self, audio_sample_rate, audio_stream, options=None
-    ):
+        self, metadata: SpeechMetadata, stream
+    ) -> SpeechResult:
         """Collect the stream, cap it, wrap it, ask the hub.
 
-        Returns a `SpeechResult` with the words (or the hub's placeholder),
-        or None when there is nothing to say — empty capture, hub
-        unreachable or failed call — which the pipeline handles as "not
-        understood".
+        Returns the words (or the hub's placeholder for a spoken passcode), or an error result
+        when there is nothing to say: empty capture, hub unreachable or a failed call. The
+        pipeline treats that as "not understood".
         """
-        rate = int(audio_sample_rate) or SAMPLE_RATE
+        started = time.monotonic()
+        rate = int(metadata.sample_rate) or SAMPLE_RATE
         cap = pcm_cap(rate, MAX_STT_SECONDS)
         pcm = bytearray()
-        async for chunk in audio_stream:
+        async for chunk in stream:
             if len(pcm) < cap:
                 pcm.extend(chunk)
             # keep draining the stream past the cap so the sender stays happy
+        collected = time.monotonic()
         if not pcm:
-            return None
-        result = await self.api.transcribe(bytes(pcm[:cap]), room=self.room,
-                                           hint=self.hint)
+            return SpeechResult(None, SpeechResultState.ERROR)
+        result = await self.api.transcribe(wav_from_pcm(bytes(pcm[:cap]), rate),
+                                           room=self.room, hint=self.hint)
+        done = time.monotonic()
+        # Stage timings, so a slow answer can be pinned on a stage: how long the speaker talked
+        # (audio plus the pipeline's silence wait), then the hub's transcription call.
+        _LOGGER.info(
+            "helm_speaker timing: stt heard %.1f s of audio over %.2f s, hub transcribed in %.2f s (%s)",
+            len(pcm) / (2 * rate), collected - started, done - collected, result.get("kind"),
+        )
         if result.get("kind") == KIND_ANSWER:
-            return SpeechResult(SpeechSettings(language=None), result["text"])
+            return SpeechResult(result["text"], SpeechResultState.SUCCESS)
         if result.get("kind") != KIND_EMPTY:
             _LOGGER.debug("speaker stt: hub said %s", result.get("kind"))
-        return None
+        return SpeechResult(None, SpeechResultState.ERROR)
