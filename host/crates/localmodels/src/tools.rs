@@ -84,10 +84,11 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
              reload: brings the models back after an unload; safe, and refused when they are \
              already on.\n\
              hold: while you use the card for something a model load would spoil (a benchmark, a \
-             long GPU job), set a hold with a short reason. It refuses nothing: every composer of a \
-             local-model chat shows the reason with \"sending will reload the local model\" and \
-             asks once before the first send. It ends by itself after hours (2 by default, 8 at \
-             most). Call release as soon as you are done. Chats on Claude models are not \
+             long GPU job), set a hold with a short reason. Every composer of a local-model chat \
+             shows the reason with \"sending will reload the local model\" and asks once before \
+             the first send; app_send_message to a local-model chat and app_create_chat on a \
+             local model are refused, with the reason and the time it ends, until the hold ends. \
+             It ends by itself after hours (2 by default, 8 at most). Call release as soon as you are done. Chats on Claude models are not \
              affected.\n\
              release: clears the hold now.\n\
              Never unload on your own: it takes the card away from other working chats.",

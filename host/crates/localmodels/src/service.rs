@@ -198,7 +198,7 @@ pub struct LocalService {
     speech_in_use: Mutex<Option<SpeechProbe>>,
     /// The graphics-card lock as stored; every load path reads this copy.
     gpu_lock: Arc<Mutex<LockState>>,
-    /// The warning a chat set that the card is in use (see `hold`); it refuses nothing.
+    /// The note a chat set that the card is in use (see `hold`).
     pub(crate) hold: crate::hold::HoldCell,
     /// Held for reading by a request that loads a model or launches a server, from its lock check
     /// to the end of that request. An unload takes it once for writing after the lock is set, so
@@ -1715,6 +1715,15 @@ fn strata_sentence(
 }
 
 impl LocalModels for LocalService {
+    fn gpu_hold(&self) -> Option<helm_chats::local::GpuHold> {
+        self.hold
+            .current(helm_core::now_ms())
+            .map(|h| helm_chats::local::GpuHold {
+                reason: h.reason,
+                until: h.until,
+            })
+    }
+
     fn knows(&self, server_id: &str) -> bool {
         self.settings().servers.iter().any(|s| s.id == server_id)
     }

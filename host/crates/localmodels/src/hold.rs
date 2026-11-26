@@ -1,9 +1,11 @@
 //! The graphics-card hold: a note, set by a chat, that something is using the card and sending to a
 //! chat on a local model would reload the model server and spoil it (a benchmark run, say).
 //!
-//! It warns and never blocks. While a hold is set the composer of every local-model chat says why
-//! and asks once before the first send; the lock in [`crate::lock`] is the one that refuses loads.
-//! A hold ends by itself: two hours by default, eight at most, or when the same tool clears it. It
+//! The person is warned, not stopped: while a hold is set the composer of every local-model chat
+//! says why and asks once before the first send. Another chat is stopped: `app_send_message` to a
+//! chat on a local model and `app_create_chat` on a local model are refused with the reason and
+//! the time the hold ends. Schedules and wait deliveries are not held. The lock in
+//! [`crate::lock`] is the one that refuses loads. A hold ends by itself: two hours by default, eight at most, or when the same tool clears it. It
 //! lives in memory, so a restart of Helm drops it.
 
 use crate::service::LocalService;

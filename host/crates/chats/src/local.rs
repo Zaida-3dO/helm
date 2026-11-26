@@ -136,6 +136,30 @@ pub struct QueueInfo {
     pub queued: Option<u64>,
 }
 
+/// A note, set by a chat, that the graphics card is in use and a message that wakes a local model
+/// would spoil what runs on it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuHold {
+    pub reason: String,
+    /// When it ends by itself, in ms since the epoch.
+    pub until: i64,
+}
+
+impl GpuHold {
+    /// The refusal an agent gets when it tries to wake a local model while the hold is on.
+    pub fn refusal(&self) -> String {
+        use chrono::TimeZone;
+        let until = chrono::Local
+            .timestamp_millis_opt(self.until)
+            .single()
+            .map_or_else(|| "it ends".to_owned(), |t| t.format("%H:%M").to_string());
+        format!(
+            "a GPU hold is on: {}, until {until}; retry after it ends",
+            self.reason
+        )
+    }
+}
+
 /// The local model servers, as the chats crate uses them. Calls marked blocking are made off the
 /// chat's task, on the blocking pool.
 pub trait LocalModels: Send + Sync {
@@ -167,6 +191,11 @@ pub trait LocalModels: Send + Sync {
     /// chat has a request open against that server — never at start-up, never on a plain timer.
     /// `None` when the server reports no such thing, or does not answer.
     fn queue(&self, _server_id: &str) -> Option<QueueInfo> {
+        None
+    }
+
+    /// The graphics-card hold in force now, if one is set.
+    fn gpu_hold(&self) -> Option<GpuHold> {
         None
     }
 }

@@ -1376,6 +1376,61 @@ async fn send_message(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRe
     }
 }
 
+/// The refusal for waking a local model while a GPU hold is on: `Some` when a hold is set and
+/// `wakes_local` says this send or new chat would load a model on the local server.
+fn gpu_hold_refusal(ctx: &ToolCtx, wakes_local: impl FnOnce() -> bool) -> Option<ToolError> {
+    let hold = rt(ctx).ok()?.local_models()?.gpu_hold()?;
+    wakes_local().then(|| refuse(hold.refusal()))
+}
+
+/// Whether a new chat that asks for `model` (or, unasked, gets the new-chat default) would run on
+/// a local model server that can be used.
+fn starts_locally(ctx: &ToolCtx, model: Option<&str>) -> bool {
+    let model = match model {
+        Some(m) => Some(m.to_owned()),
+        None => db(ctx)
+            .ok()
+            .and_then(|store| {
+                store
+                    .snapshot(|tx| {
+                        Ok::<_, rusqlite::Error>(crate::runtime_settings::new_chat_defaults(tx).0)
+                    })
+                    .ok()
+            })
+            .flatten(),
+    };
+    let Some(model) = model.filter(|m| m.starts_with(crate::local::PREFIX)) else {
+        return false;
+    };
+    // A default whose server is gone or off starts on Claude instead; a named model is checked
+    // (and refused) when the chat is made.
+    rt(ctx)
+        .ok()
+        .and_then(|rt| rt.local_models())
+        .zip(crate::local::split(&model))
+        .is_none_or(|(l, (server, _))| l.available(server))
+}
+
+/// Whether the chat runs on a local model server.
+fn runs_locally(ctx: &ToolCtx, id: &str) -> bool {
+    db(ctx)
+        .and_then(|store| {
+            store
+                .snapshot(|tx| {
+                    tx.query_row(
+                        "SELECT provider IS NOT NULL AND provider != '' FROM chats WHERE id = ?1",
+                        [id],
+                        |r| r.get::<_, bool>(0),
+                    )
+                    .optional()
+                })
+                .map_err(|e| ToolError::maybe(e.to_string()))
+        })
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+}
+
 /// A chat the finished-chat sweep archived (and nobody has restored or archived since) is brought
 /// back when another chat writes to it, so a late report or a follow-up is not lost. A chat the
 /// person archived by hand is left as it is and the send is refused as before.
@@ -1454,6 +1509,9 @@ fn send_local_message(
     }
     if to == ctx.caller_chat_id {
         return Err(refuse("A chat cannot message itself."));
+    }
+    if let Some(held) = gpu_hold_refusal(ctx, || runs_locally(ctx, &to)) {
+        return Err(held);
     }
     limits.admit(&ctx.caller_chat_id, Some(to.as_str()), Instant::now())?;
     let sent = send_framed(ctx, &to, body, kind)?;
@@ -2063,6 +2121,9 @@ async fn create_chat(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRes
             )
         })
         .map_err(|e| ToolError::maybe(e.to_string()))??;
+    if let Some(held) = gpu_hold_refusal(&ctx, || starts_locally(&ctx, str_arg(&a, "model"))) {
+        return Err(held);
+    }
     limits.admit(&ctx.caller_chat_id, None, Instant::now())?;
     // `chat_create` writes the board row; the folder project is found or added for `cwd`.
     let mut args = json!({"cwd": placed.cwd, "boardId": placed.board});
@@ -4193,6 +4254,107 @@ mod tests {
     async fn create(h: &H, t: &HostTools, caller: &str, mut args: Value) -> Value {
         args["message"] = json!("Start here.");
         call(h, t, caller, "app_create_chat", args).await
+    }
+
+    /// A local-model server that knows only the graphics-card hold.
+    struct HeldCard(Mutex<Option<crate::local::GpuHold>>);
+    impl crate::local::LocalModels for HeldCard {
+        fn knows(&self, server_id: &str) -> bool {
+            server_id == "ollama"
+        }
+        fn server(&self, _: &str, _: &str) -> Result<crate::local::LocalServer, String> {
+            Err("not used".into())
+        }
+        fn prepare(&self, _: &crate::local::LocalTurn, _: &dyn Fn(&str)) -> Result<String, String> {
+            Err("not used".into())
+        }
+        fn finished(&self, _: &str, _: &str) {}
+        fn catalogue(&self, _: bool) -> Vec<crate::types::LocalModelInfo> {
+            Vec::new()
+        }
+        fn gpu_hold(&self) -> Option<crate::local::GpuHold> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    /// While a GPU hold is on, another chat cannot wake a local model: a send to a chat on one
+    /// and a new chat on one are refused with the reason and the end time; a chat on Claude is
+    /// not affected, and the same send goes through once the hold is gone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_gpu_hold_refuses_waking_a_local_model_from_another_chat() {
+        let (h, fake) = gated();
+        let held = Arc::new(HeldCard(Mutex::new(Some(crate::local::GpuHold {
+            reason: "Benchmark running".into(),
+            until: helm_core::now_ms() + 3_600_000,
+        }))));
+        h.rt.set_local_models(held.clone());
+        let t = tools(&h);
+        let (maker, local, claude) = (h.create().await, h.create().await, h.create().await);
+        h.db.write(|tx| {
+            tx.execute(
+                "UPDATE chats SET provider = 'ollama', model = 'qwen3:8b' WHERE id = ?1",
+                [&local],
+            )
+        })
+        .unwrap();
+        let folder = h
+            .col(&format!(
+                "SELECT project_id FROM chats WHERE id = '{maker}'"
+            ))
+            .pop()
+            .unwrap();
+        let work = h.work.to_string_lossy().into_owned();
+        fake.boards.lock().unwrap().push(board(
+            "b-home",
+            "Home",
+            None,
+            Some((folder.as_str(), work.as_str())),
+        ));
+        fake.groups
+            .lock()
+            .unwrap()
+            .insert(maker.clone(), "b-home".into());
+        let send =
+            |to: &str| json!({"chatId": to, "message": "go", "kind": "update", "mode": "steer"});
+        for (label, op, args, refused) in [
+            (
+                "send to a local chat",
+                "app_send_message",
+                send(&local),
+                true,
+            ),
+            (
+                "send to a Claude chat",
+                "app_send_message",
+                send(&claude),
+                false,
+            ),
+            (
+                "a new local chat",
+                "app_create_chat",
+                json!({"message": "Start here.", "model": "local/ollama/qwen3:8b"}),
+                true,
+            ),
+        ] {
+            let r = call(&h, &t, &maker, op, args).await;
+            if refused {
+                let why = r["error"].as_str().unwrap_or_default();
+                assert!(
+                    why.contains("a GPU hold is on: Benchmark running, until ")
+                        && why.contains("retry after it ends"),
+                    "{label}: {r}"
+                );
+            } else {
+                assert_eq!(r["ok"], true, "{label}: {r}");
+            }
+        }
+        // The hold over, the same send to the local chat is no longer refused for it.
+        *held.0.lock().unwrap() = None;
+        let r = call(&h, &t, &maker, "app_send_message", send(&local)).await;
+        assert!(
+            !r["error"].as_str().unwrap_or_default().contains("GPU hold"),
+            "{r}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
