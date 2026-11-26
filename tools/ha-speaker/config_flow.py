@@ -19,12 +19,13 @@ from homeassistant.config_entries import (
     ConfigEntry,
     ConfigFlow,
     ConfigFlowResult,
-    OptionsFlowWithConfigEntry,
+    OptionsFlow,
 )
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
 
 from . import AiohttpTransport
 from .const import (
+    CONF_DRY,
     CONF_EXTRA_BODY,
     CONF_EXTRA_HEADERS,
     CONF_HINT,
@@ -90,7 +91,9 @@ class HelmSpeakerFlowHandler(ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(
         config_entry: ConfigEntry,
     ) -> "HelmSpeakerOptionsFlow":
-        return HelmSpeakerOptionsFlow(config_entry)
+        # the entry reaches the flow through its handler; it is not handed to
+        # the constructor (that base class is on its way out)
+        return HelmSpeakerOptionsFlow()
 
     async def async_step_user(self, user_input=None) -> ConfigFlowResult:
         if self._async_current_entries():
@@ -169,36 +172,50 @@ class HelmSpeakerFlowHandler(ConfigFlow, domain=DOMAIN):
         return self.async_create_entry(title=title, data=data, options=options)
 
 
-class HelmSpeakerOptionsFlow(OptionsFlowWithConfigEntry):
-    """Edit both model profiles and switch the active one without a restart.
+class HelmSpeakerOptionsFlow(OptionsFlow):
+    """Edit the model profiles and switch the active one without a restart.
 
-    The form shows the fields of whichever profile the dropdown names; on
-    save they land back under that name. The key field starts empty by
-    design - the stored key is never echoed to the UI, and leaving it blank
-    keeps what is stored."""
+    Two steps on purpose: first pick which profile to edit (the form cannot
+    re-read a dropdown mid-step, so picking and editing in one form once
+    wrote the wrong profile's values), then the fields arrive prefilled from
+    *that* profile. The key field starts empty by design - the stored key is
+    never echoed back, and leaving it blank keeps what is stored."""
 
     async def async_step_init(self, user_input=None) -> ConfigFlowResult:
-        profiles = profiles_from_entry(self.config_entry.data,
-                                       self.config_entry.options)
-        active = (self.config_entry.options or {}).get(CONF_PROFILE) or PROFILES[0]
+        options = dict(self.config_entry.options or {})
+        active = options.get(CONF_PROFILE) or PROFILES[0]
         schema = vol.Schema({
-            vol.Required("show_profile", default=active): vol.In(list(PROFILES)),
-            **_model_schema(profiles[active]),
+            vol.Required("edit_profile", default=active): vol.In(list(PROFILES)),
+            vol.Optional("make_active", default="keep"):
+                vol.In(["keep", *PROFILES]),
+            vol.Optional(CONF_DRY, default=bool(options.get(CONF_DRY))): bool,
         })
         if user_input is None:
             return self.async_show_form(step_id="init", data_schema=schema)
+        self._picked = user_input["edit_profile"]
+        self._dry = bool(user_input.get(CONF_DRY))
+        self._active = user_input.get("make_active") or "keep"
+        return await self.async_step_model()
+
+    async def async_step_model(self, user_input=None) -> ConfigFlowResult:
+        picked = getattr(self, "_picked", PROFILES[0])
+        profiles = profiles_from_entry(self.config_entry.data,
+                                       self.config_entry.options)
+        schema = vol.Schema(_model_schema(profiles[picked]))
+        if user_input is None:
+            return self.async_show_form(step_id="model", data_schema=schema)
 
         headers, herr = parse_json_field(user_input.get(CONF_EXTRA_HEADERS))
         body, berr = parse_json_field(user_input.get(CONF_EXTRA_BODY))
         if herr or berr:
             return self.async_show_form(
-                step_id="init", data_schema=schema, errors={"base": herr or berr})
+                step_id="model", data_schema=schema,
+                errors={"base": herr or berr})
 
-        name = user_input["show_profile"]
         updated = {
             "model_url": (user_input[CONF_MODEL_URL] or "").strip().rstrip("/"),
             "model_name": (user_input[CONF_MODEL_NAME] or "").strip(),
-            "api_key": user_input.get(CONF_MODEL_KEY) or profiles[name]["api_key"],
+            "api_key": user_input.get(CONF_MODEL_KEY) or profiles[picked]["api_key"],
             "thinking": bool(user_input.get(CONF_THINKING, True)),
             "extra_headers": headers or {},
             "extra_body": body or {},
@@ -206,14 +223,9 @@ class HelmSpeakerOptionsFlow(OptionsFlowWithConfigEntry):
         }
         options = dict(self.config_entry.options or {})
         stored = profiles_from_entry(self.config_entry.data, options)
-        stored[name] = updated
+        stored[picked] = updated          # the profile actually on screen
         options["profiles"] = stored
-        options[CONF_PROFILE] = name
+        options[CONF_DRY] = self._dry
+        if getattr(self, "_active", "keep") != "keep":
+            options[CONF_PROFILE] = self._active  # else active stays put
         return self.async_create_entry(title="", data=options)
-
-
-def _json_text(value):
-    try:
-        return json.dumps(value or {}, sort_keys=True)
-    except (TypeError, ValueError):
-        return ""

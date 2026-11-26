@@ -23,6 +23,10 @@ CONF_TIMEOUT_S = "timeout_s"
 PROFILES = ("path_a", "path_b")
 CONF_PROFILE = "profile"
 
+# House tools describe what they would do and change nothing while this
+# option is on. Off by default: the speaker is meant to work the lights.
+CONF_DRY = "control_dry"
+
 MAX_JSON_FIELD = 4096  # guard on the free-text JSON fields in the UI
 
 # The unlock indicator: how often to ask the hub whether the session is

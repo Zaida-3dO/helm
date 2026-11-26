@@ -8,27 +8,49 @@
           "model_url": "Model address (OpenAI-style chat completions)",
           "model_name": "Model name",
           "model_api_key": "Model key (optional, kept secret)",
-          "thinking": "Model thinking on",
+          "thinking": "Model thinking on (sent to the endpoint as a request-body switch)",
           "extra_headers_json": "Extra headers as JSON, e.g. for a priority lane (optional)",
-          "extra_body_json": "Extra body keys as JSON, e.g. thinking switches (optional)",
+          "extra_body_json": "Extra body keys as JSON, e.g. a server-specific thinking switch (optional)",
           "timeout_s": "Seconds to wait for the model",
           "url": "Hub address (optional, for escalation and records)",
           "token": "Speaker token from Helm (optional)",
           "room": "Room label (optional)",
           "hint": "Identity hint for a second wake word (optional, not used yet)",
           "led_entity": "Light entity to colour while unlocked (optional)",
-          "allow_plain_http": "Allow plain http hub: the token is sent unencrypted on my network"
+          "allow_plain_http": "Allow plain http: traffic to these addresses is unencrypted on my network"
+        }
+      }
+    },
+    "error": {
+      "plain_http": "That hub address is plain http, so the token would cross the network readable. Use https, or tick the box to allow it.",
+      "model_plain_http": "The model address is plain http, so what you say travels unencrypted on my network. Tick the box below if that is intended (a local model endpoint usually is).",
+      "bad_auth": "The hub refused that token.",
+      "bad_json": "That box must hold a JSON object, like {\"X-Header\": \"now\"}.",
+      "json_too_long": "That JSON box is too big."
+    },
+    "abort": {
+      "already_configured": "This speaker is already set up."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Profiles and house control",
+        "description": "Pick the profile to edit on the next screen. Changes apply as soon as you save; no restart.",
+        "data": {
+          "edit_profile": "Profile to edit",
+          "make_active": "Which profile answers (keep changes nothing)",
+          "control_dry": "Dry run: say what would change, change nothing"
         }
       },
-      "init": {
-        "title": "Model profiles",
-        "description": "Edit a profile and switch which one answers. Changes apply immediately.",
+      "model": {
+        "title": "Model endpoint",
+        "description": "The fields of the chosen profile.",
         "data": {
-          "show_profile": "Profile to edit and set active",
           "model_url": "Model address",
           "model_name": "Model name",
           "model_api_key": "Model key (blank keeps the stored one)",
-          "thinking": "Model thinking on",
+          "thinking": "Model thinking on (sent to the endpoint as a request-body switch)",
           "extra_headers_json": "Extra headers as JSON",
           "extra_body_json": "Extra body keys as JSON",
           "timeout_s": "Seconds to wait for the model"
@@ -36,16 +58,8 @@
       }
     },
     "error": {
-      "cannot_connect": "Could not reach that address.",
-      "plain_http": "That hub address is plain http, so the token would cross the network readable. Use https, or tick the box to allow it.",
-      "model_plain_http": "The model address is plain http, so what you say travels unencrypted on my network. Tick the box below if that is intended (a local model endpoint usually is).",
-      "bad_auth": "The hub refused that token.",
       "bad_json": "That box must hold a JSON object, like {\"X-Header\": \"now\"}.",
-      "json_too_long": "That JSON box is too big.",
-      "already_configured": "This speaker is already set up."
-    },
-    "abort": {
-      "already_configured": "This speaker is already set up."
+      "json_too_long": "That JSON box is too big."
     }
   }
 }

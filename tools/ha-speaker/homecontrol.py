@@ -95,7 +95,8 @@ SCHEMAS = [
         "label": {"type": "string"}},
         ("action",)),
     _fn("home_state", "Read one room: what is on, temperatures.", {
-        "target": {"type": "string", "description": "area name"}}),
+        "target": {"type": "string", "description": "area name"}},
+        ("target",)),
 ]
 
 
@@ -108,22 +109,66 @@ class HomeControlError(Exception):
         self.candidates = candidates or []
 
 
-class HomeControl:
-    """Executes one tool call end to end: resolve, validate, act (or dry)."""
+MAX_WRITE_CALLS = 4  # write calls (service or intent) one spoken ask may make
 
-    def __init__(self, backend, dry=False):
+
+class HomeControl:
+    """Executes one tool call end to end: resolve, validate, act (or dry).
+
+    A fresh instance is a fresh turn; ``reset_budget`` opens the turn again
+    (the replay loop runs many rows through one instance). The per-turn
+    budget stops one loose sentence from rewriting the whole house."""
+
+    def __init__(self, backend, dry=False, ask_helm=True):
         self.backend = backend
         self.dry = dry
+        # read by agent_core: with no hub to ask, the ask_helm tool and its
+        # prompt rule are left out entirely
+        self.ask_enabled = bool(ask_helm)
         # exposed() is cheap in HA; cache for the turn and refresh per execute
         # only when empty, so a mid-activation expose still works next call.
         self._exposed_cache = None
+        self.reset_budget()
+
+    def reset_budget(self):
+        self._touched = set()  # entity ids changed by writes this turn
+        self._writes = 0       # write calls made this turn
 
     @property
     def schemas(self):
         return SCHEMAS
 
+    # ---------------- per-turn budget ----------------
+    # Reads are free. One spoken ask may change at most MAX_ENTITIES devices
+    # across all its calls (the same ceiling that caps a single call) and
+    # make at most MAX_WRITE_CALLS write calls.
+
+    def _charge(self, entity_ids, calls=1):
+        """Refuse before acting when this write would break the turn budget."""
+        if len(self._touched | set(entity_ids)) > MAX_ENTITIES:
+            raise HomeControlError(
+                "that is more than %d devices in one ask; try one room at a"
+                " time" % MAX_ENTITIES)
+        if self._writes + calls > MAX_WRITE_CALLS:
+            raise HomeControlError(
+                "I make at most %d changes per ask; say the rest separately"
+                % MAX_WRITE_CALLS)
+
+    def _spend(self, entity_ids, calls=1):
+        self._touched.update(entity_ids)
+        self._writes += calls
+
     async def execute(self, name, args):
         args = args if isinstance(args, dict) else {}
+        # small models trained on Home Assistant service data write those
+        # argument names; accept the two common ones instead of refusing a
+        # request that was exactly right
+        if name == "light" and args.get("color_temp") is None \
+                and args.get("color_temp_kelvin") is not None:
+            args = dict(args, color_temp=args["color_temp_kelvin"])
+        elif name == "climate" and not args.get("mode") \
+                and args.get("hvac_mode"):
+            args = dict(args, mode=args["hvac_mode"])
         try:
             if name == "light":
                 return await self._light(args)
@@ -242,14 +287,18 @@ class HomeControl:
         if action == "status":
             return self._light_status(picked, states)
 
-        plan = []  # (service, data) - one call per payload group
-        base = {"entity_id": eids}
         extra = {}
+        dim_to_off = False
 
         brightness_pct = args.get("brightness_pct")
         if brightness_pct is not None:
             pct = self._pct(brightness_pct, lo=0, hi=100)
-            extra["brightness"] = int(round(pct * 255 / 100))
+            if pct == 0 and action in ("on", "set"):
+                # "turn it on at zero" or "dim to nothing" means off; a
+                # turn_on at brightness 0 just confuses the bulb
+                dim_to_off = True
+            else:
+                extra["brightness"] = int(round(pct * 255 / 100))
         change_pct = args.get("brightness_change_pct")
         if change_pct is not None:
             step = self._pct(change_pct, lo=-100, hi=100)
@@ -257,10 +306,10 @@ class HomeControl:
 
         kelvin_groups = []
         color_temp = args.get("color_temp")
-        if color_temp is not None:
+        if color_temp is not None and not dim_to_off:
             kelvin_groups = self._kelvin_by_group(color_temp, eids, states)
         color_hex = None
-        if args.get("color") is not None:
+        if args.get("color") is not None and not dim_to_off:
             color_hex = self._parse_color(args["color"])
             cannot = [name for name, eid in picked
                       if not self._supports_color(states, eid)]
@@ -269,25 +318,31 @@ class HomeControl:
                     "these lights cannot change colour: "
                     + ", ".join(cannot))
 
-        if action == "on" or (action == "set" and not extra):
-            plan.append(("light", "turn_on", dict(base)))
-        elif action == "off":
-            plan.append(("light", "turn_off", dict(base)))
+        # (service, data) per payload; every parameter of the ask rides in the
+        # same turn_on as everything else - two calls would mean an audible
+        # flash between brightness and colour
+        plan = []
+        rgb = self._hex_to_rgb(color_hex) if color_hex else None
+        if action == "off" or (action in ("on", "set") and dim_to_off):
+            plan.append(("light", "turn_off", {"entity_id": eids}))
         elif action == "toggle":
-            plan.append(("light", "toggle", dict(base)))
-        elif action == "set":
-            if not (extra or kelvin_groups or color_hex):
+            plan.append(("light", "toggle", {"entity_id": eids}))
+        else:  # on or set
+            if action == "set" and not (extra or kelvin_groups or color_hex):
                 raise HomeControlError(
                     "to set a light give brightness, colour or temperature")
-            if extra:
-                plan.append(("light", "turn_on", {**base, **extra}))
-        if color_hex:
-            plan.append(("light", "turn_on", {"entity_id": eids,
-                                              "rgb_color": self._hex_to_rgb(
-                                                  color_hex)}))
-        for kelvin, group in kelvin_groups:
-            plan.append(("light", "turn_on",
-                         {"entity_id": group, "color_temp_kelvin": kelvin}))
+            common = dict(extra)
+            if rgb is not None:
+                common["rgb_color"] = rgb
+            if not kelvin_groups:
+                payload = {"entity_id": eids}
+                payload.update(common)
+                plan.append(("light", "turn_on", payload))
+            for kelvin, group in kelvin_groups:
+                # one call per clamped-kelvin group; each carries the rest
+                payload = {"entity_id": group, "color_temp_kelvin": kelvin}
+                payload.update(common)
+                plan.append(("light", "turn_on", payload))
 
         return await self._run(plan, "done")
 
@@ -326,9 +381,12 @@ class HomeControl:
 
     @staticmethod
     def _supports_color(states, eid):
-        modes = HomeControl._attrs(states, eid).get("supported_color_modes") or []
-        return any(m in ("rgb", "rgbw", "rgbww", "hs", "xy", "color_temp")
-                   for m in modes)
+        """Whether an rgb colour word can land: a colour-temperature-only
+        bulb takes warm/cool words, not red."""
+        modes = HomeControl._attrs(states, eid).get("supported_color_modes")
+        if modes is None:
+            return True  # says nothing about itself; give it the chance
+        return any(m in ("rgb", "rgbw", "rgbww", "hs", "xy") for m in modes)
 
     @staticmethod
     def _parse_color(value):
@@ -477,6 +535,10 @@ class HomeControl:
                 mins, "" if mins == 1 else "s")
         elif action == "cancel":
             plain = "Timer cancelled."
+        if action in ("start", "cancel"):
+            # a timer is a write too: one ask cannot queue a pile of them
+            self._charge([])
+            self._spend([])
         intent_name = TIMER_INTENTS[action]
         if self.dry:
             return {"ok": True, "dry": True,
@@ -537,11 +599,21 @@ class HomeControl:
     # ---------------- acting ----------------
 
     async def _run(self, plan, summary):
+        if not plan:
+            raise HomeControlError("nothing to change")
+        # one spoken ask = at most MAX_ENTITIES devices touched and
+        # MAX_WRITE_CALLS write calls; refuse the whole call before acting
+        entities = set()
+        for _domain, _service, data in plan:
+            entities.update(data.get("entity_id") or [])
+        self._charge(entities)
         if self.dry:
+            self._spend(entities)
             return {"ok": True, "dry": True,
                     "would_call": [{"service": "%s.%s" % (d, s), "data": data}
                                    for d, s, data in plan],
                     "text": "would " + str(summary)}
+        self._spend(entities)  # spend first: a failing call still counted
         for domain, service, data in plan:
             await self.backend.call_service(domain, service, data)
         return {"ok": True, "text": str(summary)}

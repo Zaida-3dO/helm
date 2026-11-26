@@ -213,6 +213,9 @@ async def run_set(rows, *, config, control, emit, transport=None, tags=None,
             turn_tags.update(row.get("tags") or {})
             turn_tags.setdefault("set_id", row.get("id"))
             for _ in range(max(1, burst)):
+                # each spoken request gets its own change budget; the same
+                # HomeControl instance serves the whole set
+                control.reset_budget()
                 result = await agent_core.run_turn(
                     config, transport, control, ctx, text, tags=turn_tags,
                     clock=time.time)
@@ -271,9 +274,16 @@ def register_service(hass, entry):
     })
 
     async def handle(call: ServiceCall) -> None:
+        from homeassistant.exceptions import HomeAssistantError  # noqa: PLC0415
         path = hass.config.path(call.data["path"])
-        rows = load_set(path)
+        if not hass.config.is_allowed_path(path):
+            # a service call must not read arbitrary files off the machine
+            raise HomeAssistantError(
+                "this path is not on the allowed list (add it to"
+                " configuration.yaml or keep it under the config folder)")
+        rows = await hass.async_add_executor_job(load_set, path)
         runtime = entry.runtime_data or {}
+        prev_dry = runtime.get("control_dry")
         runtime["control_dry"] = not call.data["act"]
         try:
             for _ in range(call.data["repeat"]):
@@ -290,7 +300,10 @@ def register_service(hass, entry):
                         if call.data["gap_ms"]:
                             await asyncio.sleep(call.data["gap_ms"] / 1000.0)
         finally:
-            runtime["control_dry"] = False
+            if prev_dry is None:
+                runtime.pop("control_dry", None)
+            else:  # restore what the entry options or a prior run left set
+                runtime["control_dry"] = prev_dry
 
     hass.services.async_register("helm_speaker", "replay", handle,
                                  schema=schema)
@@ -331,7 +344,8 @@ def main(argv=None):
         with open(args.house, encoding="utf-8") as fh:
             house = json.load(fh)
     backend = CliBackend(house) if house else EmptyBackend()
-    control = HomeControl(backend, dry=True)  # the CLI never touches the house
+    # the CLI has no hub to ask either: same tool set a hub-less speaker gets
+    control = HomeControl(backend, dry=True, ask_helm=False)
     rows = load_set(args.set)
 
     async def go():
