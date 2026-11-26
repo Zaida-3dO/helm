@@ -757,6 +757,43 @@ async fn the_hub_outage_opens_one_repair_chat_per_service_per_hour() {
     );
 }
 
+/// The hub's recovery closes the repair chat it opened for that service, and says nothing when
+/// there is no repair chat for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_hub_recovery_tells_the_repair_chat_it_opened() {
+    let e = env();
+    let down = ServiceOutage {
+        person: None,
+        service: "stt".into(),
+        since: "09:12".into(),
+        detail: Some("its health address does not answer".into()),
+    };
+    let chat = open_repair_chat(&e.ctx, &down, T0).unwrap();
+    let chats: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    chats.lock().unwrap().insert("stt".into(), chat.clone());
+    let back = ServiceRecovered {
+        person: None,
+        service: "stt".into(),
+        since: Some("09:12".into()),
+        back: "10:05".into(),
+    };
+    stand_down_repair_chat(&e.ctx, &chats, &back).unwrap();
+    let s = subs(&e.db, &chat);
+    assert_eq!(s.len(), 2, "the recovery is the repair chat's second message");
+    assert_eq!(s[1].4,
+        "The speech-to-text service answers the hub's health probe again (back at 10:05; it \
+         was unreachable since 09:12). If it checks out, say it is back and close this out.");
+    // A service no repair chat was opened for: nothing to stand down, and nothing sent.
+    let other = ServiceRecovered {
+        person: None,
+        service: "hub-search".into(),
+        since: None,
+        back: "now".into(),
+    };
+    stand_down_repair_chat(&e.ctx, &chats, &other).unwrap();
+    assert_eq!(subs(&e.db, &chat).len(), 2, "no stray message");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_starts_the_telegram_chat_with_origin_telegram_and_is_stored_once() {
     let e = env();

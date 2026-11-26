@@ -5,9 +5,11 @@
 //!
 //! [`Heal`] watches the probe's state [`HEALTH_PROBE/4`] apart: while the server is down it sends
 //! the PC a `service_down` frame at most once an hour; the moment the server answers again it lets
-//! every bridge retry what it holds. A note held while the probe sees nothing wrong (the server
-//! answers `/health` but a transcription failed) is retried a minute after its last try, and every
-//! held note ends at its hour whether or not an outage was seen.
+//! every bridge retry what it holds and sends the PC one `service_up` frame, so an alert the PC
+//! raised for the outage closes itself when the outage is seen to be over. A note held while the
+//! probe sees nothing wrong (the server answers `/health` but a transcription failed) is retried a
+//! minute after its last try, and every held note ends at its hour whether or not an outage was
+//! seen.
 
 use crate::lines::Lines;
 use crate::relay::Channel;
@@ -61,6 +63,10 @@ pub struct Heal {
     last_frame_ms: AtomicI64,
     /// Whether the last tick saw an outage, so the edge back up is noticed once.
     was_down: AtomicBool,
+    /// When the outage the last `was_down` saw began: [`SttHealth`] clears its own `down_since`
+    /// the moment the probe answers again, before the watch ticks, so the recovery frame needs
+    /// the start remembered here.
+    down_since_ms: AtomicI64,
 }
 
 impl Heal {
@@ -72,6 +78,7 @@ impl Heal {
             healed: Vec::new(),
             last_frame_ms: AtomicI64::new(0),
             was_down: AtomicBool::new(false),
+            down_since_ms: AtomicI64::new(0),
         }
     }
 
@@ -107,10 +114,26 @@ impl Heal {
         Some(f)
     }
 
+    /// The `service_up` frame for the outage just seen to be over: one per outage, named by its
+    /// start, so the PC can close the alert it raised.
+    fn up_frame(&self, since_ms: i64, now_ms: i64) -> Value {
+        json!({
+            "type": "service_up",
+            "service": SERVICE,
+            "since": clock_text(since_ms),
+            "back": clock_text(now_ms),
+            "personId": self.person.to_string(),
+        })
+    }
+
     /// One tick of the watch.
     pub fn tick(&self, now_ms: i64) {
         if self.health.is_down() {
-            self.was_down.store(true, Ordering::Relaxed);
+            if !self.was_down.swap(true, Ordering::Relaxed) {
+                // A fresh outage seen by the watch: remember its start for the recovery frame.
+                self.down_since_ms
+                    .store(self.health.down_since_ms().unwrap_or(now_ms), Ordering::Relaxed);
+            }
             if let Some(f) = self.due_frame(now_ms) {
                 if self.lines.send_frame(self.person, &f) {
                     self.last_frame_ms.store(now_ms, Ordering::Relaxed);
@@ -120,6 +143,12 @@ impl Heal {
         } else if self.was_down.swap(false, Ordering::Relaxed) {
             // Back up: the next outage starts its frame count again, and everything held goes.
             self.last_frame_ms.store(0, Ordering::Relaxed);
+            let since = self.down_since_ms.swap(0, Ordering::Relaxed);
+            if since != 0 {
+                if self.lines.send_frame(self.person, &self.up_frame(since, now_ms)) {
+                    eprintln!("stt: told the person's PC that the speech server answers again");
+                }
+            }
             for h in &self.healed {
                 h.stt_back(now_ms);
             }
@@ -229,7 +258,8 @@ mod tests {
         // Past the hour: one more frame.
         heal.tick(base + FRAME_GAP_MS + 1_000);
         assert_eq!(rec.0.lock().unwrap().len(), 2);
-        // Back up: every bridge is told once, and no more while it stays fine.
+        // Back up: every bridge is told once, the PC is told the outage is over, and no more
+        // while it stays fine.
         health.note_ok(base + FRAME_GAP_MS + 2_000);
         heal.tick(base + FRAME_GAP_MS + 2_000);
         assert_eq!(seen.backs.load(Ordering::SeqCst), 1);
@@ -240,17 +270,28 @@ mod tests {
             2,
             "fine again: held notes are looked at, not only on the edge"
         );
+        let frames = rec.0.lock().unwrap();
+        assert_eq!(frames.len(), 3, "two down frames and one recovery");
+        let up = frames[2].clone();
+        drop(frames);
+        assert_eq!(up["type"], "service_up");
+        assert_eq!(up["service"], SERVICE);
+        assert_eq!(up["personId"], "7");
+        // The recovery names the same start as the outage opened with, and the minute it landed.
+        assert_eq!(up["since"], rec.0.lock().unwrap()[0]["since"]);
+        assert_eq!(up["back"], clock_text(base + FRAME_GAP_MS + 2_000));
         // A fresh outage opens its frame at once, not an hour late.
         health.note_down(
             base + FRAME_GAP_MS + 4_000,
             "its health address answered HTTP 503",
         );
         heal.tick(base + FRAME_GAP_MS + 4_000);
-        assert_eq!(rec.0.lock().unwrap().len(), 3);
+        assert_eq!(rec.0.lock().unwrap().len(), 4);
         assert_eq!(
-            rec.0.lock().unwrap()[2]["detail"],
+            rec.0.lock().unwrap()[3]["detail"],
             "its health address answered HTTP 503"
         );
+        assert_eq!(rec.0.lock().unwrap()[3]["type"], "service_down");
     }
 
     #[test]
