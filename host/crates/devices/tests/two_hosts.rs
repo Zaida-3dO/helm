@@ -14,7 +14,7 @@ use helm_devices::host::HostPort;
 use helm_devices::link::{DeviceLink, MemLink, MemRouter, Rpc};
 use helm_devices::mirror::{self, ChatView, Mirror, MirrorSlot, PeopleSync, WhoFilter};
 use helm_devices::testing::{fake_interaction, fake_record, fake_row, FakePort};
-use helm_devices::wire::{code, DeviceFrame, DevicePerson, Frame, Push};
+use helm_devices::wire::{code, DeviceFrame, DevicePerson, Frame, Push, WireError};
 use helm_devices::{ChatPort, Service};
 use helm_ipc::{
     ApiError, AppEvent, Dispatcher, OpClass, OpCtx, OpIntercept, OpRegistry, RecordingSink,
@@ -4206,6 +4206,8 @@ async fn a_port_of_one_pc_opens_on_another_and_closes_when_that_pc_goes() {
         ),
         (Some("c1"), Some("First"), Some("Preview"))
     );
+    // No profile here is linked to the chat's person: the name Desk gives them.
+    assert_eq!(fwd["person"], "Alex", "{fwd}");
     for (filter, want) in [
         (json!({"device": "desk"}), 1),
         (json!({"device": this_pc, "chatId": "c1"}), 1),
@@ -4268,6 +4270,40 @@ async fn a_port_of_one_pc_opens_on_another_and_closes_when_that_pc_goes() {
         .unwrap_err();
     assert_eq!(e.code, code::NOT_ALLOWED);
     port.set_run(true);
+
+    // The sidebar shows a profile that is not on the hub yet, and the tablet runs a Helm that
+    // does not know the report: Desk is still asked (as this PC's own person), and the tablet is
+    // named as too old, never taken for a PC with no forwards.
+    let line = Arc::downgrade(&tablet.link);
+    tablet.link.subscribe(Box::new(move |f| {
+        if let (Some(line), Frame::DevCall { id, op, .. }) = (line.upgrade(), f) {
+            if op == "forwards_report" {
+                line.send(Frame::result(&id, Err(WireError::elsewhere())));
+            }
+        }
+    }));
+    b.db.write(|tx| {
+        tx.execute_batch(
+            "CREATE TABLE profiles (id TEXT PRIMARY KEY, hub_person_id TEXT, name TEXT,
+                                    is_home INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO profiles VALUES ('p-new', NULL, 'New', 0);
+             CREATE TABLE IF NOT EXISTS preferences (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        )
+    })
+    .unwrap();
+    b.db.write(|tx| helm_core::prefs::set_raw(tx, "activeProfile", &json!("p-new")))
+        .unwrap();
+    assert!(b.mirror.acting_now().is_err());
+    let report = api
+        .call_host("devices_forwards_report", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(report["forwards"][0]["state"], "ok", "{report}");
+    assert_eq!(report["unreachable"][0]["name"], "Tablet", "{report}");
+    assert_eq!(
+        report["unreachable"][0]["reason"],
+        "Tablet's Helm is too old for this; update it there."
+    );
 
     // The server stops while the forward stays, and the tablet goes off the hub: the report says
     // where the forward points at nothing, and names the PC it could not ask.

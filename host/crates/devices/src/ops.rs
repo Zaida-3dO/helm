@@ -1263,14 +1263,21 @@ struct PcReport {
 /// Join the PCs' reports into one entry per forward. The PC that views a forward and the PC that
 /// runs its server each list it under the same id; an entry is `ok` only when both agree,
 /// something answers on the server's port and the viewing PC listens. `names` give each PC's
-/// name; `down` holds the PCs that could not be asked and why: their end is then unknown, not
-/// wrong. Oldest first.
+/// name. An end on a PC whose report is not in `pcs` is unknown, not wrong: `down` holds the PCs
+/// that could not be asked, and any other was never asked. A forward only one PC lists that
+/// opened less than [`OPEN_TIMEOUT`] before `now` (Unix ms) is still opening: the other PC binds
+/// its port only once the person views the chat there. Oldest first.
+///
+/// [`OPEN_TIMEOUT`]: crate::tunnel::OPEN_TIMEOUT
 fn merge_forwards(
     pcs: &[PcReport],
     names: &HashMap<String, String>,
     down: &HashMap<String, String>,
+    now: i64,
 ) -> Vec<Value> {
     let name = |uid: &str| names.get(uid).cloned().unwrap_or_else(|| uid.to_owned());
+    let asked = |uid: &str| pcs.iter().any(|p| p.uid == uid);
+    let opening = crate::tunnel::OPEN_TIMEOUT.as_millis() as i64;
     type End<'a> = (&'a str, &'a Checked);
     let mut hosted: HashMap<&str, End> = HashMap::new();
     let mut viewing: HashMap<&str, End> = HashMap::new();
@@ -1293,6 +1300,10 @@ fn merge_forwards(
         let host = h.map_or_else(|| first.info.device_uid.clone(), |(u, _)| u.to_owned());
         let view = v.map_or_else(|| first.info.device_uid.clone(), |(u, _)| u.to_owned());
         let server_port = first.info.port;
+        // Listed by one PC only, though the other was asked, and only just made.
+        let missing = if h.is_none() { &host } else { &view };
+        let still_opening =
+            (h.is_none() || v.is_none()) && asked(missing) && now - first.info.opened_at < opening;
         let mismatch = match (h, v) {
             (Some((_, h)), Some((view_pc, v))) => {
                 if v.info.device_uid != host {
@@ -1323,11 +1334,12 @@ fn merge_forwards(
                     None
                 }
             }
-            (Some(_), None) if !down.contains_key(&view) => Some(format!(
-                "{} does not list it, so nothing there is listening for it (it may only be starting).",
+            _ if still_opening => None,
+            (Some(_), None) if asked(&view) => Some(format!(
+                "{} does not list it, so nothing there is listening for it.",
                 name(&view)
             )),
-            (None, Some(_)) if !down.contains_key(&host) => Some(format!(
+            (None, Some(_)) if asked(&host) => Some(format!(
                 "{} does not share it any more, so the port there is not forwarded.",
                 name(&host)
             )),
@@ -1337,6 +1349,22 @@ fn merge_forwards(
         let dst = v.and_then(|(_, c)| c.alive);
         let (state, why) = if let Some(m) = mismatch {
             ("mismatch", Some(m))
+        } else if still_opening && src != Some(false) {
+            // The host lists a forward before the viewing PC binds its port.
+            let wait = if v.is_none() {
+                format!(
+                    ", and opens on {} while the person views the chat there",
+                    name(&view)
+                )
+            } else {
+                String::new()
+            };
+            (
+                "unknown",
+                Some(format!(
+                    "It is still opening{wait}; ask again in a few seconds."
+                )),
+            )
         } else if src == Some(false) {
             (
                 "source_not_answering",
@@ -1353,14 +1381,15 @@ fn merge_forwards(
         } else if src == Some(true) && dst == Some(true) {
             ("ok", None)
         } else {
-            let who = [&host, &view]
-                .into_iter()
-                .find(|u| down.contains_key(*u))
-                .map(|u| name(u));
+            let who = [&host, &view].into_iter().find(|u| !asked(u.as_str()));
             (
                 "unknown",
                 Some(match who {
-                    Some(w) => format!("{w} could not be reached, so its end was not checked."),
+                    Some(w) if down.contains_key(w) => format!(
+                        "{} could not be reached, so its end was not checked.",
+                        name(w)
+                    ),
+                    Some(w) => format!("{} was not asked, so its end was not checked.", name(w)),
                     None => "One end could not be checked.".to_owned(),
                 }),
             )
@@ -1401,9 +1430,14 @@ fn merge_forwards(
 }
 
 /// A chat's title and its person's name, as this PC knows them: its own chat, or the copy of
-/// another PC's. The name is that of the profile linked to the person here, when there is one.
-fn chat_label(conn: &rusqlite::Connection, chat_id: &str) -> (Option<String>, Option<String>) {
-    let own: Option<(String, String)> = conn
+/// another PC's. The name is that of the profile linked to the person here, else the name the
+/// household's PCs give that person (`people`, hub person id to name), else none.
+fn chat_label(
+    conn: &rusqlite::Connection,
+    chat_id: &str,
+    people: &HashMap<String, String>,
+) -> (Option<String>, Option<String>) {
+    let own: Option<(String, Option<String>)> = conn
         .query_row(
             "SELECT title, profile_id FROM chats WHERE id = ?1",
             [chat_id],
@@ -1413,12 +1447,16 @@ fn chat_label(conn: &rusqlite::Connection, chat_id: &str) -> (Option<String>, Op
         .ok()
         .flatten();
     if let Some((title, profile)) = own {
-        let person = conn
-            .query_row("SELECT name FROM profiles WHERE id = ?1", [&profile], |r| {
+        // A chat made before profiles has none: it is the home profile's.
+        let person = match profile {
+            Some(p) => conn.query_row("SELECT name FROM profiles WHERE id = ?1", [p], |r| {
                 r.get::<_, String>(0)
-            })
-            .ok();
-        return (Some(title), person);
+            }),
+            None => conn.query_row("SELECT name FROM profiles WHERE is_home = 1", [], |r| {
+                r.get::<_, String>(0)
+            }),
+        };
+        return (Some(title), person.ok());
     }
     let record: Option<Value> = conn
         .query_row(
@@ -1433,13 +1471,14 @@ fn chat_label(conn: &rusqlite::Connection, chat_id: &str) -> (Option<String>, Op
     let Some(record) = record else {
         return (None, None);
     };
-    let person = record["personId"].as_str().map(|p| {
+    let person = record["personId"].as_str().and_then(|p| {
         conn.query_row(
             "SELECT name FROM profiles WHERE hub_person_id = ?1",
             [p],
             |r| r.get::<_, String>(0),
         )
-        .unwrap_or_else(|_| p.to_owned())
+        .ok()
+        .or_else(|| people.get(p).cloned())
     });
     (record["title"].as_str().map(str::to_owned), person)
 }
@@ -1452,9 +1491,11 @@ fn chat_label(conn: &rusqlite::Connection, chat_id: &str) -> (Option<String>, Op
 /// `ok` (both PCs list the same forward, something answers on the server's port and the viewing PC
 /// listens), `source_not_answering` (nothing answers on the port where the server runs),
 /// `destination_not_listening` (the viewing PC no longer listens), `mismatch` (the two PCs
-/// disagree; `why` says how) or `unknown` (an end could not be checked). Each PC checks its own
-/// end on its loopback; a PC that is offline or does not answer is in `unreachable` with the
-/// reason, never left out. `device` (a PC's name or id) and `chatId` narrow the list.
+/// disagree; `why` says how) or `unknown` (an end could not be checked, or it is still opening).
+/// Each PC checks its own end on its loopback; a PC that is offline, does not answer or was not
+/// asked is in `unreachable` with the reason, never left out. `device` (a PC's name or id) and
+/// `chatId` narrow the list. Other PCs are asked as this PC's own person, whichever profile the
+/// sidebar shows.
 async fn devices_forwards_report(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ForwardsReportArgs =
         serde_json::from_value(if args.is_null() { json!({}) } else { args })
@@ -1463,12 +1504,22 @@ async fn devices_forwards_report(ctx: OpCtx, args: Value) -> Result<Value, ApiEr
     let (this_uid, this_name) = db
         .write(identity::ensure)
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    let peers: Vec<_> = db
+    let devices = db
         .snapshot(|tx| mirror::load_devices(tx))
-        .map_err(|e| ApiError::internal(e.to_string()))?
-        .into_iter()
-        .filter(|d| !d.is_self)
-        .collect();
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    // Every person the household's PCs name, for a chat whose person has no profile here.
+    let mut people: HashMap<String, String> = HashMap::new();
+    for d in &devices {
+        if let (Some(id), Some(n)) = (&d.person_id, &d.person) {
+            people.insert(id.clone(), n.clone());
+        }
+        for p in d.people.iter().filter(|p| !p.person.is_empty()) {
+            people
+                .entry(p.person_id.clone())
+                .or_insert_with(|| p.person.clone());
+        }
+    }
+    let peers: Vec<_> = devices.into_iter().filter(|d| !d.is_self).collect();
     let mut names: HashMap<String, String> = peers
         .iter()
         .map(|d| (d.uid.clone(), d.name.clone()))
@@ -1505,30 +1556,27 @@ async fn devices_forwards_report(ctx: OpCtx, args: Value) -> Result<Value, ApiEr
     }];
     let mut down: HashMap<String, String> = HashMap::new();
     if let Some(mirror) = mirror_of(&ctx) {
-        let person = mirror.acting_now();
         let mut asks = Vec::new();
         for d in &peers {
-            let (m, uid, person) = (mirror.clone(), d.uid.clone(), person.clone());
-            asks.push(tokio::spawn(async move {
-                let answered = match person {
-                    Ok(p) => tokio::time::timeout(REPORT_WAIT, m.forwards_report(&uid, &p))
-                        .await
-                        .unwrap_or_else(|_| {
-                            Err(ApiError::new(
-                                "timeout",
-                                "It did not answer in time, so its forwards were not checked.",
-                            ))
-                        }),
-                    Err(e) => Err(e),
-                };
-                (uid, answered)
-            }));
+            let (m, uid) = (mirror.clone(), d.uid.clone());
+            let ask = tokio::spawn(async move {
+                tokio::time::timeout(REPORT_WAIT, m.forwards_report(&uid))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(ApiError::new(
+                            "timeout",
+                            "It did not answer in time, so its forwards were not checked.",
+                        ))
+                    })
+            });
+            asks.push((d.uid.clone(), ask));
         }
-        for ask in asks {
-            let Ok((uid, answered)) = ask.await else {
+        for (uid, ask) in asks {
+            let who = names.get(&uid).cloned().unwrap_or_else(|| uid.clone());
+            let Ok(answered) = ask.await else {
+                down.insert(uid, format!("{who} could not be asked."));
                 continue;
             };
-            let who = names.get(&uid).cloned().unwrap_or_else(|| uid.clone());
             match answered.map(serde_json::from_value::<Report>) {
                 Ok(Ok(report)) => pcs.push(PcReport { uid, report }),
                 Ok(Err(_)) => {
@@ -1546,11 +1594,23 @@ async fn devices_forwards_report(ctx: OpCtx, args: Value) -> Result<Value, ApiEr
         }
     }
 
-    let mut forwards = merge_forwards(&pcs, &names, &down);
+    let mut forwards = merge_forwards(&pcs, &names, &down, helm_core::now_ms());
+    // A PC at the far end of a forward that was never asked (not paired here, or there is no
+    // line) is named too, never left out.
+    for c in pcs
+        .iter()
+        .flat_map(|p| p.report.viewing.iter().chain(&p.report.hosted))
+    {
+        let uid = &c.info.device_uid;
+        if !pcs.iter().any(|p| &p.uid == uid) && !down.contains_key(uid) {
+            let who = names.get(uid).cloned().unwrap_or_else(|| uid.clone());
+            down.insert(uid.clone(), format!("{who} was not asked."));
+        }
+    }
     for f in &mut forwards {
         let chat = f["chatId"].as_str().unwrap_or_default().to_owned();
         let (title, person) = db
-            .snapshot(|tx| Ok::<_, rusqlite::Error>(chat_label(tx, &chat)))
+            .snapshot(|tx| Ok::<_, rusqlite::Error>(chat_label(tx, &chat, &people)))
             .unwrap_or_default();
         f["chatTitle"] = json!(title);
         f["person"] = json!(person);
@@ -1626,11 +1686,14 @@ mod tests {
         // Desk runs the server of port 5173 for chat c1; Laptop views it on 6000.
         let host = |alive| pc("a", vec![], vec![end("f1", "b", 5173, 5173, "c1", alive)]);
         let view = |alive| pc("b", vec![end("f1", "a", 5173, 6000, "c1", alive)], vec![]);
+        // Long after every forward here opened.
+        let later = 60_000;
         let cases = vec![
             (
                 "agree",
                 vec![host(Some(true)), view(Some(true))],
                 &none,
+                later,
                 "ok",
                 "",
             ),
@@ -1638,6 +1701,7 @@ mod tests {
                 "no server",
                 vec![host(Some(false)), view(Some(true))],
                 &none,
+                later,
                 "source_not_answering",
                 "Nothing answers on port 5173 on Desk",
             ),
@@ -1645,6 +1709,7 @@ mod tests {
                 "not listening",
                 vec![host(Some(true)), view(Some(false))],
                 &none,
+                later,
                 "destination_not_listening",
                 "Laptop is no longer listening",
             ),
@@ -1652,6 +1717,7 @@ mod tests {
                 "unchecked",
                 vec![host(None), view(Some(true))],
                 &none,
+                later,
                 "unknown",
                 "could not be checked",
             ),
@@ -1659,6 +1725,7 @@ mod tests {
                 "viewer forgot",
                 vec![host(Some(true)), pc("b", vec![], vec![])],
                 &none,
+                later,
                 "mismatch",
                 "Laptop does not list it",
             ),
@@ -1666,6 +1733,7 @@ mod tests {
                 "host forgot",
                 vec![pc("a", vec![], vec![]), view(Some(true))],
                 &none,
+                later,
                 "mismatch",
                 "Desk does not share it",
             ),
@@ -1673,6 +1741,7 @@ mod tests {
                 "host cannot be asked",
                 vec![view(Some(true))],
                 &gone,
+                later,
                 "unknown",
                 "Desk could not be reached",
             ),
@@ -1687,6 +1756,7 @@ mod tests {
                     ),
                 ],
                 &none,
+                later,
                 "mismatch",
                 "Laptop forwards port 3000 but Desk shares port 5173",
             ),
@@ -1701,6 +1771,7 @@ mod tests {
                     ),
                 ],
                 &none,
+                later,
                 "mismatch",
                 "different chats",
             ),
@@ -1715,12 +1786,31 @@ mod tests {
                     ),
                 ],
                 &none,
+                later,
                 "mismatch",
                 "Laptop lists it as shown from Tablet",
             ),
+            // Desk lists it but Laptop does not yet: it was offered a moment ago.
+            (
+                "opening",
+                vec![host(Some(true)), pc("b", vec![], vec![])],
+                &none,
+                5 + 1_000,
+                "unknown",
+                "still opening, and opens on Laptop",
+            ),
+            // Laptop is not among the PCs asked (not paired here, or no line): not wrong, unknown.
+            (
+                "viewer never asked",
+                vec![host(Some(true))],
+                &none,
+                later,
+                "unknown",
+                "Laptop was not asked",
+            ),
         ];
-        for (what, pcs, down, state, why) in cases {
-            let out = merge_forwards(&pcs, &names, down);
+        for (what, pcs, down, now, state, why) in cases {
+            let out = merge_forwards(&pcs, &names, down, now);
             assert_eq!(out.len(), 1, "{what}");
             assert_eq!(out[0]["state"], state, "{what}: {}", out[0]);
             assert!(
@@ -1735,9 +1825,42 @@ mod tests {
             );
         }
         // The agreed one carries both addresses and the viewer's title.
-        let out = merge_forwards(&[host(Some(true)), view(Some(true))], &names, &none);
+        let out = merge_forwards(&[host(Some(true)), view(Some(true))], &names, &none, later);
         assert_eq!(out[0]["destination"]["address"], "localhost:6000 on Laptop");
         assert_eq!(out[0]["destination"]["url"], "http://127.0.0.1:6000/");
         assert_eq!(out[0]["title"], "Preview");
+    }
+
+    #[test]
+    fn a_forwards_chat_is_named_with_its_person_wherever_the_chat_runs() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE profiles (id TEXT PRIMARY KEY, hub_person_id TEXT, name TEXT,
+                                    is_home INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO profiles VALUES ('p-s', 'person-s', 'Sam', 1), ('p-j', NULL, 'Jo', 0);
+             CREATE TABLE chats (id TEXT PRIMARY KEY, title TEXT NOT NULL, profile_id TEXT);
+             INSERT INTO chats VALUES ('mine', 'Mine', 'p-j'), ('old', 'Old', NULL);
+             CREATE TABLE mirror_chats (chat_id TEXT PRIMARY KEY, record TEXT NOT NULL);
+             INSERT INTO mirror_chats VALUES
+                 ('far-s', '{\"title\": \"Far\", \"personId\": \"person-s\"}'),
+                 ('far-b', '{\"title\": \"Theirs\", \"personId\": \"person-b\"}'),
+                 ('far-x', '{\"title\": \"Stranger\", \"personId\": \"person-x\"}');",
+        )
+        .unwrap();
+        let people: HashMap<String, String> = [("person-b".to_owned(), "Blake".to_owned())].into();
+        let s = |v: &str| Some(v.to_owned());
+        for (chat, want) in [
+            ("mine", (s("Mine"), s("Jo"))),
+            // Made before profiles: the home profile's.
+            ("old", (s("Old"), s("Sam"))),
+            ("far-s", (s("Far"), s("Sam"))),
+            // No profile here for that person: the name the household's PCs give them.
+            ("far-b", (s("Theirs"), s("Blake"))),
+            // Nobody knows the person: no name rather than a raw id.
+            ("far-x", (s("Stranger"), None)),
+            ("gone", (None, None)),
+        ] {
+            assert_eq!(chat_label(&conn, chat, &people), want, "{chat}");
+        }
     }
 }

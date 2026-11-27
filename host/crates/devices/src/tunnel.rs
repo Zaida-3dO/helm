@@ -74,8 +74,9 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 pub const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long a check of one end of a forward waits for an answer.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
-/// The most ends one report checks; the rest are listed unchecked. There are at most
-/// [`MAX_FORWARDS`] to this PC and as many to each other PC, so this is never reached in practice.
+/// The most servers one report dials; the rest are listed unchecked. A PC shares at most
+/// [`MAX_FORWARDS`] ports with each other PC, so in a household of more than five PCs this can be
+/// reached. The ends this PC views need no dial: their own listener answers for them.
 pub const MAX_PROBES: usize = 16;
 /// Remote-desktop and remote-management ports: never forwarded, whatever answers on them.
 pub const REMOTE_ADMIN_PORTS: [u16; 4] = [3389, 5985, 5986, 47001];
@@ -352,6 +353,21 @@ impl State {
             .filter(|w| w.role == role && peer.is_none_or(|p| w.peer == p))
             .count()
     }
+
+    /// The forwards of `role`, oldest first.
+    fn list(&self, role: Role) -> Vec<ViewInfo> {
+        let mut v: Vec<(i64, ViewInfo)> = self
+            .fwds
+            .iter()
+            .filter(|(_, w)| w.role == role)
+            .map(|(id, w)| (w.opened_at, w.info(id)))
+            .collect();
+        v.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| a.1.forward_id.cmp(&b.1.forward_id))
+        });
+        v.into_iter().map(|(_, i)| i).collect()
+    }
 }
 
 struct Inner {
@@ -479,18 +495,7 @@ impl Tunnels {
     /// The ports of this PC other devices hold forwards for, oldest first: what the PC the ports
     /// are on lists, each with the viewing PC as `device_uid`.
     pub fn hosted(&self) -> Vec<ViewInfo> {
-        let st = lock(&self.inner.st);
-        let mut v: Vec<(i64, ViewInfo)> = st
-            .fwds
-            .iter()
-            .filter(|(_, w)| w.role == Role::Host)
-            .map(|(id, w)| (w.opened_at, w.info(id)))
-            .collect();
-        v.sort_by(|a, b| {
-            a.0.cmp(&b.0)
-                .then_with(|| a.1.forward_id.cmp(&b.1.forward_id))
-        });
-        v.into_iter().map(|(_, i)| i).collect()
+        lock(&self.inner.st).list(Role::Host)
     }
 
     /// Stop sharing one of this PC's ports and tell the PC viewing it. `false` when there is no
@@ -587,18 +592,7 @@ impl Tunnels {
 
     /// The forwards to this PC, oldest first.
     pub fn forwards(&self) -> Vec<ViewInfo> {
-        let st = lock(&self.inner.st);
-        let mut v: Vec<(i64, ViewInfo)> = st
-            .fwds
-            .iter()
-            .filter(|(_, w)| w.role == Role::View)
-            .map(|(id, w)| (w.opened_at, w.info(id)))
-            .collect();
-        v.sort_by(|a, b| {
-            a.0.cmp(&b.0)
-                .then_with(|| a.1.forward_id.cmp(&b.1.forward_id))
-        });
-        v.into_iter().map(|(_, i)| i).collect()
+        lock(&self.inner.st).list(Role::View)
     }
 
     /// The forward to this PC of `port` on device `host`, if there is one: open it again rather
@@ -611,51 +605,39 @@ impl Tunnels {
 
     // ----------------------------------------------------------------------- both
 
-    /// Both lists with each end checked on this PC's loopback, at the same time and each for at
-    /// most [`PROBE_TIMEOUT`]. A check only connects (and closes at once) or finds the port taken:
-    /// it sends nothing, and a forward sees no stream from it.
+    /// Both lists, taken at one moment, with each end checked on this PC's loopback. A port this
+    /// PC views is listening while its forward's accept loop runs (the loop ends only with the
+    /// forward), so it needs no test of its own. A port this PC shares is dialled, all at once and
+    /// each for at most [`PROBE_TIMEOUT`]: the dial connects and closes at once, sends nothing,
+    /// and the forward sees no stream from it.
     pub async fn report(&self) -> Report {
-        let (viewing, hosted) = (self.forwards(), self.hosted());
-        let listening: HashMap<String, bool> = lock(&self.inner.st)
-            .fwds
-            .iter()
-            .map(|(id, w)| {
-                let up = w.listener.as_ref().is_some_and(|l| !l.is_finished());
-                (id.clone(), up)
-            })
-            .collect();
+        let (viewing, hosted) = {
+            let st = lock(&self.inner.st);
+            let viewing: Vec<Checked> = st
+                .list(Role::View)
+                .into_iter()
+                .map(|info| {
+                    let up = st
+                        .fwds
+                        .get(&info.forward_id)
+                        .is_some_and(|w| w.listener.as_ref().is_some_and(|l| !l.is_finished()));
+                    Checked {
+                        info,
+                        alive: Some(up),
+                    }
+                })
+                .collect();
+            (viewing, st.list(Role::Host))
+        };
         let mut checks = tokio::task::JoinSet::new();
-        for (n, info) in viewing
-            .iter()
-            .chain(hosted.iter())
-            .enumerate()
-            .take(MAX_PROBES)
-        {
-            let net = self.inner.net.clone();
-            let (port, is_view) = (
-                if n < viewing.len() {
-                    info.local_port
-                } else {
-                    info.port
-                },
-                n < viewing.len(),
-            );
-            let task_up = listening.get(&info.forward_id).copied().unwrap_or(false);
+        for (n, info) in hosted.iter().enumerate().take(MAX_PROBES) {
+            let (net, port) = (self.inner.net.clone(), info.port);
             checks.spawn_on(
                 async move {
-                    let alive = if is_view {
-                        // Binding fails only while something listens: the forward's own listener.
-                        task_up
-                            && matches!(
-                                tokio::time::timeout(PROBE_TIMEOUT, net.listen(port)).await,
-                                Ok(Err(_))
-                            )
-                    } else {
-                        matches!(
-                            tokio::time::timeout(PROBE_TIMEOUT, net.dial(port)).await,
-                            Ok(Ok(_))
-                        )
-                    };
+                    let alive = matches!(
+                        tokio::time::timeout(PROBE_TIMEOUT, net.dial(port)).await,
+                        Ok(Ok(_))
+                    );
                     (n, alive)
                 },
                 &self.inner.handle,
@@ -667,19 +649,16 @@ impl Tunnels {
                 seen.insert(n, alive);
             }
         }
-        let count = viewing.len();
-        let checked = |list: Vec<ViewInfo>, first: usize| -> Vec<Checked> {
-            list.into_iter()
+        Report {
+            viewing,
+            hosted: hosted
+                .into_iter()
                 .enumerate()
-                .map(|(i, info)| Checked {
-                    alive: seen.get(&(first + i)).copied(),
+                .map(|(n, info)| Checked {
+                    alive: seen.get(&n).copied(),
                     info,
                 })
-                .collect()
-        };
-        Report {
-            viewing: checked(viewing, 0),
-            hosted: checked(hosted, count),
+                .collect(),
         }
     }
 

@@ -869,17 +869,12 @@ impl Mirror {
 
     /// Every forward `device` takes part in, each end checked there: `{viewing, hosted}`. Needs
     /// the line and the device up and the pairing, not the run switch: it only reads. Asked as
-    /// `person`, who may see all of it: what a PC forwards is not per person.
-    pub async fn forwards_report(&self, device: &str, person: &str) -> Result<Value, ApiError> {
+    /// this PC's own person, whichever profile the sidebar shows: what a PC forwards is not per
+    /// person, so the answer is the same for anyone of the household.
+    pub async fn forwards_report(&self, device: &str) -> Result<Value, ApiError> {
         self.check_up(device)?;
-        self.ask_as(
-            device,
-            "forwards_report",
-            json!({}),
-            "its forwards",
-            &[person.to_owned()],
-        )
-        .await
+        self.ask_as(device, "forwards_report", json!({}), "its forwards", &[])
+            .await
     }
 
     /// One read of the task board the PC that runs this chat has set up, sent as that PC's own
