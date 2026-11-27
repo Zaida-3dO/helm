@@ -23,6 +23,8 @@ and it speaks the reply with whatever local text-to-speech you set up.
 | `hubapi.py` | all hub talking in one plain-Python module |
 | `profiles.py` | entry data + options in, one model config out; keeps keys quiet |
 | `timings.py`, `stages.py`, `replay.py` | the benchmark: timing lines, record joiner, replay door |
+| `error_lines.json`, `errorlines.py` | the pre-recorded failure lines: one catalogue plus the decision table that picks one |
+| `render_error_lines.py` | renders that catalogue's flac files into Home Assistant's `www` folder |
 | `errors.py` | the one transport error family every caller shares |
 
 ## Installing
@@ -126,6 +128,60 @@ nothing — useful while testing what a small model actually asks for.
   answer), the tool's own sentence is spoken — never a denial of something
   that happened.
 
+## Pre-recorded error lines
+
+Every way a spoken turn can fail or end without an answer has a short
+pre-recorded line in `error_lines.json`: code, words, flac file, situations,
+and which fixed sentence of this package it stands in for (`agent_core` and
+`hubapi` constants; a test fails when a new fixed sentence appears without a
+line). The texts stay under twelve words, calm, no jargon.
+
+Who says what: the component only DECIDES. When a turn ends on one of these
+codes and the asking satellite resolves to an `assist_satellite` entity, the
+response carries an empty string — the voice pipeline then skips synthesis
+and ends cleanly — and a `helm_speaker_line` event names the code and that
+entity. The companion Home Assistant automation plays `<config>/www/<file>`
+with `assist_satellite.announce` when it sees processing hand to idle. The
+component never announces from inside its own turn: an announcement cancels
+the running pipeline, and a delayed one races the automation into double
+speech. Automation-side lines (`speech_down`, `stuck_try`) are decided there,
+not here — one probe each for hearing (:18950) and voice (:18960) tells
+"hearing down", "voice down" and "machine down" apart, and a satellite stuck
+in processing for twenty seconds gets its own line whose announcement cancels
+the hung run.
+
+Fallback: no code (a live answer, a text or REST turn with no satellite, a
+wrong token... nothing special), no `assist_satellite` entity on the device,
+or a missing/unreadable json — the turn speaks its fixed sentence live by
+text-to-speech exactly as before this feature. History rows, benchmark stages
+and hub records keep the canonical sentence either way; only the pipeline's
+input goes blank when a file replaces it.
+
+The one exact-match line (`helm_needs_updating`) compares the hub's answer to
+its "too old to answer by voice" sentence word for word — fragile by nature:
+if the hub ever rewords it, that turn just speaks live words again. The log
+says so when http 401/403 refuses a turn (a wrong speaker token or scope is a
+setup mistake).
+
+Situations deliberately left with no line: wake word plus silence stays
+silent; tool refusals the model words around variable device names ("which
+one did you mean?") are normal answers, not failures; a truncated long answer
+and "the tool worked and the model said Done." are normal too.
+
+Render after each voice change (run on the machine whose voice service
+answers, where Home Assistant's `www` folder is reachable):
+
+```
+python render_error_lines.py --www <config>/www          # only what is missing
+python render_error_lines.py --www <config>/www --force  # after editing default_voice.txt
+python render_error_lines.py --www <config>/www --check  # exits non-zero if any file is missing
+```
+
+The speech service must be on the same machine (loopback only); ffmpeg does
+the wav→flac conversion. `helm_speaker_offline_alba.flac` predates this
+catalogue and is reused by the hub-unreachable line, so a plain render never
+touches it.
+
 ## Benchmark hooks
 
 Every turn appends one JSON line to `<config>/helm_speaker/timings.jsonl`
@@ -143,11 +199,13 @@ key goes in via `--api-key-env`, never on the command line.
 ```
 cd tools/ha-speaker
 PYTHONDONTWRITEBYTECODE=1 python -B -m unittest \
-    test_hubapi test_agent_core test_homecontrol test_ha_glue test_stages test_record
+    test_hubapi test_agent_core test_homecontrol test_ha_glue test_stages test_record test_error_lines
 ```
 
 Standard library only — no installs, no network. They cover the wire shapes,
 the turn engine (including a model that misparses tools or says nothing), the
-house rules above, profile switching and secrecy, and the timing records. The
-screens and entities themselves need a running Home Assistant; those run as a
-separate scratch-install check, not in this suite.
+house rules above, profile switching and secrecy, the timing records, and the
+error-line decision table plus the render command against a fake speech
+service and a stand-in ffmpeg. The screens and entities themselves need a
+running Home Assistant; those run as a separate scratch-install check, not in
+this suite.
