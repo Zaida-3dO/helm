@@ -160,6 +160,9 @@ export interface SpeakerSettings {
   leanTools: string[];
   /** The app's default lean tool set, for the chips. */
   leanToolsDefault: string[];
+  /** Whether the saved list is a custom one. Only a custom list is stored: saving other speaker
+   * settings must not pin the defaults, or later changes to them would never reach this person. */
+  leanToolsCustom: boolean;
   /** The board every chat arriving from the hub is shown on — room speakers, phone voice and
    * Telegram alike; blank: the app's own choice. One setting for all three channels. */
   boardId: string;
@@ -258,7 +261,9 @@ export function hubOps(api: Api) {
       }),
     resetVoice: (s: ChannelScope = {}) => api<VoiceSettings>('relay_voice_reset', scope(s)),
     speaker: (s: ChannelScope = {}) => api<SpeakerSettings>('relay_speaker_get', scope(s)),
-    saveSpeaker: (s: SpeakerSettings & ChannelScope) =>
+    /** `leanToolsEdited`: set only when this save is an edit of the lean tool chips. Any other
+     * save omits the list entirely, so it never pins the built-in defaults into the file. */
+    saveSpeaker: (s: SpeakerSettings & ChannelScope & { leanToolsEdited?: boolean }) =>
       api<SpeakerSettings>('relay_speaker_save', {
         model: s.model,
         effort: s.effort,
@@ -266,7 +271,7 @@ export function hubOps(api: Api) {
         previousHours: s.previousHours,
         lean: s.lean,
         leanPrompt: s.leanPrompt,
-        leanTools: s.leanTools,
+        ...(s.leanToolsEdited ? { leanTools: s.leanTools } : {}),
         boardId: s.boardId,
         quickModel: s.quickModel,
         quickEffort: s.quickEffort,

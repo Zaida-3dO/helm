@@ -140,8 +140,18 @@ export function SpeakerBlock({ profileId }: { profileId: string | null }) {
     }
   };
 
-  const save = (patch: Partial<SpeakerSettings>) => {
+  const save = (patch: Partial<SpeakerSettings> & { leanToolsEdited?: boolean }) => {
     if (speaker && profileId) void run(ops.saveSpeaker({ ...speaker, ...patch, profileId }));
+  };
+
+  // Adding a tool by typing: any name a person's MCP server is saved under, or any host tool.
+  const [newTool, setNewTool] = useState('');
+  const addTool = () => {
+    if (!speaker) return;
+    const token = newTool.trim();
+    if (!token || toolTokens(speaker).some((t) => t.toLowerCase() === token.toLowerCase())) return;
+    setNewTool('');
+    save({ leanTools: [...speaker.leanTools, token], leanToolsEdited: true });
   };
 
   const hours = Number(previous);
@@ -352,7 +362,11 @@ export function SpeakerBlock({ profileId }: { profileId: string | null }) {
         <SettingRow
           testId="hub-speaker-tools"
           title="Tools a lean chat may use"
-          description="What the new room-speaker chats start with. Everything else stays available on demand: the chat can find and call more of Helm's tools by itself."
+          description={`What the new room-speaker chats start with. ${
+            speaker.leanToolsCustom
+              ? 'This is your saved list; editing it changes only this person.'
+              : 'The built-in set so far — toggling a chip or adding one saves a list of your own.'
+          } Everything else stays available on demand: the chat can find and call more of Helm's tools by itself.`}
         >
           <div className="hub-chips" data-testid="hub-speaker-tools-chips">
             {toolTokens(speaker).map((token) => (
@@ -367,13 +381,35 @@ export function SpeakerBlock({ profileId }: { profileId: string | null }) {
                   const next = toolTokens(speaker)
                     .filter((t) => (t === token ? !on : speaker.leanTools.includes(t)))
                     .filter((t, i, all) => all.indexOf(t) === i);
-                  save({ leanTools: next });
+                  save({ leanTools: next, leanToolsEdited: true });
                 }}
               >
                 {toolLabel(token)}
               </Button>
             ))}
           </div>
+          <label className="hub-limit">
+            <input
+              type="text"
+              aria-label="Add a tool to the lean set"
+              data-testid="hub-speaker-tool-add-name"
+              placeholder="another tool or server name"
+              value={newTool}
+              disabled={busy}
+              onChange={(e) => setNewTool(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') addTool();
+              }}
+            />
+          </label>
+          <Button
+            variant="secondary"
+            disabled={busy || !newTool.trim() || toolTokens(speaker).some((t) => t.toLowerCase() === newTool.trim().toLowerCase())}
+            data-testid="hub-speaker-tool-add"
+            onClick={addTool}
+          >
+            Add
+          </Button>
         </SettingRow>
       )}
       {speaker && speaker.lean && (

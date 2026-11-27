@@ -524,9 +524,12 @@ pub struct SpeakerView {
     pub lean_prompt: String,
     pub lean_prompt_default: &'static str,
     /// What a lean chat may use, as resolved (the saved list, else the defaults), and the default
-    /// list — Settings edits chips over these names.
+    /// list — Settings edits chips over these names. `lean_tools_custom` says which it is: only a
+    /// custom list is ever written to the file, so anyone who never edited the chips still gets
+    /// later changes to the built-in defaults.
     pub lean_tools: Vec<String>,
     pub lean_tools_default: Vec<String>,
+    pub lean_tools_custom: bool,
     /// The board chats that arrive from the hub are shown on; blank: the app's own choice. One
     /// setting for every channel — phone voice, room speakers and Telegram alike.
     pub board_id: String,
