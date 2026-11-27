@@ -101,7 +101,8 @@ steering and tool control" for why it is delivery and not the acknowledgement.
   another retry ends the earlier one `retried`; an error result ends it `failed`; a stop ends it
   `cancelled`. A failed request shows up as a synthetic assistant message, projected as an
   `error` row.
-- **Other CLI control requests:** `hook_callback` goes to the landing guard (see "Landing guard") or the long-command guard when its
+- **Other CLI control requests:** `hook_callback` goes to the landing guard (see "Landing guard"),
+  the rule-notes hook (see "Rule notes") or the long-command guard when its
   callback id is the one registered in `initialize` (see "Delivery, steering and tool control"),
   and is answered empty otherwise; `elicitation` declined; anything else answered with an error.
 
@@ -508,6 +509,23 @@ The host answers at once with `allow:true, active:false` in any chat without Orc
 an active task, or with the guard switched off. No answer within `limits.guardTimeoutMs` (10 s):
 the call is refused with a try-again note if the last answer said `active`, and let through with a
 logged warning otherwise.
+
+## Rule notes
+
+Registered only when the launch carries `claude.ruleMatcher` (a rule with a moment trigger named
+its tools at this chat's start; the matcher arrives fixed and does not change mid-worker): one
+`PreToolUse` entry, that matcher, callback `helm-rule-notes`. It rides on its own: a chat needs no
+host tools for it.
+
+| Line | Direction | Fields and behaviour |
+|---|---|---|
+| `rule_check` | worker → host | `id`, `tool` (the tool's full name), `input` (over 64 KiB it goes as its path fields only — `file_path`, `notebook_path`, `path`, `paths` — so a big Write or Edit still matches its folder; nothing left is `{}`), `cwd?` (the hook input's), `root?` (the chat's own folder, when there is no cwd), `epoch` (`<worker session id>:<compactions>`: it changes with a new worker or a compaction, which restarts the notes), `agentId?` (the sub-agent making the call; its notes and refusals count apart from the root chat's). |
+| `rule_verdict` | host → worker, no response | `id`, then at most one of: `stop` (a one-time refusal carrying the rule as the reason), or `context` (the note for the call) with `shown` (`[{key, revision}]`: which rules that note carried). |
+| `rules_shown` | worker → host event | The worker shows the note through the hook answer and confirms it: `text` (one line naming the rules, for the transcript's Rules row), `keys` (the `shown` pairs echoed back — only now are they spent for this context), `agentId`. |
+
+No answer within `limits.ruleNoteTimeoutMs` (1.5 s): the call is let through and a warning is
+logged; rule notes only inform, they never hold work up. A `stop` refuses that one call; the same
+call sent again goes through (the refusal is spent for the context).
 
 ## Turn-end (Stop) hook
 

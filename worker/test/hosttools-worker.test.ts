@@ -362,6 +362,70 @@ test("the landing guard asks the host before Bash and MCP calls, and fails close
   }
 });
 
+test("rule notes ride matching tool calls only when the launch asks: note, stop once, no answer passes, and a compaction opens a fresh epoch", async () => {
+  const s = startWithFixture("rule-notes", { claude: { ruleMatcher: "Bash|Read" }, limits: { ruleNoteTimeoutMs: 300 } });
+  try {
+    await s.host.ready();
+    const init = s.received().find((r) => r.type === "control_request" && (r.request as Json).subtype === "initialize")?.request as Json;
+    assert.ok(((init.hooks as Json).PreToolUse as Json[]).some((m) => m.matcher === "Bash|Read" && (m.hookCallbackIds as string[])[0] === "helm-rule-notes"), "the hook rides the launch's matcher");
+    await prompt(s.host, "start");
+    const seen: Json[] = [];
+    const check = async () => {
+      const c = await s.host.waitFor((e) => e.type === "rule_check" && !seen.includes(e), 5000, 0);
+      seen.push(c);
+      return c;
+    };
+    const c1 = await check();
+    assert.equal(c1.tool, "Read");
+    assert.deepEqual(c1.input, { file_path: "C:/work/repo/src/a.rs" }, "the input rides whole");
+    assert.equal(c1.cwd, "C:/work/repo");
+    assert.ok(c1.agentId === undefined, "a root call names no agent");
+    s.host.send({ type: "rule_verdict", id: String(c1.id), context: "[Helm rule]\n### Keep notes\nAlways end with the folder.", shown: [{ key: "everyone/keep-notes.md", revision: "rev1" }] });
+    const shown = await s.host.waitFor((e) => e.type === "rules_shown", 5000, 0);
+    assert.deepEqual(shown.keys, [{ key: "everyone/keep-notes.md", revision: "rev1" }], "the note is confirmed, which spends it");
+    assert.equal(shown.agentId, "root");
+    assert.match(String(shown.text), /keep-notes/, "the transcript line names the rule");
+    const c2 = await check();
+    assert.equal(c2.tool, "Bash");
+    s.host.send({ type: "rule_verdict", id: String(c2.id), stop: "Refused by the rule \"Kill by PID\": name the process id." });
+    await check(); // The third identical call gets no answer: past the short timeout it goes through.
+    await s.host.waitForType("agent_settled", 8000, 0);
+    await prompt(s.host, "more");
+    const c4 = await check();
+    assert.equal(c4.agentId, "sub-9", "a sub-agent call carries its agent");
+    assert.notEqual(c4.epoch, c1.epoch, "the compaction opened a fresh context");
+    s.host.send({ type: "rule_verdict", id: String(c4.id), context: "[Helm rule] one line only.", shown: [] });
+    await s.host.waitFor((e) => e.type === "agent_settled", 8000, s.host.events.indexOf(s.host.ofType("agent_settled")[0]) + 1);
+    const replies = s
+      .received()
+      .filter((r) => r.type === "control_response" && String((r.response as Json)?.request_id ?? "").startsWith("fake-hook-"))
+      .map((r) => (((r.response as Json).response as Json).hookSpecificOutput as Json | undefined) ?? {});
+    assert.deepEqual(
+      replies.map((h) => h.permissionDecision ?? (h.additionalContext ? "note" : "allow")),
+      ["note", "deny", "allow", "note"],
+    );
+    assert.equal(replies[1].permissionDecisionReason, "Refused by the rule \"Kill by PID\": name the process id.");
+  } finally {
+    await s.done();
+  }
+});
+
+test("with no matcher in the launch the worker registers no rule hook and never asks the host", async () => {
+  const s = startWithFixture("rule-notes");
+  try {
+    await s.host.ready();
+    const init = s.received().find((r) => r.type === "control_request" && (r.request as Json).subtype === "initialize")?.request as Json;
+    assert.ok(!JSON.stringify(init.hooks ?? {}).includes("helm-rule-notes"), "no matcher: no hook");
+    await prompt(s.host, "start");
+    await s.host.waitForType("agent_settled", 8000, 0);
+    await prompt(s.host, "more");
+    await s.host.waitFor((e) => e.type === "agent_settled", 8000, s.host.events.indexOf(s.host.ofType("agent_settled")[0]) + 1);
+    assert.ok(!s.host.events.some((e) => e.type === "rule_check" || e.type === "rules_shown"), "nothing was asked and nothing shown");
+  } finally {
+    await s.done();
+  }
+});
+
 test("a Claude chat lists every host tool it may call; a local chat lists only the core ones; old names are never listed", async () => {
   const { HostToolServer } = await import("../src/hosttools/server.ts");
   const tool = (name: string, extra: Json = {}) => ({ name, description: `${name} does one thing. More text.`, inputSchema: { type: "object" }, requestLimitBytes: 8192, timeoutMs: 20000, children: false, mutating: false, ...extra });

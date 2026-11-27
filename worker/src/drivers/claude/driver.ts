@@ -18,6 +18,7 @@ import { Interactions } from "./interactions.ts";
 import { BUDGET_HOOK_ID, SubagentBudget, subagentRule } from "./limits.ts";
 import { isLongCommandLevel, LongCommandPolicy, PROMPT_RULE, SHELL_TOOLS_MATCHER } from "./longcmd.ts";
 import { LANDING_GUARD_HOOK_ID, LANDING_GUARD_MATCHER, LandingGuard } from "./guard.ts";
+import { RULE_NOTES_HOOK_ID, RuleNotes } from "./rulenotes.ts";
 import { agentsArg, appendMode, cliVersion } from "./cliversion.ts";
 import { assertNotShim, resolveClaude, type Resolved } from "./resolve.ts";
 import { NATIVE_SCHEDULE_MATCHER, SCHEDULE_REDIRECT_HOOK_ID, scheduleRedirect } from "./schedulecalls.ts";
@@ -43,6 +44,8 @@ const DEFAULTS = {
   shutdownGraceMs: 3_000,
   /** How long a tool call waits for the landing guard's answer from the host. */
   guardTimeoutMs: 10_000,
+  /** How long a tool call waits for a rule note; it only informs, so this is short. */
+  ruleNoteTimeoutMs: 1_500,
 };
 /** Short limits for the send-behaviour controls: a slow answer must not hold up the host. */
 const QUICK_CONTROL_MS = 5_000;
@@ -233,6 +236,10 @@ export class ClaudeDriver implements Driver {
   private readonly budget: SubagentBudget;
   /** The landing guard (guard.ts): asks the host before Bash, PowerShell and MCP calls. */
   private readonly guard: LandingGuard | undefined;
+  /** Rule notes (rulenotes.ts): asks the host before tool calls a rule trigger names. */
+  private readonly ruleNotes: RuleNotes | undefined;
+  /** The matcher this chat's rules asked for; absent until one does, and fixed at worker start. */
+  private readonly ruleMatcher: string | undefined;
   /** The host-tool channel, when the workflow's gates may act in this chat (gates.ts). */
   private readonly gateChannel: RequestChannel | undefined;
   /** The channel the Stop hook asks on: set by either the workflow gates or the project's startup. */
@@ -299,6 +306,11 @@ export class ClaudeDriver implements Driver {
       // request as an extra body field; a server that does not know the field ignores it.
       if (this.isLocal) this.localExtraBody = localExtraBody(this.hostTools.surfaceNames());
       this.guard = new LandingGuard({ emit: (l) => this.ch.emit(l), diag: deps.diag, timeoutMs: this.limits.guardTimeoutMs });
+    }
+    // Rule notes ride on their own: a chat needs host tools for neither the hook nor the answer.
+    if (typeof c.ruleMatcher === "string" && c.ruleMatcher) {
+      this.ruleMatcher = c.ruleMatcher;
+      this.ruleNotes = new RuleNotes({ emit: (l) => this.ch.emit(l), diag: deps.diag, timeoutMs: this.limits.ruleNoteTimeoutMs });
     }
   }
 
@@ -375,6 +387,7 @@ export class ClaudeDriver implements Driver {
       if (this.gateChannel) preToolUse.push(gateHook());
       initRequest.sdkMcpServers = [SERVER_NAME];
     }
+    if (this.ruleNotes && this.ruleMatcher) preToolUse.push({ matcher: this.ruleMatcher, hookCallbackIds: [RULE_NOTES_HOOK_ID] });
     if (this.budget.enabled) preToolUse.push({ matcher: ".*", hookCallbackIds: [BUDGET_HOOK_ID] });
     if (this.shellChanges) preToolUse.push({ matcher: "Bash", hookCallbackIds: [SHELL_CHANGES_HOOK_ID] });
     if (this.launch.claude?.scheduleTools === true) preToolUse.push({ matcher: NATIVE_SCHEDULE_MATCHER, hookCallbackIds: [SCHEDULE_REDIRECT_HOOK_ID] });
@@ -455,6 +468,8 @@ export class ClaudeDriver implements Driver {
     if (e.type === "compaction_end") {
       this.autoCompacting = false;
       if (this.compacting) this.compacting.boundary = true;
+      // A compaction reopens every rule context: the notes start again in the new one.
+      this.ruleNotes?.compacted();
       this.ch.emit({ ...e, ok: true });
       return;
     }
@@ -474,6 +489,7 @@ export class ClaudeDriver implements Driver {
   hostLine(cmd: Json): boolean {
     if (cmd.type === "set_permission_mode") return this.setPermissionMode(cmd);
     if (cmd.type === "guard_verdict") return this.guard?.onVerdict(cmd) ?? false;
+    if (cmd.type === "rule_verdict") return this.ruleNotes?.onVerdict(cmd) ?? false;
     if (cmd.type === "mcp_oauth_header") return this.mcp ? applyOauthHeaderLine(this.mcp, cmd) : false;
     if (cmd.type === "mcp_owner_grant") return this.mcp ? applyOwnerGrantLine(this.mcp, cmd) : false;
     return this.mcp ? applyConfigLine(this.mcp, cmd) : false;
@@ -530,6 +546,7 @@ export class ClaudeDriver implements Driver {
     this.shuttingDown = true;
     this.mcp?.close();
     this.guard?.close();
+    this.ruleNotes?.close();
     this.deps.diag(`claude driver shutting down: ${reason}`);
     clearTimeout(this.stopTimer);
     for (const s of this.subs.values()) {
@@ -872,6 +889,20 @@ export class ClaudeDriver implements Driver {
       const root = !input.agent_id && !this.subagentTools.has(toolUseId);
       const call = { tool: String(input.tool_name ?? ""), input: obj(input.tool_input), root, cwd: typeof input.cwd === "string" ? input.cwd : undefined };
       void this.guard.decide(call).then((reply) => this.controlReply(requestId, reply));
+      return;
+    }
+    if (req.callback_id === RULE_NOTES_HOOK_ID && this.ruleNotes) {
+      // The agent the hook names owns its own notes and refusals at the host; a sub-agent call it
+      // cannot name counts as the root's.
+      const agentId = typeof input.agent_id === "string" && input.agent_id !== "" ? input.agent_id : undefined;
+      const call = {
+        tool: String(input.tool_name ?? ""),
+        input: obj(input.tool_input),
+        cwd: typeof input.cwd === "string" && input.cwd !== "" ? input.cwd : undefined,
+        root: this.launch.cwd || undefined,
+        agentId,
+      };
+      void this.ruleNotes.decide(call).then((reply) => this.controlReply(requestId, reply));
       return;
     }
     if (req.callback_id === HOST_TOOL_HOOK_ID) {
