@@ -185,9 +185,6 @@ impl RuleWhen {
             && self.commands.is_empty())
     }
 
-    /// The header lines this trigger asks for, in `TRIGGER_KEYS` order: a key that is unset maps
-    /// to `None` so a rewrite removes its old lines. List values join with ", "; one holding a
-    /// comma goes in double quotes.
     /// Whether the values may become header lines. The reader drops unknown words and malformed
     /// dates into `problems` — a rule written with one then quietly loses that limit and reaches
     /// chats it was not meant for, while the caller is told "saved". So writes refuse instead:
@@ -244,6 +241,9 @@ impl RuleWhen {
         Ok(())
     }
 
+    /// The header lines this trigger asks for, in `TRIGGER_KEYS` order: a key that is unset maps
+    /// to `None` so a rewrite removes its old lines. List values join with ", "; one holding a
+    /// comma goes in double quotes.
     pub fn header_changes(&self) -> Vec<(&'static str, Option<String>)> {
         let word = |v: &Option<String>| v.clone();
         let list = |v: &[String]| {
