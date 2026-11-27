@@ -35,6 +35,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.util import dt as dt_util
 
 from . import agent_core
+from . import errorlines
 from .const import (
     CONF_DRY,
     CONF_HINT,
@@ -129,13 +130,14 @@ class HelmSpeakerAgent(ConversationEntity):
         kind = result.kind
         spoken = result.text
         record_kind = "answer"
+        hub_detail = None
         if kind == agent_core.KIND_ESCALATE:
             record_kind = "escalated"
             api = runtime.get("api")
             if api is not None:
-                hub = await self._escalate(api, device_id,
-                                           result.escalate_text or text, ctx)
-                spoken = hub["text"]
+                hub_detail = await self._escalate(api, device_id,
+                                                  result.escalate_text or text, ctx)
+                spoken = hub_detail["text"]
             else:
                 # without a hub ask_helm is not even offered; this only catches
                 # a model that calls it anyway - answer plainly, no fake error
@@ -145,8 +147,31 @@ class HelmSpeakerAgent(ConversationEntity):
         elif kind in (agent_core.KIND_OFFLINE, agent_core.KIND_ERROR):
             record_kind = "error"
 
+        # Pre-recorded failure lines: we only DECIDE here. An empty response
+        # string makes the voice pipeline skip TTS; a Home Assistant automation
+        # watching this satellite's states announces the matching flac file (the
+        # component must never announce mid-turn - that cancels our own run).
+        # No code, or no satellite entity for this device, or no lines file:
+        # every row below carries today's live sentence and the turn behaves
+        # exactly as before.
+        if kind == agent_core.KIND_ESCALATE and hub_detail is not None:
+            code = errorlines.code_for_turn(
+                kind, has_satellite=bool(device_id),
+                escalate_state=hub_detail.get("kind"),
+                escalate_status=hub_detail.get("status"),
+                escalate_text=hub_detail["text"])
+        else:
+            code = errorlines.code_for_turn(kind, text=spoken,
+                                            has_satellite=bool(device_id))
+        entity_id = (self._satellite_entity(device_id)
+                     if code and device_id else None)
+        announce = bool(code and entity_id)
+        # history, benchmark stages and the hub record keep the canonical
+        # sentence even when the flac replaces its live twin
+        row_text = errorlines.canonical_text(code) if announce else spoken
+
         history = runtime["history"].setdefault(key, [])
-        history.append({"user": text, "spoken": spoken, "ts": time.time()})
+        history.append({"user": text, "spoken": row_text, "ts": time.time()})
         del history[:-8]  # agent_core filters by age and count anyway
 
         _LOGGER.info(
@@ -161,7 +186,7 @@ class HelmSpeakerAgent(ConversationEntity):
             if hasattr(stages, "note_turn"):
                 stages.note_turn(self.hass, self.entry, device_id=device_id,
                                  turn_id=turn_id, text_in=text,
-                                 text_out=spoken, kind=kind, result=result)
+                                 text_out=row_text, kind=kind, result=result)
 
         api = runtime.get("api")
         if api is not None and getattr(api, "record", None) is not None \
@@ -169,7 +194,7 @@ class HelmSpeakerAgent(ConversationEntity):
             # a background task owned by the entry: it dies with an unload
             # instead of haunting a reloaded integration
             coro = self._record(
-                api, turn_id, device_id, text, spoken, record_kind, result)
+                api, turn_id, device_id, text, row_text, record_kind, result)
             if hasattr(self.entry, "async_create_background_task"):
                 self.entry.async_create_background_task(
                     self.hass, coro, "helm_speaker record " + turn_id[:8])
@@ -177,12 +202,32 @@ class HelmSpeakerAgent(ConversationEntity):
                 asyncio.create_task(coro)
 
         response = intent.IntentResponse(language=user_input.language)
-        response.async_set_speech(spoken)
+        if announce:
+            # empty speech: the run loop sees a blank tts_input and ends the
+            # turn without synthesising anything - the pre-recorded flac is
+            # already on its way from the automation instead
+            response.async_set_speech("")
+            self.hass.bus.async_fire("helm_speaker_line",
+                                     {"code": code, "entity_id": entity_id})
+        else:
+            response.async_set_speech(spoken)
         return ConversationResult(
             response=response,
             conversation_id=user_input.conversation_id,
-            continue_conversation=agent_core.ends_with_question(spoken),
+            # the microphone rule reads the sentence we meant, not the empty
+            # string handed to the pipeline
+            continue_conversation=agent_core.ends_with_question(row_text),
         )
+
+    def _satellite_entity(self, device_id):
+        """The assist_satellite entity sitting on the asking satellite's
+        device - what announces target. None if the device carries none (text
+        or REST turns), which keeps this turn on live speech."""
+        entries = er.async_get(self.hass)
+        for entry in er.async_entries_for_device(entries, device_id):
+            if entry.domain == "assist_satellite":
+                return entry.entity_id
+        return None
 
     async def _ctx(self, backend, device_id, history):
         """The minimised context agent_core expects: room label, exposed
@@ -234,14 +279,22 @@ class HelmSpeakerAgent(ConversationEntity):
             context=context, escalation=True,
             budget=ESCALATION_BUDGET_S, first_wait=ESCALATION_FIRST_WAIT)
         kind = result.get("kind")
+        status = result.get("status")  # http code when the hub itself replied
         if kind == KIND_ANSWER:
-            return {"text": result["text"]}
+            return {"text": result["text"], "kind": "answer"}
         if kind == "offline":
-            return {"text": OFFLINE_TEXT}
+            return {"text": OFFLINE_TEXT, "kind": "offline"}
         if kind == "timeout":
-            return {"text": TIMEOUT_TEXT}
-        _LOGGER.debug("escalation ended as %s", kind)
-        return {"text": ERROR_TEXT}
+            return {"text": TIMEOUT_TEXT, "kind": "timeout"}
+        if status in (401, 403):
+            # a wrong token or scope is someone's setup mistake: worth one
+            # grep-able line; out loud it stays the plain try-again sentence
+            _LOGGER.warning(
+                "helm_speaker escalation refused with http %s - check the "
+                "speaker token and its scope", status)
+        else:
+            _LOGGER.debug("escalation ended as %s", kind)
+        return {"text": ERROR_TEXT, "kind": "error", "status": status}
 
     async def _record(self, api, turn_id, device_id, asked, spoken, kind, result):
         """Best effort: the hub route may not exist yet; never raise out of

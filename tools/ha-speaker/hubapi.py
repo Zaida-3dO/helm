@@ -274,7 +274,10 @@ class HubApi:
         """Ask the hub one turn and return
         ``{"kind": "answer", "text": ..., "session": ...}``, or one of the
         fixed-sentence kinds (``offline``, ``error``, ``timeout``). Unknown
-        hub states count as errors: fail closed."""
+        hub states count as errors: fail closed. An error reached over http
+        also carries ``"status"`` (the reply code), so a caller can tell a
+        busy hub from a refused token; an unreachable hub or a broken body
+        has no code to give."""
         body = {
             "turn_id": turn_id,
             "text": text,
@@ -307,11 +310,13 @@ class HubApi:
         except TransportError:
             return {"kind": KIND_OFFLINE}
         if status in (401, 403):
-            return {"kind": KIND_ERROR}
+            # the http status rides along so the caller can tell a setup
+            # mistake from plain bad luck (and say "busy" for a 429)
+            return {"kind": KIND_ERROR, "status": status}
         if status == 202:
             return await self._poll(turn_id, started, budget, poll_wait)
         if status != 200:
-            return {"kind": KIND_ERROR}
+            return {"kind": KIND_ERROR, "status": status}
         return self._answer(raw)
 
     async def _poll(self, turn_id, started, budget, poll_wait):
@@ -330,14 +335,14 @@ class HubApi:
             except TransportError:
                 return {"kind": KIND_OFFLINE}
             if status in (401, 403):
-                return {"kind": KIND_ERROR}
+                return {"kind": KIND_ERROR, "status": status}
             if status == 202:
                 continue
             if status == 404:
                 # The hub restarted or dropped the turn; do not resend.
-                return {"kind": KIND_ERROR}
+                return {"kind": KIND_ERROR, "status": status}
             if status != 200:
-                return {"kind": KIND_ERROR}
+                return {"kind": KIND_ERROR, "status": status}
             return self._answer(raw)
 
     def _answer(self, raw):

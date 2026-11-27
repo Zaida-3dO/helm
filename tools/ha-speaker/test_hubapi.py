@@ -201,6 +201,29 @@ class TurnTable(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result["kind"], want)
 
 
+    async def test_http_errors_carry_their_status_code(self):
+        # The speaker decides which pre-recorded line fits a failed hub turn,
+        # and that needs the code: 429 is "busy", 401/403 is a wrong token or
+        # scope (a setup mistake), 404 means the hub forgot the turn.
+        cases = [
+            ("busy while posting", [(429, {"error": "queue full"})], KIND_ERROR, 429),
+            ("bad token posting", [(401, b"x")], KIND_ERROR, 401),
+            ("refused scope", [(403, b"x")], KIND_ERROR, 403),
+            ("server broke", [(500, b"x")], KIND_ERROR, 500),
+            ("poll lost the turn", [(202, {"state": "working"}), (404, b"")],
+             KIND_ERROR, 404),
+            ("busy while polling", [(202, {"state": "working"}), (429, {})],
+             KIND_ERROR, 429),
+        ]
+        for name, script, want_kind, want_status in cases:
+            with self.subTest(name):
+                times = iter([0.0, 0.0, 5.0, 5.0])
+                api, _ = make_api(script, clock=lambda: next(times, 5.0))
+                result = await api.run_turn(text="x", turn_id="t")
+                self.assertEqual(result["kind"], want_kind)
+                self.assertEqual(result["status"], want_status)
+
+
 class WavTable(unittest.TestCase):
     def test_header(self):
         pcm = b"\x01\x02" * 100
