@@ -16,7 +16,7 @@ and it speaks the reply with whatever local text-to-speech you set up.
 | `manifest.json`, `strings.json`, `translations/en.json` | integration metadata and screen wording |
 | `config_flow.py` | setup screen and the options screens (profiles, dry run) |
 | `agent_core.py` | the turn engine: prompt, tool rounds, retries, timings |
-| `homecontrol.py` | the four house tools and what they may change |
+| `homecontrol.py` | the five house tools and what they may change |
 | `ha_backend.py` | the Home Assistant side of those tools (expose check, timers) |
 | `conversation.py` | the conversation agent entity that runs one spoken turn |
 | `stt.py` | speech-to-text stage that wraps audio for the hub (hub entries only) |
@@ -65,13 +65,26 @@ nothing — useful while testing what a small model actually asks for.
 
 - Home Assistant's own local intents answer first when they match; anything
   else reaches this agent: rules, the asking room and the exposed names of
-  each area (capped per area with a "(+N more)" tail), then up to three rounds
-  of house tools.
+  each area (capped per area with a "(+N more)" tail), then up to four model
+  rounds over the house tools.
+- A house request does not become words until a tool call has succeeded
+  behind it. If the model answers one with no tool call at all, it is sent
+  back once with the tool forced; if still nothing runs, a fixed "I couldn't
+  do that." goes instead of any success claim. When every call failed, the
+  spoken line is built from the tools' own plain reason, never from the
+  model's wording. Those rows carry `guard_reprompt` / `guard_blocked` in
+  the timing record. A question back ("Which room?") claims no success and
+  is not blocked.
 - The house tools are `light`, `climate`, `timer`, `home_state` and
   `home_status`. Timers go through Home Assistant's built-in voice-timer
   intents on the asking speaker, so they live on the satellite rather than as
   helper entities. Names match by area first, then exact name, then a
-  forgiving spelling; an ambiguous name is asked back, never guessed.
+  forgiving spelling; an ambiguous name is asked back, never guessed. A room
+  word carrying "lights" ("the office lights", "all the kitchen lights")
+  means every exposed light of that room in ONE call - even when one bulb
+  is itself named after the room. A bulb that cannot do the colour or colour
+  temperature is left out with a plain per-light note while the others move:
+  a partial result saying what worked and which ones could not.
 - `home_status` answers "what chores are due / what needs water" from the
   optional chores feed: at most three names, overdue first, one or two short
   sentences. It only ever reads — nothing is marked done by voice — and a
@@ -84,9 +97,10 @@ nothing — useful while testing what a small model actually asks for.
   calls would flicker. Zero brightness means off.
 - Entities you have hidden, disabled, or filed under a config/diagnostic
   category are invisible here even if an old expose switch happens to be on.
-- One spoken ask may touch at most twelve devices and make at most four write
-  calls; a second sentence starts a fresh budget. A request that would
-  rewrite the whole house in one breath is refused politely instead.
+- One spoken ask may touch at most twelve devices and make at most six write
+  calls (a whole room counts as one); a second sentence starts a fresh
+  budget. A request that would rewrite the whole house in one breath is
+  refused politely instead.
 - If no room is named, the asking room (the satellite's area) is meant; the
   prompt says so and the house clock arrives in the local zone.
 - A personal question ("what is on my calendar") calls `ask_helm` — only when
@@ -107,7 +121,8 @@ carry tags like `arm=A run=3`, which ride into every row. The
 pipeline — the file must be one Home Assistant is allowed to read (its config
 folder by default), it runs dry unless you pass `act: true`, and each row gets
 a fresh change budget. Outside Home Assistant, `python replay.py --set ...`
-runs the same engine against a JSON house description, always dry.
+runs the same engine against a JSON house description, always dry; a model
+key goes in via `--api-key-env`, never on the command line.
 
 ## Tests
 

@@ -212,6 +212,10 @@ def clean_reply(text):
     if not isinstance(text, str):
         return ""
     t = strip_thinking(text)
+    # a stray thinking close tag (an opener the block patterns never saw)
+    # must not reach the speaker: small models emit "</think" mid-sentence,
+    # usually without even the closing bracket
+    t = re.sub(r"</\s*th(?:ink|inking|ought)\w*\b>?", " ", t, flags=re.I)
     t = re.sub(r"```.*?```", " ", t, flags=re.DOTALL)          # fenced code
     t = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", t)             # markdown links
     t = re.sub(r"[*_`>#]+", " ", t)                            # emphasis/headers

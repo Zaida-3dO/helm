@@ -200,6 +200,16 @@ class AgentCoreTest(unittest.TestCase):
         self.assertEqual(r.text,
                          "Here is one: why did the bulb turn down? Too bright.")
 
+    def test_stray_thinking_close_tag_never_spoken(self):
+        # seen live from the small model: a lone "</think" landed in the
+        # middle of an otherwise fine sentence; it must never be spoken
+        r, _, _ = run_case([msg_text("Why did the bulb turn off? It burnt"
+                                     " out. </think Want another one?")],
+                           text="tell me a joke")
+        self.assertNotIn("</think", r.text)
+        self.assertNotIn("<", r.text)
+        self.assertIn("Want another one?", r.text)
+
     def test_unclosed_thinking_leaves_nothing(self):
         r, _, _ = run_case([msg_text("<think>endless reasoning about bulbs")],
                            cfg_extra={"escalate_url": None})
