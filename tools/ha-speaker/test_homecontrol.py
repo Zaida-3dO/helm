@@ -271,6 +271,35 @@ class LightTest(unittest.TestCase):
         self.assertIn("cannot change colour", r[0]["error"])
         self.assertEqual(b.service_calls, [])
 
+    def test_colour_temperature_emulates_on_xy_hs_bulbs(self):
+        # HA's light.turn_on emulates colour temperature on xy, hs and rgb
+        # bulbs; only fixed-white, brightness-only and on/off bulbs cannot.
+        # was: the xy and hs bulbs were refused the warm setting outright.
+        fixture = {"Den": {"lights": [("Xy bulb", "light.xy"),
+                                      ("Hs bulb", "light.hs"),
+                                      ("White only", "light.whiteo")],
+                           "climates": []}}
+        states = {
+            "light.xy": {"state": "on", "attributes": {
+                "friendly_name": "Xy bulb",
+                "supported_color_modes": ["xy"]}},
+            "light.hs": {"state": "on", "attributes": {
+                "friendly_name": "Hs bulb",
+                "supported_color_modes": ["hs"]}},
+            "light.whiteo": {"state": "on", "attributes": {
+                "friendly_name": "White only",
+                "supported_color_modes": ["white"]}},
+        }
+        r, b = run([("light", {"target": "Den lights", "action": "set",
+                               "color_temp": "warm"})],
+                   exposed=fixture, states=states)
+        self.assertTrue(r[0]["ok"], r[0])
+        self.assertEqual([(d, s, c["entity_id"]) for d, s, c in b.service_calls],
+                         [("light", "turn_on", ["light.xy", "light.hs"])])
+        self.assertEqual(b.service_calls[0][2]["color_temp_kelvin"], 2700)
+        self.assertEqual(r[0]["notes"],
+                         ["White only cannot set the colour temperature"])
+
     def test_colour_word_and_rgb_accepted_on_colour_bulb(self):
         _, b = run([("light", {"target": "Sofa lamp", "action": "set",
                                "color": "warm white"}),

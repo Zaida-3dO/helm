@@ -502,11 +502,15 @@ class HomeControl:
 
     @staticmethod
     def _supports_kelvin(attrs):
-        """Whether a colour-temperature setting can land. A bulb that says
+        """Whether a colour-temperature setting can land. light.turn_on
+        emulates colour temperature on xy, hs and rgb bulbs too (the older
+        rule wrongly refused them); only genuinely incapable bulbs - on/off,
+        brightness-only and fixed-white - are excluded. A bulb that says
         nothing about itself gets the chance, same as with colour."""
         modes = attrs.get("supported_color_modes")
         if isinstance(modes, (list, tuple)) and modes:
-            return any(m in ("color_temp", "rgbww") for m in modes) \
+            return any(m in ("color_temp", "rgbww", "rgb", "rgbw", "xy", "hs")
+                       for m in modes) \
                 or "min_color_temp_kelvin" in attrs
         return True
 
