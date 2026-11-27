@@ -102,7 +102,7 @@ impl SettingsExtension for HubView {
                     "hasFallback": false,
                     "memoryServer": false,
                 },
-                "about": "Read only: whether this PC is connected to the home hub. paired: a hub address and token are set. state: the line to the hub (off, connecting, online or offline). personName and machineName: who the hub says this PC is (empty when the connection was typed in by hand). hasFallback: a second address is set. memoryServer: the hub's shared-memory MCP server is added and enabled. configProblem: present only when a saved connection exists but could not be read, with the reason. The address, the token and any id are never shown. To pair, use app_stage_settings (the user approves it) or ask the user to use Settings > Hub.",
+                "about": "Read only: whether this PC is connected to the home hub. paired: a hub address and token are set. state: the line to the hub (off, connecting, online or offline). personName and machineName: who the hub says this PC is (empty when the connection was typed in by hand). hasFallback: a second address is set. memoryServer: the hub's shared-memory MCP server is added and enabled. configProblem: present only when a saved connection exists but could not be read, with the reason. The address, the token and any id are never shown. To pair, use app_stage_settings with hubPairing: the user approves it, and the one-time code is read from a file only when it is applied.",
                 "hasEffect": true,
             })
         })

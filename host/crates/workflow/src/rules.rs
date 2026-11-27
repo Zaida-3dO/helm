@@ -116,7 +116,7 @@ fn steps(s: &WorkflowSettings) -> Vec<(&'static str, String)> {
         || st.review.use_ != StageUse::Off
         || st.smoketest.use_ != StageUse::Off
     {
-        put(&mut out, step, "A cap is a limit, not a goal: stop a loop as soon as it is approved. When a plan or change is at its cap you may give it one more round yourself with app_workflow {action: \"allowMore\", stage, reason}; past that only the user can.".into());
+        put(&mut out, step, "A cap is a limit, not a goal: stop a loop as soon as it is approved. When a plan or change is at its cap you may give it one more round yourself with app_workflow {action: \"allowMore\", stage, reason}; past that, stage a higher maxRounds for the stage (orchestrator stages.<stage>.maxRounds) with app_stage_settings.".into());
     }
     step = "land";
     let protected = if s.landing.protected_branches.is_empty() {

@@ -280,7 +280,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::write(
             TOOL,
-            "Start signing a Google account in to Helm (for example a personal Gmail, a new account, or one whose Gmail permissions are missing). The user gets an Approve card; on Approve Google's own sign-in opens in the browser on this PC and they only pick the account and allow it. Every Gmail permission is asked for. Answers pending; the outcome reaches you as a note. It cannot set the sign-in client in Settings > MCP: only the user can.",
+            "Start signing a Google account in to Helm (for example a personal Gmail, a new account, or one whose Gmail permissions are missing). The user gets an Approve card; on Approve Google's own sign-in opens in the browser on this PC and they only pick the account and allow it. Every Gmail permission is asked for. Answers pending; the outcome reaches you as a note. It signs in with the client already saved in Settings > MCP and never changes that client.",
             json!({
                 "type": "object",
                 "properties": {

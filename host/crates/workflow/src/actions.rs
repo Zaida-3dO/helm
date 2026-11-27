@@ -405,7 +405,7 @@ pub fn update(tx: &Transaction<'_>, x: &Act<'_>, a: &Value) -> Out {
         Err(e) => return Ok(Err(e)),
     };
     match a.get("visual").and_then(Value::as_bool) {
-        Some(false) => return Ok(Err("Only the user can clear the visual flag: ask them to send \"Clear the visual flag.\" and call app_workflow clear_visual with their words as userQuote.".into())),
+        Some(false) => return Ok(Err("The visual flag is cleared on the user's own words: ask them to send \"Clear the visual flag.\" and call app_workflow clear_visual with their words as userQuote.".into())),
         Some(true) if !run.visual => {
             run.visual = true;
             store::save_run(tx, &run, None, x.now)?;
@@ -523,7 +523,7 @@ pub fn skip_with(tx: &Transaction<'_>, x: &Act<'_>, a: &Value, proof: Proof) -> 
         )));
     }
     if stage == "smoketest" && run.visual {
-        return Ok(Err("This task is marked visual, so its smoketest can't be skipped; only the user can clear the visual flag (app_workflow clear_visual, on their words).".into()));
+        return Ok(Err("This task is marked visual, so its smoketest can't be skipped; the visual flag is cleared with app_workflow clear_visual on the user's own words.".into()));
     }
     if engine::skipped(&run, stage) {
         return Ok(Ok(json!({"skipped": stage, "changed": false})));
@@ -531,7 +531,7 @@ pub fn skip_with(tx: &Transaction<'_>, x: &Act<'_>, a: &Value, proof: Proof) -> 
     let mut verified = false;
     if use_ == StageUse::Required {
         let t = json!({"stage": stage});
-        let why = format!("The {stage} stage is required, so only the user can skip it.");
+        let why = format!("The {stage} stage is required, so skipping it needs your approval.");
         if let Err(e) = kinds::consent(tx, x.kinds, x.chat_id, "skip", &t, &proof, &why, x.now)? {
             return Ok(Err(e));
         }
@@ -778,7 +778,7 @@ pub fn allow_more_with(tx: &Transaction<'_>, x: &Act<'_>, a: &Value, proof: Proo
         )));
     }
     if engine::self_grants(tx, &run, stage, tref, Some(run.attempt))? > 0 {
-        return Ok(Err("You already gave this target its one extra round in this attempt; only the user can allow more now. Stop that loop and explain the blocker.".into()));
+        return Ok(Err("You already gave this target its one extra round in this attempt; more rounds need a higher maxRounds for this stage: stage it (orchestrator stages.<stage>.maxRounds) with app_stage_settings, and meanwhile stop that loop and explain the blocker.".into()));
     }
     let what = tref
         .map(|(_, b)| format!("on {b}"))

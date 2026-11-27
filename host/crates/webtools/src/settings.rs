@@ -47,7 +47,7 @@ impl SettingsExtension for WebSearchKeys {
             json!({
                 "type": "boolean",
                 "default": false,
-                "about": "Settings > Web search, \"Offer in Claude chats\". On: Claude chats get the app_web_search tool (Brave Search) as well, using the user's own Brave key and allowance. Off: only chats running on a local model get it, because they have no web search of their own. It does nothing until the user has entered a Brave key (details says whether one is set), and a chat sees the change at its next turn. The key is the user's to enter and is never shown or changed through these tools.",
+                "about": "Settings > Web search, \"Offer in Claude chats\". On: Claude chats get the app_web_search tool (Brave Search) as well, using the user's own Brave key and allowance. Off: only chats running on a local model get it, because they have no web search of their own. It does nothing until the user has entered a Brave key (details says whether one is set), and a chat sees the change at its next turn. The key is a secret and is never shown: stage credentials {for: \"websearch\"} with app_stage_settings and the user types it on that Settings page.",
             })
         })
     }

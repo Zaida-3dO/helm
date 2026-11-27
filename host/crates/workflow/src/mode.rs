@@ -306,7 +306,7 @@ pub fn agent_on(
     match from {
         ChatMode::On => return Ok(Err("Orchestrator is already on for this chat.".into())),
         ChatMode::Off => return Ok(Err(
-            "Only the user can turn Orchestrator on for this chat; ask them if the task needs it."
+            "Orchestrator is off for this chat by the user's choice, so this call does not turn it on. Say in your reply that the task needs it; the user can switch it on for this chat."
                 .into(),
         )),
         ChatMode::Auto => {}

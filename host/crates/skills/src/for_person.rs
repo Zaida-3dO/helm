@@ -522,13 +522,7 @@ pub(crate) fn save_memory(
 /// and it is filed for Undo.
 fn write(ctx: &ToolCtx, staged: &Staged) -> ToolResult {
     let outcome = match &staged.memory {
-        Some(m) => apply_memory(
-            &ctx.services,
-            &ctx.caller_chat_id,
-            &uuid::Uuid::new_v4().to_string(),
-            staged,
-            m,
-        ),
+        Some(m) => apply_memory(&ctx.services, &ctx.caller_chat_id, &save_key(m), staged, m),
         None => apply_staged(&ctx.services, &ctx.events, &ctx.caller_chat_id, staged),
     };
     match outcome.strip_prefix("Applied. ") {
@@ -550,8 +544,25 @@ fn write(ctx: &ToolCtx, staged: &Staged) -> ToolResult {
 
 // ---- writing ------------------------------------------------------------------------------
 
-/// Save a memory on the hub as the other person's. The write is keyed by `request_id`, so a retry
-/// of the same call finds it already there.
+/// What names a memory saved for another person: the same words for the same person from the same
+/// asker always give the same key, so a call repeated after a lost reply finds the memory already
+/// there instead of saving a second one.
+fn save_key(m: &MemoryChange) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for part in [&m.asker_person, &m.for_person, &m.title, &m.body] {
+        h.update((part.len() as u64).to_le_bytes());
+        h.update(part.as_bytes());
+    }
+    for t in &m.tags {
+        h.update((t.len() as u64).to_le_bytes());
+        h.update(t.as_bytes());
+    }
+    hex::encode(&h.finalize()[..12])
+}
+
+/// Save a memory on the hub as the other person's. The write is keyed by `request_id` (see
+/// [`save_key`]), so a retry of the same call finds it already there.
 fn apply_memory(
     services: &Arc<Services>,
     chat_id: &str,
@@ -560,7 +571,7 @@ fn apply_memory(
     m: &MemoryChange,
 ) -> String {
     let nothing = |why: &str| format!("Nothing saved: {why}");
-    // The profile must still be the one the card named, linked to the same person on the hub.
+    // The profile must still be the one the call named, linked to the same person on the hub.
     let same = services.get::<Database>().is_some_and(|db| {
         db.snapshot(|tx| {
             tx.query_row(
@@ -576,12 +587,12 @@ fn apply_memory(
     });
     if !same {
         return nothing(&format!(
-            "{} is no longer a profile on this PC under that name and hub person. Ask again.",
+            "{} is no longer a profile on this PC under that name and hub person. Read the profiles again and retry.",
             s.profile_name
         ));
     }
     let Some(hub) = hub_of(services) else {
-        return nothing("shared memory isn't connected. Ask again.");
+        return nothing("shared memory isn't connected. Retry when it is.");
     };
     let args = json!({
         "title": m.title,
@@ -611,7 +622,9 @@ fn apply_memory(
                 m.title, s.profile_name
             )
         }
-        Err(MemError::Unavailable(_)) => nothing("the hub could not be reached. Ask again."),
+        Err(MemError::Unavailable(_)) => {
+            nothing("the hub could not be reached. Retry in a moment: the same call saves it once.")
+        }
         Err(MemError::Refused(why)) => nothing(&why),
     }
 }
@@ -642,7 +655,7 @@ fn apply_staged(
     });
     if !still_there {
         return nothing(&format!(
-            "{} is no longer a profile on this PC under that name. Ask again.",
+            "{} is no longer a profile on this PC under that name. Read the profiles again and retry.",
             s.profile_name
         ));
     }
@@ -666,7 +679,7 @@ fn apply_staged(
                         Ok((now, _)) if now.revision == p.revision => {}
                         _ => {
                             return nothing(&format!(
-                                "the rule {} changed since the card was made. Ask again.",
+                                "the rule {} changed since you read it. Read it again and retry.",
                                 p.path
                             ))
                         }
@@ -718,7 +731,7 @@ fn apply_staged(
                 Ok((_, d)) if d == k.digest => {}
                 _ => {
                     return nothing(&format!(
-                        "the folder {} changed since the card was made. Ask again.",
+                        "the folder {} changed since you read it. Read it again and retry.",
                         k.source
                     ))
                 }
@@ -761,7 +774,32 @@ fn apply_staged(
 
 #[cfg(test)]
 mod tests {
-    use super::hidden_in;
+    use super::{hidden_in, save_key, MemoryChange};
+
+    /// A repeated call names its memory the same way; any other words, person or asker name another.
+    #[test]
+    fn a_repeated_save_for_someone_names_the_same_memory() {
+        let base = || MemoryChange {
+            title: "Likes tea".into(),
+            body: "Earl Grey, no milk.".into(),
+            tags: vec!["food".into()],
+            for_person: "7".into(),
+            asker_person: "3".into(),
+        };
+        assert_eq!(save_key(&base()), save_key(&base()));
+        let mut seen = std::collections::HashSet::from([save_key(&base())]);
+        for change in [
+            |m: &mut MemoryChange| m.title.push('!'),
+            |m: &mut MemoryChange| m.body.push('!'),
+            |m: &mut MemoryChange| m.tags.push("x".into()),
+            |m: &mut MemoryChange| m.for_person = "8".into(),
+            |m: &mut MemoryChange| m.asker_person = "4".into(),
+        ] {
+            let mut m = base();
+            change(&mut m);
+            assert!(seen.insert(save_key(&m)), "{m:?}");
+        }
+    }
 
     #[test]
     fn rule_text_refuses_control_and_invisible_characters_but_not_line_breaks_or_tabs() {

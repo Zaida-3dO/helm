@@ -557,7 +557,7 @@ pub struct AdminToolDef {
     pub large_request: bool,
 }
 
-const GUIDANCE: &str = " Act only on the user's explicit request, confirm ambiguous matches with app_list_mcp_servers first, and report what changed. Every change needs the current revision from app_list_mcp_servers. Saving never connects or signs in. Prefer environment or file references for credentials; never paste a secret the user did not ask you to store. OAuth sign-in is user-only, in Settings → MCP. A change only the user may make is refused with how to ask: send the call again with askUser: true (and a reason) and the user gets an Approve card. If the reply is lost, the change may have happened: list the servers before retrying.";
+const GUIDANCE: &str = " Act only on the user's explicit request, confirm ambiguous matches with app_list_mcp_servers first, and report what changed. Every change needs the current revision from app_list_mcp_servers. Saving never connects or signs in. Prefer environment or file references for credentials; never paste a secret the user did not ask you to store. OAuth sign-in starts with google_sign_in (an Approve card) or a change sent with askUser: true. A change that needs the user's click is answered with how to ask: send the call again with askUser: true (and a reason) and the user gets an Approve card. If the reply is lost, the change may have happened: list the servers before retrying.";
 
 /// The two arguments every changing admin tool takes: ask the user instead of changing, and why.
 fn ask_props() -> [(&'static str, Value); 2] {
