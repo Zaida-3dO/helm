@@ -954,19 +954,35 @@ async fn two_speakers_interleave_their_talks_and_each_idles_on_its_own() {
     .await;
     send(&mut ws, final_answer("turn-0103", "One again.")).await;
 
-    // Idle past five minutes: both talks close, each with its own id.
-    hub.bridge()
-        .tick(now_ms() + idle.as_millis() as i64 + 1_000);
-    let mut closed: Vec<String> = drain(&mut ws, 400)
+    // Idle past five minutes: both talks close, each with its own id. A last answer can still be
+    // in flight when the sweep first runs, and a session with a live turn is held back, so tick
+    // again on every pass until both closes are seen; check nothing else closes twice or late.
+    let mut closed: Vec<String> = Vec::new();
+    for _ in 0..15 {
+        hub.bridge()
+            .tick(now_ms() + idle.as_millis() as i64 + 1_000);
+        closed.extend(
+            drain(&mut ws, 300)
+                .await
+                .into_iter()
+                .filter(|f| f["type"] == "speaker_session_closed")
+                .map(|f| f["sessionId"].as_str().unwrap_or_default().to_owned()),
+        );
+        if closed.len() >= 2 {
+            break;
+        }
+    }
+    let late = drain(&mut ws, 200)
         .await
         .into_iter()
         .filter(|f| f["type"] == "speaker_session_closed")
-        .map(|f| f["sessionId"].as_str().unwrap_or_default().to_owned())
-        .collect();
+        .count();
     closed.sort();
+    closed.dedup();
     let mut want = vec![s1.clone(), s2.clone()];
     want.sort();
     assert_eq!(closed, want, "both talks idle out on their own");
+    assert_eq!(late, 0, "each talk closes exactly once");
 
     // The next utterance after the idle starts a fresh talk for that speaker.
     assert_eq!(ask("turn-0104", "Fresh start.", BEDROOM).await.status, 202);
