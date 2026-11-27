@@ -652,7 +652,15 @@ fn open_session(
         },
     );
     let hypothesis_token = recognizer.HypothesisGenerated(&hypothesis_handler)?;
-    wait_action(&session.StartAsync()?, Duration::from_secs(10))?;
+    if let Err(e) = wait_action(&session.StartAsync()?, Duration::from_secs(10)) {
+        // The handshake failed or timed out: detach what this attempt attached. Otherwise the
+        // handlers stay on this recognizer's session, and a late event from it can end the NEXT
+        // language's session at once — the engine would hear an `Ended` it never started.
+        let _ = session.RemoveResultGenerated(result_token);
+        let _ = session.RemoveCompleted(completed_token);
+        let _ = recognizer.RemoveHypothesisGenerated(hypothesis_token);
+        return Err(e);
+    }
     Ok(Windows {
         recognizer: recognizer.clone(),
         session,
@@ -684,8 +692,23 @@ impl Engine for WinRtEngine {
         // language, then Windows' own. The first that opens, compiles and starts wins; when none
         // does, the first failure is the one the user is told, because it is about the language
         // they asked for.
+        // One deadline for the whole attempt. A single language can take a dozen seconds or more
+        // to open, compile and start its model, and there are up to four candidates: without this
+        // line the fallback waits minutes while Stop and cancel queue behind the slot lock. After
+        // the deadline no further language is tried — one full attempt is always made.
+        let began = Instant::now();
+        const START_DEADLINE: Duration = Duration::from_secs(8);
         let mut first_failure: Option<windows::core::Error> = None;
+        let mut attempts = 0usize;
         for tag in candidate_languages(self.language.as_deref()) {
+            if attempts > 0 && began.elapsed() >= START_DEADLINE {
+                log::warn!(
+                    "live dictation: giving up on further languages after {} s",
+                    began.elapsed().as_secs()
+                );
+                break;
+            }
+            attempts += 1;
             let label = tag.as_deref().unwrap_or("the default language");
             let recognizer = match create_recognizer(tag.as_deref()) {
                 Ok(r) => r,
