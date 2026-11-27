@@ -5,8 +5,8 @@
 //! Helm's profile, touches it every half minute while the window is open, and deletes it when the
 //! window closes. This tool only reads those files.
 //!
-//! - **Off by default.** The `ideContext` preference ("Settings > Chat") must be on, and only the
-//!   user can turn it on: it is user-only, so no agent tool changes it.
+//! - **Off by default.** The `ideContext` preference ("Settings > Chat") must be on. A chat can
+//!   turn it on with `app_update_settings`, and the user sees a notice with Undo.
 //! - **Fresh only.** A file not written or touched in the last [`FRESH_SECS`] seconds belongs to an
 //!   editor that has gone away (a crash leaves its file behind) and counts as no hand-off at all.
 //! - **Bounded.** A file over [`MAX_FILE_BYTES`] is skipped, at most [`MAX_WINDOWS`] windows are

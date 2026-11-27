@@ -11,12 +11,12 @@
 //! is no longer what the chat left, like every other change in the ring, so it never overwrites
 //! something the user did since.
 //!
-//! Chats cannot write the list through the settings tools: [`RepositoryList::apply`] always
-//! refuses and points at the repository tool. The key is listed for chats only so the ring and its
-//! Undo can reach it, and, like the tool, only while "Chats can change all settings" is on.
+//! The list is changed with the repository tool, not through the settings tools:
+//! [`RepositoryList::apply`] answers with the tool to call. The key is listed for chats so the
+//! ring and its Undo can reach it.
 
 use crate::repos::{self, Entry};
-use helm_hosttools::SettingsExtension;
+use helm_hosttools::{SettingsExtension, StagedPart};
 use helm_ipc::AppEvent;
 use helm_worktrees::{config, offlist, rules};
 use rusqlite::{params, Transaction};
@@ -159,6 +159,10 @@ struct RepositoryList {
 }
 
 impl SettingsExtension for RepositoryList {
+    fn staged_parts(&self, _key: &str) -> &'static [StagedPart] {
+        &[]
+    }
+
     fn keys(&self) -> Vec<&'static str> {
         vec![KEY]
     }
@@ -171,10 +175,6 @@ impl SettingsExtension for RepositoryList {
                 "about": "The saved repositories and their checkouts. Read only here: change them with app_update_repo. A change you make that way is filed so the user can undo it.",
             })
         })
-    }
-
-    fn needs_all_settings(&self, _key: &str) -> bool {
-        true
     }
 
     fn read(&self, tx: &Transaction<'_>, _key: &str) -> Value {

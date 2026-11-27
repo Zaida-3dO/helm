@@ -8,7 +8,7 @@
 
 use crate::store::{self, Settings};
 use crate::WebSearch;
-use helm_hosttools::SettingsExtension;
+use helm_hosttools::{SettingsExtension, StagedPart};
 use helm_ipc::AppEvent;
 use rusqlite::Transaction;
 use serde_json::{json, Value};
@@ -34,6 +34,10 @@ fn put(tx: &Transaction<'_>, on: bool) -> Result<(), String> {
 }
 
 impl SettingsExtension for WebSearchKeys {
+    fn staged_parts(&self, _key: &str) -> &'static [StagedPart] {
+        &[]
+    }
+
     fn keys(&self) -> Vec<&'static str> {
         vec![KEY]
     }

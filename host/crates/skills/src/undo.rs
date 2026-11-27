@@ -11,7 +11,7 @@
 
 use crate::layers::{self, Kind, Layer};
 use crate::{agents, install_dir, is_valid_name, rules};
-use helm_hosttools::SettingsExtension;
+use helm_hosttools::{SettingsExtension, StagedPart};
 use helm_ipc::AppEvent;
 use rusqlite::Transaction;
 use serde_json::{json, Value};
@@ -262,6 +262,10 @@ struct Knowledge {
 }
 
 impl SettingsExtension for Knowledge {
+    fn staged_parts(&self, _key: &str) -> &'static [StagedPart] {
+        &[]
+    }
+
     fn keys(&self) -> Vec<&'static str> {
         vec![KEY]
     }
@@ -274,10 +278,6 @@ impl SettingsExtension for Knowledge {
                 "about": "The rules, skills and agents of every layer. Read only here: change them with app_save_rule, app_remove_rule, app_add_skill and app_remove_skill. A change you make that way is filed so the user can undo it.",
             })
         })
-    }
-
-    fn needs_all_settings(&self, _key: &str) -> bool {
-        true
     }
 
     fn read(&self, _tx: &Transaction<'_>, _key: &str) -> Value {

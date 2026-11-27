@@ -347,8 +347,8 @@ pub const FACADES: &[FacadeSpec] = &[
     FacadeSpec {
         name: "app_settings",
         group: "settings",
-        description: "Helm settings a chat may change: read them with options and current values (get), or change 1-16 live with Undo for the user (update). Read first: a value outside a key's options is refused.",
-        guidelines: "get: optional keys. Each key's options give its type, allowed values, default and what it does; a key chats cannot change is listed under unavailable.\nupdate: changes {key: value}, keys applied alphabetically, stopping at the first failure. A value replaces the stored one whole, except fontSizes, sounds and orchestrator (send only the fields to change); null restores the default. Some settings need the user to turn on \"Chats can change all settings\".\nSetup that only the user may approve goes through app_stage_settings.",
+        description: "Helm settings: read them with options and current values (get), or change 1-16 live with Undo for the user (update). Every setting is either changed here or staged with app_stage_settings for one Approve click. Read first: a value outside a key's options is refused.",
+        guidelines: "get: optional keys. Each key's options give its type, allowed values, default and what it does; options that say needsApproval mark the few settings you stage instead of changing.\nupdate: changes {key: value}, keys applied alphabetically, stopping at the first failure. A value replaces the stored one whole, except fontSizes, sounds and orchestrator (send only the fields to change); null restores the default. A setting that needs approval (or a part of one) changes nothing here: the answer is the exact app_stage_settings call to make.\nTwo ways only: change it yourself with update (the user is told and can Undo), or stage it with app_stage_settings (the user approves on one card). Nothing is left for the user to do on their own.",
         core: false,
         actions: &[("get", "app_get_settings"), ("update", "app_update_settings")],
         fixed: &[],

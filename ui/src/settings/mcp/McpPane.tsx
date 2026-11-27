@@ -249,7 +249,7 @@ function Editor({
       ) : preset?.id === BROKER_PRESET ? (
         <p className="mcp-help">
           The Your browser block sets which browser chats use, the broker extension's id in it, the sites chats may act on, and its optional connect
-          token. Chats never change any of these, and never act on a site that is not listed.
+          token. A chat can ask you to change any of these with an Approve card, and never acts on a site that is not listed.
         </p>
       ) : preset?.secretEnv?.length ? (
         <p className="mcp-help">Under Environment, enter {preset.secretEnv.join(' and ')} as secrets.</p>

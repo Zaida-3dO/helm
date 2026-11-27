@@ -7586,8 +7586,8 @@ async fn a_picked_permission_mode_reaches_the_worker_and_its_successors() {
     .unwrap();
     let s = h.call("runtime_settings_get", json!({})).await.unwrap();
     assert_eq!(s["permissionMode"], "acceptEdits");
-    // No chat can move the stored pick: the preference is the user's alone.
-    assert!(helm_hosttools::settings_allow::refusal("newChatPermissionMode", true).is_some());
+    // A chat does not move the stored pick itself: the preference needs the user's approval.
+    assert!(helm_hosttools::settings_allow::reason("newChatPermissionMode").is_some());
     let err = h
         .call(
             "chat_set_permission_mode",

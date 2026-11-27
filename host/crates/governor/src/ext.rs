@@ -1,14 +1,13 @@
 //! The usage governor as a key of `app_get_settings` and `app_update_settings`: `usageGovernor`.
 //!
-//! The governor can stop running chats near the plan's limit, so a chat only reads it and stages a
-//! change (`app_stage_settings`) for the user to approve. The value is the Settings page's own:
-//! `{enabled, selectivePct, windDownPct, stopPct, atStop}`; a staged value names only the fields
+//! A chat reads it and changes it itself, with the Undo notice. The value is the Settings page's
+//! own: `{enabled, selectivePct, windDownPct, stopPct, atStop}`; a value names only the fields
 //! to change, and the merged result goes through the page's strict check.
 
 use crate::bands::{self, GovernorSettings};
 use crate::service::Governor;
 use crate::store;
-use helm_hosttools::SettingsExtension;
+use helm_hosttools::{SettingsExtension, StagedPart};
 use helm_ipc::AppEvent;
 use rusqlite::Transaction;
 use serde_json::{json, Value};
@@ -54,6 +53,10 @@ fn put(tx: &Transaction<'_>, value: &Value) -> Result<(Value, Value), String> {
 }
 
 impl SettingsExtension for GovernorKey {
+    fn staged_parts(&self, _key: &str) -> &'static [StagedPart] {
+        &[]
+    }
+
     fn keys(&self) -> Vec<&'static str> {
         vec![KEY]
     }

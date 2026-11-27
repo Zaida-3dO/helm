@@ -6,7 +6,8 @@
 //! - **Check in with me** (`check_in`): a chat stops and asks when a choice matters. This is
 //!   what Helm did before the mode existed, and it stays the default.
 //!
-//! The app's mode is the user-only preference `workingMode`. A board can override it (the
+//! The app's mode is the preference `workingMode`, which a chat reaches through the `workmode`
+//! settings key (staged, and the user approves). A board can override it (the
 //! `board_working_modes` table, one row per board; no row means "same as the app"). A chat's
 //! effective mode is the override of the board it is shown under, else the app's.
 //!

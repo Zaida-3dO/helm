@@ -6,12 +6,12 @@
 //! `preference` op) are checked at runtime by the single writer instead.
 //!
 //! A crate adding a preference adds one line here (its registration line) and declares the key as a
-//! `const` in its own code.
+//! `const` in its own code. The line must say how a chat reaches the setting: [`Access`] has
+//! exactly two values, and there is no way to write "chats may not touch it".
 //!
-//! **A new preference is agent-settable by default**: classify it `Registry(Base)` and chats change
-//! it themselves, with the Undo notice. `High` (a chat stages it and the user approves) and
-//! `UserOnly` (no tool at all, kept for what changes what approval means) each carry a one-line
-//! reason, and need a good one.
+//! **A new preference is directly changeable by default**: give it `DIRECT` and chats change it
+//! themselves, with a notice and Undo. `approval("...")` (a chat stages it and the user clicks
+//! Approve) needs a one-line reason that names a concrete danger; the bar is very high.
 //!
 //! ```
 //! use helm_core::prefs::PrefKey;
@@ -24,99 +24,110 @@
 //! const NOPE: PrefKey = PrefKey::classified("notARealPreference");
 //! ```
 
-/// Agent tiers for Registry keys.
+/// How a chat reaches a setting. These are the only two ways: a chat either changes the setting
+/// itself, or stages the change and the user clicks Approve. Neither is a refusal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tier {
-    /// Always offered to agents.
-    Base,
-    /// Only while "Chats can change all settings" is on.
-    All,
+pub enum Access {
+    /// The chat applies it; the user sees a notice with Undo.
+    Direct,
+    /// The chat stages it (`app_stage_settings`) and it applies when the user clicks Approve. The
+    /// text is the one-line reason the card shows; build it with [`Access::approval`].
+    Approval(&'static str),
+}
+
+impl Access {
+    /// The longest reason, in bytes: it has to fit on one line of the Approve card.
+    pub const MAX_REASON: usize = 130;
+
+    /// An approval access with its reason. In a `const` or a table a missing or over-long reason
+    /// is a compile error.
+    pub const fn approval(reason: &'static str) -> Self {
+        assert!(!reason.is_empty(), "an approval needs its one-line reason");
+        assert!(
+            reason.len() <= Self::MAX_REASON,
+            "the reason must fit on one line of the card"
+        );
+        Self::Approval(reason)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrefClass {
-    /// Changeable through the generic agent settings tools.
-    Registry(Tier),
-    /// Changed by agents only through its own host tool.
-    Tool,
-    /// Agents stage a change (`app_stage_settings`) and it applies only after the user approves
-    /// it. Carries what the approval is for (≤ 130 bytes).
-    High(&'static str),
-    /// Only the user, in Settings: no tool changes it at all. Carries the reason (≤ 130 bytes).
-    UserOnly(&'static str),
-    /// App state, not a setting.
+    /// A setting. [`Access`] says how a chat changes it.
+    Setting(Access),
+    /// App state, not a setting: no tool lists or changes it.
     Internal,
-    /// Harmless, not yet exposed. Nothing is listed here now: a new preference is agent-settable
-    /// by default.
-    Later,
 }
 
-use PrefClass::*;
-use Tier::*;
+use PrefClass::{Internal, Setting};
 
-/// Every fixed preference key and its class. Seeded with the Base tier,
-/// the All-tier `keybindings`, the generic-validated layout keys, and the all-settings
-/// switch. Later features add their keys here.
+/// A setting a chat changes itself.
+const DIRECT: PrefClass = Setting(Access::Direct);
+
+/// A setting a chat stages for the user to approve, with the one-line reason.
+const fn approval(reason: &'static str) -> PrefClass {
+    Setting(Access::approval(reason))
+}
+
+/// Every fixed preference key and its class. Later features add their keys here.
 pub const CLASSIFIED: &[(&str, PrefClass)] = &[
-    // Base tier.
-    ("theme", Registry(Base)),
-    ("interfaceTheme", Registry(Base)),
-    ("appearance", Registry(Base)),
-    ("codeThemes", Registry(Base)),
-    ("fontSizes", Registry(Base)),
-    ("fontFamilies", Registry(Base)),
-    ("dopamine", Registry(Base)),
-    ("animationControls", Registry(Base)),
-    ("themeEffects", Registry(Base)),
-    ("cursorTrail", Registry(Base)),
-    ("customCursors", Registry(Base)),
+    ("theme", DIRECT),
+    ("interfaceTheme", DIRECT),
+    ("appearance", DIRECT),
+    ("codeThemes", DIRECT),
+    ("fontSizes", DIRECT),
+    ("fontFamilies", DIRECT),
+    ("dopamine", DIRECT),
+    ("animationControls", DIRECT),
+    ("themeEffects", DIRECT),
+    ("cursorTrail", DIRECT),
+    ("customCursors", DIRECT),
     // Settings > Appearance > Colours: an accent hue, a tint and a contrast choice, per profile.
-    ("customColours", Registry(Base)),
-    ("pauseAnimationsOnScroll", Registry(Base)),
-    ("compactSidebar", Registry(Base)),
-    ("hiddenSidebarItems", Registry(Base)),
-    ("moveCompletedTasksToTop", Registry(Base)),
-    ("reviewWrap", Registry(Base)),
-    ("zoomLevel", Registry(Base)),
-    ("sounds", Registry(Base)),
-    ("keepAwake", Registry(Base)),
-    ("hiddenSkills", Registry(Base)),
-    ("sidebarVisible", Registry(Base)),
-    ("inspectorVisible", Registry(Base)),
-    ("sidebarWidth", Registry(Base)),
-    ("inspectorWidth", Registry(Base)),
-    ("collapsedProjects", Registry(Base)),
-    ("expandedChats", Registry(Base)),
-    ("sendShortcut", Registry(Base)),
-    ("defaultHarness", Registry(Base)),
-    ("newChat", Registry(Base)),
-    ("autocomplete", Registry(Base)),
-    ("taskTriage", Registry(Base)),
-    ("chatElements", Registry(Base)),
-    ("desktopPet", Registry(Base)),
-    ("projectsMode", Registry(Base)),
-    ("tasks", Registry(Base)),
-    // All tier.
-    ("keybindings", Registry(All)),
+    ("customColours", DIRECT),
+    ("pauseAnimationsOnScroll", DIRECT),
+    ("compactSidebar", DIRECT),
+    ("hiddenSidebarItems", DIRECT),
+    ("moveCompletedTasksToTop", DIRECT),
+    ("reviewWrap", DIRECT),
+    ("zoomLevel", DIRECT),
+    ("sounds", DIRECT),
+    ("keepAwake", DIRECT),
+    ("hiddenSkills", DIRECT),
+    ("sidebarVisible", DIRECT),
+    ("inspectorVisible", DIRECT),
+    ("sidebarWidth", DIRECT),
+    ("inspectorWidth", DIRECT),
+    ("collapsedProjects", DIRECT),
+    ("expandedChats", DIRECT),
+    ("sendShortcut", DIRECT),
+    ("defaultHarness", DIRECT),
+    ("newChat", DIRECT),
+    ("autocomplete", DIRECT),
+    ("taskTriage", DIRECT),
+    ("chatElements", DIRECT),
+    ("desktopPet", DIRECT),
+    ("projectsMode", DIRECT),
+    ("tasks", DIRECT),
+    ("keybindings", DIRECT),
     // Layout and chat-behaviour keys.
-    ("sidebarView", Registry(Base)),
-    ("terminalHeight", Registry(Base)),
+    ("sidebarView", DIRECT),
+    ("terminalHeight", DIRECT),
     // Minutes without output before a running chat is stalled.
-    ("stallMinutes", Registry(Base)),
+    ("stallMinutes", DIRECT),
     // How many of our chats one local model server may carry at once (0 switches the cap off).
-    ("localChatCap", Registry(Base)),
+    ("localChatCap", DIRECT),
     // Settings > Chat and Shell: how the user's own window and keyboard behave. A chat changes
     // these itself, with the Undo notice.
-    ("scrollOnSend", Registry(Base)),
-    ("doubleShift", Registry(Base)),
+    ("scrollOnSend", DIRECT),
+    ("doubleShift", DIRECT),
     // Whether Helm archives a chat that has sent its completed report and gone quiet.
-    ("archiveFinishedChats", Registry(Base)),
-    ("sendBehavior", Registry(Base)),
-    ("responseVerbosity", Registry(Base)),
-    ("notifications", Registry(Base)),
-    ("dictationMic", Registry(Base)),
+    ("archiveFinishedChats", DIRECT),
+    ("sendBehavior", DIRECT),
+    ("responseVerbosity", DIRECT),
+    ("notifications", DIRECT),
+    ("dictationMic", DIRECT),
     // The board chats with no other home are shown on (a board project id, or "ask").
-    ("defaultBoard", Registry(Base)),
+    ("defaultBoard", DIRECT),
     // The open chat and project, restored at launch.
     ("selection", Internal),
     // The profile whose chats the sidebar shows (a profile id, or "all").
@@ -128,83 +139,45 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
     // The device whose chats New creates and the sidebar toggle shows (a device uid); unset is
     // this device.
     ("selectedDevice", Internal),
-    // Higher risk: a chat stages the change and it applies only when the user approves it.
+    // Tuning that a chat changes itself.
     // The percent of the Claude plan windows at which a new Claude chat waits for the reset
     // (0 switches it off). The default lives in `helm-chats` with the queue.
-    (
-        "claudeHoldPct",
-        High("Decides when Claude chats wait for the plan to reset, so you approve it."),
-    ),
-    (
-        "globalHotkey",
-        High("A system-wide shortcut works in every app, so you approve it."),
-    ),
-    (
-        "terminalShell",
-        High("The shell your terminal runs is a program Helm starts, so you approve it."),
-    ),
-    (
-        "backgroundModel",
-        High("The model that reads your chats for titles and checks is yours to approve."),
-    ),
-    (
-        "titlesLocalViaClaude",
-        High("Whether a local chat's first message may go to Claude for a title is yours to approve."),
-    ),
-    (
-        "ideContext",
-        High("Lets agents read your editor's open file and selection, so you approve it."),
-    ),
+    ("claudeHoldPct", DIRECT),
+    ("globalHotkey", DIRECT),
+    ("terminalShell", DIRECT),
+    ("backgroundModel", DIRECT),
+    ("titlesLocalViaClaude", DIRECT),
+    ("ideContext", DIRECT),
+    // "Use my Claude Code MCP servers", default on.
+    ("nativeMcp", DIRECT),
+    // The MCP master switch, default on. Off: no chat loads any MCP server.
+    ("mcpEnabled", DIRECT),
+    // The pull request view: whether Helm reads and writes GitHub for you.
+    ("githubPrView", DIRECT),
+    // Whether other devices may run chats on this PC (on when missing).
+    ("deviceRunFromOthers", DIRECT),
+    // What other people in the household may see of this install's chats; all off by default.
+    ("householdSharing", DIRECT),
+    // Context size at which an idle chat is asked to roll over into a fresh one (0 = never).
+    ("rolloverTokens", DIRECT),
+    // The few settings a chat stages for the user to approve. Each reason names a concrete
+    // danger; the list is kept short on purpose (a test caps it).
     (
         "newChatPermissionMode",
-        High("The permission mode new chats start in sets what they may do, so you approve it."),
-    ),
-    // "Use my Claude Code MCP servers", default on.
-    (
-        "nativeMcp",
-        High("Which of your own MCP servers chats load is yours to approve."),
-    ),
-    // The MCP master switch, default on. Off: no chat loads any MCP server.
-    (
-        "mcpEnabled",
-        High("Whether chats may use MCP servers at all is yours to approve."),
+        approval("New chats may start with permissions bypassed, so you approve it."),
     ),
     (
         "updateSource",
-        High("Decides which program Helm runs to update itself, so you approve it."),
+        approval("Helm installs the update it finds in this folder, so you approve which folder."),
     ),
-    // The pull request view: whether Helm reads and writes GitHub for you.
-    (
-        "githubPrView",
-        High("Whether Helm reads and writes GitHub for you is yours to approve."),
-    ),
-    // What the household may see of this install's chats; all three switches default to off.
-    (
-        "householdSharing",
-        High("What other people in your household may see of your chats is yours to approve."),
-    ),
-    // Whether other devices may run chats on this PC (on when missing).
-    (
-        "deviceRunFromOthers",
-        High("Whether other devices may run chats on this PC is yours to approve."),
-    ),
-    // The switch that governs what chats may change without asking.
+    // The switch that opens the repository tools to chats without asking.
     (
         "agentSettingsAll",
-        UserOnly("Lets chats change every setting without asking, so only you can turn it on."),
+        approval("Lets chats use tools that act on your repositories without asking, so you approve it."),
     ),
-    // How chats work: run to completion, or check in (check in when missing).
-    (
-        "workingMode",
-        UserOnly("How your chats work, run to completion or check in, is yours to set; no brief can change it."),
-    ),
-    // Context size at which an idle chat is asked to roll over into a fresh one (0 = never). A
-    // chat could set a tiny threshold and force itself and every other chat to keep rolling
-    // over, so only the user sets it.
-    (
-        "rolloverTokens",
-        UserOnly("A chat could use a low threshold to force rollovers, so when chats roll over is yours to set."),
-    ),
+    // How chats work (run to completion or check in): kept here, changed through the `workmode`
+    // key, which also covers a board's own mode.
+    ("workingMode", Internal),
 ];
 
 /// Dynamic keys under fixed prefixes: all internal.
@@ -290,21 +263,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_tiers_and_the_floor() {
-        let count =
-            |want: fn(&PrefClass) -> bool| CLASSIFIED.iter().filter(|(_, c)| want(c)).count();
-        assert_eq!(count(|c| *c == Registry(Base)), 48);
-        assert_eq!(count(|c| *c == Registry(All)), 1);
-        // The user-only floor: the switch that governs what chats may change, how chats work,
-        // and when they roll themselves over.
-        let user: Vec<_> = CLASSIFIED
-            .iter()
-            .filter(|(_, c)| matches!(c, UserOnly(_)))
-            .map(|(k, _)| *k)
-            .collect();
-        assert_eq!(user, ["agentSettingsAll", "workingMode", "rolloverTokens"]);
-        // Nothing is parked: a new preference is agent-settable unless it says why not.
-        assert_eq!(count(|c| *c == Later), 0);
+    fn the_approval_list_is_short_and_each_entry_says_why() {
+        let count = |want: fn(&PrefClass) -> bool| CLASSIFIED.iter().filter(|(_, c)| want(c)).count();
+        assert_eq!(count(|c| matches!(c, Setting(Access::Approval(_)))), 3);
+        assert_eq!(count(|c| *c == Internal), 5);
+        for (k, c) in CLASSIFIED {
+            if let Setting(Access::Approval(why)) = c {
+                assert!(why.ends_with('.') && why.len() <= Access::MAX_REASON, "{k}");
+            }
+        }
     }
 
     #[test]
@@ -317,19 +284,10 @@ mod tests {
     }
 
     #[test]
-    fn user_only_and_high_reasons_fit_130_bytes() {
-        for (k, c) in CLASSIFIED {
-            if let UserOnly(reason) | High(reason) = c {
-                assert!(reason.len() <= 130, "{k}: reason too long");
-            }
-        }
-    }
-
-    #[test]
     fn dynamic_prefixes_need_a_suffix() {
         assert_eq!(classify("autocompleteBudget:chat-1"), Some(Internal));
         assert_eq!(classify("autocompleteBudget:"), None);
-        assert_eq!(classify("sidebarWidth"), Some(Registry(Base)));
+        assert_eq!(classify("sidebarWidth"), Some(DIRECT));
         assert_eq!(classify("sidebarWidthX"), None);
     }
 }

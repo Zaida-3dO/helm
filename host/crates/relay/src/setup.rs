@@ -1,15 +1,16 @@
 //! Changes a chat stages and the user approves: `app_stage_settings`.
 //!
-//! A chat may change a low-risk setting itself, but a higher-risk one (pairing this PC with the
-//! hub, the update folder, the Devices switches, which shell the terminal runs...) only applies
-//! after the user's click. Instead of changing it, the chat stages it here, and Helm files one
+//! A chat changes almost every setting itself, with a notice and Undo. The few that need the
+//! user's click (pairing this PC with the hub, the update folder, permissions, how much chats
+//! may decide on their own...) are staged here instead: the chat stages the change, and Helm files one
 //! approval request (allow kind `protected_settings`) whose card lists exactly what changes, one
 //! line each, built only from what this module checked. When the user clicks Approve, Helm applies
 //! the staged changes at that moment ([`SettingsApplier`]), and the chat hears the outcome as a
 //! note. The card never blocks the chat: it carries on while the card waits.
 //!
-//! - **Any High setting, with its own validators.** Every key the risk table calls High is
-//!   admitted. Staging checks the value by running the change in a transaction that is rolled
+//! - **Any setting that needs approval, with its own validators.** Every key the access table
+//!   marks Approval is admitted, and so is a part of a key that a chat may change except for that
+//!   part (the Telegram switches that let an outside answer approve things). Staging checks the value by running the change in a transaction that is rolled
 //!   back (the same writer a chat's own change uses, so the preference's validators, its owner's
 //!   rule or the extension's own checks all apply), and the card shows what that run says the
 //!   setting would become. Applying runs the same writer for real, records each change for the
@@ -18,6 +19,9 @@
 //!   exchanged, so Helm cannot ask first who the code is for. The chat says who it should be,
 //!   the card shows it, and on Approve Helm saves nothing unless the hub names the same person
 //!   and computer.
+//! - **A secret never travels through a chat.** A chat that needs the user to type one stages
+//!   `credentials` naming a page (`{"for": "mcp"}`), and Approve opens that page of Settings;
+//!   nothing is stored and nothing comes back.
 //! - **The code is read from a file, once, when applying.** Staging only checks the file's
 //!   metadata (a plain file of at most 256 bytes). The code never appears in the target, the
 //!   card, the tool result, the outcome, a log line or an error; every message about it is fixed
@@ -32,7 +36,7 @@ use crate::pair;
 use helm_consent::store::{self as consent, NewRequest};
 use helm_consent::{AllowKind, AllowKinds, Applier, ApplyJob, Canonical};
 use helm_core::db::Database;
-use helm_hosttools::settings_allow::{high_keys, risk, user_refusal, Risk};
+use helm_hosttools::settings_allow::{CREDENTIALS, CREDENTIALS_KEY};
 use helm_hosttools::{HostToolRegistry, ToolCtx, ToolError, ToolResult, ToolSpec};
 use helm_ipc::{AppEvent, EventSink, Services};
 use rusqlite::Transaction;
@@ -54,7 +58,6 @@ const MAX_NAME: usize = 64;
 /// The most settings one request may change.
 const MAX_SETTINGS: usize = 16;
 const TITLE: &str = "Change settings on this PC";
-const RUN_FROM_OTHERS: &str = "Let other devices use chats on this PC";
 const PAIRING: &str = "hubPairing";
 
 /// Staged pairing, as the target holds it.
@@ -90,6 +93,17 @@ struct Staged {
     hub_pairing: Option<Pairing>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     settings: BTreeMap<String, Change>,
+    /// The page of Settings to open for the user to type a secret; the id from `CREDENTIALS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    credentials_page: Option<String>,
+}
+
+/// The page and what it holds, for one id of `CREDENTIALS`.
+fn credential_page(id: &str) -> Option<(&'static str, &'static str)> {
+    CREDENTIALS
+        .iter()
+        .find(|(i, ..)| *i == id)
+        .map(|(_, title, what)| (*title, *what))
 }
 
 fn host_port(line_url: &str) -> &str {
@@ -100,7 +114,6 @@ fn host_port(line_url: &str) -> &str {
 fn label(key: &str) -> &str {
     match key {
         "updateSource" => "Update folder",
-        "deviceRunFromOthers" => RUN_FROM_OTHERS,
         k => k,
     }
 }
@@ -115,6 +128,26 @@ fn show(key: &str, v: &Value) -> String {
         Value::Bool(false) => "off".into(),
         Value::String(s) if s.is_empty() => "\"\"".into(),
         Value::String(s) => s.clone(),
+        Value::Array(list) if key == "localServers" => {
+            let one = |s: &Value| {
+                let field = |k: &str| s.get(k).and_then(Value::as_str).unwrap_or_default();
+                let mut t = format!("{} at {}", field("name"), field("baseUrl"));
+                for (k, label) in [("folder", "folder"), ("preset", "preset")] {
+                    if !field(k).is_empty() {
+                        t.push_str(&format!(", {label} {}", field(k)));
+                    }
+                }
+                if s.get("enabled") == Some(&Value::Bool(false)) {
+                    t.push_str(" (off)");
+                }
+                t
+            };
+            if list.is_empty() {
+                "no servers".into()
+            } else {
+                list.iter().map(one).collect::<Vec<_>>().join("; ")
+            }
+        }
         other => other.to_string(),
     }
 }
@@ -155,6 +188,11 @@ fn card_lines(s: &Staged) -> Result<Vec<String>, String> {
                 p.replaces
             ));
         }
+    }
+    if let Some((title, what)) = s.credentials_page.as_deref().and_then(credential_page) {
+        lines.push(format!(
+            "Open Settings > {title} so you can type {what} yourself (no secret is staged)"
+        ));
     }
     for (key, c) in &s.settings {
         let (from, to) = (show(key, &c.from), show(key, &c.to));
@@ -327,20 +365,27 @@ fn build_pairing(services: &Services, v: &Value) -> Result<Pairing, String> {
     })
 }
 
-/// Why `key` cannot be staged, or `None` when it can.
-fn not_stageable(key: &str) -> Option<String> {
-    let shown: String = key.chars().take(64).collect();
-    match risk(key) {
-        Some(Risk::High) => None,
-        Some(Risk::Low) => Some(format!(
-            "{shown} is a setting you change yourself with app_update_settings, so it is not staged."
-        )),
-        Some(Risk::User) => Some(user_refusal(key)),
-        None => Some(format!(
-            "{shown} is not a setting that can be staged: stage hubPairing or one of {}.",
-            high_keys().join(", ")
-        )),
-    }
+/// The page a chat asks the user to open to type a secret: only an id from the table, never a
+/// value.
+fn build_credentials(v: &Value) -> Result<String, String> {
+    let ids = || {
+        CREDENTIALS
+            .iter()
+            .map(|(id, ..)| *id)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let id = v
+        .as_object()
+        .filter(|o| o.len() == 1)
+        .and_then(|o| o.get("for"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            format!("credentials takes {{\"for\": <one of {}>}} and nothing else: a secret is typed by the user, never staged.", ids())
+        })?;
+    credential_page(id)
+        .map(|_| id.to_owned())
+        .ok_or_else(|| format!("credentials for must be one of {}.", ids()))
 }
 
 /// Check what the chat asked for against this PC and build the target. Changes nothing: the
@@ -361,21 +406,20 @@ fn build(
     if changes.is_empty() {
         return Err("Stage at least one change.".into());
     }
-    if changes.len() > MAX_SETTINGS + usize::from(changes.contains_key(PAIRING)) {
+    let special = |k: &str| k == PAIRING || k == CREDENTIALS_KEY;
+    if changes.len() > MAX_SETTINGS + changes.keys().filter(|k| special(k)).count() {
         return Err(format!("Stage at most {MAX_SETTINGS} settings at once."));
-    }
-    for k in changes.keys().filter(|k| k.as_str() != PAIRING) {
-        if let Some(why) = not_stageable(k) {
-            return Err(why);
-        }
     }
     let mut staged = Staged::default();
     if let Some(v) = changes.get(PAIRING) {
         staged.hub_pairing = Some(build_pairing(services, v)?);
     }
+    if let Some(v) = changes.get(CREDENTIALS_KEY) {
+        staged.credentials_page = Some(build_credentials(v)?);
+    }
     let wanted: Vec<(String, Value)> = changes
         .iter()
-        .filter(|(k, _)| k.as_str() != PAIRING)
+        .filter(|(k, _)| !special(k))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     if !wanted.is_empty() {
@@ -458,13 +502,21 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::write(
             TOOL,
-            "Stage changes that only the user may approve, for Helm to apply when they click Approve. changes holds any settings that app_get_settings marks needsApproval (setting name: value, validated like app_update_settings; null restores a default) and optionally hubPairing {address, fallback?, codeFile, person, machine}, which pairs this PC with the hub using the one-time code in codeFile (Helm reads it only when applying, and pairs only if the hub names that person and machine). Answers at once with pending; the user sees one Approve card listing every change, and the outcome reaches you as a note from Helm. Carry on with other work meanwhile. Use it only when the user asked for these changes.",
+            "Stage the few changes that need the user's click, for Helm to apply when they Approve. This is the other half of app_update_settings: a setting is either changed there, or staged here. changes holds any settings that app_get_settings marks needsApproval (setting name: value, validated like app_update_settings; null restores a default), including a part of a key listed under needsApprovalParts (send the same value app_update_settings turned away); optionally hubPairing {address, fallback?, codeFile, person, machine}, which pairs this PC with the hub using the one-time code in codeFile (Helm reads it only when applying, and pairs only if the hub names that person and machine); and optionally credentials {for: <page>}, which carries no secret: on Approve Helm opens that page of Settings so the user types the secret there. Answers at once with pending; the user sees one Approve card listing every change, and the outcome reaches you as a note from Helm. Carry on with other work meanwhile. Use it only when the user asked for these changes.",
             json!({
                 "type": "object",
                 "properties": {
                     "changes": {
                         "type": "object",
                         "properties": {
+                            "credentials": {
+                                "type": "object",
+                                "properties": {
+                                    "for": {"type": "string", "enum": CREDENTIALS.iter().map(|(id, ..)| *id).collect::<Vec<_>>()}
+                                },
+                                "required": ["for"],
+                                "additionalProperties": false
+                            },
                             "hubPairing": {
                                 "type": "object",
                                 "properties": {
@@ -479,7 +531,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                             }
                         },
                         "minProperties": 1,
-                        "maxProperties": 17
+                        "maxProperties": 18
                     },
                     "reason": {"type": "string", "minLength": 1, "maxLength": 1000}
                 },
@@ -663,6 +715,14 @@ fn apply_staged(
                 );
             }
         }
+    }
+    if let Some((title, what)) = s.credentials_page.as_deref().and_then(credential_page) {
+        if let Some(id) = &s.credentials_page {
+            events.emit(AppEvent::new("shell_open_settings").with("pane", id.clone()));
+        }
+        done.push(format!(
+            "Settings > {title} is open for the user to type {what}; it never comes back to this chat."
+        ));
     }
     let mut out = format!("Applied. {}", done.join(" "));
     for d in drift {

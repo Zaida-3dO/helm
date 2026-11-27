@@ -420,7 +420,7 @@ fn card_lines(t: &Target) -> Result<Vec<String>, String> {
         && lines.join("\n").chars().count() <= helm_consent::kinds::MAX_SUMMARY;
     if !fits {
         return Err(format!(
-            "This change is too long to show whole on one card (a line holds {} characters, the card {}): use shorter arguments, or ask the user to make it in Settings > MCP.",
+            "This change is too long to show whole on one card (a line holds {} characters, the card {}): use shorter arguments, or split it into smaller changes.",
             helm_consent::kinds::MAX_SUMMARY_LINE,
             helm_consent::kinds::MAX_SUMMARY
         ));
@@ -590,7 +590,7 @@ pub(crate) fn stage_admin(ctx: &ToolCtx, tool: &str, args: Value) -> ToolResult 
         .map_err(|e| refuse(e.to_string()))?;
     if carries_value(&after) || args_carry_value(&args) {
         return Err(refuse(
-            "a card never carries a secret value. Leave the value out: the user types it in Settings > MCP, or a person's own value is saved with app_set_mcp_secret from a file.",
+            "a card never carries a secret value. Leave the value out: a person's own value is saved with app_set_mcp_secret from a file, or stage credentials {for: mcp} with app_stage_settings and Settings > MCP opens for the user to type it.",
         ));
     }
     if before == after {
@@ -686,7 +686,7 @@ fn locate<'a>(
     let header = t.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name));
     match (env, header) {
         (Some(_), Some(_)) => Err(format!(
-            "{name} names both a variable and a header of that server: ask the user to set it in Settings > MCP."
+            "{name} names both a variable and a header of that server: remove one of them with edit (removeEnv or removeHeaders), then ask again."
         )),
         (Some((k, r)), None) => Ok(("env", k.clone(), r)),
         (None, Some((k, r))) => Ok(("header", k.clone(), r)),
@@ -838,7 +838,7 @@ fn stage_secret(ctx: &ToolCtx, args: Value) -> ToolResult {
     let (slot, name, r) = locate(server, text_arg(&args, "secret")?).map_err(refuse)?;
     if r.kind != RefKind::Literal {
         return Err(refuse(
-            "a per-person value needs a typed secret: this one is read from a variable or file, so ask the user to change it in Settings > MCP.",
+            "a per-person value needs a typed secret: this one is read from a variable or file. Stage credentials {for: mcp} with app_stage_settings and Settings > MCP opens for the user to type it.",
         ));
     }
     let file = plain_path(

@@ -232,7 +232,7 @@ fn apply_edit(s: &mut McpServer, e: EditArgs, who: Who) -> Result<(), StoreError
         return bad("Helm sets the person header itself; change it in Settings > MCP.");
     }
     // The Google accounts' program, its arguments (which hold the mail permission level) and its
-    // sign-in settings are the user's to change.
+    // sign-in settings need the user's Approve card (askUser).
     if who == Who::Agent && s.preset.as_deref() == Some(crate::google::PRESET_ID) {
         let sign_in = |k: &String| {
             let u = k.to_ascii_uppercase();

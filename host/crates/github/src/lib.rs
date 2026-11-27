@@ -4,7 +4,7 @@
 //! sign-in: Helm holds no GitHub credential, never asks `gh` for its token and never reads its
 //! configuration. The land step and declared waits already rely on `gh` the same way.
 //!
-//! The view has one user-only switch, off by default. While it is off nothing here runs: every
+//! The view has one switch, off by default. While it is off nothing here runs: every
 //! network op checks the switch before anything is spawned. The ops are main-window ops only;
 //! none of them is an agent tool.
 //!

@@ -10,18 +10,19 @@
 //! | `localToolsSetup` | `lean` or `full`: the tools a local chat is offered |
 //! | `localCompareModel` | `opus`, `sonnet` or `haiku`: the Claude model local usage is priced against |
 //! | `localGameLiftMinutes` | minutes after the last listed game closes before local models come back, 1 to 60 |
-//! | `localGames` | **needs approval:** the programs that unload local models while they run (a list of names like `game.exe`) |
-//! | `localRestartTask` | **needs approval:** the Windows scheduled task Helm ends while local models are unloaded and starts after |
-//! | `localPauseFile` | **needs approval:** the file Helm writes while local models are unloaded |
+//! | `localGames` | the programs that unload local models while they run (a list of names like `game.exe`) |
+//! | `localRestartTask` | the Windows scheduled task Helm ends while local models are unloaded and starts after |
+//! | `localPauseFile` | the file Helm writes while local models are unloaded |
+//! | `localServers` | **needs approval:** the servers themselves: name, address, folder, preset (a list of records) |
 //!
-//! The first seven are changed by a chat itself: each is bounded, shows in "Changed by chats" with
-//! Undo, and none can reach outside this machine. The last three decide what Helm stops, starts
-//! and writes outside its own window, so a chat only stages them (`app_stage_settings`) for the
-//! user to approve. **Never here:** a server's address, name or key, and whether local models are
-//! unloaded right now. Those are the user's, in Settings > Local models.
+//! The first ten are changed by a chat itself: each is bounded and shows in "Changed by chats"
+//! with Undo. `localServers` is the one a chat stages (`app_stage_settings`) for the user to
+//! approve: a server's start folder and preset make Helm start a program. A server's key is a
+//! secret and never passes through a chat: stage `credentials` for the local models page and the
+//! user types it there.
 
 use crate::settings::{self, Changes, CompareModel, LocalSettings, ToolsSetup};
-use helm_hosttools::SettingsExtension;
+use helm_hosttools::{SettingsExtension, StagedPart};
 use helm_ipc::AppEvent;
 use rusqlite::Transaction;
 use serde_json::{json, Value};
@@ -37,6 +38,7 @@ pub const GAME_LIFT: &str = "localGameLiftMinutes";
 pub const GAMES: &str = "localGames";
 pub const RESTART_TASK: &str = "localRestartTask";
 pub const PAUSE_FILE: &str = "localPauseFile";
+pub const SERVERS: &str = "localServers";
 
 const PAGE: &str = "Settings > Local models";
 
@@ -56,6 +58,7 @@ fn value_of(s: &LocalSettings, key: &str) -> Value {
         TOOLS => serde_json::to_value(s.tools).unwrap_or(Value::Null),
         GAME_LIFT => json!(s.game_lift_minutes),
         GAMES => json!(s.games),
+        SERVERS => json!(s.servers),
         // Empty text is "none".
         RESTART_TASK => json!(s.restart_task.clone().unwrap_or_default()),
         PAUSE_FILE => json!(s.pause_file.clone().unwrap_or_default()),
@@ -181,6 +184,12 @@ fn change(key: &str, cur: &LocalSettings, value: &Value) -> Result<Changes, Stri
                     .map_err(|_| format!("{key} is \"opus\", \"sonnet\" or \"haiku\"."))?,
             )
         }
+        SERVERS => {
+            let list: Vec<settings::ServerInput> = serde_json::from_value(v).map_err(|e| {
+                format!("{key} is a list of servers {{id?, name, kind, baseUrl, enabled?, model?, autoStart?, folder?, preset?, chatCap?}}: {e}")
+            })?;
+            c.servers = Some(list);
+        }
         ENABLED => {
             let map = v
                 .as_object()
@@ -211,7 +220,7 @@ fn change(key: &str, cur: &LocalSettings, value: &Value) -> Result<Changes, Stri
             {
                 let ids: Vec<&str> = cur.servers.iter().map(|s| s.id.as_str()).collect();
                 return Err(format!(
-                    "{key}.{unknown}: there is no such server. The servers are {}. Adding or changing one is the user's, in {PAGE}.",
+                    "{key}.{unknown}: there is no such server. The servers are {}. To add or change one, stage localServers with app_stage_settings (the user approves it).",
                     ids.join(", ")
                 ));
             }
@@ -234,6 +243,10 @@ fn put(
 }
 
 impl SettingsExtension for LocalKeys {
+    fn staged_parts(&self, _key: &str) -> &'static [StagedPart] {
+        &[]
+    }
+
     fn keys(&self) -> Vec<&'static str> {
         vec![
             CONTEXT,
@@ -246,6 +259,7 @@ impl SettingsExtension for LocalKeys {
             GAMES,
             RESTART_TASK,
             PAUSE_FILE,
+            SERVERS,
         ]
     }
 
@@ -269,7 +283,7 @@ impl SettingsExtension for LocalKeys {
             ENABLED => Some(json!({
                 "type": "object",
                 "merge": true,
-                "about": format!("{PAGE}: whether Helm uses each local model server, by server id (read it to see the ids). Send only the servers to change. A server that is off shows no models and refuses new turns. Adding, removing or re-addressing a server, and its key, are the user's, in {PAGE}."),
+                "about": format!("{PAGE}: whether Helm uses each local model server, by server id (read it to see the ids). Send only the servers to change. A server that is off shows no models and refuses new turns. Adding, removing or re-addressing a server is localServers, which you stage with app_stage_settings; a server's key is typed by the user (stage credentials for the local models page)."),
                 "valueType": "boolean",
                 "default": "every server on",
             })),
@@ -298,6 +312,12 @@ impl SettingsExtension for LocalKeys {
                 "max": settings::MAX_GAME_LIFT,
                 "default": d.game_lift_minutes,
                 "about": format!("{PAGE}, Wait after a game closes: minutes after the last listed game closes before local models come back."),
+            })),
+            SERVERS => Some(json!({
+                "type": "array",
+                "maxItems": settings::MAX_SERVERS,
+                "default": d.servers,
+                "about": format!("{PAGE}: the model servers Helm uses, each {{id, name, kind (strata or ollama), baseUrl (an address on this computer), enabled, model, autoStart, folder (Strata's install folder), preset (Strata's launch preset), chatCap}}. A server's folder and preset make Helm start a program, so a change is staged with app_stage_settings for the user to approve; leave out id for a new server, and a server left out of the list is removed. A server's key is not here: stage credentials for the local models page."),
             })),
             GAMES => Some(json!({
                 "type": "array",
@@ -366,10 +386,9 @@ mod tests {
                 .unwrap()
         };
         // The keys, their descriptions and their defaults.
-        assert_eq!(ext.keys().len(), 10);
+        assert_eq!(ext.keys().len(), 11);
         for k in ext.keys() {
             assert!(ext.describe(k).is_some(), "{k}");
-            assert!(!ext.needs_all_settings(k), "{k}");
         }
         assert!(ext.describe("theme").is_none());
         assert_eq!(read(CONTEXT), json!(65_536));
@@ -404,9 +423,8 @@ mod tests {
         // Servers: only enabled flags, by id, merged; others are the user's.
         let (_, after) = apply(ENABLED, json!({"ollama": false})).unwrap();
         assert_eq!(after, json!({"strata": true, "ollama": false}));
-        assert!(apply(ENABLED, json!({"rogue": true}))
-            .unwrap_err()
-            .contains("no such server"));
+        let why = apply(ENABLED, json!({"rogue": true})).unwrap_err();
+        assert!(why.contains("no such server") && why.contains("stage localServers"), "{why}");
         assert!(apply(ENABLED, json!({"strata": "yes"}))
             .unwrap_err()
             .contains("true or false"));
@@ -414,8 +432,25 @@ mod tests {
         assert_eq!(
             s.servers[1].base_url,
             settings::OLLAMA_URL,
-            "an address never changes here"
+            "the enabled flags never move an address"
         );
+        // The servers themselves are one record each; a new one joins the list, a bad address
+        // is refused, and what was left out is gone. (A chat stages this; approval applies it.)
+        let mut list = read(SERVERS);
+        assert_eq!(list.as_array().unwrap().len(), 2);
+        list.as_array_mut().unwrap().push(
+            json!({"name": "Mine", "kind": "ollama", "baseUrl": "http://127.0.0.1:11500"}),
+        );
+        let (_, after) = apply(SERVERS, list.clone()).unwrap();
+        assert_eq!(after.as_array().unwrap().len(), 3);
+        assert_eq!(after[2]["id"], "mine");
+        list.as_array_mut().unwrap()[2]["baseUrl"] = json!("http://example.com");
+        assert!(apply(SERVERS, list).unwrap_err().contains("Server 3"));
+        assert!(apply(SERVERS, json!("strata"))
+            .unwrap_err()
+            .contains("list of servers"));
+        apply(SERVERS, Value::Null).unwrap();
+        assert_eq!(read(SERVERS).as_array().unwrap().len(), 2);
         assert_eq!(
             (
                 s.ollama_context,

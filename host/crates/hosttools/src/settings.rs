@@ -1,30 +1,33 @@
 //! The settings tools, the change ring and Undo.
 //!
-//! - `app_get_settings` reads the agent-visible keys; `app_update_settings` changes 1–16 of them,
-//!   applied alphabetically through the same validators as the UI and stopping at the first
-//!   failure. Each applied change goes into `settings_changes` (a 100-entry ring) and the UI gets
-//!   `preferences` plus `external_settings {chatId, changes}`, which shows the 8 s toast with Undo
-//!   and Open chat.
-//! - Ops `settings_changes_list` and `settings_undo {changeIds[1–16]}`: all or nothing, and only
+//! - `app_get_settings` reads every setting a chat can reach, the directly changeable ones and
+//!   the ones it stages; `app_update_settings` changes 1-16 of them, applied alphabetically
+//!   through the same validators as the UI and stopping at the first failure. A setting that
+//!   needs approval, or the part of one that does, changes nothing and answers with the call to
+//!   make instead (`app_stage_settings`): see `settings_allow::route`. Each applied change goes
+//!   into `settings_changes` (a 100-entry ring) and the UI gets `preferences` plus
+//!   `external_settings {chatId, changes}`, which shows the 8 s toast with Undo and Open chat.
+//! - Ops `settings_changes_list` and `settings_undo {changeIds[1-16]}`: all or nothing, and only
 //!   if every value is still what the chat set.
-//! - Op `settings_risk_list`: every setting's class (`low`, `high`, `user`) with the reason a
-//!   `high` or `user` one carries, and the parts of a `low` key that only the user changes. The
+//! - Op `settings_access_list`: every setting's access (`direct` or `approval`) with the reason an
+//!   approval one carries, and the parts of a direct extension key that need approval. The
 //!   Settings pages read it to say which settings need the user's approval.
 
 use crate::registry::{HostToolRegistry, ToolCtx, ToolError, ToolResult};
 use crate::settings_allow::{
-    agent_keys, high_pref_keys, high_refusal, needs_all_refusal, reason, refusal, risk,
-    user_refusal, Risk, NAMED, USER_PARTS,
+    access, approval_pref_keys, direct_message, direct_pref_keys, not_a_setting, reason, route,
+    stage_message, Access, Route, CREDENTIALS, CREDENTIALS_KEY, NAMED,
 };
-use crate::settings_ext::{PrefRules, SettingsExtensions};
+use crate::settings_ext::{PrefRules, SettingsExtension, SettingsExtensions, StagedPart};
 use crate::settings_options;
 use crate::spec::ToolSpec;
 use helm_core::db::Database;
-use helm_core::prefs::classes::CLASSIFIED;
+use helm_core::prefs::classes::{PrefClass, CLASSIFIED};
 use helm_core::prefs::{self, PrefKey};
 use helm_ipc::{ApiError, AppEvent, OpClass, OpCtx, OpRegistry};
 use rusqlite::{params, Transaction};
 use serde_json::{json, Map, Value};
+use std::sync::Arc;
 
 pub const RING: i64 = 100;
 pub const MAX_CHANGES: usize = 16;
@@ -43,10 +46,6 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              undone    INTEGER NOT NULL DEFAULT 0
          );",
     )
-}
-
-fn all_settings(tx: &rusqlite::Connection) -> bool {
-    matches!(prefs::read(tx, "agentSettingsAll"), Some(Value::Bool(true)))
 }
 
 /// The entry of `customColours` this device is showing: the active profile's id, or "default"
@@ -93,16 +92,61 @@ fn extensions(services: &helm_ipc::Services) -> SettingsExtensions {
         .unwrap_or_default()
 }
 
+/// The extension for the person who owns `chat` when the setting is theirs alone, else `x`.
+fn bound(
+    tx: &Transaction<'_>,
+    x: &Arc<dyn SettingsExtension>,
+    chat: &str,
+) -> Arc<dyn SettingsExtension> {
+    x.for_chat(tx, chat).unwrap_or_else(|| x.clone())
+}
+
+/// The value at a dotted path, if there is one.
+fn at<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
+    path.split('.').try_fold(v, |v, k| v.get(k))
+}
+
+/// The staged part of `key` that `patch` would change: a field a chat stages rather than changes,
+/// named by the patch at a value other than the one it has now. Repeating a value is no change.
+fn touched_part(
+    tx: &Transaction<'_>,
+    x: &dyn SettingsExtension,
+    key: &str,
+    patch: &Value,
+) -> Option<StagedPart> {
+    if !patch.is_object() {
+        return None;
+    }
+    let now = x.read(tx, key);
+    x.staged_parts(key)
+        .iter()
+        .find(|p| at(patch, p.path).is_some_and(|new| Some(new) != at(&now, p.path)))
+        .copied()
+}
+
+/// What `app_get_settings` says about `credentials`: it holds no value, only the pages a chat can
+/// ask the user to open to type a secret.
+fn credentials_options() -> Value {
+    let pages: Vec<Value> = CREDENTIALS
+        .iter()
+        .map(|(id, title, what)| json!({"for": id, "page": title, "holds": what}))
+        .collect();
+    json!({
+        "type": "object",
+        "fields": {"for": {"type": "enum", "allowed": CREDENTIALS.iter().map(|(id, _, _)| *id).collect::<Vec<_>>()}},
+        "pages": pages,
+        "about": "Not a value: a secret must never pass through a chat. Stage {for: <page>} with app_stage_settings and, on Approve, Helm opens that page of Settings so the user types the secret there. Nothing is stored and nothing is sent back to you.",
+    })
+}
+
 fn get_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
     let db = db(ctx)?;
     let ext = extensions(&ctx.services);
     db.snapshot(|tx| {
-        let all = all_settings(tx);
-        let mut visible = agent_keys(all);
-        visible.extend(high_pref_keys());
-        visible.extend(ext.keys().into_iter().filter(|k| {
-            all || !ext.owner(k).is_some_and(|x| x.needs_all_settings(k))
-        }));
+        let mut visible = direct_pref_keys();
+        visible.extend(approval_pref_keys());
+        visible.extend(ext.keys());
+        visible.push(CREDENTIALS_KEY);
         let wanted: Vec<String> = match a.get("keys").and_then(Value::as_array) {
             Some(k) => k
                 .iter()
@@ -115,12 +159,15 @@ fn get_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
         let mut unavailable = Map::new();
         let mut details = Map::new();
         for k in &wanted {
-            let high = risk(k) == Some(Risk::High);
-            if let Some(x) = ext.owner(k) {
-                if x.needs_all_settings(k) && !all {
-                    unavailable.insert(k.clone(), json!(needs_all_refusal(k)));
-                    continue;
-                }
+            let Some(acc) = access(k) else {
+                unavailable.insert(k.clone(), json!(not_a_setting(k)));
+                continue;
+            };
+            if k == CREDENTIALS_KEY {
+                settings.insert(k.clone(), Value::Null);
+                options.insert(k.clone(), credentials_options());
+            } else if let Some(owner) = ext.owner(k) {
+                let x = bound(tx, owner, &ctx.caller_chat_id);
                 settings.insert(k.clone(), x.read(tx, k));
                 if let Some(o) = x.describe(k) {
                     options.insert(k.clone(), o);
@@ -128,21 +175,34 @@ fn get_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
                 if let Some(d) = x.details(tx, k) {
                     details.insert(k.clone(), d);
                 }
-            } else if let Some(why) = refusal(k, all).filter(|_| !high) {
-                unavailable.insert(k.clone(), json!(why));
+                let parts = x.staged_parts(k);
+                if !parts.is_empty() {
+                    let list: Vec<Value> = parts
+                        .iter()
+                        .map(|p| json!({"path": p.path, "why": p.reason}))
+                        .collect();
+                    if let Some(o) = options
+                        .entry(k.clone())
+                        .or_insert_with(|| json!({}))
+                        .as_object_mut()
+                    {
+                        o.insert("needsApprovalParts".into(), Value::Array(list));
+                    }
+                }
             } else {
                 settings.insert(k.clone(), prefs::read(tx, k).unwrap_or(Value::Null));
                 if let Some(o) = settings_options::describe(k) {
                     options.insert(k.clone(), o);
                 }
             }
-            if high {
+            if let Access::Approval(why) = acc {
                 if let Some(o) = options
                     .entry(k.clone())
                     .or_insert_with(|| json!({}))
                     .as_object_mut()
                 {
                     o.insert("needsApproval".into(), json!(true));
+                    o.insert("approvalReason".into(), json!(why));
                 }
             }
         }
@@ -150,7 +210,7 @@ fn get_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
             "settings": settings,
             "options": options,
             "unavailable": unavailable,
-            "note": "null means the default is in use: options.<key>.default says what that is, and sending null in app_update_settings restores it. options.<key> gives the type and the allowed values or limits. An option with hasEffect false is stored but nothing in Helm reads it yet, so changing it changes nothing. details.<key> holds read-only facts about a key. A key whose options say needsApproval is read here but changed only with app_stage_settings: the user sees one Approve card and Helm applies the change on their click.",
+            "note": "null means the default is in use: options.<key>.default says what that is, and sending null in app_update_settings restores it. options.<key> gives the type and the allowed values or limits. An option with hasEffect false is stored but nothing in Helm reads it yet, so changing it changes nothing. details.<key> holds read-only facts about a key. A key whose options say needsApproval (or a part of one listed under needsApprovalParts) is read here but changed only with app_stage_settings: the user sees one Approve card and Helm applies the change on their click. unavailable lists names that are not settings at all.",
         });
         if !details.is_empty() {
             out["details"] = Value::Object(details);
@@ -253,12 +313,13 @@ fn update_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
     Ok(out)
 }
 
-/// Who is changing a setting, which decides the settings it may touch.
+/// Who is changing a setting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum By {
-    /// A chat, with `app_update_settings`: Low settings only.
+    /// A chat, with `app_update_settings`: it applies what is Direct and is told how to stage the
+    /// rest.
     Chat,
-    /// Helm applying what the user approved on a card: High settings only.
+    /// Helm applying what the user approved on a card.
     Approved,
     /// Checking what the user would be asked to approve, in a transaction that is rolled back.
     Check,
@@ -267,9 +328,10 @@ pub enum By {
 /// A setting's value before and after a change; `None` is the default in use.
 type Change = (Option<Value>, Option<Value>);
 
-/// Check one change against the key's class and its own validators, and store it in `tx`.
+/// Check one change against the setting's access and its own validators, and store it in `tx`.
 /// `app_update_settings` and an approved change both go through here, so a staged value passes the
-/// same checks a chat's own would.
+/// same checks a chat's own would. The extension's `apply` never sees who is asking: whether a
+/// change goes ahead or is staged is decided here, once, by `settings_allow::route`.
 fn change_key(
     tx: &Transaction<'_>,
     ext: &SettingsExtensions,
@@ -286,39 +348,46 @@ fn change_key(
     if let Some(at) = helm_core::hidden::find_hidden(v) {
         return Err(hidden_refusal(key, &at));
     }
-    match (by, risk(key)) {
-        (By::Chat, Some(Risk::High)) => return Err(high_refusal(key)),
-        (By::Chat, Some(Risk::User)) => return Err(user_refusal(key)),
-        // A setting with no class is closed to chats until someone decides which it is.
-        (By::Chat, None) => return Err(format!("{key} is not a setting chats can change.")),
-        (By::Approved | By::Check, Some(Risk::High)) => {}
-        (By::Approved | By::Check, _) => {
-            return Err(format!("{key} is not a setting the user approves."))
+    let acc = access(key).ok_or_else(|| not_a_setting(key))?;
+    let owner = ext.owner(key).map(|x| bound(tx, x, chat));
+    match by {
+        By::Chat => {
+            let touched = owner
+                .as_ref()
+                .and_then(|x| touched_part(tx, x.as_ref(), key, v));
+            if let Route::Stage { part, reason } = route(acc, touched.as_ref()) {
+                return Err(stage_message(key, part, reason));
+            }
         }
-        _ => {}
+        By::Approved | By::Check => {
+            // Only what a chat would have to stage can be staged; the rest it changes itself.
+            let has_parts = owner
+                .as_ref()
+                .is_some_and(|x| !x.staged_parts(key).is_empty());
+            if !matches!(acc, Access::Approval(_)) && !has_parts {
+                return Err(direct_message(key));
+            }
+        }
     }
-    if let Some(x) = ext.owner(key) {
-        if by == By::Chat && x.needs_all_settings(key) && !all_settings(tx) {
-            return Err(needs_all_refusal(key));
-        }
+    if key == CREDENTIALS_KEY {
+        return Err(format!(
+            "{key} stores nothing: stage {{\"{key}\": {{\"for\": <one of {}>}}}} with app_stage_settings and Approve opens that page.",
+            CREDENTIALS.iter().map(|(id, _, _)| *id).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    if let Some(x) = owner {
         let (b, a) = match by {
-            By::Chat => x.apply(tx, key, v)?,
-            By::Approved => x.apply_approved(tx, key, v)?,
             By::Check => x.check_approved(tx, key, v)?,
+            By::Chat | By::Approved => x.apply(tx, key, v)?,
         };
         return Ok((Some(b), Some(a)));
-    }
-    if by == By::Chat {
-        if let Some(why) = refusal(key, all_settings(tx)) {
-            return Err(why);
-        }
     }
     settings_options::check(key, v)?;
     let pref = CLASSIFIED
         .iter()
-        .find(|(k, _)| *k == key && matches!(risk(k), Some(Risk::Low | Risk::High)))
+        .find(|(k, c)| *k == key && matches!(c, PrefClass::Setting(_)))
         .map(|(k, _)| PrefKey::classified(k))
-        .ok_or_else(|| format!("{key} is not a setting chats can change."))?;
+        .ok_or_else(|| not_a_setting(key))?;
     let before = prefs::read(tx, key);
     let mut stored = if key == settings_options::COLOURS_KEY {
         settings_options::merge_colours(before.as_ref(), v, &chat_colour_profile(tx, chat))
@@ -351,7 +420,7 @@ pub struct Approved {
     pub change_id: Option<i64>,
 }
 
-/// Apply approved changes (High settings) together: all or nothing, each recorded in the change
+/// Apply approved changes (settings that need approval) together: all or nothing, each recorded in the change
 /// list for the user's Undo (a chat never gets it), then announced. With `commit` false nothing
 /// is kept: it answers what each setting would become, which is how a staged change is checked
 /// up front, with the same validators.
@@ -568,7 +637,7 @@ pub(crate) fn undo(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
             let mut plan = Vec::new();
             for id in &ids {
                 let row = tx.query_row(
-                    "SELECT key, before, after, undone FROM settings_changes WHERE id = ?1",
+                    "SELECT key, before, after, undone, chat_id FROM settings_changes WHERE id = ?1",
                     [id],
                     |r| {
                         Ok((
@@ -576,10 +645,11 @@ pub(crate) fn undo(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                             r.get::<_, Option<String>>(1)?,
                             r.get::<_, Option<String>>(2)?,
                             r.get::<_, bool>(3)?,
+                            r.get::<_, String>(4)?,
                         ))
                     },
                 );
-                let Ok((key, before, after, undone)) = row else {
+                let Ok((key, before, after, undone, chat)) = row else {
                     return Ok(Err(ApiError::conflict("That change is no longer listed.")));
                 };
                 if undone {
@@ -587,19 +657,19 @@ pub(crate) fn undo(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                         "{key} was already undone."
                     ))));
                 }
-                plan.push((*id, key, parse_json(before), after));
+                plan.push((*id, key, parse_json(before), after, chat));
             }
             // Two changes to one setting cannot both be undone to a defined value.
-            for (i, (_, k, _, _)) in plan.iter().enumerate() {
-                if plan[..i].iter().any(|(_, x, _, _)| x == k) {
+            for (i, (_, k, _, _, _)) in plan.iter().enumerate() {
+                if plan[..i].iter().any(|(_, x, _, _, _)| x == k) {
                     return Ok(Err(ApiError::bad_args(format!(
                         "Two of these changes are to {k}; undo them one at a time."
                     ))));
                 }
             }
-            for (_, key, _, after) in &plan {
+            for (_, key, _, after, chat) in &plan {
                 let now = match ext.owner(key) {
-                    Some(x) => Some(x.read(tx, key)),
+                    Some(x) => Some(bound(tx, x, chat).read(tx, key)),
                     None => prefs::read(tx, key),
                 };
                 if now != after.as_ref().and_then(|a| serde_json::from_str(a).ok()) {
@@ -609,9 +679,9 @@ pub(crate) fn undo(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                 }
             }
             let mut changed = Map::new();
-            for (id, key, before, _) in plan {
+            for (id, key, before, _, chat) in plan {
                 match ext.owner(&key) {
-                    Some(x) => x
+                    Some(x) => bound(tx, x, &chat)
                         .restore(tx, &key, &before)
                         .map_err(rusqlite::Error::InvalidParameterName)?,
                     None => prefs::set_raw(tx, &key, &before)
@@ -645,8 +715,8 @@ pub(crate) fn undo(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
 }
 
 /// `settings_all_set {enabled}`: the user's switch for "Chats can change all settings". It is
-/// its own op, not a generic preference write, so the one switch that widens what a chat may
-/// change cannot be reached through the settings tools.
+/// its own op, not a generic preference write. A chat reaches the same switch by staging
+/// `agentSettingsAll`, which the user approves.
 pub(crate) fn all_settings_set(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let enabled = args
         .get("enabled")
@@ -663,31 +733,40 @@ pub(crate) fn all_settings_set(ctx: &OpCtx, args: Value) -> Result<Value, ApiErr
     Ok(Value::Null)
 }
 
-/// `settings_risk_list`: the risk table, for the pages that show which settings need approval.
-pub(crate) fn risk_list(_ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
-    let name = |r: Risk| match r {
-        Risk::Low => "low",
-        Risk::High => "high",
-        Risk::User => "user",
+/// `settings_access_list`: every setting's access, for the pages that show which settings need
+/// approval, and the parts of a direct extension key that do.
+pub(crate) fn access_list(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
+    let name = |a: Access| match a {
+        Access::Direct => "direct",
+        Access::Approval(_) => "approval",
     };
+    let ext = extensions(&ctx.services);
     let settings: Vec<Value> = CLASSIFIED
         .iter()
         .map(|(k, _)| *k)
-        .chain(NAMED.iter().map(|(k, ..)| *k))
+        .chain(NAMED.iter().map(|(k, _)| *k))
         .filter_map(|k| {
-            let r = risk(k)?;
-            Some(json!({"key": k, "risk": name(r), "why": reason(k)}))
+            let a = access(k)?;
+            Some(json!({"key": k, "access": name(a), "why": reason(k)}))
         })
         .collect();
-    let parts: Vec<Value> = USER_PARTS
+    let parts: Vec<Value> = ext
+        .0
         .iter()
-        .map(|(key, part, why)| json!({"key": key, "part": part, "why": why}))
+        .flat_map(|x| {
+            x.keys().into_iter().flat_map(|k| {
+                x.staged_parts(k)
+                    .iter()
+                    .map(|p| json!({"key": k, "part": p.path, "why": p.reason}))
+                    .collect::<Vec<_>>()
+            })
+        })
         .collect();
-    Ok(json!({ "settings": settings, "userParts": parts }))
+    Ok(json!({ "settings": settings, "stagedParts": parts }))
 }
 
 pub fn register_ops(reg: &mut OpRegistry) {
-    reg.blocking("settings_risk_list", OpClass::Blocking, risk_list)
+    reg.blocking("settings_access_list", OpClass::Blocking, access_list)
         .blocking("settings_changes_list", OpClass::Blocking, changes_list)
         .blocking("settings_undo", OpClass::Maintenance, undo)
         .blocking("settings_all_set", OpClass::Maintenance, all_settings_set);
@@ -697,7 +776,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::read(
             "app_get_settings",
-            "Read the Helm settings a chat may change, with their current values (null means the default in use). options gives each key's type, allowed values or limits, default and what it does. keys narrows the list; a key chats cannot change is listed under unavailable with where the user changes it.",
+            "Read every Helm setting a chat can reach, with its current value (null means the default in use). options gives each key's type, allowed values or limits, default and what it does. A setting is either one you change yourself (app_update_settings) or one whose options say needsApproval (you stage it with app_stage_settings); there is no setting you are simply refused. keys narrows the list; a name that is no setting at all is listed under unavailable.",
             json!({"type": "object", "properties": {"keys": {"type": "array", "items": {"type": "string"}, "maxItems": 64}}, "additionalProperties": false}),
         ),
         get_settings,
@@ -705,7 +784,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .blocking(
         ToolSpec::write(
             "app_update_settings",
-            "Change 1-16 Helm settings live: changes is {key: value}. Keys are applied alphabetically and the call stops at the first failure; the answer has each applied key's before and after. The user sees a notice with Undo. Read app_get_settings first: its options say what each key accepts, and a value outside them is refused with the allowed values. A key's value replaces the stored one whole, except fontSizes, sounds and orchestrator, where you send only the fields to change and the others keep their values; null restores the default. An option with hasEffect false is read by nothing yet, so changing it does nothing visible. The orchestrator key is Settings > Orchestrator: options.orchestrator says which of its fields are yours to change, and the rest are the user's alone and are refused. Some other settings are refused until the user turns on \"Chats can change all settings\" in Settings > General; only they can. A key whose options say needsApproval is not changed here: stage it with app_stage_settings and the user approves it. Act only when the user explicitly asked for this change, and report what changed. If the reply is lost, check the current values before trying again and never retry automatically.",
+            "Change 1-16 Helm settings live: changes is {key: value}. Keys are applied alphabetically and the call stops at the first failure; the answer has each applied key's before and after. The user sees a notice with Undo. Read app_get_settings first: its options say what each key accepts, and a value outside them is refused with the allowed values. A key's value replaces the stored one whole, except fontSizes, sounds and orchestrator, where you send only the fields to change and the others keep their values; null restores the default. An option with hasEffect false is read by nothing yet, so changing it does nothing visible. Send the orchestrator key's changes the same way: only the fields to change. A key whose options say needsApproval, or a part of one listed under needsApprovalParts, is not changed here and nothing is applied: the answer is the exact app_stage_settings call to make, and the user approves it on one card. Act only when the user explicitly asked for this change, and report what changed. If the reply is lost, check the current values before trying again and never retry automatically.",
             json!({"type": "object", "properties": {"changes": {"type": "object", "minProperties": 1, "maxProperties": 16}}, "required": ["changes"], "additionalProperties": false}),
         )
         .large(),
@@ -767,10 +846,11 @@ mod tests {
         let e = env();
         let r = update_settings(
             &ctx(&e),
-            json!({"changes": {"sidebarWidth": 300, "compactSidebar": true, "fastMode": true, "zoomLevel": 1}}),
+            json!({"changes": {"sidebarWidth": 300, "compactSidebar": true, "newChatPermissionMode": "default", "zoomLevel": 1}}),
         )
         .unwrap();
-        // compactSidebar, then fastMode fails: sidebarWidth and zoomLevel are not tried.
+        // compactSidebar, then newChatPermissionMode needs approval: sidebarWidth and zoomLevel are
+        // not tried.
         assert_eq!(r["applied"].as_object().unwrap().len(), 1);
         assert_eq!(r["applied"]["compactSidebar"]["after"], true);
         assert!(r["error"].as_str().unwrap().contains("app_stage_settings"));
@@ -785,14 +865,19 @@ mod tests {
     }
 
     #[test]
-    fn the_all_settings_switch_is_the_users_op_and_opens_the_all_tier() {
+    fn the_all_settings_switch_is_its_own_op_and_a_chat_stages_it() {
         let e = env();
-        let blocked = update_settings(&ctx(&e), json!({"changes": {"keybindings": {}}}));
-        assert!(blocked.unwrap_err().public.contains("all settings"));
-        assert!(all_settings_set(&op(&e), json!({"enabled": "yes"})).is_err());
-        all_settings_set(&op(&e), json!({"enabled": true})).unwrap();
-        assert_eq!(e.sink.kinds(), ["preferences"]);
+        // Shortcuts are a chat's own to change; the switch no longer holds them back.
         assert!(update_settings(&ctx(&e), json!({"changes": {"keybindings": {}}})).is_ok());
+        assert!(all_settings_set(&op(&e), json!({"enabled": "yes"})).is_err());
+        let before = e.sink.kinds().len();
+        all_settings_set(&op(&e), json!({"enabled": true})).unwrap();
+        assert_eq!(e.sink.kinds().len(), before + 1);
+        // A chat reaches the switch by staging it, and is told so.
+        let why = update_settings(&ctx(&e), json!({"changes": {"agentSettingsAll": false}}))
+            .unwrap_err()
+            .public;
+        assert!(why.contains("app_stage_settings") && why.contains("agentSettingsAll"), "{why}");
         // The generic preference writer still refuses it.
         assert!(e
             .db
@@ -801,30 +886,101 @@ mod tests {
     }
 
     #[test]
-    fn validators_and_tiers_apply() {
+    fn validators_apply_and_what_needs_approval_says_how_to_stage() {
         let e = env();
         let r = update_settings(&ctx(&e), json!({"changes": {"sidebarWidth": 10}}));
         assert!(r.unwrap_err().public.contains("200 to 4096"));
-        let r = update_settings(&ctx(&e), json!({"changes": {"keybindings": {}}}));
-        assert!(r.unwrap_err().public.contains("all settings"));
-        let r = update_settings(&ctx(&e), json!({"changes": {"agentSettingsAll": true}}));
-        assert!(r.unwrap_err().public.contains("yours to change only"));
         let many: Map<String, Value> = (0..17).map(|i| (format!("k{i}"), json!(1))).collect();
         assert!(update_settings(&ctx(&e), json!({"changes": many})).is_err());
-        let g = get_settings(&ctx(&e), json!({"keys": ["theme", "agentSettingsAll"]})).unwrap();
+        let g = get_settings(&ctx(&e), json!({"keys": ["theme", "agentSettingsAll", "selection"]}))
+            .unwrap();
         assert!(g["settings"].get("theme").is_some());
-        assert!(g["unavailable"]["agentSettingsAll"]
+        assert_eq!(g["options"]["agentSettingsAll"]["needsApproval"], true);
+        assert!(g["options"]["agentSettingsAll"]["approvalReason"].is_string());
+        // A name that is no setting is said so, not blamed on the user.
+        assert!(g["unavailable"]["selection"]
             .as_str()
             .unwrap()
-            .contains("yours to change only"));
+            .contains("not a Helm setting"));
+        // A secret never rides in a value: credentials only names the page to open.
+        assert_eq!(g["settings"]["agentSettingsAll"], Value::Null);
+        let c = get_settings(&ctx(&e), json!({"keys": ["credentials"]})).unwrap();
+        assert_eq!(c["options"]["credentials"]["needsApproval"], true);
+        assert!(c["options"]["credentials"]["fields"]["for"]["allowed"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("mcp")));
     }
 
-    /// A rule that upper-cases a shortcut and counts commits, for the generic writer's hooks.
+    /// Every preference key is either changed by the chat or answered with the staging call, and
+    /// no answer ever tells a chat to go and ask the user. The same for a chat of any person.
+    #[test]
+    fn every_preference_key_is_changed_or_staged_and_for_every_person_alike() {
+        use crate::settings_allow::{approval_pref_keys, direct_pref_keys, DEAD_ENDS};
+        let e = env();
+        e.db.write(|tx| {
+            tx.execute_batch(
+                "CREATE TABLE profiles (id TEXT PRIMARY KEY, is_home INTEGER);
+                 INSERT INTO profiles VALUES ('home', 1), ('p-2', 0);
+                 ALTER TABLE chats ADD COLUMN profile_id TEXT;
+                 INSERT INTO projects (id, name, created_at) VALUES ('pr', 'P', 1);
+                 INSERT INTO chats (id, project_id, created_at, updated_at, profile_id)
+                 VALUES ('chat-1', 'pr', 1, 1, 'home'), ('chat-2', 'pr', 1, 1, 'p-2');",
+            )
+        })
+        .unwrap();
+        let as_chat = |chat: &str| {
+            let mut c = ctx(&e);
+            c.caller_chat_id = chat.into();
+            c
+        };
+        let kinds: Vec<(&str, bool)> = direct_pref_keys()
+            .into_iter()
+            .map(|k| (k, true))
+            .chain(approval_pref_keys().into_iter().map(|k| (k, false)))
+            .collect();
+        assert!(kinds.len() > 50);
+        for (key, direct) in kinds {
+            let mut said = Vec::new();
+            for chat in ["chat-1", "chat-2"] {
+                // null restores the default, which every key accepts.
+                let r = update_settings(&as_chat(chat), json!({"changes": {key: null}}));
+                said.push(match r {
+                    Ok(_) => "applied".to_owned(),
+                    Err(err) => {
+                        assert!(!direct, "{key}: a direct key was turned away: {}", err.public);
+                        assert!(err.public.contains("app_stage_settings"), "{key}: {}", err.public);
+                        for dead in DEAD_ENDS {
+                            assert!(!err.public.to_lowercase().contains(dead), "{key}");
+                        }
+                        err.public
+                    }
+                });
+                // What is staged is checked with the key's own validators and nothing is kept.
+                let staged = apply_approved(
+                    &as_chat(chat).services,
+                    &*e.sink,
+                    chat,
+                    &[(key.to_owned(), Value::Null)],
+                    false,
+                );
+                match (direct, staged) {
+                    (true, Err(m)) => assert!(m.contains("app_update_settings"), "{key}: {m}"),
+                    (false, Ok(done)) => assert_eq!(done.len(), 1, "{key}"),
+                    (d, r) => panic!("{key} direct={d}: {r:?}"),
+                }
+            }
+            assert_eq!(said[0], said[1], "{key}: the two people were answered differently");
+            assert_eq!(said[0] == "applied", direct, "{key}");
+        }
+    }
+
+    /// A rule that upper-cases a folder and counts commits, for the generic writer's hooks.
     struct Shout;
     static SHOUTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     impl crate::PrefRule for Shout {
         fn key(&self) -> &'static str {
-            "globalHotkey"
+            "updateSource"
         }
         fn prepare(
             &self,
@@ -833,9 +989,9 @@ mod tests {
             value: &Value,
         ) -> Result<Value, String> {
             match value.as_str() {
-                Some("nope") => Err("That shortcut is taken.".into()),
+                Some("nope") => Err("That folder is taken.".into()),
                 Some(s) => Ok(json!(s.to_uppercase())),
-                None => Err("A shortcut is text.".into()),
+                None => Err("A folder is text.".into()),
             }
         }
         fn after_commit(&self, _after: Option<&Value>) {
@@ -844,7 +1000,7 @@ mod tests {
     }
 
     #[test]
-    fn a_high_setting_is_read_by_a_chat_and_changed_only_on_approval() {
+    fn an_approval_setting_is_read_by_a_chat_and_changed_only_on_approval() {
         let e = env();
         let mut s = Services::new();
         s.insert(e.db.clone());
@@ -856,8 +1012,8 @@ mod tests {
             e.db.snapshot(|tx| Ok::<_, rusqlite::Error>(prefs::read(tx, k)))
                 .unwrap()
         };
-        // The pages read the table: High keys carry their reason, user-only ones too.
-        let table = risk_list(&op(&e), Value::Null).unwrap();
+        // The pages read the table: approval keys carry their reason.
+        let table = access_list(&op(&e), Value::Null).unwrap();
         let row = |k: &str| {
             table["settings"]
                 .as_array()
@@ -867,47 +1023,47 @@ mod tests {
                 .cloned()
                 .unwrap()
         };
-        assert_eq!(row("terminalShell")["risk"], "high");
-        assert_eq!(row("agentSettingsAll")["risk"], "user");
+        assert_eq!(row("newChatPermissionMode")["access"], "approval");
+        assert!(row("newChatPermissionMode")["why"].is_string());
+        assert_eq!(row("fastMode")["access"], "direct");
         assert_eq!(row("theme")["why"], Value::Null);
-        assert!(table["userParts"].as_array().unwrap().len() >= 3);
-        // A chat reads it, flagged, and cannot change it; the refusal names the staging tool.
-        let g = get_settings(&c, json!({"keys": ["terminalShell", "agentSettingsAll"]})).unwrap();
-        assert_eq!(g["options"]["terminalShell"]["needsApproval"], true);
-        assert_eq!(g["options"]["terminalShell"]["allowed"][1], "powershell");
-        assert!(g["unavailable"]["agentSettingsAll"].is_string());
+        // A chat reads it, flagged, and is told how to stage it.
+        let g = get_settings(&c, json!({"keys": ["newChatPermissionMode"]})).unwrap();
+        assert_eq!(g["options"]["newChatPermissionMode"]["needsApproval"], true);
+        assert_eq!(g["options"]["newChatPermissionMode"]["allowed"][1], "default");
         let all = get_settings(&c, json!({})).unwrap();
-        assert!(all["settings"].get("terminalShell").is_some());
-        let r = update_settings(&c, json!({"changes": {"terminalShell": "gitbash"}}));
-        assert!(r.unwrap_err().public.contains("app_stage_settings"));
-        // Approval is for High settings only, whatever the tier of the other.
+        assert!(all["settings"].get("newChatPermissionMode").is_some());
+        let r = update_settings(&c, json!({"changes": {"newChatPermissionMode": "default"}}));
+        let said = r.unwrap_err().public;
+        assert!(said.contains("app_stage_settings") && said.contains("newChatPermissionMode"), "{said}");
+        // What a chat changes itself is not staged: it is told the call to make.
         let low = [("compactSidebar".to_owned(), json!(true))];
         let never = apply_approved(&services, &*e.sink, "chat-1", &low, true).unwrap_err();
-        assert!(never.contains("not a setting the user approves"), "{never}");
+        assert!(never.contains("app_update_settings"), "{never}");
         // Checked up front with the key's own validators, and nothing kept.
         let want = [
-            ("globalHotkey".to_owned(), json!("ctrl+alt+j")),
-            ("terminalShell".to_owned(), json!("gitbash")),
+            ("updateSource".to_owned(), json!("d:/dist")),
+            ("newChatPermissionMode".to_owned(), json!("default")),
         ];
         let dry = apply_approved(&services, &*e.sink, "chat-1", &want, false).unwrap();
-        assert_eq!(dry[0].after, Some(json!("CTRL+ALT+J")), "the rule's value");
-        assert_eq!((read("terminalShell"), e.sink.kinds().len()), (None, 0));
-        let bad = [("terminalShell".to_owned(), json!("zsh"))];
+        assert_eq!(dry[0].after, Some(json!("D:/DIST")), "the rule's value");
+        assert_eq!((read("newChatPermissionMode"), e.sink.kinds().len()), (None, 0));
+        let bad = [("newChatPermissionMode".to_owned(), json!("plan"))];
         let why = apply_approved(&services, &*e.sink, "chat-1", &bad, false).unwrap_err();
-        assert!(why.contains("\"pwsh\""), "{why}");
+        assert!(why.contains("\"acceptEdits\""), "{why}");
         // All or nothing: the second change fails, so the first is not kept either.
         let half = [
-            ("terminalShell".to_owned(), json!("gitbash")),
-            ("globalHotkey".to_owned(), json!("nope")),
+            ("newChatPermissionMode".to_owned(), json!("default")),
+            ("updateSource".to_owned(), json!("nope")),
         ];
         let why = apply_approved(&services, &*e.sink, "chat-1", &half, true).unwrap_err();
         assert!(why.contains("taken"), "{why}");
-        assert_eq!(read("terminalShell"), None);
+        assert_eq!(read("newChatPermissionMode"), None);
         // Approved: stored, announced to the interface and the rule, listed for the user's Undo.
         let shouts = SHOUTS.load(std::sync::atomic::Ordering::SeqCst);
         let done = apply_approved(&services, &*e.sink, "chat-1", &want, true).unwrap();
-        assert_eq!(read("terminalShell"), Some(json!("gitbash")));
-        assert_eq!(read("globalHotkey"), Some(json!("CTRL+ALT+J")));
+        assert_eq!(read("newChatPermissionMode"), Some(json!("default")));
+        assert_eq!(read("updateSource"), Some(json!("D:/DIST")));
         assert_eq!(SHOUTS.load(std::sync::atomic::Ordering::SeqCst), shouts + 1);
         assert_eq!(e.sink.kinds(), ["preferences", "external_settings"]);
         let mut o = op(&e);
@@ -916,7 +1072,7 @@ mod tests {
         assert_eq!(listed["changes"].as_array().unwrap().len(), 2);
         let ids: Vec<i64> = done.iter().filter_map(|a| a.change_id).collect();
         undo(&o, json!({"changeIds": ids})).unwrap();
-        assert_eq!((read("terminalShell"), read("globalHotkey")), (None, None));
+        assert_eq!((read("newChatPermissionMode"), read("updateSource")), (None, None));
         assert_eq!(SHOUTS.load(std::sync::atomic::Ordering::SeqCst), shouts + 2);
     }
 
@@ -1107,11 +1263,26 @@ mod tests {
             .contains("nothing in Helm reads"));
     }
 
-    /// A stand-in extension: one key holding `{open, level}`; chats may change only `level`.
-    struct Fake(bool);
+    /// The part of the stand-in key a chat stages.
+    const OPEN: &[crate::StagedPart] = &[crate::StagedPart::new(
+        "open",
+        "Opening it lets the stand-in act, so you approve it.",
+    )];
+
+    /// A stand-in extension: one key holding `{open, level}`; a chat stages `open` and changes
+    /// `level`. Each person has their own copy, as the channel policies do.
+    struct Fake(Option<String>);
+    impl Fake {
+        fn slot(&self) -> String {
+            match &self.0 {
+                Some(who) => format!("localGameLiftMinutes@{who}"),
+                None => "localGameLiftMinutes".to_owned(),
+            }
+        }
+    }
     impl crate::SettingsExtension for Fake {
-        fn needs_all_settings(&self, _key: &str) -> bool {
-            self.0
+        fn staged_parts(&self, _key: &str) -> &'static [crate::StagedPart] {
+            OPEN
         }
         fn keys(&self) -> Vec<&'static str> {
             vec!["localGameLiftMinutes", "unclassifiedFake"]
@@ -1122,7 +1293,7 @@ mod tests {
         }
         fn read(&self, tx: &Transaction<'_>, _key: &str) -> Value {
             prefs::read(tx, "desktopPet")
-                .and_then(|v| v.get("localGameLiftMinutes").cloned())
+                .and_then(|v| v.get(self.slot()).cloned())
                 .unwrap_or_else(|| json!({"open": false, "level": 1}))
         }
         fn apply(
@@ -1132,17 +1303,28 @@ mod tests {
             value: &Value,
         ) -> Result<(Value, Value), String> {
             let before = self.read(tx, key);
-            if value.get("open").is_some() {
-                return Err("fake.open is yours to change only.".into());
-            }
             let mut after = before.clone();
-            after["level"] = value["level"].clone();
-            prefs::set_raw(tx, "desktopPet", &json!({"localGameLiftMinutes": after})).unwrap();
+            for f in ["open", "level"] {
+                if let Some(v) = value.get(f) {
+                    after[f] = v.clone();
+                }
+            }
+            let mut all = prefs::read(tx, "desktopPet").unwrap_or_else(|| json!({}));
+            all[self.slot()] = after.clone();
+            prefs::set_raw(tx, "desktopPet", &all).unwrap();
             Ok((before, after))
         }
         fn restore(&self, tx: &Transaction<'_>, _key: &str, value: &Value) -> Result<(), String> {
-            prefs::set_raw(tx, "desktopPet", &json!({"localGameLiftMinutes": value}))
-                .map_err(|e| e.to_string())
+            let mut all = prefs::read(tx, "desktopPet").unwrap_or_else(|| json!({}));
+            all[self.slot()] = value.clone();
+            prefs::set_raw(tx, "desktopPet", &all).map_err(|e| e.to_string())
+        }
+        fn for_chat(
+            &self,
+            _tx: &Transaction<'_>,
+            chat: &str,
+        ) -> Option<Arc<dyn crate::SettingsExtension>> {
+            Some(Arc::new(Fake(Some(chat.to_owned()))))
         }
         fn changed_event(&self, _key: &str) -> AppEvent {
             AppEvent::new("fake_changed")
@@ -1158,22 +1340,31 @@ mod tests {
     /// How many times the stand-in was told a change had committed.
     static COMMITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-    #[test]
-    fn an_extension_key_is_listed_changed_recorded_and_undone() {
-        let e = env();
+    fn with_fake(e: &Env) -> ToolCtx {
         let mut s = Services::new();
         s.insert(e.db.clone());
         s.insert(Arc::new(crate::SettingsExtensions(vec![Arc::new(Fake(
-            false,
+            None,
         ))])));
-        let mut c = ctx(&e);
+        let mut c = ctx(e);
         c.services = Arc::new(s);
+        c
+    }
+
+    #[test]
+    fn an_extension_key_is_listed_changed_staged_recorded_and_undone() {
+        let e = env();
+        let c = with_fake(&e);
         let g = get_settings(&c, json!({})).unwrap();
         assert_eq!(
             g["settings"]["localGameLiftMinutes"],
             json!({"open": false, "level": 1})
         );
         assert_eq!(g["options"]["localGameLiftMinutes"]["default"]["level"], 1);
+        assert_eq!(
+            g["options"]["localGameLiftMinutes"]["needsApprovalParts"][0]["path"],
+            "open"
+        );
         // Read-only facts ride along beside the value, only for keys that have them.
         assert_eq!(g["details"]["localGameLiftMinutes"], json!({"queue": []}));
         assert!(get_settings(&ctx(&e), json!({"keys": ["theme"]})).unwrap()["details"].is_null());
@@ -1181,28 +1372,49 @@ mod tests {
             g["options"].as_object().unwrap().len(),
             g["settings"].as_object().unwrap().len()
         );
-        // The extension refuses what is not the chat's; nothing is recorded or announced.
+        // A part that needs approval changes nothing and answers with the call to make; nothing
+        // is recorded or announced.
         let r = update_settings(
             &c,
             json!({"changes": {"localGameLiftMinutes": {"open": true}}}),
         );
-        assert!(r.unwrap_err().public.contains("yours to change only"));
-        // An extension key nobody gave a class is closed to chats, not open.
+        let said = r.unwrap_err().public;
+        assert!(
+            said.contains("localGameLiftMinutes.open") && said.contains("app_stage_settings"),
+            "{said}"
+        );
+        assert!(e.sink.kinds().is_empty());
+        // Repeating the part at its current value is no change, so it goes ahead.
+        update_settings(
+            &c,
+            json!({"changes": {"localGameLiftMinutes": {"open": false, "level": 2}}}),
+        )
+        .unwrap();
+        e.sink.events.lock().unwrap().clear();
+        // Staged, it is checked, and on approval it is applied with the part included.
+        let staged = [(
+            "localGameLiftMinutes".to_owned(),
+            json!({"open": true, "level": 3}),
+        )];
+        let dry = apply_approved(&c.services, &*e.sink, "chat-1", &staged, false).unwrap();
+        assert_eq!(dry[0].after.as_ref().unwrap()["open"], true);
+        assert!(e.sink.kinds().is_empty(), "checking announces nothing");
+        let done = apply_approved(&c.services, &*e.sink, "chat-1", &staged, true).unwrap();
+        assert_eq!(done[0].after.as_ref().unwrap()["level"], 3);
+        e.sink.events.lock().unwrap().clear();
+        // An extension key nobody gave an access to is no setting: a typo, not a policy.
         let r = update_settings(&c, json!({"changes": {"unclassifiedFake": {"level": 3}}}));
-        assert!(r
-            .unwrap_err()
-            .public
-            .contains("not a setting chats can change"));
+        assert!(r.unwrap_err().public.contains("not a Helm setting"));
         assert!(e.sink.kinds().is_empty());
         let commits = COMMITS.load(std::sync::atomic::Ordering::SeqCst);
         let r = update_settings(
             &c,
-            json!({"changes": {"localGameLiftMinutes": {"level": 3}}}),
+            json!({"changes": {"localGameLiftMinutes": {"level": 4}}}),
         )
         .unwrap();
         assert!(COMMITS.load(std::sync::atomic::Ordering::SeqCst) > commits);
-        assert_eq!(r["applied"]["localGameLiftMinutes"]["before"]["level"], 1);
-        assert_eq!(r["applied"]["localGameLiftMinutes"]["after"]["level"], 3);
+        assert_eq!(r["applied"]["localGameLiftMinutes"]["before"]["level"], 3);
+        assert_eq!(r["applied"]["localGameLiftMinutes"]["after"]["level"], 4);
         // Its own event, not a preference change.
         assert_eq!(e.sink.kinds(), ["fake_changed", "external_settings"]);
         let id = r["applied"]["localGameLiftMinutes"]["changeId"]
@@ -1212,73 +1424,47 @@ mod tests {
         o.services = c.services.clone();
         let u = undo(&o, json!({"changeIds": [id]})).unwrap();
         assert!(COMMITS.load(std::sync::atomic::Ordering::SeqCst) > commits + 1);
-        assert_eq!(u["restored"]["localGameLiftMinutes"]["level"], 1);
+        assert_eq!(u["restored"]["localGameLiftMinutes"]["level"], 3);
         let g = get_settings(&c, json!({"keys": ["localGameLiftMinutes"]})).unwrap();
-        assert_eq!(g["settings"]["localGameLiftMinutes"]["level"], 1);
+        assert_eq!(g["settings"]["localGameLiftMinutes"]["level"], 3);
         assert_eq!(
             e.sink.kinds().last().map(String::as_str),
             Some("fake_changed")
         );
     }
 
-    fn with_fake(e: &Env, all_tier: bool) -> ToolCtx {
-        let mut s = Services::new();
-        s.insert(e.db.clone());
-        s.insert(Arc::new(crate::SettingsExtensions(vec![Arc::new(Fake(
-            all_tier,
-        ))])));
-        let mut c = ctx(e);
-        c.services = Arc::new(s);
-        c
-    }
-
+    /// A setting that belongs to a person is that person's copy for their chats: a second
+    /// person's chat changes theirs, and Undo puts back the copy the change came from.
     #[test]
-    fn an_all_tier_extension_key_obeys_the_all_settings_switch() {
+    fn each_person_changes_their_own_copy_of_a_per_person_key() {
         let e = env();
-        let c = with_fake(&e, true);
-        // Switch off: not listed, refused to read and to change, like keybindings.
-        let g = get_settings(&c, json!({})).unwrap();
-        assert!(g["settings"].get("localGameLiftMinutes").is_none());
-        let g = get_settings(&c, json!({"keys": ["localGameLiftMinutes", "keybindings"]})).unwrap();
-        assert!(g["unavailable"]["localGameLiftMinutes"]
-            .as_str()
+        let mut c = with_fake(&e);
+        let mut set = |chat: &str, level: i64| {
+            c.caller_chat_id = chat.into();
+            update_settings(
+                &c,
+                json!({"changes": {"localGameLiftMinutes": {"level": level}}}),
+            )
             .unwrap()
-            .contains("all settings"));
-        assert_eq!(
-            g["unavailable"]["localGameLiftMinutes"],
-            g["unavailable"]["keybindings"]
-                .as_str()
-                .unwrap()
-                .replace("keybindings", "localGameLiftMinutes")
-        );
-        let r = update_settings(
-            &c,
-            json!({"changes": {"localGameLiftMinutes": {"level": 3}}}),
-        );
-        assert!(r.unwrap_err().public.contains("all settings"));
-        assert!(e.sink.kinds().is_empty());
-        // Switch on: listed, readable and changeable.
-        e.db.write(|tx| {
-            prefs::set_raw(tx, "agentSettingsAll", &json!(true))
-                .map_err(|_| rusqlite::Error::InvalidQuery)
-        })
-        .unwrap();
-        let g = get_settings(&c, json!({})).unwrap();
-        assert_eq!(g["settings"]["localGameLiftMinutes"]["level"], 1);
-        let r = update_settings(
-            &c,
-            json!({"changes": {"localGameLiftMinutes": {"level": 3}}}),
-        )
-        .unwrap();
-        assert_eq!(r["applied"]["localGameLiftMinutes"]["after"]["level"], 3);
-        // A base-tier extension key never needed the switch.
-        let e2 = env();
-        let c2 = with_fake(&e2, false);
-        assert!(update_settings(
-            &c2,
-            json!({"changes": {"localGameLiftMinutes": {"level": 2}}})
-        )
-        .is_ok());
+        };
+        let first = set("chat-1", 5);
+        set("chat-2", 7);
+        let level = |chat: &str| {
+            let mut x = ctx(&e);
+            x.services = c.services.clone();
+            x.caller_chat_id = chat.into();
+            get_settings(&x, json!({"keys": ["localGameLiftMinutes"]})).unwrap()["settings"]
+                ["localGameLiftMinutes"]["level"]
+                .clone()
+        };
+        assert_eq!((level("chat-1"), level("chat-2")), (json!(5), json!(7)));
+        let mut o = op(&e);
+        o.services = c.services.clone();
+        let id = first["applied"]["localGameLiftMinutes"]["changeId"]
+            .as_i64()
+            .unwrap();
+        undo(&o, json!({"changeIds": [id]})).unwrap();
+        assert_eq!((level("chat-1"), level("chat-2")), (json!(1), json!(7)));
     }
 
     #[test]
@@ -1398,8 +1584,7 @@ mod tests {
             e.db.snapshot(|tx| Ok::<_, rusqlite::Error>(prefs::read(tx, "hiddenSkills")))
                 .unwrap();
         assert_eq!(stored, None);
-        // Shortcuts need the all-settings switch; with it on they get the chord checks too.
-        all_settings_set(&op(&e), json!({"enabled": true})).unwrap();
+        // Shortcuts get the chord checks the Settings page applies.
         for (bad, says) in [
             (json!({"a": "Ctrl+\u{200b}K"}), "invisible"),
             (json!({"a\u{2066}": "Ctrl+K"}), "invisible"),

@@ -8,7 +8,7 @@
 pub mod classes;
 mod store;
 
-pub use classes::{classify, PrefClass, PrefKey, Tier};
+pub use classes::{classify, Access, PrefClass, PrefKey};
 
 use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde::de::DeserializeOwned;

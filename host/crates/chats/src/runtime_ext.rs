@@ -4,24 +4,24 @@
 //! They live in `claude-runtime.json`, which a worker reads when it starts, so a change reaches a
 //! chat at its next worker start.
 //!
-//! | Key | Value | Class |
+//! | Key | Value | Access |
 //! |---|---|---|
-//! | `shellChanges` | record which files shell commands change, for the turn's change card | needs approval |
-//! | `lowPriority` | run agents, their tools and Helm's helpers at below-normal priority | chat changes it |
-//! | `toolOutputCap` | cut very long outputs of Helm's own tools | chat changes it |
-//! | `subagentSoftTurns` | turns before a sub-agent is told to hand off, 20 to 1000 | chat changes it |
-//! | `fastMode` | Claude Code's fast mode, as the default new chats start with | needs approval |
-//! | `worktreeTools` | let Claude Code's own worktree tools through | needs approval |
-//! | `scheduleTools` | let Claude Code's own schedule tools be offered | needs approval |
-//! | `skipPermissions` | launch chats with permissions bypassed, or asking | needs approval |
-//! | `subagentLimits` | which chats get sub-agent limits: `off`, `orchestrator` or `all` | needs approval |
-//! | `subagentHardStop` | refuse a sub-agent's tool calls past the hard limit | needs approval |
-//! | `claudeExecutable` | the program Helm runs as Claude Code (an absolute path; empty finds it) | needs approval |
+//! | `shellChanges` | record which files shell commands change, for the turn's change card | direct |
+//! | `lowPriority` | run agents, their tools and Helm's helpers at below-normal priority | direct |
+//! | `toolOutputCap` | cut very long outputs of Helm's own tools | direct |
+//! | `subagentSoftTurns` | turns before a sub-agent is told to hand off, 20 to 1000 | direct |
+//! | `fastMode` | Claude Code's fast mode, as the default new chats start with | direct |
+//! | `worktreeTools` | let Claude Code's own worktree tools through | direct |
+//! | `scheduleTools` | let Claude Code's own schedule tools be offered | direct |
+//! | `skipPermissions` | launch chats with permissions bypassed, or asking | approval |
+//! | `subagentLimits` | which chats get sub-agent limits: `off`, `orchestrator` or `all` | direct |
+//! | `subagentHardStop` | refuse a sub-agent's tool calls past the hard limit | direct |
+//! | `claudeExecutable` | the program Helm runs as Claude Code (an absolute path; empty finds it) | approval |
 //!
-//! The class of each key is in the risk table of `helm_hosttools::settings_allow`; this extension
-//! only reads, checks and writes the file. Checking a staged change never writes it.
+//! The access of each key is in `helm_hosttools::settings_allow`; this extension only reads,
+//! checks and writes the file, whoever asks. Checking a staged change never writes it.
 
-use helm_hosttools::SettingsExtension;
+use helm_hosttools::{SettingsExtension, StagedPart};
 use helm_ipc::AppEvent;
 use helm_workers::launch::{ClaudeRuntime, SubagentScope, MAX_SOFT_TURNS, MIN_SOFT_TURNS};
 use rusqlite::Transaction;
@@ -158,6 +158,10 @@ impl RuntimeKeys {
 }
 
 impl SettingsExtension for RuntimeKeys {
+    fn staged_parts(&self, _key: &str) -> &'static [StagedPart] {
+        &[]
+    }
+
     fn keys(&self) -> Vec<&'static str> {
         KEYS.to_vec()
     }
@@ -249,7 +253,6 @@ mod tests {
         for k in ext.keys() {
             let d = ext.describe(k).unwrap();
             assert_eq!(d["default"], value_of(&ClaudeRuntime::default(), k), "{k}");
-            assert!(!ext.needs_all_settings(k), "{k}");
         }
         assert_eq!(read(FAST_MODE), json!(false), "fast mode starts off");
         assert_eq!(read(EXECUTABLE), json!(""));
@@ -259,7 +262,7 @@ mod tests {
         assert!(!dir.path().join("claude-runtime.json").exists());
         assert_eq!(read(FAST_MODE), json!(false));
         // Applying writes the file; the others keep their values.
-        go(&|tx| ext.apply_approved(tx, FAST_MODE, &json!(true))).unwrap();
+        go(&|tx| ext.apply(tx, FAST_MODE, &json!(true))).unwrap();
         go(&|tx| ext.apply(tx, SOFT_TURNS, &json!(50))).unwrap();
         go(&|tx| ext.apply(tx, SUBAGENT_LIMITS, &json!("all"))).unwrap();
         let rt = ClaudeRuntime::load(dir.path()).0;

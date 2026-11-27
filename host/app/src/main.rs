@@ -644,14 +644,16 @@ mod tests {
         assert!(names.len() >= 6, "the migrations ran: {names:?}");
     }
 
-    /// Every setting the tools list (a preference key or a key an extension owns) has exactly one
-    /// risk class, and every High one can be staged: a preference with options, or an extension key.
+    /// Every setting the tools list (a preference key or a key an extension owns) has an access,
+    /// which is Direct or Approval and nothing else; every extension key is in the table, every
+    /// Approval one can be staged, and every part of a key that is staged is declared by its
+    /// owner.
     #[test]
-    fn every_setting_key_has_one_risk_class_and_every_high_one_can_be_staged() {
-        use helm_hosttools::settings_allow::{high_keys, risk, Risk, NAMED, READ_ONLY};
+    fn every_setting_key_has_an_access_and_every_approval_one_can_be_staged() {
+        use helm_hosttools::settings_allow::{access, approval_keys, Access, NAMED, READ_ONLY};
         let dir = std::env::temp_dir().join(format!("helm-risk-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut ext_keys: Vec<&str> = [
+        let exts = [
             helm_workflow::settings_extension(),
             helm_localmodels::settings_extension(),
             helm_relay::settings_extension(&dir),
@@ -659,10 +661,8 @@ mod tests {
             helm_dictation::ext::settings_extension(),
             helm_projects::repo_undo::settings_extension(&dir),
             helm_skills::undo::settings_extension(&dir),
-        ]
-        .iter()
-        .flat_map(|x| x.keys())
-        .collect();
+        ];
+        let mut ext_keys: Vec<&str> = exts.iter().flat_map(|x| x.keys()).collect();
         // The extensions that need a live service to build: their keys by name.
         ext_keys.extend([
             helm_mcp::unencrypted::KEY,
@@ -674,30 +674,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         for k in &ext_keys {
             assert!(
-                risk(k).is_some() != READ_ONLY.contains(k),
-                "{k} is an extension key: give it a class in settings_allow::NAMED"
+                access(k).is_some() != READ_ONLY.contains(k),
+                "{k} is an extension key: give it an access in settings_allow::NAMED"
             );
             assert!(
                 helm_core::prefs::classify(k).is_none(),
                 "{k} clashes with a preference key"
             );
         }
-        for (k, r, _) in NAMED {
-            if *r == Risk::Low {
-                assert!(
-                    ext_keys.contains(k),
-                    "{k} is named Low but no extension owns it"
-                );
+        // Every extension's staged parts belong to a key a chat changes itself, and say why.
+        for x in &exts {
+            for k in x.keys() {
+                for p in x.staged_parts(k) {
+                    assert_eq!(access(k), Some(Access::Direct), "{k}.{}", p.path);
+                    assert!(!p.reason.is_empty(), "{k}.{}", p.path);
+                }
             }
         }
-        // A High key is either a preference with options (so it has a validator) or an extension
-        // key (whose own apply is the validator).
-        for k in high_keys() {
+        // A named key an extension owns, or one of the two that stage without a value.
+        for (k, a) in NAMED {
+            let special = *k == helm_hosttools::settings_allow::CREDENTIALS_KEY;
+            assert!(
+                special || ext_keys.contains(k),
+                "{k} is named ({a:?}) but no extension owns it"
+            );
+        }
+        // An Approval key is either a preference with options (so it has a validator), an
+        // extension key (whose own apply is the validator) or the credentials page request.
+        for k in approval_keys() {
             let pref = helm_core::prefs::classify(k).is_some();
             assert!(
                 (pref && helm_hosttools::settings_options::describe(k).is_some())
-                    || (!pref && ext_keys.contains(&k)),
-                "{k} is High but cannot be staged"
+                    || (!pref && ext_keys.contains(&k))
+                    || k == helm_hosttools::settings_allow::CREDENTIALS_KEY,
+                "{k} needs approval but cannot be staged"
             );
         }
     }

@@ -41,7 +41,8 @@ pub enum Condition {
     Always,
     /// Projects mode on and the chat eligible (`app_repo_locations`).
     ProjectsMode,
-    /// Projects mode on and "Chats can change all settings" on (`app_update_repo`).
+    /// Projects mode on and "Chats can change all settings" on (`app_update_repo`); a chat reaches
+    /// that switch by staging `agentSettingsAll`.
     ProjectsModeAndAllSettings,
     /// At least one enabled MCP server.
     McpEnabled,

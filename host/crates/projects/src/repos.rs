@@ -456,7 +456,7 @@ pub fn update(tx: &Transaction<'_>, patch: &Patch) -> Result<Entry, Refusal> {
         patch.remove || !patch.add_locations.is_empty() || !patch.remove_location_ids.is_empty();
     if touches_places && !cur.worktrees_allowed {
         return Err(Refusal::Refused(
-            "Worktrees are switched off for this repository, so its checkouts are locked; ask the user to change that in Settings.".into(),
+            "Worktrees are switched off for this repository, so its checkouts are locked.".into(),
         ));
     }
     if patch.remove {

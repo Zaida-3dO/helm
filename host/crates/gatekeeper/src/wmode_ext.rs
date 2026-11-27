@@ -1,7 +1,7 @@
 //! The working mode as a settings key, `workmode`, for `app_get_settings` and the change tools.
 //!
 //! A chat reads the whole picture (the app's mode and every board's own mode) but cannot change
-//! it itself: the key is `Risk::High` in the hosttools' `settings_allow`, so a chat stages the
+//! it itself: the key needs approval in the hosttools' `settings_allow`, so a chat stages the
 //! change with `app_stage_settings` and Helm applies it when the user clicks Approve — changing
 //! how much a chat may decide on its own is the user's call, not the chat's. An approved change
 //! goes through the same machinery as the Settings page uses: the app's mode or one board's,
@@ -17,7 +17,7 @@
 
 use crate::workmode::{self, Mode};
 use helm_core::db::Database;
-use helm_hosttools::SettingsExtension;
+use helm_hosttools::{SettingsExtension, StagedPart};
 use helm_ipc::AppEvent;
 use rusqlite::Transaction;
 use serde_json::{json, Value};
@@ -123,6 +123,10 @@ fn is_board(tx: &Transaction<'_>, id: &str) -> bool {
 }
 
 impl SettingsExtension for WorkModeKeys {
+    fn staged_parts(&self, _key: &str) -> &'static [StagedPart] {
+        &[]
+    }
+
     fn keys(&self) -> Vec<&'static str> {
         vec![KEY]
     }
@@ -132,7 +136,7 @@ impl SettingsExtension for WorkModeKeys {
             json!({
                 "type": "object",
                 "default": {"app": "check_in"},
-                "about": "Settings > Chat & agents > Gatekeeper: how chats work. run: chats carry on and decide the small things themselves, keeping each choice for the user to review. check_in: a chat stops and asks when a choice matters. Send {\"app\": \"run\"|\"check_in\"} for the default of every chat, or {\"board\": {\"id\": …, \"mode\": …|null}} to set one board's own mode (null gives it back to the app). Needs the user's approval: stage it with app_stage_settings.",
+                "about": "Settings > Chat & agents > Gatekeeper: how chats work. run: chats carry on and decide the small things themselves, keeping each choice for the user to review. check_in: a chat stops and asks when a choice matters. Send {\"app\": \"run\"|\"check_in\"} for the default of every chat, or {\"board\": {\"id\": …, \"mode\": …|null}} to set one board's own mode (null gives it back to the app). A chat stages it with app_stage_settings and the user approves it.",
             })
         })
     }
@@ -146,15 +150,6 @@ impl SettingsExtension for WorkModeKeys {
     }
 
     fn apply(
-        &self,
-        _tx: &Transaction<'_>,
-        _key: &str,
-        _value: &Value,
-    ) -> Result<(Value, Value), String> {
-        Err("The working mode changes how much a chat may decide on its own, so only you may stage it: use app_stage_settings and the user approves it.".to_owned())
-    }
-
-    fn apply_approved(
         &self,
         tx: &Transaction<'_>,
         key: &str,
@@ -366,10 +361,6 @@ mod tests {
         };
         assert_eq!(snap(), json!({"app": "check_in", "boards": []}));
 
-        // A chat changing it itself is refused with the staging sentence.
-        let why = run(&db, |tx| ext.apply(tx, KEY, &json!({"app": "run"}))).unwrap_err();
-        assert!(why.contains("app_stage_settings"), "{why}");
-
         // The dry check answers what it would become; the transaction below rolls back, and
         // check_approved itself stores nothing anyway.
         let (before, after) = run(&db, |tx| {
@@ -381,7 +372,7 @@ mod tests {
 
         // The approved change lands, answering before and after.
         let (before, after) = run(&db, |tx| {
-            ext.apply_approved(tx, KEY, &json!({"app": "run"}))
+            ext.apply(tx, KEY, &json!({"app": "run"}))
         })
         .unwrap();
         assert_eq!(before["app"], "check_in");
@@ -391,7 +382,7 @@ mod tests {
         // A board override joins the list; a bad board or a bad word is refused whole.
         board(&db, "b1", "Garden");
         let (_, after) = run(&db, |tx| {
-            ext.apply_approved(tx, KEY, &json!({"board": {"id": "b1", "mode": "check_in"}}))
+            ext.apply(tx, KEY, &json!({"board": {"id": "b1", "mode": "check_in"}}))
         })
         .unwrap();
         assert_eq!(
@@ -405,7 +396,7 @@ mod tests {
             json!([]),
         ] {
             assert!(
-                run(&db, |tx| ext.apply_approved(tx, KEY, &bad.clone())).is_err(),
+                run(&db, |tx| ext.apply(tx, KEY, &bad.clone())).is_err(),
                 "{bad}"
             );
         }

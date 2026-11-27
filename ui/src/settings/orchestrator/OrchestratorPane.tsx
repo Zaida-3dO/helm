@@ -132,7 +132,7 @@ export function OrchestratorPane() {
   return (
     <div className="orch-pane" data-testid="orchestrator-pane">
       <p className="orch-intro">
-        The staged workflow for Claude Code chats: plan, review, build, review, clean-up and land. Only you can change these settings.
+        The staged workflow for Claude Code chats: plan, review, build, review, clean-up and land. Chats can change them too; each change shows a notice with Undo.
       </p>
 
       <SettingRow title="Orchestrator workflow" description="Turn the workflow on. Refused while a Claude Code chat is running a turn." testId="orch-enabled-row">
@@ -232,7 +232,7 @@ export function OrchestratorPane() {
           onRounds={(n) => setStages((s) => ({ ...s, smoketest: { ...s.smoketest, maxRounds: n } }))}
         />
       </div>
-      <p className="orch-note">A task marked visual needs a smoketest whatever this says. Review has no Auto, so only you can skip it.</p>
+      <p className="orch-note">A task marked visual needs a smoketest whatever this says. Review has no Auto: it is required unless you turn it off here.</p>
 
       <SettingRow title="Agents that start a task" description="Names, separated by commas. Dispatching one outside a task starts one." testId="orch-start-row">
         <TextInput aria-label="Agents that start a task" value={texts.startAgents} onChange={(e) => text('startAgents')(e.target.value)} />

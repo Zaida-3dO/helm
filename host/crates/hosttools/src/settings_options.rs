@@ -156,6 +156,16 @@ const PET_SIZES: Kind = Kind::Choice(&["s", "m", "l"]);
 const ANY_OBJECT: Kind = Kind::AnyObject;
 const ID_512: Kind = Kind::Text { max: 512 };
 const NAME_OR_NULL: Kind = Kind::TextOrNull { max: 200 };
+const ZERO: Kind = Kind::Int {
+    min: 0,
+    max: 0,
+    step: 1,
+};
+const ROLLOVER_TOKENS: Kind = Kind::Int {
+    min: 50_000,
+    max: 2_000_000,
+    step: 1,
+};
 const SEND_MODE: Kind = Kind::Choice(&["asap", "interrupt"]);
 const WAIT_LIMIT: Kind = Kind::IntOrNull { min: 5, max: 3600 };
 const LONG_COMMANDS: Kind = Kind::Choice(&["off", "warn", "redirect"]);
@@ -458,7 +468,7 @@ fn table() -> Vec<Entry> {
                 max: 500,
             },
             default: || json!({}),
-            about: "Keyboard shortcuts as {commandId: chord}; a null chord clears that shortcut. A chord Windows or the web view keeps (Alt+F4, F12, anything with the Windows key...) and one chord given to two commands are refused. Needs the all-settings switch.",
+            about: "Keyboard shortcuts as {commandId: chord}; a null chord clears that shortcut. A chord Windows or the web view keeps (Alt+F4, F12, anything with the Windows key...) and one chord given to two commands are refused.",
         },
         Entry {
             key: "sidebarView",
@@ -633,6 +643,18 @@ fn table() -> Vec<Entry> {
             kind: Kind::Bool,
             default: || json!(true),
             about: "Whether the user's other devices may run chats on this PC.",
+        },
+        Entry {
+            key: "rolloverTokens",
+            kind: Kind::Either(&[&ZERO, &ROLLOVER_TOKENS]),
+            default: null,
+            about: "The context size, in tokens, at which an idle chat is asked to roll over into a fresh one: 0 switches it off, otherwise 50000 to 2000000. Null uses Helm's own size.",
+        },
+        Entry {
+            key: "agentSettingsAll",
+            kind: Kind::Bool,
+            default: || json!(false),
+            about: "Whether chats may use the tools that act on the user's repositories without asking (the same switch as Settings > General, Chats can change all settings).",
         },
     ]
 }
@@ -949,15 +971,15 @@ pub fn check(key: &str, v: &Value) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings_allow::{agent_keys, high_pref_keys};
+    use crate::settings_allow::{approval_pref_keys, direct_pref_keys};
 
     #[test]
     fn every_agent_key_has_an_entry_and_nothing_else_does() {
         let mut have = keys();
         have.sort_unstable();
         // The keys a chat changes itself and the ones it may stage: both are checked here.
-        let mut want = agent_keys(true);
-        want.extend(high_pref_keys());
+        let mut want = direct_pref_keys();
+        want.extend(approval_pref_keys());
         want.sort_unstable();
         assert_eq!(have, want);
     }

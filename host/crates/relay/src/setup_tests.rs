@@ -4,7 +4,7 @@
 use super::*;
 use crate::pair::tests::{fake_hub, TOKEN};
 use helm_core::db::MigrationRegistry;
-use helm_core::prefs::{self, DEVICE_RUN_FROM_OTHERS};
+use helm_core::prefs::{self, PrefKey};
 use helm_ipc::RecordingSink;
 use helm_platform::keychain::MemoryKeychain;
 use std::net::TcpListener;
@@ -248,7 +248,7 @@ fn staged_settings_apply_all_or_nothing_and_never_show_the_code() {
             Hub::Down,
             "Pat",
             false,
-            "Nothing changed: Let other devices use chats on this PC is not what the card showed",
+            "Nothing changed: agentSettingsAll is not what the card showed",
             false,
             false,
         ),
@@ -273,7 +273,7 @@ fn staged_settings_apply_all_or_nothing_and_never_show_the_code() {
                     "hubPairing": {"address": address, "codeFile": code_file.to_str().unwrap(),
                                    "person": person, "machine": "Laptop"},
                     "updateSource": folder.to_str().unwrap(),
-                    "deviceRunFromOthers": false,
+                    "agentSettingsAll": true,
                 }),
             )
             .unwrap();
@@ -285,7 +285,7 @@ fn staged_settings_apply_all_or_nothing_and_never_show_the_code() {
         assert!(lines
             .iter()
             .any(|l| l.contains(code_file.to_str().unwrap())));
-        assert!(lines.contains(&format!("{RUN_FROM_OTHERS}: on → off")));
+        assert!(lines.contains(&"agentSettingsAll: off → on".to_owned()));
         assert!(lines.contains(&format!(
             "Update folder: none → {}",
             folder.to_str().unwrap()
@@ -296,7 +296,13 @@ fn staged_settings_apply_all_or_nothing_and_never_show_the_code() {
 
         let moved = case == "moved since the card";
         if moved {
-            e.db.write(|tx| prefs::set(tx, DEVICE_RUN_FROM_OTHERS, &Value::Bool(false)))
+            e.db.write(|tx| {
+                prefs::set(
+                    tx,
+                    PrefKey::classified("agentSettingsAll"),
+                    &Value::Bool(true),
+                )
+            })
                 .unwrap();
         }
         let outcome = e.approve(staged["requestId"].as_str().unwrap());
@@ -309,8 +315,8 @@ fn staged_settings_apply_all_or_nothing_and_never_show_the_code() {
         }
         assert_eq!(e.paired().usable(), paired, "{case}");
         assert_eq!(
-            e.pref("deviceRunFromOthers"),
-            (changed || moved).then_some(Value::Bool(false)),
+            e.pref("agentSettingsAll"),
+            (changed || moved).then_some(Value::Bool(true)),
             "{case}: the switches change only with everything else"
         );
         assert_eq!(
@@ -361,8 +367,8 @@ fn staging_is_refused_when_it_would_be_wrong_or_change_nothing() {
     let rows = [
         (
             "home",
-            json!({"deviceRunFromOthers": true}),
-            "deviceRunFromOthers is already on",
+            json!({"agentSettingsAll": false}),
+            "agentSettingsAll is already off",
         ),
         (
             "home",
@@ -373,28 +379,37 @@ fn staging_is_refused_when_it_would_be_wrong_or_change_nothing() {
         (
             "home",
             json!({"theme": "dark"}),
-            "theme is a setting you change yourself",
-        ),
-        (
-            "home",
-            json!({"agentSettingsAll": true}),
-            "agentSettingsAll is yours to change only",
+            "theme needs no approval: change it yourself with app_update_settings",
         ),
         (
             "home",
             json!({"nonsense": 1}),
-            "not a setting that can be staged",
-        ),
-        ("home", json!({"terminalShell": "zsh"}), "pwsh"),
-        (
-            "home",
-            json!({"terminalShell": "pwsh"}),
-            "terminalShell is already pwsh",
+            "nonsense is not a Helm setting",
         ),
         (
             "home",
-            json!({"householdSharing": {"chats": 1}}),
-            "householdSharing",
+            json!({"newChatPermissionMode": "plan"}),
+            "acceptEdits",
+        ),
+        (
+            "home",
+            json!({"newChatPermissionMode": null}),
+            "newChatPermissionMode is already default",
+        ),
+        (
+            "home",
+            json!({"credentials": {"for": "bank"}}),
+            "credentials for must be one of",
+        ),
+        (
+            "home",
+            json!({"credentials": {"for": "mcp", "value": "hunter2"}}),
+            "never staged",
+        ),
+        (
+            "home",
+            json!({"credentials": "hunter2"}),
+            "never staged",
         ),
         (
             "home",
@@ -451,40 +466,38 @@ fn staging_is_refused_when_it_would_be_wrong_or_change_nothing() {
 }
 
 #[test]
-fn any_high_setting_is_staged_applied_and_left_for_the_users_undo() {
+fn any_approval_setting_is_staged_applied_and_left_for_the_users_undo() {
     let e = env();
+    let folder = e.dir.path().join("dist");
+    std::fs::create_dir(&folder).unwrap();
     let staged = e
         .stage(
             "home",
             json!({
-                "terminalShell": "gitbash",
-                "nativeMcp": false,
-                "backgroundModel": {"local": "qwen"},
-                "householdSharing": {"chats": true, "transcripts": true},
+                "newChatPermissionMode": "acceptEdits",
+                "agentSettingsAll": true,
+                "updateSource": folder.to_str().unwrap(),
             }),
         )
         .unwrap();
     // The chat is told at once and carries on; nothing has changed yet.
     assert_eq!(staged["state"], "pending");
     let lines: Vec<String> = serde_json::from_value(staged["changes"].clone()).unwrap();
-    assert_eq!(lines.len(), 4, "{lines:?}");
-    assert!(lines.contains(&"terminalShell: pwsh → gitbash".to_owned()));
-    assert!(lines.contains(&"nativeMcp: on → off".to_owned()));
-    assert_eq!(e.pref("terminalShell"), None);
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert!(lines.contains(&"newChatPermissionMode: default → acceptEdits".to_owned()));
+    assert!(lines.contains(&"agentSettingsAll: off → on".to_owned()));
+    assert_eq!(e.pref("newChatPermissionMode"), None);
     let outcome = e.approve(staged["requestId"].as_str().unwrap());
     assert!(outcome.starts_with("Applied."), "{outcome}");
     assert!(
-        outcome.contains("terminalShell is now gitbash."),
+        outcome.contains("newChatPermissionMode is now acceptEdits."),
         "{outcome}"
     );
-    assert_eq!(e.pref("terminalShell"), Some(json!("gitbash")));
-    assert_eq!(e.pref("nativeMcp"), Some(json!(false)));
-    assert_eq!(e.pref("backgroundModel"), Some(json!({"local": "qwen"})));
-    // The owner's rule filled in the switch the others depend on being off.
     assert_eq!(
-        e.pref("householdSharing"),
-        Some(json!({"chats": true, "transcripts": true, "messages": false}))
+        e.pref("newChatPermissionMode"),
+        Some(json!("acceptEdits"))
     );
+    assert_eq!(e.pref("agentSettingsAll"), Some(json!(true)));
     // The user's change list has them for Undo, under the chat that staged them.
     let listed: Vec<(String, String)> =
         e.db.snapshot(|tx| {
@@ -493,30 +506,61 @@ fn any_high_setting_is_staged_applied_and_left_for_the_users_undo() {
                 .collect()
         })
         .unwrap();
-    assert_eq!(listed.len(), 4, "{listed:?}");
+    assert_eq!(listed.len(), 3, "{listed:?}");
     assert!(listed.iter().all(|(_, c)| c == "home"));
     assert!(e.sink.kinds().contains(&"external_settings".to_string()));
-    // The household switches reached the live line too, not just the table.
-    assert!(e.sink.kinds().contains(&"household_changed".to_string()));
 
     // A setting that moved after the card was made is not applied: the user approved the lines
     // they saw, not whatever the setting has become.
-    let staged = e.stage("home", json!({"nativeMcp": true})).unwrap();
+    let staged = e.stage("home", json!({"agentSettingsAll": false})).unwrap();
     e.db.write(|tx| {
         helm_core::prefs::set(
             tx,
-            helm_core::prefs::PrefKey::classified("nativeMcp"),
-            &json!(true),
+            helm_core::prefs::PrefKey::classified("agentSettingsAll"),
+            &json!(false),
         )
     })
     .unwrap();
     let outcome = e.approve(staged["requestId"].as_str().unwrap());
     assert!(
-        outcome.starts_with("Nothing changed: nativeMcp is not what the card showed"),
+        outcome.starts_with("Nothing changed: agentSettingsAll is not what the card showed"),
         "{outcome}"
     );
 
     // A household member's chat stages a change exactly as the PC's own person's chat does.
-    let staged = e.stage("guest", json!({"nativeMcp": false})).unwrap();
+    let staged = e.stage("guest", json!({"agentSettingsAll": true})).unwrap();
     assert_eq!(staged["state"], "pending");
+}
+
+/// A secret never travels through a chat: staging `credentials` names a page, the card says so,
+/// and Approve opens that page without storing or sending anything back.
+#[test]
+fn a_chat_asks_for_a_secret_by_opening_the_page_never_by_carrying_it() {
+    let e = env();
+    let staged = e
+        .stage("guest", json!({"credentials": {"for": "localmodels"}}))
+        .unwrap();
+    let lines: Vec<String> = serde_json::from_value(staged["changes"].clone()).unwrap();
+    assert_eq!(
+        lines,
+        ["Open Settings > Local models so you can type a local model server's key yourself (no secret is staged)"]
+    );
+    let before = e.sink.kinds().len();
+    let outcome = e.approve(staged["requestId"].as_str().unwrap());
+    assert!(
+        outcome.starts_with("Applied. Settings > Local models is open"),
+        "{outcome}"
+    );
+    let events = e.sink.events.lock().unwrap().clone();
+    let open = events
+        .iter()
+        .skip(before)
+        .find(|ev| ev.kind == "shell_open_settings")
+        .expect("the page is opened");
+    assert_eq!(open.fields["pane"], "localmodels");
+    // Nothing was stored.
+    let changed: i64 =
+        e.db.snapshot(|tx| tx.query_row("SELECT COUNT(*) FROM settings_changes", [], |r| r.get(0)))
+            .unwrap();
+    assert_eq!(changed, 0);
 }

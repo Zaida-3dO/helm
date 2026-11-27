@@ -75,7 +75,7 @@ function GeneralPane() {
       ))}
       <SettingRow
         title="Chats can change all settings"
-        description="Chats can already change most settings and you can undo each change below. Turn this on to let them change every setting, including your shortcuts."
+        description="Chats change almost every setting themselves and you can undo each change below. This switch also lets them use the tools that act on your repositories without asking. A chat can ask you to turn it on with one Approve card."
         testId="setting-agent-all"
       >
         <Checkbox

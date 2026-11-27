@@ -95,16 +95,21 @@ as `const MY_KEY: PrefKey = PrefKey::classified("myKey");`. An unclassified name
 Write through `helm_core::prefs::set`; never write SQL against `preferences` (a test scans
 every host source file and allows only `prefs/store.rs`).
 
-**A new preference is agent-settable by default.** Classify it `Registry(Base)` and add its entry
+**A new preference is changeable by chats by default.** Give it the `DIRECT` line and add its entry
 (shape, default, one sentence) to `hosttools/src/settings_options.rs`: chats then change it
 themselves with `app_update_settings`, with the Undo notice, and a test fails until the entry
-exists. Only two other classes exist, and each needs a one-line reason beside it. `High`: the change
-changes what runs, what agents may read or who may reach this PC, so a chat only stages it
-(`app_stage_settings`) and it applies after the user clicks Approve; it still needs its options
-entry, which is how the staged value is checked. `UserOnly`: no tool at all, for the few settings
-that change what approval means, and for secrets. Settings that are not preferences (an extension's
-keys, a file's) are classed in `NAMED` in `hosttools/src/settings_allow.rs`; a test in the app
-crate pins that every key has exactly one class and that every `High` one can be staged.
+exists. There are exactly two ways a chat reaches a setting (the `Access` type): change it itself
+(`Direct`), or stage it (`Approval`, with a one-line reason naming a concrete danger) with
+`app_stage_settings`, where it applies after the user clicks Approve; an approval key still needs
+its options entry, which is how the staged value is checked. There is no third value: nothing can
+be written that turns a chat away, and the one place that words the staging answer is
+`stage_message` in `hosttools/src/settings_allow.rs`. A test caps how many keys may need
+approval, so adding one is a deliberate decision. Settings that are not preferences (an
+extension's keys, a file's) are listed in `NAMED` in the same file, where leaving the access out
+does not compile; an extension declares a part of a key that needs approval in `staged_parts`, and
+its `apply` only validates and stores. A test in the app crate pins that every key has an access
+and every approval one can be staged, and another scans the sources for text that sends a chat to
+the user instead of to a call.
 
 ### Editor selection for agents
 
@@ -112,8 +117,7 @@ crate pins that every key has exactly one class and that every `High` one can be
 selection. Helm never connects to the editor: the extension in `tools/vscode-editor-context` writes one
 JSON file per VS Code window to `<profile>/ide-context/` (see its README for what it holds and how to
 install it: copy the folder into `.vscode/extensions`, no build). The tool reads those files. It
-answers `available: false` with a reason when the `ideContext` preference (Settings > Chat; a chat can only stage a change,
-for the user to approve; off by default) is off, or when no file was written or touched in the last two minutes. Selections are cut
+answers `available: false` with a reason when the `ideContext` preference (Settings > Chat; a chat can turn it on, with a notice and Undo; off by default) is off, or when no file was written or touched in the last two minutes. Selections are cut
 to 12 KiB each and the reply keeps to 40 KiB of selected text.
 
 ## Design decisions

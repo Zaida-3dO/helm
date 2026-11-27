@@ -1,21 +1,21 @@
-//! Settings → Hub for chats: the `telegram` and `voice` keys of `app_get_settings` and
+//! Settings → Hub for chats: the `telegram`, `voice` and `speaker` keys of `app_get_settings` and
 //! `app_update_settings`.
 //!
-//! The `voice` key is the voice chat's policy ([`crate::voice::PolicyFile`]): the model and effort a
-//! new voice chat opens with, the idle, age and token limits, and what the attention watch wakes
-//! it for. As for Telegram, a chat may change only the model and effort; the rest is the user's,
-//! and an update that would move any of it is refused whole. `null` puts the model and effort
-//! back to the defaults, and a blank one means the app's usual new-chat setting.
+//! Each key is the policy file of the person who owns the chat asking: a chat of any person reads
+//! and changes its own person's copy, and Undo goes back to the copy the change came from. A
+//! chat changes every field itself, with the Undo notice, except two on the Telegram key:
+//! `approvals` and `remoteAnswers` decide what an answer from outside the app may approve, so a
+//! chat stages them (`app_stage_settings`) and the user approves. The tools decide that before
+//! these adapters run (the key's `staged_parts`); nothing here answers "locked".
 //!
-//! What follows describes the `telegram` key.
+//! The `voice` key is the voice chat's policy ([`crate::voice::PolicyFile`]): the model and effort
+//! a new voice chat opens with, the idle, age and token limits, and what the attention watch wakes
+//! it for. `null` puts the model and effort back to the defaults, and a blank one means the
+//! app's usual new-chat setting.
 //!
-//! The value is the whole Telegram policy file: the tag limits, the away-alerts switch, whether
-//! approval prompts can be answered from Telegram, whether waiting prompts can be answered from
-//! the hub's Remote page, and the model and effort a new Telegram chat opens with. A chat reads
-//! all of it but may change only the last two: the limits and the three switches decide what
-//! leaves the machine unattended, so they stay the user's, changed only on
-//! the Settings page. An update that would move one of them is refused whole, even though it may
-//! repeat those fields at their current value.
+//! The `telegram` value is the whole Telegram policy file: the tag limits, the away-alerts switch,
+//! whether approval prompts can be answered from Telegram, whether waiting prompts can be
+//! answered from the hub's Remote page, and the model and effort a new Telegram chat opens with.
 //!
 //! An update names only the fields to change; the merged file goes through the same checks as
 //! the Settings page (`PolicyFile::check` and the effort set), so a bad value refuses the whole
@@ -25,15 +25,15 @@
 
 use crate::telegram::{self, PolicyFile};
 use crate::voice;
-use helm_hosttools::SettingsExtension;
+use helm_hosttools::{SettingsExtension, StagedPart};
 use helm_ipc::AppEvent;
 use rusqlite::Transaction;
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use rusqlite::OptionalExtension;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 pub const KEY: &str = "telegram";
-const PAGE: &str = "Settings > Hub";
 const EVENT: &str = "relay_telegram";
 /// Model ids are short (a Claude model, or `local/<server>/<model>`); this bounds the stored
 /// string without rejecting any id the model picker offers.
@@ -43,22 +43,43 @@ const EFFORT_LIST: &str = "low, medium, high, xhigh or max";
 
 pub struct TelegramPolicy {
     dir: PathBuf,
+    /// Whose policy: a profile id, or `None` for the home person's.
+    profile: Option<String>,
 }
+
+/// The two fields a chat stages: an answer sent from outside the app can approve things.
+const TELEGRAM_STAGED: &[StagedPart] = &[
+    StagedPart::new(
+        "approvals",
+        "An answer sent from Telegram can approve things for you, so you approve turning that on.",
+    ),
+    StagedPart::new(
+        "remoteAnswers",
+        "An answer sent from the hub's Remote page can approve things for you, so you approve turning that on.",
+    ),
+];
 
 /// The extension to register as a [`helm_hosttools::SettingsExtensions`] entry. It owns the three
 /// channel keys: `telegram`, `voice` and `speaker`.
 pub fn settings_extension(profile_dir: &std::path::Path) -> std::sync::Arc<dyn SettingsExtension> {
-    std::sync::Arc::new(Both {
-        telegram: TelegramPolicy {
-            dir: profile_dir.to_path_buf(),
-        },
-        voice: VoicePolicy {
-            dir: profile_dir.to_path_buf(),
-        },
-        speaker: SpeakerPolicy {
-            dir: profile_dir.to_path_buf(),
-        },
-    })
+    std::sync::Arc::new(Both::new(profile_dir, None))
+}
+
+/// The profile that owns `chat`: its own, else the home profile. `None` when neither exists.
+fn chat_profile(tx: &Transaction<'_>, chat: &str) -> Option<String> {
+    tx.query_row(
+        "SELECT COALESCE(
+             (SELECT p.id FROM profiles p
+               WHERE p.id = (SELECT NULLIF(c.profile_id, '') FROM chats c WHERE c.id = ?1)),
+             (SELECT id FROM profiles WHERE is_home = 1))",
+        [chat],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .flatten()
+    .filter(|id| !id.is_empty())
 }
 
 /// The channel keys behind one registration: each call goes to the policy that owns the key.
@@ -69,6 +90,24 @@ struct Both {
 }
 
 impl Both {
+    /// The three policies of one person (`None`: the home person's).
+    fn new(dir: &std::path::Path, profile: Option<String>) -> Self {
+        Both {
+            telegram: TelegramPolicy {
+                dir: dir.to_path_buf(),
+                profile: profile.clone(),
+            },
+            voice: VoicePolicy {
+                dir: dir.to_path_buf(),
+                profile: profile.clone(),
+            },
+            speaker: SpeakerPolicy {
+                dir: dir.to_path_buf(),
+                profile,
+            },
+        }
+    }
+
     fn owner(&self, key: &str) -> &dyn SettingsExtension {
         match key {
             VOICE_KEY => &self.voice,
@@ -85,8 +124,12 @@ impl SettingsExtension for Both {
     fn describe(&self, key: &str) -> Option<Value> {
         self.owner(key).describe(key)
     }
-    fn needs_all_settings(&self, key: &str) -> bool {
-        self.owner(key).needs_all_settings(key)
+    fn staged_parts(&self, key: &str) -> &'static [StagedPart] {
+        self.owner(key).staged_parts(key)
+    }
+    fn for_chat(&self, tx: &Transaction<'_>, chat: &str) -> Option<Arc<dyn SettingsExtension>> {
+        let profile = chat_profile(tx, chat)?;
+        Some(Arc::new(Both::new(&self.telegram.dir, Some(profile))))
     }
     fn read(&self, tx: &Transaction<'_>, key: &str) -> Value {
         self.owner(key).read(tx, key)
@@ -122,38 +165,6 @@ fn from_json(v: &Value) -> Result<PolicyFile, String> {
     serde_json::from_value(v.clone()).map_err(|e| {
         format!("Expected maxAgeHours, maxTokens, awayAlerts, approvals, remoteAnswers, and optional model and effort: {e}")
     })
-}
-
-/// `v` without the fields a chat may change: what is left must not differ across an update.
-fn locked(v: &Value) -> Value {
-    let mut v = v.clone();
-    if let Some(o) = v.as_object_mut() {
-        o.remove("model");
-        o.remove("effort");
-    }
-    v
-}
-
-/// The path of the first difference between `a` and `b`, if any.
-fn first_diff(a: &Value, b: &Value, path: &str) -> Option<String> {
-    match (a, b) {
-        (Value::Object(x), Value::Object(y)) => {
-            let keys: BTreeSet<&String> = x.keys().chain(y.keys()).collect();
-            keys.into_iter().find_map(|k| {
-                let p = if path.is_empty() {
-                    k.clone()
-                } else {
-                    format!("{path}.{k}")
-                };
-                match (x.get(k), y.get(k)) {
-                    (Some(l), Some(r)) => first_diff(l, r, &p),
-                    _ => Some(p),
-                }
-            })
-        }
-        _ if a == b => None,
-        _ => Some(path.to_owned()),
-    }
 }
 
 /// Merge `patch` into `base`: objects field by field, anything else replaces.
@@ -220,7 +231,7 @@ fn io_err(e: std::io::Error) -> String {
 fn options() -> Value {
     json!({
         "type": "object",
-        "about": "Settings > Hub: the Telegram chat's tag limits and switches, and the model and effort a new Telegram chat opens with. Read all of it. You may change only model and effort; the limits and the three switches are the user's and an update that touches them is refused. Send only the fields to change: the rest must repeat at their current value or stay out. null resets model and effort to unset.",
+        "about": "Settings > Hub: the Telegram chat's tag limits and switches, and the model and effort a new Telegram chat opens with. Change any field except approvals and remoteAnswers, which decide what an answer from outside the app may approve: those two are staged with app_stage_settings and the user approves them. Send only the fields to change; the rest stay as they are. null resets model and effort to unset.",
         "default": as_json(&PolicyFile::default()),
         "merge": true,
         "fields": {
@@ -240,6 +251,9 @@ impl TelegramPolicy {
     /// folder under `relay/people/`; the file the single-person builds left straight under
     /// `relay/` is still read until it moves there, and a fresh PC writes the new place.
     fn policy_path(&self, tx: &Transaction<'_>) -> PathBuf {
+        if let Some(who) = &self.profile {
+            return crate::people::telegram_paths(&self.dir, who).policy;
+        }
         let per = helm_profiles::store::home(tx)
             .ok()
             .flatten()
@@ -258,6 +272,10 @@ impl TelegramPolicy {
 }
 
 impl SettingsExtension for TelegramPolicy {
+    fn staged_parts(&self, _key: &str) -> &'static [StagedPart] {
+        TELEGRAM_STAGED
+    }
+
     fn keys(&self) -> Vec<&'static str> {
         vec![KEY]
     }
@@ -305,11 +323,6 @@ impl SettingsExtension for TelegramPolicy {
         let merged = from_json(&wanted)?;
         merged.check()?;
         let after = as_json(&merged);
-        if let Some(path) = first_diff(&locked(&before), &locked(&after), "") {
-            return Err(format!(
-                "{KEY}.{path} is yours to change only: ask the user to change it in {PAGE}. You may change model and effort."
-            ));
-        }
         telegram::save_policy(&path, merged).map_err(io_err)?;
         Ok((before, after))
     }
@@ -332,6 +345,8 @@ const VOICE_EVENT: &str = "relay_voice";
 
 pub struct VoicePolicy {
     dir: PathBuf,
+    /// Whose policy: a profile id, or `None` for the home person's.
+    profile: Option<String>,
 }
 
 fn voice_json(f: &voice::PolicyFile) -> Value {
@@ -377,7 +392,7 @@ fn check_voice_changeable(patch: &Value) -> Result<(), String> {
 fn voice_options() -> Value {
     json!({
         "type": "object",
-        "about": "Settings > Hub: the voice chat's model and effort for a new voice chat, its limits, and what the attention watch wakes it for. Read all of it. You may change only model and effort; the limits and the watch are the user's and an update that touches them is refused. Send only the fields to change: the rest must repeat at their current value or stay out. null puts model and effort back to the defaults.",
+        "about": "Settings > Hub: the voice chat's model and effort for a new voice chat, its limits, and what the attention watch wakes it for. Read all of it and change any field. Send only the fields to change; the rest stay as they are. null puts model and effort back to the defaults.",
         "default": voice_json(&voice::PolicyFile::default()),
         "merge": true,
         "fields": {
@@ -396,6 +411,9 @@ impl VoicePolicy {
     /// home profile's folder under `relay/people/`, with the older single-person file read
     /// until it moves there.
     fn voice_path(&self, tx: &Transaction<'_>) -> PathBuf {
+        if let Some(who) = &self.profile {
+            return crate::people::voice_paths(&self.dir, who).policy;
+        }
         let per = helm_profiles::store::home(tx)
             .ok()
             .flatten()
@@ -414,6 +432,10 @@ impl VoicePolicy {
 }
 
 impl SettingsExtension for VoicePolicy {
+    fn staged_parts(&self, _key: &str) -> &'static [StagedPart] {
+        &[]
+    }
+
     fn keys(&self) -> Vec<&'static str> {
         vec![VOICE_KEY]
     }
@@ -458,11 +480,6 @@ impl SettingsExtension for VoicePolicy {
         let merged = voice_from_json(&wanted)?;
         merged.check()?;
         let after = voice_json(&merged);
-        if let Some(path) = first_diff(&locked(&before), &locked(&after), "") {
-            return Err(format!(
-                "{VOICE_KEY}.{path} is yours to change only: ask the user to change it in {PAGE}. You may change model and effort."
-            ));
-        }
         voice::save_policy(&file, &merged).map_err(voice_io_err)?;
         Ok((before, after))
     }
@@ -489,6 +506,8 @@ const SPEAKER_EVENT: &str = "relay_speaker";
 
 pub struct SpeakerPolicy {
     dir: PathBuf,
+    /// Whose policy: a profile id, or `None` for the home person's.
+    profile: Option<String>,
 }
 
 fn speaker_json(f: &crate::speaker::PolicyFile) -> Value {
@@ -536,7 +555,7 @@ fn check_speaker_changeable(patch: &Value) -> Result<(), String> {
 fn speaker_options() -> Value {
     json!({
         "type": "object",
-        "about": "Settings > Hub: what a new room-speaker chat opens with, and how the house's speakers are taken. Read all of it. You may change only model and effort; which PC takes the speaker and how long a finished talk is remembered are the user's, and an update that touches them is refused. Send only the fields to change: the rest must repeat at their current value or stay out. null puts model and effort back to the defaults.",
+        "about": "Settings > Hub: what a new room-speaker chat opens with, and how the house's speakers are taken. Read all of it and change any field. Send only the fields to change; the rest stay as they are. null puts model and effort back to the defaults.",
         "default": speaker_json(&crate::speaker::PolicyFile::default()),
         "merge": true,
         "fields": {
@@ -544,8 +563,8 @@ fn speaker_options() -> Value {
             "effort": {"type": "enum", "allowed": helm_chats::catalogue::EFFORTS, "blankAllowed": true, "nullable": true, "about": "The effort a new room-speaker chat opens with; blank: the app's usual new-chat effort; null: the default."},
             "takeSpeaker": {"type": "boolean", "nullable": true, "about": "Whether this PC takes its person's room speakers. null: the default, on for the home profile and off for the others."},
             "previousHours": {"type": "integer", "min": 0, "max": 72, "about": "Whether a talk that just ended may be named to the next one on that speaker (always within half an hour of the close); 0 never names it."},
-            "lean": {"type": "boolean", "about": "Lean speaker chats: a thin system prompt (a short persona and the speaker prompt) and only the Home Assistant server and the tool that sends a message to the phone. Applies to chats started after the change. The user's to change."},
-            "boardId": {"type": "string", "nullable": true, "about": "The board a new speaker chat is shown on; unset leaves it to the app. The user's to change."},
+            "lean": {"type": "boolean", "about": "Lean speaker chats: a thin system prompt (a short persona and the speaker prompt) and only the Home Assistant server and the tool that sends a message to the phone. Applies to chats started after the change."},
+            "boardId": {"type": "string", "nullable": true, "about": "The board a new speaker chat is shown on; unset leaves it to the app."},
         },
     })
 }
@@ -554,6 +573,9 @@ impl SpeakerPolicy {
     /// Settings shows one speaker policy — the home person's, whose file lives in that profile's
     /// folder under `relay/people/`.
     fn policy_path(&self, tx: &Transaction<'_>) -> Option<PathBuf> {
+        if let Some(who) = &self.profile {
+            return Some(crate::speaker::paths(&self.dir, who).policy);
+        }
         helm_profiles::store::home(tx)
             .ok()
             .flatten()
@@ -562,6 +584,10 @@ impl SpeakerPolicy {
 }
 
 impl SettingsExtension for SpeakerPolicy {
+    fn staged_parts(&self, _key: &str) -> &'static [StagedPart] {
+        &[]
+    }
+
     fn keys(&self) -> Vec<&'static str> {
         vec![SPEAKER_KEY]
     }
@@ -611,11 +637,6 @@ impl SettingsExtension for SpeakerPolicy {
         let merged = speaker_from_json(&wanted)?;
         merged.check()?;
         let after = speaker_json(&merged);
-        if let Some(path) = first_diff(&locked(&before), &locked(&after), "") {
-            return Err(format!(
-                "{SPEAKER_KEY}.{path} is yours to change only: ask the user to change it in {PAGE}. You may change model and effort."
-            ));
-        }
         crate::speaker::save_policy(&file, &merged).map_err(speaker_io_err)?;
         Ok((before, after))
     }
@@ -656,6 +677,7 @@ mod tests {
         let db = Database::open(&dir.path().join("t.sqlite3"), &MigrationRegistry::new()).unwrap();
         let ext = TelegramPolicy {
             dir: dir.path().join("prof"),
+            profile: None,
         };
         Env { db, ext, dir }
     }
@@ -679,12 +701,11 @@ mod tests {
     }
 
     #[test]
-    fn a_chat_sets_the_new_telegram_chat_model_and_effort_and_undo_puts_them_back() {
+    fn a_chat_sets_the_telegram_policy_and_undo_puts_it_back() {
         let e = env();
         assert_eq!(e.ext.keys(), vec![KEY]);
         assert!(e.ext.describe(KEY).is_some());
         assert!(e.ext.describe("theme").is_none());
-        assert!(!e.ext.needs_all_settings(KEY));
         assert_eq!(e.ext.changed_event(KEY).kind, EVENT);
         // The said list is the app's own, phrased with an "or".
         let efforts = helm_chats::catalogue::EFFORTS;
@@ -703,7 +724,7 @@ mod tests {
         assert!(off.get("model").is_none());
         assert!(off.get("effort").is_none());
 
-        // A change names only the two fields a chat may set.
+        // A change names only the fields to set.
         let (before, after) = e
             .apply(json!({"model": "local/strata/qwen-small", "effort": "low"}))
             .unwrap();
@@ -749,30 +770,31 @@ mod tests {
             .unwrap_err()
             .contains("at most 120"));
 
-        // The user-only fields: refused whole when they would move, allowed when repeated as-is.
-        let err = e.apply(json!({"approvals": true})).unwrap_err();
-        assert!(
-            err.contains("approvals") && err.contains("Settings > Hub"),
-            "{err}"
+        // The adapter holds nothing back: the two switches that decide what an outside answer may
+        // approve are declared as staged parts, which the tools stage before this ever runs.
+        assert_eq!(
+            e.ext
+                .staged_parts(KEY)
+                .iter()
+                .map(|p| p.path)
+                .collect::<Vec<_>>(),
+            ["approvals", "remoteAnswers"]
         );
-        // Answering from the Remote page is the user's switch too, however it is worded.
-        let err = e.apply(json!({"remoteAnswers": true})).unwrap_err();
+        // Every other field is a chat's own: limits and the alerts switch change like the rest.
+        let (_, after) = e
+            .apply(json!({"maxAgeHours": 48, "awayAlerts": false}))
+            .unwrap();
+        assert_eq!((after["maxAgeHours"].clone(), after["awayAlerts"].clone()), (json!(48), json!(false)));
+        // Applying the staged switches (the path an approved change takes) stores them.
+        let (_, after) = e
+            .apply(json!({"approvals": true, "remoteAnswers": true}))
+            .unwrap();
+        assert_eq!(after["approvals"], json!(true));
         assert!(
-            err.contains("remoteAnswers") && err.contains("Settings > Hub"),
-            "{err}"
+            telegram::load_file(&telegram::policy_path(&e.dir.path().join("prof"))).remote_answers
         );
-        assert!(
-            !telegram::load_file(&telegram::policy_path(&e.dir.path().join("prof"))).remote_answers
-        );
-        assert!(e
-            .apply(json!({"approvals": false, "maxAgeHours": 48}))
-            .unwrap_err()
-            .contains("maxAgeHours"));
-        assert!(e
-            .apply(json!({"approvals": false, "model": "opus"}))
-            .is_ok_and(|(_, a)| a["model"] == json!("opus") && a["approvals"] == json!(false)));
-        // Nothing was stored by the refused updates.
-        assert!(!telegram::load_file(&telegram::policy_path(&e.dir.path().join("prof"))).approvals);
+        e.apply(json!({"approvals": false, "remoteAnswers": false, "maxAgeHours": 24, "awayAlerts": true}))
+            .unwrap();
 
         // The merged file goes through the page's own range checks all the same.
         assert!(e
@@ -805,7 +827,7 @@ mod tests {
         let now = e.read();
         assert_eq!(now["maxAgeHours"], json!(72));
         assert_eq!(now["model"], json!("sonnet"));
-        // A chat repeating the user's fields at their current values may still set effort.
+        // A change that repeats the other fields at their current values still sets the effort.
         let (_, after) = e
             .apply(json!({
                 "maxAgeHours": 72, "maxTokens": 50_000, "awayAlerts": false, "approvals": true,
@@ -822,10 +844,9 @@ mod tests {
         e.restore(after).unwrap();
         assert!(e.read().get("model").is_none());
 
-        // null resets only the two fields a chat may set.
-        e.apply(json!({"model": "opus", "effort": "high"})).unwrap();
-        e.apply(json!({"awayAlerts": false, "model": "opus", "effort": "high"}))
-            .unwrap(); // repeat as-is
+        // null resets the model and effort and leaves the limits and switches as they are.
+        e.apply(json!({"model": "opus", "effort": "high", "awayAlerts": false}))
+            .unwrap();
         e.apply(json!(null)).unwrap();
         let back = e.read();
         assert!(back.get("model").is_none());
@@ -840,10 +861,11 @@ mod tests {
     }
 
     #[test]
-    fn a_chat_sets_the_voice_chats_model_and_effort_only_and_undo_puts_them_back() {
+    fn a_chat_sets_the_voice_chats_policy_and_undo_puts_it_back() {
         let e = env();
         let voice_ext = VoicePolicy {
             dir: e.dir.path().join("prof"),
+            profile: None,
         };
         let apply = |v: Value| {
             e.db.write(|tx| Ok::<_, rusqlite::Error>(voice_ext.apply(tx, VOICE_KEY, &v)))
@@ -888,7 +910,7 @@ mod tests {
         );
         assert_eq!(read()["idleMinutes"], json!(240));
 
-        // Refusals: a bad effort, a bad model, the user's fields, a stranger, a bare value.
+        // Refusals: a bad effort, a bad model, a bad limit, a stranger, a bare value.
         for bad in ["ultra", "HIGH"] {
             let err = apply(json!({"effort": bad})).unwrap_err();
             assert!(
@@ -900,18 +922,10 @@ mod tests {
         assert!(apply(json!({"model": "ha\nku"}))
             .unwrap_err()
             .contains("at most 120"));
-        for field in [
-            json!({"idleMinutes": 30}),
-            json!({"watch": "off"}),
-            json!({"maxTokens": 20_000}),
-        ] {
-            let err = apply(field.clone()).unwrap_err();
-            let name = field.as_object().unwrap().keys().next().unwrap().clone();
-            assert!(
-                err.contains(&name) && err.contains("Settings > Hub"),
-                "{err}"
-            );
-        }
+        // The limits and the watch are a chat's own to change.
+        apply(json!({"idleMinutes": 30, "watch": "off", "maxTokens": 20_000})).unwrap();
+        assert_eq!(read()["watch"], json!("off"));
+        assert!(both.staged_parts(VOICE_KEY).is_empty());
         assert!(apply(json!({"idleMinutes": 5}))
             .unwrap_err()
             .contains("idle time"));
@@ -919,7 +933,7 @@ mod tests {
             .unwrap_err()
             .contains("idleMinutes"));
         assert!(apply(json!("opus")).unwrap_err().contains("object"));
-        // The user's fields may be repeated as they are.
+        // Put the limits back, with the model, in one change.
         assert!(apply(json!({"idleMinutes": 240, "watch": "flags", "model": "sonnet"})).is_ok());
         assert_eq!(read()["model"], json!("sonnet"));
 

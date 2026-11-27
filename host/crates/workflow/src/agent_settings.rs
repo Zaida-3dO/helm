@@ -1,37 +1,23 @@
 //! Settings → Orchestrator for chats: the `orchestrator` key of `app_get_settings` and
 //! `app_update_settings`.
 //!
-//! A chat reads every field. It may change only two kinds of field: `newChats` and the agent a
-//! stage uses (`stages.<stage>.agent`). Everything else decides who may act or what may land
-//! without the user (the master switch, Move fast, who signs off a plan, whether the orchestrator
-//! edits, the landing rules, each stage's use and round cap, which agents may start building), so
-//! it stays the user's: an update that would change any of it is refused whole, with the Settings
-//! page named. An update may repeat a user-only field at its current value.
+//! A chat reads every field and changes any of them itself, with the Undo notice; there is no
+//! part of the key it must leave alone.
 //!
 //! An update names only the fields to change. Objects merge field by field; a list or a value
 //! replaces the old one. The merged result goes through the same strict validation as the
-//! Settings page, so an unknown or invalid field refuses the whole update. `null` resets the
-//! fields a chat may change to their defaults and leaves the rest alone.
+//! Settings page, so an unknown or invalid field refuses the whole update. `null` restores every
+//! field to its default.
 
 use crate::settings;
 use crate::types::WorkflowSettings;
-use helm_hosttools::SettingsExtension;
+use helm_hosttools::{SettingsExtension, StagedPart};
 use helm_ipc::AppEvent;
 use rusqlite::Transaction;
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 pub const KEY: &str = "orchestrator";
-const PAGE: &str = "Settings > Orchestrator";
-const STAGES: [&str; 6] = [
-    "plan",
-    "planReview",
-    "build",
-    "review",
-    "cleanup",
-    "smoketest",
-];
 
 pub struct OrchestratorSettings;
 
@@ -42,44 +28,6 @@ pub fn extension() -> Arc<dyn SettingsExtension> {
 
 fn as_json(s: &WorkflowSettings) -> Value {
     serde_json::to_value(s).expect("settings serialise")
-}
-
-/// `v` without the fields a chat may change: what is left must not differ across an update.
-fn locked(v: &Value) -> Value {
-    let mut v = v.clone();
-    if let Some(o) = v.as_object_mut() {
-        o.remove("newChats");
-        if let Some(stages) = o.get_mut("stages").and_then(Value::as_object_mut) {
-            for s in STAGES {
-                if let Some(st) = stages.get_mut(s).and_then(Value::as_object_mut) {
-                    st.remove("agent");
-                }
-            }
-        }
-    }
-    v
-}
-
-/// The path of the first difference between `a` and `b`, if any.
-fn first_diff(a: &Value, b: &Value, path: &str) -> Option<String> {
-    match (a, b) {
-        (Value::Object(x), Value::Object(y)) => {
-            let keys: BTreeSet<&String> = x.keys().chain(y.keys()).collect();
-            keys.into_iter().find_map(|k| {
-                let p = if path.is_empty() {
-                    k.clone()
-                } else {
-                    format!("{path}.{k}")
-                };
-                match (x.get(k), y.get(k)) {
-                    (Some(l), Some(r)) => first_diff(l, r, &p),
-                    _ => Some(p),
-                }
-            })
-        }
-        _ if a == b => None,
-        _ => Some(path.to_owned()),
-    }
 }
 
 /// Merge `patch` into `base`: objects field by field, anything else replaces.
@@ -97,31 +45,6 @@ fn merge(base: &mut Value, patch: &Value) {
         }
         (slot, v) => *slot = v.clone(),
     }
-}
-
-/// The current value with the fields a chat may change set back to their defaults.
-fn reset_changeable(current: &Value) -> Value {
-    let defaults = as_json(&WorkflowSettings::default());
-    let mut out = current.clone();
-    if let (Some(o), Some(d)) = (out.as_object_mut(), defaults.as_object()) {
-        if let Some(n) = d.get("newChats") {
-            o.insert("newChats".into(), n.clone());
-        }
-        if let (Some(stages), Some(dstages)) = (
-            o.get_mut("stages").and_then(Value::as_object_mut),
-            d.get("stages").and_then(Value::as_object),
-        ) {
-            for s in STAGES {
-                let agent = dstages.get(s).and_then(|v| v.get("agent")).cloned();
-                if let (Some(st), Some(agent)) =
-                    (stages.get_mut(s).and_then(Value::as_object_mut), agent)
-                {
-                    st.insert("agent".into(), agent);
-                }
-            }
-        }
-    }
-    out
 }
 
 fn sql(e: rusqlite::Error) -> String {
@@ -145,9 +68,9 @@ fn rounds() -> Value {
 
 fn options() -> Value {
     let uses = word(&["required", "auto", "off"]);
-    let mut o = json!({
+    json!({
         "type": "object",
-        "about": "Settings > Orchestrator: the staged workflow (plan, review, build, review, clean up, smoke test) and how its work lands. Read all of it. You may change only newChats and each stage's agent; everything else is the user's and an update that touches it is refused. Send only the fields to change: objects merge field by field, lists replace. null resets newChats and the stage agents to their defaults.",
+        "about": "Settings > Orchestrator: the staged workflow (plan, review, build, review, clean up, smoke test) and how its work lands. Read all of it and change any field. Send only the fields to change: objects merge field by field, lists replace. null restores every field to its default.",
         "default": as_json(&WorkflowSettings::default()),
         "merge": true,
         "fields": {
@@ -183,19 +106,12 @@ fn options() -> Value {
                     "protectedBranches": {"type": "list", "items": {"type": "string"}, "maxItems": settings::MAX_PROTECTED},
                 },
             },
-            "moveFast": {"type": "boolean", "about": "Move fast: tests only what a change touches. Only the user can turn it on or off."},
-            "landingGuard": {"type": "boolean", "about": "The landing guard: refuses pushes, merges and other landings in chats with a task. Only the user can turn it on or off."},
-            "dispatchGate": {"type": "boolean", "about": "The dispatch gate: during a task, agent spawns face their stage's gate. Only the user can turn it off."},
+            "moveFast": {"type": "boolean", "about": "Move fast: tests only what a change touches. Changing it is noted for the user, with Undo."},
+            "landingGuard": {"type": "boolean", "about": "The landing guard: refuses pushes, merges and other landings in chats with a task. Changing it is noted for the user, with Undo."},
+            "dispatchGate": {"type": "boolean", "about": "The dispatch gate: during a task, agent spawns face their stage's gate. Changing it is noted for the user, with Undo."},
             "newChats": {"type": "enum", "allowed": ["auto", "always", "never"], "about": "Whether new chats start with Orchestrator on."},
         },
-    });
-    let mut changeable = vec!["newChats".to_owned()];
-    changeable.extend(STAGES.iter().map(|s| format!("stages.{s}.agent")));
-    o["chatsMayChange"] = json!(changeable);
-    o["userOnly"] = json!(format!(
-        "Every other field. Readable here, changed only by the user in {PAGE}."
-    ));
-    o
+    })
 }
 
 impl SettingsExtension for OrchestratorSettings {
@@ -207,8 +123,8 @@ impl SettingsExtension for OrchestratorSettings {
         (key == KEY).then(options)
     }
 
-    fn needs_all_settings(&self, _key: &str) -> bool {
-        true
+    fn staged_parts(&self, _key: &str) -> &'static [StagedPart] {
+        &[]
     }
 
     fn read(&self, tx: &Transaction<'_>, _key: &str) -> Value {
@@ -225,7 +141,7 @@ impl SettingsExtension for OrchestratorSettings {
     ) -> Result<(Value, Value), String> {
         let before = as_json(&settings::load(tx).map_err(sql)?);
         let wanted = if value.is_null() {
-            reset_changeable(&before)
+            as_json(&WorkflowSettings::default())
         } else if value.is_object() {
             let mut m = before.clone();
             merge(&mut m, value);
@@ -237,11 +153,6 @@ impl SettingsExtension for OrchestratorSettings {
         };
         let next = settings::validate(wanted).map_err(|e| format!("{KEY}.{e}"))?;
         let after = as_json(&next);
-        if let Some(path) = first_diff(&locked(&before), &locked(&after), "") {
-            return Err(format!(
-                "{KEY}.{path} is yours to change only: ask the user to change it in {PAGE}. You may change newChats and each stage's agent."
-            ));
-        }
         settings::store(tx, &next, helm_core::now_ms()).map_err(sql)?;
         Ok((before, after))
     }
@@ -272,17 +183,6 @@ mod tests {
         db.snapshot(settings::load).unwrap()
     }
 
-    fn refused(db: &helm_core::db::Database, v: Value, field: &str) {
-        let before = load(db);
-        let why = apply(db, v).unwrap_err();
-        assert!(
-            why.contains(&format!("{KEY}.{field} is yours to change only")),
-            "{why}"
-        );
-        assert!(why.contains(PAGE), "{why}");
-        assert_eq!(load(db), before, "a refused update stores nothing");
-    }
-
     #[test]
     fn a_chat_reads_everything_with_its_allowed_values() {
         let (_d, db) = db(&[]);
@@ -306,20 +206,16 @@ mod tests {
             json!(["required", "off"])
         );
         assert_eq!(o["default"], v);
-        assert!(o["chatsMayChange"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("stages.review.agent")));
         assert!(OrchestratorSettings.describe("theme").is_none());
     }
 
     #[test]
-    fn the_key_is_in_the_all_tier() {
-        assert!(OrchestratorSettings.needs_all_settings(KEY));
+    fn no_part_of_the_key_is_held_back() {
+        assert!(OrchestratorSettings.staged_parts(KEY).is_empty());
     }
 
     #[test]
-    fn a_chat_may_change_new_chats_and_stage_agents_and_the_rest_merges() {
+    fn a_chat_changes_any_field_and_the_rest_merges() {
         let (_d, db) = db(&[]);
         let (before, after) = apply(
             &db,
@@ -338,79 +234,29 @@ mod tests {
     }
 
     #[test]
-    fn user_only_fields_are_refused_and_nothing_is_stored() {
+    fn every_field_is_changed_and_a_bad_one_stores_nothing() {
         let (_d, db) = db(&[]);
-        refused(&db, json!({"moveFast": true}), "moveFast");
-        refused(&db, json!({"enabled": true}), "enabled");
-        refused(&db, json!({"planSignOff": "me"}), "planSignOff");
-        refused(
-            &db,
-            json!({"orchestratorEdits": "allow"}),
-            "orchestratorEdits",
-        );
-        refused(
-            &db,
-            json!({"landing": {"default": "merge"}}),
-            "landing.default",
-        );
-        refused(
-            &db,
-            json!({"landing": {"protectedBranches": []}}),
-            "landing.protectedBranches",
-        );
-        refused(&db, json!({"homeRepos": ["github.com/o/r"]}), "homeRepos");
-        refused(
-            &db,
-            json!({"stages": {"review": {"maxRounds": 9}}}),
-            "stages.review.maxRounds",
-        );
-        refused(
-            &db,
-            json!({"stages": {"review": {"use": "off"}}}),
-            "stages.review.use",
-        );
-        refused(
-            &db,
-            json!({"stages": {"build": {"buildExempt": ["x"]}}}),
-            "stages.build.buildExempt",
-        );
-        // A good field next to a user-only one refuses the whole update.
-        refused(
-            &db,
-            json!({"newChats": "never", "moveFast": true}),
-            "moveFast",
-        );
-        assert_eq!(load(&db).new_chats, NewChats::Auto);
-    }
-
-    #[test]
-    fn repeating_a_user_only_field_at_its_current_value_is_fine() {
-        let (_d, db) = db(&[]);
-        let all = apply(&db, json!({})).unwrap().1;
-        let mut echo = all.clone();
-        echo["newChats"] = json!("always");
-        let (_, after) = apply(&db, echo).unwrap();
-        assert_eq!(after["newChats"], "always");
-        assert_eq!(after["moveFast"], false);
-    }
-
-    #[test]
-    fn a_user_who_turned_move_fast_on_keeps_it_across_a_chat_update() {
-        let (_d, db) = db(&[]);
-        db.write(|tx| {
-            let mut s = WorkflowSettings::default();
-            s.enabled = true;
-            s.move_fast = true;
-            settings::store(tx, &s, 1)
-        })
-        .unwrap();
-        apply(&db, json!({"newChats": "always"})).unwrap();
+        for (patch, check) in [
+            (json!({"moveFast": true}), "moveFast"),
+            (json!({"enabled": true}), "enabled"),
+            (json!({"planSignOff": "me"}), "planSignOff"),
+            (json!({"orchestratorEdits": "allow"}), "orchestratorEdits"),
+            (json!({"landing": {"default": "merge"}}), "landing.default"),
+            (json!({"landing": {"protectedBranches": []}}), "landing.protectedBranches"),
+            (json!({"homeRepos": ["github.com/o/r"]}), "homeRepos"),
+            (json!({"stages": {"review": {"maxRounds": 9}}}), "stages.review.maxRounds"),
+            (json!({"stages": {"review": {"use": "off"}}}), "stages.review.use"),
+            (json!({"stages": {"build": {"buildExempt": ["x"]}}}), "stages.build.buildExempt"),
+        ] {
+            let (before, after) = apply(&db, patch).unwrap();
+            assert_ne!(before, after, "{check}");
+        }
         let s = load(&db);
-        assert!(s.enabled && s.move_fast);
-        assert_eq!(s.new_chats, NewChats::Always);
-        // Turning it off is still the user's.
-        refused(&db, json!({"moveFast": false}), "moveFast");
-        assert!(load(&db).move_fast);
+        assert!(s.move_fast && s.enabled);
+        // A bad field next to a good one stores neither.
+        let kept = load(&db);
+        assert!(apply(&db, json!({"newChats": "never", "bogus": 1})).is_err());
+        assert_eq!(load(&db), kept);
     }
 
     #[test]
@@ -427,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn null_resets_what_a_chat_may_change_and_nothing_else() {
+    fn null_restores_every_field_to_its_default() {
         let (_d, db) = db(&[]);
         db.write(|tx| {
             let mut s = WorkflowSettings::default();
@@ -438,10 +284,7 @@ mod tests {
         })
         .unwrap();
         apply(&db, Value::Null).unwrap();
-        let s = load(&db);
-        assert_eq!(s.new_chats, NewChats::Auto);
-        assert_eq!(s.stages.review.agent, "reviewer");
-        assert!(s.move_fast, "the user's Move fast is not reset");
+        assert_eq!(load(&db), WorkflowSettings::default());
     }
 
     #[test]

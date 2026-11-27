@@ -1,12 +1,13 @@
 //! Dictation as a key of `app_get_settings` and `app_update_settings`: `dictation`.
 //!
 //! Where a recording of the user's voice is sent decides who hears it, so a chat reads the
-//! setting and stages a change (`app_stage_settings`) for the user to approve. The value is
+//! setting and stages a change (`app_stage_settings`) for the user to approve; it never applies
+//! it directly. The value is
 //! `{sttUrl, allowPrivateNetwork, model, language, mode}`; a staged value names only the fields to
 //! change, and the result passes the same address rule as the Settings page.
 
 use crate::settings::{self, Settings};
-use helm_hosttools::SettingsExtension;
+use helm_hosttools::{SettingsExtension, StagedPart};
 use helm_ipc::AppEvent;
 use rusqlite::Transaction;
 use serde_json::{json, Value};
@@ -105,6 +106,10 @@ fn put(tx: &Transaction<'_>, value: &Value) -> Result<(Value, Value), String> {
 }
 
 impl SettingsExtension for DictationKey {
+    fn staged_parts(&self, _key: &str) -> &'static [StagedPart] {
+        &[]
+    }
+
     fn keys(&self) -> Vec<&'static str> {
         vec![KEY]
     }

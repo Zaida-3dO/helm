@@ -15,7 +15,7 @@ use crate::config::{self, RelayConfig};
 use crate::pair::MEMORY_SERVER_ID;
 use helm_core::credentials::CredentialStore;
 use helm_core::profile::Profile;
-use helm_hosttools::SettingsExtension;
+use helm_hosttools::{SettingsExtension, StagedPart};
 use helm_ipc::{AppEvent, Services};
 use helm_platform::Platform;
 use rusqlite::Transaction;
@@ -81,6 +81,10 @@ impl HubView {
 }
 
 impl SettingsExtension for HubView {
+    fn staged_parts(&self, _key: &str) -> &'static [StagedPart] {
+        &[]
+    }
+
     fn keys(&self) -> Vec<&'static str> {
         vec![KEY]
     }
