@@ -1188,7 +1188,7 @@ async fn turns_wait_while_helm_is_offline_and_a_turn_helm_never_takes_expires() 
     let status = http(&hub, "GET", "/voice/status", Some(PHONE), "", &[]).await;
     assert_eq!(
         status.body,
-        json!({"ok": true, "helm": "offline", "version": 1, "stt": true, "pc": pc_unknown()})
+        json!({"ok": true, "helm": "offline", "version": 1, "urgency": true, "stt": true, "pc": pc_unknown()})
     );
 }
 
@@ -1458,7 +1458,7 @@ async fn status_fresh_and_heard_reports() {
     let get = |target: &'static str| http(&hub, "GET", target, Some(PHONE), "", &[]);
     assert_eq!(
         get("/voice/status").await.body,
-        json!({"ok": true, "helm": "offline", "version": 1, "stt": true, "pc": pc_unknown()})
+        json!({"ok": true, "helm": "offline", "version": 1, "urgency": true, "stt": true, "pc": pc_unknown()})
     );
     let fresh = http(&hub, "POST", "/voice/fresh", Some(PHONE), "", &[]).await;
     assert_eq!(

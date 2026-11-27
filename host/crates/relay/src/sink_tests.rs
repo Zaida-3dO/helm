@@ -3624,6 +3624,9 @@ async fn a_quick_voice_turn_opens_its_own_chat_on_the_quick_model_beside_the_dee
     let c = vctx(
         &e,
         voice::PolicyFile {
+            // The deep lane on the app default (the model field blank), the quick lane named.
+            model: String::new(),
+            effort: String::new(),
             quick_model: "local/small/quick-one".into(),
             ..Default::default()
         },

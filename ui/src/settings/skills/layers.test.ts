@@ -147,8 +147,10 @@ test('rules: the filter chips, the search and the sort of due rows', () => {
   const paths = (filter: string, query = '') => filterRules(rules, filter as never, query, today).map((r) => r.path);
   // Due rows come first; the rest keep their order.
   assert.deepEqual(paths('all'), ['rules/gone.md', 'rules/stale.md', 'rules/plain.md', 'rules/toll.md', 'rules/legacy.md']);
+  // A date counts as a trigger, exactly as the host reads an empty `when` — so the expired and
+  // review rows sit on the Triggered chip too, keeping the two chips a partition.
   assert.deepEqual(paths('plain'), ['rules/plain.md', 'rules/legacy.md']);
-  assert.deepEqual(paths('triggered'), ['rules/stale.md', 'rules/toll.md']);
+  assert.deepEqual(paths('triggered'), ['rules/gone.md', 'rules/stale.md', 'rules/toll.md']);
   assert.deepEqual(paths('expired'), ['rules/gone.md']);
   assert.deepEqual(paths('review'), ['rules/stale.md']);
   // The search reads the title, the file name and the trigger summary.
