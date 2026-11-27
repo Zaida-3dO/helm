@@ -613,6 +613,10 @@ fn voice_reset(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let paths = people::voice_paths(&profile.dir, &pid);
     voice::save_tag(&paths.tag, None)
         .map_err(|_| ApiError::internal("The voice chat tag could not be removed."))?;
+    // Both lanes start fresh: a stale quick-lane tag would otherwise hand the next utterance
+    // on that lane straight back to the old chat.
+    voice::save_tag(&paths.tag_quick, None)
+        .map_err(|_| ApiError::internal("The voice chat tag could not be removed."))?;
     voice_view(ctx, &args)
 }
 

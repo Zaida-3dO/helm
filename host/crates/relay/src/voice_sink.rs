@@ -934,12 +934,15 @@ pub fn place(c: &Ctx, turn: &VoiceTurn, notes: &[String], now: i64) -> Result<Pl
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .take();
-    // A chat that has grown past the lane's size rolls over when the next turn arrives: a fresh
-    // chat in the same lane takes its place, with what was last said written into its first message
-    // by Helm (no model turn), and the old one archived and linked as its earlier session. The
-    // turn is then delivered to the new chat, not the old one — an agent hand-off would occupy a
-    // small local model right when the next utterance lands.
-    let rolled = {
+    // A chat that has grown past the lane's size rolls over when the next turn arrives, but only
+    // once it is idle: a roll archives the old chat and stops what runs there, so rolling during
+    // an answer in flight would drop that answer (and any ask on it) mid-turn. The utterance
+    // then goes to the old chat, and the next quiet moment rolls. When it does roll, a fresh
+    // chat in the same lane takes its place, with what was last said written into its first
+    // message by Helm (no model turn), and the old one archived and linked as its earlier
+    // session. The turn is then delivered to the new chat, not the old one — an agent hand-off
+    // would occupy a small local model right when the next utterance lands.
+    let mut rolled = {
         let size =
             c.db.snapshot(|tx| {
                 Ok::<_, rusqlite::Error>(helm_chats::turn_usage::context_reported_at(
@@ -953,7 +956,15 @@ pub fn place(c: &Ctx, turn: &VoiceTurn, notes: &[String], now: i64) -> Result<Pl
             size.map(|(n, _)| n),
             first_context(&c.db, &tag.chat_id),
             c.file.roll_at(lane),
-        )
+        ) && c
+            .db
+            .snapshot(|tx| {
+                Ok::<_, rusqlite::Error>(
+                    helm_chats::finished::keeps_open(tx, &tag.chat_id, None)?.is_none(),
+                )
+            })
+            // A failed read counts as "holds": no roll without proof the chat is idle.
+            .unwrap_or(false)
     };
     let mut carry: Option<String> = None;
     if rolled {
@@ -978,8 +989,10 @@ pub fn place(c: &Ctx, turn: &VoiceTurn, notes: &[String], now: i64) -> Result<Pl
             Ok(new_id) => {
                 if let Err(e) = helm_chats::rollover::link_successor(&c.rt, &old, &new_id) {
                     // The roll-over did not complete (the old chat refused to archive, say): the
-                    // turn goes to the tagged chat as usual rather than being lost.
+                    // turn goes to the tagged chat as usual rather than being lost — and it is
+                    // no longer a first message, so no pointer line rides along.
                     log::warn!("relay: a voice chat could not roll over early: {e}");
+                    rolled = false;
                 } else {
                     carry = Some(note);
                     tag.tokens_at_start = port.facts(&new_id).map(|f| f.tokens).unwrap_or(0);
@@ -991,7 +1004,10 @@ pub fn place(c: &Ctx, turn: &VoiceTurn, notes: &[String], now: i64) -> Result<Pl
                     let _ = voice::save_tag(tag_path, Some(&tag));
                 }
             }
-            Err(e) => log::warn!("relay: the voice roll-over could not open a chat: {e}"),
+            Err(e) => {
+                log::warn!("relay: the voice roll-over could not open a chat: {e}");
+                rolled = false;
+            }
         }
     }
     let baseline = max_row(&c.db, &tag.chat_id);
@@ -1213,6 +1229,9 @@ impl ChatVoice {
                 .into_iter()
                 .flatten()
                 .collect();
+            // Restamp the refresh, or every busy event after the first expiry re-reads both
+            // tag files and the policy.
+            e.0 = Some(Instant::now());
         }
         e.1.clone()
     }

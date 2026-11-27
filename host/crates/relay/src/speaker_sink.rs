@@ -150,7 +150,7 @@ pub fn place(c: &Ctx, turn: &SpeakerTurn, now: i64) -> Result<Placed, String> {
     let lane = crate::voice::Lane::parse(turn.urgency.as_deref());
     let quick_lane = lane == crate::voice::Lane::Quick && c.file.has_quick_lane();
     let (model, effort) = c.file.new_chat(lane);
-    let port = RealPort {
+    let mut port = RealPort {
         db: &c.db,
         rt: &c.rt,
         ops: &*c.ops,
@@ -204,10 +204,20 @@ pub fn place(c: &Ctx, turn: &SpeakerTurn, now: i64) -> Result<Placed, String> {
     }
     // The talk's chat has outgrown its lane: a fresh chat in the same lane, linked as its
     // successor, with this turn's words carried over in a host-written note. No model turn, so
-    // there is no race with the next utterance.
+    // there is no race with the next utterance — but only when the chat is idle: a roll archives
+    // it and stops what runs there, so an answer in flight (or an ask waiting on it) would be
+    // dropped mid-turn; that turn goes to the old chat and the next quiet moment rolls. The
+    // talk's own lane decides the size and the fresh chat, not this turn: a quick utterance
+    // landing in a deep talk must not size its chat against the quick limit, nor open its
+    // successor on the quick model.
     let mut carry = None;
     if !made {
         let old = talk.chat_id.clone();
+        let talk_lane = if talk.quick {
+            crate::voice::Lane::Quick
+        } else {
+            crate::voice::Lane::Deep
+        };
         let size =
             c.db.snapshot(|tx| {
                 Ok::<_, rusqlite::Error>(helm_chats::turn_usage::context_reported_at(tx, &old))
@@ -215,7 +225,18 @@ pub fn place(c: &Ctx, turn: &SpeakerTurn, now: i64) -> Result<Placed, String> {
             .ok()
             .flatten();
         let first = crate::sink::first_context(&c.db, &old);
-        if crate::voice::roll_due(size.map(|(n, _)| n), first, c.file.roll_at(lane)) {
+        // A failed read counts as "holds": no roll without proof the chat is idle.
+        let idle =
+            c.db.snapshot(|tx| {
+                Ok::<_, rusqlite::Error>(
+                    helm_chats::finished::keeps_open(tx, &old, None)?.is_none(),
+                )
+            })
+            .unwrap_or(false);
+        if crate::voice::roll_due(size.map(|(n, _)| n), first, c.file.roll_at(talk_lane)) && idle {
+            let (m2, e2) = c.file.new_chat(talk_lane);
+            port.new_chat_model = m2.map(str::to_owned);
+            port.new_chat_effort = e2.map(str::to_owned);
             let title =
                 c.db.snapshot(|tx| {
                     Ok::<String, rusqlite::Error>(
@@ -242,7 +263,7 @@ pub fn place(c: &Ctx, turn: &SpeakerTurn, now: i64) -> Result<Placed, String> {
                     } else {
                         carry = Some(crate::voice::carry_note(&title, &pairs));
                         talk.chat_id = new_id.clone();
-                        if !speaker::retalk(&c.paths.chats, &turn.session, &new_id) {
+                        if !speaker::retalk(&c.paths.chats, &turn.session, &new_id, talk.quick) {
                             log::warn!(
                                 "relay: the speaker talk could not follow its own roll-over"
                             );
@@ -954,7 +975,8 @@ impl SpeakerSink for HouseSpeaker {
                 self.stop_mirror(&talk.chat_id);
                 let db3 = c.db.clone();
                 let chat = talk.chat_id.clone();
-                let holding = tokio::task::spawn_blocking(move || {
+                let started = talk.started_at;
+                let (holding, typed) = tokio::task::spawn_blocking(move || {
                     let ask = || {
                         db3.snapshot(|tx| {
                             let open = window_open_chat(tx);
@@ -977,12 +999,19 @@ impl SpeakerSink for HouseSpeaker {
                         std::thread::sleep(Duration::from_millis(150));
                         holding = ask();
                     }
-                    holding
+                    // Did the person type into this chat during the talk? Then it is theirs —
+                    // an ordinary chat, not one the channel may archive or sweep.
+                    let typed = person_typed(&db3, &chat, started);
+                    (holding, typed)
                 })
                 .await
-                .unwrap_or(None);
+                .unwrap_or((None, false));
                 if holding.is_some() || talk.leftover {
                     speaker::keep_chat(&c.paths.chats, &talk.chat_id, now);
+                } else if typed {
+                    log::debug!(
+                        "relay: a speaker chat the person typed into stays an ordinary chat"
+                    );
                 } else {
                     let _ = c
                         .ops

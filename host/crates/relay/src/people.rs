@@ -123,6 +123,23 @@ pub fn telegram_paths(profile_dir: &Path, profile_id: &str) -> telegram::Paths {
     }
 }
 
+/// Whether this chat is a live voice conversation for the profile right now — the phone app's
+/// deep lane or its quick lane (each tag file names one chat), or one of the room speaker's
+/// talks: open ones, and the ones kept past their close with something still held in them. An
+/// ask waiting in such a chat belongs on the phone, not on this PC's screen; both places that
+/// route asks read this one answer.
+pub fn voice_chat_here(profile_dir: &Path, profile_id: &str, chat: &str) -> bool {
+    let vp = voice_paths(profile_dir, profile_id);
+    if [vp.tag.as_path(), vp.tag_quick.as_path()]
+        .iter()
+        .any(|p| voice::load_tag(p).is_some_and(|t| t.chat_id == chat))
+    {
+        return true;
+    }
+    let talks = crate::speaker::load_talks(&crate::speaker::paths(profile_dir, profile_id).chats);
+    talks.talks.iter().any(|t| t.chat_id == chat) || talks.kept.iter().any(|k| k.chat_id == chat)
+}
+
 /// The voice files of one profile.
 pub fn voice_paths(profile_dir: &Path, profile_id: &str) -> voice::Paths {
     let dir = person_dir(profile_dir, profile_id);

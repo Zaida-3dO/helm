@@ -942,10 +942,11 @@ mod surface_tests {
     /// found by group, and families are merged. The caps leave a little room: a tool added to the
     /// core list, or a description grown past its cap, fails here.
     ///
-    /// Raised once for two additions every chat pays for: the progress-line tool and the
-    /// graphics-card hold actions on `app_gpu` (what a hold does now belongs in its guidelines,
-    /// not in the one-line description). The list was trimmed where it was wordy, but not by
-    /// enough to keep the old caps without cutting teaching agents need.
+    /// The caps were set to the measured current list plus a small margin — a few hundred
+    /// characters and one visible tool over what this PC prints with `HELM_PRINT_BUDGET=1`
+    /// today. Nothing was added to or trimmed from the core list for them; they leave room so
+    /// ordinary drift trips here instead of cutting teaching agents need. Trimming wordy
+    /// descriptions is a separate job, not something these numbers stand for.
     #[test]
     fn a_chats_own_tool_list_stays_small_and_every_description_stays_short() {
         let reg = super::host_tools();

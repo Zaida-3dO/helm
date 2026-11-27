@@ -358,8 +358,7 @@ fn ask(ctx: &ToolCtx, a: Value) -> ToolResult {
     // the person is there — not while they sit at the keys in Helm, where it belongs instead.
     let now = helm_core::now_ms();
     let tg_here = ch.tg_chat.as_deref() == Some(ctx.caller_chat_id.as_str());
-    let voice_here = crate::voice::load_tag(&crate::people::voice_paths(&dir, &ch.profile_id).tag)
-        .is_some_and(|t| t.chat_id == ctx.caller_chat_id);
+    let voice_here = crate::people::voice_chat_here(&dir, &ch.profile_id, &ctx.caller_chat_id);
     let origin = if tg_here {
         approve::Surface::Telegram
     } else if voice_here {
@@ -506,6 +505,7 @@ fn look(
     dir: &Path,
     kinds: Option<&helm_consent::AllowKinds>,
     open: &[String],
+    asked: &[(String, String)],
     seen: &HashMap<String, i64>,
 ) -> Look {
     let chans = channels(db, dir);
@@ -519,13 +519,14 @@ fn look(
         src,
         Some(Source::Manual | Source::ScreenLock | Source::Sleep)
     );
+    // The input clock is per-PC, not per-person: anyone moving this machine's mouse counts as
+    // "at the keys", so another household member working here keeps a person's asks on this
+    // screen instead of their phone. A known limit of one desktop signal per machine.
     let desktop_at = helm_afk::signals::idle_secs().map(|s| now - (s as i64) * 1000);
     // The one routing decision of the look: which surface this request's ask belongs to.
     let wanted = |ch: &Channel, chat: &str| -> bool {
         let tg_here = ch.tg_chat.as_deref() == Some(chat);
-        let voice_here =
-            crate::voice::load_tag(&crate::people::voice_paths(dir, &ch.profile_id).tag)
-                .is_some_and(|t| t.chat_id == chat);
+        let voice_here = crate::people::voice_chat_here(dir, &ch.profile_id, chat);
         let origin = if tg_here {
             approve::Surface::Telegram
         } else if voice_here {
@@ -586,15 +587,22 @@ fn look(
                 };
                 if !ch.policy.approvals
                     || !matches!(r.kind, AttentionKind::Approval | AttentionKind::Plan)
-                    || !wanted(ch, &r.chat_id)
                 {
                     continue;
                 }
+                // Routing only decides fresh asks. Once buttons are out for one of these
+                // interactions its card must stay until the interaction itself ends: a lapsed
+                // Telegram window or someone moving the PC's mouse would otherwise take the
+                // card down as if it had been answered here.
+                let routed = wanted(ch, &r.chat_id);
                 for i in rt
                     .live_thread(&r.chat_id)
                     .map(|t| t.interactions)
                     .unwrap_or_default()
                 {
+                    if !routed && !asked.iter().any(|(c, k)| c == &r.chat_id && k == &i.id) {
+                        continue;
+                    }
                     out.push(approve::Waiting {
                         chat_id: r.chat_id.clone(),
                         chat_title: r.title.clone(),
@@ -629,7 +637,12 @@ fn look(
                 if member {
                     continue;
                 }
-                if !ch.policy.approvals || !wanted(ch, &r.chat_id) {
+                // A card already asked on the phone stays asked: routing only picks where a
+                // new ask goes, and dropping this row would tear the open card down while
+                // its request still waits.
+                if !ch.policy.approvals
+                    || (!open.iter().any(|i| i == &r.id) && !wanted(ch, &r.chat_id))
+                {
                     continue;
                 }
                 out.push(approve::ConsentWaiting {
@@ -688,13 +701,23 @@ pub fn watch_away(
         loop {
             every.tick().await;
             let (rt2, afk, dir, db2) = (rt.clone(), afk.clone(), profile_dir.clone(), db.clone());
-            let (kinds, open, seen) = (
+            let (kinds, open, asked, seen) = (
                 services.get::<helm_consent::AllowKinds>(),
                 sink.asks.consent_ids(),
+                sink.asks.asked_keys(),
                 sink.seen.snapshot(),
             );
             let Ok(found) = tokio::task::spawn_blocking(move || {
-                look(&rt2, &afk, &db2, &dir, kinds.as_deref(), &open, &seen)
+                look(
+                    &rt2,
+                    &afk,
+                    &db2,
+                    &dir,
+                    kinds.as_deref(),
+                    &open,
+                    &asked,
+                    &seen,
+                )
             })
             .await
             else {

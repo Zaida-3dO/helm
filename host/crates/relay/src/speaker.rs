@@ -398,13 +398,15 @@ pub fn mark_leftover(path: &Path, session: &str) -> bool {
 }
 
 /// A talk's chat was rolled over into `new_chat` (an early roll-over the hub-side channel does):
-/// the talk follows its own link, keeping the talk on one live chat.
-pub fn retalk(path: &Path, session: &str, new_chat: &str) -> bool {
+/// the talk follows its own link, keeping the talk on one live chat. `quick` restates which lane
+/// the new chat opened on, so a talk that changed lanes keeps its record in step with its chat.
+pub fn retalk(path: &Path, session: &str, new_chat: &str, quick: bool) -> bool {
     let mut talks = load_talks(path);
     let Some(t) = talks.talks.iter_mut().find(|t| t.session == session) else {
         return false;
     };
     t.chat_id = new_chat.to_owned();
+    t.quick = quick;
     save_talks(path, &talks).is_ok()
 }
 
@@ -852,10 +854,12 @@ mod tests {
             kept.iter().map(|k| k.chat_id.as_str()).collect::<Vec<_>>(),
             ["kept-1"]
         );
-        // Reset empties the list and hands back the chats to archive.
+        // Reset empties the list and hands back the chats to archive. The one talk left is the
+        // fresh one for s-2 (its chat was hand-archived with no successor, so the leftover flag
+        // went with it): nothing is open on it.
         let all = take_all(&file);
         assert_eq!(all.len(), 1);
-        assert!(all[0].leftover);
+        assert!(!all[0].leftover);
         assert!(load_talks(&file).talks.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }

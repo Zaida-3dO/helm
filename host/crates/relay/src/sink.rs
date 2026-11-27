@@ -678,6 +678,11 @@ impl ChatPort for RealPort<'_> {
         // default exactly as before. No board is named, so the chat goes to the default board
         // (no board has the Telegram folder as its own).
         let mut args = json!({ "cwd": self.folder });
+        // Name the profile the chat is for: `chat_create` then reads that profile's new-chat
+        // defaults, not whichever profile happens to be active in the sidebar.
+        if let Some(pid) = &self.profile_id {
+            args["profileId"] = json!(pid);
+        }
         // A saved local model whose server is set up but switched off would be accepted here and
         // then refuse every turn, leaving the phone with no reason: it is left out, and the chat
         // opens on the app default (the effort, if any, is kept).
@@ -740,11 +745,12 @@ impl ChatPort for RealPort<'_> {
                     self.label,
                     crate::telegram::cut_chars(&e.message, 160).0
                 ));
+                let mut plain = json!({ "cwd": self.folder });
+                if let Some(pid) = &self.profile_id {
+                    plain["profileId"] = json!(pid);
+                }
                 self.handle
-                    .block_on(
-                        self.ops
-                            .invoke("chat_create", json!({ "cwd": self.folder })),
-                    )
+                    .block_on(self.ops.invoke("chat_create", plain))
                     .map_err(|e| e.message)?
             }
         };
@@ -917,9 +923,13 @@ pub(crate) fn open_repair_chat(c: &Ctx, o: &ServiceOutage, now: i64) -> Result<S
     let folder = plain_path(&PathBuf::from(&c.folder).join("service-repair"));
     std::fs::create_dir_all(&folder)
         .map_err(|_| "The service chats' folder could not be made.".to_owned())?;
+    // The profile named at creation decides whose new-chat defaults the repair chat gets.
     let chat = c
         .handle
-        .block_on(c.ops.invoke("chat_create", json!({ "cwd": folder })))
+        .block_on(c.ops.invoke(
+            "chat_create",
+            json!({ "cwd": folder, "profileId": c.profile_id }),
+        ))
         .map_err(|e| e.message)?;
     let id = chat["id"]
         .as_str()

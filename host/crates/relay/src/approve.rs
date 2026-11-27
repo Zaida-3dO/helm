@@ -81,6 +81,12 @@ pub struct Presence {
 ///
 /// - A voice conversation, and any AFK span that states the person left this PC — set by hand,
 ///   screen locked, machine asleep: nobody can answer at this screen, so the phone is the place.
+/// - A chat started over Telegram keeps its asks there: the phone is where that conversation
+///   lives, and no quiet minute moves it to a screen nobody is watching. Only input at this PC
+///   that came *after* the last touch on that channel takes its asks to Helm instead. There is
+///   deliberately no time window here: the card spam this rule stopped was cards answered at
+///   the keys, which the fresher-input check already covers; a window also strands a phone
+///   conversation's cards the moment it lapses or Helm restarts with an empty memory.
 /// - Being idle is deliberately not enough on its own. An untouched mouse only says nobody has
 ///   clicked lately; sending an ask to the phone for every quiet minute is how approval cards
 ///   piled up over nights spent watching one chat in Helm and answering its cards there.
@@ -91,6 +97,15 @@ pub struct Presence {
 pub fn on_telegram(origin: Surface, presence: &Presence, away_declared: bool, now: i64) -> bool {
     if origin == Surface::Voice || away_declared {
         return true;
+    }
+    // Only a touch at this PC that postdates the channel's own last message takes over there;
+    // with no recorded touch there is nothing to postdate.
+    let desk_first = matches!(
+        (presence.telegram_at, presence.desktop_at),
+        (Some(t), Some(d)) if d > t
+    );
+    if origin == Surface::Telegram {
+        return !desk_first;
     }
     let Some(at) = presence.telegram_at else {
         return false;
@@ -558,6 +573,17 @@ impl Asks {
             .values()
             .filter(|a| a.consent)
             .map(|a| a.request_id.clone())
+            .collect()
+    }
+
+    /// The (chat, request) pairs of waiting requests that already have an ask out — neither a
+    /// chat's own question nor a consent card. Routing decides fresh asks only; once buttons
+    /// are out for one of these, its card stays until the request itself ends.
+    pub fn asked_keys(&self) -> Vec<(String, String)> {
+        self.map()
+            .values()
+            .filter(|a| !a.consent && a.question.is_none())
+            .map(|a| (a.chat_id.clone(), a.request_id.clone()))
             .collect()
     }
 
