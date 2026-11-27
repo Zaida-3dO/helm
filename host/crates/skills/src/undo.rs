@@ -232,6 +232,11 @@ pub fn revert(profile_dir: &Path, restore: &Restore) -> io::Result<()> {
         }
         discard(profile_dir, restore);
     }
+    // The file was put back by direct write: a restored or re-deleted rule must reach the rule
+    // index at once.
+    if restore.kind == Kind::Rule {
+        crate::launch::forget_rules(&restore.layer.root(profile_dir));
+    }
     Ok(())
 }
 

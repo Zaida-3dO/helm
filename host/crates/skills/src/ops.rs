@@ -651,6 +651,12 @@ fn transfer(ctx: &OpCtx, v: Value, remove_original: bool) -> Result<String, ApiE
         })?;
         knowledge_changed(ctx, &from);
     }
+    // A rule that just landed in (or left) a layer must reach the rule index at once: copy and
+    // move write the file directly, without going through `rules::write`.
+    if kind == Kind::Rule {
+        crate::launch::forget_rules(&from.root(&data));
+        crate::launch::forget_rules(&to.root(&data));
+    }
     knowledge_changed(ctx, &to);
     Ok(a.name)
 }

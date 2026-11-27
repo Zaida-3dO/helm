@@ -339,6 +339,11 @@ fn safe_target(root: &Path, rel: &str) -> Option<PathBuf> {
     Some(p)
 }
 
+/// Whether a hub-relative path (`rules/<file>` and friends) lands in the rules folder.
+fn touches_rules(rel: &str) -> bool {
+    rel.split('/').next().unwrap_or("") == "rules"
+}
+
 /// Remove folders left empty by a deleted file, up to (not including) the `rules`, `skills` or
 /// `agents` folder.
 fn prune(abs: &Path, kind_dir: &Path) {
@@ -475,6 +480,11 @@ impl Pass<'_> {
                     if fs::remove_file(&lf.abs).is_ok() {
                         let kind = lf.rel.split('/').next().unwrap_or("");
                         prune(&lf.abs, &root.join(kind));
+                        // The local copy is gone and the hub's will be re-pulled: keep the rule
+                        // index honest about the gap in between.
+                        if touches_rules(&lf.rel) {
+                            crate::launch::forget_rules(&root);
+                        }
                         self.rep.touched(&link.local);
                     }
                     self.st.files.remove(&k);
@@ -629,6 +639,10 @@ impl Pass<'_> {
                 }
                 if fs::remove_file(&abs).is_ok() {
                     prune(&abs, &kind_dir);
+                    // A pulled delete lands on the file directly: a rule must leave the index now.
+                    if touches_rules(&f.path) {
+                        crate::launch::forget_rules(&root);
+                    }
                     self.rep.removed += 1;
                     self.rep.touched(&link.local);
                 }
@@ -689,6 +703,11 @@ impl Pass<'_> {
                         sha256: sha,
                     },
                 );
+                // The hub's copy is written straight to the file: a rule lands in the index at
+                // once, not after the fresh window.
+                if touches_rules(&f.path) {
+                    crate::launch::forget_rules(&root);
+                }
                 self.rep.pulled += 1;
                 self.rep.touched(&link.local);
             }
