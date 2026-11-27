@@ -424,7 +424,10 @@ mod tests {
         let (_, after) = apply(ENABLED, json!({"ollama": false})).unwrap();
         assert_eq!(after, json!({"strata": true, "ollama": false}));
         let why = apply(ENABLED, json!({"rogue": true})).unwrap_err();
-        assert!(why.contains("no such server") && why.contains("stage localServers"), "{why}");
+        assert!(
+            why.contains("no such server") && why.contains("stage localServers"),
+            "{why}"
+        );
         assert!(apply(ENABLED, json!({"strata": "yes"}))
             .unwrap_err()
             .contains("true or false"));
@@ -438,9 +441,9 @@ mod tests {
         // is refused, and what was left out is gone. (A chat stages this; approval applies it.)
         let mut list = read(SERVERS);
         assert_eq!(list.as_array().unwrap().len(), 2);
-        list.as_array_mut().unwrap().push(
-            json!({"name": "Mine", "kind": "ollama", "baseUrl": "http://127.0.0.1:11500"}),
-        );
+        list.as_array_mut()
+            .unwrap()
+            .push(json!({"name": "Mine", "kind": "ollama", "baseUrl": "http://127.0.0.1:11500"}));
         let (_, after) = apply(SERVERS, list.clone()).unwrap();
         assert_eq!(after.as_array().unwrap().len(), 3);
         assert_eq!(after[2]["id"], "mine");

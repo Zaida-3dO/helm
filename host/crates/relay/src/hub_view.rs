@@ -26,8 +26,8 @@ pub const KEY: &str = "hubConnection";
 /// Names come from the hub; keep what a chat sees short and on one line.
 const MAX_NAME: usize = 64;
 
-const REFUSAL: &str =
-    "hubConnection is read only. Pair with app_stage_settings (the user approves it) or in Settings > Hub.";
+const READ_ONLY_ANSWER: &str =
+    "hubConnection is read only: it reports the connection. To pair, call app_stage_settings with changes {\"hubPairing\": {...}} and the user approves it.";
 
 type StateFn = Box<dyn Fn() -> &'static str + Send + Sync>;
 type MemoryFn = Box<dyn Fn() -> bool + Send + Sync>;
@@ -123,11 +123,11 @@ impl SettingsExtension for HubView {
         _key: &str,
         _value: &Value,
     ) -> Result<(Value, Value), String> {
-        Err(REFUSAL.into())
+        Err(READ_ONLY_ANSWER.into())
     }
 
     fn restore(&self, _tx: &Transaction<'_>, _key: &str, _value: &Value) -> Result<(), String> {
-        Err(REFUSAL.into())
+        Err(READ_ONLY_ANSWER.into())
     }
 
     fn changed_event(&self, _key: &str) -> AppEvent {
@@ -251,7 +251,7 @@ mod tests {
             v.restore(&tx, KEY, &json!({})).unwrap_err(),
         ] {
             assert!(
-                e.contains("app_stage_settings") && e.contains("Settings > Hub"),
+                e.contains("app_stage_settings") && e.contains("hubPairing"),
                 "{e}"
             );
         }

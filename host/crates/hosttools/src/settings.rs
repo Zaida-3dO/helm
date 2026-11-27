@@ -877,7 +877,10 @@ mod tests {
         let why = update_settings(&ctx(&e), json!({"changes": {"agentSettingsAll": false}}))
             .unwrap_err()
             .public;
-        assert!(why.contains("app_stage_settings") && why.contains("agentSettingsAll"), "{why}");
+        assert!(
+            why.contains("app_stage_settings") && why.contains("agentSettingsAll"),
+            "{why}"
+        );
         // The generic preference writer still refuses it.
         assert!(e
             .db
@@ -892,8 +895,11 @@ mod tests {
         assert!(r.unwrap_err().public.contains("200 to 4096"));
         let many: Map<String, Value> = (0..17).map(|i| (format!("k{i}"), json!(1))).collect();
         assert!(update_settings(&ctx(&e), json!({"changes": many})).is_err());
-        let g = get_settings(&ctx(&e), json!({"keys": ["theme", "agentSettingsAll", "selection"]}))
-            .unwrap();
+        let g = get_settings(
+            &ctx(&e),
+            json!({"keys": ["theme", "agentSettingsAll", "selection"]}),
+        )
+        .unwrap();
         assert!(g["settings"].get("theme").is_some());
         assert_eq!(g["options"]["agentSettingsAll"]["needsApproval"], true);
         assert!(g["options"]["agentSettingsAll"]["approvalReason"].is_string());
@@ -948,8 +954,16 @@ mod tests {
                 said.push(match r {
                     Ok(_) => "applied".to_owned(),
                     Err(err) => {
-                        assert!(!direct, "{key}: a direct key was turned away: {}", err.public);
-                        assert!(err.public.contains("app_stage_settings"), "{key}: {}", err.public);
+                        assert!(
+                            !direct,
+                            "{key}: a direct key was turned away: {}",
+                            err.public
+                        );
+                        assert!(
+                            err.public.contains("app_stage_settings"),
+                            "{key}: {}",
+                            err.public
+                        );
                         for dead in DEAD_ENDS {
                             assert!(!err.public.to_lowercase().contains(dead), "{key}");
                         }
@@ -970,7 +984,10 @@ mod tests {
                     (d, r) => panic!("{key} direct={d}: {r:?}"),
                 }
             }
-            assert_eq!(said[0], said[1], "{key}: the two people were answered differently");
+            assert_eq!(
+                said[0], said[1],
+                "{key}: the two people were answered differently"
+            );
             assert_eq!(said[0] == "applied", direct, "{key}");
         }
     }
@@ -1030,12 +1047,18 @@ mod tests {
         // A chat reads it, flagged, and is told how to stage it.
         let g = get_settings(&c, json!({"keys": ["newChatPermissionMode"]})).unwrap();
         assert_eq!(g["options"]["newChatPermissionMode"]["needsApproval"], true);
-        assert_eq!(g["options"]["newChatPermissionMode"]["allowed"][1], "default");
+        assert_eq!(
+            g["options"]["newChatPermissionMode"]["allowed"][1],
+            "default"
+        );
         let all = get_settings(&c, json!({})).unwrap();
         assert!(all["settings"].get("newChatPermissionMode").is_some());
         let r = update_settings(&c, json!({"changes": {"newChatPermissionMode": "default"}}));
         let said = r.unwrap_err().public;
-        assert!(said.contains("app_stage_settings") && said.contains("newChatPermissionMode"), "{said}");
+        assert!(
+            said.contains("app_stage_settings") && said.contains("newChatPermissionMode"),
+            "{said}"
+        );
         // What a chat changes itself is not staged: it is told the call to make.
         let low = [("compactSidebar".to_owned(), json!(true))];
         let never = apply_approved(&services, &*e.sink, "chat-1", &low, true).unwrap_err();
@@ -1047,7 +1070,10 @@ mod tests {
         ];
         let dry = apply_approved(&services, &*e.sink, "chat-1", &want, false).unwrap();
         assert_eq!(dry[0].after, Some(json!("D:/DIST")), "the rule's value");
-        assert_eq!((read("newChatPermissionMode"), e.sink.kinds().len()), (None, 0));
+        assert_eq!(
+            (read("newChatPermissionMode"), e.sink.kinds().len()),
+            (None, 0)
+        );
         let bad = [("newChatPermissionMode".to_owned(), json!("plan"))];
         let why = apply_approved(&services, &*e.sink, "chat-1", &bad, false).unwrap_err();
         assert!(why.contains("\"acceptEdits\""), "{why}");
@@ -1072,7 +1098,10 @@ mod tests {
         assert_eq!(listed["changes"].as_array().unwrap().len(), 2);
         let ids: Vec<i64> = done.iter().filter_map(|a| a.change_id).collect();
         undo(&o, json!({"changeIds": ids})).unwrap();
-        assert_eq!((read("newChatPermissionMode"), read("updateSource")), (None, None));
+        assert_eq!(
+            (read("newChatPermissionMode"), read("updateSource")),
+            (None, None)
+        );
         assert_eq!(SHOUTS.load(std::sync::atomic::Ordering::SeqCst), shouts + 2);
     }
 

@@ -3,7 +3,8 @@
 //! change it:
 //!
 //! - `UserOnly`: settings-like rows only the user edits (in Settings); no agent tool writes them.
-//! - `Tool`: rows an agent may change, only through that feature's own host tool.
+//! - `Tool`: rows an agent may change, only through that feature's own host tool or through the
+//!   settings tools (`app_update_settings`, or `app_stage_settings` when the key needs approval).
 //! - `Data`: the app's own records (chats, messages, projects, caches), never a setting.
 //!
 //! The app's `every_table_is_classified` test opens a database with every registered migration and
@@ -147,10 +148,7 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("schedule_runs", Data),
     ("schedule_reminders", Data),
     // Workflow: Settings > Orchestrator and the per-chat Orchestrator state.
-    (
-        "workflow_settings",
-        UserOnly("Settings > Orchestrator is yours alone; no agent tool reads or changes it."),
-    ),
+    ("workflow_settings", Tool),
     // An Auto chat's own root agent may turn that chat on (app_orchestrator_on); nothing else.
     ("chat_workflow_modes", Tool),
     // Tasks, changes and their record: written through app_workflow / app_workflow_report.
@@ -171,10 +169,7 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("afk_spans", Data),
     ("afk_digests", Data),
     ("afk_events", Data),
-    (
-        "governor_settings",
-        UserOnly("The usage governor can stop your chats, so only you set it."),
-    ),
+    ("governor_settings", Tool),
     // The question gatekeeper: its settings and its audit trail of the asks it looked at.
     (
         "gate_settings",
@@ -185,15 +180,9 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("gate_stop_chains", Data),
     // Chats another chat placed on a board, which keep the mode they had there.
     ("chat_agent_moves", Data),
-    (
-        "board_working_modes",
-        UserOnly("How a board's chats work is yours to set; agents never change it."),
-    ),
+    ("board_working_modes", Tool),
     // Local model servers: the addresses, switches and numbers around them.
-    (
-        "local_model_settings",
-        UserOnly("Servers and their keys are yours to set; chats change some switches and stage the games, restart task and pause file."),
-    ),
+    ("local_model_settings", Tool),
     // Which Ollama variants Helm made for chat windows; written and pruned by Helm alone.
     ("local_model_variants", Data),
     // Whether local models are unloaded and kept off, and since when.
@@ -253,10 +242,7 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ),
     ("memindex_docs", Data),
     // Dictation: which speech-to-text server the microphone button sends audio to.
-    (
-        "dictation_settings",
-        UserOnly("Where your voice is sent for dictation is yours to set."),
-    ),
+    ("dictation_settings", Tool),
 ];
 
 /// The class of a table, or None when it is unclassified.

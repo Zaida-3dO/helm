@@ -29,7 +29,10 @@ impl StagedPart {
     /// A part with its reason. In a `const`, an empty path or reason is a compile error.
     pub const fn new(path: &'static str, reason: &'static str) -> Self {
         assert!(!path.is_empty(), "a staged part needs its path");
-        assert!(!reason.is_empty(), "a staged part needs its one-line reason");
+        assert!(
+            !reason.is_empty(),
+            "a staged part needs its one-line reason"
+        );
         assert!(
             reason.len() <= helm_core::prefs::Access::MAX_REASON,
             "the reason must fit on one line of the card"

@@ -254,8 +254,14 @@ mod tests {
                 Route::Apply => assert_eq!(a, Access::Direct, "{k}"),
                 Route::Stage { part, reason } => {
                     let said = stage_message(k, part, reason);
-                    assert!(said.contains("app_stage_settings") && said.contains(k), "{said}");
-                    assert!(reason.ends_with('.') && reason.len() <= Access::MAX_REASON, "{k}");
+                    assert!(
+                        said.contains("app_stage_settings") && said.contains(k),
+                        "{said}"
+                    );
+                    assert!(
+                        reason.ends_with('.') && reason.len() <= Access::MAX_REASON,
+                        "{k}"
+                    );
                     for dead in DEAD_ENDS {
                         assert!(!said.to_lowercase().contains(dead), "{said}");
                     }
@@ -268,15 +274,22 @@ mod tests {
         // A part of a Direct key that needs approval stages too, naming the part.
         let part = StagedPart::new("approvals", "It can approve things for you.");
         match route(Access::Direct, Some(&part)) {
-            Route::Stage { part: Some("approvals"), reason } => {
-                assert!(stage_message("telegram", Some("approvals"), reason).contains("telegram.approvals"))
+            Route::Stage {
+                part: Some("approvals"),
+                reason,
+            } => {
+                assert!(stage_message("telegram", Some("approvals"), reason)
+                    .contains("telegram.approvals"))
             }
             other => panic!("{other:?}"),
         }
         assert!(direct_message("theme").contains("app_update_settings"));
         assert!(not_a_setting("selection").contains("not a Helm setting"));
         assert!(access("nonsense").is_none() && access("hubConnection").is_none());
-        assert!(access("selection").is_none(), "internal rows are no setting");
+        assert!(
+            access("selection").is_none(),
+            "internal rows are no setting"
+        );
     }
 
     /// The approval list stays short and each entry names its danger. Adding one means raising
@@ -286,13 +299,29 @@ mod tests {
         let keys = approval_keys();
         assert!(keys.len() <= MAX_APPROVAL_KEYS, "{keys:?}");
         for k in &keys {
-            assert!(reason(k).is_some_and(|w| !w.is_empty() && w.ends_with('.')), "{k}");
+            assert!(
+                reason(k).is_some_and(|w| !w.is_empty() && w.ends_with('.')),
+                "{k}"
+            );
         }
-        for must in ["agentSettingsAll", "workmode", "skipPermissions", "dictation", "credentials"] {
+        for must in [
+            "agentSettingsAll",
+            "workmode",
+            "skipPermissions",
+            "dictation",
+            "credentials",
+        ] {
             assert!(keys.contains(&must), "{must}");
         }
         // Tuning is Direct, and so is what the old tiers held back.
-        for k in ["theme", "keybindings", "fastMode", "usageGovernor", "localGames", "rolloverTokens"] {
+        for k in [
+            "theme",
+            "keybindings",
+            "fastMode",
+            "usageGovernor",
+            "localGames",
+            "rolloverTokens",
+        ] {
             assert_eq!(access(k), Some(Access::Direct), "{k}");
         }
         assert!(direct_pref_keys().len() > 50);
@@ -302,12 +331,16 @@ mod tests {
     }
 
     fn files(dir: &Path, want: &dyn Fn(&str) -> bool, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             let name = path.file_name().unwrap().to_string_lossy().to_string();
             if path.is_dir() {
-                if !["target", "tests", "gen", "node_modules", "generated", "dev"].contains(&name.as_str()) {
+                if !["target", "tests", "gen", "node_modules", "generated", "dev"]
+                    .contains(&name.as_str())
+                {
                     files(&path, want, out);
                 }
             } else if want(&name) {
@@ -349,22 +382,44 @@ mod tests {
     /// interface source, so writing a dead end again fails here.
     #[test]
     fn no_source_text_sends_a_chat_to_the_user_instead_of_a_call() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("..");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("..");
         let mut rust = Vec::new();
-        files(&root.join("host"), &|n| n.ends_with(".rs") && n != "tests.rs" && !n.ends_with("_tests.rs"), &mut rust);
+        files(
+            &root.join("host"),
+            &|n| n.ends_with(".rs") && n != "tests.rs" && !n.ends_with("_tests.rs"),
+            &mut rust,
+        );
         let mut ui = Vec::new();
-        files(&root.join("ui").join("src"), &|n| {
-            (n.ends_with(".ts") || n.ends_with(".tsx")) && !n.contains(".test.") && !n.ends_with(".d.ts")
-        }, &mut ui);
-        assert!(rust.len() > 100 && ui.len() > 50, "the scan found too few files: wrong root?");
+        files(
+            &root.join("ui").join("src"),
+            &|n| {
+                (n.ends_with(".ts") || n.ends_with(".tsx"))
+                    && !n.contains(".test.")
+                    && !n.ends_with(".d.ts")
+            },
+            &mut ui,
+        );
+        assert!(
+            rust.len() > 100 && ui.len() > 50,
+            "the scan found too few files: wrong root?"
+        );
         let mut found = Vec::new();
         for f in rust.iter().chain(ui.iter()) {
             // This file lists the phrases it forbids.
             if f.ends_with("hosttools/src/settings_allow.rs") {
                 continue;
             }
-            let Ok(raw) = std::fs::read_to_string(f) else { continue };
-            let text = if f.extension().is_some_and(|e| e == "rs") { without_tests(&raw) } else { raw };
+            let Ok(raw) = std::fs::read_to_string(f) else {
+                continue;
+            };
+            let text = if f.extension().is_some_and(|e| e == "rs") {
+                without_tests(&raw)
+            } else {
+                raw
+            };
             let low = text.to_lowercase();
             for dead in DEAD_ENDS {
                 if low.contains(dead) {
@@ -372,7 +427,11 @@ mod tests {
                 }
             }
         }
-        assert!(found.is_empty(), "text that sends a chat to the user:\n{}", found.join("\n"));
+        assert!(
+            found.is_empty(),
+            "text that sends a chat to the user:\n{}",
+            found.join("\n")
+        );
         // The scanner itself: a dropped test module hides its text, a live line does not.
         let src = "fn a() { \"yours to change only\" }\n#[cfg(test)]\nmod tests {\n    \"ask the user to change it\"\n}\n";
         let kept = without_tests(src);

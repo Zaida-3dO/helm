@@ -162,6 +162,44 @@ fn effective(key: &str, stored: Option<&Value>) -> Value {
     }
 }
 
+/// The fields of an object setting that differ between `from` and `to`, as (dotted path, before,
+/// after). Empty when either is not an object or nothing differs.
+fn field_changes<'a>(from: &'a Value, to: &'a Value) -> Vec<(String, &'a Value, &'a Value)> {
+    fn walk<'a>(
+        path: &str,
+        from: &'a Value,
+        to: &'a Value,
+        out: &mut Vec<(String, &'a Value, &'a Value)>,
+    ) {
+        match (from, to) {
+            (Value::Object(a), Value::Object(b)) => {
+                let mut keys: Vec<&String> = a.keys().chain(b.keys()).collect();
+                keys.sort();
+                keys.dedup();
+                for k in keys {
+                    let (x, y) = (
+                        a.get(k).unwrap_or(&Value::Null),
+                        b.get(k).unwrap_or(&Value::Null),
+                    );
+                    let p = if path.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{path}.{k}")
+                    };
+                    walk(&p, x, y, out);
+                }
+            }
+            _ if from != to => out.push((path.to_owned(), from, to)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    if from.is_object() && to.is_object() {
+        walk("", from, to, &mut out);
+    }
+    out
+}
+
 /// The card's lines: the title, then one line per change. Every value is shown whole; a target
 /// whose lines would not fit is refused rather than cut.
 fn card_lines(s: &Staged) -> Result<Vec<String>, String> {
@@ -195,13 +233,25 @@ fn card_lines(s: &Staged) -> Result<Vec<String>, String> {
         ));
     }
     for (key, c) in &s.settings {
-        let (from, to) = (show(key, &c.from), show(key, &c.to));
-        let one = format!("{}: {from} → {to}", label(key));
-        if one.chars().count() <= helm_consent::kinds::MAX_SUMMARY_LINE {
-            lines.push(one);
+        // A setting that is an object shows the fields that change, not the whole of it.
+        let parts = field_changes(&c.from, &c.to);
+        let rows: Vec<(String, &Value, &Value)> = if parts.is_empty() {
+            vec![(label(key).to_owned(), &c.from, &c.to)]
         } else {
-            lines.push(format!("{} now: {from}", label(key)));
-            lines.push(format!("{} after: {to}", label(key)));
+            parts
+                .into_iter()
+                .map(|(path, f, t)| (format!("{}.{path}", label(key)), f, t))
+                .collect()
+        };
+        for (name, f, t) in rows {
+            let (from, to) = (show(key, f), show(key, t));
+            let one = format!("{name}: {from} → {to}");
+            if one.chars().count() <= helm_consent::kinds::MAX_SUMMARY_LINE {
+                lines.push(one);
+            } else {
+                lines.push(format!("{name} now: {from}"));
+                lines.push(format!("{name} after: {to}"));
+            }
         }
     }
     let fits = lines

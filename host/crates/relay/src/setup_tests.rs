@@ -74,6 +74,9 @@ fn env_with(own_hub_ok: bool) -> Env {
     }
     let rules = crate::pref_rules::pref_rules(&s, &events);
     s.insert(Arc::new(helm_hosttools::PrefRules(rules)));
+    s.insert(Arc::new(helm_hosttools::SettingsExtensions(vec![
+        crate::settings_extension(&profile.dir),
+    ])));
     s.insert(Arc::new(profile));
     s.insert(Arc::new(platform));
     s.insert(db.clone());
@@ -137,6 +140,49 @@ impl Env {
             })
             .unwrap()
             .unwrap_or_default()
+    }
+
+    /// A chat's own `app_update_settings`.
+    fn update(&self, chat: &str, changes: Value) -> Result<Value, String> {
+        let mut reg = HostToolRegistry::new();
+        helm_hosttools::settings::register_host_tools(&mut reg);
+        let helm_hosttools::ToolHandler::Blocking(f) =
+            reg.get("app_update_settings").unwrap().handler.clone()
+        else {
+            panic!("blocking tool")
+        };
+        let ctx = ToolCtx {
+            caller_chat_id: chat.into(),
+            is_child: false,
+            tool_call_id: None,
+            origin: helm_hosttools::CallOrigin::Agent,
+            services: self.services.clone(),
+            events: self.sink.clone(),
+            ops: None,
+        };
+        f(&ctx, json!({"changes": changes})).map_err(|e| e.public)
+    }
+
+    /// The Telegram policy file of the profile that owns `chat`.
+    fn telegram_policy(&self, chat: &str) -> crate::telegram::PolicyFile {
+        let who: String = self
+            .db
+            .snapshot(|tx| {
+                tx.query_row(
+                    "SELECT COALESCE(NULLIF(profile_id, ''), (SELECT id FROM profiles WHERE is_home = 1))
+                       FROM chats WHERE id = ?1",
+                    [chat],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        let dir = self
+            .services
+            .get::<helm_core::profile::Profile>()
+            .unwrap()
+            .dir
+            .clone();
+        crate::telegram::load_file(&crate::people::telegram_paths(&dir, &who).policy)
     }
 
     fn pref(&self, key: &str) -> Option<Value> {
@@ -303,7 +349,7 @@ fn staged_settings_apply_all_or_nothing_and_never_show_the_code() {
                     &Value::Bool(true),
                 )
             })
-                .unwrap();
+            .unwrap();
         }
         let outcome = e.approve(staged["requestId"].as_str().unwrap());
         assert!(outcome.starts_with(outcome_starts), "{case}: {outcome}");
@@ -406,11 +452,7 @@ fn staging_is_refused_when_it_would_be_wrong_or_change_nothing() {
             json!({"credentials": {"for": "mcp", "value": "hunter2"}}),
             "never staged",
         ),
-        (
-            "home",
-            json!({"credentials": "hunter2"}),
-            "never staged",
-        ),
+        ("home", json!({"credentials": "hunter2"}), "never staged"),
         (
             "home",
             json!({"updateSource": "relative\\dist"}),
@@ -493,10 +535,7 @@ fn any_approval_setting_is_staged_applied_and_left_for_the_users_undo() {
         outcome.contains("newChatPermissionMode is now acceptEdits."),
         "{outcome}"
     );
-    assert_eq!(
-        e.pref("newChatPermissionMode"),
-        Some(json!("acceptEdits"))
-    );
+    assert_eq!(e.pref("newChatPermissionMode"), Some(json!("acceptEdits")));
     assert_eq!(e.pref("agentSettingsAll"), Some(json!(true)));
     // The user's change list has them for Undo, under the chat that staged them.
     let listed: Vec<(String, String)> =
@@ -530,6 +569,16 @@ fn any_approval_setting_is_staged_applied_and_left_for_the_users_undo() {
     // A household member's chat stages a change exactly as the PC's own person's chat does.
     let staged = e.stage("guest", json!({"agentSettingsAll": true})).unwrap();
     assert_eq!(staged["state"], "pending");
+
+    // A server list reads as names and addresses, and what starts a program, on the card.
+    let servers = json!([
+        {"name": "Mine", "baseUrl": "http://127.0.0.1:9", "folder": "D:/S", "enabled": false},
+        {"name": "Other", "baseUrl": "http://127.0.0.1:8", "preset": "Fast"},
+    ]);
+    assert_eq!(
+        show("localServers", &servers),
+        "Mine at http://127.0.0.1:9, folder D:/S (off); Other at http://127.0.0.1:8, preset Fast"
+    );
 }
 
 /// A secret never travels through a chat: staging `credentials` names a page, the card says so,
@@ -563,4 +612,47 @@ fn a_chat_asks_for_a_secret_by_opening_the_page_never_by_carrying_it() {
         e.db.snapshot(|tx| tx.query_row("SELECT COUNT(*) FROM settings_changes", [], |r| r.get(0)))
             .unwrap();
     assert_eq!(changed, 0);
+}
+
+/// Two people's chats reach their own copy of a per-person setting, the same switches are
+/// staged for both, and neither is turned away.
+#[test]
+fn each_person_changes_their_own_channel_policy_and_stages_the_same_switches() {
+    let e = env();
+    e.update("home", json!({"telegram": {"model": "opus"}}))
+        .unwrap();
+    e.update(
+        "guest",
+        json!({"telegram": {"model": "haiku", "maxAgeHours": 12}}),
+    )
+    .unwrap();
+    let (home, guest) = (e.telegram_policy("home"), e.telegram_policy("guest"));
+    assert_eq!(home.new_chat().0, Some("opus"));
+    assert_eq!(guest.new_chat().0, Some("haiku"));
+    assert_eq!((home.max_age_hours, guest.max_age_hours), (24, 12));
+    // The switches that decide what an outside answer may approve are staged, for both alike.
+    let mut said = Vec::new();
+    for chat in ["home", "guest"] {
+        let why = e
+            .update(chat, json!({"telegram": {"approvals": true}}))
+            .unwrap_err();
+        assert!(
+            why.contains("telegram.approvals") && why.contains("app_stage_settings"),
+            "{why}"
+        );
+        said.push(why);
+    }
+    assert_eq!(said[0], said[1]);
+    assert!(!e.telegram_policy("guest").approvals);
+    let staged = e
+        .stage("guest", json!({"telegram": {"approvals": true}}))
+        .unwrap();
+    assert_eq!(staged["changes"][0], "telegram.approvals: off → on");
+    let outcome = e.approve(staged["requestId"].as_str().unwrap());
+    assert!(outcome.starts_with("Applied."), "{outcome}");
+    assert!(e.telegram_policy("guest").approvals);
+    assert!(
+        !e.telegram_policy("home").approvals,
+        "the other person's copy is untouched"
+    );
 }

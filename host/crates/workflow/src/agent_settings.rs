@@ -242,11 +242,23 @@ mod tests {
             (json!({"planSignOff": "me"}), "planSignOff"),
             (json!({"orchestratorEdits": "allow"}), "orchestratorEdits"),
             (json!({"landing": {"default": "merge"}}), "landing.default"),
-            (json!({"landing": {"protectedBranches": []}}), "landing.protectedBranches"),
+            (
+                json!({"landing": {"protectedBranches": []}}),
+                "landing.protectedBranches",
+            ),
             (json!({"homeRepos": ["github.com/o/r"]}), "homeRepos"),
-            (json!({"stages": {"review": {"maxRounds": 9}}}), "stages.review.maxRounds"),
-            (json!({"stages": {"review": {"use": "off"}}}), "stages.review.use"),
-            (json!({"stages": {"build": {"buildExempt": ["x"]}}}), "stages.build.buildExempt"),
+            (
+                json!({"stages": {"review": {"maxRounds": 9}}}),
+                "stages.review.maxRounds",
+            ),
+            (
+                json!({"stages": {"review": {"use": "off"}}}),
+                "stages.review.use",
+            ),
+            (
+                json!({"stages": {"build": {"buildExempt": ["x"]}}}),
+                "stages.build.buildExempt",
+            ),
         ] {
             let (before, after) = apply(&db, patch).unwrap();
             assert_ne!(before, after, "{check}");

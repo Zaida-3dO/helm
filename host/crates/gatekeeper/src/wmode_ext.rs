@@ -371,10 +371,7 @@ mod tests {
         assert_eq!(after["app"], "run");
 
         // The approved change lands, answering before and after.
-        let (before, after) = run(&db, |tx| {
-            ext.apply(tx, KEY, &json!({"app": "run"}))
-        })
-        .unwrap();
+        let (before, after) = run(&db, |tx| ext.apply(tx, KEY, &json!({"app": "run"}))).unwrap();
         assert_eq!(before["app"], "check_in");
         assert_eq!(after["app"], "run");
         assert_eq!(snap()["app"], "run");

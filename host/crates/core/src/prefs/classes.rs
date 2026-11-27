@@ -173,7 +173,9 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
     // The switch that opens the repository tools to chats without asking.
     (
         "agentSettingsAll",
-        approval("Lets chats use tools that act on your repositories without asking, so you approve it."),
+        approval(
+            "Lets chats use tools that act on your repositories without asking, so you approve it.",
+        ),
     ),
     // How chats work (run to completion or check in): kept here, changed through the `workmode`
     // key, which also covers a board's own mode.
@@ -264,7 +266,8 @@ mod tests {
 
     #[test]
     fn the_approval_list_is_short_and_each_entry_says_why() {
-        let count = |want: fn(&PrefClass) -> bool| CLASSIFIED.iter().filter(|(_, c)| want(c)).count();
+        let count =
+            |want: fn(&PrefClass) -> bool| CLASSIFIED.iter().filter(|(_, c)| want(c)).count();
         assert_eq!(count(|c| matches!(c, Setting(Access::Approval(_)))), 3);
         assert_eq!(count(|c| *c == Internal), 5);
         for (k, c) in CLASSIFIED {

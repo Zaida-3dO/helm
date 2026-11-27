@@ -94,6 +94,38 @@ adds to every run, locally and in CI, and slows everyone down.
 4. **Stage by path.** `git add <paths>`, never `git add -A`/`.`. Run `git status` before committing
    and confirm every staged path is one you meant to change.
 
+## Access
+
+Permissions are never a blocker. They only add roadblocks to productivity. New features bias
+toward access: every setting and every tool is usable by chats directly, with a notice for the
+user and an Undo. Put something behind an approval click **only** when the owner explicitly asks
+to restrict it, or when it is highly sensitive and dangerous (it hands over a secret, sends a
+recording of the user's voice somewhere, starts a program, bypasses permissions, or changes what
+chats may decide on their own). The bar is very high and almost no setting qualifies.
+
+- **Two ways, and no third.** A chat reaches a setting through the `Access` type
+  (`helm_core::prefs::classes`): `Direct` (the chat applies it, with a notice and Undo) or
+  `Approval(reason)` (the chat stages it with `app_stage_settings` and the user clicks Approve on
+  one card). That type is the only way to express access: there is no "only the user" value, and
+  an extension's `apply` only validates and stores, so it cannot answer "locked". A part of a
+  Direct key that needs approval is declared in the extension's `staged_parts`; the one decision is
+  `settings_allow::route`, and `stage_message` is the one place that words the staging answer. An
+  approval needs a one-line reason that names the danger, and a test caps how many there may be:
+  raising the cap is a decision the commit explains.
+- **A flat refusal is never allowed.** No text a chat reads may tell it to ask the user to do the
+  thing themselves ("ask the user to change it", "yours to change only"). The only alternative to
+  direct access is a staged change the user approves, and the answer names the exact next call. A
+  test scans the sources for such text. A secret never passes through a chat: the chat stages
+  `credentials` naming a Settings page, and Approve opens it for the user to type the secret.
+- **No person on an install has a right another lacks.** What differs between people or between
+  computers (rules, memories, skills, agents, settings, chats, schedules, saved items, MCP
+  servers, per-device state) is either Shared (visible and used by everyone by default) or
+  Personal (shown and applied only for the person or computer it was made for). Personal is only a
+  default view so that nothing irrelevant clutters another person's screen; it is never a
+  permission. Any other person or computer can still list, read, edit, copy, move or delete a
+  Personal item by naming the person or device in the call, with the same notice and Undo as any
+  direct change. Defaults may differ per person as long as each person can change their own.
+
 ## CI
 
 Actions minutes are limited and **Windows minutes bill double**. CI therefore runs **only** on
