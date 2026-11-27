@@ -532,6 +532,11 @@ pub struct ChatRecord {
     /// chat through its note, so editing it away or deleting it must be reported like a launched
     /// rule going away would be.
     delivered: HashMap<String, (Decision, String)>,
+    /// Rule keys whose "no longer apply here" row a message note has already shown since the
+    /// launch or the last compaction: a rule that went away is said gone once, not on every
+    /// later message. A key leaves the set when the rule applies again (its next going-away is
+    /// worth saying afresh), and the whole set clears at a new generation or a relaunch.
+    gone_reported: HashSet<String>,
     /// The chat's context generation; a change means compaction reset every context.
     pub gen: u64,
     /// The worker's epoch for this chat; a change clears notes and refusals alike.
@@ -628,6 +633,30 @@ impl SentStore {
             .insert(key.to_owned(), (decision, revision.to_owned()));
     }
 
+    /// The rule keys whose going-away has already been shown since the launch or compaction.
+    pub fn gone_reported(&self, chat_id: &str) -> HashSet<String> {
+        self.chats
+            .get(chat_id)
+            .map(|(_, r)| r.gone_reported.clone())
+            .unwrap_or_default()
+    }
+
+    /// A "no longer apply here" row committed: those rules are not announced again until they
+    /// come back, the generation moves, or the chat relaunches.
+    pub fn note_gone(&mut self, chat_id: &str, keys: &[String]) {
+        let record = self.touch(chat_id);
+        for key in keys {
+            record.gone_reported.insert(key.clone());
+        }
+    }
+
+    /// A reported-gone rule applies again: forget the report so its next going-away is said.
+    pub fn unreport_gone(&mut self, chat_id: &str, key: &str) {
+        if let Some((_, record)) = self.chats.get_mut(chat_id) {
+            record.gone_reported.remove(key);
+        }
+    }
+
     /// A worker ended: its launch record must not outlive it, or the next send would diff
     /// against a dead launch and the relaunch would carry fresh rules twice.
     pub fn end_worker(&mut self, chat_id: &str) {
@@ -643,6 +672,9 @@ impl SentStore {
             for seen in record.agents.values_mut() {
                 seen.sent.clear();
             }
+            // A compacted context may have lost a gone rule without ever hearing it go: the
+            // row rides again once per generation.
+            record.gone_reported.clear();
         }
     }
 
@@ -658,6 +690,7 @@ impl SentStore {
         if record.epoch != epoch {
             record.epoch = epoch.to_owned();
             record.agents.clear();
+            record.gone_reported.clear();
         }
     }
 
@@ -725,6 +758,9 @@ pub struct RuleNote {
     /// `mark_message_sent` records them once the send commits, so a refused or rolled-back send
     /// does not consume the note.
     keys: Vec<(String, String, Decision)>,
+    /// The rule keys this note's "no longer apply here" row named; recorded on commit so the
+    /// same going-away is not announced on every later message.
+    gone_keys: Vec<String>,
 }
 
 /// The most whole-rule bytes one message note carries; the rest degrade to one line each.
@@ -750,12 +786,16 @@ fn key_stem(key: &str) -> String {
 /// *peek*: it marks nothing. Call [`mark_message_sent`] only once the message write commits, so
 /// a refused or rolled-back send does not consume the note.
 pub fn message_note(profile_dir: &Path, chat_id: &str, gen: u64, _now_ms: i64) -> Option<RuleNote> {
-    let (launched, delivered) = with_sent(|s| {
+    let (launched, delivered, reported) = with_sent(|s| {
         if !s.has_launch(chat_id) {
             return None;
         }
         s.set_gen(chat_id, gen);
-        Some((s.launch_map(chat_id)?, s.delivered_map(chat_id)))
+        Some((
+            s.launch_map(chat_id)?,
+            s.delivered_map(chat_id),
+            s.gone_reported(chat_id),
+        ))
     })?;
     let who = crate::launch::who(chat_id);
     let facts = Facts::of(&who, None);
@@ -805,19 +845,29 @@ pub fn message_note(profile_dir: &Path, chat_id: &str, gen: u64, _now_ms: i64) -
             adds.push(one);
         }
     }
+    // A rule that applies again after its going-away was announced: drop the report, so the
+    // next time it goes is worth saying afresh.
+    for one in &current {
+        if one.decision != Decision::Hidden && reported.contains(&one.key) {
+            with_sent(|s| s.unreport_gone(chat_id, &one.key));
+        }
+    }
     // Known means either the launch showed it or a message note carried it: both made it real
-    // to this chat, so either way its going away has to be said.
+    // to this chat, so either way its going away has to be said — once. A going-away already
+    // announced since the launch or compaction stays quiet until the rule comes back, the
+    // generation moves, or the worker relaunches.
     let known = |key: &str| {
         launched
             .get(key)
             .or_else(|| delivered.get(key))
             .map(|(d, _)| *d)
     };
-    let mut gone: Vec<String> = current
+    let mut gone: Vec<(String, String)> = current
         .iter()
         .filter_map(|one| {
             let was = known(&one.key)?;
-            (rank(was) > 0 && one.decision == Decision::Hidden).then(|| key_stem(&one.key))
+            (rank(was) > 0 && one.decision == Decision::Hidden && !reported.contains(&one.key))
+                .then(|| (one.key.clone(), key_stem(&one.key)))
         })
         .collect();
     // Rules the chat was shown that are not in the layers any more: deleted.
@@ -825,8 +875,10 @@ pub fn message_note(profile_dir: &Path, chat_id: &str, gen: u64, _now_ms: i64) -
         launched
             .iter()
             .chain(delivered.iter())
-            .filter(|(key, (d, _))| rank(*d) > 0 && !current.iter().any(|c| c.key == **key))
-            .map(|(key, _)| key_stem(key)),
+            .filter(|(key, (d, _))| {
+                rank(*d) > 0 && !current.iter().any(|c| c.key == **key) && !reported.contains(key.as_str())
+            })
+            .map(|(key, _)| (key.clone(), key_stem(key))),
     );
     gone.sort();
     gone.dedup();
@@ -834,7 +886,6 @@ pub fn message_note(profile_dir: &Path, chat_id: &str, gen: u64, _now_ms: i64) -
         return None;
     }
     adds.sort_by(|a, b| a.key.cmp(&b.key));
-    gone.sort();
     let mut context = String::new();
     let mut keys: Vec<(String, String, Decision)> = Vec::new();
     let mut used_full = 0usize;
@@ -861,15 +912,16 @@ pub fn message_note(profile_dir: &Path, chat_id: &str, gen: u64, _now_ms: i64) -
         row_parts.push(format!("Rules added: {}", names.join(", ")));
     }
     if !gone.is_empty() {
-        row_parts.push(format!(
-            "These rules no longer apply here: {}",
-            gone.join(", ")
-        ));
+        let mut names: Vec<&str> = gone.iter().map(|(_, stem)| stem.as_str()).collect();
+        names.sort();
+        names.dedup(); // two layers may name the same rule; say it once, report both keys
+        row_parts.push(format!("These rules no longer apply here: {}", names.join(", ")));
     }
     Some(RuleNote {
         context: context.trim_start().to_owned(),
         row: row_parts.join(". "),
         keys,
+        gone_keys: gone.iter().map(|(key, _)| key.clone()).collect(),
     })
 }
 
@@ -881,6 +933,9 @@ pub fn mark_message_sent(chat_id: &str, note: &RuleNote) {
             s.first_note(chat_id, "root", key, revision);
             s.note_delivered(chat_id, key, *decision, revision);
         });
+    }
+    if !note.gone_keys.is_empty() {
+        with_sent(|s| s.note_gone(chat_id, &note.gone_keys));
     }
 }
 
@@ -1775,7 +1830,7 @@ mod tests {
         assert!(note.context.contains("Be kind and brief."), "{note:?}");
         mark_message_sent(chat, &note);
 
-        // A rule stops applying (a kinds gate this household chat fails): the row says so.
+        // A rule stops applying (a kinds gate this household chat fails): the row says so once.
         seed_rules(
             dir,
             &[
@@ -1792,20 +1847,47 @@ mod tests {
             "{}",
             note.row
         );
+        mark_message_sent(chat, &note);
+        // It is not said again on every later send: three more peeks after the row rode stay
+        // quiet — three sends give one row.
+        for _ in 0..3 {
+            assert!(message_note(dir, chat, 0, 0).is_none());
+        }
 
-        // Deleting rules lands in the same row.
-        seed_rules(dir, &[("kind", "# Be kind\n\nStill brief.\n")]);
-        let note = message_note(dir, chat, 0, 0).expect("deleted and edited");
-        assert!(
-            note.row.contains("no longer apply here: sleep"),
-            "{}",
-            note.row
-        );
+        // A real file delete says its own going-away once as well (seed_rules only ever writes;
+        // the index must be dropped to see the removal).
+        let rules = crate::layers::Layer::Everyone.root(dir).join("rules");
+        std::fs::remove_file(rules.join("kind.md")).unwrap();
+        crate::launch::clear_rule_index();
+        let note = message_note(dir, chat, 0, 0).expect("deleted rule");
+        assert!(note.row.contains("no longer apply here: kind"), "{}", note.row);
+        assert!(!note.row.contains("sleep"), "already said once: {}", note.row);
+        mark_message_sent(chat, &note);
+        assert!(message_note(dir, chat, 0, 0).is_none());
 
-        // A new context generation sends marked rules again.
-        seed_rules(dir, &[("kind", "# Be kind\n\nBrief always.\n")]);
+        // A deleted rule that comes back rides as added again — and its next going-away is
+        // worth saying afresh.
+        std::fs::write(rules.join("sleep.md"), "# Sleep tight\n\nLights out at nine.\n").unwrap();
+        crate::launch::clear_rule_index();
+        let note = message_note(dir, chat, 0, 0).expect("re-added rule");
+        assert!(note.row.contains("Rules added: Sleep tight"), "{}", note.row);
+        mark_message_sent(chat, &note);
+        std::fs::remove_file(rules.join("sleep.md")).unwrap();
+        crate::launch::clear_rule_index();
+        let note = message_note(dir, chat, 0, 0).expect("gone again after coming back");
+        assert!(note.row.contains("no longer apply here: sleep"), "{}", note.row);
+        mark_message_sent(chat, &note);
+
+        // A new context generation sends marked rules and gone rows again.
+        std::fs::write(rules.join("kind.md"), "# Be kind\n\nBrief always.\n").unwrap();
+        crate::launch::clear_rule_index();
         let note = message_note(dir, chat, 7, 0).expect("after compaction");
         assert!(note.context.contains("Brief always."), "{note:?}");
+        assert!(
+            note.row.contains("no longer apply here: sleep"),
+            "gone rows ride again after compaction: {}",
+            note.row
+        );
     }
 
     #[test]
