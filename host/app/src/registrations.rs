@@ -378,14 +378,15 @@ impl helm_skills::launch::ChatLookup for RuleFacts {
             let home_folder = who.cwd.as_deref().is_some_and(|c| {
                 norm_folder(c) == norm_folder(&self.profile_dir.to_string_lossy())
             });
-            if home_folder
-                || who.cwd.as_deref().is_some_and(|c| {
-                    helm_relay::channel::channel_of_folder(&self.profile_dir, c).is_some()
-                })
-            {
-                // Keep the folder out of the kind walk: the launch still sees the real folder
-                // (it prefers what the worker reports), and a tool call carries its own.
-                who.cwd = None;
+            let channel = who.cwd.as_deref().is_some_and(|c| {
+                helm_relay::channel::channel_of_folder(&self.profile_dir, c).is_some()
+            });
+            if home_folder || channel {
+                // Say what the chat *is*, not that it has no folder: a tool call carries its own
+                // cwd and the launch prefers what the worker reports, so clearing the folder here
+                // would be undone at both places. The flag decides the kind wherever the folder
+                // goes; the folder stays for path triggers to read.
+                who.household = true;
             }
         }
         who

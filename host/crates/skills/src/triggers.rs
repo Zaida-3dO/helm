@@ -69,10 +69,11 @@ pub struct Facts {
 impl Facts {
     /// The facts of one chat from what its lookup knows plus the launch folder. `cwd_override`
     /// wins over the recorded folder when given (the worker reports the real one). The kind is
-    /// derived: orchestrating when the Orchestrator is in effect for the chat, coding when its
-    /// folder sits inside a git work tree, household otherwise. A caller that must force
-    /// `household` (a chat that came in through a channel, say) keeps `cwd` unset and
-    /// `orchestrating` false.
+    /// derived: orchestrating when the Orchestrator is in effect for the chat, household when the
+    /// lookup says the chat came from a channel or runs on the home folder, coding when its
+    /// folder sits inside a git work tree, household otherwise. A house chat pointed at a git
+    /// folder keeps `household`: the override and the recorded folder never turn it into a
+    /// coding chat, only the lookup's flags decide.
     pub fn of(who: &crate::launch::ChatKnowledge, cwd_override: Option<&Path>) -> Facts {
         let cwd = cwd_override.map(PathBuf::from).or_else(|| {
             who.cwd
@@ -82,6 +83,8 @@ impl Facts {
         });
         let kind = if who.orchestrating {
             ChatKind::Orchestrating
+        } else if who.household {
+            ChatKind::Household
         } else if cwd.as_deref().is_some_and(in_git_tree) {
             ChatKind::Coding
         } else {
@@ -256,7 +259,7 @@ fn abs_words(command: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut run = String::new();
     let mut quote: Option<char> = None;
-    let mut push = |run: &mut String, out: &mut Vec<String>| {
+    let push = |run: &mut String, out: &mut Vec<String>| {
         if let Some(p) = word_path(run) {
             out.push(p);
         }
@@ -566,7 +569,8 @@ impl SentStore {
         }
         self.clock += 1;
         let tick = self.clock;
-        self.chats
+        &mut self
+            .chats
             .entry(chat_id.to_owned())
             .or_insert_with(|| (tick, ChatRecord::default()))
             .1
@@ -924,14 +928,14 @@ pub fn check_rule_call(profile_dir: &Path, chat_id: &str, req: &RuleCheck) -> se
             }
         }
         picked.sort_by(|a, b| a.0.cmp(&b.0));
-        (stop, notes_from(picked))
+        let (context, shown) = notes_from(picked);
+        (stop, context, shown)
     };
     let mut line = serde_json::json!({"type": "rule_verdict", "id": req.id});
     if let Some(reason) = stop {
         line["stop"] = serde_json::Value::String(reason);
         return line;
     }
-    let (context, shown) = build_tool_context(notes);
     if !context.is_empty() {
         line["context"] = serde_json::Value::String(context);
         line["shown"] = serde_json::json!(shown);
@@ -940,13 +944,14 @@ pub fn check_rule_call(profile_dir: &Path, chat_id: &str, req: &RuleCheck) -> se
 }
 
 /// Turn picked rules into the note text: at most TOOL_NOTE_WHOLE_MAX whole and 4 KB; the rest on
-/// one line each. Returns (context, shown keys).
-fn notes_from(picked: Vec<(String, String, String, Decision)>) -> (String, Vec<serde_json::Value>) {
+/// one line each. Each picked rule is a key, its revision and its whole `### title` + body text.
+/// Returns (context, shown keys).
+fn notes_from(picked: Vec<(String, String, String)>) -> (String, Vec<serde_json::Value>) {
     let mut context = String::new();
     let mut shown: Vec<serde_json::Value> = Vec::new();
     let mut used = 0usize;
     let mut whole = 0usize;
-    for (key, revision, text, _) in picked {
+    for (key, revision, text) in picked {
         if whole < TOOL_NOTE_WHOLE_MAX && used + text.len() <= TOOL_NOTE_CAP {
             context.push_str(&format!("\n\n[Helm rule]\n{text}"));
             used += text.len();
@@ -1664,6 +1669,20 @@ mod tests {
             ChatKind::Coding,
             "the walk looks at parents too"
         );
+        // …unless the lookup says the chat is a house one: a channel or home chat pointed at a
+        // git folder keeps its household rules (the folder stays for path triggers to read).
+        let house = ChatKnowledge {
+            household: true,
+            cwd: Some(repo.to_string_lossy().into_owned()),
+            ..ChatKnowledge::default()
+        };
+        assert_eq!(Facts::of(&house, None).kind, ChatKind::Household);
+        // Orchestrating still outranks the household flag.
+        let both = ChatKnowledge {
+            orchestrating: true,
+            ..house
+        };
+        assert_eq!(Facts::of(&both, Some(&repo)).kind, ChatKind::Orchestrating);
         // …and a plain folder is household.
         let plain = base.path().join("plain");
         fs::create_dir_all(&plain).unwrap();

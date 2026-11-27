@@ -2386,6 +2386,7 @@ dependencies = [
 name = "helm-skills"
 version = "2.4.12"
 dependencies = [
+ "chrono",
  "helm-consent",
  "helm-core",
  "helm-hosttools",
