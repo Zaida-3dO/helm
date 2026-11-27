@@ -192,7 +192,12 @@ fn tool_error(message: impl Into<String>) -> Value {
 }
 
 const READ_TOOLS: &[&str] = &["memory_search", "memory_read", "memory_list"];
-const WRITE_TOOLS: &[&str] = &["memory_write", "memory_update", "memory_delete"];
+const WRITE_TOOLS: &[&str] = &[
+    "memory_write",
+    "memory_update",
+    "memory_delete",
+    "memory_restore",
+];
 
 fn tool_list(client: &Client, opts: &Options) -> Vec<Value> {
     if !client.scopes.can_read_memory() {
@@ -277,7 +282,7 @@ fn tool_list(client: &Client, opts: &Options) -> Vec<Value> {
         if opts.allow_mutate {
             tools.push(json!({
                 "name": "memory_update",
-                "description": "Change fields of a memory: yours, a shared one, or another person's private one when you name `person` (their name or id). A new body without a new vector clears the old vector.",
+                "description": "Change fields of a memory: yours, a shared one, or another person's private one when you name `person` (their name or id). A new body without a new vector clears the old vector. The version it replaces is kept for 30 days: memory_restore puts it back.",
                 "inputSchema": { "type": "object", "properties": {
                     "id": { "type": "integer" },
                     "person": person,
@@ -293,8 +298,16 @@ fn tool_list(client: &Client, opts: &Options) -> Vec<Value> {
                 }, "required": ["id"] }
             }));
             tools.push(json!({
+                "name": "memory_restore",
+                "description": "Undo a memory_delete or a memory_update within 30 days: a deleted memory is made again with its id, an updated one goes back to the version before the last change (its vector is not kept, so it is searched by its words until it is embedded again). Name `person` for another person's private memory.",
+                "inputSchema": { "type": "object", "properties": {
+                    "id": { "type": "integer", "description": "The memory's id, as it was." },
+                    "person": person
+                }, "required": ["id"] }
+            }));
+            tools.push(json!({
                 "name": "memory_delete",
-                "description": "Delete a memory permanently: yours, a shared one, or another person's private one when you name `person`.",
+                "description": "Delete a memory: yours, a shared one, or another person's private one when you name `person`. It is kept for 30 days, and memory_restore brings it back.",
                 "inputSchema": { "type": "object", "properties": {
                     "id": { "type": "integer" },
                     "person": person
@@ -331,11 +344,12 @@ fn call_tool(
         "memory_read" => read(store, client, people, args),
         "memory_list" => list(store, client, people, args),
         "memory_write" => write(store, client, people, approved_for, args),
-        "memory_update" | "memory_delete" if !opts.allow_mutate => {
+        "memory_update" | "memory_delete" | "memory_restore" if !opts.allow_mutate => {
             return tool_error(format!("{name} is turned off on this hub"));
         }
         "memory_update" => update(store, client, people, args),
         "memory_delete" => delete(store, client, people, args),
+        "memory_restore" => restore(store, client, people, args),
         _ => return tool_error(format!("unknown tool {name:?}")),
     };
     match r {
@@ -979,13 +993,7 @@ fn list(store: &mut Store, client: &Client, people: &[Person], args: &Value) -> 
         _ => Some(client.person_id),
     };
     let rows = store
-        .list_by(
-            viewer,
-            named,
-            tag.as_deref(),
-            since.as_deref(),
-            limit,
-        )
+        .list_by(viewer, named, tag.as_deref(), since.as_deref(), limit)
         .map_err(store_err)?;
     let results: Vec<Value> = rows
         .iter()
@@ -1108,9 +1116,25 @@ fn update(store: &mut Store, client: &Client, people: &[Person], args: &Value) -
     Ok(json!({ "id": m.id, "updated_at": m.updated_at, "has_vector": m.dim.is_some() }))
 }
 
+/// `memory_restore`: put back what a delete or an update replaced, under the rule a change is
+/// made by: the caller's own, a shared one, or another person's private one when named.
+fn restore(store: &mut Store, client: &Client, people: &[Person], args: &Value) -> ToolResult {
+    let id = int_arg(args, "id")?.ok_or("id is required")?;
+    let (owner, visibility) = store.kept_owner(id).map_err(store_err)?;
+    let named = named_other(args, client, people)?;
+    if !(owner == Some(client.person_id)
+        || visibility == Visibility::Shared.as_str()
+        || (named.is_some() && owner == named))
+    {
+        return Err(store_err(StoreError::NotFound));
+    }
+    let m = store.restore(id).map_err(store_err)?;
+    Ok(json!({ "id": m.id, "restored": true, "updated_at": m.updated_at }))
+}
+
 fn delete(store: &mut Store, client: &Client, people: &[Person], args: &Value) -> ToolResult {
     let id = int_arg(args, "id")?.ok_or("id is required")?;
     reachable(store, client, people, args, id)?;
     store.delete(id).map_err(store_err)?;
-    Ok(json!({ "id": id, "deleted": true }))
+    Ok(json!({ "id": id, "deleted": true, "restorable_for_days": 30 }))
 }

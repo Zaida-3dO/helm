@@ -426,6 +426,17 @@ impl Store {
                  saved_at  TEXT NOT NULL
              );",
         )?;
+        // What a delete or an update replaced, kept for a while so it can be restored.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS memory_history (
+                 id         INTEGER PRIMARY KEY,
+                 memory_id  INTEGER NOT NULL,
+                 kind       TEXT NOT NULL,
+                 snapshot   TEXT NOT NULL,
+                 at         TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS memory_history_memory ON memory_history(memory_id, id);",
+        )?;
         // The household's knowledge files share this database (see `knowledge.rs`).
         crate::knowledge::init(&conn)?;
         // The search index mirrors the memories (see `index.rs`).
@@ -848,6 +859,8 @@ impl Store {
             Some(t) => normalize_tags(&t)?,
             None => cur.tags.clone(),
         };
+        // The version being replaced stays restorable for a while.
+        keep_version(&self.conn, id, "replaced")?;
         let tx = self.conn.transaction()?;
         tx.execute(
             &format!(
@@ -890,6 +903,8 @@ impl Store {
     }
 
     pub fn delete(&mut self, id: i64) -> Result<()> {
+        // A deleted memory goes to the history first, and stays restorable for a while.
+        keep_version(&self.conn, id, "deleted")?;
         let tx = self.conn.transaction()?;
         let n = tx.execute("DELETE FROM memories WHERE id = ?1", [id])?;
         if n == 0 {
@@ -899,6 +914,104 @@ impl Store {
         tx.commit()?;
         self.codes.apply(delta);
         Ok(())
+    }
+
+    /// Who a memory that was deleted or replaced belongs to, and whether it is shared: what a
+    /// restore is checked against. `NotFound` when nothing of it is kept.
+    pub fn kept_owner(&self, id: i64) -> Result<(Option<i64>, String)> {
+        let snap: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT snapshot FROM memory_history WHERE memory_id = ?1 ORDER BY id DESC LIMIT 1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let v: serde_json::Value = serde_json::from_str(&snap.ok_or(StoreError::NotFound)?)
+            .map_err(|e| StoreError::Invalid(e.to_string()))?;
+        Ok((
+            v["owner_person"].as_i64(),
+            v["visibility"].as_str().unwrap_or("private").to_owned(),
+        ))
+    }
+
+    /// Put memory `id` back: a deleted one is made again (with its id), a replaced one goes back
+    /// to the version before the last change. The vector is not kept, so the memory is searched
+    /// by its words until it is embedded again.
+    pub fn restore(&mut self, id: i64) -> Result<Memory> {
+        let row: Option<(i64, String, String)> = self
+            .conn
+            .query_row(
+                "SELECT id, kind, snapshot FROM memory_history WHERE memory_id = ?1
+                 ORDER BY id DESC LIMIT 1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let (hid, kind, snap) = row.ok_or(StoreError::NotFound)?;
+        let v: serde_json::Value =
+            serde_json::from_str(&snap).map_err(|e| StoreError::Invalid(e.to_string()))?;
+        let text = |k: &str| v[k].as_str().map(str::to_owned);
+        let tags: Vec<String> = serde_json::from_value(v["tags"].clone()).unwrap_or_default();
+        let links = v["links"].to_string();
+        let exists = self.get(id).is_ok();
+        if kind == "deleted" && exists {
+            return Err(StoreError::Invalid(
+                "that memory is back already".to_owned(),
+            ));
+        }
+        let tx = self.conn.transaction()?;
+        if kind == "deleted" {
+            tx.execute(
+                "INSERT INTO memories (id, name, title, description, kind, body, tags, source,
+                 links, owner_person, visibility, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    id,
+                    text("name"),
+                    text("title").unwrap_or_default(),
+                    text("description").unwrap_or_default(),
+                    text("kind"),
+                    text("body").unwrap_or_default(),
+                    json_list(&tags),
+                    text("source"),
+                    links,
+                    v["owner_person"].as_i64(),
+                    text("visibility").unwrap_or_else(|| "private".into()),
+                    text("created_at").unwrap_or_default(),
+                    text("updated_at").unwrap_or_default(),
+                ],
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::SqliteFailure(_, _) => StoreError::Invalid(
+                    "a memory with that name exists now: rename it or delete it first".into(),
+                ),
+                other => other.into(),
+            })?;
+        } else {
+            tx.execute(
+                &format!(
+                    "UPDATE memories SET title = ?2, body = ?3, description = ?4, tags = ?5,
+                     source = ?6, visibility = ?7, vector = NULL, model = NULL, dim = NULL,
+                     updated_at = {NOW} WHERE id = ?1"
+                ),
+                params![
+                    id,
+                    text("title").unwrap_or_default(),
+                    text("body").unwrap_or_default(),
+                    text("description").unwrap_or_default(),
+                    json_list(&tags),
+                    text("source"),
+                    text("visibility").unwrap_or_else(|| "private".into()),
+                ],
+            )?;
+        }
+        write_tags(&tx, id, &tags)?;
+        tx.execute("DELETE FROM memory_history WHERE id = ?1", [hid])?;
+        let delta = crate::index::mirror_memory(&tx, id)?;
+        tx.commit()?;
+        self.codes.apply(delta);
+        self.get(id)
     }
 
     /// `(id, name, source)` of every memory whose source starts with `prefix` (case-sensitive,
@@ -1168,6 +1281,46 @@ fn norm(v: &[f32]) -> f64 {
         .map(|x| (*x as f64) * (*x as f64))
         .sum::<f64>()
         .sqrt()
+}
+
+/// How long a deleted or replaced memory stays restorable, and how many versions of one are kept.
+const KEEP_DAYS: i64 = 30;
+const KEEP_VERSIONS: i64 = 5;
+
+/// File memory `id` as it is now in the history (`kind`: `deleted` or `replaced`), drop what is
+/// older than [`KEEP_DAYS`] and what passes [`KEEP_VERSIONS`] for it. A memory that is not there
+/// files nothing.
+fn keep_version(conn: &Connection, id: i64, kind: &str) -> Result<()> {
+    let snap: Option<String> = conn
+        .query_row(
+            "SELECT json_object('name', name, 'title', title, 'description', description,
+                    'kind', kind, 'body', body, 'tags', json(tags), 'source', source,
+                    'links', json(links), 'owner_person', owner_person,
+                    'visibility', visibility, 'created_at', created_at, 'updated_at', updated_at)
+             FROM memories WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(snap) = snap else { return Ok(()) };
+    conn.execute(
+        &format!(
+            "INSERT INTO memory_history (memory_id, kind, snapshot, at) VALUES (?1, ?2, ?3, {NOW})"
+        ),
+        params![id, kind, snap],
+    )?;
+    conn.execute(
+        &format!(
+            "DELETE FROM memory_history WHERE at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-{KEEP_DAYS} days')"
+        ),
+        [],
+    )?;
+    conn.execute(
+        "DELETE FROM memory_history WHERE memory_id = ?1 AND id NOT IN
+         (SELECT id FROM memory_history WHERE memory_id = ?1 ORDER BY id DESC LIMIT ?2)",
+        params![id, KEEP_VERSIONS],
+    )?;
+    Ok(())
 }
 
 fn write_tags(tx: &rusqlite::Transaction<'_>, id: i64, tags: &[String]) -> Result<()> {

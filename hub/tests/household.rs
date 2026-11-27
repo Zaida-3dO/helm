@@ -271,7 +271,8 @@ async fn pairing_connects_machines_side_by_side_and_a_revoke_drops_only_that_one
 }
 
 #[tokio::test]
-async fn memories_are_shared_unless_made_private_and_a_private_one_is_reached_by_naming_its_owner() {
+async fn memories_are_shared_unless_made_private_and_a_private_one_is_reached_by_naming_its_owner()
+{
     let hub = start().await;
     let ann = add(&hub, "Ann", "desk", "memory:rw");
     let bea = add(&hub, "Bea", "laptop", "memory:rw");
@@ -354,7 +355,10 @@ async fn memories_are_shared_unless_made_private_and_a_private_one_is_reached_by
         json!({ "id": shared, "body": "tomatoes, edited" }),
     )
     .await;
-    assert_eq!(r["isError"], false, "a shared memory is the household's: {r}");
+    assert_eq!(
+        r["isError"], false,
+        "a shared memory is the household's: {r}"
+    );
     // Naming the owner is the explicit request that reaches their private memory, to read and to
     // change.
     let read = tool(
@@ -1338,8 +1342,18 @@ async fn a_memory_saved_for_someone_else_is_theirs_shared_and_needs_the_approved
     stranger["for"] = json!("Nobody");
     for (token, headers, args, why) in [
         (&ann, &[][..], &save, "goes through Helm's app_save_memory"),
-        (&ann, &other[..], &save, "goes through Helm's app_save_memory"),
-        (&ann, &named_other[..], &save, "goes through Helm's app_save_memory"),
+        (
+            &ann,
+            &other[..],
+            &save,
+            "goes through Helm's app_save_memory",
+        ),
+        (
+            &ann,
+            &named_other[..],
+            &save,
+            "goes through Helm's app_save_memory",
+        ),
         (
             &ann,
             &[("x-helm-approved-for", "Bea")][..],
@@ -1427,4 +1441,88 @@ async fn a_memory_saved_for_someone_else_is_theirs_shared_and_needs_the_approved
     )
     .await;
     assert_eq!(top(&r).as_deref(), Some("Ann"), "{r}");
+}
+
+/// A delete or an update by another person is not for good: the memory is kept for a while and
+/// `memory_restore` puts it back, for its owner or for anyone who may reach it.
+#[tokio::test]
+async fn a_deleted_or_replaced_memory_is_restorable() {
+    let hub = start().await;
+    let ann = add(&hub, "Ann", "desk", "memory:rw");
+    let bea = add(&hub, "Bea", "laptop", "memory:rw");
+    let id_of = |r: &Value| r["structuredContent"]["id"].as_i64().unwrap();
+    let shared = id_of(
+        &tool(
+            &hub,
+            &ann,
+            "memory_write",
+            json!({ "title": "Garden notes", "body": "tomatoes in May" }),
+        )
+        .await,
+    );
+    let secret = id_of(
+        &tool(
+            &hub,
+            &ann,
+            "memory_write",
+            json!({ "title": "Gift plan", "body": "ring size secret", "scope": "me" }),
+        )
+        .await,
+    );
+    // Bea deletes Ann's shared memory; the answer says it can be restored, and Ann restores it.
+    let r = tool(&hub, &bea, "memory_delete", json!({ "id": shared })).await;
+    assert_eq!(r["isError"], false, "{r}");
+    assert_eq!(r["structuredContent"]["restorable_for_days"], 30);
+    let gone = tool(&hub, &ann, "memory_read", json!({ "id": shared })).await;
+    assert_eq!(gone["isError"], true);
+    let r = tool(&hub, &ann, "memory_restore", json!({ "id": shared })).await;
+    assert_eq!(r["isError"], false, "{r}");
+    let back = tool(&hub, &ann, "memory_read", json!({ "id": shared })).await;
+    assert_eq!(back["structuredContent"]["body"], "tomatoes in May");
+    assert_eq!(back["structuredContent"]["mine"], true);
+    // A private one is reached by naming its owner, to delete and to restore.
+    let r = tool(&hub, &bea, "memory_restore", json!({ "id": secret })).await;
+    assert_eq!(
+        r["isError"], true,
+        "nothing of it is kept yet, and it is not hers to see"
+    );
+    let r = tool(
+        &hub,
+        &bea,
+        "memory_delete",
+        json!({ "id": secret, "person": "Ann" }),
+    )
+    .await;
+    assert_eq!(r["isError"], false, "{r}");
+    let r = tool(&hub, &bea, "memory_restore", json!({ "id": secret })).await;
+    assert_eq!(
+        r["isError"], true,
+        "a private memory is restored by naming its owner"
+    );
+    let r = tool(
+        &hub,
+        &bea,
+        "memory_restore",
+        json!({ "id": secret, "person": "Ann" }),
+    )
+    .await;
+    assert_eq!(r["isError"], false, "{r}");
+    let read = tool(&hub, &ann, "memory_read", json!({ "id": secret })).await;
+    assert_eq!(read["structuredContent"]["title"], "Gift plan");
+    // An update keeps the version it replaced, and restore goes back to it.
+    let r = tool(
+        &hub,
+        &bea,
+        "memory_update",
+        json!({ "id": shared, "body": "tomatoes in June" }),
+    )
+    .await;
+    assert_eq!(r["isError"], false, "{r}");
+    let r = tool(&hub, &ann, "memory_restore", json!({ "id": shared })).await;
+    assert_eq!(r["isError"], false, "{r}");
+    let read = tool(&hub, &ann, "memory_read", json!({ "id": shared })).await;
+    assert_eq!(read["structuredContent"]["body"], "tomatoes in May");
+    // Nothing kept, nothing to restore.
+    let r = tool(&hub, &ann, "memory_restore", json!({ "id": shared })).await;
+    assert_eq!(r["isError"], true);
 }
