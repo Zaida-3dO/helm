@@ -3570,6 +3570,27 @@ async fn a_recorded_exchange_is_written_without_a_model_and_open_talks_are_kept(
         said[2].4
     );
 
+    // Let the handed-over turn settle first: the close waits only a few seconds for a message
+    // still on its way, and a slow machine can take longer to deliver it than that.
+    let in_flight = || {
+        e.db.snapshot(|tx| {
+            tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM submissions WHERE chat_id = ?1
+                 AND state IN ('saved', 'dispatching', 'accepted', 'delivered'))",
+                [&chat],
+                |r| r.get::<_, bool>(0),
+            )
+        })
+        .unwrap()
+    };
+    for _ in 0..300 {
+        if !in_flight() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(!in_flight(), "the handed-over turn settles");
+
     // The talk ends with nothing open: its chat is put away.
     s.talk_closed(None, "s-1".to_owned()).await;
     let archived = |chat: &str| {
