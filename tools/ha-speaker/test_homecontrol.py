@@ -73,8 +73,9 @@ STATES = {
 
 
 class FakeBackend:
-    def __init__(self, exposed=None):
+    def __init__(self, exposed=None, states=None):
         self.exposed_map = EXPOSED if exposed is None else exposed
+        self.states_map = STATES if states is None else states
         self.service_calls = []
         self.intent_calls = []
 
@@ -82,7 +83,8 @@ class FakeBackend:
         return self.exposed_map
 
     async def states(self, entity_ids):
-        return {eid: STATES[eid] for eid in entity_ids if eid in STATES}
+        return {eid: self.states_map[eid] for eid in entity_ids
+                if eid in self.states_map}
 
     async def call_service(self, domain, service, data):
         self.service_calls.append((domain, service, json.loads(
@@ -93,8 +95,8 @@ class FakeBackend:
         return {"text": "One timer left."}
 
 
-def run(args_list, exposed=None, dry=False):
-    backend = FakeBackend(exposed)
+def run(args_list, exposed=None, dry=False, states=None):
+    backend = FakeBackend(exposed, states)
     control = homecontrol.HomeControl(backend, dry=dry)
 
     async def go():
@@ -148,6 +150,53 @@ class ResolveTest(unittest.TestCase):
         self.assertFalse(r[0]["ok"])
         self.assertIn("I don't know a light called", r[0]["error"])
         self.assertEqual(b.service_calls, [])
+
+    # the review house: real lamps are named after rooms that are also areas.
+    # A singular lamp/light/bulb must keep the exact name; only plural room
+    # words mean "the whole area".
+    NAMED_HOUSE = {
+        "Home office": {"lights": [("Office lamp", "light.officelamp"),
+                                   ("Floor lamp", "light.floorlamp")],
+                        "climates": []},
+        "Office": {"lights": [("Desk light", "light.desk1")], "climates": []},
+        "Bedroom": {"lights": [("Bedroom lamp", "light.brlamp"),
+                               ("Ceiling", "light.brceil")], "climates": []},
+        "Hall": {"lights": [("Hall light", "light.hall1"),
+                            ("Hall extra", "light.hall2")], "climates": []},
+    }
+
+    def test_singular_kind_word_keeps_the_exact_lamp(self):
+        # was: trimming "office lamp" to the area word hit a different room's
+        # Desk light; "bedroom lamp" switched every bedroom light
+        table = [
+            ("office lamp", ["light.officelamp"]),
+            ("the office lamp", ["light.officelamp"]),
+            ("bedroom lamp", ["light.brlamp"]),
+            ("hall light", ["light.hall1"]),
+        ]
+        for target, want in table:
+            with self.subTest(target):
+                r, b = run([("light", {"target": target,
+                                       "action": "toggle"})],
+                           exposed=self.NAMED_HOUSE)
+                self.assertTrue(r[0]["ok"], r[0])
+                self.assertEqual([c[2]["entity_id"] for c in b.service_calls],
+                                 [want])
+
+    def test_plural_room_word_still_moves_the_whole_area(self):
+        table = [
+            ("home office lights", ["light.floorlamp", "light.officelamp"]),
+            ("office lamps", ["light.desk1"]),
+            ("the hall lights", ["light.hall1", "light.hall2"]),
+        ]
+        for target, want in table:
+            with self.subTest(target):
+                r, b = run([("light", {"target": target,
+                                       "action": "toggle"})],
+                           exposed=self.NAMED_HOUSE)
+                self.assertTrue(r[0]["ok"], r[0])
+                self.assertEqual(
+                    sorted(b.service_calls[0][2]["entity_id"]), want)
 
 
 class LightTest(unittest.TestCase):

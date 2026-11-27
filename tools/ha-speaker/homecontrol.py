@@ -219,45 +219,54 @@ class HomeControl:
                 pool.append((str(name), str(entity_id), str(area)))
         return pool
 
-    # "the home office lights" / "all the kitchen lights" name a ROOM: the
-    # trailing kind words come off so the area matches and every light of
-    # that room moves in one call, even when one bulb is itself named after
-    # the room. Only tried as extra variants - an exact entity name still
-    # matches unchanged.
-    _ROOM_SUFFIX = re.compile(r"(?:\s+all)?\s+(?:lights?|lamps?|bulbs?)$")
+    # "the home office lights" / "all the kitchen lights" name a ROOM: a
+    # trailing PLURAL kind word comes off so the area matches and every light
+    # of that room moves in one call, even when one bulb is itself named after
+    # the room. Plural only: with a singular light/lamp/bulb the words name one
+    # lamp and an exact entity name still has to win - "office lamp" must find
+    # the lamp called Office lamp, not every light of a room called Office.
+
+    _PLURAL_KIND = re.compile(r"(?:\s+all)?\s+(?:lights|lamps|bulbs)$")
 
     _ROOM_PREFIX = re.compile(r"^(?:(?:all|the|a|an)\s+)+")
 
-    def _target_variants(self, wanted):
-        out = [wanted]
-        rest = self._ROOM_PREFIX.sub("", wanted).strip()
-        if rest and rest != wanted:
-            out.append(rest)
-        while rest:
-            trimmed = self._ROOM_SUFFIX.sub("", rest).strip()
-            if not trimmed or trimmed == rest:
-                break
-            out.append(trimmed)
-            rest = trimmed
-        return out
+    def _room_forms(self, wanted):
+        """Forms of the target that may name a whole area: as spoken and after
+        articles, each also with any trailing plural kind word removed."""
+        forms = {wanted}
+        bare = self._ROOM_PREFIX.sub("", wanted).strip()
+        if bare:
+            forms.add(bare)
+        for form in list(forms):
+            cur = form
+            while True:
+                trimmed = self._PLURAL_KIND.sub("", cur).strip()
+                if not trimmed or trimmed == cur:
+                    break
+                forms.add(trimmed)
+                cur = trimmed
+        return forms
 
     def _resolve(self, target, kind):
-        """Area first (a room word wins over a bulb carrying the same name),
-        then exact name, then fuzzy. Returns a list of unique (name,
-        entity_id) or raises HomeControlError with candidates when the spoken
-        target is unknown or ambiguous."""
+        """An area named directly (or as a whole plural room word) wins over a
+        bulb carrying the same name; then an exact entity name - never trimmed
+        of a singular light/lamp/bulb, which is what keeps a lamp actually
+        called "office lamp" out of the Office room's reach; then fuzzy.
+        Returns a list of unique (name, entity_id) or raises HomeControlError
+        with candidates when the spoken target is unknown or ambiguous."""
         wanted = _norm(target)
         if not wanted:
             raise HomeControlError("no target given")
-        variants = self._target_variants(wanted)
         pool = self._pool(self._exposed_cache, kind)
         areas = {area for _, _, area in pool}
-        hit_areas = [a for a in areas if _norm(a) in variants]
+        forms = self._room_forms(wanted)
+        hit_areas = [a for a in areas if _norm(a) in forms]
         if hit_areas:
             picked = [(n, e) for n, e, a in pool if a in hit_areas]
             return dedupe(picked)
+        bare = self._ROOM_PREFIX.sub("", wanted).strip() or wanted
         exact = dedupe([(n, e) for n, e, _ in pool
-                        if _norm(n) in variants])
+                        if _norm(n) in (wanted, bare)])
         if len(exact) == 1:
             return exact
         if len(exact) > 1:
