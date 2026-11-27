@@ -4,10 +4,9 @@
 //! Telegram message. What it holds (a flag, a question, an approval, a plan) is kept and listed in
 //! the attention inbox's Muted group, so a muted crew never waits on something nobody can find.
 //!
-//! - `chat_mutes` says who is muted. The user-only `chat_mute` op writes it from the menus; the
-//!   `muted` argument of `app_create_chat` and `app_update_chat` writes it for an agent.
-//! - `chats.created_by_chat` records which chat made a chat with `app_create_chat`. Only that chat,
-//!   besides the user, may mute or unmute it (`parent_chat_id` is no proof: it can be moved).
+//! - `chat_mutes` says who is muted. The `chat_mute` op writes it from the menus; the `muted`
+//!   argument of `app_create_chat` and `app_update_chat` writes it for an agent, any chat's.
+//! - `chats.created_by_chat` records which chat made a chat with `app_create_chat`.
 //! - Every notice path asks [`is_muted`], so there is one place to look.
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -59,33 +58,6 @@ pub fn created_by(tx: &Connection, chat_id: &str) -> rusqlite::Result<Option<Str
         .flatten())
 }
 
-/// Whether `caller` made this chat, or is a roll-over successor of the chat that did: a coordinator
-/// that rolled over still manages the chats its earlier links created.
-pub fn made_by_chain(tx: &Connection, chat_id: &str, caller: &str) -> rusqlite::Result<bool> {
-    let Some(creator) = created_by(tx, chat_id)? else {
-        return Ok(false);
-    };
-    let mut at = caller.to_owned();
-    // A roll-over chain is short; the bound only guards against a loop in bad data.
-    for _ in 0..64 {
-        if at == creator {
-            return Ok(true);
-        }
-        let prev = tx
-            .query_row(
-                "SELECT predecessor_id FROM chat_succession WHERE chat_id = ?1",
-                [&at],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?;
-        match prev {
-            Some(p) => at = p,
-            None => break,
-        }
-    }
-    Ok(false)
-}
-
 /// Record the chat that made this chat.
 pub fn set_created_by(tx: &Connection, chat_id: &str, creator: &str) -> rusqlite::Result<()> {
     tx.execute(
@@ -123,9 +95,6 @@ mod tests {
                 .unwrap()
         };
         let (a, b, c) = (mk(), mk(), mk());
-        let ids = [mk(), mk()];
-        let mut ids = ids.into_iter();
-        let mut mk_id = || ids.next().unwrap();
         db.write(|tx| {
             assert!(!is_muted(tx, &a)?);
             assert_eq!(created_by(tx, &a)?, None);
@@ -141,20 +110,6 @@ mod tests {
             set_muted(tx, &a, false, 8)?;
             assert!(!is_muted(tx, &a)?);
 
-            // The creator, and the later links of its roll-over chain, may manage the chat; others
-            // and its earlier links' unrelated chats may not.
-            let (d, e) = (mk_id(), mk_id());
-            assert!(made_by_chain(tx, &a, &b)?);
-            assert!(!made_by_chain(tx, &a, &d)?);
-            for (new, old) in [(&d, &b), (&e, &d)] {
-                tx.execute(
-                    "INSERT INTO chat_succession(chat_id, predecessor_id) VALUES (?1, ?2)",
-                    [new, old],
-                )?;
-            }
-            assert!(made_by_chain(tx, &a, &e)?, "a successor of a successor");
-            assert!(!made_by_chain(tx, &b, &e)?, "a chat nobody created");
-            assert!(!made_by_chain(tx, "missing", &e)?);
             Ok::<_, rusqlite::Error>(())
         })
         .unwrap();

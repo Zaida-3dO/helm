@@ -469,12 +469,12 @@ pub fn update(
 }
 
 /// Remove an item: it is hidden from lists, search and counts at once and kept (notes and all) for
-/// [`UNDO_WINDOW_MS`], so [`restore`] can bring it back. `by_chat` is the chat asking, when a chat
-/// is: a chat may only remove an item it saved itself, while the user (`None`) may remove any.
+/// [`UNDO_WINDOW_MS`], so [`restore`] can bring it back. Any chat, or the user, may remove any
+/// item; `_by_chat` is the chat asking and changes nothing here.
 pub fn remove(
     tx: &Transaction<'_>,
     id: &str,
-    by_chat: Option<&str>,
+    _by_chat: Option<&str>,
     now: i64,
 ) -> Result<(), StoreError> {
     let owner: Option<Option<String>> = tx
@@ -484,15 +484,8 @@ pub fn remove(
             |r| r.get(0),
         )
         .optional()?;
-    let Some(owner) = owner else {
+    if owner.is_none() {
         return Err(StoreError::NotFound);
-    };
-    if let Some(chat) = by_chat {
-        if owner.as_deref() != Some(chat) {
-            return Err(StoreError::Bad(
-                "A chat can only remove saved items it saved itself; ask the user to remove this one.",
-            ));
-        }
     }
     tx.execute(
         "UPDATE saved_items SET removed_at = ?2 WHERE id = ?1",
@@ -909,7 +902,7 @@ mod tests {
             .unwrap();
         assert_eq!(left, 0, "the note trail goes with it");
 
-        // A chat removes only what it saved itself; the user removes anything.
+        // Any chat, or the user, removes any item (it stays restorable for the undo window).
         let mine = db
             .write(|tx| {
                 save(
@@ -925,17 +918,8 @@ mod tests {
             })
             .unwrap()
             .0;
-        for (id, who, ok) in [
-            (&mine.id, Some("chat-2"), false),
-            (&b.id, Some("chat-1"), false),
-            (&mine.id, Some("chat-1"), true),
-            (&b.id, None, true),
-        ] {
-            let r = db.write(|tx| remove(tx, id, who, 9100));
-            assert_eq!(r.is_ok(), ok, "{id} by {who:?}");
-            if !ok {
-                assert!(matches!(r.unwrap_err(), StoreError::Bad(_)));
-            }
+        for (id, who) in [(&mine.id, Some("chat-2")), (&b.id, None)] {
+            db.write(|tx| remove(tx, id, who, 9100)).unwrap();
         }
     }
 

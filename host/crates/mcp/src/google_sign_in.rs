@@ -136,7 +136,7 @@ fn pick_server(list: &[McpServer], what: Option<&str>) -> Result<McpServer, Stri
             .find(|s| s.id == w || s.name.eq_ignore_ascii_case(w))
             .copied()
             .ok_or_else(|| {
-                "No Google accounts server has that id or name; the user adds one in Settings → MCP."
+                "No Google accounts server has that id or name; list them with app_mcp_servers, or add one with app_mcp_servers add (preset google_accounts; if it is refused, send the same call with askUser: true)."
                     .to_owned()
             })?,
         None => {
@@ -146,7 +146,7 @@ fn pick_server(list: &[McpServer], what: Option<&str>) -> Result<McpServer, Stri
                 ([one], _) => **one,
                 ([], []) => {
                     return Err(
-                        "No Google accounts server exists; the user adds one in Settings → MCP."
+                        "No Google accounts server exists; add one with app_mcp_servers add (preset google_accounts; if it is refused, send the same call with askUser: true)."
                             .into(),
                     )
                 }
@@ -165,7 +165,7 @@ fn pick_server(list: &[McpServer], what: Option<&str>) -> Result<McpServer, Stri
     };
     if !found.enabled {
         return Err(format!(
-            "{} is turned off; the user turns it on in Settings → MCP.",
+            "{} is turned off; turn it on with app_mcp_servers set_enabled.",
             found.name
         ));
     }
@@ -222,14 +222,14 @@ fn stage(ctx: &ToolCtx, args: Value) -> ToolResult {
     };
     if !crate::repo_gate::all_on(&db) {
         return Err(refuse(
-            "MCP is switched off in Settings → MCP, so the Google tools are off too.",
+            "MCP is switched off (app_update_settings mcpEnabled turns it on), so the Google tools are off too.",
         ));
     }
     let list = store.load().map_err(|e| refuse(e.to_string()))?;
     let server = pick_server(&list, text("server")?.as_deref()).map_err(refuse)?;
     if !google::client_available(&store, &server) {
         return Err(refuse(
-            "Helm has no Google sign-in client yet. Only the user can set it, in Settings → MCP (Google accounts → sign-in client): its secret belongs to their profile, so an agent cannot enter it. Ask the user to do that first.",
+            "Helm has no Google sign-in client yet. Its secret is typed by the user, never through a chat: stage credentials {for: mcp} with app_stage_settings and Settings > MCP opens for the user to enter it (Google accounts, sign-in client), then ask again.",
         ));
     }
     if google::sign_in_open() {
@@ -280,7 +280,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::write(
             TOOL,
-            "Ask the user to sign a Google account in to Helm (for example a personal Gmail, a new account, or one whose Gmail permissions are missing). The user gets an Approve card; on Approve Google's own sign-in opens in the browser on this PC and they only pick the account and allow it. Every Gmail permission is asked for. Answers pending; the outcome reaches you as a note. It cannot set the sign-in client in Settings > MCP: only the user can.",
+            "Start signing a Google account in to Helm (for example a personal Gmail, a new account, or one whose Gmail permissions are missing). The user gets an Approve card; on Approve Google's own sign-in opens in the browser on this PC and they only pick the account and allow it. Every Gmail permission is asked for. Answers pending; the outcome reaches you as a note. It cannot set the sign-in client in Settings > MCP: only the user can.",
             json!({
                 "type": "object",
                 "properties": {
@@ -420,7 +420,7 @@ mod tests {
     }
 
     /// Asking for a sign-in over a temp profile: refused while Helm has no sign-in client (in
-    /// words that say only the user can set it), refused for a server that is off or unknown or
+    /// words that name the credentials page for it), refused for a server that is off or unknown or
     /// an address that is not one, and otherwise exactly one pending card that names the server,
     /// the account and the profile whole, and nothing is opened until the user approves.
     #[test]
@@ -476,7 +476,7 @@ mod tests {
 
         let err = stage(&ctx, json!({})).unwrap_err().text();
         assert!(
-            err.contains("Settings → MCP") && err.contains("Only the user can set it"),
+            err.contains("Settings > MCP") && err.contains("credentials"),
             "{err}"
         );
         google::seed_client(store.creds());

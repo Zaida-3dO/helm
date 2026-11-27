@@ -157,13 +157,6 @@ async fn update_project(ctx: ToolCtx, a: Value) -> ToolResult {
         .and_then(Value::as_str)
         .ok_or_else(|| ToolError::refused("projectId is required."))?
         .to_owned();
-    for k in ["path", "beforeProjectId", "position"] {
-        if a.get(k).is_some() {
-            return Err(ToolError::refused(format!(
-                "{k} cannot be changed by a chat yet; ask the user to do it in the sidebar."
-            )));
-        }
-    }
     let all = all_projects(&ctx, true).await?;
     let cur = find(&all, &id)?;
     if cur["closed"] == true {
@@ -171,12 +164,61 @@ async fn update_project(ctx: ToolCtx, a: Value) -> ToolResult {
     }
     let mut upd = json!({"projectId": id, "revision": cur["revision"]});
     let mut any = false;
+    // Where it sits: before a sibling (null: last), and which project it nests under (null: top).
+    for (k, op_key) in [
+        ("beforeProjectId", "beforeProjectId"),
+        ("parentId", "parentId"),
+    ] {
+        if let Some(v) = a.get(k) {
+            if !v.is_null() && !v.is_string() {
+                return Err(ToolError::refused(format!(
+                    "{k} is a project's id, or null."
+                )));
+            }
+            upd[op_key] = v.clone();
+            any = true;
+        }
+    }
+    // The files its chats are told about and the MCP servers they get: lists that replace the old
+    // ones (an empty list clears).
+    for (k, op_key) in [
+        ("startupFiles", "startupFiles"),
+        ("startupServers", "startupServers"),
+    ] {
+        if let Some(v) = a.get(k) {
+            let list = v
+                .as_array()
+                .filter(|l| l.iter().all(Value::is_string))
+                .ok_or_else(|| ToolError::refused(format!("{k} is a list of text.")))?;
+            upd[op_key] = json!(list);
+            any = true;
+        }
+    }
+    // A folder project is its folder: this moves it to another folder, when none of its chats is
+    // working.
+    if let Some(f) = a.get("path") {
+        if cur["kind"] == "board" {
+            return Err(ToolError::refused(
+                "A board has no folder of its own: set where its new chats start with primaryFolder.",
+            ));
+        }
+        let f = f
+            .as_str()
+            .map(str::trim)
+            .filter(|f| std::path::Path::new(f).is_absolute())
+            .ok_or_else(|| ToolError::refused("path must be an absolute folder path."))?;
+        if !std::path::Path::new(f).is_dir() {
+            return Err(ToolError::refused("That folder does not exist."));
+        }
+        upd["path"] = json!(f);
+        any = true;
+    }
     // A board's folder: where its new chats start. The folder is added as a folder project when
     // Helm has none over it.
     if let Some(f) = a.get("primaryFolder") {
         if cur["kind"] != "board" {
             return Err(ToolError::refused(
-                "primaryFolder is for boards. A folder project's folder cannot be changed by a chat; ask the user to do it in Settings.",
+                "primaryFolder is for boards. A folder project's folder is its path: change that with path.",
             ));
         }
         let f = f
@@ -230,7 +272,7 @@ async fn update_project(ctx: ToolCtx, a: Value) -> ToolResult {
             .ok_or_else(|| ToolError::refused("icon is an emoji, lib:<name> or none."))?;
         if i == "img" {
             return Err(ToolError::refused(
-                "A picture icon can only be chosen by the user, in the sidebar.",
+                "A picture icon is set with iconImagePath (a PNG file), not by name.",
             ));
         }
         upd["icon"] = if i == "none" { Value::Null } else { json!(i) };
@@ -238,6 +280,27 @@ async fn update_project(ctx: ToolCtx, a: Value) -> ToolResult {
     }
     if any {
         ctx.op("project_update", upd).await?;
+    }
+    // A picture: a square PNG file of at most 64 KB, which becomes the icon.
+    if let Some(path) = a.get("iconImagePath") {
+        let path = path
+            .as_str()
+            .map(str::trim)
+            .filter(|p| std::path::Path::new(p).is_absolute())
+            .ok_or_else(|| ToolError::refused("iconImagePath must be an absolute file path."))?;
+        let bytes =
+            std::fs::read(path).map_err(|_| ToolError::refused("That file could not be read."))?;
+        if bytes.len() > 64 * 1024 || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return Err(ToolError::refused(
+                "iconImagePath must be a PNG file of at most 64 KB.",
+            ));
+        }
+        use base64::Engine;
+        ctx.op(
+            "project_icon_image_set",
+            json!({"projectId": id, "pngBase64": base64::engine::general_purpose::STANDARD.encode(bytes)}),
+        )
+        .await?;
     }
     if let Some(arch) = a.get("archived").and_then(Value::as_bool) {
         if arch != cur["archived"].as_bool().unwrap_or(false) {
@@ -372,7 +435,13 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                     "description": {"type": "string", "maxLength": 200, "description": "One plain line telling chats and people what the project is for; none clears."},
                     "icon": {"type": "string", "maxLength": 128, "description": "An emoji, lib:<name> or none."},
                     "archived": {"type": "boolean"},
-                    "primaryFolder": {"type": "string", "maxLength": 4096, "description": "For a board: the absolute folder its new chats start in."}
+                    "primaryFolder": {"type": "string", "maxLength": 4096, "description": "For a board: the absolute folder its new chats start in."},
+                    "path": {"type": "string", "maxLength": 4096, "description": "For a folder project: the absolute folder it is; every chat in it must be idle."},
+                    "beforeProjectId": {"type": ["string", "null"], "description": "Put the project before this sibling; null puts it last."},
+                    "parentId": {"type": ["string", "null"], "description": "Nest the project under this project; null makes it top level."},
+                    "startupFiles": {"type": "array", "items": {"type": "string"}, "maxItems": 32, "description": "The context files the project's chats are told about (absolute paths); replaces the list."},
+                    "startupServers": {"type": "array", "items": {"type": "string"}, "maxItems": 32, "description": "The MCP server ids the project's chats get (the others are left out); replaces the list."},
+                    "iconImagePath": {"type": "string", "maxLength": 4096, "description": "An absolute path to a square PNG of at most 64 KB, which becomes the icon."}
                 }),
                 &["projectId"],
             ),
@@ -579,10 +648,11 @@ mod tests {
         assert!(calls
             .iter()
             .any(|(o, a)| o == "project_archive" && a["projectId"] == "p1"));
+        // A folder project's folder moves with path; it must exist.
         let e = update_project(ctx(ops.clone()), json!({"projectId": "p1", "path": "C:/x"}))
             .await
             .unwrap_err();
-        assert!(e.public.contains("path cannot be changed"));
+        assert!(!e.public.contains("ask the user"), "{}", e.public);
         // An icon is an emoji or a library name; a picture is the user's own choice.
         for (icon, want) in [
             (json!("🚀"), Some(json!("🚀"))),

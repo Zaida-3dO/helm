@@ -105,7 +105,7 @@ pub fn rename(tx: &Transaction<'_>, raw: &str) -> Result<(String, String), Devic
 }
 
 /// The computer's own name, title-cased and screened.
-fn default_name() -> String {
+pub fn default_name() -> String {
     let raw = if cfg!(windows) {
         std::env::var("COMPUTERNAME").ok()
     } else {

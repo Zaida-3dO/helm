@@ -113,7 +113,7 @@ fn main() -> ExitCode {
     };
     match &parsed.command {
         Command::WorktreeAdd { .. } => refuse(&format!(
-            "Worktrees are switched off for {} in Helm. Work in the existing checkout; if it is busy, tell the user instead of making a worktree.",
+            "Worktrees are switched off for {0} in Helm. Work in the existing checkout, or turn them on with app_update_settings (changes {{\"worktrees\": {{\"repos\": {{\"{0}\": true}}}}}}) if you need one.",
             line.repo_id
         )),
         Command::WorktreeRemove { path: Some(path) } => {

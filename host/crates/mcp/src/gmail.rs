@@ -146,7 +146,7 @@ fn google_server(store: &McpStore) -> Result<crate::types::McpServer, ToolError>
         .into_iter()
         .find(|s| s.enabled && s.preset.as_deref() == Some(google::PRESET_ID))
         .ok_or_else(|| {
-            ToolError::refused("No Google accounts server is turned on in Settings → MCP.")
+            ToolError::refused("No Google accounts server is turned on: turn one on with app_mcp_servers set_enabled.")
         })
 }
 
@@ -272,7 +272,7 @@ fn account_choices(store: &McpStore, ctx: &ToolCtx) -> String {
     let (req, home) = chat_scope(ctx);
     let list = google::accounts_for(store.creds(), req.as_deref(), home.as_deref());
     if list.is_empty() {
-        return "No Google account is signed in for this chat's profile; the user signs one in under Settings → MCP."
+        return "No Google account is signed in for this chat's profile; sign one in with app_mcp_servers google_sign_in."
             .to_owned();
     }
     let names: Vec<String> = list
@@ -296,7 +296,7 @@ fn resolve(
     if let Some(db) = ctx.services.get::<helm_core::db::Database>() {
         if !crate::repo_gate::all_on(&db) {
             return Err(ToolError::refused(
-                "MCP is switched off in Settings → MCP, so Helm's Gmail tools are off too.",
+                "MCP is switched off (app_update_settings mcpEnabled turns it on), so Helm's Gmail tools are off too.",
             ));
         }
     }
@@ -3468,7 +3468,7 @@ mod tests {
             panic!("blocking")
         };
         let err = f(&ctx, json!({"account": "a@x.com", "query": "x"})).unwrap_err();
-        assert!(err.text().contains("Settings → MCP"), "{}", err.text());
+        assert!(err.text().contains("app_mcp_servers"), "{}", err.text());
         // Every tool's description tells the agent where to learn the accounts.
         for n in [
             SEARCH, READ, THREAD, LABELS, LABEL, DRAFTS, DRAFT, TRASH, SEND,

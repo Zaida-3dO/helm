@@ -61,11 +61,11 @@ pub struct PolicyFile {
     #[serde(default = "on")]
     pub away_alerts: bool,
     /// Approval prompts can be answered with Telegram buttons ([`crate::approve`]). Off unless
-    /// the user turns it on in Settings.
+    /// it is turned on in Settings (a chat stages it and the user approves).
     #[serde(default)]
     pub approvals: bool,
     /// Waiting prompts can be answered from the hub's Remote page ([`crate::remote`]). Off unless
-    /// the user turns it on in Settings.
+    /// it is turned on in Settings (a chat stages it and the user approves).
     #[serde(default)]
     pub remote_answers: bool,
     /// The model a new Telegram chat opens with. `None` (or blank): the same model as any other

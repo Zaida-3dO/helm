@@ -94,11 +94,10 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
              shows the reason with \"sending will reload the local model\" and asks once before \
              the first send; a message from a schedule, a wait or another chat to a local-model \
              chat is saved and waits until the hold ends instead of waking the model, and so does \
-             the first message of a new local-model chat. The hold belongs to your chat: only you \
-             can release it, and it lifts by itself after hours (2 by default, 8 at most) or when \
-             your chat ends.\n\
-             release: clears your own hold now; another chat's hold is refused. Chats on Claude \
-             models are never held.\n\
+             the first message of a new local-model chat. A hold lifts by itself after hours \
+             (2 by default, 8 at most) or when your chat ends.\n\
+             release: clears the hold now, yours or another's (its holder hears the card is back). \
+             Chats on Claude models are never held.\n\
              Never unload on your own: it takes the card away from other working chats.",
         ),
         gpu,

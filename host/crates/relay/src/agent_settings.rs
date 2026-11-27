@@ -27,7 +27,6 @@ use crate::telegram::{self, PolicyFile};
 use crate::voice;
 use helm_hosttools::{SettingsExtension, StagedPart};
 use helm_ipc::AppEvent;
-use rusqlite::OptionalExtension;
 use rusqlite::Transaction;
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -63,23 +62,6 @@ const TELEGRAM_STAGED: &[StagedPart] = &[
 /// channel keys: `telegram`, `voice` and `speaker`.
 pub fn settings_extension(profile_dir: &std::path::Path) -> std::sync::Arc<dyn SettingsExtension> {
     std::sync::Arc::new(Both::new(profile_dir, None))
-}
-
-/// The profile that owns `chat`: its own, else the home profile. `None` when neither exists.
-fn chat_profile(tx: &Transaction<'_>, chat: &str) -> Option<String> {
-    tx.query_row(
-        "SELECT COALESCE(
-             (SELECT p.id FROM profiles p
-               WHERE p.id = (SELECT NULLIF(c.profile_id, '') FROM chats c WHERE c.id = ?1)),
-             (SELECT id FROM profiles WHERE is_home = 1))",
-        [chat],
-        |r| r.get::<_, Option<String>>(0),
-    )
-    .optional()
-    .ok()
-    .flatten()
-    .flatten()
-    .filter(|id| !id.is_empty())
 }
 
 /// The channel keys behind one registration: each call goes to the policy that owns the key.
@@ -128,7 +110,7 @@ impl SettingsExtension for Both {
         self.owner(key).staged_parts(key)
     }
     fn for_chat(&self, tx: &Transaction<'_>, chat: &str) -> Option<Arc<dyn SettingsExtension>> {
-        let profile = chat_profile(tx, chat)?;
+        let profile = helm_hosttools::settings_ext::chat_profile(tx, chat)?;
         Some(Arc::new(Both::new(&self.telegram.dir, Some(profile))))
     }
     fn read(&self, tx: &Transaction<'_>, key: &str) -> Value {

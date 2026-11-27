@@ -456,7 +456,10 @@ pub fn update(tx: &Transaction<'_>, patch: &Patch) -> Result<Entry, Refusal> {
         patch.remove || !patch.add_locations.is_empty() || !patch.remove_location_ids.is_empty();
     if touches_places && !cur.worktrees_allowed {
         return Err(Refusal::Refused(
-            "Worktrees are switched off for this repository, so its checkouts are locked.".into(),
+            format!(
+                "Worktrees are switched off for this repository, so its checkouts are locked. Turn them on with app_update_settings (changes {{\"worktrees\": {{\"repos\": {{\"{}\": true}}}}}}), then try again.",
+                patch.repo_id
+            ),
         ));
     }
     if patch.remove {
@@ -584,7 +587,7 @@ pub fn register_checkout(
         if let Some(existing) = by_remote(tx, &r.key())? {
             if !worktrees_allowed(tx, &existing)? {
                 return Err(Refusal::Refused(format!(
-                    "Worktrees are switched off for {existing}, so its checkouts cannot be changed from a chat."
+                    "Worktrees are switched off for {existing}, so its checkouts are locked. Turn them on with app_update_settings (changes {{\"worktrees\": {{\"repos\": {{\"{existing}\": true}}}}}}), then try again."
                 )));
             }
         }

@@ -677,7 +677,7 @@ impl McpStore {
                         let bytes = self
                             .creds
                             .read(id, &identity(server_id, id, Some(p)))
-                            .map_err(|_| format!("{label}: the saved secret could not be read. Enter it again in Settings → MCP."))?;
+                            .map_err(|_| format!("{label}: the saved secret could not be read: stage credentials {{for: mcp}} with app_stage_settings and Settings > MCP opens for the user to enter it again."))?;
                         String::from_utf8(bytes)
                             .map_err(|_| format!("{label}: the saved secret is not text."))?
                     }
@@ -709,7 +709,7 @@ impl McpStore {
                 let bytes = self
                     .creds
                     .read(id, &identity(server_id, id, None))
-                    .map_err(|_| format!("{label}: the saved secret could not be read. Enter it again in Settings → MCP."))?;
+                    .map_err(|_| format!("{label}: the saved secret could not be read: stage credentials {{for: mcp}} with app_stage_settings and Settings > MCP opens for the user to enter it again."))?;
                 String::from_utf8(bytes)
                     .map_err(|_| format!("{label}: the saved secret is not text."))?
             }

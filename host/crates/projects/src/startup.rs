@@ -25,8 +25,8 @@
 //!
 //! The startup set also holds **context files** (listed in the first message, never pasted; an
 //! agent reads one with `app_help project/<name>`) and the **MCP servers** the project's chats get
-//! (the others are left out of the chat's server list). Only the user sets these two, in Settings:
-//! a file path decides what an agent is shown, and a server list what it may reach.
+//! (the others are left out of the chat's server list). An agent changes these two with
+//! `app_update_project` (`startupFiles`, `startupServers`), like the project's other details.
 
 use crate::store::{self, Res};
 use crate::types::{ProjectNode, ProjectUpdateArgs};
@@ -523,7 +523,7 @@ fn project_startup(ctx: &ToolCtx, args: Value) -> ToolResult {
             "characters": node.startup_instructions.as_deref().map_or(0, |t| t.chars().count()),
             "contextFiles": node.startup_files,
             "mcpServers": node.startup_servers,
-            "note": "Context files and MCP servers are set by the user in Settings > Projects; set here changes the instructions only.",
+            "note": "Context files and MCP servers are changed with app_update_project (startupFiles, startupServers); set here stages the instructions for the user to approve.",
         })),
         Some("set") => stage_set(ctx, &db, &node, &args),
         _ => Err(refused("action is get or set.")),

@@ -27,6 +27,7 @@ mod ops;
 pub mod policy;
 pub mod service;
 pub mod settings;
+pub mod settings_key;
 pub mod signals;
 pub mod store;
 pub mod texts;

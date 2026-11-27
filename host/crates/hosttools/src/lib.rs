@@ -40,6 +40,7 @@ pub mod sections;
 pub mod settings;
 pub mod settings_allow;
 pub mod settings_ext;
+pub mod settings_json;
 pub mod settings_options;
 pub mod shells;
 pub mod show_images;
@@ -58,6 +59,7 @@ pub use registry::{
     ToolFuture, ToolHandler, ToolResult,
 };
 pub use settings_ext::{PrefRule, PrefRules, SettingsExtension, SettingsExtensions, StagedPart};
+pub use settings_json::JsonKey;
 pub use spec::{
     Availability, CatalogueEntry, Condition, LaunchKeys, McpChatProblem, McpChatProblems,
     McpChatProblemsGate, McpLaunch, McpLaunchGate, McpLaunchSource, McpServerFilter,

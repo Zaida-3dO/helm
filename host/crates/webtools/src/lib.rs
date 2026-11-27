@@ -110,7 +110,7 @@ impl WebSearch {
     fn check_allowed(&self, chat_id: &str) -> Result<(), String> {
         if !self.has_key() {
             return Err(
-                "No Brave search key is set. The user adds one in Settings > Web search."
+                "No Brave search key is set. The key is typed by the user, never through a chat: stage credentials {for: websearch} with app_stage_settings and Settings > Web search opens for them."
                     .to_owned(),
             );
         }

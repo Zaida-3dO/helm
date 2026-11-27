@@ -1732,7 +1732,7 @@ fn a_gpu_hold_has_an_owner_survives_a_restart_and_lifts_on_its_own() {
         .unwrap();
     };
 
-    // A hold set by a chat belongs to it: the view shows the owner and no other chat can clear it.
+    // A hold set by a chat names it as the owner.
     made_chat("owner-1");
     let view = r
         .svc()
@@ -1743,23 +1743,18 @@ fn a_gpu_hold_has_an_owner_survives_a_restart_and_lifts_on_its_own() {
         r.svc().gpu_hold().unwrap().owner.as_deref(),
         Some("owner-1")
     );
-    assert!(
-        r.svc()
-            .clear_hold(Some("some-other-chat"))
-            .unwrap_err()
-            .contains("another chat"),
-        "a stranger cannot end another chat's work"
-    );
-    assert_eq!(r.svc().gpu_hold().unwrap().reason, "Benchmark running");
-    // Nor can it be taken from under the holder while it is live: a second chat's set refuses,
-    // and the first hold stands on untouched.
-    assert!(
-        r.svc()
-            .set_hold("Mine now", None, Some("other-chat".into()))
-            .unwrap_err()
-            .contains("another chat"),
-        "a second chat cannot take over a live hold"
-    );
+    // Another chat may end it (and says so by calling release); then the owner sets it again.
+    r.svc().clear_hold(Some("some-other-chat")).unwrap();
+    assert!(r.svc().gpu_hold().is_none(), "any chat may end a hold");
+    r.svc()
+        .set_hold("Benchmark running", Some(2.0), Some("owner-1".into()))
+        .unwrap();
+    // A second chat's set while the hold is live names the call that ends it, and changes nothing.
+    let why = r
+        .svc()
+        .set_hold("Mine now", None, Some("other-chat".into()))
+        .unwrap_err();
+    assert!(why.contains("app_gpu release"), "{why}");
     assert_eq!(
         r.svc().gpu_hold().unwrap().reason,
         "Benchmark running",
@@ -1787,29 +1782,31 @@ fn a_gpu_hold_has_an_owner_survives_a_restart_and_lifts_on_its_own() {
     );
     assert_eq!(
         *chats.stops.lock().unwrap(),
-        vec![("flush".into(), "-".into())]
+        vec![("flush".into(), "-".into()), ("flush".into(), "-".into())],
+        "once when another chat ended the first hold, once when the owner's chat ended"
     );
     let svc3 = r.service();
     assert_eq!(svc3.hold.peek(), None, "and its stored row went with it");
 
-    // A hold the person set from the app is theirs alone to end: a chat may not release it,
-    // while an app-side release (no `by`) clears it.
+    // A hold the person set from the app is ended like any other: by a chat's release, or by the
+    // app's.
     let svc4 = r.service();
     svc4.attach_chats(chats.clone());
     svc4.set_hold("Movie night", None, None).unwrap();
     assert!(svc4.gpu_hold().unwrap().owner.is_none());
-    // Nor may a chat take the card from under the person while it is on.
+    // A chat's set while the person's hold is on names the call that ends it.
     assert!(
         svc4.set_hold("My job now", None, Some("some-chat".into()))
             .unwrap_err()
-            .contains("user from the app"),
-        "the person's hold stands"
+            .contains("app_gpu release"),
+        "the person's hold stands until it is released"
     );
+    svc4.clear_hold(Some("any-chat")).unwrap();
     assert!(
-        svc4.clear_hold(Some("any-chat")).is_err(),
-        "a chat may not end a hold the person set"
+        svc4.gpu_hold().is_none(),
+        "a chat may end a hold the person set"
     );
-    assert!(svc4.gpu_hold().is_some());
+    svc4.set_hold("Movie night", None, None).unwrap();
     svc4.clear_hold(None).unwrap();
     assert!(svc4.gpu_hold().is_none());
 

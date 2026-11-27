@@ -338,7 +338,7 @@ fn ask(ctx: &ToolCtx, a: Value) -> ToolResult {
         .map_err(|e| ToolError::refused(format!("{e}, so nothing was asked.")))?;
     if !telegram::load_approvals(&ch.paths.policy) {
         return Err(ToolError::refused(
-            "Approving from Telegram is off (the user turns it on in Settings → Hub), so nothing was asked.",
+            "Approving from Telegram is off (stage telegram {approvals: true} with app_stage_settings and the user approves it), so nothing was asked.",
         ));
     }
     let (Some(line), Some(sink)) = (

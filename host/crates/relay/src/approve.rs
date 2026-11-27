@@ -1,6 +1,6 @@
 //! Approving from Telegram.
 //!
-//! Off unless the user turns it on in Settings → Hub. Then a permission prompt or a plan approval
+//! Off unless it is turned on in Settings → Hub (a chat stages it and the user approves). Then a permission prompt or a plan approval
 //! waiting in a chat can go to Telegram as a message with one button per option, and a tap answers
 //! it as the card in Helm would — but only when Telegram is where that person can answer: an ask
 //! never mirrors to every surface at once ([`on_telegram`]).

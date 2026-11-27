@@ -15,10 +15,12 @@
 pub mod bindings;
 mod ops;
 mod seeds;
+mod settings_key;
 mod store;
 pub mod types;
 
 pub use ops::register_ops;
+pub use settings_key::settings_extension;
 pub use types::{ActionButton, ActionKind, ActionSet, ActionsSaveArgs, Placement};
 
 pub fn register_migrations(reg: &mut helm_core::db::MigrationRegistry) {

@@ -28,7 +28,7 @@ pub fn register(r: &mut HostToolRegistry) {
         ToolSpec::write(
             "app_queue_action",
             format!(
-                "Act on one chat waiting in the queue: top (push to the front of its line), up, down or cancel (give the waiting send back: typed text returns to the draft). Parking and releasing a chat are the user's own clicks (hold and release are refused here). Returns the fresh queue. Any chat in the line may be acted on, whoever it belongs to.{EXPLICIT}"
+                "Act on one chat waiting in the queue: top (push to the front of its line), up, down or cancel (give the waiting send back: typed text returns to the draft). hold parks a chat so it waits until released, and release lets it go on. Returns the fresh queue. Any chat in the line may be acted on, whoever it belongs to.{EXPLICIT}"
             ),
             obj(
                 json!({
@@ -42,7 +42,7 @@ pub fn register(r: &mut HostToolRegistry) {
             ),
         )
         .guidelines(
-            "chatId must name a chat waiting in the queue right now (check app_queue_status first); top, up and down refuse a chat that is not waiting or was parked by hand, and cancel on a chat that is not waiting refuses with its state. hold and release are the user's alone.",
+            "chatId must name a chat waiting in the queue right now (check app_queue_status first); top, up and down refuse a chat that is not waiting or was parked by hand, and cancel on a chat that is not waiting refuses with its state. hold and release work on any chat: a chat that is not waiting is answered with its state.",
         ),
         act,
     );
@@ -69,19 +69,6 @@ fn act(ctx: &ToolCtx, a: Value) -> ToolResult {
         .is_some();
     if !known {
         return Err(refuse("There is no chat with that id."));
-    }
-    // Parking a chat and ending a park are the user's own clicks: a park may be the user's, and
-    // the tool cannot tell whose it is.
-    if matches!(action, "hold" | "release") {
-        return Err(refuse(
-            "ask the user: parking a chat and releasing a park are theirs to do in the queue panel.",
-        ));
-    }
-    // Cancelling a hand-parked chat would end the park as well.
-    if action == "cancel" && queue::is_manual(db, chat_id) {
-        return Err(refuse(
-            "ask the user: a chat parked by hand stays parked until they release it in the queue panel.",
-        ));
     }
     // The drag form of `move` belongs to the panel; agents push, nudge and send back.
     let summary = queue::action(&rt, chat_id, action, None)
@@ -189,8 +176,8 @@ mod tests {
         let mut both = [mine.as_str(), other.as_str()];
         both.sort_unstable();
         assert_eq!(ids, both, "{r}");
-        // Parking and releasing are the user's own clicks, even on the caller's own chat: the
-        // park may be the user's.
+        // Parking and releasing are open to any chat, so the answers are the queue's own words
+        // about the chat's state, never "ask the user".
         for action in ["hold", "release", "cancel"] {
             let r = call(
                 &h,
@@ -200,15 +187,18 @@ mod tests {
                 json!({"chatId": other, "action": action}),
             )
             .await;
-            assert_eq!(r["ok"], false, "{action}: {r}");
-            assert!(
-                r["error"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .contains("ask the user"),
-                "{action}: {r}"
-            );
+            assert!(!r.to_string().contains("ask the user"), "{action}: {r}");
         }
+        // Park it again, by hand.
+        let r = call(
+            &h,
+            &t,
+            &other,
+            "app_queue_action",
+            json!({"chatId": other, "action": "hold"}),
+        )
+        .await;
+        assert_eq!(r["ok"], true, "{r}");
         // A hand-parked chat has no line to be pushed to the front of.
         let r = call(
             &h,

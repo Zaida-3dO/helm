@@ -12,6 +12,7 @@ helm-ipc.workspace = true
 helm-platform.workspace = true
 helm-workers.workspace = true
 helm-chats.workspace = true
+helm-hosttools = { path = "../hosttools" }
 sha2.workspace = true
 hex.workspace = true
 rusqlite.workspace = true

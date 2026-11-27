@@ -152,7 +152,7 @@ async fn save_saved(ctx: ToolCtx, a: Value) -> ToolResult {
 }
 
 /// The `saved_update` args for a chat's update: the named fields, and for a removal the calling
-/// chat, so the op lets it remove only an item it saved itself (the user may remove any).
+/// chat; any chat may remove any item, and the user can restore it for a while.
 fn saved_update_args(chat_id: &str, a: &Value) -> Result<Value, ToolError> {
     let id = a
         .get("id")
@@ -253,7 +253,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
             format!(
                 "Change or remove a saved item (its id comes from the list). state moves it between saved, filed, done and dismissed; \
                  set remindAt to a new epoch-ms time (from a day ago to five years ahead) to arm a reminder, or to null to clear it. \
-                 remove works only on items this chat saved itself; the user removes the rest.{EXPLICIT}"
+                 remove hides the item for a while so the user can restore it.{EXPLICIT}"
             ),
             json!({
                 "type": "object",

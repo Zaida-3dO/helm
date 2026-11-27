@@ -670,6 +670,16 @@ mod tests {
             helm_relay::hub_view::KEY,
             helm_gatekeeper::wmode_ext::KEY,
             "webSearchInClaudeChats",
+            helm_afk::settings_key::KEY,
+            helm_gatekeeper::settings_key::KEY,
+            helm_actions::settings_extension().keys()[0],
+            helm_devices::settings_key::settings_extension().keys()[0],
+            helm_panel::settings_key::CONTEXT_KEY,
+            helm_panel::settings_key::VAULTS_KEY,
+            helm_projects::settings_keys::WORKTREES_KEY,
+            helm_projects::settings_keys::BOARD_KEY,
+            helm_profiles::settings_keys::KEY,
+            helm_profiles::settings_keys::DELETE_KEY,
         ]);
         let _ = std::fs::remove_dir_all(&dir);
         for k in &ext_keys {
@@ -710,6 +720,156 @@ mod tests {
                 "{k} needs approval but cannot be staged"
             );
         }
+    }
+
+    /// The settings the Settings pages keep in their own tables are reachable by a chat: each key
+    /// reads, changes, answers a part that needs approval with the staging call, and Undo puts the
+    /// old value back.
+    #[test]
+    fn the_page_table_settings_keys_read_change_and_undo() {
+        use helm_hosttools::settings_allow::{access, Access};
+        use helm_hosttools::SettingsExtension;
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("helm-keys-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut m = MigrationRegistry::new();
+        registrations::migrations(&mut m);
+        let db = Arc::new(Database::open(&dir.join("t.sqlite3"), &m).unwrap());
+        let home = db
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO projects (id, name, created_at) VALUES ('pr', 'P', 1)",
+                    [],
+                )?;
+                tx.execute(
+                    "INSERT INTO chats (id, project_id, created_at, updated_at) VALUES ('chat-1', 'pr', 1, 1)",
+                    [],
+                )?;
+                Ok::<_, helm_profiles::store::ProfileError>(
+                    helm_profiles::store::ensure_home(tx, 1)?.id,
+                )
+            })
+            .unwrap();
+        let go = |x: &Arc<dyn SettingsExtension>, key: &str, v: Value| {
+            db.write(|tx| Ok::<_, rusqlite::Error>(x.apply(tx, key, &v)))
+                .unwrap()
+        };
+        let read = |x: &Arc<dyn SettingsExtension>, key: &str| {
+            db.snapshot(|tx| Ok::<_, rusqlite::Error>(x.read(tx, key)))
+                .unwrap()
+        };
+        let undo = |x: &Arc<dyn SettingsExtension>, key: &str, v: Value| {
+            db.write(|tx| Ok::<_, rusqlite::Error>(x.restore(tx, key, &v)))
+                .unwrap()
+                .unwrap()
+        };
+
+        // The action buttons: the whole list replaces.
+        let actions = helm_actions::settings_extension();
+        let button = json!({"id": "b1", "label": "Go", "kind": "prompt", "text": "Carry on.",
+            "projectId": null, "placement": "topbar", "hidden": false, "seedId": null});
+        let (before, after) = go(&actions, "actionButtons", json!([button])).unwrap();
+        assert_eq!(after.as_array().unwrap().len(), 1);
+        undo(&actions, "actionButtons", before.clone());
+        assert_eq!(read(&actions, "actionButtons"), before);
+
+        // The gatekeeper, per person: the model is a chat's own, the three that decide what it
+        // answers for the user are staged.
+        let gate = helm_gatekeeper::settings_key::settings_extension();
+        let parts: Vec<&str> = gate
+            .staged_parts("gatekeeper")
+            .iter()
+            .map(|p| p.path)
+            .collect();
+        assert_eq!(parts, ["enabled", "askFrequency", "policy"]);
+        let mine = db
+            .snapshot(|tx| Ok::<_, rusqlite::Error>(gate.for_chat(tx, "chat-1")))
+            .unwrap()
+            .expect("the record is the chat's person's");
+        let (before, after) = go(&mine, "gatekeeper", json!({"model": "haiku"})).unwrap();
+        assert_eq!(after["model"], "haiku");
+        assert_ne!(before["model"], after["model"]);
+        undo(&mine, "gatekeeper", before.clone());
+        assert_eq!(read(&mine, "gatekeeper"), before);
+
+        // AFK: the plan sign-off is staged, the rest is a chat's own.
+        let afk = helm_afk::settings_key::settings_extension_with(|| {});
+        assert_eq!(afk.staged_parts("afk")[0].path, "planApproval");
+        let (_, after) = go(&afk, "afk", json!({"auto": {"idleMinutes": 60}})).unwrap();
+        assert_eq!(after["auto"]["idleMinutes"], 60);
+        assert!(go(&afk, "afk", json!({"auto": {"idleMinutes": 1}})).is_err());
+
+        // This computer's name.
+        let device = helm_devices::settings_key::settings_extension();
+        let (before, after) = go(&device, "deviceName", json!("Kitchen PC")).unwrap();
+        assert_eq!(after, "Kitchen PC");
+        undo(&device, "deviceName", before.clone());
+        assert_eq!(read(&device, "deviceName"), before);
+
+        // The people: a chat adds one, Undo takes it out again, and removing one is staged.
+        let people = helm_profiles::settings_keys::settings_extensions(&Services::new());
+        let (profiles, delete) = (&people[0], &people[1]);
+        let (before, after) = go(profiles, "profiles", json!([{"name": "Sam"}])).unwrap();
+        assert_eq!(after.as_array().unwrap().len(), 2);
+        assert_eq!(before.as_array().unwrap().len(), 1);
+        assert!(
+            go(profiles, "profiles", json!([{"name": "Sam"}])).is_err(),
+            "names are unique"
+        );
+        let sam = after
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "Sam")
+            .unwrap()["id"]
+            .clone();
+        go(
+            profiles,
+            "profiles",
+            json!([{"id": sam, "about": "Likes short answers."}]),
+        )
+        .unwrap();
+        undo(profiles, "profiles", before);
+        assert_eq!(read(profiles, "profiles").as_array().unwrap().len(), 1);
+        assert_eq!(access("deleteProfile"), Some(Access::approval(
+            "Removing a profile is for good and moves its chats to the home profile, so you approve it."
+        )));
+        assert!(
+            go(delete, "deleteProfile", json!({"id": home})).is_err(),
+            "never the home profile"
+        );
+
+        // The side panel: each chat's eye toggle, and the vault folders.
+        let panel = helm_panel::settings_key::settings_extensions(Vec::new());
+        let eye = db
+            .snapshot(|tx| Ok::<_, rusqlite::Error>(panel[0].for_chat(tx, "chat-1")))
+            .unwrap()
+            .expect("the toggle is the chat's own");
+        assert_eq!(read(&eye, "panelContext"), json!(false));
+        go(&eye, "panelContext", json!(true)).unwrap();
+        assert_eq!(read(&eye, "panelContext"), json!(true));
+        let folder = dir.to_string_lossy().into_owned();
+        let (before, after) = go(&panel[1], "vaults", json!({"folders": [folder]})).unwrap();
+        assert_eq!(after["folders"].as_array().unwrap().len(), 1);
+        undo(&panel[1], "vaults", before.clone());
+        assert_eq!(read(&panel[1], "vaults"), before);
+
+        // Worktrees and the board's address (which is staged).
+        let mut s = Services::new();
+        s.insert(db.clone());
+        s.insert(Arc::new(Profile::open(&dir.join("profile")).unwrap()));
+        s.insert(Arc::new(Platform {
+            keychain: Arc::new(helm_platform::keychain::MemoryKeychain::default()),
+            ..Platform::native()
+        }));
+        let project = helm_projects::settings_keys::settings_extensions(&s);
+        let (before, after) =
+            go(&project[1], "boardAddress", json!("http://127.0.0.1:9000")).unwrap();
+        assert_eq!(before, "");
+        assert!(after.as_str().unwrap().starts_with("http://127.0.0.1:9000"));
+        assert!(matches!(access("boardAddress"), Some(Access::Approval(_))));
+        assert!(read(&project[0], "worktrees")["root"].is_string());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

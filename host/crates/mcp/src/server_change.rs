@@ -1154,7 +1154,7 @@ fn apply_level(store: &McpStore, t: &Target, lv: &LevelChange) -> String {
             );
             out.push_str(" A higher level takes effect after the accounts sign in again.");
             if scope_grows(lv) {
-                out.push_str(" This asks Google for more than the accounts were given: ask the user to sign in again.");
+                out.push_str(" This asks Google for more than the accounts were given: the accounts sign in again with app_mcp_servers google_sign_in.");
             }
             out
         }

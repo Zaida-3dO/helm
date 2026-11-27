@@ -197,8 +197,9 @@ impl LocalService {
                     "the user from the app"
                 };
                 return Err(format!(
-                    "a GPU hold is already on: \"{}\", set by {who}; only that holder, or the \
-                     user from the app, can end it — it ends by itself when its time comes",
+                    "a GPU hold is already on: \"{}\", set by {who}. End it with app_gpu \
+                     release first if the work it protects is done; it also ends by itself when \
+                     its time comes",
                     live.reason
                 ));
             }
@@ -216,32 +217,10 @@ impl LocalService {
         Ok(self.lock_view())
     }
 
-    /// Clear the hold; clearing none is not an error. `by` is the chat asked (from the tool
-    /// layer); `None` means the person did it from the app and any hold may be cleared. A hold
-    /// with an owner belongs to that chat alone: another chat cannot end its work.
-    pub fn clear_hold(&self, by: Option<&str>) -> Result<LockView, String> {
-        // Ownership is checked with `peek`, not `current`: asking must never drop an ended hold
-        // itself — the watch thread's tidy does that once, together with handing over what waited.
-        if let Some(h) = self.hold.peek() {
-            match (h.owner.as_deref(), by) {
-                (Some(o), Some(b)) if o != b => {
-                    return Err(
-                        "that hold was set by another chat: only that chat, or the user from \
-                         the app, can clear it; it ends by itself when its time comes."
-                            .into(),
-                    );
-                }
-                // A hold the person set in the app is theirs to end: no chat may release it.
-                (None, Some(_)) => {
-                    return Err(
-                        "that hold was set from the app: only the user can clear it there; \
-                         it ends by itself when its time comes."
-                            .into(),
-                    );
-                }
-                _ => {}
-            }
-        }
+    /// Clear the hold; clearing none is not an error. Any chat, or the person from the app, may
+    /// clear any hold: the one who held it hears of it as the card comes back, and sets a new hold
+    /// if the work still needs one. `_by` is the chat asked and changes nothing.
+    pub fn clear_hold(&self, _by: Option<&str>) -> Result<LockView, String> {
         if self.hold.clear() {
             if let Err(e) = self.db().write(|tx| store(tx, None)) {
                 log::warn!("the GPU hold could not be cleared in storage: {e}");

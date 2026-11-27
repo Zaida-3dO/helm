@@ -1757,6 +1757,7 @@ name = "helm-actions"
 version = "2.4.13"
 dependencies = [
  "helm-core",
+ "helm-hosttools",
  "helm-ipc",
  "rusqlite",
  "serde",
@@ -1772,6 +1773,7 @@ dependencies = [
  "chrono",
  "helm-chats",
  "helm-core",
+ "helm-hosttools",
  "helm-ipc",
  "helm-workflow",
  "log",
@@ -2055,6 +2057,7 @@ dependencies = [
 name = "helm-hosttools"
 version = "2.4.13"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "helm-core",
  "helm-ipc",
@@ -2209,6 +2212,7 @@ dependencies = [
  "base64 0.22.1",
  "helm-chats",
  "helm-core",
+ "helm-hosttools",
  "helm-ipc",
  "helm-platform",
  "helm-workers",
@@ -2245,6 +2249,7 @@ dependencies = [
  "helm-chats",
  "helm-core",
  "helm-devices",
+ "helm-hosttools",
  "helm-ipc",
  "helm-skills",
  "helm-workers",

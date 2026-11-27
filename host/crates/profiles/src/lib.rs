@@ -36,6 +36,7 @@
 pub mod bindings;
 pub mod launch;
 mod ops;
+pub mod settings_keys;
 pub mod store;
 
 pub use ops::register_ops;

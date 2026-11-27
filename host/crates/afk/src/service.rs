@@ -432,6 +432,22 @@ impl AfkService {
         self.view()
     }
 
+    /// A change made through the settings tools has committed: what a switch-off ends is closed,
+    /// a recorded lock is forgotten and the interface hears of it, as after the page's own save.
+    pub fn settings_committed(&self, now: i64) {
+        let s = self.settings();
+        {
+            let mut inner = self.lock();
+            inner.mon.lock_at = None;
+            if !s.enabled || s.applies_to != settings::AppliesTo::All {
+                let _ = self.close(&mut inner, now);
+            }
+            inner.seq += 1;
+        }
+        self.publish();
+        self.deliver(now);
+    }
+
     /// The UI's presence report: window focus and in-window input.
     pub fn presence(&self, focused: Option<bool>, input: bool, now: i64) {
         if let Some(f) = focused {

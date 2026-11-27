@@ -35,6 +35,7 @@ pub use helm_platform::private;
 pub mod quick;
 pub mod resolve;
 pub mod serve;
+pub mod settings_key;
 pub mod tabs;
 pub mod turns;
 pub mod vault;

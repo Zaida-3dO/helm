@@ -135,7 +135,7 @@ pub fn reply(enabled: bool, folder: &Path, chat_folder: Option<&str>, now: Syste
         return json!({
             "available": false,
             "windows": [],
-            "reason": "Sharing the editor's selection with agents is off. Only the user can turn it on: Settings > Chat, \"Agents can read your editor selection\".",
+            "reason": "Sharing the editor's selection with agents is off. Turn it on with app_update_settings (ideContext: true); the user sees a notice with Undo.",
         });
     }
     let fresh = Duration::from_secs(FRESH_SECS);
@@ -269,7 +269,7 @@ mod tests {
         );
         let off = reply(false, dir, None, now);
         assert_eq!(off["available"], false);
-        assert!(off["reason"].as_str().unwrap().contains("Settings > Chat"));
+        assert!(off["reason"].as_str().unwrap().contains("ideContext"));
         let none = reply(true, &dir.join("missing"), None, now);
         assert_eq!(none["available"], false);
         assert!(none["reason"].as_str().unwrap().contains("two minutes"));

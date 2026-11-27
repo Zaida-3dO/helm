@@ -30,15 +30,15 @@ pub enum Class {
 
 const MCP: &str =
     "it changes or calls the MCP servers that run on the PC with the user's credentials";
-const CHANGES: &str = "it changes chats, projects or folders; ask the user to do it in Helm";
-const SETTINGS: &str = "settings are read and changed in Helm only";
-const SCHEDULES: &str = "schedules are made only on the user's explicit request in Helm";
+const CHANGES: &str = "it changes chats, projects or folders; send the request to a chat in Helm with app_send_message and that chat does it";
+const SETTINGS: &str = "settings are read and changed by a chat in Helm: send the request to one with app_send_message";
+const SCHEDULES: &str = "schedules are made by a chat in Helm on the user's request: send the request to one with app_send_message";
 const CONSENT: &str = "approvals and workflow decisions are made by the user in Helm";
 const LOCAL: &str = "it works on Helm's own local records";
 const TOOLS: &str = "it lists or runs the PC's own tools";
 const EDITOR: &str = "it reads the user's code editor on the PC";
 const SEARCH: &str = "it spends the user's own web search allowance";
-const UPDATES: &str = "it updates Helm itself on this PC; ask the user to do it in Helm";
+const UPDATES: &str = "it updates Helm itself on this PC; send the request to a chat in Helm with app_send_message and that chat does it";
 
 /// Every reserved name, classified. Kept in the order of `reserved.json`.
 pub const TABLE: &[(&str, Class)] = &[

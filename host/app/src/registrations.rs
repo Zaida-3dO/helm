@@ -195,6 +195,25 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
         // A chat's edits to the rules and skills, which Undo puts back.
         extensions.push(helm_skills::undo::settings_extension(&profile.dir));
     }
+    // The settings the Settings pages keep in their own tables: AFK, the gatekeeper, the action
+    // buttons, the side panel's vaults and eye toggle, worktrees, the board's address, the people
+    // of this Helm and this computer's name. A chat changes them itself; only what could not be
+    // undone or acts for the user is staged.
+    if let Some(afk) = services.get::<helm_afk::AfkService>() {
+        extensions.push(helm_afk::settings_key::settings_extension(afk));
+    }
+    extensions.push(helm_gatekeeper::settings_key::settings_extension());
+    extensions.push(helm_actions::settings_extension());
+    extensions.push(helm_devices::settings_key::settings_extension());
+    extensions.extend(helm_projects::settings_keys::settings_extensions(services));
+    extensions.extend(helm_profiles::settings_keys::settings_extensions(services));
+    if let Some(profile) = services.get::<helm_core::profile::Profile>() {
+        let mut private = vec![profile.dir.clone()];
+        if let Ok(d) = helm_core::profile::default_profile_dir() {
+            private.push(d);
+        }
+        extensions.extend(helm_panel::settings_key::settings_extensions(private));
+    }
     // Whether this PC is connected to the hub, read only (never the address, token or ids).
     extensions.extend(helm_relay::hub_view::settings_extension(services));
     services.insert(Arc::new(helm_hosttools::SettingsExtensions(extensions)));

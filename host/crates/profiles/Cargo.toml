@@ -13,6 +13,7 @@ helm-chats.workspace = true
 helm-devices = { path = "../devices" }
 helm-skills = { path = "../skills" }
 helm-workers.workspace = true
+helm-hosttools = { path = "../hosttools" }
 serde.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true

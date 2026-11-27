@@ -2,7 +2,6 @@
 //! preference keys' `CLASSIFIED`. Every SQLite table any crate creates is listed here with who may
 //! change it:
 //!
-//! - `UserOnly`: settings-like rows only the user edits (in Settings); no agent tool writes them.
 //! - `Tool`: rows an agent may change, only through that feature's own host tool or through the
 //!   settings tools (`app_update_settings`, or `app_stage_settings` when the key needs approval).
 //! - `Data`: the app's own records (chats, messages, projects, caches), never a setting.
@@ -12,7 +11,6 @@
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TableClass {
-    UserOnly(&'static str),
     Tool,
     Data,
 }
@@ -25,6 +23,9 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("preferences", Data), // classified per key in prefs::classes
     ("projects", Data),
     ("chats", Data),
+    ("chat_summary", Data),
+    ("chat_finished_sweep", Data),
+    ("chat_finished_sweep_start", Data),
     ("messages", Data),
     ("submissions", Data),
     ("runs", Data),
@@ -68,10 +69,7 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("agent_waits", Data),
     ("saved_items", Data),
     ("saved_item_notes", Data),
-    (
-        "chat_mutes",
-        UserOnly("Muting a chat is yours to decide; agents never mute or unmute."),
-    ),
+    ("chat_mutes", Tool),
     // The chat search index (an FTS5 table and its shadow tables).
     ("message_search", Data),
     ("message_search_data", Data),
@@ -98,33 +96,21 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("repositories", Tool),
     ("repo_checkouts", Tool),
     ("repo_ignored", Data),
-    (
-        "repo_worktree_settings",
-        UserOnly("Whether agents may make worktrees in a repository is yours to set; agents never change it."),
-    ),
-    (
-        "worktree_config",
-        UserOnly("Where agents' worktrees go is yours to set; agents never change it."),
-    ),
+    ("repo_worktree_settings", Tool),
+    ("worktree_config", Tool),
     ("project_notes", Tool),
-    (
-        "board_connection",
-        UserOnly("The Agent Standup address is yours to set in Settings; agents never change it."),
-    ),
+    ("board_connection", Tool),
     // Panel.
     ("panel_tab_sets", Data),
-    ("panel_context", UserOnly("The side panel eye toggle is yours alone; no agent tool reads or changes it.")),
+    ("panel_context", Tool),
     ("panel_context_sent", Data),
     ("review_comments", Data),
-    ("panel_vaults", UserOnly("The Obsidian vaults Helm reads are yours to add in Settings; agents never change them.")),
-    ("panel_vault_default", UserOnly("Your default vault for note links; only you set it in Settings.")),
+    ("panel_vaults", Tool),
+    ("panel_vault_default", Tool),
     // Search.
     ("search_opens", Data),
     // Actions.
-    (
-        "action_sets",
-        UserOnly("Your own one-click buttons; only you edit them in Settings."),
-    ),
+    ("action_sets", Tool),
     // Consent.
     ("consent_requests", Data),
     ("consent_asks", Data),
@@ -162,19 +148,13 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     // Follow-ups queued from reviews and post-land reports (read and dropped through app_workflow).
     ("workflow_followups", Tool),
     // AFK and the usage governor.
-    (
-        "afk_settings",
-        UserOnly("AFK decides when Helm answers for you, so only you set it."),
-    ),
+    ("afk_settings", Tool),
     ("afk_spans", Data),
     ("afk_digests", Data),
     ("afk_events", Data),
     ("governor_settings", Tool),
     // The question gatekeeper: its settings and its audit trail of the asks it looked at.
-    (
-        "gate_settings",
-        UserOnly("The gatekeeper decides when Helm answers questions for you, so only you set it."),
-    ),
+    ("gate_settings", Tool),
     ("gate_asks", Data),
     // The run of nudges a chat is on (the gatekeeper's own count), and a board's working mode.
     ("gate_stop_chains", Data),
@@ -186,31 +166,18 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     // Which Ollama variants Helm made for chat windows; written and pruned by Helm alone.
     ("local_model_variants", Data),
     // Whether local models are unloaded and kept off, and since when.
-    (
-        "local_model_lock",
-        UserOnly("Only you unload local models or turn them back on; a game on your list can set it too."),
-    ),
+    ("local_model_lock", Tool),
+    // The GPU hold a chat sets while it uses the card (app_gpu hold and release).
+    ("local_model_hold", Tool),
     // Web search: the Claude-chats switch (agents may change it through the settings tools) and
     // the last settings file imported from. The Brave key is in the credential store, not here.
     ("web_search_settings", Tool),
     // Profiles (the people who use Helm) and the label each chat carries; chats never change them.
-    (
-        "profiles",
-        UserOnly("Who uses this Helm, and which chats are theirs, is yours to set."),
-    ),
-    (
-        "chat_profiles",
-        UserOnly("Which profile a chat belongs to is yours to set."),
-    ),
-    (
-        "chat_shares",
-        UserOnly("Which profiles a chat is shared with is yours to set."),
-    ),
+    ("profiles", Tool),
+    ("chat_profiles", Tool),
+    ("chat_shares", Tool),
     // A person the user unlinked or deleted stays so until they link them on purpose.
-    (
-        "declined_people",
-        UserOnly("Whether an unlinked person stays unlinked is yours to set."),
-    ),
+    ("declined_people", Data),
     // Messages other devices sent here, kept a week so a repeat runs once.
     ("remote_sends", Data),
     // This PC's copy of the other devices of the household and the chats they run: what the hub
@@ -223,23 +190,14 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     // Staged images and files waiting to cross to a chat another device runs.
     ("mirror_attachments", Data),
     // This install's own device id and name; written by Helm and the user's rename alone.
-    (
-        "device_self",
-        UserOnly("This PC's device name is yours to set."),
-    ),
+    ("device_self", Tool),
     // Sealed pages: pins are made through app_pin_page; a page's saved state is its own.
     ("pinned_pages", Tool),
     ("page_state", Data),
     // Memory indexing: what is uploaded to the hub's search index is the user's decision (agents
     // go through app_memory_index and the Allow card); the doc rows are only a record of what was sent.
-    (
-        "memindex_sources",
-        UserOnly("What Helm indexes for memory search is yours to choose."),
-    ),
-    (
-        "memindex_settings",
-        UserOnly("Memory indexing's switches are yours to set."),
-    ),
+    ("memindex_sources", Tool),
+    ("memindex_settings", Tool),
     ("memindex_docs", Data),
     // Dictation: which speech-to-text server the microphone button sends audio to.
     ("dictation_settings", Tool),
@@ -258,13 +216,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn names_are_unique_and_reasons_short() {
+    fn names_are_unique() {
         let mut seen = std::collections::HashSet::new();
-        for (n, c) in CLASSIFIED_TABLES {
+        for (n, _) in CLASSIFIED_TABLES {
             assert!(seen.insert(*n), "{n} is listed twice");
-            if let UserOnly(why) = c {
-                assert!(why.len() <= 130, "{n}: reason too long");
-            }
         }
         assert_eq!(table_class("chats"), Some(Data));
         assert_eq!(table_class("nope"), None);

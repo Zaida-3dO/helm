@@ -26,7 +26,7 @@ pub use helm_core::prefs::Access;
 
 /// The most settings that may need approval, preference keys and named ones together. Raising
 /// it is a decision, and the commit says why.
-pub const MAX_APPROVAL_KEYS: usize = 9;
+pub const MAX_APPROVAL_KEYS: usize = 11;
 
 /// The key a chat stages to ask the user to type a secret. It carries no secret: only which
 /// credential, and Approve opens the Settings page where the user types it.
@@ -66,6 +66,14 @@ pub const NAMED: &[(&str, Access)] = &[
     ("subagentHardStop", Access::Direct),
     // Settings in a crate's own table.
     ("usageGovernor", Access::Direct),
+    ("afk", Access::Direct),
+    ("gatekeeper", Access::Direct),
+    ("actionButtons", Access::Direct),
+    ("panelContext", Access::Direct),
+    ("vaults", Access::Direct),
+    ("worktrees", Access::Direct),
+    ("profiles", Access::Direct),
+    ("deviceName", Access::Direct),
     // The few a chat stages for the user to approve.
     (
         "workmode",
@@ -89,6 +97,18 @@ pub const NAMED: &[(&str, Access)] = &[
         "localServers",
         Access::approval(
             "A server's folder and preset make Helm start a program, so you approve them.",
+        ),
+    ),
+    (
+        "boardAddress",
+        Access::approval(
+            "Helm sends the board's work records to this address, so you approve which one.",
+        ),
+    ),
+    (
+        "deleteProfile",
+        Access::approval(
+            "Removing a profile is for good and moves its chats to the home profile, so you approve it.",
         ),
     ),
     (
@@ -219,10 +239,25 @@ pub fn not_a_setting(key: &str) -> String {
 #[cfg(test)]
 pub(crate) const DEAD_ENDS: &[&str] = &[
     "yours to change only",
-    "ask the user to change it",
-    "ask the user to change that",
+    "ask the user to change",
+    "ask the user to do it",
+    "ask the user to restore",
+    "ask the user to remove",
+    "ask the user to mute",
+    "ask the user to set",
+    "ask the user to sign",
+    "ask the user:",
     "user's to change",
     "is not a setting chats can change",
+    "can only be chosen by the user",
+    "the user adds one in",
+    "the user turns it on in",
+    "the user signs one in",
+    "only the user can set it",
+    "only the user can clear it",
+    "set by the user in settings",
+    "are theirs to do",
+    "the user removes the rest",
 ];
 
 #[cfg(test)]

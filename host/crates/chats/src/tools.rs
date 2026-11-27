@@ -1703,7 +1703,7 @@ fn place(
     };
     if board.archived {
         return Ok(Err(refuse(
-            "That board is archived; ask the user to restore it before starting chats on it.",
+            "That board is archived: restore it with app_update_project (archived: false) before starting chats on it.",
         )));
     }
     if board.closed {
@@ -1719,7 +1719,7 @@ fn place(
         (None, Some((path, id))) => (path, Some(id)),
         (None, None) => {
             let mut m = format!(
-                "The board '{}' has no folder yet. Ask the user to set one",
+                "The board '{}' has no folder yet. Set one with app_update_project (primaryFolder: an absolute folder)",
                 board.name
             );
             if let Some(r) = board
@@ -2199,15 +2199,14 @@ async fn fork_chat(ctx: ToolCtx, a: Value) -> ToolResult {
 
 async fn update_chat(ctx: ToolCtx, a: Value) -> ToolResult {
     let id = chat_id_arg(&a)?;
-    for k in ["beforeChatId", "position", "harness", "provider"] {
+    for k in ["harness", "provider"] {
         if a.get(k).is_some() {
             return Err(refuse(format!(
-                "{k} cannot be changed by a chat yet; ask the user to do it in the sidebar."
+                "A chat's {k} is fixed when the chat starts and no call changes it later: start a new chat with app_create_chat on the one you want, or change this chat's model with model."
             )));
         }
     }
-    // Only the chat that made this chat (or a roll-over successor of it), or the user, may mute or
-    // unmute it.
+    // Any chat may mute or unmute any chat; the user sees what changed in the chat's own row.
     let muted = match a.get("muted") {
         None => None,
         Some(m) => Some(
@@ -2215,16 +2214,6 @@ async fn update_chat(ctx: ToolCtx, a: Value) -> ToolResult {
                 .ok_or_else(|| refuse("muted must be true or false."))?,
         ),
     };
-    if muted.is_some() {
-        let allowed = db(&ctx)?
-            .snapshot(|tx| crate::mute::made_by_chain(tx, &id, &ctx.caller_chat_id))
-            .map_err(|e| ToolError::maybe(e.to_string()))?;
-        if !allowed {
-            return Err(refuse(
-                "Only the chat that created this chat, or the user, can mute it; ask the user to mute it from the chat's menu.",
-            ));
-        }
-    }
     let m = meta(&ctx, &id)?;
     if m["archived"] == true {
         return Err(refuse("That chat is archived."));
@@ -2257,6 +2246,23 @@ async fn update_chat(ctx: ToolCtx, a: Value) -> ToolResult {
     }
     if let Some(p) = a.get("pinned").and_then(Value::as_bool) {
         organize["pinned"] = json!(p);
+    }
+    // Where it sits among its siblings: before another chat, or at the end.
+    if let Some(b) = a.get("beforeChatId") {
+        let b = b
+            .as_str()
+            .filter(|x| x.len() == 36 && uuid::Uuid::parse_str(x).is_ok())
+            .ok_or_else(|| refuse("beforeChatId must be a chat's exact 36-character id."))?;
+        organize["beforeChatId"] = json!(b);
+    }
+    match a.get("position").map(|p| p.as_str()) {
+        None => {}
+        Some(Some("end")) => organize["toEnd"] = json!(true),
+        Some(_) => {
+            return Err(refuse(
+                "position is \"end\" (to put the chat last), or use beforeChatId.",
+            ))
+        }
     }
     // A move made by a chat's own tool must not change how the moved chat works: tell the stop
     // judge, so the chat keeps its mode, or the stricter one of the new board's, until the user
@@ -2299,6 +2305,27 @@ async fn update_chat(ctx: ToolCtx, a: Value) -> ToolResult {
     if let Some(muted) = muted {
         ctx.op("chat_mute", json!({"chatId": id, "muted": muted}))
             .await?;
+    }
+    // Whose chat it is, and who else sees it: any person's, named by their profile id (see the
+    // profiles key of app_get_settings).
+    if let Some(p) = str_arg(&a, "profileId") {
+        ctx.op(
+            "profiles_assign_chats",
+            json!({"chatIds": [id], "profileId": p}),
+        )
+        .await?;
+    }
+    for (key, shared) in [("shareWith", true), ("unshareFrom", false)] {
+        for p in a.get(key).and_then(Value::as_array).into_iter().flatten() {
+            let p = p
+                .as_str()
+                .ok_or_else(|| refuse(format!("{key} is a list of profile ids.")))?;
+            ctx.op(
+                "profiles_share_chats",
+                json!({"chatIds": [id], "profileId": p, "shared": shared}),
+            )
+            .await?;
+        }
     }
     meta(&ctx, &id)
 }
@@ -2636,6 +2663,11 @@ A helper started with Claude Code's Agent tool always runs on this chat's own mo
                     "projectId": {"type": "string"},
                     "parentChatId": {"type": ["string", "null"], "minLength": 36, "maxLength": 36},
                     "muted": {"type": "boolean"},
+                    "beforeChatId": {"type": "string", "minLength": 36, "maxLength": 36, "description": "Put the chat before this sibling."},
+                    "position": {"type": "string", "enum": ["end"], "description": "end: put the chat last among its siblings."},
+                    "profileId": {"type": "string", "description": "Make the chat belong to this profile (ids are under the profiles key of app_get_settings)."},
+                    "shareWith": {"type": "array", "items": {"type": "string"}, "maxItems": 16, "description": "Also show the chat to these profiles."},
+                    "unshareFrom": {"type": "array", "items": {"type": "string"}, "maxItems": 16, "description": "Stop showing the chat to these profiles."},
                     "model": {"type": "string", "description": "A Claude model id (sonnet, opus, ...) or a local model id (local/<server>/<model>)."},
                     "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]},
                     "reason": {"type": "string", "minLength": 1, "maxLength": 500}
@@ -4381,7 +4413,7 @@ mod tests {
         let nil = Value::Null;
         let no_folder = concat!(
             "The board 'Site' has no folder yet. ",
-            "Ask the user to set one (the board's repository is owner/site)."
+            "Set one with app_update_project (primaryFolder: an absolute folder) (the board's repository is owner/site)."
         );
         let not_board = "Pick a board; folders are where chats run";
         // (caller, args, error text or "", then for a new chat: its board, parent and folder)
@@ -4674,13 +4706,9 @@ mod tests {
                 "",
                 None,
             ),
-            // Not made by the caller: only the creator, or the user, may mute it.
-            (
-                json!({"muted": true}),
-                "Only the chat that created this chat, or the user, can mute it",
-                None,
-            ),
-            (json!({"harness": "codex"}), "cannot be changed", None),
+            // Any chat may mute another, and a harness is fixed: the answer names the call to use.
+            (json!({"muted": true}), "", None),
+            (json!({"harness": "codex"}), "app_create_chat", None),
             (json!({"parentChatId": "short"}), "parentChatId", None),
         ];
         for (i, (extra, err, organize)) in cases.into_iter().enumerate() {

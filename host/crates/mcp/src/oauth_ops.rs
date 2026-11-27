@@ -47,7 +47,7 @@ const REFRESH_MARGIN: Duration = Duration::from_secs(300);
 const FRESH_FOR: u64 = 30;
 
 /// The words a not-connected server is reported with, in the chat's server list as well.
-pub const NOT_CONNECTED: &str = "Not connected: open Settings → MCP and click Connect.";
+pub const NOT_CONNECTED: &str = "Not connected: stage credentials {for: mcp} with app_stage_settings and Settings > MCP opens for the user to click Connect.";
 
 /// The credential entry for one server's sign-in, and the identity its envelope is bound to.
 pub(crate) fn entry_name(server_id: &str) -> String {
@@ -169,7 +169,7 @@ fn client_secret(store: &McpStore, server: &McpServer) -> Result<Option<String>,
                 .creds()
                 .read(id, &crate::config::identity(&server.id, id, None))
                 .map_err(|_| {
-                    "The saved client secret could not be read. Enter it again in Settings → MCP."
+                    "The saved client secret could not be read: stage credentials {for: mcp} with app_stage_settings and Settings > MCP opens for the user to enter it again."
                         .to_owned()
                 })?;
             String::from_utf8(bytes)

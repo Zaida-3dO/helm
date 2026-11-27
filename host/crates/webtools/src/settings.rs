@@ -86,7 +86,7 @@ impl SettingsExtension for WebSearchKeys {
     fn details(&self, _tx: &Transaction<'_>, _key: &str) -> Option<Value> {
         Some(json!({
             "braveKeySet": self.web.has_key(),
-            "note": "The Brave search key is entered by the user in Settings > Web search; no tool reads or changes it.",
+            "note": "The Brave search key is a secret: no tool reads it, and the user types it on the Web search page, which a chat opens by staging credentials {for: websearch} with app_stage_settings.",
         }))
     }
 }

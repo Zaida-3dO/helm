@@ -1068,7 +1068,7 @@ pub fn runs_bridge(server: &McpServer, creds: &CredentialStore) -> bool {
 
 static SIGNING_IN: AtomicBool = AtomicBool::new(false);
 /// The words for a sign-in that cannot start because Helm has no Google sign-in client.
-pub(crate) const NO_CLIENT: &str = "Set the Google sign-in client in Settings → MCP first.";
+pub(crate) const NO_CLIENT: &str = "Set the Google sign-in client first: its secret is typed by the user, so stage credentials {for: mcp} with app_stage_settings and Settings > MCP opens for them.";
 /// The words for a second sign-in asked for while one is still waiting for the browser.
 pub(crate) const SIGN_IN_OPEN: &str =
     "A sign-in is already open. Finish it in your browser, or try again in a few minutes.";

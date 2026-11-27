@@ -6,7 +6,7 @@
 
 use crate::types::*;
 
-pub const HEADING: &str = "Workflow rules (set by the user in Settings > Orchestrator and enforced by Helm; Helm refuses any step that breaks them):";
+pub const HEADING: &str = "Workflow rules (from Settings > Orchestrator, changed with app_update_settings, and enforced by Helm; Helm refuses any step that breaks them):";
 
 pub const MOVE_FAST: &str = "Move fast is on. Tell every coder and reviewer to test only what the change touches: the tests of the touched module, the one check script involved, and a type check when typed code moved. No whole-project build or test run, no UI checks, golden images or smoketests, unless Helm itself requires a smoketest (a visual task, or Smoketest set to required). Reviewers read the diff and run no more than those same tests. When one feature is split across a series of PRs, the earlier PRs may land on targeted tests alone; the full build, the full suites, UI checks and any smoketest still owed belong to the last PR of the series. Otherwise rely on a full-check lane: one chat, which the user names, builds main and runs every suite after 10 merges or 2 hours, whichever comes first, and any failure gets an immediate fix-forward PR from the most likely culprit; a briefly red main is fine. If there is no full-check lane and the user has not said there is one, mention it to the user once rather than starting one. Move fast changes only how much testing is done: every other rule here still applies, and so does every step that needs the user's consent.";
 

@@ -148,3 +148,22 @@ impl SettingsExtensions {
         self.0.iter().flat_map(|x| x.keys()).collect()
     }
 }
+
+/// The profile that owns `chat`: its own, else the home profile. `None` when neither exists. A
+/// setting that belongs to a person is read and changed for this profile.
+pub fn chat_profile(tx: &Transaction<'_>, chat: &str) -> Option<String> {
+    use rusqlite::OptionalExtension;
+    tx.query_row(
+        "SELECT COALESCE(
+             (SELECT p.id FROM profiles p
+               WHERE p.id = (SELECT NULLIF(c.profile_id, '') FROM chats c WHERE c.id = ?1)),
+             (SELECT id FROM profiles WHERE is_home = 1))",
+        [chat],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .flatten()
+    .filter(|id| !id.is_empty())
+}

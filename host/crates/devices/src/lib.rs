@@ -94,6 +94,7 @@ mod ops;
 pub mod route;
 pub mod sends;
 pub mod serve;
+pub mod settings_key;
 pub mod subs;
 pub mod testing;
 pub mod tunnel;

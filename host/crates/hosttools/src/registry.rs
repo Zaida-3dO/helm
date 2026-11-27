@@ -44,7 +44,7 @@ impl ToolCtx {
             return Err(ToolError::refused("This tool is not available here."));
         };
         // A change to a chat that runs on another PC would be made as the person the sidebar
-        // shows, not the person the calling chat belongs to: an agent leaves those to the user.
+        // shows, not the person the calling chat belongs to: an agent asks that chat to do it itself.
         if CHANGES_A_CHAT.contains(&op)
             && args
                 .get("chatId")
@@ -56,7 +56,7 @@ impl ToolCtx {
                 })
         {
             return Err(ToolError::refused(
-                "That chat runs on another PC: change it from there, or ask the user to.",
+                "That chat runs on another PC: ask it to make the change itself with app_send_message.",
             ));
         }
         ops.invoke(op, args)

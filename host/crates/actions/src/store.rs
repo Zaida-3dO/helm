@@ -162,6 +162,33 @@ pub fn save(db: &Database, a: ActionsSaveArgs) -> Result<ActionSet, ApiError> {
     .map_err(|f| f.0)
 }
 
+/// The buttons as stored, in the caller's transaction (the settings tools read and change them
+/// there; the seeds are written by the Settings page's first read).
+pub fn buttons_in(tx: &Transaction<'_>) -> Result<Vec<ActionButton>, String> {
+    Ok(read(tx)
+        .map_err(|e| e.message)?
+        .map(|s| s.buttons)
+        .unwrap_or_default())
+}
+
+/// Replace the buttons in the caller's transaction, checked like the page's own save, and bump
+/// the revision so an editor that is open reloads.
+pub fn set_buttons_in(
+    tx: &Transaction<'_>,
+    buttons: Vec<ActionButton>,
+) -> Result<Vec<ActionButton>, String> {
+    validate(&buttons).map_err(|e| e.message)?;
+    let cur = read(tx).map_err(|e| e.message)?;
+    let (revision, seed_version) = cur.map(|c| (c.revision, c.seed_version)).unwrap_or((0, 0));
+    let set = ActionSet {
+        revision: revision + 1,
+        seed_version: seed_version.max(SEED_VERSION),
+        buttons,
+    };
+    write_row(tx, &set).map_err(|e| e.message)?;
+    Ok(set.buttons)
+}
+
 pub fn validate(buttons: &[ActionButton]) -> Result<(), ApiError> {
     if buttons.len() > MAX_BUTTONS {
         return Err(ApiError::bad_args(format!(

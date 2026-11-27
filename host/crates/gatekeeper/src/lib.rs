@@ -26,6 +26,7 @@ pub mod route;
 pub mod scrub;
 pub mod service;
 pub mod settings;
+pub mod settings_key;
 pub mod stoproute;
 pub mod stops;
 pub mod store;

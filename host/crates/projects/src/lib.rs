@@ -33,6 +33,7 @@ pub mod repo_undo;
 pub mod repos;
 pub mod retitle;
 pub mod schema;
+pub mod settings_keys;
 pub mod startup;
 pub mod store;
 pub mod tasks;
