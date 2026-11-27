@@ -294,7 +294,9 @@ pub fn promote_for_orchestrator(tools: &mut Value) {
 /// list and out of its prompt, but they stay callable through the always-on pair `app_list_tools`
 /// (which still finds them) and `app_mcp_call` — the escape hatch a lean chat uses to load more
 /// of Helm's tools on demand. A merged tool's old names are left as they are: they were never
-/// listed anyway, and the facade that replaced them follows the same hidden flag.
+/// listed anyway, and the facade that replaced them follows the same hidden flag. The entries
+/// the launch named are promoted to `core`, so a lean chat running on a local model — which is
+/// only ever given core tools — still gets its whole list.
 pub fn hide_outside(tools: &mut Value, names: &[String]) {
     if let Some(list) = tools.as_array_mut() {
         for t in list.iter_mut() {
@@ -302,7 +304,12 @@ pub fn hide_outside(tools: &mut Value, names: &[String]) {
                 .get("name")
                 .and_then(Value::as_str)
                 .is_some_and(|n| names.iter().any(|k| k == n));
-            if !shown {
+            if shown {
+                // A local-model chat lists only core tools, and a lean list is that chat's whole
+                // tool set — small enough to ride every request. Promote what the launch named,
+                // or a lean chat on a local model would silently lose the tools it was given.
+                t["core"] = Value::Bool(true);
+            } else {
                 t["hidden"] = Value::Bool(true);
             }
         }
@@ -420,15 +427,18 @@ mod tests {
     fn a_lean_launch_hides_everything_it_did_not_name() {
         let all = json!([
             {"name": "app_telegram_send"},
-            {"name": "app_schedule", "aliasOf": null},
+            {"name": "app_schedule", "aliasOf": null, "core": false},
             {"name": "app_help"}
         ]);
         let mut tools = all.clone();
         hide_outside(&mut tools, &["app_telegram_send".to_owned()]);
-        // The named tool is untouched; everything else carries the hidden flag and stays in the
-        // catalogue, so the escape hatch can still find and call it.
-        assert_eq!(tools[0], json!({"name": "app_telegram_send"}));
+        // The named tool is kept and promoted to core: a local-model chat lists only core
+        // tools, and the lean list is exactly what that chat needs — app_schedule on it must
+        // survive. Everything else carries the hidden flag and stays in the catalogue, so the
+        // escape hatch can still find and call it.
+        assert_eq!(tools[0], json!({"name": "app_telegram_send", "core": true}));
         assert_eq!(tools[1]["hidden"], json!(true));
+        assert_eq!(tools[1]["core"], json!(false), "a hidden tool keeps its core flag");
         assert_eq!(tools[2]["hidden"], json!(true));
         // None named: all hidden, none removed; a catalogue that is not a list is left alone.
         let mut none = all;

@@ -433,7 +433,9 @@ test("a Claude chat lists every host tool it may call; a local chat lists only t
     tool("app_list_chats", { core: true, group: "chats" }),
     tool("app_show_images", { core: false, group: "chats" }),
     tool("app_create_schedule", { core: false, group: "schedules", aliasOf: { tool: "app_schedule", action: "create" } }),
-    tool("app_schedule", { core: false, group: "schedules", actions: [{ action: "create", tool: "app_create_schedule", description: "Make one." }], guidelines: "Only on request." }),
+    // Not core for an ordinary chat; a lean launch that names it gets promoted to core (hosttools
+    // hide_outside), so a speaker-style local chat still receives it — the row below checks that.
+    tool("app_schedule", { core: true, group: "schedules", actions: [{ action: "create", tool: "app_create_schedule", description: "Make one." }], guidelines: "Only on request." }),
     tool("app_older", {}),
     // A lean chat hid this one: never listed, still findable and callable — the escape hatch.
     tool("app_attention", { core: true, group: "attention", hidden: true }),
@@ -446,8 +448,8 @@ test("a Claude chat lists every host tool it may call; a local chat lists only t
   // A Claude chat: every tool but an old name, so a call naming one is dispatched and runs.
   assert.deepEqual(await listed(s), ["app_list_chats", "app_show_images", "app_schedule", "app_older", "app_list_tools", "app_mcp_call"]);
   // A local chat: every listed schema rides every request, so it keeps the core list; one without
-  // the field (an older catalogue) counts as core.
-  assert.deepEqual(await listed(new HostToolServer({ hostTools, channel, local: true })), ["app_list_chats", "app_older", "app_list_tools", "app_mcp_call"]);
+  // the field (an older catalogue) counts as core, and a lean launch's promoted entry (above) is kept.
+  assert.deepEqual(await listed(new HostToolServer({ hostTools, channel, local: true })), ["app_list_chats", "app_schedule", "app_older", "app_list_tools", "app_mcp_call"]);
   // Every tool — an old name and a hidden one included — answers through app_mcp_call, even
   // though the chat was never shown the hidden one.
   for (const name of ["app_show_images", "app_create_schedule", "app_schedule", "app_attention"]) assert.equal((await s.call("app_mcp_call", { name, arguments: {} }, { child: false })).ok, true, name);
