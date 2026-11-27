@@ -20,6 +20,7 @@ tool call carries that name and its args contain every key/value listed
 
 import asyncio
 import json
+import os
 import time
 import urllib.request
 import uuid
@@ -71,6 +72,8 @@ class CliBackend:
     def __init__(self, house):
         self._areas = {}
         for area, kinds in (house or {}).items():
+            if str(area).startswith("_"):
+                continue  # "_states" and friends are not areas
             entry = {"lights": [], "climates": []}
             for kind in ("lights", "climates"):
                 for item in kinds.get(kind) or []:
@@ -97,8 +100,10 @@ class CliBackend:
 
 def load_set(path_or_lines):
     if isinstance(path_or_lines, str):
+        # read the whole file before the handle closes - iterating a closed
+        # file object used to raise straight out of the CLI and the service
         with open(path_or_lines, encoding="utf-8") as fh:
-            lines = fh
+            lines = fh.readlines()
     else:
         lines = path_or_lines
     rows = []
@@ -181,7 +186,11 @@ def config_from_args(args):
         key, _, value = kv.partition("=")
         headers[key] = value
     body = json.loads(args.body_json) if args.body_json else {}
+    # a model key belongs in the environment, never on a command line where
+    # it lands in shell history and process listings
+    api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
     return Config(model_url=args.model_url, model_name=args.model_name,
+                  api_key=api_key,
                   extra_headers=headers, extra_body=body,
                   thinking=not args.no_thinking, timeout_s=args.timeout)
 
@@ -318,6 +327,9 @@ def main(argv=None):
     ap.add_argument("--set", required=True, help="JSONL set file")
     ap.add_argument("--model-url", required=True)
     ap.add_argument("--model-name", required=True)
+    ap.add_argument("--api-key-env", metavar="NAME",
+                    help="name of an environment variable holding the model"
+                         " key (the key never appears on the command line)")
     ap.add_argument("--header", action="append", metavar="K=V",
                     help="extra header; repeatable (the priority lane lives here)")
     ap.add_argument("--body-json", help="extra request body as JSON")
