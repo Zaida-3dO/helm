@@ -188,6 +188,62 @@ impl RuleWhen {
     /// The header lines this trigger asks for, in `TRIGGER_KEYS` order: a key that is unset maps
     /// to `None` so a rewrite removes its old lines. List values join with ", "; one holding a
     /// comma goes in double quotes.
+    /// Whether the values may become header lines. The reader drops unknown words and malformed
+    /// dates into `problems` — a rule written with one then quietly loses that limit and reaches
+    /// chats it was not meant for, while the caller is told "saved". So writes refuse instead:
+    /// same word sets as the reader, dates in the shape it parses, and no line break, quote or
+    /// control character inside a list value (one would write extra header lines, so an approval
+    /// card could show something different from what was actually written).
+    pub fn validate_for_write(&self) -> Result<(), String> {
+        let one_of = |name: &str, got: Option<&String>, allowed: &[&str]| -> Result<(), String> {
+            match got.map(|v| v.to_lowercase()) {
+                Some(v) if !allowed.contains(&v.as_str()) => {
+                    Err(format!("{name}: use {}", allowed.join(" or ")))
+                }
+                _ => Ok(()),
+            }
+        };
+        one_of("show", self.show.as_ref(), &["auto", "full", "line"])?;
+        one_of("otherwise", self.otherwise.as_ref(), &["hidden", "line"])?;
+        one_of("before", self.before.as_ref(), &["note", "stop"])?;
+        for k in &self.kinds {
+            let k = k.to_lowercase();
+            if !matches!(k.as_str(), "coding" | "orchestrating" | "household") {
+                return Err(format!(
+                    "kinds: {k}: use coding, orchestrating or household"
+                ));
+            }
+        }
+        for (name, v) in [
+            ("from", &self.from),
+            ("until", &self.until),
+            ("review", &self.review),
+        ] {
+            if let Some(v) = v {
+                if v.is_empty() || parse_date(v).is_none() {
+                    return Err(format!("{name}: not a YYYY-MM-DD date"));
+                }
+            }
+        }
+        for (name, list) in [
+            ("folders", &self.folders),
+            ("hosts", &self.hosts),
+            ("pcs", &self.pcs),
+            ("tools", &self.tools),
+            ("commands", &self.commands),
+            ("people", &self.people),
+        ] {
+            for v in list {
+                if v.chars().any(|c| c == '"' || c.is_control()) {
+                    return Err(format!(
+                        "{name}: a value must not hold a line break, a quote or a control character"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn header_changes(&self) -> Vec<(&'static str, Option<String>)> {
         let word = |v: &Option<String>| v.clone();
         let list = |v: &[String]| {
@@ -633,6 +689,11 @@ pub fn write(
     when: Option<&RuleWhen>,
     max_text: usize,
 ) -> io::Result<RuleEntry> {
+    // A trigger that cannot be read back must not be written: it would loosen the rule against
+    // its own intent, and the caller would still hear "saved". The bad key is named.
+    if let Some(w) = when {
+        w.validate_for_write().map_err(invalid)?;
+    }
     let title = title.trim();
     if title.is_empty() || title.chars().count() > MAX_TITLE_CHARS {
         return Err(invalid("a rule's title is 1 to 120 characters"));
@@ -694,6 +755,7 @@ pub fn write(
     }
     helm_core::privfs::create_private_dir_all(&rules_dir(root))?;
     helm_core::privfs::write_atomic(&rules_dir(root).join(&file), body.as_bytes())?;
+    crate::launch::forget_rules(root);
     read(root, &file).map(|(e, _)| e)
 }
 
@@ -709,7 +771,13 @@ pub fn remove(root: &Path, path: &str) -> io::Result<()> {
         Ok(m) if helm_platform::fs::is_link_like(&m) || !m.is_file() => {
             Err(invalid("not a rule file"))
         }
-        Ok(_) => fs::remove_file(&full),
+        Ok(_) => {
+            let done = fs::remove_file(&full);
+            if done.is_ok() {
+                crate::launch::forget_rules(root);
+            }
+            done
+        }
     }
 }
 

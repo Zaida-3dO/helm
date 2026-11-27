@@ -331,8 +331,21 @@ struct RuleIndexEntry {
 
 static RULE_INDEX: Mutex<Option<HashMap<String, RuleIndexEntry>>> = Mutex::new(None);
 
-/// Test seam: drop every cached layer index. Production relies on the fresh window to notice a
-/// changed folder; tests write rules and read them back in the same breath.
+/// Drop one folder's cached index: every rule written or removed through this crate calls it, so
+/// a change is seen at once instead of waiting out the fresh window.
+pub(crate) fn forget_rules(root: &Path) {
+    let key = root.to_string_lossy().to_lowercase();
+    if let Some(map) = RULE_INDEX
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_mut()
+    {
+        map.remove(&key);
+    }
+}
+
+/// Test seam: drop every cached layer index. Production drops a folder's entry when its rules
+/// change; tests write rules and read them back in the same breath.
 #[cfg(test)]
 pub(crate) fn clear_rule_index() {
     if let Some(map) = RULE_INDEX
@@ -361,7 +374,7 @@ fn rule_signature(root: &Path) -> Vec<(String, u64, i64)> {
                 meta.modified()
                     .ok()
                     .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64)
+                    .map(|d| d.as_nanos() as i64)
                     .unwrap_or(0),
             ))
         })

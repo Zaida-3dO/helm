@@ -502,9 +502,24 @@ fn knowledge_rules_preview(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
     let a: RulesPreviewArgs = parse(v, "a layer and what to imagine about the chat")?;
     let (data, layer, _) = layer_root(ctx, Some(&a.layer))?;
     let person_name = match (&layer, &a.person) {
-        (Layer::Profile(id), None) => id.clone(),
         (_, Some(p)) => p.clone(),
         (Layer::Everyone, None) => String::new(),
+        // The imagined chat belongs to that list's person, so its person is that profile's NAME:
+        // a `people:` rule compares names, and the raw id would never match.
+        (Layer::Profile(id), None) => ctx
+            .services
+            .get::<helm_core::db::Database>()
+            .and_then(|db| {
+                db.snapshot(|tx| {
+                    tx.query_row("SELECT name FROM profiles WHERE id = ?1", [id], |r| {
+                        r.get::<_, String>(0)
+                    })
+                    .optional()
+                })
+                .ok()
+                .flatten()
+            })
+            .unwrap_or_default(),
     };
     let who = ChatKnowledge {
         profile: Some(ProfileRef {
