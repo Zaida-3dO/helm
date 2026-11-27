@@ -3639,6 +3639,15 @@ async fn a_quick_voice_turn_opens_its_own_chat_on_the_quick_model_beside_the_dee
     .await
     .unwrap();
     let deep = vchat(&p1).0;
+    // The pointer line names what the other lane last answered. These tests run no model, so
+    // seed the deep chat's one assistant row — in a real lane it answers long before the phone
+    // switches over, and a pointer with nothing to point at is correctly no pointer.
+    sql(
+        &e.db,
+        "INSERT INTO messages(chat_id, source_key, role, text, status, timestamp) \
+         VALUES (?1, 'a1', 'assistant', 'Sunny in the living room.', 'complete', 2000)",
+        &[&deep],
+    );
     let mut q = vturn("t2", "And in the kitchen?", "conversation");
     q.urgency = Some("quick".into());
     let p2 = vplace(&c, q, 2_000).await.unwrap();

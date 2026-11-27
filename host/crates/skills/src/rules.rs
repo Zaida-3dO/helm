@@ -692,7 +692,7 @@ pub fn write(
     // A trigger that cannot be read back must not be written: it would loosen the rule against
     // its own intent, and the caller would still hear "saved". The bad key is named.
     if let Some(w) = when {
-        w.validate_for_write().map_err(invalid)?;
+        w.validate_for_write().map_err(|w| invalid(&w))?;
     }
     let title = title.trim();
     if title.is_empty() || title.chars().count() > MAX_TITLE_CHARS {

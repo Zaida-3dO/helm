@@ -145,17 +145,22 @@ fn in_git_tree(dir: &Path) -> bool {
 pub fn glob_to_regex(pattern: &str) -> String {
     let pat = pattern.trim();
     let mut re = String::new();
+    // A plain name (letters, digits, `_`, `-`, and `*` wildcards only) anchors to the whole tool
+    // name or its last `__`-part; anything else is a deliberate pattern — its regex characters
+    // are quoted, but it matches wherever it fits.
+    let mut plain = true;
     for c in pat.chars() {
         match c {
             '*' => re.push_str(".*"),
             c if !(c.is_ascii_alphanumeric() || c == '_' || c == '-') => {
                 re.push('\\');
                 re.push(c);
+                plain = false;
             }
             c => re.push(c),
         }
     }
-    if pat.contains("__") {
+    if pat.contains("__") || !plain {
         re
     } else {
         format!("(^|__){re}$")
@@ -831,7 +836,7 @@ pub fn message_note(profile_dir: &Path, chat_id: &str, gen: u64, _now_ms: i64) -
     adds.sort_by(|a, b| a.key.cmp(&b.key));
     gone.sort();
     let mut context = String::new();
-    let mut keys: Vec<(String, String)> = Vec::new();
+    let mut keys: Vec<(String, String, Decision)> = Vec::new();
     let mut used_full = 0usize;
     let mut whole_count = 0usize;
     for one in &adds {
@@ -1077,6 +1082,8 @@ pub fn register_worker_lines(l: &mut helm_hosttools::lines::WorkerLines, profile
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
     use serde_json::json;
 
     fn facts(kind: ChatKind, cwd: Option<&str>, person: Option<&str>, pc: &str) -> Facts {
@@ -1409,10 +1416,13 @@ mod tests {
         assert!(!store.take_stop_turn("chat-1", "root", "c"));
         assert!(store.take_stop_turn("chat-1", "agent-1", "c"));
 
-        // A new generation sends notes again but keeps spent refusals; a new epoch clears both.
+        // A new generation sends notes again but keeps spent refusals; a *changed* epoch clears
+        // both. The first epoch seen after a launch only sets the baseline, so set one here —
+        // otherwise this call would be that baseline and change nothing.
         store.set_gen("chat-1", 7);
         assert!(store.first_note("chat-1", "root", "a", "r1"));
         assert!(!store.take_stop_turn("chat-1", "root", "c"));
+        store.set_epoch("chat-1", "s1:0");
         store.set_epoch("chat-1", "s2:0");
         assert!(store.first_note("chat-1", "root", "a", "r1"));
         assert!(store.take_stop_turn("chat-1", "root", "c"));

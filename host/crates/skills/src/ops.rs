@@ -1002,6 +1002,10 @@ mod tests {
         assert_eq!(row_in(&fired, &tpath)["decision"], "hidden");
         assert_eq!(row_in(&fired, &tpath)["fires"], true);
 
+        // Put Sam's list back to the one rule the copy/move section works with: drop the trigger
+        // rule now that its previews have been read.
+        knowledge_delete(&ctx, json!({"layer": sam, "kind": "rule", "name": tpath})).unwrap();
+
         // A copy keeps the original and lands in the other list; a taken name is refused; a move
         // removes the original.
         let copy = |from: &str, to: &str| {
