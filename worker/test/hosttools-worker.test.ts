@@ -435,6 +435,8 @@ test("a Claude chat lists every host tool it may call; a local chat lists only t
     tool("app_create_schedule", { core: false, group: "schedules", aliasOf: { tool: "app_schedule", action: "create" } }),
     tool("app_schedule", { core: false, group: "schedules", actions: [{ action: "create", tool: "app_create_schedule", description: "Make one." }], guidelines: "Only on request." }),
     tool("app_older", {}),
+    // A lean chat hid this one: never listed, still findable and callable — the escape hatch.
+    tool("app_attention", { core: true, group: "attention", hidden: true }),
   ];
   const sent: string[] = [];
   const channel = { call: async (name: string) => (sent.push(name), { ok: true as const, result: { name } }) } as never;
@@ -446,12 +448,16 @@ test("a Claude chat lists every host tool it may call; a local chat lists only t
   // A local chat: every listed schema rides every request, so it keeps the core list; one without
   // the field (an older catalogue) counts as core.
   assert.deepEqual(await listed(new HostToolServer({ hostTools, channel, local: true })), ["app_list_chats", "app_older", "app_list_tools", "app_mcp_call"]);
-  // Every tool, an old name included, answers through app_mcp_call.
-  for (const name of ["app_show_images", "app_create_schedule", "app_schedule"]) assert.equal((await s.call("app_mcp_call", { name, arguments: {} }, { child: false })).ok, true, name);
-  assert.deepEqual(sent, ["app_show_images", "app_create_schedule", "app_schedule"], "the calls reached the host channel under the names used");
-  // No argument: the groups, with the old name left out.
+  // Every tool — an old name and a hidden one included — answers through app_mcp_call, even
+  // though the chat was never shown the hidden one.
+  for (const name of ["app_show_images", "app_create_schedule", "app_schedule", "app_attention"]) assert.equal((await s.call("app_mcp_call", { name, arguments: {} }, { child: false })).ok, true, name);
+  assert.deepEqual(sent, ["app_show_images", "app_create_schedule", "app_schedule", "app_attention"], "the calls reached the host channel under the names used");
+  // A hidden tool is off the listing but found by search and listed under its group.
+  assert.ok(!(await listed(s)).includes("app_attention"));
+  assert.deepEqual(((await rpc("app_list_tools", { query: "attention" })).tools as Json[]).map((t) => t.name), ["app_attention"]);
+  // No argument: the groups, with the old name left out; a hidden tool's group shows.
   const groups = (await rpc("app_list_tools", {})).groups as Json[];
-  assert.deepEqual(groups.map((g) => g.group), ["chats", "older", "schedules", "tools"]);
+  assert.deepEqual(groups.map((g) => g.group), ["attention", "chats", "older", "schedules", "tools"]);
   assert.deepEqual((groups.find((g) => g.group === "schedules") as Json).tools, ["app_schedule"]);
   assert.equal((groups.find((g) => g.group === "chats") as Json).about, "app_list_chats does one thing.");
   // A group: its tools in full, with the actions and guidelines.

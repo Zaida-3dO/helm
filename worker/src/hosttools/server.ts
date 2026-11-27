@@ -53,6 +53,9 @@ export interface HostTool {
   group?: string;
   /** In the chat's own tool list. Absent counts as listed (a catalogue from before the field). */
   core?: boolean;
+  /** A lean chat marked this one out: off the listing and the prompt, but `app_list_tools` still
+   * finds it and `app_mcp_call` still calls it — the way a lean chat loads more tools on demand. */
+  hidden?: boolean;
   /** Set when a merged tool took this one over: callable by this name, never listed or searched. */
   aliasOf?: { tool: string; action: string };
   /** On a merged tool: what each action does. */
@@ -226,10 +229,12 @@ export class HostToolServer {
     return this.movable.get(toolCallId)?.() ?? false;
   }
 
-  /** The tools/list catalogue, host tools first: never a merged tool's old name; every other host
-   * tool on a Claude chat, only the core ones on a local chat. */
+  /** The tools/list catalogue, host tools first: never a merged tool's old name and never a tool
+   * a lean chat hid; every other host tool on a Claude chat, only the core ones on a local chat. */
   catalogue(): HostTool[] {
-    const listed = this.o.hostTools.filter((t) => !t.aliasOf && (this.o.local !== true || t.core !== false));
+    const listed = this.o.hostTools.filter(
+      (t) => !t.aliasOf && t.hidden !== true && (this.o.local !== true || t.core !== false),
+    );
     return [...listed, ...this.compatTools()];
   }
 

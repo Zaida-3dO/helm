@@ -584,7 +584,7 @@ which speaks exactly these routes.
 | Variable | |
 |---|---|
 | `HUB_SPEAKER` | `on` (the default) or `off`. On, the routes exist whether or not any speaker token does; with none every call answers 401 or 403 like any route without its token. Off: every `/speaker/*` route answers 404, and the relay line drops the speaker's frames. Anything else: the hub refuses to start |
-| `HUB_SPEAKER_IDLE_MINUTES` | How long one talk on one speaker stays one conversation after its last turn, 3-30 (default 10). Past it the hub tells Helm the talk closed, and the next utterance starts a new one |
+| `HUB_SPEAKER_IDLE_MINUTES` | How long one talk on one speaker stays one conversation after its last turn, 3-30 (default 5). Past it the hub tells Helm the talk closed, and the next utterance starts a new one |
 
 | Route | |
 |---|---|

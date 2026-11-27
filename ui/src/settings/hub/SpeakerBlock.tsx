@@ -9,11 +9,31 @@ import type { ProjectNode } from '../../api/generated/projects/ProjectNode.ts';
 import { hubOps, type SpeakerSettings } from '../../api/hub.ts';
 import { localModelChoices } from '../../composer/modelEffort.ts';
 import { useShell } from '../../shell/context.ts';
-import { Button, Checkbox, Picker, SettingRow } from '../../ui/index.ts';
+import { Button, Checkbox, Picker, SettingRow, TextArea } from '../../ui/index.ts';
 import { SETTINGS_DIALOG } from '../SettingsDialog.tsx';
 import { EFFORT_OPTIONS } from '../runtime/model.ts';
 
 type Choice = { value: string; title: string; subtitle?: string };
+
+/** Plain words for the lean tool-set entry names, shown as chip labels. Anything not listed here
+ * (a server a person added by name or id) shows under its own saved name. */
+const TOOL_LABELS: Record<string, string> = {
+  'home assistant': 'Home Assistant',
+  memory_search: 'Memory search',
+  app_schedule: 'Timers & reminders',
+  app_list_chats: 'Past chats · list',
+  app_read_chat: 'Past chats · read',
+  app_telegram_send: 'Send to phone',
+};
+
+const toolLabel = (token: string): string => TOOL_LABELS[token] ?? token;
+
+/** The chips to show: the default order first, then any entry the saved list added. */
+function toolTokens(speaker: SpeakerSettings): string[] {
+  const out = [...speaker.leanToolsDefault];
+  for (const t of speaker.leanTools) if (!out.includes(t)) out.push(t);
+  return out;
+}
 
 const PREVIOUS_MIN = 0;
 const PREVIOUS_MAX = 72;
@@ -69,6 +89,7 @@ export function SpeakerBlock({ profileId }: { profileId: string | null }) {
   const [previous, setPrevious] = useState('');
   const [quickRoll, setQuickRoll] = useState('');
   const [deepRoll, setDeepRoll] = useState('');
+  const [leanPrompt, setLeanPrompt] = useState('');
   const [models, setModels] = useState<{ id: string; name: string; description?: string }[]>([]);
   const [boards, setBoards] = useState<{ id: string; name: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -79,6 +100,7 @@ export function SpeakerBlock({ profileId }: { profileId: string | null }) {
     setPrevious(String(v.previousHours));
     setQuickRoll(String(v.quickRollAt));
     setDeepRoll(String(v.deepRollAt));
+    setLeanPrompt(v.leanPrompt);
   }, []);
 
   useEffect(() => {
@@ -315,7 +337,7 @@ export function SpeakerBlock({ profileId }: { profileId: string | null }) {
         <SettingRow
           testId="hub-speaker-lean"
           title="Lean speaker chats"
-          description="A new room-speaker chat gets a short persona and the speaker prompt as its whole system prompt, and only the Home Assistant server and the tool that sends a message to your phone. Faster for a small model; the chat can do less. Chats already open keep how they started."
+          description="A new room-speaker chat gets a short prompt of its own and few tools: faster for a small model; the chat can do less. The prompt and tool set below shape it. Chats already open keep how they started."
         >
           <Checkbox
             checked={speaker.lean}
@@ -324,6 +346,70 @@ export function SpeakerBlock({ profileId }: { profileId: string | null }) {
             data-testid="hub-speaker-lean-box"
             onChange={(on) => save({ lean: on })}
           />
+        </SettingRow>
+      )}
+      {speaker && speaker.lean && (
+        <SettingRow
+          testId="hub-speaker-tools"
+          title="Tools a lean chat may use"
+          description="What the new room-speaker chats start with. Everything else stays available on demand: the chat can find and call more of Helm's tools by itself."
+        >
+          <div className="hub-chips" data-testid="hub-speaker-tools-chips">
+            {toolTokens(speaker).map((token) => (
+              <Button
+                key={token}
+                variant={speaker.leanTools.includes(token) ? 'primary' : 'secondary'}
+                disabled={busy}
+                aria-pressed={speaker.leanTools.includes(token)}
+                data-testid={`hub-speaker-tool-${token.replace(/[^a-zA-Z0-9]/g, '-')}`}
+                onClick={() => {
+                  const on = speaker.leanTools.includes(token);
+                  const next = toolTokens(speaker)
+                    .filter((t) => (t === token ? !on : speaker.leanTools.includes(t)))
+                    .filter((t, i, all) => all.indexOf(t) === i);
+                  save({ leanTools: next });
+                }}
+              >
+                {toolLabel(token)}
+              </Button>
+            ))}
+          </div>
+        </SettingRow>
+      )}
+      {speaker && speaker.lean && (
+        <SettingRow
+          testId="hub-speaker-prompt-row"
+          title="Prompt for lean chats"
+          description="The whole system prompt a new room-speaker chat is given — spoken style, and what the speaker is for. Leave it empty to use the built-in prompt."
+        >
+          <TextArea
+            rows={5}
+            aria-label="Lean chats prompt"
+            data-testid="hub-speaker-prompt"
+            value={leanPrompt}
+            placeholder={speaker.leanPromptDefault}
+            disabled={busy}
+            onChange={(e) => setLeanPrompt(e.target.value)}
+          />
+          <Button
+            variant="secondary"
+            disabled={busy || leanPrompt.trim() === speaker.leanPrompt.trim()}
+            data-testid="hub-speaker-prompt-save"
+            onClick={() => save({ leanPrompt: leanPrompt.trim() })}
+          >
+            Save
+          </Button>
+          <Button
+            variant="text"
+            disabled={busy || speaker.leanPrompt === ''}
+            data-testid="hub-speaker-prompt-reset"
+            onClick={() => {
+              setLeanPrompt('');
+              save({ leanPrompt: '' });
+            }}
+          >
+            Use the built-in prompt
+          </Button>
         </SettingRow>
       )}
       {speaker && (

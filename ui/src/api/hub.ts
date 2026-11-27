@@ -149,8 +149,17 @@ export interface SpeakerSettings {
   takeSpeaker: boolean;
   /** How long a talk that just ended may be named to the next one; 0 never names it. */
   previousHours: number;
-  /** Lean speaker chats: a thin system prompt and only the Home Assistant server and the phone-message tool. */
+  /** Lean speaker chats: a short prompt of its own and a small tool set. */
   lean: boolean;
+  /** The lean prompt in force; blank: the built-in speaker prompt (`leanPromptDefault`). */
+  leanPrompt: string;
+  /** The built-in lean prompt, for showing and resetting to it. */
+  leanPromptDefault: string;
+  /** What a lean chat may use: host-tool names and MCP server names or ids; resolved to the
+   * defaults when nothing custom is saved. `memory_search` means the connected memory server. */
+  leanTools: string[];
+  /** The app's default lean tool set, for the chips. */
+  leanToolsDefault: string[];
   /** The board every chat arriving from the hub is shown on — room speakers, phone voice and
    * Telegram alike; blank: the app's own choice. One setting for all three channels. */
   boardId: string;
@@ -256,6 +265,8 @@ export function hubOps(api: Api) {
         takeSpeaker: s.takeSpeaker,
         previousHours: s.previousHours,
         lean: s.lean,
+        leanPrompt: s.leanPrompt,
+        leanTools: s.leanTools,
         boardId: s.boardId,
         quickModel: s.quickModel,
         quickEffort: s.quickEffort,

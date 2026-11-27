@@ -472,9 +472,11 @@ impl Spawner for ProcessSpawner {
                 if extras.orchestrator_on {
                     helm_hosttools::spec::promote_for_orchestrator(&mut tools);
                 }
-                // A lean chat keeps only the host tools named for it.
+                // A lean chat is shown only the host tools named for it; the rest stay in the
+                // catalogue, hidden from its list but reachable on demand through app_list_tools
+                // and app_mcp_call.
                 if let Some(l) = &extras.lean {
-                    helm_hosttools::spec::keep_only(&mut tools, &l.host_tools);
+                    helm_hosttools::spec::hide_outside(&mut tools, &l.host_tools);
                 }
                 (Some(tools), Some(dir.to_string_lossy().into_owned()))
             }

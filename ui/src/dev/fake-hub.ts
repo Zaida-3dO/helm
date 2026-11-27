@@ -35,7 +35,7 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
       p = {
         tg: { chat: null, maxAgeHours: 24, maxTokens: 400_000, awayAlerts: true, approvals: false, remoteAnswers: false, model: null, effort: null, takeTelegram: id === 'home' },
         voice: { chat: null, model: 'claude-sonnet-5-5', effort: 'low', idleMinutes: 240, maxAgeHours: 24, maxTokens: 300_000, watch: 'flags', takeVoice: id === 'home', quickModel: '', quickEffort: '', quickRollAt: 0, deepRollAt: 0 },
-        speaker: { talks: [], model: 'local/strata/qwen3.8-flash-next-iq3_s', effort: 'low', takeSpeaker: id === 'home', previousHours: 12, lean: false, boardId: '', quickModel: '', quickEffort: '', quickRollAt: 0, deepRollAt: 0, kept: [] },
+        speaker: { talks: [], model: 'local/strata/qwen3.8-flash-next-iq3_s', effort: 'low', takeSpeaker: id === 'home', previousHours: 12, lean: false, leanPrompt: '', leanPromptDefault: 'You are Helm, the voice of this house, answering out loud through a room speaker.', leanTools: ['home assistant', 'memory_search', 'app_schedule', 'app_list_chats', 'app_read_chat', 'app_telegram_send'], leanToolsDefault: ['home assistant', 'memory_search', 'app_schedule', 'app_list_chats', 'app_read_chat', 'app_telegram_send'], boardId: '', quickModel: '', quickEffort: '', quickRollAt: 0, deepRollAt: 0, kept: [] },
         linked: false,
         pinned: [],
         prompts: {},
@@ -152,6 +152,9 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         if (typeof a.takeSpeaker === 'boolean') sp.takeSpeaker = a.takeSpeaker;
         sp.previousHours = Number(a.previousHours) || 0;
         if (typeof a.lean === 'boolean') sp.lean = a.lean;
+        if (typeof a.leanPrompt === 'string') sp.leanPrompt = a.leanPrompt.trim();
+        if (Array.isArray(a.leanTools))
+          sp.leanTools = (a.leanTools as unknown[]).filter((t): t is string => typeof t === 'string');
         if (typeof a.boardId === 'string') sp.boardId = a.boardId.trim();
         sp.quickModel = typeof a.quickModel === 'string' ? a.quickModel.trim() : '';
         sp.quickEffort = typeof a.quickEffort === 'string' ? a.quickEffort.trim() : '';

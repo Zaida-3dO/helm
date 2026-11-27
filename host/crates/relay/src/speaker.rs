@@ -45,6 +45,11 @@ pub const TALKS_KEPT: usize = 32;
 pub const MAX_TEXT_CHARS: usize = 8_000;
 /// How much of the talk before is quoted to a new one.
 pub const PREVIOUS_NOTE_MAX_CHARS: usize = 300;
+/// The longest lean-prompt replacement Settings accepts, in characters.
+pub const MAX_LEAN_PROMPT_CHARS: usize = 6_000;
+/// The most entries in a lean tool list, and the longest one entry may be.
+pub const MAX_LEAN_TOOLS: usize = 24;
+pub const MAX_LEAN_TOOL_CHARS: usize = 120;
 /// How much of what the speaker said just before a handed-over turn is kept.
 pub const MAX_CONTEXT_CHARS: usize = 2_048;
 
@@ -70,11 +75,19 @@ pub struct PolicyFile {
     /// How long a talk that just ended may be named to the next one.
     #[serde(default = "default_previous")]
     pub previous_hours: i64,
-    /// Lean speaker chats: the system prompt is a thin persona plus the speaker's channel prompt
-    /// alone, and the chat's tools are the Home Assistant server and the one that sends a
-    /// message to the phone. A chat started under another setting keeps what it started with.
+    /// Lean speaker chats: a short prompt of its own and a small tool set (see
+    /// [`crate::lean`]). A chat started under another setting keeps what it started with.
     #[serde(default)]
     pub lean: bool,
+    /// The system prompt a lean speaker chat gets; blank: the built-in speaker prompt. Lean mode
+    /// only; the ordinary channel prompt still shapes non-lean speaker chats.
+    #[serde(default)]
+    pub lean_prompt: String,
+    /// What a lean speaker chat may use: host-tool names and MCP server names or ids (the Home
+    /// Assistant server is matched by its preset). `None`: the built-in default set; an empty
+    /// list: nothing beyond the tools every chat keeps for finding more. Lean mode only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lean_tools: Option<Vec<String>>,
     /// The board a new speaker chat is shown on; `None` leaves it to the app (the board over the
     /// speaker folder, else the default board). One setting for every chat that arrives from the
     /// hub — phone voice, room speakers and Telegram alike.
@@ -123,6 +136,8 @@ impl Default for PolicyFile {
             take_speaker: None,
             previous_hours: default_previous(),
             lean: false,
+            lean_prompt: String::new(),
+            lean_tools: None,
             board_id: None,
             quick_model: String::new(),
             quick_effort: default_quick_effort(),
@@ -148,6 +163,30 @@ impl PolicyFile {
             b.trim().is_empty() || b.chars().count() > 120 || b.chars().any(char::is_control)
         }) {
             return Err("The board must be a board id, or left unset.".into());
+        }
+        if self.lean_prompt.chars().count() > MAX_LEAN_PROMPT_CHARS
+            || self
+                .lean_prompt
+                .chars()
+                .any(|c| c.is_control() && c != '\n')
+        {
+            return Err(format!(
+                "The lean prompt must be plain text of at most {MAX_LEAN_PROMPT_CHARS} characters."
+            ));
+        }
+        if let Some(list) = &self.lean_tools {
+            if list.len() > MAX_LEAN_TOOLS
+                || list.iter().any(|t| {
+                    t.trim().is_empty()
+                        || t.chars().count() > MAX_LEAN_TOOL_CHARS
+                        || t.chars().any(char::is_control)
+                })
+            {
+                return Err(format!(
+                    "The lean tool list must be at most {MAX_LEAN_TOOLS} names of up to \
+                     {MAX_LEAN_TOOL_CHARS} characters each."
+                ));
+            }
         }
         if self.quick_model.chars().count() > 120 || self.quick_model.chars().any(char::is_control)
         {
@@ -225,7 +264,8 @@ pub fn takes_speaker(f: &PolicyFile, is_home: bool) -> bool {
 
 /// The saved settings, or the defaults when none are saved (or the file is unreadable).
 pub fn load_file(path: &Path) -> PolicyFile {
-    helm_core::privfs::read_capped(path, 4 * 1024)
+    // The cap fits a full lean prompt and tool list with room to spare.
+    helm_core::privfs::read_capped(path, 32 * 1024)
         .ok()
         .and_then(|b| serde_json::from_slice::<PolicyFile>(&b).ok())
         .filter(|f| f.check().is_ok())
@@ -290,6 +330,10 @@ pub struct Previous {
     pub ended_at: i64,
     /// The last thing said there, kept short.
     pub gist: String,
+    /// The room the talk ran in, as the speaker named it; a new talk is only pointed at this one
+    /// when it comes from that same room (or either side never named one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room: Option<String>,
 }
 
 /// The speaker files of one profile.
@@ -380,6 +424,7 @@ pub fn end_talk(
             chat_id: talk.chat_id.clone(),
             ended_at: now,
             gist: gist.trim().chars().take(PREVIOUS_NOTE_MAX_CHARS).collect(),
+            room: talk.room.clone(),
         });
     }
     let _ = save_talks(path, &talks);
@@ -598,9 +643,19 @@ pub fn record_notice(rec: &crate::client::SpeakerRecord) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
-/// The line that names the talk before: its title, and what was last said there.
+/// The line that names the talk before: its title, its chat id (so a new chat can pull up what
+/// was said there with `app_read_chat`), and what was last said.
 pub fn previous_pointer(p: &Previous) -> String {
-    format!("{} — {}", p.title, p.gist.trim())
+    format!("{} — {} (chat {})", p.title, p.gist.trim(), p.chat_id)
+}
+
+/// Whether a new turn belongs to the room of the talk it might be pointed at: both named one and
+/// they differ, no; either never named one, yes. Compared like titles are cleaned, case-free.
+pub fn same_room(prev: Option<&str>, next: Option<&str>) -> bool {
+    match (prev.map(str::trim), next.map(str::trim)) {
+        (Some(a), Some(b)) if !a.is_empty() && !b.is_empty() => a.eq_ignore_ascii_case(b),
+        _ => true,
+    }
 }
 
 /// The talk id and room of a `speaker_session_closed` frame.
@@ -817,8 +872,21 @@ mod tests {
         assert!(!previous_usable(&prev, &policy, T0 + 20 * HOUR_MS));
         assert_eq!(
             previous_pointer(&prev),
-            "HA speaker kitchen voice 2027-01-15 — It is 7:20."
+            "HA speaker kitchen voice 2027-01-15 — It is 7:20. (chat chat-1)"
         );
+        // The pointer belongs to the room its talk ran in, and a new turn's room decides whether
+        // it rides along: same room yes, another no, either unnamed still yes.
+        assert_eq!(prev.room.as_deref(), Some("kitchen"));
+        assert!(same_room(prev.room.as_deref(), Some("Kitchen")));
+        assert!(!same_room(prev.room.as_deref(), Some("study")));
+        assert!(same_room(prev.room.as_deref(), None) && same_room(None, Some("study")));
+        // The pointer is usable for half a day by default: any follow-up within 30 minutes of the
+        // close lands well inside it.
+        assert!(previous_usable(
+            &prev,
+            &policy,
+            T0 + 700_000 + 25 * MINUTE_MS
+        ));
         let off = PolicyFile {
             previous_hours: 0,
             ..PolicyFile::default()
@@ -904,7 +972,10 @@ mod tests {
         );
         assert_eq!(with_lane.roll_at(crate::voice::Lane::Deep), 0);
         // Lean is off and no board is chosen until Settings says so; a chosen board is trimmed.
+        // Lean's own prompt and tool list start unset: blank prompt means the built-in one, and
+        // an absent list means the app's default set.
         assert!(!f.lean && f.board().is_none());
+        assert!(f.lean_prompt.is_empty() && f.lean_tools.is_none());
         let chosen = PolicyFile {
             lean: true,
             board_id: Some(" board-1 ".into()),
@@ -914,7 +985,29 @@ mod tests {
         // An older settings file with neither field still loads, and writes neither back.
         let old: PolicyFile = serde_json::from_str(r#"{"model":"m","effort":"low"}"#).unwrap();
         assert!(!old.lean && old.board_id.is_none());
+        assert!(old.lean_prompt.is_empty() && old.lean_tools.is_none());
         assert!(!serde_json::to_string(&old).unwrap().contains("boardId"));
+        assert!(!serde_json::to_string(&old).unwrap().contains("leanTools"));
+        // A chosen lean prompt and tool list round-trip through the file's camelCase names; an
+        // empty list is a real choice ("nothing but the finding tools"), distinct from no list.
+        let chosen_lean = PolicyFile {
+            lean: true,
+            lean_prompt: "Answer in one line.".into(),
+            lean_tools: Some(vec!["home assistant".into(), "memory_search".into()]),
+            ..PolicyFile::default()
+        };
+        assert!(chosen_lean.check().is_ok());
+        let json = serde_json::to_string(&chosen_lean).unwrap();
+        assert!(json.contains(r#""leanPrompt":"Answer in one line.""#));
+        assert!(json.contains(r#""leanTools":["home assistant","memory_search"]"#));
+        let back: PolicyFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, chosen_lean);
+        assert!(PolicyFile {
+            lean_tools: Some(vec![]),
+            ..PolicyFile::default()
+        }
+        .check()
+        .is_ok());
         let switched = PolicyFile {
             take_speaker: Some(false),
             ..PolicyFile::default()
@@ -939,6 +1032,26 @@ mod tests {
             },
             PolicyFile {
                 board_id: Some("b\nad".into()),
+                ..PolicyFile::default()
+            },
+            PolicyFile {
+                lean_prompt: "x".repeat(MAX_LEAN_PROMPT_CHARS + 1),
+                ..PolicyFile::default()
+            },
+            PolicyFile {
+                lean_prompt: "one\there".into(),
+                ..PolicyFile::default()
+            },
+            PolicyFile {
+                lean_tools: Some((0..=MAX_LEAN_TOOLS).map(|i| format!("t{i}")).collect()),
+                ..PolicyFile::default()
+            },
+            PolicyFile {
+                lean_tools: Some(vec!["  ".into()]),
+                ..PolicyFile::default()
+            },
+            PolicyFile {
+                lean_tools: Some(vec!["x".repeat(MAX_LEAN_TOOL_CHARS + 1)]),
                 ..PolicyFile::default()
             },
         ] {

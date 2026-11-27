@@ -84,7 +84,7 @@ ENVIRONMENT:
                               whose Home Assistant holds a speaker-scope token
                               (`client add --scopes speaker`)
   HUB_SPEAKER_IDLE_MINUTES    how long one talk on a speaker stays one conversation after
-                              its last turn (3-30, default 10)
+                              its last turn (3-30, default 5)
   HUB_WAKE                    off (default), udp or ha: how the hub wakes a PC that is off or
                               asleep (only when a person taps Wake or sends /wake). udp sends
                               a magic packet by broadcast; ha asks Home Assistant to

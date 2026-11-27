@@ -289,15 +289,23 @@ pub fn promote_for_orchestrator(tools: &mut Value) {
     }
 }
 
-/// Cut a launch's catalogue (`hostTools[]` as JSON) to the tools named, for a chat that runs lean.
-/// Every other tool is left out: it is neither listed nor callable by that chat.
-pub fn keep_only(tools: &mut Value, names: &[String]) {
+/// Hide every tool a lean chat was not given, in a launch's catalogue (`hostTools[]` as JSON):
+/// entries outside `names` get `"hidden": true`. The worker leaves hidden tools off the chat's
+/// list and out of its prompt, but they stay callable through the always-on pair `app_list_tools`
+/// (which still finds them) and `app_mcp_call` — the escape hatch a lean chat uses to load more
+/// of Helm's tools on demand. A merged tool's old names are left as they are: they were never
+/// listed anyway, and the facade that replaced them follows the same hidden flag.
+pub fn hide_outside(tools: &mut Value, names: &[String]) {
     if let Some(list) = tools.as_array_mut() {
-        list.retain(|t| {
-            t.get("name")
+        for t in list.iter_mut() {
+            let shown = t
+                .get("name")
                 .and_then(Value::as_str)
-                .is_some_and(|n| names.iter().any(|k| k == n))
-        });
+                .is_some_and(|n| names.iter().any(|k| k == n));
+            if !shown {
+                t["hidden"] = Value::Bool(true);
+            }
+        }
     }
 }
 
@@ -409,18 +417,30 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn a_lean_launch_keeps_only_the_tools_named() {
-        let all =
-            json!([{"name": "app_telegram_send"}, {"name": "app_schedule"}, {"name": "app_help"}]);
+    fn a_lean_launch_hides_everything_it_did_not_name() {
+        let all = json!([
+            {"name": "app_telegram_send"},
+            {"name": "app_schedule", "aliasOf": null},
+            {"name": "app_help"}
+        ]);
         let mut tools = all.clone();
-        keep_only(&mut tools, &["app_telegram_send".to_owned()]);
-        assert_eq!(tools, json!([{"name": "app_telegram_send"}]));
-        // None named, none kept; and a catalogue that is not a list is left alone.
-        let mut none = all.clone();
-        keep_only(&mut none, &[]);
-        assert_eq!(none, json!([]));
+        hide_outside(&mut tools, &["app_telegram_send".to_owned()]);
+        // The named tool is untouched; everything else carries the hidden flag and stays in the
+        // catalogue, so the escape hatch can still find and call it.
+        assert_eq!(tools[0], json!({"name": "app_telegram_send"}));
+        assert_eq!(tools[1]["hidden"], json!(true));
+        assert_eq!(tools[2]["hidden"], json!(true));
+        // None named: all hidden, none removed; a catalogue that is not a list is left alone.
+        let mut none = all;
+        hide_outside(&mut none, &[]);
+        assert_eq!(none.as_array().unwrap().len(), 3);
+        assert!(none
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["hidden"] == json!(true)));
         let mut odd = json!({"name": "app_help"});
-        keep_only(&mut odd, &["app_help".to_owned()]);
+        hide_outside(&mut odd, &["app_help".to_owned()]);
         assert_eq!(odd, json!({"name": "app_help"}));
     }
 }

@@ -94,8 +94,10 @@ pub const RECORD_HOLD_MS: i64 = 30 * 60_000;
 pub const RECORD_ABANDON_MS: i64 = 120_000;
 /// The longest escalation context kept with a turn, in bytes.
 pub const MAX_CONTEXT_BYTES: usize = 2_048;
-/// A session idles out this long, by default, and the range the setting allows.
-pub const DEFAULT_IDLE_MINUTES: u64 = 10;
+/// A session idles out this long, by default, and the range the setting allows. Five minutes: a
+/// follow-up said within it carries on in the same chat; past it the talk is closed and the next
+/// word starts a fresh one (the host then points that new chat at the old).
+pub const DEFAULT_IDLE_MINUTES: u64 = 5;
 pub const IDLE_MINUTES_RANGE: std::ops::RangeInclusive<u64> = 3..=30;
 
 /// What the speaker is told when the person's Helm is up but has not said that it takes speaker
@@ -285,7 +287,7 @@ impl Default for SpeakerConfig {
 
 impl SpeakerConfig {
     /// Reads `HUB_SPEAKER` (`on`, the default, or `off`) and `HUB_SPEAKER_IDLE_MINUTES`
-    /// (3-30, default 10). `None`: the speaker line is off.
+    /// (3-30, default 5). `None`: the speaker line is off.
     pub fn from_env() -> Result<Option<SpeakerConfig>, String> {
         Self::from_vars(&|k: &str| std::env::var(k).ok())
     }
@@ -1123,8 +1125,9 @@ mod tests {
         };
         // (settings, what they mean: the idle, or `off`, or a refused start)
         let table: &[Case] = &[
-            (&[], Ok(Some(Duration::from_secs(600)))),
-            (&[("HUB_SPEAKER", "on")], Ok(Some(Duration::from_secs(600)))),
+            // With nothing set a talk stays one conversation for five minutes.
+            (&[], Ok(Some(Duration::from_secs(300)))),
+            (&[("HUB_SPEAKER", "on")], Ok(Some(Duration::from_secs(300)))),
             (&[("HUB_SPEAKER", "off")], Ok(None)),
             (
                 &[("HUB_SPEAKER_IDLE_MINUTES", "3")],

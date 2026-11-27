@@ -635,16 +635,24 @@ fn speaker_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let wanted = without_profile(&args);
     let mut f: speaker::PolicyFile = serde_json::from_value(wanted.clone()).map_err(|_| {
         ApiError::bad_args(
-            "Expected model, effort, takeSpeaker, previousHours (0 to 72), lean and boardId.",
+            "Expected model, effort, takeSpeaker, previousHours (0 to 72), lean, leanPrompt, \
+             leanTools and boardId.",
         )
     })?;
     let profile = ctx.services.need::<Profile>()?;
     let pid = channel_profile(ctx, &args)?;
     let before = speaker::load_file(&speaker::paths(&profile.dir, &pid).policy);
-    // A save that does not mention lean or the board (a window from before they existed) leaves
-    // them as they were.
+    // A save that does not mention lean, its own settings or the board (a window from before
+    // they existed) leaves them as they were. `leanTools` is kept only when the key is absent:
+    // an empty list in a payload is the real "nothing but the finding tools" choice.
     if wanted.get("lean").is_none() {
         f.lean = before.lean;
+    }
+    if wanted.get("leanPrompt").is_none() {
+        f.lean_prompt = before.lean_prompt.clone();
+    }
+    if wanted.get("leanTools").is_none() {
+        f.lean_tools = before.lean_tools.clone();
     }
     if wanted.get("boardId").is_none() {
         f.board_id = before.board_id.clone();

@@ -276,11 +276,17 @@ pub fn place(c: &Ctx, turn: &SpeakerTurn, now: i64) -> Result<Placed, String> {
     }
     let baseline = max_row(&c.db, &talk.chat_id);
     let (said, _) = cut_chars(&turn.text, speaker::MAX_TEXT_CHARS);
-    // A new talk may be told which talk came before it, unless this is that same talk.
+    // A new talk may be told which talk came before it — same room (or neither named one), not
+    // this same chat, and recent enough. The pointer carries the old chat's id, so a follow-up
+    // after the idle close can pull that transcript up with `app_read_chat`.
     let previous = speaker::load_talks(&c.paths.chats)
         .previous
         .as_ref()
-        .filter(|p| p.chat_id != talk.chat_id && speaker::previous_usable(p, &c.file, now))
+        .filter(|p| {
+            p.chat_id != talk.chat_id
+                && speaker::same_room(p.room.as_deref(), turn.room.as_deref())
+                && speaker::previous_usable(p, &c.file, now)
+        })
         .map(speaker::previous_pointer);
     let mut text = speaker::delivered_text(
         turn.room.as_deref(),
@@ -509,6 +515,14 @@ pub struct SpeakerView {
     pub previous_hours: i64,
     /// Whether speaker chats run lean (a thin prompt, few tools).
     pub lean: bool,
+    /// The lean prompt in force: the saved replacement, blank when the built-in one is used; and
+    /// the built-in text itself, so Settings can show it.
+    pub lean_prompt: String,
+    pub lean_prompt_default: &'static str,
+    /// What a lean chat may use, as resolved (the saved list, else the defaults), and the default
+    /// list — Settings edits chips over these names.
+    pub lean_tools: Vec<String>,
+    pub lean_tools_default: Vec<String>,
     /// The board chats that arrive from the hub are shown on; blank: the app's own choice. One
     /// setting for every channel — phone voice, room speakers and Telegram alike.
     pub board_id: String,
@@ -615,6 +629,18 @@ pub fn speaker_view(db: &Database, profile_dir: &std::path::Path, profile_id: &s
         quick_effort: file.quick_effort.trim().to_owned(),
         quick_roll_at: file.quick_roll_at,
         deep_roll_at: file.deep_roll_at,
+        lean_prompt: file.lean_prompt.trim().to_owned(),
+        lean_prompt_default: crate::lean::DEFAULT_PROMPT,
+        lean_tools: file.lean_tools.clone().unwrap_or_else(|| {
+            crate::lean::DEFAULT_TOOLS
+                .iter()
+                .map(|t| (*t).to_owned())
+                .collect()
+        }),
+        lean_tools_default: crate::lean::DEFAULT_TOOLS
+            .iter()
+            .map(|t| (*t).to_owned())
+            .collect(),
         kept,
     }
 }
