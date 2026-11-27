@@ -754,6 +754,7 @@ mod host_tool_tests {
             "app_open_panel",
             "app_forward_port",
             "app_list_forwards",
+            "app_close_forward",
             "app_update",
             "app_request_allow",
             "app_list_mcp_servers",

@@ -10,7 +10,13 @@
 //! `app_list_forwards` answers what is forwarded now: every port forwarded between PCs of the
 //! household, whoever it belongs to, with the PC and port of the server, the PC and address it
 //! opens on, and whether the two ends agree and answer (`devices_forwards_report`). The tool adds
-//! a note that names the next call for any forward that is wrong.
+//! a note that names the next calls for any forward that is wrong: `app_close_forward`, then
+//! `app_forward_port`.
+//!
+//! `app_close_forward` ends one forward at whichever end this PC holds (`devices_forward_close`
+//! when this PC views it, `devices_forward_hosted_stop` when this PC runs its server); the other
+//! PC is told. When neither end is here it closes nothing and says which call reaches a PC that
+//! holds one.
 
 use crate::registry::{screen_label, HostToolRegistry, ToolCtx, ToolError, ToolResult};
 use crate::spec::ToolSpec;
@@ -93,17 +99,34 @@ fn forwards_note(r: &Value, narrowed: bool) -> String {
     let (forwards, unreachable) = (list("forwards"), list("unreachable"));
     let mut lines: Vec<String> = Vec::new();
     for f in &forwards {
-        let (src, dst) = (&f["source"]["address"], &f["destination"]["address"]);
-        let (src, dst) = (src.as_str().unwrap_or("?"), dst.as_str().unwrap_or("?"));
+        let at = |end: &str| {
+            let e = &f[end];
+            e["address"]
+                .as_str()
+                .or(e["deviceName"].as_str())
+                .unwrap_or("?")
+                .to_owned()
+        };
         let why = f["why"].as_str().unwrap_or_default();
+        // A re-offer alone hands back the same broken forward while the viewing PC still lists
+        // it, so every fix closes it first.
+        let close = format!(
+            "app_close_forward {{forwardId: \"{}\"}}",
+            f["forwardId"].as_str().unwrap_or_default()
+        );
         let next = match f["state"].as_str() {
             Some("ok") => continue,
-            Some("source_not_answering") => "Start the server again; if it now listens on another port, close this forward from the chat bar and offer the right port with app_forward_port.",
-            Some("destination_not_listening") => "Close it from the chat bar and offer it again with app_forward_port.",
-            Some("mismatch") => "Close it from the chat bar and offer it again with app_forward_port.",
-            _ => "Ask again in a moment, or offer it again with app_forward_port.",
+            Some("source_not_answering") => format!("Start the server again; if it now listens on another port, close it with {close} and offer the right port with app_forward_port."),
+            Some("destination_not_listening") | Some("mismatch") => {
+                format!("Close it with {close}, then offer it again with app_forward_port.")
+            }
+            _ => format!("Ask again with app_list_forwards in a few seconds; if it stays so, close it with {close} and offer it again with app_forward_port."),
         };
-        lines.push(format!("{src} -> {dst}: {why} {next}"));
+        lines.push(format!(
+            "{} -> {}: {why} {next}",
+            at("source"),
+            at("destination")
+        ));
     }
     let mut note = if forwards.is_empty() {
         let none = if narrowed {
@@ -111,7 +134,7 @@ fn forwards_note(r: &Value, narrowed: bool) -> String {
         } else {
             "No ports are forwarded between PCs right now."
         };
-        format!("{none} To let the user open a server of this PC from another one, offer it with app_forward_port {{port}}.")
+        format!("{none} A port offered with app_forward_port {{port}} opens only once the user views the chat on their PC: if you just offered one, ask again after they have opened it rather than offering it again.")
     } else if lines.is_empty() {
         format!(
             "{} forward{} active and every end answers.",
@@ -133,7 +156,7 @@ fn forwards_note(r: &Value, narrowed: bool) -> String {
             })
             .collect();
         note.push_str(&format!(
-            " Not checked, so their forwards are not listed: {}.",
+            " Not reached, so their ends were not checked: {}.",
             who.join("; ")
         ));
     }
@@ -152,6 +175,65 @@ async fn list_forwards(ctx: ToolCtx, a: Value) -> ToolResult {
     let mut r = ctx.op("devices_forwards_report", args).await?;
     r["note"] = json!(forwards_note(&r, narrowed));
     Ok(r)
+}
+
+/// The forward `id` in a `{forwards}` list, if it is there.
+fn find_forward(list: &Value, id: &str) -> Option<Value> {
+    list["forwards"]
+        .as_array()?
+        .iter()
+        .find(|f| f["forwardId"].as_str() == Some(id))
+        .cloned()
+}
+
+/// `app_close_forward`: end one forward at whichever end this PC holds; the other PC is told and
+/// ends its own. A closed forward cannot be reopened as it was, so its Undo is a fresh offer of
+/// the same port.
+async fn close_forward(ctx: ToolCtx, a: Value) -> ToolResult {
+    let id = match a.get("forwardId").and_then(Value::as_str).map(str::trim) {
+        Some(id) if !id.is_empty() && id.chars().count() <= MAX_FILTER => id.to_owned(),
+        _ => {
+            return Err(ToolError::refused(
+                "forwardId must be a forward's id, as app_list_forwards gives it.",
+            ))
+        }
+    };
+    let args = json!({"forwardId": id});
+    let port = |f: &Value| f["port"].as_u64().unwrap_or_default();
+    let pc = |f: &Value| {
+        f["deviceName"]
+            .as_str()
+            .unwrap_or("the other PC")
+            .to_owned()
+    };
+    let viewing = ctx.op("devices_forwards", json!({})).await?;
+    if let Some(f) = find_forward(&viewing, &id) {
+        ctx.op("devices_forward_close", args).await?;
+        let (port, host) = (port(&f), pc(&f));
+        return Ok(json!({
+            "closed": true,
+            "end": "destination",
+            "forward": f,
+            "note": format!("Closed: port {port} of {host} no longer opens on this PC, and {host} was told."),
+            "undo": format!("To open it again, a chat on {host} offers it with app_forward_port {{port: {port}}}."),
+        }));
+    }
+    let hosted = ctx.op("devices_forwards_hosted", json!({})).await?;
+    if let Some(f) = find_forward(&hosted, &id) {
+        ctx.op("devices_forward_hosted_stop", args).await?;
+        let (port, viewer) = (port(&f), pc(&f));
+        return Ok(json!({
+            "closed": true,
+            "end": "source",
+            "forward": f,
+            "note": format!("Closed: port {port} of this PC is no longer shared with {viewer}, and {viewer} was told."),
+            "undo": format!("To open it again, offer it with app_forward_port {{port: {port}}}."),
+        }));
+    }
+    Ok(json!({
+        "closed": false,
+        "note": format!("Neither end of forward {id} is on this PC (or it has already ended), so nothing was closed. app_list_forwards names the two PCs of each forward; a chat that runs on either one closes it with app_close_forward: send it the request with app_send_message."),
+    }))
 }
 
 pub fn register_host_tools(r: &mut HostToolRegistry) {
@@ -188,6 +270,22 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
         .timeout_ms(40_000),
         list_forwards,
     );
+    r.async_tool(
+        ToolSpec::write(
+            "app_close_forward",
+            "Close one port forward between the PCs of the household, by the forwardId app_list_forwards gives: it works on the PC that runs the server and on the PC it opens on, and the other PC is told. Close a forward app_list_forwards reports as wrong before offering the port again with app_forward_port: an offer alone reopens the same broken forward. To undo a close, offer the port again with app_forward_port.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "forwardId": {"type": "string", "description": "The forward's id, from app_list_forwards."}
+                },
+                "required": ["forwardId"],
+                "additionalProperties": false
+            }),
+        )
+        .self_locking(),
+        close_forward,
+    );
 }
 
 #[cfg(test)]
@@ -206,27 +304,50 @@ mod tests {
             Box<dyn std::future::Future<Output = Result<Value, helm_ipc::ApiError>> + Send + 'a>,
         > {
             self.0.lock().unwrap().push((op.to_owned(), args.clone()));
+            // This PC views v1 (Desk's port 5173) and shares its own port 3000 with Laptop (h1).
+            let listed = match op {
+                "devices_forwards" => {
+                    Some(json!([{"forwardId": "v1", "port": 5173, "deviceName": "Desk"}]))
+                }
+                "devices_forwards_hosted" => {
+                    Some(json!([{"forwardId": "h1", "port": 3000, "deviceName": "Laptop"}]))
+                }
+                "devices_forward_close" | "devices_forward_hosted_stop" => Some(Value::Null),
+                _ => None,
+            };
+            if let Some(forwards) = listed {
+                let out = if forwards.is_null() {
+                    json!({})
+                } else {
+                    json!({"forwards": forwards})
+                };
+                return Box::pin(async move { Ok(out) });
+            }
             if op == "devices_forwards_report" {
-                let forward = |state: &str, why: Value| {
+                let forward = |id: &str, state: &str, why: Value| {
                     json!({
-                        "state": state, "why": why,
-                        "source": {"address": "localhost:5173 on Desk"},
-                        "destination": {"address": "localhost:5173 on Laptop"},
+                        "forwardId": id, "state": state, "why": why,
+                        "source": {"address": "localhost:5173 on Desk", "deviceName": "Desk"},
+                        "destination": {"address": "localhost:5173 on Laptop", "deviceName": "Laptop"},
                     })
                 };
+                // Desk shares it, Laptop does not list it: there is no address on Laptop.
+                let mut host_only = forward("f3", "mismatch", json!("Laptop does not list it."));
+                host_only["destination"]["address"] = Value::Null;
                 let out = match args["device"].as_str() {
                     Some("Nobody") => {
                         Err(helm_ipc::ApiError::new("not_found", "No PC called Nobody."))
                     }
                     Some("Empty") => Ok(json!({"forwards": [], "unreachable": []})),
                     Some("Quiet") => Ok(json!({
-                        "forwards": [forward("ok", Value::Null)], "unreachable": []
+                        "forwards": [forward("f1", "ok", Value::Null)], "unreachable": []
                     })),
                     _ => Ok(json!({
                         "forwards": [
-                            forward("ok", Value::Null),
-                            forward("source_not_answering", json!("Nothing answers on port 5173 on Desk.")),
-                            forward("mismatch", json!("Laptop does not list it.")),
+                            forward("f1", "ok", Value::Null),
+                            forward("f2", "source_not_answering", json!("Nothing answers on port 5173 on Desk.")),
+                            host_only,
+                            forward("f4", "unknown", json!("It is still opening; ask again in a few seconds.")),
                         ],
                         "unreachable": [{"name": "Tablet", "reason": "Tablet is offline."}],
                     })),
@@ -334,7 +455,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_forwards_list_asks_the_op_with_clean_filters_and_names_the_next_call() {
+    async fn the_forwards_list_names_the_next_calls_and_a_forward_closes_at_the_end_held_here() {
         let fake = Arc::new(Fake(Mutex::new(vec![])));
         let list = |args: Value| {
             let fake = fake.clone();
@@ -366,20 +487,34 @@ mod tests {
             .all(|c| c.0 == "devices_forwards_report"));
 
         // Every wrong end is named with the call to make; a PC that could not be asked is named.
+        // Each one is closed by its id before the port is offered again, since an offer alone
+        // reopens the same forward; an end with no address is named by its PC.
         let r = list(json!({})).await.unwrap();
-        assert_eq!(r["forwards"].as_array().unwrap().len(), 3);
+        assert_eq!(r["forwards"].as_array().unwrap().len(), 4);
         let note = r["note"].as_str().unwrap();
-        assert!(note.contains("Nothing answers on port 5173 on Desk"));
-        assert!(note.contains("Laptop does not list it"));
-        assert!(note.contains("app_forward_port"));
-        assert!(note.contains("Tablet (Tablet is offline.)"));
+        for want in [
+            "Nothing answers on port 5173 on Desk.",
+            "close it with app_close_forward {forwardId: \"f2\"} and offer the right port with app_forward_port",
+            "localhost:5173 on Desk -> Laptop: Laptop does not list it. Close it with app_close_forward {forwardId: \"f3\"}, then offer it again with app_forward_port.",
+            "still opening; ask again in a few seconds. Ask again with app_list_forwards",
+            "Not reached, so their ends were not checked: Tablet (Tablet is offline.).",
+        ] {
+            assert!(note.contains(want), "{want} in {note}");
+        }
+        assert!(!note.contains("f1") && !note.contains("chat bar"), "{note}");
 
-        // Nothing wrong, and nothing there: each says so, the empty one with how to offer a port.
+        // Nothing wrong, and nothing there: each says so; the empty one says an offer opens once
+        // the user views the chat, so a chat that just offered one does not offer it again.
         let r = list(json!({"device": "Quiet"})).await.unwrap();
         assert!(r["note"].as_str().unwrap().contains("every end answers"));
         let r = list(json!({"device": "Empty"})).await.unwrap();
         let note = r["note"].as_str().unwrap();
-        assert!(note.contains("No forward matches") && note.contains("app_forward_port {port}"));
+        assert!(
+            note.contains("No forward matches")
+                && note.contains("opens only once the user views the chat")
+                && note.contains("rather than offering it again"),
+            "{note}"
+        );
 
         // The op's refusal reaches the agent; bad arguments never reach the op.
         let e = list(json!({"device": "Nobody"})).await.unwrap_err();
@@ -393,5 +528,57 @@ mod tests {
             assert!(list(args.clone()).await.is_err(), "{args}");
         }
         assert_eq!(fake.0.lock().unwrap().len(), before);
+
+        // Closing: at the end this PC holds, with the Undo that offers the port again; with
+        // neither end here nothing is closed and the answer names the calls that reach one.
+        for (id, op, closed, says) in [
+            (
+                "v1",
+                Some("devices_forward_close"),
+                true,
+                "a chat on Desk offers it with app_forward_port {port: 5173}",
+            ),
+            (
+                " h1 ",
+                Some("devices_forward_hosted_stop"),
+                true,
+                "offer it with app_forward_port {port: 3000}",
+            ),
+            (
+                "zz",
+                None,
+                false,
+                "closes it with app_close_forward: send it the request with app_send_message",
+            ),
+        ] {
+            fake.0.lock().unwrap().clear();
+            let r = call_tool(&fake, "app_close_forward", json!({"forwardId": id}))
+                .await
+                .unwrap();
+            assert_eq!(r["closed"], closed, "{id}: {r}");
+            let text = format!("{} {}", r["note"], r["undo"]);
+            assert!(text.contains(says), "{id}: {text}");
+            let calls = fake.0.lock().unwrap().clone();
+            let closes: Vec<_> = calls
+                .iter()
+                .filter(|c| c.0.contains("_close") || c.0.contains("_stop"))
+                .collect();
+            assert_eq!(closes.first().map(|c| c.0.as_str()), op, "{id}");
+            if op.is_some() {
+                assert_eq!(closes[0].1, json!({"forwardId": id.trim()}));
+            }
+        }
+        for args in [
+            json!({}),
+            json!({"forwardId": " "}),
+            json!({"forwardId": 7}),
+        ] {
+            assert!(
+                call_tool(&fake, "app_close_forward", args.clone())
+                    .await
+                    .is_err(),
+                "{args}"
+            );
+        }
     }
 }

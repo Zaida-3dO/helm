@@ -11,6 +11,7 @@
     "app_browser_step_result",
     "app_cancel_schedule",
     "app_chat",
+    "app_close_forward",
     "app_consent_check",
     "app_create_chat",
     "app_create_feedback",
