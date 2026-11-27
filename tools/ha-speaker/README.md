@@ -68,23 +68,37 @@ nothing — useful while testing what a small model actually asks for.
   each area (capped per area with a "(+N more)" tail), then up to four model
   rounds over the house tools.
 - A house request does not become words until a tool call has succeeded
-  behind it. If the model answers one with no tool call at all, it is sent
-  back once with the tool forced; if still nothing runs, a fixed "I couldn't
-  do that." goes instead of any success claim. When every call failed, the
-  spoken line is built from the tools' own plain reason, never from the
-  model's wording. Those rows carry `guard_reprompt` / `guard_blocked` in
-  the timing record. A question back ("Which room?") claims no success and
-  is not blocked.
+  behind it - and for an ask that changes something, only a successful
+  WRITE counts as standing behind it (a read that happened to work proves
+  nothing about the change). If the model answers one with no tool call at
+  all, it is sent back once with the tool forced; if still nothing runs, a
+  fixed "I couldn't do that." goes instead of any success claim. When every
+  call failed, the spoken line is built from the tools' own reasons plus the
+  options they offered, never from the model's wording; when only part of
+  the ask worked, the failure reason is appended to the model's own sentence.
+  A single clean question ("Which room?") or an honest "sorry, I didn't
+  catch that" claims no success and is spoken as-is - forcing a guessed
+  action over those is exactly what this guard exists to prevent. And the
+  gate only engages sentences that really ask something of the house: a
+  joke about a lamp, a reminder for mum or the hour the shop opens sail
+  through untouched, and a tool is only forced when the sentence names its
+  target. Those rows carry `guard_reprompt` / `guard_blocked` in the timing
+  record; an endpoint that refuses the forced round or answers it with
+  nothing gets the fixed sentence, not a second unguarded brain.
 - The house tools are `light`, `climate`, `timer`, `home_state` and
   `home_status`. Timers go through Home Assistant's built-in voice-timer
   intents on the asking speaker, so they live on the satellite rather than as
-  helper entities. Names match by area first, then exact name, then a
-  forgiving spelling; an ambiguous name is asked back, never guessed. A room
-  word carrying "lights" ("the office lights", "all the kitchen lights")
-  means every exposed light of that room in ONE call - even when one bulb
-  is itself named after the room. A bulb that cannot do the colour or colour
-  temperature is left out with a plain per-light note while the others move:
-  a partial result saying what worked and which ones could not.
+  helper entities. Names match areas first: a PLURAL room word ("the office
+  lights", "all the kitchen lights") means every exposed light of that room
+  in ONE call - even when one bulb is itself named after the room. A
+  singular lamp/light/bulb keeps the exact entity name, so a real "office
+  lamp" is found by name instead of sweeping up a room called Office. Then
+  comes forgiving spelling; an ambiguous name is asked back, never guessed.
+  Colour-temperature asks are not limited to bulbs advertising `color_temp`:
+  Home Assistant emulates it on the other colour bulbs too, so only
+  fixed-white, brightness-only and on/off bulbs are left out with a plain
+  per-light note while the others move: a partial result saying what worked
+  and which ones could not.
 - `home_status` answers "what chores are due / what needs water" from the
   optional chores feed: at most three names, overdue first, one or two short
   sentences. It only ever reads — nothing is marked done by voice — and a
