@@ -7,6 +7,7 @@ Run with either plain python or the scratch venv: profiles.py imports only
 agent_core and const.
 """
 
+import asyncio
 import os
 import sys
 import types
@@ -21,6 +22,48 @@ _PKG.__path__ = [_HERE]
 sys.modules.setdefault("hs", _PKG)
 
 import importlib  # noqa: E402
+
+def _stub_homeassistant():
+    """ha_backend.py is live-HA glue; give it the handful of HA names it
+    imports so house_read - which only ever touches the injected transport -
+    can be tested without Home Assistant itself. Skipped when real HA is
+    importable, so the scratch-HA run keeps testing the genuine modules."""
+    try:  # pragma: no cover - environment dependent
+        import homeassistant  # noqa: F401
+        return False
+    except ImportError:
+        pass
+
+    def mod(name, parent=None, **attrs):
+        m = types.ModuleType(name)
+        for key, value in attrs.items():
+            setattr(m, key, value)
+        sys.modules[name] = m
+        if parent is not None:
+            setattr(parent, name.rsplit(".", 1)[1], m)
+        return m
+
+    ha = mod("homeassistant")
+    mod("homeassistant.core", ha, HomeAssistant=object)
+    comp = mod("homeassistant.components", ha)
+    comp_assist = mod("homeassistant.components.homeassistant", comp)
+    mod("homeassistant.components.homeassistant.exposed_entities", comp_assist,
+        async_should_expose=lambda hass, assistant, entity_id: True)
+    helpers = mod("homeassistant.helpers", ha)
+    for name in ("area_registry", "device_registry", "entity_registry"):
+        mod("homeassistant.helpers." + name, helpers)
+    mod("homeassistant.helpers.intent", helpers,
+        IntentError=type("IntentError", (Exception,), {}),
+        async_handle=None)
+    mod("homeassistant.helpers.aiohttp_client", helpers,
+        async_get_clientsession=lambda hass: None)
+    return True
+
+
+_stub_homeassistant()
+_ha_backend = importlib.import_module("hs.ha_backend")
+_errors = importlib.import_module("hs.errors")
+_housecontrol = importlib.import_module("hs.homecontrol")
 
 _profiles = importlib.import_module("hs.profiles")
 active_profile = _profiles.active_profile
@@ -121,6 +164,80 @@ class ProfilesTest(unittest.TestCase):
     def test_legacy_entry_without_profiles_still_builds(self):
         cfg = build_model_config(base_data(model_api_key="k"), {"profile": "path_b"})
         self.assertEqual(cfg.api_key, "k")  # both profiles inherit live fields
+
+
+class FakeTransport:
+    """The tiny transport contract ha_backend.house_read uses: scripted
+    (status, body) outcome or a raised error; records every request."""
+
+    def __init__(self, outcome=None):
+        self.outcome = outcome if outcome is not None else (200, b'{"ok": 1}')
+        self.seen = []  # (method, url, headers, timeout)
+
+    async def request(self, method, url, *, headers=None, data=None,
+                      timeout=None):
+        self.seen.append((method, url, dict(headers or {}), timeout))
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
+
+
+def house_backend(transport=None, url="http://chores.example:8123",
+                  token="ro-example"):
+    return _ha_backend.HaBackend(None, transport=transport, house_url=url,
+                                 house_token=token)
+
+
+def run_read(backend, kind):
+    return asyncio.run(backend.house_read(kind))
+
+
+class HouseReadTest(unittest.TestCase):
+    """house_read builds the right bounded GET and never lets anything - a
+    timeout, a dead host, a 401 or garbage json - escape as an exception."""
+
+    def test_urls_headers_and_the_three_second_cap(self):
+        for kind, path in (("chores", "/api/chores?status=all"),
+                           ("plants", "/api/plants?status=all")):
+            t = FakeTransport((200, b'{"status": "all", "count": 0}'))
+            out = run_read(house_backend(t), kind)
+            self.assertEqual(out, {"status": "all", "count": 0})
+            self.assertEqual(t.seen, [("GET", "http://chores.example:8123" +
+                                       path,
+                                       {"Authorization": "Bearer ro-example"},
+                                       _ha_backend.HOUSE_TIMEOUT_S)])
+        # the spoken answer must not stall: a total timeout of 3 s or less
+        self.assertLessEqual(_ha_backend.HOUSE_TIMEOUT_S, 3.0)
+
+    def test_every_failure_becomes_none_not_an_exception(self):
+        cases = [
+            _errors.RequestTimeout("slow"),          # the 3 s cap firing
+            _errors.TransportError("no route to host"),
+            (401, b'{"error": "bad token"}'),        # read-only or not, a no
+            (200, b"not json at all"),               # html error page etc.
+            (200, b"[1, 2]"),                        # right port, wrong shape
+        ]
+        for outcome in cases:
+            self.assertIsNone(run_read(house_backend(FakeTransport(outcome)),
+                                       "chores"), outcome)
+
+    def test_unset_config_short_circuits_before_any_request(self):
+        cases = [
+            {"house_url": None, "house_token": "ro-example"},
+            {"house_url": "http://chores.example", "house_token": ""},
+            {"house_url": None, "house_token": None},
+        ]
+        for kw in cases:
+            t = FakeTransport()
+            b = _ha_backend.HaBackend(None, transport=t, **kw)
+            self.assertEqual(run_read(b, "plants"),
+                             _housecontrol.HOUSE_NOT_SET_UP, kw)
+            self.assertEqual(t.seen, [])  # unset feed means no request at all
+        # configured, but this backend has no transport to speak on: same line
+        b = _ha_backend.HaBackend(None, transport=None,
+                                  house_url="http://chores.example",
+                                  house_token="ro-example")
+        self.assertEqual(run_read(b, "plants"), _housecontrol.HOUSE_NOT_SET_UP)
 
 
 if __name__ == "__main__":

@@ -349,15 +349,167 @@ class DryAndSchemaTest(unittest.TestCase):
             golden = json.load(fh)
         self.assertEqual(golden, json.loads(json.dumps(homecontrol.SCHEMAS)))
         compact = json.dumps(homecontrol.SCHEMAS, separators=(",", ":"))
-        self.assertLess(max(1, len(compact) // 4), 450)
+        # Measured at five tools (1690 chars): home_status is a new honest
+        # noun, not prose drift - the ceiling follows the measurement by the
+        # same ~7% rule it has always had, so sloppy wording still trips it.
+        self.assertLess(max(1, len(compact) // 4), 450)   # measured 422
         # the review's tight proxy: tool definitions alone must stay small
-        self.assertLess(len(compact) // 3, 550)
+        self.assertLess(len(compact) // 3, 600)           # measured 563
+
+    def test_the_speaker_only_ever_gets_these_five_tools(self):
+        # the spoken side stays read/write bounded by design: house control,
+        # timers, two room/list reads. No locks, vacuums or other new write
+        # tools may appear here without amending this pin on purpose.
+        self.assertEqual([fn["function"]["name"] for fn in homecontrol.SCHEMAS],
+                         ["light", "climate", "timer", "home_state",
+                          "home_status"])
 
     def test_ask_helm_is_not_this_modules_business(self):
         r, b = run([("ask_helm", {"text": "anything"})])
         self.assertFalse(r[0]["ok"])
         self.assertIn("unknown tool", r[0]["error"])
         self.assertEqual(b.service_calls + b.intent_calls, [])
+
+
+class HomeStatusTest(unittest.TestCase):
+    """The spoken chores/plants check-in: the pure formatter over real feed
+    shapes (fetched with status=all, so this half does the picking), and the
+    dispatch where a read must cost nothing and every failure still speaks."""
+
+    def test_formatter_table(self):
+        cases = [
+            # overdue first; chores only count when due within a week
+            ("chores", {"chores": [
+                {"name": "Bins", "overdue": True, "hours_until_due": -3.0},
+                {"name": "Vacuum", "overdue": False, "hours_until_due": 20.0},
+                {"name": "Paint the shed", "overdue": False,
+                 "hours_until_due": 900.0}]},
+             "2 chores due: Bins, Vacuum."),
+            ("chores", {"chores": [
+                {"name": "Soon", "overdue": False, "hours_until_due": 5.0},
+                {"name": "Overgrown", "overdue": True, "hours_until_due": -9.0}]},
+             "2 chores due: Overgrown, Soon."),   # order survives the payload
+            ("chores", {"chores": [
+                {"name": "C", "overdue": False, "hours_until_due": 60.0},
+                {"name": "A", "overdue": False, "hours_until_due": 10.0},
+                {"name": "B", "overdue": False, "hours_until_due": 30.0}]},
+             "3 chores due: A, B, C."),           # soonest first, not arrival
+            ("chores", {"chores": [
+                {"name": "Bins", "overdue": True, "hours_until_due": -1.0}]},
+             "1 chore due: Bins."),
+            ("chores", {"chores": [
+                {"name": n, "overdue": True, "hours_until_due": -1.0}
+                for n in "ABCDE"]},
+             "5 chores due: A, B, C (+2 more)."),  # cap three, honest total
+            ("chores", {"chores": [
+                {"name": "Far away", "overdue": False,
+                 "hours_until_due": 900.0}]},
+             "No chores are due right now."),
+            ("chores", {"chores": []}, "No chores are due right now."),
+            # junk entries are skipped, never spoken: an unnamed or unreadable
+            # row, a bare string, and negative hours without the overdue flag
+            ("chores", {"chores": [
+                "junk", {"overdue": True}, {"name": "  ", "overdue": True},
+                {"name": "Ghost", "overdue": False, "hours_until_due": -4.0},
+                {"name": "Bins", "overdue": True}]},
+             "1 chore due: Bins."),
+            # a payload that is not the promised shape says out-of-reach, so
+            # we never promise an empty house when the answer is unknown
+            ("chores", {}, "I can't reach the chore list right now."),
+            ("plants", {"moisture_error": "the sensor farm failed"},
+             "I can't reach the plant list right now."),
+            # plants: only overdue (thirsty) ones get named
+            ("plants", {"plants": [
+                {"name": "Monstera", "overdue": True, "hours_until_due": -2.0},
+                {"name": "Fern", "overdue": True},
+                {"name": "Cactus", "overdue": False, "hours_until_due": 3.0}]},
+             "2 plants need water: Monstera, Fern."),
+            ("plants", {"plants": [{"name": "Fern", "overdue": True}]},
+             "1 plant needs water: Fern."),
+            ("plants", {"plants": [{"name": "Cactus", "overdue": False}]},
+             "No plants need water right now."),
+            # the two honest failure sentences, per kind
+            ("chores", None, "I can't reach the chore list right now."),
+            ("plants", None, "I can't reach the plant list right now."),
+            ("chores", homecontrol.HOUSE_NOT_SET_UP,
+             "Chores are not set up on this speaker yet."),
+            ("plants", dict(homecontrol.HOUSE_NOT_SET_UP),
+             "Plant care is not set up on this speaker yet."),
+        ]
+        for kind, payload, want in cases:
+            self.assertEqual(homecontrol.format_home_status(kind, payload),
+                             want, "%s / %r" % (kind, payload))
+
+    def test_reads_are_free_and_never_write(self):
+        # three check-ins plus two changes fit in one ask: home_status never
+        # touches the device/write budget and posts nothing
+        backend = HouseFeedBackend(
+            {"chores": [{"name": "Bins", "overdue": True}]})
+        control = homecontrol.HomeControl(backend)
+
+        async def go():
+            out = []
+            for _ in range(3):
+                out.append(await control.execute("home_status",
+                                                 {"kind": "chores"}))
+            out.append(await control.execute("light", {"target": "kitchen",
+                                                       "action": "on"}))
+            out.append(await control.execute("light", {"target": "kitchen",
+                                                       "action": "off"}))
+            return out
+
+        r = asyncio.run(go())
+        self.assertTrue(all(x["ok"] for x in r), r)
+        self.assertEqual(r[0]["text"], "1 chore due: Bins.")
+        self.assertEqual(backend.reads, ["chores"] * 3)
+        self.assertEqual([(d, s) for d, s, _ in backend.service_calls],
+                         [("light", "turn_on"), ("light", "turn_off")])
+
+    def test_feed_down_not_set_up_and_no_backend_all_speak_plainly(self):
+        # every outcome comes back ok=True with a spoken text: never an error
+        r, _ = run([("home_status", {"kind": "plants"})],
+                   exposed=None)  # plain FakeBackend has no house_read at all
+        self.assertTrue(r[0]["ok"])
+        self.assertEqual(r[0]["text"],
+                         "Plant care is not set up on this speaker yet.")
+
+        async def one(backend):
+            return await homecontrol.HomeControl(backend).execute(
+                "home_status", {"kind": "chores"})
+
+        down = asyncio.run(one(HouseFeedBackend(None)))
+        self.assertTrue(down["ok"])
+        self.assertEqual(down["text"],
+                         "I can't reach the chore list right now.")
+        unset = asyncio.run(one(HouseFeedBackend(
+            dict(homecontrol.HOUSE_NOT_SET_UP))))
+        self.assertEqual(unset["text"],
+                         "Chores are not set up on this speaker yet.")
+
+    def test_kind_is_validated_before_any_fetch(self):
+        backend = HouseFeedBackend({"chores": []})
+        r = asyncio.run(_execute(backend, "home_status", {"kind": "bins"}))
+        self.assertFalse(r[0]["ok"])
+        self.assertIn("chores or plants", r[0]["error"])
+        self.assertEqual(backend.reads, [])
+
+
+async def _execute(backend, name, args):
+    control = homecontrol.HomeControl(backend)
+    return [await control.execute(name, args)]
+
+
+class HouseFeedBackend(FakeBackend):
+    """The fake house plus a scripted chores/plants feed read."""
+
+    def __init__(self, payload):
+        FakeBackend.__init__(self)
+        self.payload = payload
+        self.reads = []
+
+    async def house_read(self, kind):
+        self.reads.append(kind)
+        return self.payload
 
 
 if __name__ == "__main__":

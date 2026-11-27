@@ -29,6 +29,8 @@ from .const import (
     CONF_EXTRA_BODY,
     CONF_EXTRA_HEADERS,
     CONF_HINT,
+    CONF_HOUSE_TOKEN,
+    CONF_HOUSE_URL,
     CONF_LED,
     CONF_MODEL_KEY,
     CONF_MODEL_NAME,
@@ -77,6 +79,8 @@ STEP_SCHEMA = vol.Schema({
     vol.Optional(CONF_ROOM): str,
     vol.Optional(CONF_HINT): str,
     vol.Optional(CONF_LED): str,
+    vol.Optional(CONF_HOUSE_URL): str,
+    vol.Optional(CONF_HOUSE_TOKEN): str,
     vol.Optional(CONF_PLAIN_HTTP, default=False): bool,
 })
 
@@ -123,6 +127,17 @@ class HelmSpeakerFlowHandler(ConfigFlow, domain=DOMAIN):
                 step_id="user", data_schema=STEP_SCHEMA,
                 errors={"base": "model_plain_http"})
 
+        house_url = (user_input.get(CONF_HOUSE_URL) or "").strip().rstrip("/")
+        house_token = (user_input.get(CONF_HOUSE_TOKEN) or "").strip()
+        if (house_url.lower().startswith("http://") and house_token
+                and not user_input.get(CONF_PLAIN_HTTP)):
+            # the read-only feed token would travel readable too; without a
+            # token the fetch is anonymous, so only the http+token pair needs
+            # the explicit tick
+            return self.async_show_form(
+                step_id="user", data_schema=STEP_SCHEMA,
+                errors={"base": "house_plain_http"})
+
         profile = {
             "model_url": model_url,
             "model_name": (user_input[CONF_MODEL_NAME] or "").strip(),
@@ -164,6 +179,8 @@ class HelmSpeakerFlowHandler(ConfigFlow, domain=DOMAIN):
             CONF_ROOM: user_input.get(CONF_ROOM) or None,
             CONF_HINT: user_input.get(CONF_HINT) or None,
             CONF_LED: user_input.get(CONF_LED) or None,
+            CONF_HOUSE_URL: house_url or None,
+            CONF_HOUSE_TOKEN: house_token or None,
         }
         options = {"profile": PROFILES[0],
                    "profiles": {PROFILES[0]: dict(profile),

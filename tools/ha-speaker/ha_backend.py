@@ -7,6 +7,7 @@ assistant), so hidden or unexposed entities are invisible to every path in
 this component - they cannot be resolved, called, or even seen.
 """
 
+import json
 import logging
 
 from homeassistant.components.homeassistant.exposed_entities import (
@@ -17,6 +18,9 @@ from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import intent
+
+from .errors import TransportError
+from .homecontrol import HOUSE_NOT_SET_UP
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -30,14 +34,50 @@ _KINDS = {"light": "lights", "climate": "climates"}
 # cancel/status matchers, not fill-ins for a new timer.
 _TIMER_SLOTS = {"label": "name"}
 
+# The chores/plants check-in is a spoken question: the whole fetch gets three
+# seconds and any pain in it becomes one honest sentence (homecontrol owns the
+# wording), never a stack inside the turn.
+HOUSE_TIMEOUT_S = 3.0
+_HOUSE_PATHS = {"chores": "/api/chores?status=all",
+                "plants": "/api/plants?status=all"}
+
 
 class HaBackend:
     """One per conversation turn (it remembers the asking satellite so the
-    built-in voice timers land on it)."""
+    built-in voice timers land on it). The transport is the entry's shared
+    aiohttp-backed one - it already wraps Home Assistant's client session and
+    maps network pain onto our error family, so house_read gets the same
+    treatment as a model call without importing aiohttp here."""
 
-    def __init__(self, hass: HomeAssistant, satellite_device_id=None):
+    def __init__(self, hass: HomeAssistant, satellite_device_id=None,
+                 transport=None, house_url=None, house_token=None):
         self.hass = hass
         self.satellite_device_id = satellite_device_id
+        self.transport = transport
+        self.house_url = (house_url or "").strip().rstrip("/")
+        # the token stays on this object for one turn's header; never logged
+        self.house_token = (house_token or "").strip()
+
+    async def house_read(self, kind):
+        """GET the chores or plants feed for a spoken check-in. Never raises:
+        the sentinel says not-configured, None says unreachable/bad answer."""
+        if (kind not in _HOUSE_PATHS or self.transport is None
+                or not self.house_url or not self.house_token):
+            return dict(HOUSE_NOT_SET_UP)
+        try:
+            status, raw = await self.transport.request(
+                "GET", self.house_url + _HOUSE_PATHS[kind],
+                headers={"Authorization": "Bearer " + self.house_token},
+                timeout=HOUSE_TIMEOUT_S)
+        except TransportError:
+            return None
+        if status != 200:
+            return None
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError, AttributeError):
+            return None
+        return payload if isinstance(payload, dict) else None
 
     async def exposed(self):
         """{area: {"lights": [(name, entity_id)], "climates": [...]}} using

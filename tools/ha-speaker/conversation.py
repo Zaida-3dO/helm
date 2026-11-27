@@ -2,7 +2,7 @@
 
 One turn arrives -> build the minimised context (time, asking room, exposed
 light and climate names, short history) -> agent_core runs the lean prompt
-against the configured chat endpoint with the four house tools -> speak the
+against the configured chat endpoint with the five house tools -> speak the
 answer. Anything personal or long comes back as kind ``escalate`` and is put
 to the hub over its speaker route; the hub's short answer is what gets
 spoken then. If the hub is not configured, escalation falls back to one of
@@ -35,7 +35,14 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.util import dt as dt_util
 
 from . import agent_core
-from .const import CONF_DRY, CONF_HINT, CONF_ROOM, DOMAIN
+from .const import (
+    CONF_DRY,
+    CONF_HINT,
+    CONF_HOUSE_TOKEN,
+    CONF_HOUSE_URL,
+    CONF_ROOM,
+    DOMAIN,
+)
 from .ha_backend import HaBackend
 from .homecontrol import HomeControl
 from .hubapi import (
@@ -96,7 +103,13 @@ class HelmSpeakerAgent(ConversationEntity):
         device_id = getattr(user_input, "device_id", None)
         key = device_id or self.entry.entry_id
 
-        backend = HaBackend(self.hass, satellite_device_id=device_id)
+        # the optional chores/plants feed rides along: same entry transport,
+        # read-only token from setup; unset means home_status speaks the
+        # not-set-up sentence instead of reaching anywhere
+        backend = HaBackend(self.hass, satellite_device_id=device_id,
+                            transport=runtime.get("transport"),
+                            house_url=self.entry.data.get(CONF_HOUSE_URL),
+                            house_token=self.entry.data.get(CONF_HOUSE_TOKEN))
         has_hub = runtime.get("api") is not None
         dry = bool(runtime.get("control_dry")) or bool(
             (self.entry.options or {}).get(CONF_DRY))

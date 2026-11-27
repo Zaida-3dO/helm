@@ -42,6 +42,7 @@ and it speaks the reply with whatever local text-to-speech you set up.
 | Extra headers / body (JSON) | e.g. a priority-lane header, or a server-specific thinking switch |
 | Hub address / token | optional; without them the speaker still does home control, it just cannot take personal questions |
 | Room label, identity hint, unlock light | optional labels and the passcode indicator |
+| Chores feed address / token | optional pair for the spoken "what's due" check-in; the token should be a read-only one — it can fetch the lists and nothing else. Unset: the speaker just says so plainly |
 
 Plain `http://` addresses are refused unless "Allow plain http" is ticked —
 what you say (and the speaker token) would otherwise travel unencrypted on
@@ -66,11 +67,16 @@ nothing — useful while testing what a small model actually asks for.
   else reaches this agent: rules, the asking room and the exposed names of
   each area (capped per area with a "(+N more)" tail), then up to three rounds
   of house tools.
-- The house tools are `light`, `climate`, `timer` and `home_state`. Timers go
-  through Home Assistant's built-in voice-timer intents on the asking speaker,
-  so they live on the satellite rather than as helper entities. Names match by
-  area first, then exact name, then a forgiving spelling; an ambiguous name is
-  asked back, never guessed.
+- The house tools are `light`, `climate`, `timer`, `home_state` and
+  `home_status`. Timers go through Home Assistant's built-in voice-timer
+  intents on the asking speaker, so they live on the satellite rather than as
+  helper entities. Names match by area first, then exact name, then a
+  forgiving spelling; an ambiguous name is asked back, never guessed.
+- `home_status` answers "what chores are due / what needs water" from the
+  optional chores feed: at most three names, overdue first, one or two short
+  sentences. It only ever reads — nothing is marked done by voice — and a
+  read never spends the ask's change budget. Feed down or unset speaks one
+  honest sentence instead of an error.
 - A small model trained on Home Assistant's own service data sometimes writes
   those argument names instead of ours — `color_temp_kelvin` and `hvac_mode`
   are accepted as aliases of `color_temp` and `mode`. Everything for one

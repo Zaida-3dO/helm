@@ -1,4 +1,4 @@
-"""The four house-control tools the speaker model sees, and their execution.
+"""The five house-control tools the speaker model sees, and their execution.
 
 Pure standard library: everything Home Assistant-side arrives through an
 injected Backend, which production wires to ``hass`` (ha_backend.py) and tests
@@ -15,6 +15,10 @@ Backend contract (all async where it says await):
                                              "attributes": dict}}
     await call_service(domain, service, data) -> None
     await intent(name, data) -> plain dict (maybe {}) or None
+    await house_read(kind) -> the fetched JSON dict for "chores" or "plants",
+                HOUSE_NOT_SET_UP when the feed is not configured, or None on
+                any fetch/parse failure - never an exception. Optional: a
+                backend without it simply has no chores feed.
 
 Targeting is by exposed names and areas only: area first, then exact name,
 then fuzzy name. Hidden or unexposed entities simply do not exist here. An
@@ -30,6 +34,11 @@ MAX_ENTITIES = 12
 LIGHT_ACTIONS = ("on", "off", "toggle", "set", "status")
 CLIMATE_ACTIONS = ("set", "status")
 TIMER_ACTIONS = ("start", "cancel", "status")
+HOME_STATUS_KINDS = ("chores", "plants")
+
+# The read-only chores/plants feed is optional config; a backend says so with
+# this sentinel rather than an exception, and the honest sentence stays here.
+HOUSE_NOT_SET_UP = {"house": "not_set_up"}
 
 # Common colour words a spoken sentence actually uses, to hex.
 CSS_COLORS = {
@@ -97,6 +106,9 @@ SCHEMAS = [
     _fn("home_state", "Read one room: what is on, temperatures.", {
         "target": {"type": "string", "description": "area name"}},
         ("target",)),
+    _fn("home_status", "Read chores/plants: what's due, needs water.", {
+        "kind": {"type": "string", "enum": list(HOME_STATUS_KINDS)}},
+        ("kind",)),
 ]
 
 
@@ -178,6 +190,8 @@ class HomeControl:
                 return await self._timer(args)
             if name == "home_state":
                 return await self._home_state(args)
+            if name == "home_status":
+                return await self._home_status(args)
             return {"ok": False, "error": "unknown tool: " + str(name)}
         except HomeControlError as exc:
             out = {"ok": False, "error": exc.text}
@@ -596,6 +610,20 @@ class HomeControl:
             text += "; " + "; ".join(bits)
         return {"ok": True, "text": text + "."}
 
+    # ---------------- home_status (chores/plants check-in) ----------------
+    # Reads are free: a spoken question about the chore list must never eat
+    # the ask's change budget. Every outcome - feed down, not configured,
+    # nothing due - ends as one plain sentence, never an error path.
+
+    async def _home_status(self, args):
+        kind = str(args.get("kind") or "").strip().lower()
+        if kind not in HOME_STATUS_KINDS:
+            raise HomeControlError("home_status needs chores or plants",
+                                   candidates=list(HOME_STATUS_KINDS))
+        read = getattr(self.backend, "house_read", None)
+        payload = await read(kind) if read is not None else HOUSE_NOT_SET_UP
+        return {"ok": True, "text": format_home_status(kind, payload)}
+
     # ---------------- acting ----------------
 
     async def _run(self, plan, summary):
@@ -626,3 +654,78 @@ def dedupe(pairs):
             seen.add(eid)
             out.append((name, eid))
     return out
+
+
+# --------------------------------------------------------------------------
+# format_home_status: the fetched chores/plants payload in, one spoken line
+# out. Pure on purpose - the feed itself arrives through the Backend's
+# house_read; every picking decision (overdue first, a chore only counts as
+# due within a week, at most three names) lives here where tests can reach
+# it without a network. The feed asks for status=all so this half does the
+# filtering; nothing hidden decides what a person hears.
+
+HOUSE_UNREACHABLE_TEXT = {
+    "chores": "I can't reach the chore list right now.",
+    "plants": "I can't reach the plant list right now.",
+}
+HOUSE_NOT_SET_UP_TEXT = {
+    "chores": "Chores are not set up on this speaker yet.",
+    "plants": "Plant care is not set up on this speaker yet.",
+}
+
+HOUSE_DUE_WINDOW_H = 7 * 24   # a chore counts as due when it lands within a week
+HOUSE_MAX_ITEMS = 3           # a spoken list stops at three names
+
+
+def _feed_names(kind, rows):
+    """(overdue names first, then soonest-due) with the total count. For
+    plants only overdue (thirsty) ones count; for chores also everything
+    due inside HOUSE_DUE_WINDOW_H. Entries we cannot name or read are skipped."""
+    over, soon = [], []
+    hours_ok = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = " ".join(str(row.get("name") or "").split())[:40]
+        if not name:
+            continue
+        if row.get("overdue") is True:
+            over.append(name)
+        elif kind == "chores":
+            hours = row.get("hours_until_due")
+            if hours_ok(hours) and 0 <= hours <= HOUSE_DUE_WINDOW_H:
+                soon.append((hours, name))
+    soon.sort(key=lambda pair: pair[0])
+    ordered = over + [name for _, name in soon]
+    return ordered
+
+
+def format_home_status(kind, payload):
+    """One honest sentence for a spoken check-in; never raises."""
+    if payload == HOUSE_NOT_SET_UP:
+        return HOUSE_NOT_SET_UP_TEXT[kind]
+    rows_key = "chores" if kind == "chores" else "plants"
+    if not isinstance(payload, dict) or not isinstance(
+            payload.get(rows_key), list):
+        # nothing readable came back (None from a dead feed, or a shape we
+        # were not promised): say it is out of reach rather than claim an
+        # empty house when the answer is actually "unknown"
+        return HOUSE_UNREACHABLE_TEXT[kind]
+    ordered = _feed_names(kind, payload[rows_key])
+    one = len(ordered) == 1
+    if kind == "plants":
+        if not ordered:
+            return "No plants need water right now."
+        verb = "needs" if one else "need"
+        noun = "plant" if one else "plants"
+    else:
+        if not ordered:
+            return "No chores are due right now."
+        noun = "chore" if one else "chores"
+    shown = ordered[:HOUSE_MAX_ITEMS]
+    tail = " (+%d more)" % (len(ordered) - HOUSE_MAX_ITEMS) \
+        if len(ordered) > HOUSE_MAX_ITEMS else ""
+    if kind == "plants":
+        return "%d %s %s water: %s%s." % (len(ordered), noun, verb,
+                                          ", ".join(shown), tail)
+    return "%d %s due: %s%s." % (len(ordered), noun, ", ".join(shown), tail)

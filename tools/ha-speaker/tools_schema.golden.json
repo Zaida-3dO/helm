@@ -125,5 +125,27 @@
         ]
       }
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "home_status",
+      "description": "Read chores/plants: what's due, needs water.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "chores",
+              "plants"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      }
+    }
   }
 ]

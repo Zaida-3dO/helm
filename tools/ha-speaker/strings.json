@@ -17,6 +17,8 @@
           "room": "Room label (optional)",
           "hint": "Identity hint for a second wake word (optional, not used yet)",
           "led_entity": "Light entity to colour while unlocked (optional)",
+          "house_api_url": "Chores/plants feed address (optional, for spoken check-ins)",
+          "house_api_token": "Feed read-only token (optional, kept secret)",
           "allow_plain_http": "Allow plain http: traffic to these addresses is unencrypted on my network"
         }
       }
@@ -26,7 +28,8 @@
       "model_plain_http": "The model address is plain http, so what you say travels unencrypted on my network. Tick the box below if that is intended (a local model endpoint usually is).",
       "bad_auth": "The hub refused that token.",
       "bad_json": "That box must hold a JSON object, like {\"X-Header\": \"now\"}.",
-      "json_too_long": "That JSON box is too big."
+      "json_too_long": "That JSON box is too big.",
+      "house_plain_http": "That feed address is plain http, so the read-only token would cross the network readable. Use https, or tick the box to allow it."
     },
     "abort": {
       "already_configured": "This speaker is already set up."

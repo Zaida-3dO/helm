@@ -9,6 +9,12 @@ CONF_HINT = "hint"
 CONF_LED = "led_entity"
 CONF_PLAIN_HTTP = "allow_plain_http"
 
+# Optional read-only chores/plants feed for the spoken check-in. The token is
+# a read-only one: it can ask for the lists and nothing else, and like every
+# other secret here it is never echoed back to the UI nor written to a log.
+CONF_HOUSE_URL = "house_api_url"
+CONF_HOUSE_TOKEN = "house_api_token"
+
 # The model lane: the speaker's own agent talks straight to an OpenAI-style
 # chat endpoint; hub settings stay optional (escalation and record only).
 CONF_MODEL_URL = "model_url"
