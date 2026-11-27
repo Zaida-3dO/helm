@@ -189,6 +189,10 @@ pub struct VoiceTurn {
     /// The hub person this turn is for, verified by the hub. `None`: an older hub, which
     /// means the PC's own (home) person.
     pub person: Option<String>,
+    /// `"quick"` or `"deep"`: which lane of the voice settings answers it — the quick lane opens
+    /// on a smaller model, the deep one on the model saved for new voice chats. `None`: an older
+    /// phone, which means deep (today's behaviour).
+    pub urgency: Option<String>,
 }
 
 /// Where voice turns go on the PC. `person` `None` is an older hub's frame, meaning the PC's
@@ -234,6 +238,10 @@ pub struct SpeakerTurn {
     pub context: Option<String>,
     /// The speaker tried to answer this turn itself and handed it over.
     pub escalated: bool,
+    /// `"quick"` or `"deep"`: which lane of the speaker settings opens the talk's chat — the
+    /// quick lane on a smaller model, the deep lane on the saved one. `None`: an older speaker,
+    /// which means deep (today's behaviour).
+    pub urgency: Option<String>,
 }
 
 /// One tool the speaker used while it answered by itself.
@@ -869,6 +877,7 @@ impl Client {
             person,
             context: small("context"),
             escalated: small("origin").as_deref() == Some("escalation"),
+            urgency: small("urgency"),
         };
         tokio::spawn(async move {
             let r = speaker.deliver(turn).await;
@@ -1494,6 +1503,7 @@ impl Client {
                     sent_at: v.get("sentAt").and_then(Value::as_i64).unwrap_or(0),
                     age_minutes: v.get("ageMinutes").and_then(Value::as_i64),
                     continues: s("continues"),
+                    urgency: s("urgency"),
                 };
                 let out = out.clone();
                 tokio::spawn(async move {
@@ -2469,6 +2479,7 @@ mod tests {
                 sent_at: 5,
                 age_minutes: Some(3),
                 continues: Some("t0".into()),
+                urgency: None,
             }
         );
 

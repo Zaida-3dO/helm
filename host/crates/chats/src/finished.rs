@@ -397,6 +397,67 @@ pub(crate) fn pass(sh: &Arc<Shared>) {
     }
 }
 
+/// Whether a chat that has **not** handed over is nevertheless held open by something the person
+/// should still see — asked when a channel closes one of its chats and wants to put it away. The
+/// same facts [`candidate`] reads, with the two hand-over ones made impossible (no message can be
+/// newer than `i64::MAX`, nothing was swept for a hand-over at that time); the first reason that
+/// holds is returned, or `None` when the chat may go. An archived or missing chat holds nothing.
+/// Two facts only the live actors know are not visible here and so never hold: a background job
+/// in the worker, and a question or plan card open on screen (a pending **approval** is read from
+/// the database, which covers the common case of a turn stopped at a prompt).
+pub fn keeps_open(
+    tx: &Transaction<'_>,
+    id: &str,
+    open: Option<&str>,
+) -> rusqlite::Result<Option<&'static str>> {
+    let Some(c) = candidate(tx, id, i64::MAX, &Needs::new(), &HashSet::new(), open)? else {
+        return Ok(None);
+    };
+    if c.archived {
+        return Ok(None);
+    }
+    if c.flagged {
+        return Ok(Some("a flag its agent filed"));
+    }
+    // The approval table belongs to another part of the app: where it is not there, nothing waits.
+    let approval = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM consent_requests
+             WHERE chat_id = ?1 AND state = 'pending' AND expires_at > ?2)",
+            params![id, helm_core::now_ms()],
+            |r| r.get::<_, bool>(0),
+        )
+        .unwrap_or(false);
+    if approval {
+        return Ok(Some("an approval waiting for the person"));
+    }
+    if c.queued {
+        return Ok(Some("a message not delivered yet"));
+    }
+    if c.busy {
+        return Ok(Some("a turn still running"));
+    }
+    if c.helpers {
+        return Ok(Some("an open wait or a chat it started, working"));
+    }
+    if c.reports_owed {
+        return Ok(Some("a chat it started has not reported yet"));
+    }
+    if c.continuing {
+        return Ok(Some("a continuation Helm still owes the chat"));
+    }
+    if c.has_draft {
+        return Ok(Some("words left unsent in its composer"));
+    }
+    if c.pinned {
+        return Ok(Some("the chat is pinned"));
+    }
+    if c.open {
+        return Ok(Some("the person has the chat open"));
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -599,5 +660,76 @@ mod tests {
         })
         .unwrap();
         assert_eq!(ids(due_now(None)), ["kid"]);
+    }
+
+    #[test]
+    fn keeps_open_names_the_first_hold_and_only_the_hand_over_facts_never_hold() {
+        let (_d, db) = temp_db();
+        db.write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO projects (id, name, created_at) VALUES ('p', 'P', 1);
+                 INSERT INTO chats (id, project_id, title, status, created_at, updated_at)
+                   VALUES ('k', 'p', 'Keep?', 'idle', 1, 1);",
+            )
+        })
+        .unwrap();
+        let ask = |open: Option<&str>| {
+            db.snapshot(|tx| keeps_open(tx, "k", open))
+                .unwrap()
+                .map(str::to_owned)
+        };
+        let edit = |sql: &str| {
+            db.write(|tx| Ok::<_, rusqlite::Error>(tx.execute_batch(sql)?))
+                .unwrap();
+        };
+        // A long-ago queued message holds the chat even though it predates any hand-over: only
+        // the hand-over timings themselves are ignored here.
+        edit("INSERT INTO submissions (id, chat_id, text, state, created_at) VALUES ('s1', 'k', 'hi', 'saved', 1);");
+        assert_eq!(
+            ask(None).as_deref(),
+            Some("a message not delivered yet"),
+            "queued first after the flag check"
+        );
+        edit("INSERT INTO chat_flags VALUES ('k', 'q?', 'because', 'normal', 1);");
+        assert_eq!(ask(None).as_deref(), Some("a flag its agent filed"));
+        edit("DELETE FROM chat_flags WHERE chat_id = 'k';");
+        assert_eq!(ask(None).as_deref(), Some("a message not delivered yet"));
+        edit("DELETE FROM submissions WHERE id = 's1';");
+        assert_eq!(ask(None), None, "quiet and idle: nothing holds it");
+        edit("UPDATE chats SET status = 'working' WHERE id = 'k';");
+        assert_eq!(ask(None).as_deref(), Some("a turn still running"));
+        edit("UPDATE chats SET status = 'idle', draft = 'half a thought' WHERE id = 'k';");
+        assert_eq!(
+            ask(None).as_deref(),
+            Some("words left unsent in its composer")
+        );
+        edit("UPDATE chats SET draft = '', pinned = 1 WHERE id = 'k';");
+        assert_eq!(ask(None).as_deref(), Some("the chat is pinned"));
+        edit("UPDATE chats SET pinned = 0 WHERE id = 'k';");
+        // An approval waits only while it is pending and unexpired (the table belongs to another
+        // part of the app; where it is absent, nothing waits).
+        edit(
+            "CREATE TABLE consent_requests (chat_id TEXT, state TEXT, expires_at INTEGER);
+             INSERT INTO consent_requests VALUES ('k', 'pending', 0), ('k', 'allowed', 9999999999999);",
+        );
+        assert_eq!(ask(None), None, "expired or answered: no hold");
+        edit("INSERT INTO consent_requests VALUES ('k', 'pending', 9999999999999);");
+        assert_eq!(
+            ask(None).as_deref(),
+            Some("an approval waiting for the person")
+        );
+        // The window-open hold comes from the caller's `open`, not the database. An archived or
+        // missing chat holds nothing whatever else is true of it.
+        edit("UPDATE chats SET archived = 1 WHERE id = 'k';");
+        assert_eq!(ask(None), None);
+        edit("UPDATE chats SET archived = 0 WHERE id = 'k';");
+        assert_eq!(
+            ask(Some("k")).as_deref(),
+            Some("the person has the chat open")
+        );
+        assert_eq!(
+            db.snapshot(|tx| keeps_open(tx, "nope", None)).unwrap(),
+            None
+        );
     }
 }

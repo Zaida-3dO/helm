@@ -882,7 +882,8 @@ mod tests {
             (Some("opus"), Some("high"))
         );
         assert_eq!(
-            voice::load_file(&voice::policy_path(&e.dir.path().join("prof"))).new_chat(),
+            voice::load_file(&voice::policy_path(&e.dir.path().join("prof")))
+                .new_chat(crate::voice::Lane::Deep),
             (Some("opus"), Some("high"))
         );
         assert_eq!(read()["idleMinutes"], json!(240));
@@ -925,7 +926,8 @@ mod tests {
         // Blank means the app's usual setting; null puts the defaults back; undo restores.
         apply(json!({"model": "", "effort": ""})).unwrap();
         assert_eq!(
-            voice::load_file(&voice::policy_path(&e.dir.path().join("prof"))).new_chat(),
+            voice::load_file(&voice::policy_path(&e.dir.path().join("prof")))
+                .new_chat(crate::voice::Lane::Deep),
             (None, None)
         );
         let (before, after) = apply(json!(null)).unwrap();

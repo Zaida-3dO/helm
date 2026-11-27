@@ -118,6 +118,13 @@ export interface VoiceSettings {
   watch: VoiceWatch;
   /** Whether this PC takes this profile's person's voice (default: on for the home profile). */
   takeVoice: boolean;
+  /** The model a quick turn opens its chat with; blank: no quick lane — quick turns open like deep ones. */
+  quickModel: string;
+  /** The effort a quick turn opens its chat with; blank: the same as any other new chat. */
+  quickEffort: string;
+  /** The context size at which each lane's chat rolls over when the next turn arrives; 0 is off. */
+  quickRollAt: number;
+  deepRollAt: number;
 }
 
 /** One talk open on a room speaker: the chat its turns go to, and when the talk started. */
@@ -144,8 +151,27 @@ export interface SpeakerSettings {
   previousHours: number;
   /** Lean speaker chats: a thin system prompt and only the Home Assistant server and the phone-message tool. */
   lean: boolean;
-  /** The board a new speaker chat is shown on; blank: the app's own choice. */
+  /** The board every chat arriving from the hub is shown on — room speakers, phone voice and
+   * Telegram alike; blank: the app's own choice. One setting for all three channels. */
   boardId: string;
+  /** The model a quick turn opens its talk's chat with; blank: no quick lane — quick turns open like deep ones. */
+  quickModel: string;
+  /** The effort a quick turn opens its talk's chat with; blank: the same as any other new chat. */
+  quickEffort: string;
+  /** The context size at which each lane's chat rolls over when the next turn arrives; 0 is off. */
+  quickRollAt: number;
+  deepRollAt: number;
+  /** Talks kept open past their close because something was still held in their chat. */
+  kept: SpeakerKept[];
+}
+
+/** A speaker chat its talk ended with something left in it; it archives itself once nothing
+ * holds it and it has been quiet for half an hour. */
+export interface SpeakerKept {
+  chatId: string;
+  title: string;
+  /** When the talk ended (epoch milliseconds). */
+  closedAt: number;
 }
 
 /** One channel's prompt for one profile, as the host holds it. */
@@ -215,6 +241,10 @@ export function hubOps(api: Api) {
         maxTokens: s.maxTokens,
         watch: s.watch,
         takeVoice: s.takeVoice,
+        quickModel: s.quickModel,
+        quickEffort: s.quickEffort,
+        quickRollAt: s.quickRollAt,
+        deepRollAt: s.deepRollAt,
         ...scope(s),
       }),
     resetVoice: (s: ChannelScope = {}) => api<VoiceSettings>('relay_voice_reset', scope(s)),
@@ -227,6 +257,10 @@ export function hubOps(api: Api) {
         previousHours: s.previousHours,
         lean: s.lean,
         boardId: s.boardId,
+        quickModel: s.quickModel,
+        quickEffort: s.quickEffort,
+        quickRollAt: s.quickRollAt,
+        deepRollAt: s.deepRollAt,
         ...scope(s),
       }),
     /** End every talk this PC holds: each of its chats is put away, and the next word on a speaker starts a new one. */

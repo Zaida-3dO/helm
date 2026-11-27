@@ -489,6 +489,7 @@ fn env() -> Env {
         answered: Arc::new(Mutex::new(VecDeque::new())),
         answered_path: paths.answered,
         sent_path: paths.sent,
+        board_id: None,
     };
     Env { dir, db, ops, ctx }
 }
@@ -2132,6 +2133,7 @@ fn vturn(id: &str, text: &str, mode: &str) -> VoiceTurn {
         sent_at: 0,
         age_minutes: None,
         continues: None,
+        urgency: None,
     }
 }
 
@@ -2147,6 +2149,8 @@ fn vctx(e: &Env, file: voice::PolicyFile) -> vs::Ctx {
         profile_id: e.ctx.profile_id.clone(),
         person: String::new(),
         tag_path: paths.tag,
+        quick_tag_path: paths.tag_quick,
+        board_id: None,
         policy_path: paths.policy,
         heard_path: paths.heard,
         folder: plain_path(&voice::folder(&prof)),
@@ -3119,6 +3123,7 @@ fn sturn(id: &str, text: &str, session: &str) -> crate::client::SpeakerTurn {
         person: None,
         context: None,
         escalated: false,
+        urgency: None,
     }
 }
 
@@ -3606,4 +3611,174 @@ async fn a_recorded_exchange_is_written_without_a_model_and_open_talks_are_kept(
     // The settings view tells Settings what is chosen.
     let view = crate::speaker_sink::speaker_view(&e.db, &dir, &e.ctx.profile_id);
     assert_eq!((view.board_id.as_str(), view.lean), ("board-1", false));
+}
+
+/// The phone's urgency picks the lane: a quick turn opens its own chat (its own tag file) on the
+/// quick model, beside the deep one; each lane's first fresh message names the other lane's live
+/// chat, and neither tag disturbs the other's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_quick_voice_turn_opens_its_own_chat_on_the_quick_model_beside_the_deep_one() {
+    let e = env();
+    let prof = e.dir.path().join("prof");
+    let paths = crate::people::voice_paths(&prof, &e.ctx.profile_id);
+    let c = vctx(
+        &e,
+        voice::PolicyFile {
+            quick_model: "local/small/quick-one".into(),
+            ..Default::default()
+        },
+    );
+    let p1 = vplace(
+        &c,
+        vturn("t1", "What is the weather?", "conversation"),
+        1_000,
+    )
+    .await
+    .unwrap();
+    let deep = vchat(&p1).0;
+    let mut q = vturn("t2", "And in the kitchen?", "conversation");
+    q.urgency = Some("quick".into());
+    let p2 = vplace(&c, q, 2_000).await.unwrap();
+    let quick = vchat(&p2).0;
+    assert_ne!(quick, deep, "one chat per lane");
+
+    // The tags: the deep file still names the deep chat, the quick file the quick one.
+    let deep_tag = crate::voice::load_tag(&paths.tag).expect("deep tag");
+    let quick_tag = crate::voice::load_tag(&paths.tag_quick).expect("quick tag");
+    assert_eq!(deep_tag.chat_id, deep);
+    assert_eq!(quick_tag.chat_id, quick);
+
+    // The quick chat opened on the quick model; the deep one stayed on the app default.
+    let calls = e.ops.calls.lock().unwrap().clone();
+    let creates: Vec<&serde_json::Value> = calls
+        .iter()
+        .filter(|(o, _)| o == "chat_create")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(creates.len(), 2);
+    assert_eq!(
+        creates[1].get("model").and_then(Value::as_str),
+        Some("local/small/quick-one")
+    );
+    assert!(creates[0].get("model").is_none());
+
+    // The quick chat's first message points at the live deep one.
+    let said = subs(&e.db, &quick);
+    assert_eq!(said.len(), 1);
+    assert!(
+        said[0].4.contains("[The phone's other voice chat"),
+        "{:?}",
+        said[0].4
+    );
+
+    // A second quick turn stays in the quick chat; the deep tag never moved.
+    let mut q2 = vturn("t3", "Kitchen too?", "conversation");
+    q2.urgency = Some("QUICK".into());
+    let p3 = vplace(&c, q2, 3_000).await.unwrap();
+    assert_eq!(vchat(&p3).0, quick);
+    assert_eq!(
+        subs(&e.db, &quick).len(),
+        2,
+        "one pointer line, then the plain turn"
+    );
+    assert!(!subs(&e.db, &quick)[1].4.contains("other voice chat"));
+}
+
+/// A kept speaker chat puts itself away once nothing holds it and it has been quiet: clearing the
+/// leftover flag and ageing the chat past half an hour lets the next delivery sweep archive it.
+/// A message the person types in it takes it out of the kept list instead, without archiving.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kept_speaker_chat_archives_when_its_leftovers_clear_or_a_typed_message_frees_it() {
+    let e = env();
+    let dir = e.dir.path().join("prof");
+    let paths = crate::speaker::paths(&dir, &e.ctx.profile_id);
+    let s = wired_speaker(&e);
+    s.attach_ops(e.ops.clone());
+    let wire = Arc::new(SpWire::default());
+    s.attach_line(wire.clone());
+    let archived = |chat: &str| {
+        e.ops
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(o, a)| o == "chat_archive" && a["chatId"] == chat)
+    };
+    let kept_ids = || -> Vec<String> {
+        crate::speaker::load_talks(&paths.chats)
+            .kept
+            .iter()
+            .map(|k| k.chat_id.clone())
+            .collect()
+    };
+
+    // A record with something left over, closed: the flag holds it, so it is kept, not archived.
+    s.record(srec("r9", "s-9", &["Check the front door"]))
+        .await
+        .unwrap();
+    let held = crate::speaker::find(&paths.chats, "s-9").unwrap().chat_id;
+    s.talk_closed(None, "s-9".to_owned()).await;
+    assert!(!archived(&held), "the leftover flag holds the chat");
+    assert_eq!(kept_ids(), [held.clone()]);
+
+    // The person dealt with it (the flag is gone) and half an hour of quiet passes: the next
+    // delivery's sweep puts the chat away.
+    sql(&e.db, "DELETE FROM chat_flags WHERE chat_id = ?1", &[&held]);
+    let old = helm_core::now_ms() - 31 * 60_000;
+    sql(
+        &e.db,
+        "UPDATE chats SET updated_at = ?2 WHERE id = ?1",
+        &[&held, &old],
+    );
+    sql(
+        &e.db,
+        "UPDATE chat_activity SET last_activity_at = ?2 WHERE chat_id = ?1",
+        &[&held, &old],
+    );
+    let mut talks = crate::speaker::load_talks(&paths.chats);
+    talks.kept[0].closed_at = old;
+    crate::speaker::save_talks(&paths.chats, &talks).unwrap();
+    s.deliver(sturn("tt", "new talk please", "s-10"))
+        .await
+        .unwrap();
+    assert!(
+        waits(|| archived(&held)).await,
+        "the quiet kept chat goes away"
+    );
+    assert_eq!(kept_ids(), Vec::<String>::new());
+
+    // A typed message in a kept chat makes it an ordinary chat: dropped from the list, not
+    // archived, whatever the clock says.
+    s.record(srec("r10", "s-11", &["Water the garden"]))
+        .await
+        .unwrap();
+    let typed = crate::speaker::find(&paths.chats, "s-11").unwrap().chat_id;
+    s.talk_closed(None, "s-11".to_owned()).await;
+    assert_eq!(kept_ids(), [typed.clone()]);
+    sql(
+        &e.db,
+        "DELETE FROM chat_flags WHERE chat_id = ?1",
+        &[&typed],
+    );
+    let nowish = helm_core::now_ms();
+    sql(
+        &e.db,
+        "INSERT INTO submissions (id, chat_id, text, state, created_at)
+         VALUES ('tp-1', ?1, 'I already did', 'complete', ?2)",
+        &[&typed, &nowish],
+    );
+    sql(
+        &e.db,
+        "INSERT INTO submission_meta (submission_id, origin) VALUES ('tp-1', 'typed')",
+        &[],
+    );
+    s.deliver(sturn("tt2", "one more talk", "s-12"))
+        .await
+        .unwrap();
+    assert_eq!(
+        kept_ids(),
+        Vec::<String>::new(),
+        "the typed message frees it"
+    );
+    assert!(!archived(&typed), "and it is never archived for that");
 }

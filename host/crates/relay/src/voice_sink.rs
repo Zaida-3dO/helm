@@ -37,8 +37,8 @@ use crate::client::{BoxFut, LineHandle, VoiceSink, VoiceTurn};
 use crate::exec::AppExecutor;
 use crate::notify::title_of;
 use crate::sink::{
-    chat_facts, max_row, plain_path, profile_name, snapshot, RealPort, RetryHold, Snap, Stop,
-    STATUS_GAP_MS,
+    chat_facts, first_context, last_exchanges, live_pointer, live_successor, max_row, plain_path,
+    profile_name, snapshot, RealPort, RetryHold, Snap, Stop, STATUS_GAP_MS,
 };
 use crate::telegram::{cut_chars, ChatPort};
 use crate::voice::{self, Mode, Reply, TagPolicy, WatchLevel, VOICE_ORIGIN};
@@ -737,7 +737,9 @@ pub async fn mirror(
     mut out: Outbox,
     baseline: i64,
     live: Arc<Mutex<Live>>,
-    tag_path: PathBuf,
+    // Both lanes' tag files: the chat being mirrored belongs to one of them, and the mirror asks
+    // each for the conversation to answer with.
+    tag_paths: Vec<PathBuf>,
     mut fallback: Route,
     next: Arc<Mutex<Next>>,
 ) {
@@ -776,11 +778,12 @@ pub async fn mirror(
                     Up::Final(owed) => {
                         // The tag file and the heard notes are files: read and written off the
                         // async threads.
-                        let (tag_path2, chat2) = (tag_path.clone(), chat.clone());
+                        let (tag_paths2, chat2) = (tag_paths.clone(), chat.clone());
                         let (route2, id) = (route.clone(), owed.id.clone());
                         let Ok((back, sent)) = tokio::task::spawn_blocking(move || {
-                            let conversation = voice::load_tag(&tag_path2)
-                                .filter(|t| t.chat_id == chat2)
+                            let conversation = tag_paths2
+                                .iter()
+                                .find_map(|p| voice::load_tag(p).filter(|t| t.chat_id == chat2))
                                 .map(|t| t.conversation);
                             let sent =
                                 out.send(&route2, &state, conversation.as_deref(), &owed, now);
@@ -830,7 +833,12 @@ pub struct Ctx {
     pub profile_id: String,
     /// The hub person of that profile, or `""` when it is not linked yet.
     pub person: String,
+    /// The deep lane's tag file.
     pub tag_path: PathBuf,
+    /// The quick lane's tag file: its own chat, limits and age.
+    pub quick_tag_path: PathBuf,
+    /// Where chats that arrive from the hub are shown (the one shared channel-board setting).
+    pub board_id: Option<String>,
     /// This profile's policy file, re-read where a limit is asked for.
     pub policy_path: PathBuf,
     /// Where this profile's heard notes live.
@@ -899,7 +907,13 @@ pub fn place(c: &Ctx, turn: &VoiceTurn, notes: &[String], now: i64) -> Result<Pl
             Placed::Already
         });
     }
-    let (model, effort) = c.file.new_chat();
+    let lane = voice::Lane::parse(turn.urgency.as_deref());
+    let tag_path = if lane == voice::Lane::Quick {
+        &c.quick_tag_path
+    } else {
+        &c.tag_path
+    };
+    let (model, effort) = c.file.new_chat(lane);
     let port = RealPort {
         db: &c.db,
         rt: &c.rt,
@@ -911,24 +925,103 @@ pub fn place(c: &Ctx, turn: &VoiceTurn, notes: &[String], now: i64) -> Result<Pl
         new_chat_effort: effort.map(str::to_owned),
         ignored: std::sync::Mutex::new(None),
         profile_id: Some(c.profile_id.clone()),
-        board_id: None,
+        board_id: c.board_id.clone(),
     };
     let who = profile_name(&c.db, &c.profile_id);
-    let (tag, _created) = voice::active_chat(&c.tag_path, &port, &c.policy, who.as_deref(), now)?;
+    let (mut tag, created) = voice::active_chat(tag_path, &port, &c.policy, who.as_deref(), now)?;
     let ignored = port
         .ignored
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .take();
+    // A chat that has grown past the lane's size rolls over when the next turn arrives: a fresh
+    // chat in the same lane takes its place, with what was last said written into its first message
+    // by Helm (no model turn), and the old one archived and linked as its earlier session. The
+    // turn is then delivered to the new chat, not the old one — an agent hand-off would occupy a
+    // small local model right when the next utterance lands.
+    let rolled = {
+        let size =
+            c.db.snapshot(|tx| {
+                Ok(helm_chats::turn_usage::context_reported_at(
+                    tx,
+                    &tag.chat_id,
+                ))
+            })
+            .ok()
+            .flatten()
+            .flatten();
+        voice::roll_due(
+            size.map(|(n, _)| n),
+            first_context(&c.db, &tag.chat_id),
+            c.file.roll_at(lane),
+        )
+    };
+    let mut carry: Option<String> = None;
+    if rolled {
+        let old = tag.chat_id.clone();
+        let title: Option<String> =
+            c.db.snapshot(|tx| {
+                use rusqlite::OptionalExtension as _;
+                tx.query_row("SELECT title FROM chats WHERE id = ?1", [&old], |r| {
+                    r.get(0)
+                })
+                .optional()
+            })
+            .ok()
+            .flatten();
+        let exchanges = last_exchanges(&c.db, &old);
+        let quotes: Vec<(&str, &str)> = exchanges
+            .iter()
+            .map(|(who, said)| (*who, said.as_str()))
+            .collect();
+        let note = voice::carry_note(title.as_deref().unwrap_or("an earlier chat"), &quotes);
+        match port.create(&voice::chat_title(who.as_deref(), now)) {
+            Ok(new_id) => {
+                if let Err(e) = helm_chats::rollover::link_successor(&c.rt, &old, &new_id) {
+                    // The roll-over did not complete (the old chat refused to archive, say): the
+                    // turn goes to the tagged chat as usual rather than being lost.
+                    log::warn!("relay: a voice chat could not roll over early: {e}");
+                } else {
+                    carry = Some(note);
+                    tag.chat_id = new_id;
+                    tag.tokens_at_start = port.facts(&new_id).map(|f| f.tokens).unwrap_or(0);
+                    // A rolled-over chat is a new conversation, like any fresh voice chat.
+                    tag.conversation = voice::new_conversation();
+                    tag.started_at = now;
+                    tag.last_turn_at = now;
+                    let _ = voice::save_tag(tag_path, Some(&tag));
+                }
+            }
+            Err(e) => log::warn!("relay: the voice roll-over could not open a chat: {e}"),
+        }
+    }
     let baseline = max_row(&c.db, &tag.chat_id);
     let (said, _) = cut_chars(&turn.text, voice::MAX_TEXT_CHARS);
+    // The first message of a lane's chat — fresh or rolled over — points at the other lane's live
+    // chat, so "and the bedroom" still resolves when the phone switched lanes.
+    let pointer = if created || rolled {
+        let other = if lane == voice::Lane::Quick {
+            &c.tag_path
+        } else {
+            &c.quick_tag_path
+        };
+        voice::current(other, &FactsOnly(&c.db), &c.policy, now)
+            .and_then(|t| live_pointer(&c.db, &t.chat_id))
+    } else {
+        None
+    };
     let mut text = voice::delivered_text(
         Mode::parse(&turn.mode),
         turn.continues.is_some(),
         turn.age_minutes,
         notes,
+        pointer.as_deref(),
         &said,
     );
+    if let Some(note) = carry.as_deref() {
+        // The carried-over words go in front of the user's own.
+        text = format!("{note}\n{text}");
+    }
     // The chat opened without the model or effort saved for it: say so in the chat, where the
     // agent and the user can see it.
     if let Some(why) = &ignored {
@@ -1081,40 +1174,55 @@ impl ChatVoice {
     }
 
     fn remember_chat(&self, profile_id: &str, chat: &str) {
-        *self
+        let mut t = self
             .tagged
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .entry(profile_id.to_owned())
-            .or_insert((None, None)) = (Some(Instant::now()), Some(chat.to_owned()));
+            .or_insert((None, Vec::new()));
+        // The other lane's cached chat stays; the fresh one joins (or replaces its lane's entry
+        // when it is a roll-over of the same conversation).
+        let (at, chats) = &mut *t;
+        if at.is_some() && !chats.iter().any(|c| c == chat) {
+            if chats.len() >= 2 {
+                chats.remove(0);
+            }
+            chats.push(chat.to_owned());
+        } else if at.is_none() || chats.is_empty() {
+            *chats = vec![chat.to_owned()];
+        }
+        *at = Some(Instant::now());
     }
 
-    /// The chat a profile's tag file names, expired or not: news for it is still mirrored until
-    /// the next turn from the phone starts another, or until an hour after its idle time or age
-    /// limit ran out.
-    fn tagged_chat(&self, profile_id: &str, paths: &voice::Paths) -> Option<String> {
+    /// Every chat the profile's tag files name, expired or not: news for any of them is still
+    /// mirrored until the next turn from the phone starts another, or until an hour after its idle
+    /// time or age limit ran out. Both lanes count.
+    fn tagged_chats(&self, profile_id: &str, paths: &voice::Paths) -> Vec<String> {
         let mut t = self.tagged.lock().unwrap_or_else(|p| p.into_inner());
-        let e = t.entry(profile_id.to_owned()).or_insert((None, None));
+        let e = t.entry(profile_id.to_owned()).or_insert((None, Vec::new()));
         if e.0.is_none_or(|at| at.elapsed() > TAG_RECHECK) {
             let policy = voice::load_file(&paths.policy).check().unwrap_or_default();
             let now = helm_core::now_ms();
-            *e = (
-                Some(Instant::now()),
-                voice::load_tag(&paths.tag)
+            let held = |tag: &PathBuf| {
+                voice::load_tag(tag)
                     .filter(|g| {
                         let ran_out =
                             (g.last_turn_at + policy.idle_ms).min(g.started_at + policy.max_age_ms);
                         now < ran_out + EXPIRED_GRACE_MS
                     })
-                    .map(|g| g.chat_id),
-            );
+                    .map(|g| g.chat_id)
+            };
+            e.1 = [held(&paths.tag), held(&paths.tag_quick)]
+                .into_iter()
+                .flatten()
+                .collect();
         }
         e.1.clone()
     }
 
-    /// Every profile's tagged voice chat, refreshed. A chat is a voice chat when any profile's
+    /// Every profile's tagged voice chats, refreshed. A chat is a voice chat when any profile's
     /// tag names it.
-    fn all_tagged(&self) -> Vec<(String, Option<String>)> {
+    fn all_tagged(&self) -> Vec<(String, Vec<String>)> {
         let db = match self
             .exec
             .wiring()
@@ -1131,24 +1239,24 @@ impl ChatVoice {
             .into_iter()
             .map(|p| {
                 let paths = crate::people::voice_paths(&self.profile_dir, &p.id);
-                let chat = self.tagged_chat(&p.id, &paths);
-                (p.id, chat)
+                let chats = self.tagged_chats(&p.id, &paths);
+                (p.id, chats)
             })
             .collect()
     }
 
-    /// Whether `chat` is the voice chat of any profile.
+    /// Whether `chat` is the voice chat of any profile, in either lane.
     pub fn is_voice_chat(&self, chat: &str) -> bool {
         self.all_tagged()
             .iter()
-            .any(|(_, t)| t.as_deref() == Some(chat))
+            .any(|(_, ts)| ts.iter().any(|t| t == chat))
     }
 
-    /// The profile whose voice chat `chat` is, when it is one.
+    /// The profile whose voice chat (either lane) `chat` is, when it is one.
     fn profile_of_voice_chat(&self, chat: &str) -> Option<String> {
         self.all_tagged()
             .into_iter()
-            .find(|(_, t)| t.as_deref() == Some(chat))
+            .find(|(_, ts)| ts.iter().any(|t| t == chat))
             .map(|(p, _)| p)
     }
 
@@ -1311,6 +1419,13 @@ impl ChatVoice {
         let paths = crate::people::voice_paths(&self.profile_dir, &profile.id);
         // Read once per delivery, so a change in Settings applies to the next message.
         let file = voice::load_file(&paths.policy);
+        // The one board setting for every chat that arrives from the hub lives with the speaker
+        // settings (widened there from a speaker-only choice); read it for this profile.
+        let board = crate::speaker::load_file(
+            &crate::speaker::paths(&self.profile_dir, &profile.id).policy,
+        )
+        .board()
+        .map(str::to_owned);
         Ctx {
             rt: (**rt).clone(),
             db: db.clone(),
@@ -1319,6 +1434,8 @@ impl ChatVoice {
             person: profile.hub_person_id.unwrap_or_default(),
             profile_id: profile.id,
             tag_path: paths.tag,
+            quick_tag_path: paths.tag_quick,
+            board_id: board,
             policy_path: paths.policy,
             heard_path: paths.heard,
             folder: plain_path(&paths.folder),
@@ -1357,7 +1474,7 @@ impl ChatVoice {
                 .with_finals(self.finals_for(&c.profile_id)),
             baseline,
             self.live_for(&c.profile_id),
-            c.tag_path.clone(),
+            vec![c.tag_path.clone(), c.quick_tag_path.clone()],
             fallback,
             next.clone(),
         ));
@@ -1483,15 +1600,18 @@ impl VoiceSink for ChatVoice {
             let Ok(c) = self.ctx(person.as_deref()) else {
                 return;
             };
-            if voice::save_tag(&c.tag_path, None).is_err() {
-                log::warn!("relay: the voice chat tag could not be removed");
+            // "Start fresh" clears both lanes: the next turn of either opens a new chat.
+            let mut cleared = voice::save_tag(&c.tag_path, None).is_ok();
+            cleared &= voice::save_tag(&c.quick_tag_path, None).is_ok();
+            if !cleared {
+                log::warn!("relay: a voice chat tag could not be removed");
             }
             *self
                 .tagged
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .entry(c.profile_id)
-                .or_insert((None, None)) = (None, None);
+                .or_insert((None, Vec::new())) = (None, Vec::new());
         })
     }
 }
@@ -1526,6 +1646,14 @@ pub struct VoiceView {
     /// Whether this PC takes this person's voice turns (the switch, or its default: on for the
     /// home profile, off for the others).
     pub take_voice: bool,
+    /// The model a quick turn opens its chat with; blank: no quick lane — quick turns open like
+    /// deep ones.
+    pub quick_model: String,
+    /// The effort a quick turn opens its chat with; blank: the same as any other new chat.
+    pub quick_effort: String,
+    /// The context size at which each lane's chat rolls over when the next turn arrives; 0 is off.
+    pub quick_roll_at: u64,
+    pub deep_roll_at: u64,
 }
 
 pub fn voice_view(
@@ -1578,6 +1706,10 @@ pub fn voice_view(
         max_tokens: file.max_tokens,
         watch: file.watch,
         take_voice,
+        quick_model: file.quick_model,
+        quick_effort: file.quick_effort,
+        quick_roll_at: file.quick_roll_at,
+        deep_roll_at: file.deep_roll_at,
     }
 }
 
@@ -1587,6 +1719,9 @@ pub struct FactsOnly<'a>(pub &'a Database);
 impl ChatPort for FactsOnly<'_> {
     fn facts(&self, chat_id: &str) -> Option<crate::telegram::ChatFacts> {
         chat_facts(self.0, chat_id)
+    }
+    fn successor(&self, chat_id: &str) -> Option<String> {
+        live_successor(self.0, chat_id)
     }
     fn create(&self, _title: &str) -> Result<String, String> {
         Err("No voice chat is started from here.".into())
