@@ -201,10 +201,9 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     // What the generic writer cannot know about a few preference keys' values.
     let rules = crate::pref_rules::pref_rules(services, events);
     services.insert(Arc::new(rules));
+    let profile = services.get::<helm_core::profile::Profile>();
     services.insert(Arc::new(worker_lines(
-        services
-            .get::<helm_core::profile::Profile>()
-            .map(|p| p.dir.as_path()),
+        profile.as_deref().map(|p| p.dir.as_path()),
     )));
     // Other crates reach running workers through the chat runtime (helm_hosttools::lines).
     if let Some(rt) = services.get::<helm_chats::ChatRuntime>() {
@@ -525,11 +524,8 @@ pub fn host_seam(dispatcher: &Arc<helm_ipc::Dispatcher>) -> helm_chats::HostSeam
         .services
         .get::<helm_hosttools::WorkerLines>()
         .unwrap_or_else(|| {
-            Arc::new(worker_lines(
-                ctx.services
-                    .get::<helm_core::profile::Profile>()
-                    .map(|p| p.dir.as_path()),
-            ))
+            let profile = ctx.services.get::<helm_core::profile::Profile>();
+            Arc::new(worker_lines(profile.as_deref().map(|p| p.dir.as_path())))
         });
     let ops: Arc<dyn helm_hosttools::OpInvoker> = dispatcher.clone();
     helm_chats::HostSeam {

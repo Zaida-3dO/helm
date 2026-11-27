@@ -226,6 +226,8 @@ impl Default for LocalSettings {
             game_lift_minutes: DEFAULT_GAME_LIFT,
             restart_task: None,
             pause_file: None,
+            comfort: BTreeMap::new(),
+            step_up: BTreeMap::new(),
         }
     }
 }

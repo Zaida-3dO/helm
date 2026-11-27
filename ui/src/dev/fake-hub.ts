@@ -34,8 +34,8 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
     if (!p) {
       p = {
         tg: { chat: null, maxAgeHours: 24, maxTokens: 400_000, awayAlerts: true, approvals: false, remoteAnswers: false, model: null, effort: null, takeTelegram: id === 'home' },
-        voice: { chat: null, model: 'claude-sonnet-5-5', effort: 'low', idleMinutes: 240, maxAgeHours: 24, maxTokens: 300_000, watch: 'flags', takeVoice: id === 'home' },
-        speaker: { talks: [], model: 'local/strata/qwen3.8-flash-next-iq3_s', effort: 'low', takeSpeaker: id === 'home', previousHours: 12, lean: false, boardId: '' },
+        voice: { chat: null, model: 'claude-sonnet-5-5', effort: 'low', idleMinutes: 240, maxAgeHours: 24, maxTokens: 300_000, watch: 'flags', takeVoice: id === 'home', quickModel: '', quickEffort: '', quickRollAt: 0, deepRollAt: 0 },
+        speaker: { talks: [], model: 'local/strata/qwen3.8-flash-next-iq3_s', effort: 'low', takeSpeaker: id === 'home', previousHours: 12, lean: false, boardId: '', quickModel: '', quickEffort: '', quickRollAt: 0, deepRollAt: 0, kept: [] },
         linked: false,
         pinned: [],
         prompts: {},

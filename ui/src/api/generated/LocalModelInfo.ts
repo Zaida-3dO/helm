@@ -18,17 +18,17 @@ model: string,
 /**
  * The server's display name.
  */
-server: string, kind: LocalServerKind, contextTokens?: number,
+server: string, kind: LocalServerKind, contextTokens?: number, 
 /**
  * The chat size the user says this model works well up to, in tokens. None means nobody
  * said; the app then falls back to a share of `context_tokens`.
  */
-comfortTokens?: number,
+comfortTokens?: number, 
 /**
  * The other local model the user wants suggested when a chat outgrows this one, as its id.
  * None means no suggestion: set by hand only, never guessed.
  */
-stepUp?: string, sizeBytes?: number, loaded?: boolean,
+stepUp?: string, sizeBytes?: number, loaded?: boolean, 
 /**
  * False when the server did not answer; the picker greys the row.
  */

@@ -38,12 +38,12 @@ modelNames: Array<ModelNameView>,
 /**
  * The longest a model's name may be, in characters.
  */
-aliasMax: number,
+aliasMax: number, 
 /**
  * The range of a model's "works well up to" size (tokens): clearing one falls back to 70%
  * of its window.
  */
-comfortRange: Range,
+comfortRange: Range, 
 /**
  * The scheduled task that restarts a model server, paused while local models are unloaded.
  */

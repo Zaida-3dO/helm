@@ -45,7 +45,7 @@ use crate::client::{BoxFut, LineHandle, SpeakerRecord, SpeakerSink, SpeakerTurn}
 use crate::exec::AppExecutor;
 use crate::sink::{max_row, plain_path, profile_name, snapshot, RealPort, RetryHold, Snap};
 use crate::speaker::{self, Paths, PolicyFile, Talk, SPEAKER_ORIGIN};
-use crate::telegram::cut_chars;
+use crate::telegram::{cut_chars, ChatPort};
 use crate::voice::{Mode, Reply};
 use crate::voice_sink::{NOTHING_TO_SAY, NOT_STARTED, THINKING, WAITING_STATUS};
 use helm_chats::submit::{append_exchange, host_send, Exchange, HostSend};
@@ -209,19 +209,23 @@ pub fn place(c: &Ctx, turn: &SpeakerTurn, now: i64) -> Result<Placed, String> {
     if !made {
         let old = talk.chat_id.clone();
         let size =
-            c.db.snapshot(|tx| helm_chats::turn_usage::context_reported_at(tx, &old))
-                .ok()
-                .flatten();
+            c.db.snapshot(|tx| {
+                Ok::<_, rusqlite::Error>(helm_chats::turn_usage::context_reported_at(tx, &old))
+            })
+            .ok()
+            .flatten();
         let first = crate::sink::first_context(&c.db, &old);
         if crate::voice::roll_due(size.map(|(n, _)| n), first, c.file.roll_at(lane)) {
             let title =
                 c.db.snapshot(|tx| {
-                    tx.query_row("SELECT title FROM chats WHERE id = ?1", [&old], |r| {
-                        r.get::<_, String>(0)
-                    })
-                    .optional()
-                    .unwrap_or_default()
-                    .unwrap_or_default()
+                    Ok::<String, rusqlite::Error>(
+                        tx.query_row("SELECT title FROM chats WHERE id = ?1", [&old], |r| {
+                            r.get::<_, String>(0)
+                        })
+                        .optional()
+                        .unwrap_or_default()
+                        .unwrap_or_default(),
+                    )
                 })
                 .unwrap_or_default();
             let exchanges = crate::sink::last_exchanges(&c.db, &old);
@@ -397,7 +401,7 @@ fn person_typed(db: &Database, chat: &str, since: i64) -> bool {
             rusqlite::params![chat, since],
             |r| r.get::<_, bool>(0),
         )
-        .unwrap_or(false)
+        .or(Ok::<bool, rusqlite::Error>(false))
     })
     .unwrap_or(false)
 }
@@ -854,7 +858,7 @@ async fn sweeper_loop(exec: Arc<AppExecutor>, profile_dir: PathBuf, ops: Arc<dyn
             .ok()
             .unwrap_or_default();
         for p in profiles {
-            let c = build_ctx(rt, db, &ops, &profile_dir, p);
+            let c = build_ctx(&rt, &db, &ops, &profile_dir, p);
             if speaker::load_talks(&c.paths.chats).kept.is_empty() {
                 continue;
             }
@@ -908,7 +912,8 @@ impl SpeakerSink for HouseSpeaker {
             let _guard = self.serial.lock().await;
             self.start_sweeper();
             let c = self.ctx(rec.person.as_deref())?;
-            tokio::task::spawn_blocking(move || place_record(&c, &rec, helm_core::now_ms()))
+            let cc = c.clone();
+            tokio::task::spawn_blocking(move || place_record(&cc, &rec, helm_core::now_ms()))
                 .await
                 .map_err(|_| "The delivery did not finish.".to_owned())??;
             self.sweep_kept(&c).await;

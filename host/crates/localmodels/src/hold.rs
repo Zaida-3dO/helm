@@ -187,7 +187,7 @@ impl LocalService {
             owner,
         };
         self.hold.set(hold.clone());
-        if let Err(e) = self.db.write(|tx| store(tx, Some(&hold))) {
+        if let Err(e) = self.db().write(|tx| store(tx, Some(&hold))) {
             log::warn!("the GPU hold could not be stored: {e}");
         }
         self.emit_lock();
@@ -210,7 +210,7 @@ impl LocalService {
             }
         }
         if self.hold.clear() {
-            if let Err(e) = self.db.write(|tx| store(tx, None)) {
+            if let Err(e) = self.db().write(|tx| store(tx, None)) {
                 log::warn!("the GPU hold could not be cleared in storage: {e}");
             }
             self.emit_lock();

@@ -327,16 +327,19 @@ pub fn talk_chat(
     quick: bool,
 ) -> Result<(Talk, bool), String> {
     let mut talks = load_talks(path);
-    if let Some(t) = talks.talks.iter_mut().find(|t| t.session == session) {
+    if let Some(i) = talks.talks.iter().position(|t| t.session == session) {
         // A chat archived by a roll-over whose successor is live is not gone: the talk moves to
         // it. A chat archived because the person put it away (no successor) still starts a new one.
         let mut tokens = 0;
-        if crate::voice::follow_successor(port, &mut t.chat_id, &mut tokens) {
+        if crate::voice::follow_successor(port, &mut talks.talks[i].chat_id, &mut tokens) {
             save_talks(path, &talks)
                 .map_err(|_| "The speaker talk list could not be saved.".to_owned())?;
         }
-        if port.facts(&t.chat_id).is_some_and(|f| !f.archived) {
-            return Ok((t.clone(), false));
+        if port
+            .facts(&talks.talks[i].chat_id)
+            .is_some_and(|f| !f.archived)
+        {
+            return Ok((talks.talks[i].clone(), false));
         }
         talks.talks.retain(|t| t.session != session);
     }

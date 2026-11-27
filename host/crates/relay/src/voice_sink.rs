@@ -942,13 +942,12 @@ pub fn place(c: &Ctx, turn: &VoiceTurn, notes: &[String], now: i64) -> Result<Pl
     let rolled = {
         let size =
             c.db.snapshot(|tx| {
-                Ok(helm_chats::turn_usage::context_reported_at(
+                Ok::<_, rusqlite::Error>(helm_chats::turn_usage::context_reported_at(
                     tx,
                     &tag.chat_id,
                 ))
             })
             .ok()
-            .flatten()
             .flatten();
         voice::roll_due(
             size.map(|(n, _)| n),
@@ -983,8 +982,8 @@ pub fn place(c: &Ctx, turn: &VoiceTurn, notes: &[String], now: i64) -> Result<Pl
                     log::warn!("relay: a voice chat could not roll over early: {e}");
                 } else {
                     carry = Some(note);
-                    tag.chat_id = new_id;
                     tag.tokens_at_start = port.facts(&new_id).map(|f| f.tokens).unwrap_or(0);
+                    tag.chat_id = new_id;
                     // A rolled-over chat is a new conversation, like any fresh voice chat.
                     tag.conversation = voice::new_conversation();
                     tag.started_at = now;
@@ -1085,7 +1084,7 @@ pub struct ChatVoice {
 }
 
 /// One profile's voice chat id as its tag file last said, and when that was read.
-type TagEntry = (Option<Instant>, Option<String>);
+type TagEntry = (Option<Instant>, Vec<String>);
 
 /// How long the voice chat's id is trusted before the tag file is read again.
 const TAG_RECHECK: Duration = Duration::from_secs(5);
@@ -1174,10 +1173,8 @@ impl ChatVoice {
     }
 
     fn remember_chat(&self, profile_id: &str, chat: &str) {
-        let mut t = self
-            .tagged
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        let mut guard = self.tagged.lock().unwrap_or_else(|p| p.into_inner());
+        let t = guard
             .entry(profile_id.to_owned())
             .or_insert((None, Vec::new()));
         // The other lane's cached chat stays; the fresh one joins (or replaces its lane's entry

@@ -434,7 +434,7 @@ pub(crate) fn chat_facts(db: &Database, chat_id: &str) -> Option<ChatFacts> {
 /// chat, or never starts: today's "gone". The relay tags use this so a roll-over never silently
 /// drops a Telegram, voice or speaker tag.
 pub(crate) fn live_successor(db: &Database, chat_id: &str) -> Option<String> {
-    db.snapshot(|tx| {
+    db.snapshot(|tx| -> rusqlite::Result<Option<String>> {
         let start = tx
             .query_row(
                 "SELECT archived, next_session_id FROM chats WHERE id = ?1",
@@ -490,8 +490,12 @@ pub(crate) fn live_pointer(db: &Database, chat_id: &str) -> Option<String> {
             )
             .optional()
             .unwrap_or(None);
-        let title = title.filter(|t| !t.trim().is_empty())?;
-        let said = said.filter(|s| !s.trim().is_empty())?;
+        let Some(title) = title.filter(|t| !t.trim().is_empty()) else {
+            return Ok(None);
+        };
+        let Some(said) = said.filter(|s| !s.trim().is_empty()) else {
+            return Ok(None);
+        };
         Ok::<_, rusqlite::Error>(Some(
             crate::telegram::cut_chars(&format!("{title} — {said}"), 300).0,
         ))
@@ -504,7 +508,7 @@ pub(crate) fn live_pointer(db: &Database, chat_id: &str) -> Option<String> {
 /// (input + cache reads + cache writes), oldest such reply. The floor for a channel roll-over size:
 /// nothing below what the chat carried into its very first turn counts as growth.
 pub(crate) fn first_context(db: &Database, chat_id: &str) -> Option<u64> {
-    let row: Option<(i64, i64, i64)> = db
+    let row: (i64, i64, i64) = db
         .snapshot(|tx| {
             tx.query_row(
                 "SELECT COALESCE(json_extract(details, '$.usage.inputTokens'), 0),
@@ -1591,7 +1595,7 @@ impl ChatSink {
             ops,
             handle: tokio::runtime::Handle::current(),
             person: profile.hub_person_id.unwrap_or_default(),
-            profile_id: profile.id,
+            profile_id: profile.id.clone(),
             tag_path: paths.tag,
             folder: plain_path(&paths.folder),
             policy: file.check().unwrap_or_default(),
