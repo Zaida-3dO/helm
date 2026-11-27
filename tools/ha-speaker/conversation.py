@@ -61,6 +61,14 @@ _LOGGER = logging.getLogger(__name__)
 # "arm=A run=3"; they ride into every timing/record line unchanged.
 TAGS_ENTITY = "input_text.helm_speaker_tags"
 
+# The input_text helper the playback automation reads when this satellite goes
+# processing -> idle. A failed turn stores its code here itself, synchronously:
+# an event-triggered run of the automation would start one loop tick later than
+# the state trigger ending the turn, so the died-run would read an empty helper
+# and play the wrong line (or none). No helper entity in this install means the
+# deployment YAML is not loaded - such a turn speaks live words, as before.
+LINE_HELPER_ENTITY = "input_text.helm_speaker_line"
+
 # Escalation happens while a person is standing at the speaker waiting: the
 # whole hub round gets a short budget (the model turn already had its own),
 # and when it runs out the fixed sentence goes instead of an open-ended wait.
@@ -147,13 +155,17 @@ class HelmSpeakerAgent(ConversationEntity):
         elif kind in (agent_core.KIND_OFFLINE, agent_core.KIND_ERROR):
             record_kind = "error"
 
-        # Pre-recorded failure lines: we only DECIDE here. An empty response
-        # string makes the voice pipeline skip TTS; a Home Assistant automation
-        # watching this satellite's states announces the matching flac file (the
-        # component must never announce mid-turn - that cancels our own run).
-        # No code, or no satellite entity for this device, or no lines file:
-        # every row below carries today's live sentence and the turn behaves
-        # exactly as before.
+        # Pre-recorded failure lines: we only DECIDE and STORE here. An empty
+        # response string makes the voice pipeline skip TTS; the deployment's
+        # Home Assistant automation announces the matching flac file when this
+        # satellite goes processing -> idle, reading the code from the helper
+        # below (the component must never announce mid-turn - that cancels our
+        # own run). Storing is a blocking service call so the code is in the
+        # helper before this coroutine returns: an event-triggered automation
+        # run would be scheduled after the state trigger that ends the turn.
+        # No code, no satellite entity for this device, or no helper entity in
+        # this install: every row below carries today's live sentence and the
+        # turn behaves exactly as before.
         if kind == agent_core.KIND_ESCALATE and hub_detail is not None:
             code = errorlines.code_for_turn(
                 kind, has_satellite=bool(device_id),
@@ -165,7 +177,18 @@ class HelmSpeakerAgent(ConversationEntity):
                                             has_satellite=bool(device_id))
         entity_id = (self._satellite_entity(device_id)
                      if code and device_id else None)
-        announce = bool(code and entity_id)
+        announce = False
+        if code and entity_id and \
+                self.hass.states.get(LINE_HELPER_ENTITY) is not None:
+            try:
+                await self.hass.services.async_call(
+                    "input_text", "set_value",
+                    {"entity_id": LINE_HELPER_ENTITY, "value": code},
+                    blocking=True)
+                announce = True
+            except Exception:  # noqa: BLE001 - the fallback is live speech
+                _LOGGER.warning("helm_speaker could not store line %s for "
+                                "this turn; speaking it live instead", code)
         # history, benchmark stages and the hub record keep the canonical
         # sentence even when the flac replaces its live twin
         row_text = errorlines.canonical_text(code) if announce else spoken
@@ -204,8 +227,9 @@ class HelmSpeakerAgent(ConversationEntity):
         response = intent.IntentResponse(language=user_input.language)
         if announce:
             # empty speech: the run loop sees a blank tts_input and ends the
-            # turn without synthesising anything - the pre-recorded flac is
-            # already on its way from the automation instead
+            # turn without synthesising anything - the code is already in the
+            # helper, so the automation's died-run plays its file instead. The
+            # event only makes the decision visible in HA's events log.
             response.async_set_speech("")
             self.hass.bus.async_fire("helm_speaker_line",
                                      {"code": code, "entity_id": entity_id})

@@ -24,11 +24,29 @@ sys.modules.setdefault("hs", _PKG)
 
 import importlib  # noqa: E402
 
+class StubIntentResponse:
+    """Enough of homeassistant.helpers.intent.IntentResponse for the glue
+    tests below: it just carries what async_set_speech was given."""
+
+    def __init__(self, language=None):
+        self.language = language
+        self.speech = None
+
+    def async_set_speech(self, speech):
+        self.speech = speech
+
+
+class StubConversationResult:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
 def _stub_homeassistant():
-    """ha_backend.py is live-HA glue; give it the handful of HA names it
-    imports so house_read - which only ever touches the injected transport -
-    can be tested without Home Assistant itself. Skipped when real HA is
-    importable, so the scratch-HA run keeps testing the genuine modules."""
+    """ha_backend.py and conversation.py are live-HA glue; give them the
+    handful of HA names they import so turns can be driven against a fake
+    hass - which only ever touches injected transports - without Home
+    Assistant itself. Skipped when real HA is importable, so the scratch-HA
+    run keeps testing the genuine modules."""
     try:  # pragma: no cover - environment dependent
         import homeassistant  # noqa: F401
         return False
@@ -47,21 +65,32 @@ def _stub_homeassistant():
     ha = mod("homeassistant")
     mod("homeassistant.core", ha, HomeAssistant=object)
     comp = mod("homeassistant.components", ha)
+    mod("homeassistant.components.conversation", comp,
+        ConversationEntity=type("ConversationEntity", (object,), {}),
+        ConversationInput=type("ConversationInput", (object,), {}),
+        ConversationResult=StubConversationResult)
+    mod("homeassistant.config_entries", ha,
+        ConfigEntry=type("ConfigEntry", (object,), {}))
     comp_assist = mod("homeassistant.components.homeassistant", comp)
     mod("homeassistant.components.homeassistant.exposed_entities", comp_assist,
         async_should_expose=lambda hass, assistant, entity_id: True)
     helpers = mod("homeassistant.helpers", ha)
     for name in ("area_registry", "device_registry", "entity_registry"):
         mod("homeassistant.helpers." + name, helpers)
+    sys.modules["homeassistant.helpers.device_registry"].DeviceInfo = (
+        lambda **kw: kw)
     mod("homeassistant.helpers.intent", helpers,
         IntentError=type("IntentError", (Exception,), {}),
-        async_handle=None)
+        async_handle=None, IntentResponse=StubIntentResponse)
     mod("homeassistant.helpers.aiohttp_client", helpers,
         async_get_clientsession=lambda hass: None)
+    util = mod("homeassistant.util", ha)
+    import datetime as _dt
+    mod("homeassistant.util.dt", util, now=_dt.datetime.now)
     return True
 
 
-_stub_homeassistant()
+_HA_STUBBED = _stub_homeassistant()
 _ha_backend = importlib.import_module("hs.ha_backend")
 _errors = importlib.import_module("hs.errors")
 _housecontrol = importlib.import_module("hs.homecontrol")
@@ -70,6 +99,7 @@ _agent_core = importlib.import_module("hs.agent_core")
 _errorlines = importlib.import_module("hs.errorlines")
 _hubapi = importlib.import_module("hs.hubapi")
 
+_conversation = importlib.import_module("hs.conversation")
 _profiles = importlib.import_module("hs.profiles")
 active_profile = _profiles.active_profile
 build_model_config = _profiles.build_model_config
@@ -383,6 +413,212 @@ class ErrorLinesTest(unittest.TestCase):
         self.assertEqual(el.canonical_text("did_not_catch_that"),
                          _agent_core.EMPTY_TEXT)
         self.assertIsNone(el.canonical_text("no_such_code"))
+
+
+class _FakeStates:
+    def __init__(self, mapping=None):
+        self.mapping = dict(mapping or {})
+
+    def get(self, entity_id):
+        state = self.mapping.get(entity_id)
+        if state is None:
+            return None
+        return types.SimpleNamespace(state=state, attributes={})
+
+    def async_all(self, domain=None):
+        return []
+
+
+class _FakeReg:
+    """The shape dr/ar.async_get(hass) hands back here: nothing resolvable."""
+
+    def async_get(self, key):
+        return None
+
+
+class _FakeBus:
+    def __init__(self, order):
+        self.order = order
+        self.events = []
+
+    def async_fire(self, event_type, data=None):
+        self.events.append((event_type, dict(data or {})))
+        self.order.append(("event", event_type))
+
+
+class _FakeServices:
+    def __init__(self, order, fail=False):
+        self.order = order
+        self.calls = []
+        self.fail = fail
+
+    async def async_call(self, domain, service, data=None, **kwargs):
+        self.calls.append((domain, service, dict(data or {}),
+                           kwargs.get("blocking")))
+        self.order.append(("call", domain + "." + service))
+        if self.fail:
+            raise RuntimeError("service call refused")
+
+
+class _FakeHass:
+    """Enough of the hass object conversation.async_process touches: states,
+    the bus, services and the entity registry entry list for one device."""
+
+    def __init__(self, states=None, satellite_entity="assist_satellite.sat1",
+                 services_fail=False):
+        order = []
+        self.order = order
+        self.states = _FakeStates(states)
+        self.bus = _FakeBus(order)
+        self.services = _FakeServices(order, fail=services_fail)
+        self.reg = {}
+        if satellite_entity:
+            self.reg["dev1"] = [types.SimpleNamespace(
+                domain="assist_satellite", entity_id=satellite_entity)]
+
+
+@unittest.skipUnless(_HA_STUBBED, "drives the stub Home Assistant only")
+class SpeakerLineGlueTest(unittest.TestCase):
+    """conversation.py's pre-recorded-line decisions on a fake hass. The one
+    rule they guard: the code must sit in the helper before async_process
+    returns, or the automation's died-run reads an empty helper and plays the
+    wrong line - and every case that cannot store speaks its live sentence."""
+
+    HELPER = "input_text.helm_speaker_line"
+
+    def setUp(self):
+        # these are the stub registry modules (never the real ones: the class
+        # is skipped when Home Assistant itself is importable), so pointing
+        # their lookups at the fake hass needs no restoring afterwards
+        er_mod = sys.modules["homeassistant.helpers.entity_registry"]
+        er_mod.async_get = lambda hass: hass.reg
+        er_mod.async_entries_for_device = (
+            lambda reg_obj, device_id: (reg_obj or {}).get(device_id, []))
+        for mod_name in ("device_registry", "area_registry"):
+            mod = sys.modules["homeassistant.helpers." + mod_name]
+            mod.async_get = lambda hass: _FakeReg()
+        self._real_run_turn = _agent_core.run_turn
+        # stages is optional glue the turn tries to note itself into; give it
+        # an empty module so nothing reaches the real one from a fake hass
+        self._stages_seeded = "hs.stages" not in sys.modules
+        if self._stages_seeded:
+            pkg = types.ModuleType("hs.stages")
+            pkg.__name__ = "hs.stages"
+            sys.modules["hs.stages"] = pkg
+
+    def tearDown(self):
+        _agent_core.run_turn = self._real_run_turn
+        if self._stages_seeded:
+            del sys.modules["hs.stages"]
+
+    def _agent(self, hass, entry_runtime):
+        entry = types.SimpleNamespace(
+            entry_id="e1", data={"room": "Kitchen"}, options={},
+            runtime_data=entry_runtime)
+        return _conversation.HelmSpeakerAgent(hass, entry)
+
+    def _runtime(self, api=None):
+        return {"model_cfg": types.SimpleNamespace(record_text=False),
+                "transport": None, "api": api, "history": {}}
+
+    def _script_turn(self, **kwargs):
+        def fake(cfg, transport, control, ctx, text, tags=None, clock=None):
+            async def one():
+                return _agent_core.TurnResult(**kwargs)
+            return one()
+        _agent_core.run_turn = fake
+
+    def _input(self, device_id="dev1"):
+        return types.SimpleNamespace(text="dim the sofa lamp",
+                                     device_id=device_id, language="en",
+                                     conversation_id="c1")
+
+    def test_failed_turn_goes_silent_after_storing_the_code_first(self):
+        hass = _FakeHass(states={self.HELPER: ""})
+        self._script_turn(text=_agent_core.TIMEOUT_TEXT,
+                          kind=_agent_core.KIND_TIMEOUT)
+        runtime = self._runtime()
+        result = asyncio.run(
+            self._agent(hass, runtime).async_process(self._input()))
+        # the store lands before anything else this turn does outwards: a
+        # later state trigger (processing -> idle) reads it, not an event run
+        self.assertEqual(hass.order, [("call", "input_text.set_value"),
+                                      ("event", "helm_speaker_line")])
+        self.assertEqual(
+            hass.services.calls[0],
+            ("input_text", "set_value",
+             {"entity_id": self.HELPER, "value": "took_too_long"}, True))
+        self.assertEqual(hass.bus.events[0][1]["code"], "took_too_long")
+        # the pipeline gets no words of its own...
+        self.assertEqual(result.response.speech, "")
+        # ...while history keeps the canonical sentence, not the blank
+        row = runtime["history"]["dev1"][-1]
+        self.assertEqual(row["spoken"],
+                         _errorlines.canonical_text("took_too_long"))
+
+    def test_normal_answer_speaks_live_and_touches_nothing(self):
+        hass = _FakeHass(states={self.HELPER: ""})
+        self._script_turn(text="The sofa lamp is at forty percent.",
+                          kind=_agent_core.KIND_ANSWER)
+        result = asyncio.run(
+            self._agent(hass, self._runtime()).async_process(self._input()))
+        self.assertEqual(result.response.speech,
+                         "The sofa lamp is at forty percent.")
+        self.assertEqual(hass.order, [])
+
+    def test_no_helper_no_satellite_or_no_device_speaks_live(self):
+        cases = {
+            "no helper entity installed": (
+                _FakeHass(states={}, satellite_entity="assist_satellite.sat1"),
+                "dev1"),
+            "device carries no satellite entity": (
+                _FakeHass(states={self.HELPER: ""}, satellite_entity=None),
+                "dev1"),
+            "text or REST turn (no device)": (
+                _FakeHass(states={self.HELPER: ""}), None),
+        }
+        for name, (hass, device_id) in cases.items():
+            with self.subTest(name):
+                self._script_turn(text=_agent_core.ERROR_TEXT,
+                                  kind=_agent_core.KIND_ERROR)
+                result = asyncio.run(
+                    self._agent(hass, self._runtime()).async_process(
+                        self._input(device_id=device_id)))
+                self.assertEqual(result.response.speech,
+                                 _agent_core.ERROR_TEXT)
+                self.assertEqual(hass.services.calls, [])
+                self.assertEqual(hass.bus.events, [])
+
+    def test_store_failure_falls_back_to_live_speech(self):
+        hass = _FakeHass(states={self.HELPER: ""}, services_fail=True)
+        self._script_turn(text=_agent_core.OFFLINE_TEXT,
+                          kind=_agent_core.KIND_OFFLINE)
+        runtime = self._runtime()
+        with self.assertLogs("hs.conversation", level="WARNING") as logs:
+            result = asyncio.run(
+                self._agent(hass, runtime).async_process(self._input()))
+        self.assertEqual(result.response.speech, _agent_core.OFFLINE_TEXT)
+        self.assertIn("could not store line", "\n".join(logs.output))
+        self.assertEqual(hass.bus.events, [])
+        row = runtime["history"]["dev1"][-1]
+        self.assertEqual(row["spoken"], _agent_core.OFFLINE_TEXT)
+
+    def test_hub_refusal_warns_once_and_stores_try_again(self):
+        hass = _FakeHass(states={self.HELPER: ""})
+        self._script_turn(text="", kind=_agent_core.KIND_ESCALATE,
+                          escalate_text="what is on my calendar")
+
+        async def run_turn(**kwargs):
+            return {"kind": "error", "status": 401}
+        api = types.SimpleNamespace(run_turn=run_turn)
+        with self.assertLogs("hs.conversation", level="WARNING") as logs:
+            result = asyncio.run(
+                self._agent(hass, self._runtime(api=api)).async_process(
+                    self._input()))
+        joined = "\n".join(logs.output)
+        self.assertIn("http 401", joined)
+        self.assertEqual(result.response.speech, "")
+        self.assertEqual(hass.services.calls[0][2]["value"], "try_again")
 
 
 if __name__ == "__main__":

@@ -136,26 +136,34 @@ and which fixed sentence of this package it stands in for (`agent_core` and
 `hubapi` constants; a test fails when a new fixed sentence appears without a
 line). The texts stay under twelve words, calm, no jargon.
 
-Who says what: the component only DECIDES. When a turn ends on one of these
-codes and the asking satellite resolves to an `assist_satellite` entity, the
+Who says what: the component DECIDES and STORES. When a turn ends on one of
+these codes, the asking satellite resolves to an `assist_satellite` entity
+and the deployment's `input_text.helm_speaker_line` helper exists, the
 response carries an empty string — the voice pipeline then skips synthesis
-and ends cleanly — and a `helm_speaker_line` event names the code and that
-entity. The companion Home Assistant automation plays `<config>/www/<file>`
-with `assist_satellite.announce` when it sees processing hand to idle. The
-component never announces from inside its own turn: an announcement cancels
-the running pipeline, and a delayed one races the automation into double
-speech. Automation-side lines (`speech_down`, `stuck_try`) are decided there,
-not here — one probe each for hearing (:18950) and voice (:18960) tells
-"hearing down", "voice down" and "machine down" apart, and a satellite stuck
-in processing for twenty seconds gets its own line whose announcement cancels
+and ends cleanly — and the code is stored in that helper by a blocking
+service call before the turn returns. (Ordering matters: an event-triggered
+automation run is scheduled one loop tick *after* the state trigger that
+ends this turn, so letting an event store it would let the automation read
+an empty helper.) A `helm_speaker_line` event goes out too, for debugging
+only. The companion Home Assistant automation, watching processing hand to
+idle, takes the stored code and plays `<config>/www/<file>` with
+`assist_satellite.announce`. The component never announces from inside its
+own turn: an announcement cancels the running pipeline, and a delayed one
+races the automation into double speech. Automation-side lines
+(`did_not_catch_that`, `speech_down`, `stuck_try`) are decided there, not
+here — one probe each for hearing (:18950) and voice (:18960) tells
+"hearing down", "voice down" and "machine down" apart; a turn that ended
+with no stored code and both probes healthy stays quiet (that is what a
+spoken "never mind" or "cancel" should do); and a satellite stuck in
+processing for a full minute gets its own line whose announcement cancels
 the hung run.
 
-Fallback: no code (a live answer, a text or REST turn with no satellite, a
-wrong token... nothing special), no `assist_satellite` entity on the device,
-or a missing/unreadable json — the turn speaks its fixed sentence live by
-text-to-speech exactly as before this feature. History rows, benchmark stages
-and hub records keep the canonical sentence either way; only the pipeline's
-input goes blank when a file replaces it.
+Fallback: no code (a live answer, a text or REST turn with no satellite...),
+no `assist_satellite` entity on the device, no helper entity in this install
+or a store call that fails, or a missing/unreadable json — the turn speaks
+its fixed sentence live by text-to-speech exactly as before this feature.
+History rows, benchmark stages and hub records keep the canonical sentence
+either way; only the pipeline's input goes blank when a file replaces it.
 
 The one exact-match line (`helm_needs_updating`) compares the hub's answer to
 its "too old to answer by voice" sentence word for word — fragile by nature:
