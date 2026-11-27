@@ -20,6 +20,8 @@ use std::sync::Arc;
 /// Reads the stored value for a person (`None`: the install's own, or the home person's).
 pub type Load = dyn Fn(&Transaction<'_>, Option<&str>) -> Result<Value, String> + Send + Sync;
 /// Checks a whole new value, stores it, and answers what was stored.
+/// The card's own lines for a staged value, from the host's records.
+pub type CardFn = dyn Fn(&Transaction<'_>, &str, &Value) -> Vec<String> + Send + Sync;
 pub type Save =
     dyn Fn(&Transaction<'_>, Option<&str>, &Value) -> Result<Value, String> + Send + Sync;
 
@@ -34,6 +36,8 @@ pub struct JsonKey {
     save: Arc<Save>,
     restore: Option<Arc<Save>>,
     after: Option<Arc<dyn Fn() + Send + Sync>>,
+    card: Option<Arc<CardFn>>,
+    undoable: bool,
     per_person: bool,
     per_chat: bool,
     profile: Option<String>,
@@ -63,6 +67,8 @@ impl JsonKey {
             save: Arc::new(save),
             restore: None,
             after: None,
+            card: None,
+            undoable: true,
             per_person: false,
             per_chat: false,
             profile: None,
@@ -97,6 +103,22 @@ impl JsonKey {
     /// Each person has their own copy: the load and save closures get the profile id.
     pub fn per_person(mut self) -> Self {
         self.per_person = true;
+        self
+    }
+
+    /// The lines the Approve card shows for a staged change to this key, instead of the generic
+    /// before-and-after rows: what happens, written from the host's own records.
+    pub fn card(
+        mut self,
+        f: impl Fn(&Transaction<'_>, &str, &Value) -> Vec<String> + Send + Sync + 'static,
+    ) -> Self {
+        self.card = Some(Arc::new(f));
+        self
+    }
+
+    /// An approved change cannot be taken back: no Undo is filed, and the card says so.
+    pub fn without_undo(mut self) -> Self {
+        self.undoable = false;
         self
     }
 
@@ -203,6 +225,20 @@ impl SettingsExtension for JsonKey {
         let mut theirs = self.clone();
         theirs.profile = Some(profile.to_owned());
         Some(Arc::new(theirs))
+    }
+
+    fn undoable(&self, _key: &str) -> bool {
+        self.undoable
+    }
+
+    fn staged_card(
+        &self,
+        tx: &Transaction<'_>,
+        chat: &str,
+        _key: &str,
+        value: &Value,
+    ) -> Option<Vec<String>> {
+        self.card.as_ref().map(|f| f(tx, chat, value))
     }
 
     fn changed_event(&self, _key: &str) -> AppEvent {

@@ -119,6 +119,19 @@ fn bound(
     .unwrap_or_else(|| x.clone())
 }
 
+/// The person a change to `key` is for: the one the call named, when the key is one that belongs
+/// to a person; otherwise nobody (a setting that is no one's ignores `person`, and the ring does
+/// not record it).
+fn person_of_key<'a>(
+    tx: &Transaction<'_>,
+    ext: &SettingsExtensions,
+    key: &str,
+    person: Option<&'a str>,
+) -> Option<&'a str> {
+    let p = person?;
+    ext.owner(key)?.for_person(tx, p).map(|_| p)
+}
+
 /// The profile id a call's `person` names (a profile's id or its name), or `None` when the call
 /// names no one. Naming a person is how a call reaches that person's copy of a setting.
 fn named_person(tx: &Transaction<'_>, a: &Value) -> Result<Option<String>, String> {
@@ -144,27 +157,26 @@ fn named_person(tx: &Transaction<'_>, a: &Value) -> Result<Option<String>, Strin
         .ok_or_else(|| format!("No person called {who:?}: the profiles key lists them."))
 }
 
-/// The value at a dotted path, if there is one.
-fn at<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
-    path.split('.').try_fold(v, |v, k| v.get(k))
-}
-
-/// The staged part of `key` that `patch` would change: a field a chat stages rather than changes,
-/// named by the patch at a value other than the one it has now. Repeating a value is no change.
-fn touched_part(
+/// The staged part of `key` that this change would alter, decided from what the change *does*
+/// (its result, tried and rolled back), not from what the patch says: `null`, a reset and a
+/// merge all reach the same answer. A wrong value is the error the key's own check gives.
+pub fn touched_part(
     tx: &Transaction<'_>,
     x: &dyn SettingsExtension,
     key: &str,
     patch: &Value,
-) -> Option<StagedPart> {
-    if !patch.is_object() {
-        return None;
+) -> Result<Option<StagedPart>, String> {
+    let parts = x.staged_parts(key);
+    if parts.is_empty() {
+        return Ok(None);
     }
-    let now = x.read(tx, key);
-    x.staged_parts(key)
-        .iter()
-        .find(|p| at(patch, p.path).is_some_and(|new| Some(new) != at(&now, p.path)))
-        .copied()
+    tx.execute_batch("SAVEPOINT stage_check")
+        .map_err(|e| e.to_string())?;
+    let tried = x.check_approved(tx, key, patch);
+    tx.execute_batch("ROLLBACK TO stage_check; RELEASE stage_check")
+        .map_err(|e| e.to_string())?;
+    let (before, after) = tried?;
+    Ok(parts.iter().find(|p| p.staged_by(&before, &after)).copied())
 }
 
 /// What `app_get_settings` says about `credentials`: it holds no value, only the pages a chat can
@@ -189,7 +201,11 @@ fn get_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
         let person = named_person(tx, &a).map_err(rusqlite::Error::InvalidParameterName)?;
         let mut visible = direct_pref_keys();
         visible.extend(approval_pref_keys());
-        visible.extend(ext.keys());
+        visible.extend(
+            ext.keys()
+                .into_iter()
+                .filter(|k| ext.owner(k).is_none_or(|x| x.listed(k))),
+        );
         visible.push(CREDENTIALS_KEY);
         let wanted: Vec<String> = match a.get("keys").and_then(Value::as_array) {
             Some(k) => k
@@ -291,13 +307,14 @@ fn update_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
     for k in keys {
         let v = &changes[k];
         let r = db.write(|tx| {
+            let person = person_of_key(tx, &ext, k, person.as_deref());
             let (before, after) = match change_key(
                 tx,
                 &ext,
                 &rules,
                 Acting {
                     chat: &chat,
-                    person: person.as_deref(),
+                    person,
                 },
                 k,
                 v,
@@ -310,15 +327,7 @@ fn update_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
             if before == after {
                 return Ok(Ok((None, before, after)));
             }
-            let id = insert_change(
-                tx,
-                &chat,
-                person.as_deref(),
-                k,
-                before.as_ref(),
-                after.as_ref(),
-                now,
-            )?;
+            let id = insert_change(tx, &chat, person, k, before.as_ref(), after.as_ref(), now)?;
             Ok::<_, rusqlite::Error>(Ok((Some(id), before, after)))
         });
         match r {
@@ -429,9 +438,10 @@ fn change_key(
     let owner = ext.owner(key).map(|x| bound(tx, x, chat, person));
     match by {
         By::Chat => {
-            let touched = owner
-                .as_ref()
-                .and_then(|x| touched_part(tx, x.as_ref(), key, v));
+            let touched = match owner.as_ref() {
+                Some(x) => touched_part(tx, x.as_ref(), key, v)?,
+                None => None,
+            };
             if let Route::Stage { part, reason } = route(acc, touched.as_ref()) {
                 return Err(stage_message(key, part, reason));
             }
@@ -493,8 +503,13 @@ pub struct Approved {
     pub key: String,
     pub before: Option<Value>,
     pub after: Option<Value>,
-    /// The entry in the change list, where the user's Undo is; none when nothing changed.
+    /// The entry in the change list, where the user's Undo is; none when nothing changed, or when
+    /// the key cannot be undone.
     pub change_id: Option<i64>,
+    /// Whether anything changed.
+    pub changed: bool,
+    /// The card's own lines for this change, when its key has them.
+    pub card: Option<Vec<String>>,
 }
 
 /// Apply approved changes (settings that need approval) together: all or nothing, each recorded in the change
@@ -521,8 +536,12 @@ pub fn apply_approved(
         done.clear();
         for (key, v) in changes {
             let by = if commit { By::Approved } else { By::Check };
+            let who = person_of_key(tx, &ext, key, person);
+            let card = ext
+                .owner(key)
+                .and_then(|x| bound(tx, x, chat, who).staged_card(tx, chat, key, v));
             let (before, after) =
-                match change_key(tx, &ext, &rules, Acting { chat, person }, key, v, by) {
+                match change_key(tx, &ext, &rules, Acting { chat, person: who }, key, v, by) {
                     Ok(c) => c,
                     Err(why) => {
                         // The error rolls back what the earlier keys stored.
@@ -530,13 +549,15 @@ pub fn apply_approved(
                         return Err(rusqlite::Error::StatementChangedRows(1));
                     }
                 };
-            let change_id = if before == after {
+            let changed = before != after;
+            let undoable = ext.owner(key).is_none_or(|x| x.undoable(key));
+            let change_id = if !changed || !undoable {
                 None
             } else {
                 Some(insert_change(
                     tx,
                     chat,
-                    person,
+                    who,
                     key,
                     before.as_ref(),
                     after.as_ref(),
@@ -548,6 +569,8 @@ pub fn apply_approved(
                 before,
                 after,
                 change_id,
+                changed,
+                card,
             });
         }
         if commit {
@@ -575,7 +598,7 @@ fn announce(
     chat: &str,
     done: &[Approved],
 ) {
-    let changed: Vec<&Approved> = done.iter().filter(|a| a.change_id.is_some()).collect();
+    let changed: Vec<&Approved> = done.iter().filter(|a| a.changed).collect();
     let prefs_changed: Map<String, Value> = changed
         .iter()
         .filter(|a| ext.owner(&a.key).is_none())
@@ -592,8 +615,10 @@ fn announce(
             rule.after_commit(a.after.as_ref());
         }
     }
-    if !changed.is_empty() {
-        let list: Vec<Value> = changed
+    // The notice with Undo lists only what Undo can take back.
+    let undoable: Vec<&&Approved> = changed.iter().filter(|a| a.change_id.is_some()).collect();
+    if !undoable.is_empty() {
+        let list: Vec<Value> = undoable
             .iter()
             .map(|a| {
                 json!({"changeId": a.change_id, "key": a.key, "before": a.before, "after": a.after})
@@ -753,11 +778,21 @@ pub(crate) fn undo(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                 }
             }
             for (_, key, _, after, chat, person) in &plan {
-                let now = match ext.owner(key) {
-                    Some(x) => Some(bound(tx, x, chat, person.as_deref()).read(tx, key)),
-                    None => prefs::read(tx, key),
+                let wanted: Option<Value> =
+                    after.as_ref().and_then(|a| serde_json::from_str(a).ok());
+                let same = match ext.owner(key) {
+                    Some(x) => {
+                        let x = bound(tx, x, chat, person.as_deref());
+                        match &wanted {
+                            Some(w) => x
+                                .unchanged_since(tx, key, w)
+                                .unwrap_or_else(|| Some(x.read(tx, key)) == wanted),
+                            None => false,
+                        }
+                    }
+                    None => prefs::read(tx, key) == wanted,
                 };
-                if now != after.as_ref().and_then(|a| serde_json::from_str(a).ok()) {
+                if !same {
                     return Ok(Err(ApiError::conflict(format!(
                         "{key} has changed since; nothing was undone."
                     ))));

@@ -1,8 +1,12 @@
 //! Settings → Orchestrator for chats: the `orchestrator` key of `app_get_settings` and
 //! `app_update_settings`.
 //!
-//! A chat reads every field and changes any of them itself, with the Undo notice; there is no
-//! part of the key it must leave alone.
+//! A chat reads every field and changes `newChats`, each stage's agent and the rest of the record
+//! itself, with the Undo notice. The fields that decide what may land or go on without the user
+//! (the landing guard and the dispatch gate, who signs a plan off, merge as the default, the
+//! protected branches, a stage turned off or a lower bar, more rounds) are staged when a change
+//! loosens them (`app_stage_settings`), the same as the workflow itself says only the user can
+//! lift them; tightening one is the chat's own.
 //!
 //! An update names only the fields to change. Objects merge field by field; a list or a value
 //! replaces the old one. The merged result goes through the same strict validation as the
@@ -20,6 +24,56 @@ use std::sync::Arc;
 pub const KEY: &str = "orchestrator";
 
 pub struct OrchestratorSettings;
+
+fn signs_off_by_review(_before: &Value, after: &Value) -> bool {
+    after.as_str() == Some("review")
+}
+
+fn merges_by_default(_before: &Value, after: &Value) -> bool {
+    after.as_str() == Some("merge")
+}
+
+fn not_required(_before: &Value, after: &Value) -> bool {
+    after.as_str() != Some("required")
+}
+
+/// The gates a chat in a task must not lift for itself.
+const GATES: &[StagedPart] = &[
+    StagedPart::loosening(
+        "landingGuard",
+        "The landing guard stops pushes and merges in a task, so you approve switching it off.",
+        helm_hosttools::turns_off,
+    ),
+    StagedPart::loosening(
+        "dispatchGate",
+        "The dispatch gate holds agent spawns to their stage's gate, so you approve switching it off.",
+        helm_hosttools::turns_off,
+    ),
+    StagedPart::loosening(
+        "planSignOff",
+        "Who signs a plan off decides what is built, so you approve letting the review alone do it.",
+        signs_off_by_review,
+    ),
+    StagedPart::loosening(
+        "landing.default",
+        "Merge as the default lets work land without your look, so you approve it.",
+        merges_by_default,
+    ),
+    StagedPart::new(
+        "landing.protectedBranches",
+        "The protected branches are where a landing may not go, so you approve changing them.",
+    ),
+    StagedPart::loosening(
+        "stages.*.use",
+        "A stage that is turned down or off lets work pass without it, so you approve it.",
+        not_required,
+    ),
+    StagedPart::loosening(
+        "stages.*.maxRounds",
+        "More rounds than the cap lets a loop run on, so you approve raising it.",
+        helm_hosttools::grows,
+    ),
+];
 
 /// The extension to register as a [`helm_hosttools::SettingsExtensions`] entry.
 pub fn extension() -> Arc<dyn SettingsExtension> {
@@ -70,7 +124,7 @@ fn options() -> Value {
     let uses = word(&["required", "auto", "off"]);
     json!({
         "type": "object",
-        "about": "Settings > Orchestrator: the staged workflow (plan, review, build, review, clean up, smoke test) and how its work lands. Read all of it and change any field. Send only the fields to change: objects merge field by field, lists replace. null restores every field to its default.",
+        "about": "Settings > Orchestrator: the staged workflow (plan, review, build, review, clean up, smoke test) and how its work lands. Read all of it and change any field. Send only the fields to change: objects merge field by field, lists replace. null restores every field to its default. A change that loosens a gate (landingGuard or dispatchGate off, planSignOff \"review\", landing.default \"merge\", a different landing.protectedBranches, a stage turned down or off, a higher maxRounds) is not applied here: the answer is the app_stage_settings call, and the user approves it. Everything else, including newChats and each stage's agent, you change yourself.",
         "default": as_json(&WorkflowSettings::default()),
         "merge": true,
         "fields": {
@@ -124,7 +178,7 @@ impl SettingsExtension for OrchestratorSettings {
     }
 
     fn staged_parts(&self, _key: &str) -> &'static [StagedPart] {
-        &[]
+        GATES
     }
 
     fn read(&self, tx: &Transaction<'_>, _key: &str) -> Value {
@@ -209,9 +263,48 @@ mod tests {
         assert!(OrchestratorSettings.describe("theme").is_none());
     }
 
+    /// The gates that loosen are staged, and only in the loosening direction; the rest is the
+    /// chat's own.
     #[test]
-    fn no_part_of_the_key_is_held_back() {
-        assert!(OrchestratorSettings.staged_parts(KEY).is_empty());
+    fn only_the_moves_that_loosen_a_gate_are_staged() {
+        let base = as_json(&WorkflowSettings::default());
+        let staged = |patch: Value| {
+            let mut after = base.clone();
+            merge(&mut after, &patch);
+            let after = as_json(&settings::validate(after).unwrap());
+            OrchestratorSettings
+                .staged_parts(KEY)
+                .iter()
+                .find(|p| p.staged_by(&base, &after))
+                .map(|p| p.path)
+        };
+        for (patch, part) in [
+            (json!({"landingGuard": false}), Some("landingGuard")),
+            (json!({"dispatchGate": false}), Some("dispatchGate")),
+            (json!({"planSignOff": "review"}), None), // already the default
+            (
+                json!({"landing": {"default": "merge"}}),
+                Some("landing.default"),
+            ),
+            (
+                json!({"landing": {"protectedBranches": ["main"]}}),
+                Some("landing.protectedBranches"),
+            ),
+            (
+                json!({"stages": {"review": {"use": "off"}}}),
+                Some("stages.*.use"),
+            ),
+            (
+                json!({"stages": {"review": {"maxRounds": 9}}}),
+                Some("stages.*.maxRounds"),
+            ),
+            (json!({"stages": {"review": {"maxRounds": 1}}}), None),
+            (json!({"newChats": "never"}), None),
+            (json!({"stages": {"review": {"agent": "other"}}}), None),
+            (json!({"moveFast": true}), None),
+        ] {
+            assert_eq!(staged(patch.clone()), part, "{patch}");
+        }
     }
 
     #[test]

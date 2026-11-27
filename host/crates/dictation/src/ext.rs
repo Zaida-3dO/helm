@@ -1,8 +1,9 @@
 //! Dictation as a key of `app_get_settings` and `app_update_settings`: `dictation`.
 //!
-//! Where a recording of the user's voice is sent decides who hears it, so a chat reads the
-//! setting and stages a change (`app_stage_settings`) for the user to approve; it never applies
-//! it directly. The value is
+//! A chat reads the setting and changes the model, language and mode itself, with the Undo
+//! notice. Where a recording of the user's voice is sent decides who hears it, so the address
+//! (`sttUrl`) and the switch that lets it be a private-network one (`allowPrivateNetwork`) are
+//! staged (`app_stage_settings`) for the user to approve. The value is
 //! `{sttUrl, allowPrivateNetwork, model, language, mode}`; a staged value names only the fields to
 //! change, and the result passes the same address rule as the Settings page.
 
@@ -16,6 +17,19 @@ use std::sync::Arc;
 pub const KEY: &str = "dictation";
 
 struct DictationKey;
+
+/// Where the voice goes: the address (any change) and whether a private network may be one.
+const STAGED: &[StagedPart] = &[
+    StagedPart::new(
+        "sttUrl",
+        "Where a recording of your voice is sent decides who hears it, so you approve the address.",
+    ),
+    StagedPart::loosening(
+        "allowPrivateNetwork",
+        "A speech server on your network can then be chosen, so you approve turning it on.",
+        helm_hosttools::turns_on,
+    ),
+];
 
 /// The extension to register as a [`helm_hosttools::SettingsExtensions`] entry.
 pub fn settings_extension() -> Arc<dyn SettingsExtension> {
@@ -107,7 +121,7 @@ fn put(tx: &Transaction<'_>, value: &Value) -> Result<(Value, Value), String> {
 
 impl SettingsExtension for DictationKey {
     fn staged_parts(&self, _key: &str) -> &'static [StagedPart] {
-        &[]
+        STAGED
     }
 
     fn keys(&self) -> Vec<&'static str> {

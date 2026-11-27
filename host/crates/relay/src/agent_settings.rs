@@ -297,7 +297,12 @@ impl TelegramPolicy {
     /// `relay/` is still read until it moves there, and a fresh PC writes the new place.
     fn policy_path(&self, tx: &Transaction<'_>) -> PathBuf {
         if let Some(who) = &self.profile {
-            return crate::people::telegram_paths(&self.dir, who).policy;
+            return older_for_home(
+                tx,
+                who,
+                crate::people::telegram_paths(&self.dir, who).policy,
+                telegram::policy_path(&self.dir),
+            );
         }
         let per = helm_profiles::store::home(tx)
             .ok()
@@ -313,6 +318,21 @@ impl TelegramPolicy {
         } else {
             per
         }
+    }
+}
+
+/// The policy file of the person `who`. For the home person it is the older single-person file
+/// while that has not moved into the person's folder yet, so a first change keeps the policy the
+/// user already had instead of starting from the defaults beside it.
+fn older_for_home(tx: &Transaction<'_>, who: &str, per: PathBuf, legacy: PathBuf) -> PathBuf {
+    let is_home = helm_profiles::store::home(tx)
+        .ok()
+        .flatten()
+        .is_some_and(|h| h.id == who);
+    if is_home && !per.is_file() && legacy.is_file() {
+        legacy
+    } else {
+        per
     }
 }
 
@@ -477,7 +497,12 @@ impl VoicePolicy {
     /// until it moves there.
     fn voice_path(&self, tx: &Transaction<'_>) -> PathBuf {
         if let Some(who) = &self.profile {
-            return crate::people::voice_paths(&self.dir, who).policy;
+            return older_for_home(
+                tx,
+                who,
+                crate::people::voice_paths(&self.dir, who).policy,
+                voice::policy_path(&self.dir),
+            );
         }
         let per = helm_profiles::store::home(tx)
             .ok()

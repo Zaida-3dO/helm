@@ -661,6 +661,8 @@ mod tests {
             helm_dictation::ext::settings_extension(),
             helm_projects::repo_undo::settings_extension(&dir),
             helm_skills::undo::settings_extension(&dir),
+            helm_afk::settings_key::settings_extension_with(|| {}),
+            helm_gatekeeper::settings_key::settings_extension(),
         ];
         let mut ext_keys: Vec<&str> = exts.iter().flat_map(|x| x.keys()).collect();
         // The extensions that need a live service to build: their keys by name.
@@ -670,8 +672,9 @@ mod tests {
             helm_relay::hub_view::KEY,
             helm_gatekeeper::wmode_ext::KEY,
             "webSearchInClaudeChats",
-            helm_afk::settings_key::KEY,
-            helm_gatekeeper::settings_key::KEY,
+            helm_mcp::settings_key::KEY,
+            helm_projects::fields::KEY,
+            helm_profiles::chat_fields::KEY,
             helm_actions::settings_extension().keys()[0],
             helm_devices::settings_key::settings_extension().keys()[0],
             helm_panel::settings_key::CONTEXT_KEY,
@@ -701,6 +704,18 @@ mod tests {
                 }
             }
         }
+        // The honest count of what needs the user's click: the keys that always do, the parts of
+        // Direct keys that do, and the hub pairing. It stays short on purpose: raising the cap
+        // is a decision, and the commit that does it says why.
+        let parts: usize = exts
+            .iter()
+            .flat_map(|x| x.keys().into_iter().map(move |k| x.staged_parts(k).len()))
+            .sum();
+        let keys = approval_keys().len();
+        assert!(
+            keys + parts < helm_hosttools::settings_allow::MAX_APPROVALS,
+            "{keys} keys + {parts} parts + the hub pairing is over the cap"
+        );
         // A named key an extension owns, or one of the two that stage without a value.
         for (k, a) in NAMED {
             let special = *k == helm_hosttools::settings_allow::CREDENTIALS_KEY;
@@ -720,6 +735,165 @@ mod tests {
                 "{k} needs approval but cannot be staged"
             );
         }
+    }
+
+    /// A reset (`null`) of a key that has staged parts goes the way the move goes: it is staged
+    /// when it takes a part where that part is staged, and a chat's own when it only tightens.
+    /// Every key with staged parts has rows: a gate cannot be put back to its default (looser)
+    /// state with a bare `null`.
+    #[test]
+    fn a_reset_of_a_key_with_staged_parts_is_staged_when_it_loosens_one() {
+        use helm_hosttools::SettingsExtension;
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("helm-reset-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut m = MigrationRegistry::new();
+        registrations::migrations(&mut m);
+        let db = Arc::new(Database::open(&dir.join("t.sqlite3"), &m).unwrap());
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO projects (id, name, created_at) VALUES ('pr', 'P', 1)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO chats (id, project_id, created_at, updated_at) VALUES ('chat-1', 'pr', 1, 1)",
+                [],
+            )?;
+            Ok::<_, helm_profiles::store::ProfileError>(helm_profiles::store::ensure_home(tx, 1)?.id)
+        })
+        .unwrap();
+        let workflow = helm_workflow::settings_extension();
+        let relay = helm_relay::settings_extension(&dir);
+        let dictation = helm_dictation::ext::settings_extension();
+        let afk = helm_afk::settings_key::settings_extension_with(|| {});
+        let gate = helm_gatekeeper::settings_key::settings_extension();
+        // (extension, key, a state a reset would move, the part that reset stages if any)
+        type Row<'a> = (
+            &'a Arc<dyn SettingsExtension>,
+            &'a str,
+            Value,
+            Option<&'a str>,
+        );
+        let rows: Vec<Row> = vec![
+            (
+                &gate,
+                "gatekeeper",
+                json!({"enabled": false}),
+                Some("enabled"),
+            ),
+            (
+                &gate,
+                "gatekeeper",
+                json!({"askFrequency": "more"}),
+                Some("askFrequency"),
+            ),
+            (
+                &gate,
+                "gatekeeper",
+                json!({"policy": "Ask me first."}),
+                Some("policy"),
+            ),
+            // Back to "defer" only tightens.
+            (&afk, "afk", json!({"planApproval": "approve"}), None),
+            (
+                &dictation,
+                "dictation",
+                json!({"sttUrl": "http://127.0.0.1:8000"}),
+                Some("sttUrl"),
+            ),
+            (
+                &dictation,
+                "dictation",
+                json!({"allowPrivateNetwork": true}),
+                None,
+            ),
+            // A bare null on telegram only unsets the model and effort: the two switches stay.
+            (&relay, "telegram", json!({"approvals": true}), None),
+            (&relay, "telegram", json!({"remoteAnswers": true}), None),
+            (
+                &workflow,
+                "orchestrator",
+                json!({"planSignOff": "me"}),
+                Some("planSignOff"),
+            ),
+            (
+                &workflow,
+                "orchestrator",
+                json!({"stages": {"smoketest": {"use": "required"}}}),
+                Some("stages.*.use"),
+            ),
+            (
+                &workflow,
+                "orchestrator",
+                json!({"stages": {"review": {"maxRounds": 1}}}),
+                Some("stages.*.maxRounds"),
+            ),
+            (
+                &workflow,
+                "orchestrator",
+                json!({"landing": {"protectedBranches": ["main"]}}),
+                Some("landing.protectedBranches"),
+            ),
+            // The defaults of these are the stricter side: a reset only tightens.
+            (
+                &workflow,
+                "orchestrator",
+                json!({"landing": {"default": "merge"}}),
+                None,
+            ),
+            (
+                &workflow,
+                "orchestrator",
+                json!({"landingGuard": false}),
+                None,
+            ),
+            (
+                &workflow,
+                "orchestrator",
+                json!({"dispatchGate": false}),
+                None,
+            ),
+        ];
+        let mut covered = std::collections::BTreeSet::new();
+        for (x, key, setup, staged) in rows {
+            // The person's own copy where the key is a person's (the chat's), else the key itself.
+            let target = db
+                .snapshot(|tx| Ok::<_, rusqlite::Error>(x.for_chat(tx, "chat-1")))
+                .unwrap()
+                .unwrap_or_else(|| x.clone());
+            db.write(|tx| Ok::<_, rusqlite::Error>(target.apply(tx, key, &setup)))
+                .unwrap()
+                .unwrap_or_else(|e| panic!("{key} {setup}: {e}"));
+            let got = db
+                .write(|tx| {
+                    Ok::<_, rusqlite::Error>(helm_hosttools::settings::touched_part(
+                        tx,
+                        &*target,
+                        key,
+                        &Value::Null,
+                    ))
+                })
+                .unwrap()
+                .unwrap_or_else(|e| panic!("{key} {setup}: {e}"));
+            assert_eq!(got.map(|p| p.path), staged, "{key} reset after {setup}");
+            // Put the key back, so the next row starts from the defaults.
+            db.write(|tx| Ok::<_, rusqlite::Error>(target.apply(tx, key, &Value::Null)))
+                .unwrap()
+                .unwrap_or_else(|e| panic!("{key} reset: {e}"));
+            covered.insert(key);
+        }
+        // Every key that has staged parts is in the table.
+        for x in [&workflow, &relay, &dictation, &afk, &gate] {
+            for k in x.keys() {
+                if !x.staged_parts(k).is_empty() {
+                    assert!(
+                        covered.contains(k),
+                        "{k} has staged parts and no reset rows"
+                    );
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The settings the Settings pages keep in their own tables are reachable by a chat: each key

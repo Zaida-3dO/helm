@@ -24,9 +24,10 @@ use crate::settings_ext::StagedPart;
 use helm_core::prefs::classes::{classify, PrefClass, CLASSIFIED};
 pub use helm_core::prefs::Access;
 
-/// The most settings that may need approval, preference keys and named ones together. Raising
-/// it is a decision, and the commit says why.
-pub const MAX_APPROVAL_KEYS: usize = 11;
+/// The most things that may need the user's click: the keys that always do (preference keys and
+/// named ones), the parts of Direct keys that do (declared by their extensions), and the hub
+/// pairing, counted together. Raising it is a decision, and the commit says why.
+pub const MAX_APPROVALS: usize = 26;
 
 /// The key a chat stages to ask the user to type a secret. It carries no secret: only which
 /// credential, and Approve opens the Settings page where the user types it.
@@ -66,6 +67,8 @@ pub const NAMED: &[(&str, Access)] = &[
     ("subagentHardStop", Access::Direct),
     // Settings in a crate's own table.
     ("usageGovernor", Access::Direct),
+    ("dictation", Access::Direct),
+    ("browserServer", Access::Direct),
     ("afk", Access::Direct),
     ("gatekeeper", Access::Direct),
     ("actionButtons", Access::Direct),
@@ -74,6 +77,8 @@ pub const NAMED: &[(&str, Access)] = &[
     ("worktrees", Access::Direct),
     ("profiles", Access::Direct),
     ("deviceName", Access::Direct),
+    ("projectFields", Access::Direct),
+    ("chatFields", Access::Direct),
     // The few a chat stages for the user to approve.
     (
         "workmode",
@@ -86,12 +91,6 @@ pub const NAMED: &[(&str, Access)] = &[
     (
         "claudeExecutable",
         Access::approval("Helm would run this program as Claude Code, so you approve it."),
-    ),
-    (
-        "dictation",
-        Access::approval(
-            "Where a recording of your voice is sent decides who hears it, so you approve it.",
-        ),
     ),
     (
         "localServers",
@@ -231,6 +230,9 @@ pub fn direct_message(key: &str) -> String {
 /// What a chat is told for a name that is no setting at all (a typo, or an internal row).
 pub fn not_a_setting(key: &str) -> String {
     let shown: String = key.chars().take(64).collect();
+    if key == "workingMode" {
+        return "workingMode is kept behind the workmode key: read and stage workmode ({app: run or check_in}, or {board: {id, mode}}).".to_owned();
+    }
     format!("{shown} is not a Helm setting: app_get_settings lists the ones that exist.")
 }
 
@@ -258,6 +260,13 @@ pub(crate) const DEAD_ENDS: &[&str] = &[
     "set by the user in settings",
     "are theirs to do",
     "the user removes the rest",
+    "user-only",
+    "only the user can",
+    "only the user may",
+    "is the user's to",
+    "is the user's, in settings",
+    "only for a chat you created",
+    "only a chat you created",
 ];
 
 #[cfg(test)]
@@ -332,7 +341,7 @@ mod tests {
     #[test]
     fn the_approval_list_is_short_and_each_entry_says_why() {
         let keys = approval_keys();
-        assert!(keys.len() <= MAX_APPROVAL_KEYS, "{keys:?}");
+        assert!(keys.len() < MAX_APPROVALS, "{keys:?}");
         for k in &keys {
             assert!(
                 reason(k).is_some_and(|w| !w.is_empty() && w.ends_with('.')),
@@ -343,7 +352,6 @@ mod tests {
             "agentSettingsAll",
             "workmode",
             "skipPermissions",
-            "dictation",
             "credentials",
         ] {
             assert!(keys.contains(&must), "{must}");
@@ -455,7 +463,19 @@ mod tests {
             } else {
                 raw
             };
-            let low = text.to_lowercase();
+            // Comments are for readers of the code, not for chats: only text that can be said to
+            // a chat is scanned. A stop for a blocker is how a chat is told to work, not a setting
+            // it is turned away from.
+            let low = text
+                .lines()
+                .filter(|l| {
+                    let t = l.trim_start();
+                    !(t.starts_with("//") || t.starts_with("/*") || t.starts_with('*'))
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                .to_lowercase()
+                .replace("blocker only the user can", "");
             for dead in DEAD_ENDS {
                 if low.contains(dead) {
                     found.push(format!("{}: {dead}", f.display()));

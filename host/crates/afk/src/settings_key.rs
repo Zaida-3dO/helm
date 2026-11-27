@@ -7,14 +7,19 @@
 use crate::service::AfkService;
 use crate::{settings, store};
 use helm_hosttools::{JsonKey, SettingsExtension, StagedPart};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::sync::Arc;
 
 pub const KEY: &str = "afk";
 
-const STAGED: &[StagedPart] = &[StagedPart::new(
+fn approves_plans(_before: &Value, after: &Value) -> bool {
+    after.as_str() == Some("approve")
+}
+
+const STAGED: &[StagedPart] = &[StagedPart::loosening(
     "planApproval",
     "While you are away Helm would sign plans off for you, so you approve turning that on.",
+    approves_plans,
 )];
 
 /// The extension to register as a [`helm_hosttools::SettingsExtensions`] entry.

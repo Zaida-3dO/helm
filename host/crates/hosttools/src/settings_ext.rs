@@ -17,16 +17,22 @@ use serde_json::Value;
 use std::sync::Arc;
 
 /// A part of an otherwise directly changeable key that a chat stages for the user to approve
-/// instead of changing: a dotted path into the key's value, and the one line of why. The tools
-/// stage a change that would alter it; the approved change is applied like any other.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// instead of changing: a dotted path into the key's value (a `*` stands for any one name), and
+/// the one line of why. The tools stage a change whose *result* alters it, whatever the patch
+/// said (so `null` and a reset are no way round): `loosens`, when there is one, narrows that to
+/// the moves that give a gate up, so tightening one is the chat's own to do.
+#[derive(Clone, Copy, Debug)]
 pub struct StagedPart {
     pub path: &'static str,
     pub reason: &'static str,
+    /// Whether a move from the first value to the second is the one that needs approval; `None`
+    /// means any change does. A missing value is `null`.
+    pub loosens: Option<fn(&Value, &Value) -> bool>,
 }
 
 impl StagedPart {
-    /// A part with its reason. In a `const`, an empty path or reason is a compile error.
+    /// A part any change to which is staged. In a `const`, an empty path or reason is a compile
+    /// error.
     pub const fn new(path: &'static str, reason: &'static str) -> Self {
         assert!(!path.is_empty(), "a staged part needs its path");
         assert!(
@@ -37,8 +43,91 @@ impl StagedPart {
             reason.len() <= helm_core::prefs::Access::MAX_REASON,
             "the reason must fit on one line of the card"
         );
-        Self { path, reason }
+        Self {
+            path,
+            reason,
+            loosens: None,
+        }
     }
+
+    /// A part only the moves `loosens` calls for are staged: tightening it is the chat's own.
+    pub const fn loosening(
+        path: &'static str,
+        reason: &'static str,
+        loosens: fn(&Value, &Value) -> bool,
+    ) -> Self {
+        let mut p = Self::new(path, reason);
+        p.loosens = Some(loosens);
+        p
+    }
+
+    /// Whether the move from `before` to `after` (whole values of the key) is one this part
+    /// stages.
+    pub fn staged_by(&self, before: &Value, after: &Value) -> bool {
+        let mut paths = matching(before, self.path);
+        for (p, _) in matching(after, self.path) {
+            if !paths.iter().any(|(q, _)| *q == p) {
+                paths.push((p, &Value::Null));
+            }
+        }
+        paths.iter().any(|(p, _)| {
+            let (b, a) = (at(before, p), at(after, p));
+            b != a
+                && self
+                    .loosens
+                    .is_none_or(|f| f(b.unwrap_or(&Value::Null), a.unwrap_or(&Value::Null)))
+        })
+    }
+}
+
+/// A move that switches something on (to `true`).
+pub fn turns_on(_before: &Value, after: &Value) -> bool {
+    after == &Value::Bool(true)
+}
+
+/// A move that switches something off (to `false` or away).
+pub fn turns_off(before: &Value, after: &Value) -> bool {
+    before != &Value::Bool(false) && after == &Value::Bool(false)
+}
+
+/// A move to a larger number.
+pub fn grows(before: &Value, after: &Value) -> bool {
+    match (before.as_f64(), after.as_f64()) {
+        (Some(b), Some(a)) => a > b,
+        (None, Some(_)) => true,
+        _ => false,
+    }
+}
+
+/// The value at a dotted path, if there is one.
+pub fn at<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
+    path.split('.').try_fold(v, |v, k| v.get(k))
+}
+
+/// Every concrete dotted path in `v` that `pattern` stands for, with its value.
+fn matching<'a>(v: &'a Value, pattern: &str) -> Vec<(String, &'a Value)> {
+    let mut out: Vec<(String, &Value)> = vec![(String::new(), v)];
+    for seg in pattern.split('.') {
+        let mut next = Vec::new();
+        for (path, node) in out {
+            let join = |k: &str| {
+                if path.is_empty() {
+                    k.to_owned()
+                } else {
+                    format!("{path}.{k}")
+                }
+            };
+            if seg == "*" {
+                if let Some(o) = node.as_object() {
+                    next.extend(o.iter().map(|(k, c)| (join(k), c)));
+                }
+            } else if let Some(c) = node.get(seg) {
+                next.push((join(seg), c));
+            }
+        }
+        out = next;
+    }
+    out
 }
 
 pub trait SettingsExtension: Send + Sync {
@@ -98,6 +187,37 @@ pub trait SettingsExtension: Send + Sync {
         _tx: &Transaction<'_>,
         _profile: &str,
     ) -> Option<Arc<dyn SettingsExtension>> {
+        None
+    }
+
+    /// Whether the key is listed beside the settings (`false` for a key that only carries Undo
+    /// for a change another tool made).
+    fn listed(&self, _key: &str) -> bool {
+        true
+    }
+
+    /// Whether an approved change to this key can be taken back with Undo. A key that cannot
+    /// says so here, and the card says "no Undo" instead of offering a button that fails.
+    fn undoable(&self, _key: &str) -> bool {
+        true
+    }
+
+    /// The card's own lines for a staged `value`, when the generic before-and-after rows would
+    /// not say what happens (for example which profile goes, and how many chats move). Built from
+    /// the host's records, never from the chat's words.
+    fn staged_card(
+        &self,
+        _tx: &Transaction<'_>,
+        _chat: &str,
+        _key: &str,
+        _value: &Value,
+    ) -> Option<Vec<String>> {
+        None
+    }
+
+    /// Whether the key is still as `after` left it, for Undo, when comparing the whole of `read`
+    /// is the wrong test (a key that is a projection of many records). `None`: compare `read`.
+    fn unchanged_since(&self, _tx: &Transaction<'_>, _key: &str, _after: &Value) -> Option<bool> {
         None
     }
 

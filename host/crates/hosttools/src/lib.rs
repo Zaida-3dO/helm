@@ -58,7 +58,10 @@ pub use registry::{
     CallOrigin, Changed, HostToolRegistry, OpInvoker, RegisteredTool, ToolCtx, ToolError,
     ToolFuture, ToolHandler, ToolResult,
 };
-pub use settings_ext::{PrefRule, PrefRules, SettingsExtension, SettingsExtensions, StagedPart};
+pub use settings_ext::{
+    grows, turns_off, turns_on, PrefRule, PrefRules, SettingsExtension, SettingsExtensions,
+    StagedPart,
+};
 pub use settings_json::JsonKey;
 pub use spec::{
     Availability, CatalogueEntry, Condition, LaunchKeys, McpChatProblem, McpChatProblems,

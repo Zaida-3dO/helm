@@ -180,6 +180,9 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
     // How chats work (run to completion or check in): kept here, changed through the `workmode`
     // key, which also covers a board's own mode.
     ("workingMode", Internal),
+    // Which profiles load the signed-in browser server ({profileId: true or false}); changed
+    // through the `browserServer` key.
+    ("browserProfiles", Internal),
 ];
 
 /// Dynamic keys under fixed prefixes: all internal.
@@ -269,7 +272,7 @@ mod tests {
         let count =
             |want: fn(&PrefClass) -> bool| CLASSIFIED.iter().filter(|(_, c)| want(c)).count();
         assert_eq!(count(|c| matches!(c, Setting(Access::Approval(_)))), 3);
-        assert_eq!(count(|c| *c == Internal), 5);
+        assert_eq!(count(|c| *c == Internal), 6);
         for (k, c) in CLASSIFIED {
             if let Setting(Access::Approval(why)) = c {
                 assert!(why.ends_with('.') && why.len() <= Access::MAX_REASON, "{k}");

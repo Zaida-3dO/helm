@@ -1,26 +1,39 @@
 //! The question gatekeeper as the `gatekeeper` key of `app_get_settings` and
 //! `app_update_settings`: each person's own record, the one Settings > Gatekeeper shows.
 //!
-//! A chat changes the model itself, with the Undo notice. `enabled`, `askFrequency` and `policy`
-//! decide when Helm answers a chat's question for the user, so a chat stages them and the user
-//! approves.
+//! A chat changes the model, and anything that makes the gatekeeper answer less to the user,
+//! itself, with the Undo notice. Turning it on, asking less often and a new policy decide when
+//! Helm answers a chat's question for the user, so a chat stages those and the user approves.
 
 use crate::settings::{parse_strict, GateSettings};
 use crate::store;
 use helm_hosttools::{JsonKey, SettingsExtension, StagedPart};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::sync::Arc;
 
 pub const KEY: &str = "gatekeeper";
 
+fn asks_less(before: &Value, after: &Value) -> bool {
+    let rank = |v: &Value| match v.as_str() {
+        Some("less") => 0,
+        Some("more") => 2,
+        _ => 1,
+    };
+    rank(after) < rank(before)
+}
+
+/// What decides when the gatekeeper answers for the user is staged when it moves toward answering
+/// more: turned on, asking less often, or a new policy. The other way is the chat's own.
 const STAGED: &[StagedPart] = &[
-    StagedPart::new(
+    StagedPart::loosening(
         "enabled",
-        "The gatekeeper answers chats' questions for you, so you approve turning it on or off.",
+        "Turning the gatekeeper on lets it answer chats' questions for you, so you approve it.",
+        helm_hosttools::turns_on,
     ),
-    StagedPart::new(
+    StagedPart::loosening(
         "askFrequency",
-        "How often the gatekeeper asks you instead of answering decides what it settles alone, so you approve it.",
+        "Asking you less often means it settles more alone, so you approve it.",
+        asks_less,
     ),
     StagedPart::new(
         "policy",

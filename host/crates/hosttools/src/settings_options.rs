@@ -446,7 +446,7 @@ fn table() -> Vec<Entry> {
                 ("bubble", &BOOL),
             ]),
             default: null,
-            about: "The desktop pet, a small companion on the desktop that reacts to the user's chats: enabled shows it (off by default), kind is puffin, crab or lantern, size is s, m or l, bubble turns its speech bubble on or off. Send only the fields to change: the others keep their values. Where the pet sits is the user's to move and cannot be set here. The pet rests under the quiet motion level and when motion is reduced.",
+            about: "The desktop pet, a small companion on the desktop that reacts to the user's chats: enabled shows it (off by default), kind is puffin, crab or lantern, size is s, m or l, bubble turns its speech bubble on or off. Send only the fields to change: the others keep their values. Where the pet sits is not stored as a setting: it is wherever the user drags it. The pet rests under the quiet motion level and when motion is reduced.",
         },
         Entry {
             key: "projectsMode",
