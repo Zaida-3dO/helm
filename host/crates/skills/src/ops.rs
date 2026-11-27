@@ -518,6 +518,7 @@ fn knowledge_rules_preview(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
         project_id: None,
         cwd: a.folder.clone().filter(|f| !f.trim().is_empty()),
         orchestrating: a.kind.as_deref() == Some("orchestrating"),
+        household: a.kind.as_deref() == Some("household"),
     };
     let mut facts = triggers::Facts::of(&who, None);
     if let Some(k) = a.kind.as_deref().and_then(triggers::ChatKind::parse) {

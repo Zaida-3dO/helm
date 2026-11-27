@@ -50,6 +50,10 @@ pub struct ChatKnowledge {
     /// True when the Orchestrator is in effect for this chat; the app decides, since only it can
     /// load that setting.
     pub orchestrating: bool,
+    /// True when the chat came in through a channel (phone, speaker) or runs directly on the home
+    /// folder: its kind is household whatever folder it works in, so a house chat pointed at a
+    /// git tree keeps its household rules. The app decides; the plain database lookup cannot.
+    pub household: bool,
 }
 
 /// Answers who a chat is for.
@@ -112,12 +116,14 @@ impl ChatLookup for DbLookup {
                     )
                     .optional()
                     .unwrap_or(None)
+                    .flatten()
                     .filter(|p| !p.is_empty());
                 Ok::<_, rusqlite::Error>(ChatKnowledge {
                     profile,
                     project_id,
                     cwd,
                     orchestrating: false,
+                    household: false,
                 })
             })
             .unwrap_or_default()
@@ -641,7 +647,9 @@ impl AddendumSection for RulesSection {
 
     fn text(&self, ctx: &LaunchCtx<'_>) -> Option<String> {
         examples::seed(&self.profile_dir);
-        // The worker reports the folder it really runs in; prefer it over the recorded one.
+        // The worker reports the folder it really runs in; prefer it over the recorded one. It
+        // feeds path triggers only: the lookup's `orchestrating`/`household` flags decide the
+        // kind of chat, so a house chat keeps its household rules in any folder.
         let mut who = self.lookup.of_chat(ctx.chat_id);
         if !ctx.cwd.is_empty() {
             who.cwd = Some(ctx.cwd.to_owned());
