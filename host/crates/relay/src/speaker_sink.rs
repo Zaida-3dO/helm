@@ -169,6 +169,7 @@ pub fn place(c: &Ctx, turn: &SpeakerTurn, now: i64) -> Result<Placed, String> {
         &port,
         &turn.session,
         turn.room.as_deref(),
+        turn.device.as_deref(),
         who.as_deref(),
         now,
         quick_lane,
@@ -276,15 +277,17 @@ pub fn place(c: &Ctx, turn: &SpeakerTurn, now: i64) -> Result<Placed, String> {
     }
     let baseline = max_row(&c.db, &talk.chat_id);
     let (said, _) = cut_chars(&turn.text, speaker::MAX_TEXT_CHARS);
-    // A new talk may be told which talk came before it — same room (or neither named one), not
-    // this same chat, and recent enough. The pointer carries the old chat's id, so a follow-up
-    // after the idle close can pull that transcript up with `app_read_chat`.
+    // A new talk may be told which talk came before it — same room and same speaker (a side that
+    // never named one stays lenient), not this same chat, and within half an hour of the close.
+    // The pointer carries the old chat's id, so a follow-up after the idle close can pull that
+    // transcript up with `app_read_chat`.
     let previous = speaker::load_talks(&c.paths.chats)
         .previous
         .as_ref()
         .filter(|p| {
             p.chat_id != talk.chat_id
                 && speaker::same_room(p.room.as_deref(), turn.room.as_deref())
+                && speaker::same_speaker(p.device.as_deref(), turn.device.as_deref())
                 && speaker::previous_usable(p, &c.file, now)
         })
         .map(speaker::previous_pointer);
@@ -361,6 +364,7 @@ pub fn place_record(c: &Ctx, rec: &SpeakerRecord, now: i64) -> Result<(), String
         &port,
         &rec.session,
         rec.room.as_deref(),
+        rec.device.as_deref(),
         who.as_deref(),
         now,
         false,

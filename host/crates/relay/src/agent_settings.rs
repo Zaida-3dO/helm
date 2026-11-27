@@ -543,7 +543,7 @@ fn speaker_options() -> Value {
             "model": {"type": "string", "rule": "a model id from the model picker (a Claude model, or local/<server>/<model>), at most 120 characters; blank: the app's usual new-chat model; null: the default", "about": "The model a new room-speaker chat opens with. A spoken answer has to come back in seconds, so the default is a small local model."},
             "effort": {"type": "enum", "allowed": helm_chats::catalogue::EFFORTS, "blankAllowed": true, "nullable": true, "about": "The effort a new room-speaker chat opens with; blank: the app's usual new-chat effort; null: the default."},
             "takeSpeaker": {"type": "boolean", "nullable": true, "about": "Whether this PC takes its person's room speakers. null: the default, on for the home profile and off for the others."},
-            "previousHours": {"type": "integer", "min": 0, "max": 72, "about": "How long a talk that just ended may be named to the next one on that speaker; 0 never names it."},
+            "previousHours": {"type": "integer", "min": 0, "max": 72, "about": "Whether a talk that just ended may be named to the next one on that speaker (always within half an hour of the close); 0 never names it."},
             "lean": {"type": "boolean", "about": "Lean speaker chats: a thin system prompt (a short persona and the speaker prompt) and only the Home Assistant server and the tool that sends a message to the phone. Applies to chats started after the change. The user's to change."},
             "boardId": {"type": "string", "nullable": true, "about": "The board a new speaker chat is shown on; unset leaves it to the app. The user's to change."},
         },

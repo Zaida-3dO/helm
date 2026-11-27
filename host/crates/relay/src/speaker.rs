@@ -33,6 +33,7 @@ use std::path::{Path, PathBuf};
 pub const SPEAKER_ORIGIN: SubmissionOrigin = SubmissionOrigin::Speaker;
 
 const MINUTE_MS: i64 = 60 * 1000;
+#[cfg(test)]
 const HOUR_MS: i64 = 60 * MINUTE_MS;
 
 /// The settings ranges Settings accepts.
@@ -287,6 +288,10 @@ pub struct Talk {
     pub started_at: i64,
     /// What the speaker called its room, for the chat's title and for each message's note.
     pub room: Option<String>,
+    /// What the speaker called itself (its device name or token id): the pointer to this talk
+    /// belongs to that speaker alone, so two speakers in one room never inherit each other's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
     /// The speaker left something open in this talk (a record said so): the chat is kept, not
     /// archived, when the talk ends.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -334,6 +339,11 @@ pub struct Previous {
     /// when it comes from that same room (or either side never named one).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room: Option<String>,
+    /// The speaker that ended, as it named itself; the pointer belongs to that speaker alone
+    /// (or either side never named a device), so a second speaker's new talk is never pointed
+    /// at the first one's chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
 }
 
 /// The speaker files of one profile.
@@ -366,6 +376,7 @@ pub fn talk_chat(
     port: &dyn ChatPort,
     session: &str,
     room: Option<&str>,
+    device: Option<&str>,
     profile: Option<&str>,
     now: i64,
     quick: bool,
@@ -393,6 +404,7 @@ pub fn talk_chat(
         chat_id,
         started_at: now,
         room: room.map(str::to_owned),
+        device: device.map(str::to_owned),
         leftover: false,
         quick,
     };
@@ -425,6 +437,7 @@ pub fn end_talk(
             ended_at: now,
             gist: gist.trim().chars().take(PREVIOUS_NOTE_MAX_CHARS).collect(),
             room: talk.room.clone(),
+            device: talk.device.clone(),
         });
     }
     let _ = save_talks(path, &talks);
@@ -520,8 +533,13 @@ pub fn take_kept(path: &Path) -> Vec<Kept> {
 }
 
 /// The talk that ended last, when it is recent enough to be named to the next one.
+/// How long after a talk closes its pointer may ride to the next one on that speaker: the talk
+/// idle-closes in minutes, and past half an hour the reference has lost its point. The setting's
+/// `previousHours` only turns the naming off (0); any other value lets the 30-minute window stand.
+const PREVIOUS_WINDOW_MS: i64 = 30 * MINUTE_MS;
+
 pub fn previous_usable(p: &Previous, policy: &PolicyFile, now: i64) -> bool {
-    policy.previous_hours > 0 && now - p.ended_at <= policy.previous_hours * HOUR_MS
+    policy.previous_hours > 0 && now - p.ended_at <= PREVIOUS_WINDOW_MS
 }
 
 /// `HA speaker <room> voice <YYYY-MM-DD>` (UTC date), or the profile's name where the speaker
@@ -652,6 +670,16 @@ pub fn previous_pointer(p: &Previous) -> String {
 /// Whether a new turn belongs to the room of the talk it might be pointed at: both named one and
 /// they differ, no; either never named one, yes. Compared like titles are cleaned, case-free.
 pub fn same_room(prev: Option<&str>, next: Option<&str>) -> bool {
+    match (prev.map(str::trim), next.map(str::trim)) {
+        (Some(a), Some(b)) if !a.is_empty() && !b.is_empty() => a.eq_ignore_ascii_case(b),
+        _ => true,
+    }
+}
+
+/// Whether a new turn comes from the speaker that ended the talk it might be pointed at: both
+/// named themselves and differ, no; either never named a device, yes. Room alone is not enough —
+/// two speakers in one room are two people's conversations.
+pub fn same_speaker(prev: Option<&str>, next: Option<&str>) -> bool {
     match (prev.map(str::trim), next.map(str::trim)) {
         (Some(a), Some(b)) if !a.is_empty() && !b.is_empty() => a.eq_ignore_ascii_case(b),
         _ => true,
@@ -819,6 +847,7 @@ mod tests {
             &port,
             "s-1",
             Some("kitchen"),
+            Some("kitchen display"),
             Some("Alex"),
             T0,
             false,
@@ -832,6 +861,7 @@ mod tests {
             &port,
             "s-1",
             Some("kitchen"),
+            Some("kitchen display"),
             Some("Alex"),
             T0 + 60_000,
             false,
@@ -840,7 +870,7 @@ mod tests {
         assert!(!made);
         assert_eq!(again.chat_id, "chat-1");
         let (other, made) =
-            talk_chat(&file, &port, "s-2", None, Some("Alex"), T0 + 61_000, true).unwrap();
+            talk_chat(&file, &port, "s-2", None, None, Some("Alex"),T0 + 61_000, true).unwrap();
         assert!(made && other.chat_id != first.chat_id);
         assert!(
             !first.quick && find(&file, "s-2").unwrap().quick,
@@ -867,9 +897,30 @@ mod tests {
         let talks = load_talks(&file);
         let prev = talks.previous.clone().unwrap();
         assert_eq!(prev.gist, "It is 7:20.");
+        assert_eq!(
+            prev.device.as_deref(),
+            Some("kitchen display"),
+            "the speaker who ended is recorded beside the room"
+        );
         let policy = PolicyFile::default();
-        assert!(previous_usable(&prev, &policy, T0 + 8 * 60 * MINUTE_MS));
-        assert!(!previous_usable(&prev, &policy, T0 + 20 * HOUR_MS));
+        // The pointer rides for half an hour after the close, not the whole previousHours span:
+        // +5 and +25 minutes name it, +45 does not, and a far-off 12 hours certainly not.
+        assert!(previous_usable(
+            &prev,
+            &policy,
+            T0 + 700_000 + 5 * MINUTE_MS
+        ));
+        assert!(previous_usable(
+            &prev,
+            &policy,
+            T0 + 700_000 + 25 * MINUTE_MS
+        ));
+        assert!(!previous_usable(
+            &prev,
+            &policy,
+            T0 + 700_000 + 45 * MINUTE_MS
+        ));
+        assert!(!previous_usable(&prev, &policy, T0 + 700_000 + 12 * HOUR_MS));
         assert_eq!(
             previous_pointer(&prev),
             "HA speaker kitchen voice 2027-01-15 — It is 7:20. (chat chat-1)"
@@ -880,18 +931,16 @@ mod tests {
         assert!(same_room(prev.room.as_deref(), Some("Kitchen")));
         assert!(!same_room(prev.room.as_deref(), Some("study")));
         assert!(same_room(prev.room.as_deref(), None) && same_room(None, Some("study")));
-        // The pointer is usable for half a day by default: any follow-up within 30 minutes of the
-        // close lands well inside it.
-        assert!(previous_usable(
-            &prev,
-            &policy,
-            T0 + 700_000 + 25 * MINUTE_MS
-        ));
+        // And it belongs to the speaker who ended, not just the room: a second speaker in the
+        // same kitchen keeps its own pointer; an unnamed device stays lenient (older hubs).
+        assert!(same_speaker(prev.device.as_deref(), Some("Kitchen Display")));
+        assert!(!same_speaker(prev.device.as_deref(), Some("bedroom phone")));
+        assert!(same_speaker(prev.device.as_deref(), None) && same_speaker(None, Some("study speaker")));
         let off = PolicyFile {
             previous_hours: 0,
             ..PolicyFile::default()
         };
-        assert!(!previous_usable(&prev, &off, T0 + 60 * MINUTE_MS));
+        assert!(!previous_usable(&prev, &off, T0 + 700_000 + 5 * MINUTE_MS));
         // A talk that left something open says so, and keeps saying so; one this PC never made
         // cannot be marked.
         assert!(mark_leftover(&file, "s-2") && !mark_leftover(&file, "s-9"));
@@ -903,12 +952,12 @@ mod tests {
             .borrow_mut()
             .insert("chat-2".to_owned(), "succ-9".to_owned());
         let (followed, made) =
-            talk_chat(&file, &port, "s-2", None, Some("Alex"), T0 + 62_000, true).unwrap();
+            talk_chat(&file, &port, "s-2", None, None, Some("Alex"),T0 + 62_000, true).unwrap();
         assert!(!made && followed.chat_id == "succ-9");
         // No successor: hand-archived still means start fresh.
         port.archived.borrow_mut().insert("succ-9".to_owned());
         let (fresh, made) =
-            talk_chat(&file, &port, "s-2", None, Some("Alex"), T0 + 63_000, false).unwrap();
+            talk_chat(&file, &port, "s-2", None, None, Some("Alex"),T0 + 63_000, false).unwrap();
         assert!(made && fresh.chat_id != first.chat_id && fresh.chat_id != "succ-9");
         // Kept chats are listed, kept once, and leave the list when dealt with.
         keep_chat(&file, "chat-1", T0 + 700_000);
