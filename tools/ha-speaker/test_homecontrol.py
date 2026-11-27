@@ -25,7 +25,8 @@ EXPOSED = {
         "lights": [("Sofa lamp", "light.sofa"),
                    ("Reading lamp", "light.reading")],
         "climates": [("Living Room Thermostat", "climate.lr_therm")]},
-    "Bedroom": {"lights": [("Bed light", "light.bed"),
+    "Bedroom": {"lights": [("Bedroom Lights", "light.br_main"),
+                           ("Bed light", "light.bed"),
                            ("Desk light", "light.pendant"),
                            ("Bath bulb", "light.ctlamp")],
                 "climates": []},
@@ -43,6 +44,10 @@ STATES = {
     "light.reading": {"state": "off", "attributes": {
         "friendly_name": "Reading lamp",
         "supported_color_modes": ["brightness"]}},
+    "light.br_main": {"state": "on", "attributes": {
+        "friendly_name": "Bedroom Lights",
+        "supported_color_modes": ["color_temp", "xy"],
+        "min_color_temp_kelvin": 2000, "max_color_temp_kelvin": 6500}},
     "light.bed": {"state": "off", "attributes": {
         "friendly_name": "Bed light",
         "supported_color_modes": ["onoff"]}},
@@ -108,6 +113,19 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual(b.service_calls, [("light", "turn_on",
                                             {"entity_id": ["light.kitchen"]})])
 
+    def test_room_word_with_lights_beats_same_named_bulb(self):
+        # The real-world case: "the home office lights" must mean EVERY light
+        # of the room in ONE call, even though one bulb is named after it.
+        for target in ("the bedroom lights", "bedroom lights",
+                       "all the bedroom lights"):
+            with self.subTest(target):
+                r, b = run([("light", {"target": target, "action": "off"})])
+                self.assertTrue(r[0]["ok"], r)
+                self.assertEqual(len(b.service_calls), 1)
+                self.assertEqual(sorted(b.service_calls[0][2]["entity_id"]),
+                                 ["light.bed", "light.br_main",
+                                  "light.ctlamp", "light.pendant"])
+
     def test_name_target_area_first_then_name(self):
         r, b = run([("light", {"target": "Sofa lamp", "action": "off"})])
         self.assertTrue(r[0]["ok"])
@@ -149,14 +167,53 @@ class LightTest(unittest.TestCase):
         self.assertFalse(r[0]["ok"])
         self.assertEqual(b.service_calls, [])
 
-    def test_kelvin_clamped_to_each_lights_own_range(self):
-        _, b = run([("light", {"target": "Living Room", "action": "set",
+    def test_kelvin_clamped_and_a_non_tunable_bulb_gets_a_plain_note(self):
+        # was: a bare default range made the brightness-only bulb take the
+        # setting. Now it is excluded with an honest per-light note while the
+        # tunable ones move (partial result, ok=True - not an opaque failure).
+        r, b = run([("light", {"target": "Living Room lights", "action": "set",
                                "color_temp": "cool"})])
-        calls = {tuple(sorted(c[2]["entity_id"])): c[2]["color_temp_kelvin"]
-                 for c in b.service_calls if "color_temp_kelvin" in c[2]}
-        # sofa (3000-4000) clamps 6000 to 4000; reading has no own limits
-        self.assertEqual(calls[("light.sofa",)], 4000)
-        self.assertEqual(calls[("light.reading",)], 6000)
+        self.assertTrue(r[0]["ok"])
+        calls = {tuple(sorted(c[2]["entity_id"])): c[2].get("color_temp_kelvin")
+                 for c in b.service_calls}
+        # sofa clamps 6000 to its own max; reading never gets the call at all
+        self.assertEqual(calls, {("light.sofa",): 4000})
+        self.assertIn("Reading lamp cannot set the colour temperature",
+                      r[0]["text"])
+        self.assertEqual(r[0]["notes"],
+                         ["Reading lamp cannot set the colour temperature"])
+
+    def test_partial_colour_only_the_capable_lights_move(self):
+        r, b = run([("light", {"target": "Living Room lights", "action": "set",
+                               "color": "red"})])
+        self.assertTrue(r[0]["ok"])
+        self.assertEqual([(d, s, c["entity_id"]) for d, s, c in b.service_calls],
+                         [("light", "turn_on", ["light.sofa"])])
+        self.assertIn("Reading lamp cannot change colour", r[0]["text"])
+        self.assertEqual(r[0]["notes"],
+                         ["Reading lamp cannot change colour"])
+
+    def test_turn_on_with_colour_still_carries_the_white_only_bulb(self):
+        # "turn on to red": the state part applies to every light, the colour
+        # note only lists those that cannot do it
+        r, b = run([("light", {"target": "Living Room lights", "action": "on",
+                               "color": "red"})])
+        self.assertTrue(r[0]["ok"])
+        self.assertEqual(len(b.service_calls), 2)  # two parameter groups
+        withrgb = [c for c in (x[2] for x in b.service_calls)
+                   if "rgb_color" in c]
+        plain = [c for c in (x[2] for x in b.service_calls)
+                 if "rgb_color" not in c]
+        self.assertEqual(withrgb, [{"entity_id": ["light.sofa"],
+                                    "rgb_color": [255, 0, 0]}])
+        self.assertEqual(plain, [{"entity_id": ["light.reading"]}])
+        self.assertIn("Reading lamp cannot change colour", r[0]["text"])
+
+    def test_room_target_moves_every_light_in_one_call(self):
+        _, b = run([("light", {"target": "Living Room lights", "action": "on"})])
+        self.assertEqual(b.service_calls, [("light", "turn_on",
+                                            {"entity_id": ["light.sofa",
+                                                           "light.reading"]})])
 
     def test_colour_on_a_white_only_bulb_refused(self):
         r, b = run([("light", {"target": "Reading lamp", "action": "set",
@@ -256,10 +313,9 @@ class LightTest(unittest.TestCase):
             out.append(await control.execute("light", {"target": "Attic",
                                                        "action": "on"}))
             control.reset_budget()  # the person asked again in a new breath
-            for i in range(5):      # same five devices: calls, not devices, run out
-                out.append(await control.execute("light",
-                                                 {"target": "Hall %d" % i,
-                                                  "action": "on"}))
+            for i in range(7):      # calls, not devices, run out eventually
+                out.append(await control.execute(
+                    "light", {"target": "Hall %d" % (i % 5), "action": "on"}))
             return out
 
         control = homecontrol.HomeControl(FakeBackend(fixture))
@@ -267,10 +323,10 @@ class LightTest(unittest.TestCase):
         self.assertTrue(r[0]["ok"])
         self.assertFalse(r[1]["ok"])
         self.assertIn("more than 12 devices", r[1]["error"])
-        for call in r[2:6]:  # four write calls fit after the reset
-            self.assertTrue(call["ok"], call)
-        self.assertFalse(r[6]["ok"])   # the fifth write in one ask
-        self.assertIn("changes per ask", r[6]["error"])
+        for call in r[2:8]:  # six write calls fit after the reset (a room is
+            self.assertTrue(call["ok"], call)   # one, so this is real slack)
+        self.assertFalse(r[8]["ok"])   # the seventh write in one ask
+        self.assertIn("changes per ask", r[8]["error"])
 
 class ClimateTimerTest(unittest.TestCase):
     def test_setpoint_out_of_range_refused(self):
@@ -497,6 +553,67 @@ class HomeStatusTest(unittest.TestCase):
 async def _execute(backend, name, args):
     control = homecontrol.HomeControl(backend)
     return [await control.execute(name, args)]
+
+
+class RoomTurnEndToEnd(unittest.TestCase):
+    """The failing sentence from the first real speaker run, wired straight
+    through: a scripted model turn
+    driving the real HomeControl against the fake house. "Turn on the bedroom
+    lights to red." is ONE call for the whole room; the bulbs that cannot do
+    red are not touched and come back as plain notes in the tool result, so
+    the spoken answer can tell what worked and what could not."""
+
+    def test_room_red_is_one_call_with_honest_notes(self):
+        import agent_core
+
+        class ScriptTransport:
+            def __init__(self):
+                self.seen = []
+
+            async def request(self, method, url, headers=None, data=None,
+                              timeout=None):
+                body = json.loads(data.decode("utf-8"))
+                self.seen.append(body)
+                if len(self.seen) == 1:
+                    msg = {"content": None, "tool_calls": [{
+                        "id": "c0", "type": "function",
+                        "function": {
+                            "name": "light",
+                            "arguments": json.dumps(
+                                {"target": "the bedroom lights",
+                                 "action": "set", "color": "red"})}}]}
+                else:
+                    msg = {"content": ("Bedroom is red on the main light;"
+                                       " three bulbs there cannot change"
+                                       " colour.")}
+                payload = json.dumps({"choices": [{"message": msg,
+                                                   "finish_reason": "stop"}]})
+                return 200, payload.encode("utf-8")
+
+        backend = FakeBackend()
+        control = homecontrol.HomeControl(backend)
+        cfg = agent_core.Config(model_url="http://main/x", model_name="m")
+        transport = ScriptTransport()
+        result = asyncio.run(agent_core.run_turn(
+            cfg, transport, control, {}, "Turn on the bedroom lights to red.",
+            clock=lambda: 0.0))
+
+        self.assertEqual(result.kind, agent_core.KIND_ANSWER)
+        # ONE service call for the whole room - not one per bulb
+        self.assertEqual(len(backend.service_calls), 1)
+        domain, service, data = backend.service_calls[0]
+        self.assertEqual((domain, service), ("light", "turn_on"))
+        self.assertEqual(data["entity_id"], ["light.br_main"])
+        self.assertEqual(data["rgb_color"], [255, 0, 0])
+        # the notes reached the model, so its sentence can be honest
+        tool_msgs = [m for m in transport.seen[1]["messages"]
+                     if m["role"] == "tool"]
+        fed = json.dumps(tool_msgs)
+        for bulb in ("Bed light", "Desk light", "Bath bulb"):
+            self.assertIn("%s cannot change colour" % bulb, fed)
+        self.assertEqual(result.tool_calls[0]["ok"], True)
+        # and the gate let it through: a tool really did carry the turn
+        self.assertFalse(result.guard_reprompt or result.guard_blocked)
 
 
 class HouseFeedBackend(FakeBackend):

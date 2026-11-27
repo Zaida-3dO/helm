@@ -27,6 +27,7 @@ returns what it would call and changes nothing; replay defaults to dry.
 """
 
 import difflib
+import re
 
 
 MAX_ENTITIES = 12
@@ -121,7 +122,10 @@ class HomeControlError(Exception):
         self.candidates = candidates or []
 
 
-MAX_WRITE_CALLS = 4  # write calls (service or intent) one spoken ask may make
+# Write calls (service or intent) one spoken ask may make. A whole room is
+# ONE call, so this is slack for two rooms or a fix-up in the same breath -
+# not enough for "do the whole house": that still dies on MAX_ENTITIES.
+MAX_WRITE_CALLS = 6
 
 
 class HomeControl:
@@ -215,20 +219,45 @@ class HomeControl:
                 pool.append((str(name), str(entity_id), str(area)))
         return pool
 
+    # "the home office lights" / "all the kitchen lights" name a ROOM: the
+    # trailing kind words come off so the area matches and every light of
+    # that room moves in one call, even when one bulb is itself named after
+    # the room. Only tried as extra variants - an exact entity name still
+    # matches unchanged.
+    _ROOM_SUFFIX = re.compile(r"(?:\s+all)?\s+(?:lights?|lamps?|bulbs?)$")
+
+    _ROOM_PREFIX = re.compile(r"^(?:(?:all|the|a|an)\s+)+")
+
+    def _target_variants(self, wanted):
+        out = [wanted]
+        rest = self._ROOM_PREFIX.sub("", wanted).strip()
+        if rest and rest != wanted:
+            out.append(rest)
+        while rest:
+            trimmed = self._ROOM_SUFFIX.sub("", rest).strip()
+            if not trimmed or trimmed == rest:
+                break
+            out.append(trimmed)
+            rest = trimmed
+        return out
+
     def _resolve(self, target, kind):
-        """Area first, then exact name, then fuzzy. Returns a list of unique
-        (name, entity_id) or raises HomeControlError with candidates when the
-        spoken target is unknown or ambiguous."""
+        """Area first (a room word wins over a bulb carrying the same name),
+        then exact name, then fuzzy. Returns a list of unique (name,
+        entity_id) or raises HomeControlError with candidates when the spoken
+        target is unknown or ambiguous."""
         wanted = _norm(target)
         if not wanted:
             raise HomeControlError("no target given")
+        variants = self._target_variants(wanted)
         pool = self._pool(self._exposed_cache, kind)
         areas = {area for _, _, area in pool}
-        hit_areas = [a for a in areas if _norm(a) == wanted]
+        hit_areas = [a for a in areas if _norm(a) in variants]
         if hit_areas:
             picked = [(n, e) for n, e, a in pool if a in hit_areas]
             return dedupe(picked)
-        exact = dedupe([(n, e) for n, e, _ in pool if _norm(n) == wanted])
+        exact = dedupe([(n, e) for n, e, _ in pool
+                        if _norm(n) in variants])
         if len(exact) == 1:
             return exact
         if len(exact) > 1:
@@ -318,47 +347,67 @@ class HomeControl:
             step = self._pct(change_pct, lo=-100, hi=100)
             extra["brightness_step_pct"] = int(round(step))
 
-        kelvin_groups = []
+        # A whole room of lights is ONE call, and one bulb that cannot do the
+        # colour or temperature must not sink the rest: each such light gets a
+        # plain per-light note in the result instead (partial success), so the
+        # spoken answer can say what worked and what did not.
+        notes = []
+        wanted_kelvin = None
         color_temp = args.get("color_temp")
         if color_temp is not None and not dim_to_off:
-            kelvin_groups = self._kelvin_by_group(color_temp, eids, states)
+            wanted_kelvin = self._kelvin_value(color_temp)
         color_hex = None
         if args.get("color") is not None and not dim_to_off:
             color_hex = self._parse_color(args["color"])
-            cannot = [name for name, eid in picked
-                      if not self._supports_color(states, eid)]
-            if cannot:
-                raise HomeControlError(
-                    "these lights cannot change colour: "
-                    + ", ".join(cannot))
 
-        # (service, data) per payload; every parameter of the ask rides in the
-        # same turn_on as everything else - two calls would mean an audible
-        # flash between brightness and colour
-        plan = []
         rgb = self._hex_to_rgb(color_hex) if color_hex else None
+        plan = []
         if action == "off" or (action in ("on", "set") and dim_to_off):
             plan.append(("light", "turn_off", {"entity_id": eids}))
         elif action == "toggle":
             plan.append(("light", "toggle", {"entity_id": eids}))
         else:  # on or set
-            if action == "set" and not (extra or kelvin_groups or color_hex):
+            if action == "set" and not (extra or wanted_kelvin or color_hex):
                 raise HomeControlError(
                     "to set a light give brightness, colour or temperature")
-            common = dict(extra)
-            if rgb is not None:
-                common["rgb_color"] = rgb
-            if not kelvin_groups:
-                payload = {"entity_id": eids}
-                payload.update(common)
-                plan.append(("light", "turn_on", payload))
-            for kelvin, group in kelvin_groups:
-                # one call per clamped-kelvin group; each carries the rest
-                payload = {"entity_id": group, "color_temp_kelvin": kelvin}
-                payload.update(common)
+            groups = {}  # key: shared parameters -> (params, [entity ids])
+            # every parameter of the ask rides in the same turn_on as
+            # everything else - two calls would mean an audible flash
+            for name, eid in picked:
+                attrs = self._attrs(states, eid)
+                params = dict(extra)
+                if wanted_kelvin is not None:
+                    if self._supports_kelvin(attrs):
+                        lo = int(attrs.get("min_color_temp_kelvin", 2000))
+                        hi = int(attrs.get("max_color_temp_kelvin", 6500))
+                        params["color_temp_kelvin"] = max(
+                            lo, min(hi, wanted_kelvin))
+                    else:
+                        notes.append("%s cannot set the colour temperature"
+                                     % (name or eid))
+                if color_hex is not None:
+                    if self._supports_color(states, eid):
+                        params["rgb_color"] = rgb
+                    else:
+                        notes.append("%s cannot change colour" % (name or eid))
+                if not params and action == "set":
+                    # nothing this light can be set to; the note says so -
+                    # never a bare turn_on for a "set ..." request
+                    continue
+                key = str(sorted(params.items()))
+                grp = groups.setdefault(key, {"params": params, "eids": []})
+                grp["eids"].append(eid)
+            if not groups:
+                # the whole ask was something these lights cannot do: an
+                # honest refusal naming it, built from the same notes
+                raise HomeControlError("; ".join(notes)
+                                       or "these lights cannot do that")
+            for grp in groups.values():
+                payload = {"entity_id": grp["eids"]}
+                payload.update(grp["params"])
                 plan.append(("light", "turn_on", payload))
 
-        return await self._run(plan, "done")
+        return await self._run(plan, "done", notes=notes, unit="lights")
 
     async def _limit(self, target, what, kind):
         # populate the expose map before any resolution consults it
@@ -428,27 +477,29 @@ class HomeControl:
         return [int(hex_str[1:3], 16), int(hex_str[3:5], 16),
                 int(hex_str[5:7], 16)]
 
-    def _kelvin_by_group(self, value, eids, states):
-        """Spoken or numeric colour temperature, clamped to each light's own
-        range; lights end up in one group per resulting kelvin."""
+    @staticmethod
+    def _kelvin_value(value):
+        """Spoken or numeric colour temperature -> kelvin, validated."""
         if isinstance(value, str) and value.strip().lower() in COLOR_TEMP_WORDS:
-            base_k = COLOR_TEMP_WORDS[value.strip().lower()]
-        else:
-            try:
-                base_k = int(float(value))
-            except (TypeError, ValueError):
-                raise HomeControlError("temperature must be warm, neutral, cool"
-                                       " or kelvin")
-            if not 1000 <= base_k <= 10000:
-                raise HomeControlError("kelvin must be between 1000 and 10000")
-        groups = {}
-        for eid in eids:
-            attrs = self._attrs(states, eid)
-            lo = attrs.get("min_color_temp_kelvin", 2000)
-            hi = attrs.get("max_color_temp_kelvin", 6500)
-            k = max(int(lo), min(int(hi), base_k))
-            groups.setdefault(k, []).append(eid)
-        return sorted(groups.items())
+            return COLOR_TEMP_WORDS[value.strip().lower()]
+        try:
+            base_k = int(float(value))
+        except (TypeError, ValueError):
+            raise HomeControlError("temperature must be warm, neutral, cool"
+                                   " or kelvin")
+        if not 1000 <= base_k <= 10000:
+            raise HomeControlError("kelvin must be between 1000 and 10000")
+        return base_k
+
+    @staticmethod
+    def _supports_kelvin(attrs):
+        """Whether a colour-temperature setting can land. A bulb that says
+        nothing about itself gets the chance, same as with colour."""
+        modes = attrs.get("supported_color_modes")
+        if isinstance(modes, (list, tuple)) and modes:
+            return any(m in ("color_temp", "rgbww") for m in modes) \
+                or "min_color_temp_kelvin" in attrs
+        return True
 
 # --------------------------------------------------------------------------
 # climate, timer, home_state and the executor live on HomeControl.
@@ -626,7 +677,7 @@ class HomeControl:
 
     # ---------------- acting ----------------
 
-    async def _run(self, plan, summary):
+    async def _run(self, plan, summary, notes=None, unit="devices"):
         if not plan:
             raise HomeControlError("nothing to change")
         # one spoken ask = at most MAX_ENTITIES devices touched and
@@ -635,16 +686,28 @@ class HomeControl:
         for _domain, _service, data in plan:
             entities.update(data.get("entity_id") or [])
         self._charge(entities)
+        notes = [str(n)[:120] for n in (notes or [])][:MAX_ENTITIES]
+        text = str(summary)
+        if len(entities) > 1:
+            text += " (%d %s)" % (len(entities), unit)
+        if notes:
+            # partial success spoken honestly: what worked, and which ones
+            # could not do part of it - the model must echo this, not invent
+            text += "; " + "; ".join(notes)
         if self.dry:
             self._spend(entities)
-            return {"ok": True, "dry": True,
-                    "would_call": [{"service": "%s.%s" % (d, s), "data": data}
-                                   for d, s, data in plan],
-                    "text": "would " + str(summary)}
-        self._spend(entities)  # spend first: a failing call still counted
-        for domain, service, data in plan:
-            await self.backend.call_service(domain, service, data)
-        return {"ok": True, "text": str(summary)}
+            out = {"ok": True, "dry": True,
+                   "would_call": [{"service": "%s.%s" % (d, s), "data": data}
+                                  for d, s, data in plan],
+                   "text": "would " + text}
+        else:
+            self._spend(entities)  # spend first: a failing call still counted
+            for domain, service, data in plan:
+                await self.backend.call_service(domain, service, data)
+            out = {"ok": True, "text": text}
+        if notes:
+            out["notes"] = notes
+        return out
 
 
 def dedupe(pairs):
