@@ -425,16 +425,7 @@ pub fn keeps_open(
     if c.flagged {
         return Ok(Some("a flag its agent filed"));
     }
-    // The approval table belongs to another part of the app: where it is not there, nothing waits.
-    let approval = tx
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM consent_requests
-             WHERE chat_id = ?1 AND state = 'pending' AND expires_at > ?2)",
-            params![id, helm_core::now_ms()],
-            |r| r.get::<_, bool>(0),
-        )
-        .unwrap_or(false);
-    if approval {
+    if pending_approval(tx, id) {
         return Ok(Some("an approval waiting for the person"));
     }
     if c.queued {
@@ -462,6 +453,33 @@ pub fn keeps_open(
         return Ok(Some("the person has the chat open"));
     }
     Ok(None)
+}
+
+/// Whether an approval for this chat is waiting on the person right now. The approval table
+/// belongs to another part of the app: where it is not there, nothing waits.
+fn pending_approval(tx: &Transaction<'_>, id: &str) -> bool {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM consent_requests
+         WHERE chat_id = ?1 AND state = 'pending' AND expires_at > ?2)",
+        params![id, helm_core::now_ms()],
+        |r| r.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
+}
+
+/// The narrow hold for rolling a growing chat over mid-conversation: only work in flight is lost
+/// by archiving its chat right now — a turn still running, a message not delivered yet, or an
+/// approval waiting for the person. Unlike [`keeps_open`] it ignores flags, pins, drafts, open
+/// windows and child chats: those keep a chat in view, but none of them makes a roll lose
+/// anything, and letting them hold the gate would leave a flagged watch chat growing forever.
+pub fn holds_turn(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<bool> {
+    let Some(c) = candidate(tx, id, i64::MAX, &Needs::new(), &HashSet::new(), None)? else {
+        return Ok(false);
+    };
+    if c.archived {
+        return Ok(false);
+    }
+    Ok(c.running || c.queued || pending_approval(tx, id))
 }
 
 #[cfg(test)]
@@ -739,5 +757,18 @@ mod tests {
             db.snapshot(|tx| keeps_open(tx, "nope", None)).unwrap(),
             None
         );
+        // The narrow roll gate beside it: view-level holds (a flag, a draft) never stop a chat
+        // rolling over; only work in flight does.
+        let rolls = || db.snapshot(|tx| holds_turn(tx, "k")).unwrap();
+        edit("INSERT INTO chat_flags VALUES ('k', 'watch', 'attention', 'normal', 1); UPDATE chats SET draft = 'half a thought' WHERE id = 'k';");
+        assert!(!rolls(), "a flag and a draft do not stop a roll");
+        edit("DELETE FROM chat_flags WHERE chat_id = 'k'; UPDATE chats SET status = 'running' WHERE id = 'k';");
+        assert!(rolls(), "a running turn does");
+        edit("UPDATE chats SET status = 'idle', draft = ''; INSERT INTO submissions (id, chat_id, text, state, created_at) VALUES ('s2', 'k', 'hi', 'saved', 1);");
+        assert!(rolls(), "an undelivered message does");
+        edit("UPDATE submissions SET state = 'withdrawn' WHERE id = 's2'; INSERT INTO consent_requests VALUES ('k', 'pending', 9999999999999);");
+        assert!(rolls(), "an approval waiting for the person does");
+        edit("DELETE FROM consent_requests WHERE chat_id = 'k'; UPDATE chats SET archived = 1 WHERE id = 'k';");
+        assert!(!rolls(), "an archived chat holds nothing");
     }
 }

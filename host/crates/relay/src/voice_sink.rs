@@ -959,11 +959,12 @@ pub fn place(c: &Ctx, turn: &VoiceTurn, notes: &[String], now: i64) -> Result<Pl
         ) && c
             .db
             .snapshot(|tx| {
-                Ok::<_, rusqlite::Error>(
-                    helm_chats::finished::keeps_open(tx, &tag.chat_id, None)?.is_none(),
-                )
+                // Only work in flight holds the roll: a running turn, an undelivered message or
+                // an approval waiting on the person — a flag on the chat must not stop it
+                // rolling forever. A failed read counts as "holds": no roll without proof the
+                // chat is idle.
+                Ok::<_, rusqlite::Error>(!helm_chats::finished::holds_turn(tx, &tag.chat_id)?)
             })
-            // A failed read counts as "holds": no roll without proof the chat is idle.
             .unwrap_or(false)
     };
     let mut carry: Option<String> = None;

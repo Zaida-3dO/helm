@@ -226,13 +226,13 @@ pub fn place(c: &Ctx, turn: &SpeakerTurn, now: i64) -> Result<Placed, String> {
             .ok()
             .flatten();
         let first = crate::sink::first_context(&c.db, &old);
-        // A failed read counts as "holds": no roll without proof the chat is idle.
-        let idle =
-            c.db.snapshot(|tx| {
-                Ok::<_, rusqlite::Error>(
-                    helm_chats::finished::keeps_open(tx, &old, None)?.is_none(),
-                )
-            })
+        // Only work in flight holds the roll: a running turn, an undelivered message or an
+        // approval waiting on the person. A flag, pin, draft or open window keeps the chat in
+        // view but must not stop it rolling forever. A failed read counts as "holds": no roll
+        // without proof the chat is idle.
+        let idle = c
+            .db
+            .snapshot(|tx| Ok::<_, rusqlite::Error>(!helm_chats::finished::holds_turn(tx, &old)?))
             .unwrap_or(false);
         if crate::voice::roll_due(size.map(|(n, _)| n), first, c.file.roll_at(talk_lane)) && idle {
             let (m2, e2) = c.file.new_chat(talk_lane);
