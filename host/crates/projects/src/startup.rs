@@ -31,8 +31,6 @@
 use crate::store::{self, Res};
 use crate::types::{ProjectNode, ProjectUpdateArgs};
 use helm_chats::seams::{StartupInjection, StartupSeam};
-use helm_consent::store::{self as consent, NewRequest};
-use helm_consent::{AllowKind, AllowKinds, Applier, ApplyJob, Canonical};
 use helm_core::db::Database;
 use helm_hosttools::{Condition, HostToolRegistry, ToolCtx, ToolError, ToolResult, ToolSpec};
 use helm_ipc::AppEvent;
@@ -46,11 +44,8 @@ pub const DONE_TOOL: &str = "app_startup_done";
 pub const TURN_END_TOOL: &str = "app_startup_turn_end";
 pub const PROJECT_TOOL: &str = "app_project_startup";
 
-/// The longest text an agent may stage: the Approve card shows all of it, and a card holds 1,200
-/// characters. Longer instructions are typed in Helm's own dialog.
-pub const MAX_STAGED_CHARS: usize = 700;
-/// A staged card line is cut here, so no line of the text is lost to the card's own line limit.
-const CARD_WRAP: usize = 200;
+/// The longest text an agent may set: the same limit as the text typed in Helm's own dialog.
+pub const MAX_STAGED_CHARS: usize = 4000;
 
 const MAX_STEPS: usize = 20;
 const MAX_STEP_CHARS: usize = 200;
@@ -523,9 +518,9 @@ fn project_startup(ctx: &ToolCtx, args: Value) -> ToolResult {
             "characters": node.startup_instructions.as_deref().map_or(0, |t| t.chars().count()),
             "contextFiles": node.startup_files,
             "mcpServers": node.startup_servers,
-            "note": "Context files and MCP servers are changed with app_update_project (startupFiles, startupServers); set here stages the instructions for the user to approve.",
+            "note": "Context files and MCP servers are changed with app_update_project (startupFiles, startupServers); set here saves the instructions at once, with a notice and Undo for the user.",
         })),
-        Some("set") => stage_set(ctx, &db, &node, &args),
+        Some("set") => set_now(ctx, &db, &node, &args),
         _ => Err(refused("action is get or set.")),
     }
 }
@@ -540,77 +535,55 @@ fn refusal_text(r: &store::Refusal) -> String {
     }
 }
 
-/// The canonical target: what the card is built from and what Helm applies.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Staged {
-    project_id: String,
-    project_name: String,
-    /// The instructions as they stand when staged; a change after that refuses the approval.
-    from: Option<String>,
-    /// The new instructions; `None` clears.
-    to: Option<String>,
-}
-
-fn stage_set(ctx: &ToolCtx, db: &Arc<Database>, node: &ProjectNode, args: &Value) -> ToolResult {
-    let fail = |m: String| ToolError::refused(format!("[Helm] Nothing was staged: {m}"));
+/// Change the instructions at once: a change a chat makes to its own prompt, with a notice and
+/// Undo for the user (the change ring, [`crate::fields`]).
+fn set_now(ctx: &ToolCtx, db: &Arc<Database>, node: &ProjectNode, args: &Value) -> ToolResult {
     let to = match args.get("instructions") {
         None | Some(Value::Null) => None,
-        Some(Value::String(s)) => store::validate_startup(s).map_err(|e| fail(refusal_text(&e)))?,
-        Some(_) => return Err(fail("instructions must be text (empty clears).".into())),
-    };
-    if to
-        .as_deref()
-        .is_some_and(|t| t.chars().count() > MAX_STAGED_CHARS)
-    {
-        return Err(fail(format!(
-            "an agent may stage at most {MAX_STAGED_CHARS} characters, so that the Approve card shows all of them; the user can type longer instructions in the project's Edit startup instructions dialog."
-        )));
-    }
-    if to == node.startup_instructions {
-        return Err(fail("those are the instructions already.".into()));
-    }
-    let reason = args.get("reason").and_then(Value::as_str).unwrap_or("");
-    let staged = Staged {
-        project_id: node.id.clone(),
-        project_name: node.name.chars().take(80).collect(),
-        from: node.startup_instructions.clone(),
-        to,
-    };
-    let kinds = match ctx.services.get::<AllowKinds>() {
-        Some(k) if k.applies_on_allow(KIND) => k,
-        _ => {
-            return Err(fail(
-                "changing startup instructions is not available here.".into(),
-            ))
+        Some(Value::String(s)) => {
+            store::validate_startup(s).map_err(|e| refused(refusal_text(&e)))?
         }
+        Some(_) => return Err(refused("instructions must be text (empty clears).")),
     };
-    let target = serde_json::to_value(&staged).map_err(|e| fail(e.to_string()))?;
-    let r = consent::request(
-        db,
-        &kinds,
-        NewRequest {
-            chat_id: &ctx.caller_chat_id,
-            kind: KIND,
-            target: &target,
-            reason,
-            evidence: "",
-            grant_minutes: None,
-            tool_use_id: ctx.tool_call_id.as_deref(),
-        },
-        helm_core::now_ms(),
-    )
-    .map_err(|r| fail(r.0))?;
-    ctx.events
-        .emit(AppEvent::new("consent").with("chatId", ctx.caller_chat_id.clone()));
-    if let Some(w) = ctx.services.get::<helm_consent::ConsentWake>() {
-        w.0.notify_one();
+    if to == node.startup_instructions {
+        return Err(refused("those are the instructions already."));
     }
-    Ok(json!({
-        "requestId": r.id,
-        "state": "pending",
-        "note": "The user now sees an Approve card in this chat showing the new startup instructions. Helm applies them when the user approves and sends you the outcome as a note; do not call again or poll.",
-    }))
+    let done = db.write(|tx| {
+        let before = crate::fields::snapshot(tx, &node.id)?;
+        let now = store::get_project(tx, &node.id)?;
+        store::update_project(
+            tx,
+            &ProjectUpdateArgs {
+                project_id: node.id.clone(),
+                revision: now.revision,
+                startup_instructions: Some(to.clone()),
+                ..Default::default()
+            },
+        )?;
+        let after = crate::fields::snapshot(tx, &node.id)?;
+        Ok::<_, store::Refusal>((before, after, store::get_project(tx, &node.id)?))
+    });
+    let (before, after, saved) = done.map_err(|e| refused(refusal_text(&e)))?;
+    if let Ok(v) = serde_json::to_value(&saved) {
+        ctx.events.emit(AppEvent::new("project").with("project", v));
+    }
+    let mut out = json!({
+        "saved": true,
+        "project": node.name,
+        "characters": to.as_deref().map_or(0, |t| t.chars().count()),
+        "note": "Chats started from now on carry the new instructions.",
+    });
+    if helm_hosttools::settings::record_external_change(
+        ctx,
+        crate::fields::KEY,
+        json!({ node.id.clone(): before }),
+        json!({ node.id.clone(): after }),
+    )
+    .is_ok()
+    {
+        out["undo"] = json!("The user was shown a notice with Undo for this change.");
+    }
+    Ok(out)
 }
 
 pub fn register_host_tools(r: &mut HostToolRegistry) {
@@ -647,14 +620,13 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .blocking(
         ToolSpec::write(
             PROJECT_TOOL,
-            format!("Read or change a project's startup instructions: what every new chat on it does first (a worktree and branch, local servers, links for the user). get is free and defaults to this chat's board, else its folder project. set stages one Approve card showing the new text (at most {MAX_STAGED_CHARS} characters; empty clears), and Helm applies it only when the user approves. Use set only when the user asked for it."),
+            format!("Read or change a project's startup instructions: what every new chat on it does first (a worktree and branch, local servers, links for the user). get is free and defaults to this chat's board, else its folder project. set saves the new text at once (at most {MAX_STAGED_CHARS} characters; empty clears), and the user is shown a notice with Undo. Use set only when the user asked for it."),
             json!({
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["get", "set"]},
                     "projectId": {"type": "string"},
-                    "instructions": {"type": "string", "maxLength": MAX_STAGED_CHARS},
-                    "reason": {"type": "string", "maxLength": 1000}
+                    "instructions": {"type": "string", "maxLength": MAX_STAGED_CHARS}
                 },
                 "required": ["action"],
                 "additionalProperties": false
@@ -663,120 +635,6 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
         .self_locking(),
         project_startup,
     );
-}
-
-// ---- the Approve card and applying ----------------------------------------------------------
-
-/// The card: a title, what stands now, then the new text whole (wrapped, never cut).
-fn card_lines(s: &Staged) -> Result<Vec<String>, String> {
-    let mut lines = vec![match &s.to {
-        Some(_) => format!("Change the startup instructions of {}", s.project_name),
-        None => format!("Clear the startup instructions of {}", s.project_name),
-    }];
-    lines.push(match &s.from {
-        Some(t) => format!("Replaces {} characters of instructions.", t.chars().count()),
-        None => "There are none now.".to_owned(),
-    });
-    if let Some(t) = &s.to {
-        lines.push(format!("New text ({} characters):", t.chars().count()));
-        for raw in t.lines() {
-            let chars: Vec<char> = raw.chars().collect();
-            if chars.is_empty() {
-                continue;
-            }
-            for part in chars.chunks(CARD_WRAP) {
-                lines.push(part.iter().collect());
-            }
-        }
-    }
-    let fits = lines
-        .iter()
-        .all(|l| l.chars().count() <= helm_consent::kinds::MAX_SUMMARY_LINE)
-        && lines.join("\n").chars().count() <= helm_consent::kinds::MAX_SUMMARY;
-    if !fits {
-        return Err("These instructions are too long to show on one card.".into());
-    }
-    Ok(lines)
-}
-
-fn canonical(_tx: &Transaction<'_>, _chat: &str, target: &Value) -> Result<Canonical, String> {
-    let staged: Staged = serde_json::from_value(target.clone())
-        .map_err(|_| format!("Stage this change with {PROJECT_TOOL}."))?;
-    let lines = card_lines(&staged)?;
-    Ok(Canonical {
-        target: serde_json::to_value(&staged).map_err(|e| e.to_string())?,
-        summary: lines.join("\n"),
-        fixed_form: String::new(),
-        details: Vec::new(),
-    })
-}
-
-/// This module's allow kind, applied by Helm on Approve.
-pub fn register_allow_kinds(k: &mut AllowKinds) {
-    k.register_applying(
-        AllowKind {
-            id: KIND,
-            label: "Change a project's startup instructions",
-            accepts_words: false,
-            canonical,
-        },
-        Arc::new(StartupApplier),
-    );
-}
-
-pub struct StartupApplier;
-
-impl Applier for StartupApplier {
-    fn staged_with(&self) -> &'static str {
-        PROJECT_TOOL
-    }
-
-    fn apply(&self, job: &ApplyJob<'_>) -> String {
-        let Ok(s) = serde_json::from_value::<Staged>(job.target.clone()) else {
-            return "Nothing changed: the staged change could not be read.".into();
-        };
-        let Some(db) = job.services.get::<Database>() else {
-            return "Nothing changed: the projects are not available.".into();
-        };
-        let done = db.write(|tx| {
-            let node = store::get_project(tx, &s.project_id)?;
-            if node.startup_instructions != s.from {
-                return Ok::<_, store::Refusal>(Err(
-                    "Nothing changed: the instructions were edited after this card was made. Stage the change again.",
-                ));
-            }
-            store::update_project(
-                tx,
-                &ProjectUpdateArgs {
-                    project_id: s.project_id.clone(),
-                    revision: node.revision,
-                    startup_instructions: Some(s.to.clone()),
-                    ..Default::default()
-                },
-            )?;
-            Ok(Ok(store::get_project(tx, &s.project_id)?))
-        });
-        match done {
-            Ok(Ok(node)) => {
-                if let Ok(v) = serde_json::to_value(&node) {
-                    job.events.emit(AppEvent::new("project").with("project", v));
-                }
-                match s.to {
-                    Some(t) => format!(
-                        "Applied. The startup instructions of {} are now {} characters long; chats started from now on carry them.",
-                        s.project_name,
-                        t.chars().count()
-                    ),
-                    None => format!(
-                        "Applied. {} has no startup instructions now.",
-                        s.project_name
-                    ),
-                }
-            }
-            Ok(Err(m)) => m.into(),
-            Err(e) => format!("Nothing changed: {}", refusal_text(&e)),
-        }
-    }
 }
 
 // ---- the context files and servers ----------------------------------------------------------

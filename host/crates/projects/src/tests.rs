@@ -2799,12 +2799,10 @@ fn startup_env() -> StartupEnv {
     crate::register_migrations(&mut reg);
     helm_consent::register_migrations(&mut reg);
     helm_profiles::register_migrations(&mut reg);
+    helm_hosttools::register_migrations(&mut reg);
     let db = Arc::new(Database::open(&dir.path().join("t.sqlite3"), &reg).unwrap());
-    let mut kinds = helm_consent::AllowKinds::new();
-    crate::startup::register_allow_kinds(&mut kinds);
     let mut s = helm_ipc::Services::new();
     s.insert(db.clone());
-    s.insert(Arc::new(kinds));
     s.insert(Arc::new(helm_consent::MaintenanceLock::default()));
     StartupEnv {
         _dir: dir,
@@ -3211,10 +3209,10 @@ fn a_projects_files_and_servers_reach_its_chats_without_owing_a_report() {
         .contains("is not a plain file"));
 }
 
-/// An agent reads instructions freely and changes them only through one Approve card that shows
-/// the whole new text; a card made against text that has since changed applies nothing.
+/// An agent reads instructions freely and changes them at once; the user gets a notice with Undo
+/// (the change ring), and Undo puts the old text back unless someone edited it since.
 #[test]
-fn an_agent_stages_startup_instructions_and_only_the_users_click_applies_them() {
+fn an_agent_sets_startup_instructions_at_once_and_the_user_can_undo_it() {
     let env = startup_env();
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().to_string_lossy().into_owned();
@@ -3226,20 +3224,20 @@ fn an_agent_stages_startup_instructions_and_only_the_users_click_applies_them() 
     };
     assert_eq!(read(&env)["startupInstructions"], serde_json::Value::Null);
 
-    // Refused before anything is filed.
+    // Refused before anything changes.
     for (args, why) in [
         (
-            json!({"action": "set", "instructions": "x".repeat(701), "reason": "r"}),
-            "at most 700",
+            json!({"action": "set", "instructions": "x".repeat(4001)}),
+            "at most 4000",
         ),
         (
-            json!({"action": "set", "instructions": "a\u{202e}b", "reason": "r"}),
+            json!({"action": "set", "instructions": "a\u{202e}b"}),
             "plain text",
         ),
-        (json!({"action": "set", "reason": "r"}), "already"),
+        (json!({"action": "set"}), "already"),
         (json!({"action": "nope"}), "get or set"),
         (
-            json!({"action": "set", "projectId": "missing", "instructions": "x", "reason": "r"}),
+            json!({"action": "set", "projectId": "missing", "instructions": "x"}),
             "does not exist",
         ),
     ] {
@@ -3250,8 +3248,73 @@ fn an_agent_stages_startup_instructions_and_only_the_users_click_applies_them() 
     }
     assert_eq!(node(&env.db, &site).startup_instructions, None);
 
-    // A household member's chat proposes them exactly as the PC's own person's chat does; the
-    // Approve card is the gate for both.
+    // Saved at once, with a notice in the ring.
+    let text = format!("Make a worktree.\n{}", "y".repeat(450));
+    let r = env
+        .call(
+            "app_project_startup",
+            &chat,
+            json!({"action": "set", "instructions": text}),
+        )
+        .unwrap();
+    assert_eq!(r["saved"], true);
+    assert!(r["undo"].as_str().unwrap().contains("Undo"), "{r}");
+    assert_eq!(
+        node(&env.db, &site).startup_instructions.as_deref(),
+        Some(text.as_str())
+    );
+    assert_eq!(read(&env)["characters"], 467);
+    let rows: Vec<(String, String, String)> = env
+        .db
+        .snapshot(|tx| {
+            tx.prepare("SELECT key, chat_id, before FROM settings_changes")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect()
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].0.as_str(), rows[0].1.as_str()),
+        ("projectFields", chat.as_str())
+    );
+    let before: serde_json::Value = serde_json::from_str(&rows[0].2).unwrap();
+    let after: serde_json::Value = {
+        let a: String = env
+            .db
+            .snapshot(|tx| tx.query_row("SELECT after FROM settings_changes", [], |r| r.get(0)))
+            .unwrap();
+        serde_json::from_str(&a).unwrap()
+    };
+
+    // Undo is refused once someone edited the text, and puts the old state back otherwise.
+    let ext = crate::fields::settings_extension();
+    let unchanged = |env: &StartupEnv| {
+        env.db
+            .snapshot(|tx| {
+                Ok::<_, rusqlite::Error>(ext.unchanged_since(tx, "projectFields", &after))
+            })
+            .unwrap()
+    };
+    assert_eq!(unchanged(&env), Some(true));
+    env.set_text(&site, Some("Typed in Helm."));
+    assert_eq!(unchanged(&env), Some(false));
+    env.set_text(&site, Some(text.as_str()));
+    assert_eq!(unchanged(&env), Some(true));
+    env.db
+        .write(|tx| Ok::<_, rusqlite::Error>(ext.restore(tx, "projectFields", &before)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(node(&env.db, &site).startup_instructions, None);
+
+    // Clearing is the same one step.
+    env.set_text(&site, Some("Typed in Helm."));
+    let r = env
+        .call("app_project_startup", &chat, json!({"action": "set"}))
+        .unwrap();
+    assert_eq!(r["characters"], 0);
+    assert_eq!(node(&env.db, &site).startup_instructions, None);
+
+    // A household member's chat does exactly the same.
     let guest = chat_in(&env.db, &cwd, 90);
     env.db
         .write(|tx| {
@@ -3263,106 +3326,14 @@ fn an_agent_stages_startup_instructions_and_only_the_users_click_applies_them() 
         .call(
             "app_project_startup",
             &guest,
-            json!({"action": "set", "instructions": "Run x first.", "reason": "r"}),
+            json!({"action": "set", "instructions": "Run x first."}),
         )
         .unwrap();
-    assert_eq!(r["state"], "pending");
-    assert_eq!(node(&env.db, &site).startup_instructions, None);
-
-    // Staged: the card shows the new text whole, and nothing changed yet.
-    let text = format!("Make a worktree.\n{}", "y".repeat(450));
-    let r = env
-        .call(
-            "app_project_startup",
-            &chat,
-            json!({"action": "set", "instructions": text, "reason": "The user asked."}),
-        )
-        .unwrap();
-    assert_eq!(r["state"], "pending");
-    let id = r["requestId"].as_str().unwrap().to_owned();
-    let summary: String = env
-        .db
-        .snapshot(|tx| {
-            tx.query_row(
-                "SELECT summary FROM consent_requests WHERE id = ?1",
-                [&id],
-                |r| r.get(0),
-            )
-        })
-        .unwrap();
-    assert!(
-        summary.starts_with(
-            "Change the startup instructions of Site\nThere are none now.\nNew text (467 characters):\nMake a worktree.\nyyy"
-        ),
-        "{summary}"
-    );
-    assert!(summary.contains(&"y".repeat(200)));
-    assert!(summary.lines().all(|l| l.chars().count() <= 240));
-    assert_eq!(node(&env.db, &site).startup_instructions, None);
-
-    // The click applies it, and the outcome is what the agent hears.
-    let approve = |id: &str| {
-        let events: Arc<dyn helm_ipc::EventSink> = env.sink.clone();
-        let d = helm_consent::decide_and_apply(
-            &env.services,
-            &events,
-            &helm_consent::ConsentDecideArgs {
-                request_id: id.into(),
-                decision: helm_consent::Decision::Allow,
-                grant_minutes: None,
-                note: None,
-            },
-            "app",
-        )
-        .unwrap();
-        d.applying.unwrap().join().unwrap();
-        env.db
-            .snapshot(|tx| {
-                tx.query_row(
-                    "SELECT outcome FROM consent_requests WHERE id = ?1",
-                    [id],
-                    |r| r.get::<_, Option<String>>(0),
-                )
-            })
-            .unwrap()
-            .unwrap_or_default()
-    };
-    assert!(approve(&id).starts_with("Applied."));
+    assert_eq!(r["saved"], true);
     assert_eq!(
         node(&env.db, &site).startup_instructions.as_deref(),
-        Some(text.as_str())
+        Some("Run x first.")
     );
-    assert_eq!(read(&env)["characters"], 467);
-
-    // Changed since the card was made: nothing applies. Clearing is staged the same way.
-    let stale = env
-        .call(
-            "app_project_startup",
-            &chat,
-            json!({"action": "set", "instructions": "Other.", "reason": "r"}),
-        )
-        .unwrap();
-    env.set_text(&site, Some("Typed in Helm."));
-    let outcome = approve(stale["requestId"].as_str().unwrap());
-    assert!(
-        outcome.starts_with("Nothing changed: the instructions were edited"),
-        "{outcome}"
-    );
-    assert_eq!(
-        node(&env.db, &site).startup_instructions.as_deref(),
-        Some("Typed in Helm.")
-    );
-    let clear = env
-        .call(
-            "app_project_startup",
-            &chat,
-            json!({"action": "set", "reason": "r"}),
-        )
-        .unwrap();
-    assert!(
-        approve(clear["requestId"].as_str().unwrap()).starts_with("Applied. Site has no startup")
-    );
-    assert_eq!(node(&env.db, &site).startup_instructions, None);
 }
 
 /// The line a chat's launch gets: its board with the board's description (else the folder's) and

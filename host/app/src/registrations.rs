@@ -207,6 +207,9 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     extensions.push(helm_devices::settings_key::settings_extension());
     extensions.extend(helm_projects::settings_keys::settings_extensions(services));
     extensions.extend(helm_profiles::settings_keys::settings_extensions(services));
+    extensions.push(helm_profiles::chat_fields::settings_extension());
+    extensions.push(helm_projects::fields::settings_extension());
+    extensions.push(helm_mcp::settings_key::settings_extension());
     if let Some(profile) = services.get::<helm_core::profile::Profile>() {
         let mut private = vec![profile.dir.clone()];
         if let Ok(d) = helm_core::profile::default_profile_dir() {
@@ -568,7 +571,6 @@ pub fn allow_kinds() -> helm_consent::AllowKinds {
     helm_mcp::owner_step::register_allow_kinds(&mut k);
     helm_mcp::server_change::register_allow_kinds(&mut k);
     helm_memindex::register_allow_kinds(&mut k);
-    helm_projects::startup::register_allow_kinds(&mut k);
     k
 }
 

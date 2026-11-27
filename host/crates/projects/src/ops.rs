@@ -8,6 +8,7 @@
 //! | `project_update` | maintenance | [`ProjectUpdateArgs`] → [`ProjectNode`] (a new primary folder retires the project's idle workers) |
 //! | `project_icon_image_set` | maintenance | [`ProjectIconImageSetArgs`] → [`ProjectNode`] (a PNG of at most 64 KB becomes the icon) |
 //! | `project_icon_image_get` | blocking | [`ProjectIdArgs`] → [`ProjectIconImage`] |
+//! | `project_snapshot` | blocking | [`ProjectIdArgs`] → the project's place, folder, picture and startup lists, for Undo |
 //! | `project_archive` / `project_restore` | maintenance | [`ProjectIdArgs`] → [`ProjectNode`] |
 //! | `project_close` / `project_reopen` | maintenance | [`ProjectIdArgs`] → [`ProjectNode`] (a closed project is left out of `project_list` unless asked for, and refuses new work) |
 //! | `sidebar_page` | heavy | [`SidebarPageArgs`] → [`SidebarPage`] |
@@ -48,6 +49,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
             OpClass::Blocking,
             project_icon_image_get,
         )
+        .blocking("project_snapshot", OpClass::Blocking, project_snapshot)
         .blocking("project_archive", OpClass::Maintenance, project_archive)
         .blocking("project_restore", OpClass::Maintenance, project_restore)
         .blocking("project_close", OpClass::Maintenance, project_close)
@@ -199,6 +201,14 @@ fn project_icon_image_set(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     })?;
     emit_project(ctx, &node);
     to_value(&node)
+}
+
+/// `project_snapshot`: a project's place, folder, picture and startup lists, as the change ring
+/// files them around a chat's edit (see [`crate::fields`]).
+fn project_snapshot(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ProjectIdArgs = parse_args(args)?;
+    let db = ctx.services.need::<Database>()?;
+    Ok(db.snapshot(|tx| crate::fields::snapshot(tx, &a.project_id))?)
 }
 
 /// `project_icon_image_get`: the stored picture as base64, or null.

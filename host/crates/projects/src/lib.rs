@@ -24,6 +24,7 @@
 pub mod bindings;
 pub mod board;
 pub mod boards;
+pub mod fields;
 pub mod guard;
 pub mod launch;
 pub mod note;

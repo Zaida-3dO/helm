@@ -2218,6 +2218,18 @@ async fn update_chat(ctx: ToolCtx, a: Value) -> ToolResult {
     if m["archived"] == true {
         return Err(refuse("That chat is archived."));
     }
+    // Mute, profile and sharing have no Undo of their own: the user is shown a notice with Undo.
+    let fields_before = if muted.is_some()
+        || ["profileId", "shareWith", "unshareFrom"]
+            .iter()
+            .any(|k| a.get(*k).is_some())
+    {
+        ctx.op("chat_fields_snapshot", json!({"chatId": id}))
+            .await
+            .ok()
+    } else {
+        None
+    };
     // Where the chat is shown (its project group) and which chat it nests under, checked and
     // applied before anything else changes so a refusal leaves the chat as it was.
     let mut organize = json!({"chatId": id});
@@ -2327,8 +2339,28 @@ async fn update_chat(ctx: ToolCtx, a: Value) -> ToolResult {
             .await?;
         }
     }
-    meta(&ctx, &id)
+    let mut out = meta(&ctx, &id)?;
+    if let (Some(before), Ok(after)) = (
+        fields_before,
+        ctx.op("chat_fields_snapshot", json!({"chatId": id})).await,
+    ) {
+        if before != after
+            && helm_hosttools::settings::record_external_change(
+                &ctx,
+                CHAT_FIELDS_KEY,
+                json!({ id.clone(): before }),
+                json!({ id.clone(): after }),
+            )
+            .is_ok()
+        {
+            out["undo"] = json!("The user was shown a notice with Undo for this change.");
+        }
+    }
+    Ok(out)
 }
+
+/// The change-ring key a chat's mute, profile and sharing are filed under.
+const CHAT_FIELDS_KEY: &str = "chatFields";
 
 async fn wait_idle(ctx: &ToolCtx, id: &str, deadline: Duration) -> Result<bool, ToolError> {
     let end = Instant::now() + deadline;
@@ -2654,7 +2686,7 @@ A helper started with Claude Code's Agent tool always runs on this chat's own mo
     .async_tool(
         ToolSpec::write(
             "app_update_chat",
-            format!("Rename, pin or unpin a chat, change its model or effort (from its next turn), show it on another board (projectId: a board's id, never a folder project's; where it runs does not change), or nest it under another chat on that board (parentChatId) or make it top level (parentChatId null). model can name a Claude model (sonnet, opus, ...) or a local model (local/<server>/<model>): a chat can move between its current provider and the other at any time and the conversation carries over. Say why in one sentence (reason) and it shows in the transcript. muted mutes or unmutes a chat, and only for a chat you created with app_create_chat (a muted chat never notifies the user or raises flags); the user can always change it. No tool changes a chat's harness or provider: start a new chat on the one you want with app_create_chat.{EXPLICIT}"),
+            format!("Rename, pin or unpin a chat, change its model or effort (from its next turn), show it on another board (projectId: a board's id, never a folder project's; where it runs does not change), or nest it under another chat on that board (parentChatId) or make it top level (parentChatId null). model can name a Claude model (sonnet, opus, ...) or a local model (local/<server>/<model>): a chat can move between its current provider and the other at any time and the conversation carries over. Say why in one sentence (reason) and it shows in the transcript. muted mutes or unmutes any chat (a muted chat never notifies the user or raises flags); the user is shown a notice with Undo. No tool changes a chat's harness or provider: start a new chat on the one you want with app_create_chat.{EXPLICIT}"),
             obj(
                 json!({
                     "chatId": id,
@@ -4638,10 +4670,12 @@ mod tests {
         assert_eq!(listed[0]["projectName"], "Site");
     }
 
-    /// The sidebar ops live in the projects crate, so `chat_organize` is answered by a recorder here.
+    /// The sidebar and profile ops live in other crates, so `chat_organize` and the profile calls
+    /// are answered by a recorder here.
     struct Organize {
         inner: Arc<helm_ipc::Dispatcher>,
         seen: Mutex<Vec<Value>>,
+        profile_calls: Mutex<Vec<(String, Value)>>,
     }
 
     impl helm_hosttools::OpInvoker for Organize {
@@ -4656,6 +4690,13 @@ mod tests {
                 self.seen.lock().unwrap().push(args);
                 return Box::pin(async { Ok(json!([])) });
             }
+            if op.starts_with("profiles_") {
+                self.profile_calls
+                    .lock()
+                    .unwrap()
+                    .push((op.to_owned(), args));
+                return Box::pin(async { Ok(json!({})) });
+            }
             self.inner.invoke(op, args)
         }
     }
@@ -4666,6 +4707,7 @@ mod tests {
         let stub = Arc::new(Organize {
             inner: h.api.clone(),
             seen: Mutex::new(Vec::new()),
+            profile_calls: Mutex::new(Vec::new()),
         });
         let mut r = HostToolRegistry::new();
         register_host_tools(&mut r);
@@ -4710,6 +4752,15 @@ mod tests {
             (json!({"muted": true}), "", None),
             (json!({"harness": "codex"}), "app_create_chat", None),
             (json!({"parentChatId": "short"}), "parentChatId", None),
+            // Where it sits among its siblings: before a chat, or last.
+            (
+                json!({"beforeChatId": b}),
+                "",
+                Some(json!({"beforeChatId": b})),
+            ),
+            (json!({"position": "end"}), "", Some(json!({"toEnd": true}))),
+            (json!({"position": "middle"}), "beforeChatId", None),
+            (json!({"beforeChatId": "short"}), "beforeChatId", None),
         ];
         for (i, (extra, err, organize)) in cases.into_iter().enumerate() {
             let before = stub.seen.lock().unwrap().len();
@@ -4741,6 +4792,60 @@ mod tests {
             h.col(&format!("SELECT title FROM chats WHERE id = '{a}'")),
             ["Renamed"]
         );
+        // Whose chat it is and who else sees it: any chat names any profile, and each goes to the
+        // profile op as asked.
+        let profiles = [
+            (
+                json!({"profileId": "pr1"}),
+                vec![(
+                    "profiles_assign_chats",
+                    json!({"chatIds": [a], "profileId": "pr1"}),
+                )],
+            ),
+            (
+                json!({"shareWith": ["pr2", "pr3"], "unshareFrom": ["pr4"]}),
+                vec![
+                    (
+                        "profiles_share_chats",
+                        json!({"chatIds": [a], "profileId": "pr2", "shared": true}),
+                    ),
+                    (
+                        "profiles_share_chats",
+                        json!({"chatIds": [a], "profileId": "pr3", "shared": true}),
+                    ),
+                    (
+                        "profiles_share_chats",
+                        json!({"chatIds": [a], "profileId": "pr4", "shared": false}),
+                    ),
+                ],
+            ),
+        ];
+        for (extra, want) in profiles {
+            stub.profile_calls.lock().unwrap().clear();
+            let mut args = json!({"chatId": a});
+            args.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let res = call(&h, &t, &b, "app_update_chat", args).await;
+            assert_eq!(res["ok"], true, "{extra}: {res}");
+            let got = stub.profile_calls.lock().unwrap().clone();
+            let want: Vec<(String, Value)> =
+                want.into_iter().map(|(o, v)| (o.to_owned(), v)).collect();
+            assert_eq!(got, want, "{extra}");
+        }
+        let res = call(
+            &h,
+            &t,
+            &b,
+            "app_update_chat",
+            json!({"chatId": a, "shareWith": [3]}),
+        )
+        .await;
+        assert_eq!(res["ok"], false, "{res}");
+        assert!(res["error"]
+            .as_str()
+            .unwrap()
+            .contains("list of profile ids"));
         // The chat that created `a` may mute and unmute it; a third chat may not; `app_this_chat`
         // reports it.
         let c = h.create().await;

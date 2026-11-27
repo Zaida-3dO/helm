@@ -164,6 +164,21 @@ async fn update_project(ctx: ToolCtx, a: Value) -> ToolResult {
     }
     let mut upd = json!({"projectId": id, "revision": cur["revision"]});
     let mut any = false;
+    // What the project's place, folder, picture and startup lists were, for the notice's Undo.
+    let before_fields = ctx
+        .op("project_snapshot", json!({"projectId": id}))
+        .await
+        .ok();
+    // What its chats are told first: text, or none (null or blank clears).
+    if let Some(v) = a.get("startupInstructions") {
+        if !v.is_null() && !v.is_string() {
+            return Err(ToolError::refused(
+                "startupInstructions is text, or null to clear.",
+            ));
+        }
+        upd["startupInstructions"] = v.clone();
+        any = true;
+    }
     // Where it sits: before a sibling (null: last), and which project it nests under (null: top).
     for (k, op_key) in [
         ("beforeProjectId", "beforeProjectId"),
@@ -313,8 +328,30 @@ async fn update_project(ctx: ToolCtx, a: Value) -> ToolResult {
         }
     }
     let all = all_projects(&ctx, true).await?;
-    Ok(project_summary(&find(&all, &id)?, &all))
+    let mut out = project_summary(&find(&all, &id)?, &all);
+    // The fields that have no Undo of their own are filed in the change ring: the user sees a
+    // notice with Undo.
+    if let (Some(before), Ok(after)) = (
+        before_fields,
+        ctx.op("project_snapshot", json!({"projectId": id})).await,
+    ) {
+        if before != after
+            && crate::settings::record_external_change(
+                &ctx,
+                PROJECT_FIELDS_KEY,
+                json!({ id.clone(): before }),
+                json!({ id.clone(): after }),
+            )
+            .is_ok()
+        {
+            out["undo"] = json!(UNDO_NOTE);
+        }
+    }
+    Ok(out)
 }
+
+/// The change-ring key a project's place, folder, picture and startup lists are filed under.
+const PROJECT_FIELDS_KEY: &str = "projectFields";
 
 async fn repo_locations(ctx: ToolCtx, a: Value) -> ToolResult {
     let mut args = a;
@@ -439,6 +476,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                     "path": {"type": "string", "maxLength": 4096, "description": "For a folder project: the absolute folder it is; every chat in it must be idle."},
                     "beforeProjectId": {"type": ["string", "null"], "description": "Put the project before this sibling; null puts it last."},
                     "parentId": {"type": ["string", "null"], "description": "Nest the project under this project; null makes it top level."},
+                    "startupInstructions": {"type": ["string", "null"], "maxLength": 4000, "description": "What every new chat on the project does first; null or blank clears."},
                     "startupFiles": {"type": "array", "items": {"type": "string"}, "maxItems": 32, "description": "The context files the project's chats are told about (absolute paths); replaces the list."},
                     "startupServers": {"type": "array", "items": {"type": "string"}, "maxItems": 32, "description": "The MCP server ids the project's chats get (the others are left out); replaces the list."},
                     "iconImagePath": {"type": "string", "maxLength": 4096, "description": "An absolute path to a square PNG of at most 64 KB, which becomes the icon."}
@@ -675,6 +713,78 @@ mod tests {
                 None => {
                     r.unwrap_err();
                     assert!(calls.iter().all(|(o, _)| o != "project_update"), "{icon}");
+                }
+            }
+        }
+        // Where a project sits, its folder and what its chats are told: each goes to the project
+        // op as asked, and a wrong shape is refused before anything is sent.
+        for (args, sent, err) in [
+            (json!({"path": FOLDER}), Some(("path", json!(FOLDER))), ""),
+            (
+                json!({"parentId": "p2"}),
+                Some(("parentId", json!("p2"))),
+                "",
+            ),
+            (
+                json!({"parentId": null}),
+                Some(("parentId", Value::Null)),
+                "",
+            ),
+            (
+                json!({"beforeProjectId": "p8"}),
+                Some(("beforeProjectId", json!("p8"))),
+                "",
+            ),
+            (
+                json!({"startupFiles": ["NOTES.md"]}),
+                Some(("startupFiles", json!(["NOTES.md"]))),
+                "",
+            ),
+            (
+                json!({"startupFiles": []}),
+                Some(("startupFiles", json!([]))),
+                "",
+            ),
+            (
+                json!({"startupServers": ["browser"]}),
+                Some(("startupServers", json!(["browser"]))),
+                "",
+            ),
+            (
+                json!({"startupInstructions": "Make a worktree."}),
+                Some(("startupInstructions", json!("Make a worktree."))),
+                "",
+            ),
+            (
+                json!({"startupInstructions": null}),
+                Some(("startupInstructions", Value::Null)),
+                "",
+            ),
+            (json!({"startupInstructions": 3}), None, "text, or null"),
+            (json!({"startupFiles": [1]}), None, "list of text"),
+            (json!({"parentId": 3}), None, "project's id"),
+        ] {
+            ops.0.lock().unwrap().clear();
+            let mut full = json!({"projectId": "p1"});
+            full.as_object_mut()
+                .unwrap()
+                .extend(args.as_object().unwrap().clone());
+            let r = update_project(ctx(ops.clone()), full).await;
+            let calls = ops.0.lock().unwrap().clone();
+            let upd = calls.iter().find(|(o, _)| o == "project_update");
+            match sent {
+                Some((field, want)) => {
+                    r.unwrap_or_else(|e| panic!("{args}: {}", e.public));
+                    assert_eq!(upd.unwrap().1[field], want, "{args}");
+                }
+                None => {
+                    let e = r.unwrap_err();
+                    assert!(
+                        e.public.contains(err) && !e.public.contains("ask the user"),
+                        "{args}: {}",
+                        e.public
+                    );
+                    assert!(upd.is_none(), "{args}");
                 }
             }
         }

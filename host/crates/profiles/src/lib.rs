@@ -27,6 +27,7 @@
 //! | `profiles_delete` | maintenance | `{id}`: its chats move to the home profile; the home profile is refused |
 //! | `profiles_set_active` | maintenance | `{id}`: a profile id, or `null` for all profiles |
 //! | `profiles_assign_chats` | maintenance | `{chatIds, profileId}`: the chats now belong to that profile |
+//! | `chat_fields_snapshot` | blocking | `{chatId}`: the chat's mute, profile and sharing, for Undo of what `app_update_chat` changes |
 //! | `profiles_share_chats` | maintenance | `{chatIds, profileId, shared}`: show the chats to that profile too, or stop |
 //! | `profiles_chat_ids` | blocking | `{profileId}` → `{chatIds}`: the chats it owns and those shared with it (the sidebar filter) |
 //!
@@ -34,6 +35,7 @@
 //! `app_this_chat` and can filter `app_list_chats` by it.
 
 pub mod bindings;
+pub mod chat_fields;
 pub mod launch;
 mod ops;
 pub mod settings_keys;

@@ -14,7 +14,12 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("profiles_set_active", OpClass::Maintenance, set_active)
         .blocking("profiles_assign_chats", OpClass::Maintenance, assign_chats)
         .blocking("profiles_share_chats", OpClass::Maintenance, share_chats)
-        .blocking("profiles_chat_ids", OpClass::Blocking, chat_ids);
+        .blocking("profiles_chat_ids", OpClass::Blocking, chat_ids)
+        .blocking(
+            "chat_fields_snapshot",
+            OpClass::Blocking,
+            chat_fields_snapshot,
+        );
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(args: Value) -> Result<T, ApiError> {
@@ -215,6 +220,20 @@ fn share_chats(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatIdsArgs {
     profile_id: String,
+}
+
+/// `chat_fields_snapshot`: a chat's mute, profile and sharing, as the change ring files them around
+/// a chat's edit (see [`crate::chat_fields`]).
+fn chat_fields_snapshot(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct A {
+        chat_id: String,
+    }
+    let a: A = parse(args)?;
+    let db = ctx.services.need::<Database>()?;
+    db.snapshot(|tx| crate::chat_fields::snapshot(tx, &a.chat_id))
+        .map_err(|e| ApiError::new("not_found", e.to_string()))
 }
 
 fn chat_ids(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {

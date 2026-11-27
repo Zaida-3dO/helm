@@ -730,7 +730,7 @@ pub fn set_parent(tx: &Transaction<'_>, id: &str, parent: Option<&str>) -> Res<(
 
 /// The ids of `id`'s siblings in its pin group, in sidebar order (including `id`), and whether
 /// that group is the pinned one, as the profile `scope` sees them.
-fn project_siblings(
+pub(crate) fn project_siblings(
     tx: &Transaction<'_>,
     id: &str,
     scope: &str,
