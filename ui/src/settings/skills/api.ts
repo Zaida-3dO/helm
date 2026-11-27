@@ -6,6 +6,7 @@
 // optional `layer` (default: everyone).
 
 import type { Api } from '../../api/client.ts';
+import type { RuleWhen } from '../../api/generated/skills/RuleWhen.ts';
 
 /** One skill as listed: its folder name, the description from its SKILL.md, and its path. */
 export interface SkillRow {
@@ -71,6 +72,23 @@ export interface RuleRow {
   tooLarge: boolean;
   /** Kept whole in every chat's prompt however long it is, instead of being listed by a line. */
   always: boolean;
+  /** The trigger keys as the header declares them; all empty for a rule with no trigger. Missing from an older host. */
+  when?: RuleWhen;
+  /** What the trigger says in one short line; empty when there is no trigger. Built by the host, shown as is. */
+  whenSummary?: string;
+}
+
+/** One rule's answer in the preview: what a described chat would get from it. */
+export interface RulePreviewRow {
+  path: string;
+  layer: string;
+  title: string;
+  /** What the chat sees at launch: the whole text, one line, or nothing. */
+  decision: 'full' | 'line' | 'hidden';
+  /** Whether the described tool call would fire a moment rule. */
+  fires: boolean;
+  /** A short plain-words reason for the answer. */
+  why: string;
 }
 
 /** `all`, or the ids of the projects a linked folder's skills load in. */
@@ -142,13 +160,21 @@ export interface MemoryRow {
 export function knowledgeOps(api: Api) {
   return {
     get: (layer: string) => api<KnowledgeLayer>('knowledge_get', { layer }),
+    /**
+     * Which rules a chat like the one described would be shown at launch, and whether one described
+     * tool call fires a moment rule. Reads the list together with Everyone's, as a chat gets them.
+     */
+    rulesPreview: (a: { layer: string; folder?: string; kind?: string; person?: string; tool?: string; command?: string }) =>
+      api<{ rules: RulePreviewRow[] }>('knowledge_rules_preview', a).then((r) => r.rules ?? []),
     ruleRead: (layer: string, path: string) =>
       api<{ rule: RuleRow; text: string }>('knowledge_rule_read', { layer, path }),
     /**
      * A new rule has no `path`; a changed one sends the `revision` it was read at (a stale one is a
      * conflict). `always` sets or clears the "include in full" flag; left out it keeps the setting.
+     * `when` rewrites the trigger keys wholesale: an all-empty `RuleWhen` clears them, left out leaves
+     * them alone.
      */
-    ruleWrite: (a: { layer: string; path?: string; title: string; text: string; revision?: string; always?: boolean }) =>
+    ruleWrite: (a: { layer: string; path?: string; title: string; text: string; revision?: string; always?: boolean; when?: RuleWhen }) =>
       api<{ rule: RuleRow }>('knowledge_rule_write', a),
     remove: (layer: string, kind: KnowledgeKind, name: string) =>
       api<KnowledgeLayer>('knowledge_delete', { layer, kind, name }),

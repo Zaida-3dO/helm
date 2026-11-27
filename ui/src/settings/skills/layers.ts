@@ -1,8 +1,102 @@
-// The layer picker's logic, without React: which layers exist, which one a pane opens on, where an
-// item can move to, and how a linked folder's reach reads. A layer is `everyone` or
-// `profile:<profileId>` (the host's keys).
+// The Skills & rules screen's logic, without React: which layers exist, which one a pane opens on,
+// where an item can move to, how a linked folder's reach reads, and how a rule's trigger dates read
+// (badges, the filter chips and their sort). A layer is `everyone` or `profile:<profileId>` (the
+// host's keys).
 
-import type { RulesBudget, SkillSource, SourceProjects } from './api.ts';
+import type { RuleRow, RulesBudget, SkillSource, SourceProjects } from './api.ts';
+import type { RuleWhen } from '../../api/generated/skills/RuleWhen.ts';
+
+/** Today's local date as `YYYY-MM-DD`, the shape rule headers use. */
+export function localToday(now: Date = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
+}
+
+/** The date state a trigger's dates give as of `today` (both `YYYY-MM-DD`). */
+export interface RuleDates {
+  /** Past its last day: chats see nothing and Settings says Expired. */
+  expired: boolean;
+  /** Past its review day: it still applies, but asks to keep or delete. */
+  reviewDue: boolean;
+  /** Its start day has not come yet. */
+  notYet: boolean;
+}
+
+export function ruleDates(when: Pick<RuleWhen, 'from' | 'until' | 'review'> | null | undefined, today: string): RuleDates {
+  return {
+    expired: !!when?.until && when.until < today,
+    reviewDue: !!when?.review && when.review < today,
+    notYet: !!when?.from && when.from > today,
+  };
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** A `YYYY-MM-DD` date in short words ("31 Jan", "31 Jan 2027" when its year is not today's). */
+export function dateLabel(iso: string | null | undefined, today: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso ?? '');
+  if (!m || !MONTHS[Number(m[2]) - 1]) return iso ?? '';
+  const day = String(Number(m[3]));
+  const label = `${day} ${MONTHS[Number(m[2]) - 1]}`;
+  return m[1] === today.slice(0, 4) ? label : `${label} ${m[1]}`;
+}
+
+/** True when any trigger key is set. Matches how the host decides a rule has a When. */
+export function ruleHasTrigger(when: RuleWhen | null | undefined): boolean {
+  if (!when) return false;
+  const one = [when.show, when.otherwise, when.before, when.from, when.until, when.review].some((v) => v !== null && v !== undefined);
+  const lists = [when.folders, when.hosts, when.pcs, when.tools, when.commands, when.kinds, when.people];
+  return one || lists.some((l) => (l?.length ?? 0) > 0);
+}
+
+export interface RuleFlag {
+  kind: 'expired' | 'upcoming' | 'review' | 'problem';
+  label: string;
+  title: string;
+}
+
+/** The badges a rule row shows. A rule is at most one of Expired, Not yet started and Review. */
+export function ruleFlags(r: Pick<RuleRow, 'when'>, today: string): RuleFlag[] {
+  const out: RuleFlag[] = [];
+  const d = ruleDates(r.when, today);
+  if (d.expired) out.push({ kind: 'expired', label: 'Expired', title: `ended on ${dateLabel(r.when?.until, today)}` });
+  else if (d.notYet) out.push({ kind: 'upcoming', label: 'Not yet started', title: `starts on ${dateLabel(r.when?.from, today)}` });
+  else if (d.reviewDue) out.push({ kind: 'review', label: 'Review: keep or delete?', title: `review was ${dateLabel(r.when?.review, today)}` });
+  if ((r.when?.problems?.length ?? 0) > 0) out.push({ kind: 'problem', label: 'A header line could not be read', title: r.when?.problems.join('; ') ?? '' });
+  return out;
+}
+
+/** The row filter chips. */
+export const RULE_FILTERS = [
+  { value: 'all', label: 'All' },
+  { value: 'plain', label: 'Every chat' },
+  { value: 'triggered', label: 'Triggered' },
+  { value: 'expired', label: 'Expired' },
+  { value: 'review', label: 'Review due' },
+] as const;
+
+export type RuleFilter = (typeof RULE_FILTERS)[number]['value'];
+
+/** The list the Rules section draws: chip filter, text search, expired and review-due rows first. */
+export function filterRules(rules: RuleRow[], filter: RuleFilter, query: string, today: string): RuleRow[] {
+  const q = query.trim().toLowerCase();
+  const kept = rules.filter((r) => {
+    if (q && !`${r.title} ${r.path} ${r.whenSummary ?? ''}`.toLowerCase().includes(q)) return false;
+    const d = ruleDates(r.when, today);
+    switch (filter) {
+      case 'plain': return !ruleHasTrigger(r.when);
+      case 'triggered': return ruleHasTrigger(r.when);
+      case 'expired': return d.expired;
+      case 'review': return d.reviewDue || d.notYet;
+      default: return true;
+    }
+  });
+  const late = (r: RuleRow) => {
+    const d = ruleDates(r.when, today);
+    return d.expired || d.reviewDue ? 0 : 1;
+  };
+  return kept.sort((a, b) => late(a) - late(b));
+}
 
 export const EVERYONE = 'everyone';
 
