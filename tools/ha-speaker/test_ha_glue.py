@@ -66,6 +66,10 @@ _ha_backend = importlib.import_module("hs.ha_backend")
 _errors = importlib.import_module("hs.errors")
 _housecontrol = importlib.import_module("hs.homecontrol")
 
+_agent_core = importlib.import_module("hs.agent_core")
+_errorlines = importlib.import_module("hs.errorlines")
+_hubapi = importlib.import_module("hs.hubapi")
+
 _profiles = importlib.import_module("hs.profiles")
 active_profile = _profiles.active_profile
 build_model_config = _profiles.build_model_config
@@ -295,6 +299,90 @@ class ReplayCliTest(unittest.TestCase):
             api_key_env=None, header=[], body_json=None,
             no_thinking=True, timeout=30.0))
         self.assertIsNone(cfg2.api_key)
+
+
+class ErrorLinesTest(unittest.TestCase):
+    """errorlines: the one decision table, and the catalogue that feeds it."""
+
+    def test_code_for_turn_table(self):
+        ac = _agent_core
+        el = _errorlines
+        need = el.NEED_UPDATE_TEXT
+        cases = [
+            # main endpoint: the kind plus the fixed sentence it would speak
+            ("main offline", dict(kind=ac.KIND_OFFLINE), "thinking_offline"),
+            ("main timeout", dict(kind=ac.KIND_TIMEOUT), "took_too_long"),
+            ("main error generic", dict(kind=ac.KIND_ERROR, text=ac.ERROR_TEXT), "try_again"),
+            ("main error no text", dict(kind=ac.KIND_ERROR), "try_again"),
+            ("main error empty", dict(kind=ac.KIND_ERROR, text=ac.EMPTY_TEXT), "did_not_catch_that"),
+            ("main error gate blocked", dict(kind=ac.KIND_ERROR, text=ac.CONTROL_TEXT), "could_not_do_that"),
+            ("answer keeps live words", dict(kind=ac.KIND_ANSWER, text="It is three."), None),
+            ("escalate without a hub", dict(kind=ac.KIND_ESCALATE), None),
+            ("no satellite device (text/REST call)", dict(kind=ac.KIND_ERROR, has_satellite=False), None),
+            # hub side of the turn: result state, http status when one exists,
+            # and the hub's own answer text for the exact-match line
+            ("hub offline", dict(kind=ac.KIND_ESCALATE, escalate_state="offline"), "cannot_reach_helm"),
+            ("hub busy 429", dict(kind=ac.KIND_ESCALATE, escalate_state="error", escalate_status=429), "too_busy"),
+            ("hub refused the token", dict(kind=ac.KIND_ESCALATE, escalate_state="error", escalate_status=401), "try_again"),
+            ("hub forgot the turn", dict(kind=ac.KIND_ESCALATE, escalate_state="error", escalate_status=404), "try_again"),
+            ("hub gave up", dict(kind=ac.KIND_ESCALATE, escalate_state="error"), "try_again"),
+            ("escalation budget over", dict(kind=ac.KIND_ESCALATE, escalate_state="timeout"), "answer_on_phone"),
+            ("hub too old to answer", dict(kind=ac.KIND_ESCALATE, escalate_state="answer", escalate_text=need), "helm_needs_updating"),
+            ("reworded hub line falls back to live words", dict(kind=ac.KIND_ESCALATE, escalate_state="answer", escalate_text=need + " please"), None),
+            ("hub answered normally", dict(kind=ac.KIND_ESCALATE, escalate_state="answer", escalate_text="Four o'clock."), None),
+        ]
+        for name, kwargs, want in cases:
+            with self.subTest(name):
+                self.assertEqual(_errorlines.code_for_turn(**kwargs), want)
+
+    def test_every_kind_that_ends_a_turn_has_a_line(self):
+        # A new kind or hub state that ends a turn without an answer must get
+        # a catalogue entry, or this fails. "answer" and escalate-without-hub
+        # deliberately stay live speech.
+        for kind in (_agent_core.KIND_OFFLINE, _agent_core.KIND_TIMEOUT,
+                     _agent_core.KIND_ERROR):
+            self.assertIsNotNone(_errorlines.code_for_turn(kind=kind), kind)
+        for state in ("offline", "timeout", "error"):
+            self.assertIsNotNone(
+                _errorlines.code_for_turn(kind=_agent_core.KIND_ESCALATE,
+                                          escalate_state=state), state)
+
+    def test_every_fixed_sentence_is_covered_by_a_line(self):
+        # Walks the module constants: a new OFFLINE_TEXT/ERROR_TEXT/... in
+        # agent_core or hubapi without a "covers" entry fails here. The line's
+        # own words may differ (they are re-recorded), so matching is by name.
+        covered = set()
+        for entry in _errorlines.lines().values():
+            covered.update(entry.get("covers") or [])
+        # GUARD_REPROMPT_TEXT is the one exempt constant: it is sent back to
+        # the model inside the turn and never reaches a speaker.
+        exempt = {"agent_core.GUARD_REPROMPT_TEXT"}
+        for mod, mod_name in ((_agent_core, "agent_core"), (_hubapi, "hubapi")):
+            for name in sorted(dir(mod)):
+                qualified = "%s.%s" % (mod_name, name)
+                if name.endswith("_TEXT") and qualified not in exempt:
+                    self.assertIn(qualified, covered,
+                                  "%s has no pre-recorded line" % qualified)
+
+    def test_line_entries_are_speakable(self):
+        for code, entry in _errorlines.lines().items():
+            with self.subTest(code):
+                self.assertLessEqual(len(entry["text"].split()), 12)
+                self.assertTrue(entry["file"].endswith(".flac"))
+                self.assertIsInstance(entry.get("situations"), list)
+                self.assertTrue(entry["situations"])
+
+    def test_files_and_words_come_from_the_json(self):
+        el = _errorlines
+        # the hub-unreachable line reuses the file that has played since before
+        # this feature; everything else is helm_speaker_err_<code>.flac
+        self.assertEqual(el.filename_for("cannot_reach_helm"),
+                         "helm_speaker_offline_alba.flac")
+        self.assertEqual(el.filename_for("try_again"),
+                         "helm_speaker_err_try_again.flac")
+        self.assertEqual(el.canonical_text("did_not_catch_that"),
+                         _agent_core.EMPTY_TEXT)
+        self.assertIsNone(el.canonical_text("no_such_code"))
 
 
 if __name__ == "__main__":

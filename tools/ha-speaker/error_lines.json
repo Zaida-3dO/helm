@@ -1,0 +1,108 @@
+[
+  {
+    "code": "cannot_reach_helm",
+    "text": "Sorry, I could not reach Helm. Please try again in a moment.",
+    "file": "helm_speaker_offline_alba.flac",
+    "situations": [
+      "The Helm hub could not be reached for the whole turn.",
+      "The machine behind voice is down entirely: both speech probes fail."
+    ],
+    "covers": ["hubapi.OFFLINE_TEXT"]
+  },
+  {
+    "code": "thinking_offline",
+    "text": "My thinking side is offline right now.",
+    "file": "helm_speaker_err_thinking_offline.flac",
+    "situations": [
+      "The model endpoint refused the connection: nothing is listening on that port."
+    ],
+    "covers": ["agent_core.OFFLINE_TEXT"]
+  },
+  {
+    "code": "took_too_long",
+    "text": "That's taking longer than I expected. Try asking again.",
+    "file": "helm_speaker_err_took_too_long.flac",
+    "situations": [
+      "The model took longer than the turn budget allows.",
+      "A cold or queued model wait: the answer never arrived in time."
+    ],
+    "covers": ["agent_core.TIMEOUT_TEXT"]
+  },
+  {
+    "code": "answer_on_phone",
+    "text": "I'm still working on it. The answer will go to your phone.",
+    "file": "helm_speaker_err_answer_on_phone.flac",
+    "situations": [
+      "An escalation to the hub ran past its short waiting budget; the hub keeps working and can send the answer onward."
+    ],
+    "covers": ["hubapi.TIMEOUT_TEXT"]
+  },
+  {
+    "code": "try_again",
+    "text": "That didn't work. Try asking again.",
+    "file": "helm_speaker_err_try_again.flac",
+    "situations": [
+      "The model answered badly (a non-200 or unreadable reply), or the turn crashed outright.",
+      "A hub turn that was abandoned, or a hub that forgot the turn id.",
+      "The hub token or scope is wrong: a setup mistake - the log says so.",
+      "Tool refusals worded by the model, when the model itself then failed."
+    ],
+    "covers": ["agent_core.ERROR_TEXT", "hubapi.ERROR_TEXT"]
+  },
+  {
+    "code": "too_busy",
+    "text": "I'm handling a lot right now. Try again in a minute.",
+    "file": "helm_speaker_err_too_busy.flac",
+    "situations": [
+      "The hub turned the request away as busy (HTTP 429): too many live turns at once."
+    ],
+    "covers": []
+  },
+  {
+    "code": "helm_needs_updating",
+    "text": "Helm needs updating before I can answer by voice.",
+    "file": "helm_speaker_err_helm_needs_updating.flac",
+    "situations": [
+      "An escalation came back with exactly this sentence: the hub software is too old to answer by voice yet."
+    ],
+    "covers": []
+  },
+  {
+    "code": "did_not_catch_that",
+    "text": "I didn't catch that.",
+    "file": "helm_speaker_err_did_not_catch_that.flac",
+    "situations": [
+      "The model (or the fallback endpoint) said nothing usable after its retry."
+    ],
+    "covers": ["agent_core.EMPTY_TEXT"]
+  },
+  {
+    "code": "could_not_do_that",
+    "text": "I couldn't do that.",
+    "file": "helm_speaker_err_could_not_do_that.flac",
+    "situations": [
+      "A house request was blocked by the success gate: no tool call ever carried it out."
+    ],
+    "covers": ["agent_core.CONTROL_TEXT"]
+  },
+  {
+    "code": "speech_down",
+    "text": "My voice is not working right now. Try again in a moment.",
+    "file": "helm_speaker_err_speech_down.flac",
+    "situations": [
+      "Played by the Home Assistant automation, never decided by the component.",
+      "A quiet end of listening with the hearing service failing its probe.",
+      "A dead turn where only one of the two speech engines answers its probe."
+    ],
+    "covers": []
+  },
+  {
+    "code": "stuck_try",
+    "text": "I got stuck. Please try again.",
+    "file": "helm_speaker_err_stuck_try.flac",
+    "situations": [
+      "Played by the automation when the satellite sits in processing for twenty seconds; the announcement itself cancels the hung run."
+    ],
+    "covers": []
+  }
+]
