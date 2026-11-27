@@ -1313,6 +1313,7 @@ impl Inner {
                 }
                 done(self.port.mcp_list().await?)
             }
+            Op::ForwardsReport => done(to_value(&self.tunnels.report().await)?),
         }
     }
 

@@ -1058,6 +1058,9 @@ pub enum Op {
     /// environment names, commands and addresses cross as they stand. Answered only to a PC
     /// acting as this PC's own person. A read.
     McpListGet,
+    /// Every port forwarded to this PC and every port of this PC that others hold, each end
+    /// checked on this PC's loopback, for any person of the household to read. A read.
+    ForwardsReport,
 }
 
 fn args<T: for<'de> Deserialize<'de>>(v: Value) -> Result<T, WireError> {
@@ -1182,6 +1185,10 @@ impl Op {
             "mcp_list_get" => {
                 args::<NoArgs>(a)?;
                 Op::McpListGet
+            }
+            "forwards_report" => {
+                args::<NoArgs>(a)?;
+                Op::ForwardsReport
             }
             _ => return Err(WireError::elsewhere()),
         })
@@ -1496,6 +1503,8 @@ mod tests {
             ("forward_open", json!({"chatId": "c1", "port": 70000}), None),
             ("forward_open", json!({"chatId": "c1"}), None),
             ("forward_close", json!({"forwardId": "f1"}), Some(false)),
+            ("forwards_report", json!({}), Some(false)),
+            ("forwards_report", json!({"port": 1}), None),
             ("skills", json!({"chatId": "c1"}), Some(false)),
             // The lightning toggle changes the chat where it runs, so the run switch gates it.
             (

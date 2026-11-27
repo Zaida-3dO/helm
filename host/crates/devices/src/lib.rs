@@ -47,6 +47,7 @@
 //! | `devices_forward_close` | blocking | `{forwardId}` → `{}`: stop one; the other PC is told |
 //! | `devices_forwards_hosted` | blocking | `{}` → `{forwards: [Forward]}`, oldest first: the ports of this PC that seats on other PCs have open now (`deviceUid` names the seat PC) |
 //! | `devices_forward_hosted_stop` | blocking | `{forwardId}` → `{}`: stop sharing one of this PC's ports; the seat PC is told |
+//! | `devices_forwards_report` | async | `{device?, chatId?}` → `{forwards, unreachable}`: every forward of the household, for every person, asked of every PC that is up: `{forwardId, state, why, source: {deviceName, deviceUid, port, address}, destination: {deviceName, deviceUid, localPort, url, address}, title, chatId, chatTitle, person, streams, openedAt, lastUsedAt}`. `state` is `ok`, `source_not_answering` (nothing answers on the server's port), `destination_not_listening` (the viewing PC no longer listens), `mismatch` (the two PCs disagree: `why` says how) or `unknown` (an end could not be checked). `unreachable` lists each PC that was offline or silent, with the reason |
 //!
 //! `Forward` is `{forwardId, chatId, deviceUid, deviceName, port, localPort, url, title, streams,
 //! openedAt, lastUsedAt}` (times in Unix ms). A forward ends when stopped, after 30 minutes with
@@ -81,7 +82,9 @@
 //! only (their profile's, and those pinned before profiles), and a pin made from afar is theirs.
 //! Ports: `forward_open` (with the switch, for a chat the acting person owns or that is shared
 //! with them) forwards one of this PC's loopback ports to the asking PC, and `forward_close` ends
-//! one; the bytes travel as pushes (see [`tunnel`]).
+//! one; the bytes travel as pushes (see [`tunnel`]). `forwards_report` answers every forward this
+//! PC takes part in, each end checked on this PC's loopback, to any person of the household: a
+//! read that needs no switch.
 //! `mcp_list_get` reads this PC's MCP tool servers for Settings → MCP's "Copy from another PC":
 //! only a PC acting as this PC's own person is answered, and the answer carries no secrets —
 //! every secret value, saved secret id and credential-file path is blanked before it crosses.

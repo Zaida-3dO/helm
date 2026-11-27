@@ -294,6 +294,7 @@ impl Mirror {
                             | "that board"
                             | "that forward"
                             | "its tool servers"
+                            | "its forwards"
                     ) =>
             {
                 ApiError::new(
@@ -864,6 +865,21 @@ impl Mirror {
             .rpc
             .call(device, "forward_close", json!({ "forwardId": forward_id }))
             .await;
+    }
+
+    /// Every forward `device` takes part in, each end checked there: `{viewing, hosted}`. Needs
+    /// the line and the device up and the pairing, not the run switch: it only reads. Asked as
+    /// `person`, who may see all of it: what a PC forwards is not per person.
+    pub async fn forwards_report(&self, device: &str, person: &str) -> Result<Value, ApiError> {
+        self.check_up(device)?;
+        self.ask_as(
+            device,
+            "forwards_report",
+            json!({}),
+            "its forwards",
+            &[person.to_owned()],
+        )
+        .await
     }
 
     /// One read of the task board the PC that runs this chat has set up, sent as that PC's own

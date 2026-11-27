@@ -40,7 +40,7 @@
 use crate::link::BoxFut;
 use crate::wire::{code, WireError};
 use base64::Engine as _;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io;
@@ -72,6 +72,11 @@ pub const IDLE: Duration = Duration::from_secs(30 * 60);
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long the viewer waits for the host to say whether it reached the server.
 pub const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a check of one end of a forward waits for an answer.
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+/// The most ends one report checks; the rest are listed unchecked. There are at most
+/// [`MAX_FORWARDS`] to this PC and as many to each other PC, so this is never reached in practice.
+pub const MAX_PROBES: usize = 16;
 /// Remote-desktop and remote-management ports: never forwarded, whatever answers on them.
 pub const REMOTE_ADMIN_PORTS: [u16; 4] = [3389, 5985, 5986, 47001];
 
@@ -177,7 +182,7 @@ pub struct ViewSpec {
 /// One forward this PC takes part in, as either list shows it. `device_uid` names the other PC:
 /// the host for a forward to this PC, the viewer for a port this PC shares. The device's name is
 /// the caller's to add: the engine knows devices only by id.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ViewInfo {
     pub forward_id: String,
@@ -191,6 +196,25 @@ pub struct ViewInfo {
     /// Unix ms.
     pub opened_at: i64,
     pub last_used_at: i64,
+}
+
+/// One end of a forward and whether it is working now. For a port this PC shares, `alive` says a
+/// server answers on its `port` here; for a port forwarded to this PC, that this PC still listens
+/// on `local_port`. `None` when the check was not made.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Checked {
+    #[serde(flatten)]
+    pub info: ViewInfo,
+    pub alive: Option<bool>,
+}
+
+/// Every forward this PC takes part in, each checked at its own end: `viewing` are the ports
+/// forwarded to this PC, `hosted` the ports of this PC that other PCs hold.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Report {
+    pub viewing: Vec<Checked>,
+    pub hosted: Vec<Checked>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -586,6 +610,78 @@ impl Tunnels {
     }
 
     // ----------------------------------------------------------------------- both
+
+    /// Both lists with each end checked on this PC's loopback, at the same time and each for at
+    /// most [`PROBE_TIMEOUT`]. A check only connects (and closes at once) or finds the port taken:
+    /// it sends nothing, and a forward sees no stream from it.
+    pub async fn report(&self) -> Report {
+        let (viewing, hosted) = (self.forwards(), self.hosted());
+        let listening: HashMap<String, bool> = lock(&self.inner.st)
+            .fwds
+            .iter()
+            .map(|(id, w)| {
+                let up = w.listener.as_ref().is_some_and(|l| !l.is_finished());
+                (id.clone(), up)
+            })
+            .collect();
+        let mut checks = tokio::task::JoinSet::new();
+        for (n, info) in viewing
+            .iter()
+            .chain(hosted.iter())
+            .enumerate()
+            .take(MAX_PROBES)
+        {
+            let net = self.inner.net.clone();
+            let (port, is_view) = (
+                if n < viewing.len() {
+                    info.local_port
+                } else {
+                    info.port
+                },
+                n < viewing.len(),
+            );
+            let task_up = listening.get(&info.forward_id).copied().unwrap_or(false);
+            checks.spawn_on(
+                async move {
+                    let alive = if is_view {
+                        // Binding fails only while something listens: the forward's own listener.
+                        task_up
+                            && matches!(
+                                tokio::time::timeout(PROBE_TIMEOUT, net.listen(port)).await,
+                                Ok(Err(_))
+                            )
+                    } else {
+                        matches!(
+                            tokio::time::timeout(PROBE_TIMEOUT, net.dial(port)).await,
+                            Ok(Ok(_))
+                        )
+                    };
+                    (n, alive)
+                },
+                &self.inner.handle,
+            );
+        }
+        let mut seen: HashMap<usize, bool> = HashMap::new();
+        while let Some(done) = checks.join_next().await {
+            if let Ok((n, alive)) = done {
+                seen.insert(n, alive);
+            }
+        }
+        let count = viewing.len();
+        let checked = |list: Vec<ViewInfo>, first: usize| -> Vec<Checked> {
+            list.into_iter()
+                .enumerate()
+                .map(|(i, info)| Checked {
+                    alive: seen.get(&(first + i)).copied(),
+                    info,
+                })
+                .collect()
+        };
+        Report {
+            viewing: checked(viewing, 0),
+            hosted: checked(hosted, count),
+        }
+    }
 
     /// A `dev_push` of [`SUB`] from device `from` (as the hub stamped it).
     pub fn on_push(&self, from: &str, event: &Value) {

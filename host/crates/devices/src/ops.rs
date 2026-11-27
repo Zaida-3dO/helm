@@ -3,6 +3,7 @@
 use crate::identity::{self, DeviceError};
 use crate::mirror::{self, Mirror, MirrorSlot};
 use crate::route::NewChat;
+use crate::tunnel::{Checked, Report};
 use base64::Engine as _;
 use helm_chats::clock::Clock;
 use helm_core::db::Database;
@@ -10,6 +11,7 @@ use helm_ipc::{ApiError, AppEvent, OpClass, OpCtx, OpRegistry};
 use rusqlite::{Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 pub fn register_ops(reg: &mut OpRegistry) {
     reg.blocking("device_get", OpClass::Blocking, get)
@@ -61,7 +63,8 @@ pub fn register_ops(reg: &mut OpRegistry) {
             "devices_forward_hosted_stop",
             OpClass::Blocking,
             devices_forward_hosted_stop,
-        );
+        )
+        .async_op("devices_forwards_report", devices_forwards_report);
 }
 
 fn fail(e: DeviceError) -> ApiError {
@@ -1231,4 +1234,510 @@ fn devices_forward_hosted_stop(ctx: &OpCtx, args: Value) -> Result<Value, ApiErr
         s.tunnels().host_stop(&a.forward_id);
     }
     Ok(json!({}))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Every forward of the household, checked
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ForwardsReportArgs {
+    /// Only forwards with this PC at either end: its name or its id.
+    #[serde(default)]
+    device: Option<String>,
+    /// Only the forwards of this chat.
+    #[serde(default)]
+    chat_id: Option<String>,
+}
+
+/// How long a forwards report waits for one other PC before listing it as unreachable.
+const REPORT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// One PC's own report of the forwards it takes part in.
+struct PcReport {
+    uid: String,
+    report: Report,
+}
+
+/// Join the PCs' reports into one entry per forward. The PC that views a forward and the PC that
+/// runs its server each list it under the same id; an entry is `ok` only when both agree,
+/// something answers on the server's port and the viewing PC listens. `names` give each PC's
+/// name; `down` holds the PCs that could not be asked and why: their end is then unknown, not
+/// wrong. Oldest first.
+fn merge_forwards(
+    pcs: &[PcReport],
+    names: &HashMap<String, String>,
+    down: &HashMap<String, String>,
+) -> Vec<Value> {
+    let name = |uid: &str| names.get(uid).cloned().unwrap_or_else(|| uid.to_owned());
+    type End<'a> = (&'a str, &'a Checked);
+    let mut hosted: HashMap<&str, End> = HashMap::new();
+    let mut viewing: HashMap<&str, End> = HashMap::new();
+    for pc in pcs {
+        for c in &pc.report.hosted {
+            hosted.insert(&c.info.forward_id, (&pc.uid, c));
+        }
+        for c in &pc.report.viewing {
+            viewing.insert(&c.info.forward_id, (&pc.uid, c));
+        }
+    }
+    let mut ids: Vec<&str> = hosted.keys().chain(viewing.keys()).copied().collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut out: Vec<(i64, Value)> = Vec::new();
+    for id in ids {
+        let (h, v) = (hosted.get(id).copied(), viewing.get(id).copied());
+        let Some((_, first)) = h.or(v) else { continue };
+        // Who runs the server and who shows it: each end's own word, else the other end's.
+        let host = h.map_or_else(|| first.info.device_uid.clone(), |(u, _)| u.to_owned());
+        let view = v.map_or_else(|| first.info.device_uid.clone(), |(u, _)| u.to_owned());
+        let server_port = first.info.port;
+        let mismatch = match (h, v) {
+            (Some((_, h)), Some((view_pc, v))) => {
+                if v.info.device_uid != host {
+                    Some(format!(
+                        "{} lists it as shown from {}, but {} runs the server.",
+                        name(view_pc),
+                        name(&v.info.device_uid),
+                        name(&host)
+                    ))
+                } else if h.info.device_uid != view_pc {
+                    Some(format!(
+                        "{} says it is shown on {}, but {} lists it.",
+                        name(&host),
+                        name(&h.info.device_uid),
+                        name(view_pc)
+                    ))
+                } else if v.info.port != h.info.port {
+                    Some(format!(
+                        "{} forwards port {} but {} shares port {}.",
+                        name(view_pc),
+                        v.info.port,
+                        name(&host),
+                        h.info.port
+                    ))
+                } else if v.info.chat_id != h.info.chat_id {
+                    Some("The two PCs name different chats for it.".to_owned())
+                } else {
+                    None
+                }
+            }
+            (Some(_), None) if !down.contains_key(&view) => Some(format!(
+                "{} does not list it, so nothing there is listening for it (it may only be starting).",
+                name(&view)
+            )),
+            (None, Some(_)) if !down.contains_key(&host) => Some(format!(
+                "{} does not share it any more, so the port there is not forwarded.",
+                name(&host)
+            )),
+            _ => None,
+        };
+        let src = h.and_then(|(_, c)| c.alive);
+        let dst = v.and_then(|(_, c)| c.alive);
+        let (state, why) = if let Some(m) = mismatch {
+            ("mismatch", Some(m))
+        } else if src == Some(false) {
+            (
+                "source_not_answering",
+                Some(format!(
+                    "Nothing answers on port {server_port} on {}: the server has stopped.",
+                    name(&host)
+                )),
+            )
+        } else if dst == Some(false) {
+            (
+                "destination_not_listening",
+                Some(format!("{} is no longer listening for it.", name(&view))),
+            )
+        } else if src == Some(true) && dst == Some(true) {
+            ("ok", None)
+        } else {
+            let who = [&host, &view]
+                .into_iter()
+                .find(|u| down.contains_key(*u))
+                .map(|u| name(u));
+            (
+                "unknown",
+                Some(match who {
+                    Some(w) => format!("{w} could not be reached, so its end was not checked."),
+                    None => "One end could not be checked.".to_owned(),
+                }),
+            )
+        };
+        let infos = [h, v].into_iter().flatten().map(|(_, c)| &c.info);
+        let opened = infos.clone().map(|i| i.opened_at).min().unwrap_or_default();
+        let used = infos.map(|i| i.last_used_at).max().unwrap_or_default();
+        let local = v.map(|(_, c)| (c.info.local_port, c.info.url.clone()));
+        out.push((
+            opened,
+            json!({
+                "forwardId": id,
+                "state": state,
+                "why": why,
+                "source": {
+                    "deviceName": name(&host),
+                    "deviceUid": host,
+                    "port": server_port,
+                    "address": format!("localhost:{server_port} on {}", name(&host)),
+                },
+                "destination": {
+                    "deviceName": name(&view),
+                    "deviceUid": view,
+                    "localPort": local.as_ref().map(|l| l.0),
+                    "url": local.as_ref().map(|l| l.1.clone()),
+                    "address": local.as_ref().map(|l| format!("localhost:{} on {}", l.0, name(&view))),
+                },
+                "title": v.map(|(_, c)| c.info.title.clone()).unwrap_or_default(),
+                "chatId": first.info.chat_id,
+                "streams": v.map_or(0, |(_, c)| c.info.streams),
+                "openedAt": opened,
+                "lastUsedAt": used,
+            }),
+        ));
+    }
+    out.sort_by_key(|(opened, _)| *opened);
+    out.into_iter().map(|(_, v)| v).collect()
+}
+
+/// A chat's title and its person's name, as this PC knows them: its own chat, or the copy of
+/// another PC's. The name is that of the profile linked to the person here, when there is one.
+fn chat_label(conn: &rusqlite::Connection, chat_id: &str) -> (Option<String>, Option<String>) {
+    let own: Option<(String, String)> = conn
+        .query_row(
+            "SELECT title, profile_id FROM chats WHERE id = ?1",
+            [chat_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    if let Some((title, profile)) = own {
+        let person = conn
+            .query_row("SELECT name FROM profiles WHERE id = ?1", [&profile], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok();
+        return (Some(title), person);
+    }
+    let record: Option<Value> = conn
+        .query_row(
+            "SELECT record FROM mirror_chats WHERE chat_id = ?1",
+            [chat_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .and_then(|r| serde_json::from_str(&r).ok());
+    let Some(record) = record else {
+        return (None, None);
+    };
+    let person = record["personId"].as_str().map(|p| {
+        conn.query_row(
+            "SELECT name FROM profiles WHERE hub_person_id = ?1",
+            [p],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| p.to_owned())
+    });
+    (record["title"].as_str().map(str::to_owned), person)
+}
+
+/// `devices_forwards_report`: every port forwarded between PCs of the household right now, whoever
+/// it belongs to, with both ends and whether it points at the right place:
+/// `{forwards, unreachable}`. Each forward is `{forwardId, state, why, source: {deviceName,
+/// deviceUid, port, address}, destination: {deviceName, deviceUid, localPort, url, address},
+/// title, chatId, chatTitle, person, streams, openedAt, lastUsedAt}`, oldest first. `state` is
+/// `ok` (both PCs list the same forward, something answers on the server's port and the viewing PC
+/// listens), `source_not_answering` (nothing answers on the port where the server runs),
+/// `destination_not_listening` (the viewing PC no longer listens), `mismatch` (the two PCs
+/// disagree; `why` says how) or `unknown` (an end could not be checked). Each PC checks its own
+/// end on its loopback; a PC that is offline or does not answer is in `unreachable` with the
+/// reason, never left out. `device` (a PC's name or id) and `chatId` narrow the list.
+async fn devices_forwards_report(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ForwardsReportArgs =
+        serde_json::from_value(if args.is_null() { json!({}) } else { args })
+            .map_err(|e| ApiError::bad_args(e.to_string()))?;
+    let db = ctx.services.need::<Database>()?;
+    let (this_uid, this_name) = db
+        .write(identity::ensure)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let peers: Vec<_> = db
+        .snapshot(|tx| mirror::load_devices(tx))
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .into_iter()
+        .filter(|d| !d.is_self)
+        .collect();
+    let mut names: HashMap<String, String> = peers
+        .iter()
+        .map(|d| (d.uid.clone(), d.name.clone()))
+        .collect();
+    names.insert(this_uid.clone(), this_name);
+    // A PC named in the narrowing must be one of the household's.
+    let wanted = match a.device.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+        None => None,
+        Some(d) => Some(
+            names
+                .iter()
+                .find(|(uid, n)| uid.as_str() == d || n.eq_ignore_ascii_case(d))
+                .map(|(uid, _)| uid.clone())
+                .ok_or_else(|| {
+                    let mut all: Vec<&str> = names.values().map(String::as_str).collect();
+                    all.sort_unstable();
+                    ApiError::new(
+                        "not_found",
+                        format!(
+                            "No PC called \"{d}\" is paired with this household. The PCs are: {}.",
+                            all.join(", ")
+                        ),
+                    )
+                })?,
+        ),
+    };
+
+    let mut pcs = vec![PcReport {
+        uid: this_uid,
+        report: match service_of(&ctx) {
+            Some(s) => s.tunnels().report().await,
+            None => Report::default(),
+        },
+    }];
+    let mut down: HashMap<String, String> = HashMap::new();
+    if let Some(mirror) = mirror_of(&ctx) {
+        let person = mirror.acting_now();
+        let mut asks = Vec::new();
+        for d in &peers {
+            let (m, uid, person) = (mirror.clone(), d.uid.clone(), person.clone());
+            asks.push(tokio::spawn(async move {
+                let answered = match person {
+                    Ok(p) => tokio::time::timeout(REPORT_WAIT, m.forwards_report(&uid, &p))
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(ApiError::new(
+                                "timeout",
+                                "It did not answer in time, so its forwards were not checked.",
+                            ))
+                        }),
+                    Err(e) => Err(e),
+                };
+                (uid, answered)
+            }));
+        }
+        for ask in asks {
+            let Ok((uid, answered)) = ask.await else {
+                continue;
+            };
+            let who = names.get(&uid).cloned().unwrap_or_else(|| uid.clone());
+            match answered.map(serde_json::from_value::<Report>) {
+                Ok(Ok(report)) => pcs.push(PcReport { uid, report }),
+                Ok(Err(_)) => {
+                    let why =
+                        format!("{who} answered in a form this Helm cannot read; update both.");
+                    down.insert(uid, why);
+                }
+                Err(e) if e.code == "offline" => {
+                    down.insert(uid, format!("{who} is offline."));
+                }
+                Err(e) => {
+                    down.insert(uid, e.message);
+                }
+            }
+        }
+    }
+
+    let mut forwards = merge_forwards(&pcs, &names, &down);
+    for f in &mut forwards {
+        let chat = f["chatId"].as_str().unwrap_or_default().to_owned();
+        let (title, person) = db
+            .snapshot(|tx| Ok::<_, rusqlite::Error>(chat_label(tx, &chat)))
+            .unwrap_or_default();
+        f["chatTitle"] = json!(title);
+        f["person"] = json!(person);
+    }
+    let chat = a
+        .chat_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty());
+    forwards.retain(|f| {
+        let at = |end: &str| f[end]["deviceUid"].as_str();
+        wanted
+            .as_deref()
+            .is_none_or(|w| at("source") == Some(w) || at("destination") == Some(w))
+            && chat.is_none_or(|c| f["chatId"].as_str() == Some(c))
+    });
+    let mut unreachable: Vec<Value> = down
+        .into_iter()
+        .filter(|(uid, _)| wanted.as_deref().is_none_or(|w| w == uid))
+        .map(|(uid, reason)| json!({ "deviceUid": uid, "name": names.get(&uid), "reason": reason }))
+        .collect();
+    unreachable.sort_by_key(|u| u["name"].as_str().map(str::to_owned));
+    Ok(json!({ "forwards": forwards, "unreachable": unreachable }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tunnel::ViewInfo;
+
+    /// One end of forward `f`: `other` is the PC at the far end, `port` the server's port and
+    /// `local` where the viewer listens.
+    fn end(
+        f: &str,
+        other: &str,
+        port: u16,
+        local: u16,
+        chat: &str,
+        alive: Option<bool>,
+    ) -> Checked {
+        Checked {
+            info: ViewInfo {
+                forward_id: f.to_owned(),
+                chat_id: chat.to_owned(),
+                device_uid: other.to_owned(),
+                port,
+                local_port: local,
+                url: format!("http://127.0.0.1:{local}/"),
+                title: "Preview".to_owned(),
+                streams: 0,
+                opened_at: 5,
+                last_used_at: 6,
+            },
+            alive,
+        }
+    }
+
+    fn pc(uid: &str, viewing: Vec<Checked>, hosted: Vec<Checked>) -> PcReport {
+        PcReport {
+            uid: uid.to_owned(),
+            report: Report { viewing, hosted },
+        }
+    }
+
+    #[test]
+    fn two_lists_join_into_one_forward_that_says_whether_it_points_at_the_right_place() {
+        let names: HashMap<String, String> = [("a", "Desk"), ("b", "Laptop"), ("c", "Tablet")]
+            .map(|(u, n)| (u.to_owned(), n.to_owned()))
+            .into();
+        let gone: HashMap<String, String> =
+            [("a".to_owned(), "Desk is offline.".to_owned())].into();
+        let none = HashMap::new();
+        // Desk runs the server of port 5173 for chat c1; Laptop views it on 6000.
+        let host = |alive| pc("a", vec![], vec![end("f1", "b", 5173, 5173, "c1", alive)]);
+        let view = |alive| pc("b", vec![end("f1", "a", 5173, 6000, "c1", alive)], vec![]);
+        let cases = vec![
+            (
+                "agree",
+                vec![host(Some(true)), view(Some(true))],
+                &none,
+                "ok",
+                "",
+            ),
+            (
+                "no server",
+                vec![host(Some(false)), view(Some(true))],
+                &none,
+                "source_not_answering",
+                "Nothing answers on port 5173 on Desk",
+            ),
+            (
+                "not listening",
+                vec![host(Some(true)), view(Some(false))],
+                &none,
+                "destination_not_listening",
+                "Laptop is no longer listening",
+            ),
+            (
+                "unchecked",
+                vec![host(None), view(Some(true))],
+                &none,
+                "unknown",
+                "could not be checked",
+            ),
+            (
+                "viewer forgot",
+                vec![host(Some(true)), pc("b", vec![], vec![])],
+                &none,
+                "mismatch",
+                "Laptop does not list it",
+            ),
+            (
+                "host forgot",
+                vec![pc("a", vec![], vec![]), view(Some(true))],
+                &none,
+                "mismatch",
+                "Desk does not share it",
+            ),
+            (
+                "host cannot be asked",
+                vec![view(Some(true))],
+                &gone,
+                "unknown",
+                "Desk could not be reached",
+            ),
+            (
+                "another port",
+                vec![
+                    host(Some(true)),
+                    pc(
+                        "b",
+                        vec![end("f1", "a", 3000, 6000, "c1", Some(true))],
+                        vec![],
+                    ),
+                ],
+                &none,
+                "mismatch",
+                "Laptop forwards port 3000 but Desk shares port 5173",
+            ),
+            (
+                "another chat",
+                vec![
+                    host(Some(true)),
+                    pc(
+                        "b",
+                        vec![end("f1", "a", 5173, 6000, "c2", Some(true))],
+                        vec![],
+                    ),
+                ],
+                &none,
+                "mismatch",
+                "different chats",
+            ),
+            (
+                "another host",
+                vec![
+                    host(Some(true)),
+                    pc(
+                        "b",
+                        vec![end("f1", "c", 5173, 6000, "c1", Some(true))],
+                        vec![],
+                    ),
+                ],
+                &none,
+                "mismatch",
+                "Laptop lists it as shown from Tablet",
+            ),
+        ];
+        for (what, pcs, down, state, why) in cases {
+            let out = merge_forwards(&pcs, &names, down);
+            assert_eq!(out.len(), 1, "{what}");
+            assert_eq!(out[0]["state"], state, "{what}: {}", out[0]);
+            assert!(
+                out[0]["why"].as_str().unwrap_or_default().contains(why),
+                "{what}: {}",
+                out[0]
+            );
+            // Both ends are always named, from whichever PC could say.
+            assert_eq!(
+                out[0]["source"]["address"], "localhost:5173 on Desk",
+                "{what}"
+            );
+        }
+        // The agreed one carries both addresses and the viewer's title.
+        let out = merge_forwards(&[host(Some(true)), view(Some(true))], &names, &none);
+        assert_eq!(out[0]["destination"]["address"], "localhost:6000 on Laptop");
+        assert_eq!(out[0]["destination"]["url"], "http://127.0.0.1:6000/");
+        assert_eq!(out[0]["title"], "Preview");
+    }
 }

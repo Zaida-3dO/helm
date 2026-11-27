@@ -4078,7 +4078,7 @@ async fn a_port_of_one_pc_opens_on_another_and_closes_when_that_pc_goes() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let echo_port = echo.local_addr().unwrap().port();
-    tokio::spawn(async move {
+    let server = tokio::spawn(async move {
         while let Ok((mut s, _)) = echo.accept().await {
             tokio::spawn(async move {
                 let (mut r, mut w) = s.split();
@@ -4158,6 +4158,72 @@ async fn a_port_of_one_pc_opens_on_another_and_closes_when_that_pc_goes() {
     assert_eq!(listed["forwards"].as_array().unwrap().len(), 1);
     assert_eq!(*changes.lock().unwrap(), 1);
 
+    // Any chat can read every forward of the household with both ends: this PC and the one that
+    // runs the server each list it, the server answers and this PC listens, so it points at the
+    // right place. A name or a chat narrows the list; a PC nobody knows is refused in words.
+    let this_pc = api.call_host("device_get", json!({})).await.unwrap()["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let report = api
+        .call_host("devices_forwards_report", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(report["unreachable"], json!([]));
+    let [fwd] = report["forwards"].as_array().unwrap().as_slice() else {
+        panic!("{report}");
+    };
+    assert_eq!(fwd["state"], "ok", "{fwd}");
+    assert_eq!(fwd["forwardId"], f["forwardId"]);
+    assert_eq!(
+        (
+            fwd["source"]["deviceName"].as_str(),
+            fwd["source"]["port"].as_u64()
+        ),
+        (Some("Desk"), Some(echo_port as u64))
+    );
+    assert_eq!(
+        fwd["source"]["address"],
+        format!("localhost:{echo_port} on Desk")
+    );
+    assert_eq!(
+        (
+            fwd["destination"]["deviceName"].as_str(),
+            fwd["destination"]["localPort"].as_u64(),
+            fwd["destination"]["url"].as_str()
+        ),
+        (
+            Some(this_pc.as_str()),
+            Some(local as u64),
+            f["url"].as_str()
+        )
+    );
+    assert_eq!(
+        (
+            fwd["chatId"].as_str(),
+            fwd["chatTitle"].as_str(),
+            fwd["title"].as_str()
+        ),
+        (Some("c1"), Some("First"), Some("Preview"))
+    );
+    for (filter, want) in [
+        (json!({"device": "desk"}), 1),
+        (json!({"device": this_pc, "chatId": "c1"}), 1),
+        (json!({"chatId": "c2"}), 0),
+    ] {
+        let r = api
+            .call_host("devices_forwards_report", filter.clone())
+            .await
+            .unwrap();
+        assert_eq!(r["forwards"].as_array().unwrap().len(), want, "{filter}");
+    }
+    let e = api
+        .call_host("devices_forwards_report", json!({"device": "Nowhere"}))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, "not_found");
+    assert!(e.message.contains("Desk") && e.message.contains(&this_pc));
+
     // On the host: another person may forward from their own chat but not from this PC's
     // person's, and nothing is forwarded with the switch off.
     let tablet = Watcher::of(&router, "dev-c", "Tablet", true, "person-b", "Blake");
@@ -4203,6 +4269,23 @@ async fn a_port_of_one_pc_opens_on_another_and_closes_when_that_pc_goes() {
     assert_eq!(e.code, code::NOT_ALLOWED);
     port.set_run(true);
 
+    // The server stops while the forward stays, and the tablet goes off the hub: the report says
+    // where the forward points at nothing, and names the PC it could not ask.
+    server.abort();
+    let _ = server.await;
+    tablet.link.set_up(false);
+    settle().await;
+    let report = api
+        .call_host("devices_forwards_report", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(report["forwards"][0]["state"], "source_not_answering");
+    assert_eq!(report["unreachable"][0]["name"], "Tablet");
+    assert!(report["forwards"][0]["why"]
+        .as_str()
+        .unwrap()
+        .contains("Nothing answers"));
+
     // The host drops off the hub: the forward ends here, its connection closes and the window
     // hears it.
     link_a.set_up(false);
@@ -4212,6 +4295,24 @@ async fn a_port_of_one_pc_opens_on_another_and_closes_when_that_pc_goes() {
     until(|| *changes.lock().unwrap() == 2).await;
     let listed = api.call_host("devices_forwards", json!({})).await.unwrap();
     assert_eq!(listed["forwards"], json!([]));
+
+    // A PC that is off the hub is named with the reason, not left out.
+    let report = api
+        .call_host("devices_forwards_report", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(report["forwards"], json!([]));
+    let down: Vec<_> = report["unreachable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(down, ["Desk", "Tablet"]);
+    assert!(report["unreachable"][0]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("offline"));
 }
 
 /// Settings → MCP's "Copy from another PC": the other PC answers with its own export — every
