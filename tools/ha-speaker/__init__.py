@@ -30,6 +30,7 @@ from .const import (
     LED_RGB,
     PROFILES,
 )
+from . import errorlines
 from .errors import RequestTimeout, TransportError
 from .hubapi import HubApi, session_elevated
 from .profiles import build_model_config, profiles_from_entry
@@ -108,6 +109,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # an options change from the UI (profile switch, dry-run toggle) applies to
     # the running entry too; no reload needed for model or dry settings
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+
+    # read the pre-recorded-line catalogue once here, off the event loop: it
+    # is cached for the module's lifetime, so a spoken turn never touches disk
+    await hass.async_add_executor_job(errorlines.lines)
 
     platforms = PLATFORMS + (HUB_PLATFORMS if api else [])
     await hass.config_entries.async_forward_entry_setups(entry, platforms)
