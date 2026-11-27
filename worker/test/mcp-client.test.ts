@@ -6,6 +6,8 @@ import { createHash } from "node:crypto";
 import { after, test } from "node:test";
 import { startHttpFake } from "../../fakes/mcp-server/server.ts";
 import { generatedName } from "../src/mcp/index.ts";
+import { McpSession, type Transport } from "../src/mcp/session.ts";
+import { LIMITS } from "../src/mcp/types.ts";
 import { FIXED_TOOLS, harness, httpServer, stdioServer, text } from "./mcp-helpers.ts";
 
 const open: { close(): void }[] = [];
@@ -233,6 +235,28 @@ test("startup timeout fails the server, and the next use tries again", async () 
   assert.equal(h.last("hang")?.state, "failed");
   await assert.rejects(h.bridge.tools({ server: "hang" }), /did not start within/);
   assert.equal(h.lines.filter((l) => l.serverId === "hang" && l.state === "connecting").length, 2);
+});
+
+test("a request that times out while its send is still pending fails the call and not the worker", async () => {
+  const stray: unknown[] = [];
+  const onStray = (e: unknown) => stray.push(e);
+  process.on("unhandledRejection", onStray);
+  try {
+    const hung: Transport = {
+      // Like an HTTP post whose reply never comes: it only ends when the request is aborted.
+      send: (_msg, signal) =>
+        new Promise<void>((_ok, fail) => signal?.addEventListener("abort", () => setTimeout(() => fail(new Error("aborted")), 20), { once: true })),
+      onMessage: () => {},
+      onClose: () => {},
+      close: () => {},
+    };
+    const session = new McpSession(hung, { ...LIMITS, pageMs: 50 }, "Slow server");
+    await assert.rejects(session.listTools(), /Slow server did not answer tools\/list/);
+    await new Promise((r) => setTimeout(r, 100));
+    assert.deepEqual(stray, [], "no unhandled rejection is left behind");
+  } finally {
+    process.off("unhandledRejection", onStray);
+  }
 });
 
 test("a server that exits at start reports why", async () => {

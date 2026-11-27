@@ -121,6 +121,9 @@ export class McpSession {
         { once: true },
       );
     });
+    // The timeout can fire while the send below is still waiting (an HTTP post with no reply), well
+    // before `await result`: without a handler now, that rejection would end the whole worker.
+    result.catch(() => {});
     const msg: Json = { jsonrpc: "2.0", id, method };
     if (params !== undefined) msg.params = params;
     try {
