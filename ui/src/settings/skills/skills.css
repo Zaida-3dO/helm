@@ -114,6 +114,113 @@
   color: var(--text);
 }
 
+/* Rule triggers: the "When it applies" block, its filters, badges and preview. */
+
+.kn-when {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.kn-when-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.kn-field-col {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.kn-label {
+  font-size: 12px;
+  color: var(--secondary);
+}
+
+.kn-when-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.kn-when-folders .kn-field {
+  width: 100%;
+}
+
+.kn-filters {
+  margin-top: 8px;
+}
+
+.kn-flt {
+  padding: 3px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: none;
+  color: var(--secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: var(--cursor-pointer);
+}
+
+.kn-flt.on {
+  background: var(--surface-alt);
+  color: var(--text);
+}
+
+.kn-badge {
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--surface-alt);
+  color: var(--secondary);
+  font-size: 11px;
+}
+
+.kn-badge-expired {
+  color: var(--error);
+}
+
+.kn-badge-review,
+.kn-badge-upcoming {
+  color: var(--warning-text);
+}
+
+.kn-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-alt);
+}
+
+.kn-preview-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.kn-preview-list li {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.kn-preview-decision {
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--secondary);
+}
+
 .kn-source {
   margin: 0 0 8px;
   padding: 8px 10px;
