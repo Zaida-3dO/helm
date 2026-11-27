@@ -47,6 +47,7 @@ pub mod presets;
 pub mod probe;
 pub mod repo_gate;
 pub mod server_change;
+pub mod settings_key;
 pub mod status;
 pub mod tools;
 pub mod types;

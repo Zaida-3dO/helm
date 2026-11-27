@@ -23,8 +23,7 @@ pub struct ChatPerson {
     /// The chat's own profile is not the home one and is linked to no one on the hub: a server
     /// that sends the chat's person would answer as this PC's owner, so it is left out.
     pub unlinked: bool,
-    /// The chat belongs to a profile other than the home one. The servers that reach the home
-    /// person's own browser are left out of its config.
+    /// The chat belongs to a profile other than the home one (whose Google accounts it sees).
     pub not_home: bool,
     /// The chat's profile (the home one when the chat has none of its own): a secret that has a
     /// value for it is read as that value.
@@ -49,6 +48,21 @@ pub fn config_line_for(services: &Services, store: &McpStore, who: &ChatPerson) 
             who.profile.as_deref(),
         )
         .ok()?;
+    // The signed-in browser server goes to the profiles that switched it on (the home profile's
+    // chats unless it chose otherwise).
+    let browser = services
+        .get::<Database>()
+        .and_then(|db| {
+            db.snapshot(|tx| {
+                Ok::<_, rusqlite::Error>(crate::settings_key::allowed(tx, who.profile.as_deref()))
+            })
+            .ok()
+        })
+        .unwrap_or(true);
+    let servers: Vec<_> = servers
+        .into_iter()
+        .filter(|s| browser || s.preset.as_deref() != Some(crate::presets::BROKER_PRESET_ID))
+        .collect();
     Some(json!({ "type": "mcp_config", "revision": revision, "servers": servers }))
 }
 
@@ -326,9 +340,10 @@ mod tests {
                 .iter()
                 .filter_map(|s| s["id"].as_str())
                 .collect();
-            assert!(
+            assert_eq!(
                 ids.contains(&"browser"),
-                "{chat}: every profile gets the browser server"
+                chat != "c-sam",
+                "{chat}: the browser goes to the home person's chats unless a profile switched it on"
             );
         }
         let guest = l.start_lines("c-guest", &services);
@@ -338,10 +353,30 @@ mod tests {
             .iter()
             .filter_map(|s| s["id"].as_str())
             .collect();
+        assert!(
+            ids.is_empty(),
+            "c-guest: no server answers as someone else, and the browser is not theirs by default"
+        );
+        // The guest's profile switches it on for itself, from its own chat, and then has it.
+        let db = services.get::<Database>().unwrap();
+        let guest_profile = db
+            .snapshot(|tx| {
+                tx.query_row(
+                    "SELECT profile_id FROM chats WHERE id = 'c-guest'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+            })
+            .unwrap();
+        db.write(|tx| {
+            helm_core::prefs::set_raw(tx, "browserProfiles", &json!({ guest_profile: true }))
+                .map_err(|_| rusqlite::Error::InvalidQuery)
+        })
+        .unwrap();
+        let guest = l.start_lines("c-guest", &services);
         assert_eq!(
-            ids,
-            ["browser"],
-            "c-guest: no server answers as someone else, and the browser is for every profile"
+            guest[0]["servers"][0]["id"], "browser",
+            "the guest chose it"
         );
         // With the MCP master switch off, no chat gets any server.
         let db = services.get::<Database>().unwrap();

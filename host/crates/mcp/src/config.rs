@@ -373,8 +373,8 @@ impl McpStore {
     }
 
     /// As [`McpStore::resolve_enabled_where`], for a chat of the home profile or of another one
-    /// (`not_home`), which decides whose Google accounts it sees. Every profile gets every enabled
-    /// server, the browser one included.
+    /// (`not_home`), which decides whose Google accounts it sees. Which profiles load the browser
+    /// server is decided by the caller (`lines::config_line_for`), from each profile's own switch.
     pub fn resolve_enabled_scoped(
         &self,
         env: &dyn Fn(&str) -> Option<String>,
@@ -418,7 +418,10 @@ impl McpStore {
         self.load()
             .map(|l| {
                 l.iter().any(|s| {
-                    s.enabled && (sends_chat_person(s) || refs(s).any(|r| !r.profiles.is_empty()))
+                    s.enabled
+                        && (sends_chat_person(s)
+                            || is_browser(s)
+                            || refs(s).any(|r| !r.profiles.is_empty()))
                 })
             })
             .unwrap_or(false)
@@ -794,6 +797,11 @@ fn adopt_broker_preset(s: &mut McpServer) {
     {
         s.preset = Some(crate::presets::BROKER_PRESET_ID.into());
     }
+}
+
+/// The signed-in browser server: loaded per profile (see [`crate::settings_key`]).
+fn is_browser(s: &McpServer) -> bool {
+    s.preset.as_deref() == Some(crate::presets::BROKER_PRESET_ID)
 }
 
 fn sends_chat_person(s: &McpServer) -> bool {
