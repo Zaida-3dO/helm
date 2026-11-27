@@ -110,7 +110,8 @@ chats may decide on their own). The bar is very high and almost no setting quali
   an extension's `apply` only validates and stores, so it cannot answer "locked". A part of a
   Direct key that needs approval is declared in the extension's `staged_parts`; the one decision is
   `settings_allow::route`, and `stage_message` is the one place that words the staging answer. An
-  approval needs a one-line reason that names the danger, and a test caps how many there may be:
+  approval needs a one-line reason that names the danger, and a test caps how many there may be
+  (keys, staged parts and the hub pairing counted together):
   raising the cap is a decision the commit explains.
 - **A flat refusal is never allowed.** No text a chat reads may tell it to ask the user to do the
   thing themselves ("ask the user to change it", "yours to change only"). The only alternative to

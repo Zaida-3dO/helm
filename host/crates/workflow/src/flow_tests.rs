@@ -242,7 +242,7 @@ fn consented_steps_ask_first_and_parked_tasks_block_a_new_start() {
     assert!(t
         .wf(json!({"action": "update", "visual": false}))
         .unwrap_err()
-        .contains("Only the user"));
+        .contains("cleared on the user's own words"));
     t.wf(json!({"action": "park", "reason": "later"})).unwrap();
     let e = t
         .wf(json!({"action": "start", "title": "Two"}))

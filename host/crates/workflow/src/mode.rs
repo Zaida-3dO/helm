@@ -500,7 +500,7 @@ pub(crate) mod tests {
         w(&db, |tx| user_set(tx, "b", ChatMode::Off, &s, 4)).unwrap();
         assert!(w(&db, |tx| agent_on(tx, "b", "Please.", &s, 5))
             .unwrap_err()
-            .contains("Only the user"));
+            .contains("by the user's choice"));
     }
 
     #[test]

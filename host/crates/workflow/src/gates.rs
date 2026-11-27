@@ -190,7 +190,7 @@ fn stage_off(s: &WorkflowSettings, run: &Run, stage: &str) -> bool {
 
 fn cap_hint(stage: CapStage) -> String {
     format!(
-        "app_workflow allowMore {{stage: \"{}\", repo, branch, reason}} gives one more round at the cap; past that only the user's Allow more does",
+        "app_workflow allowMore {{stage: \"{}\", repo, branch, reason}} gives one more round at the cap; past that, stage a higher maxRounds (orchestrator stages.<stage>.maxRounds) with app_stage_settings",
         stage.name()
     )
 }
@@ -258,7 +258,7 @@ pub fn spawn_refusal(
             }
             let cap = engine::cap(tx, s, run, CapStage::PlanReview, None)?;
             if run.plan_rounds >= cap && !run.plan_approved {
-                return deny("planReview", format!("the plan is at its review cap ({cap} rounds). app_workflow allowMore {{stage: \"planReview\", reason}} gives one more round; past that only the user's Allow more does"));
+                return deny("planReview", format!("the plan is at its review cap ({cap} rounds). app_workflow allowMore {{stage: \"planReview\", reason}} gives one more round; past that, stage a higher maxRounds (orchestrator stages.<stage>.maxRounds) with app_stage_settings"));
             }
             Ok(None)
         }
