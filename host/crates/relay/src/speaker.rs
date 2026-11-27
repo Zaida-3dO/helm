@@ -371,6 +371,7 @@ pub fn save_talks(path: &Path, t: &Talks) -> std::io::Result<()> {
 /// not archived, else a new chat that takes the tag. `profile` is the display name of the
 /// profile that owns the channel, used in the title when the speaker named no room. Returns the
 /// talk and whether its chat was just made.
+#[allow(clippy::too_many_arguments)]
 pub fn talk_chat(
     path: &Path,
     port: &dyn ChatPort,
