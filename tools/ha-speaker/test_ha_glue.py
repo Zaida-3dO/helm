@@ -10,6 +10,7 @@ agent_core and const.
 import asyncio
 import os
 import sys
+import tempfile
 import types
 import unittest
 
@@ -238,6 +239,62 @@ class HouseReadTest(unittest.TestCase):
                                   house_url="http://chores.example",
                                   house_token="ro-example")
         self.assertEqual(run_read(b, "plants"), _housecontrol.HOUSE_NOT_SET_UP)
+
+
+class ReplayCliTest(unittest.TestCase):
+    """The replay CLI's repair round pinned down: a set read from a real path
+    (it used to iterate a closed file object and die), the house file's
+    private "_states" key not mistaken for an area, and --api-key-env keeping
+    a model key off the command line. These guard fixes shipped untested;
+    this is their coverage."""
+
+    _replay = importlib.import_module("hs.replay")
+
+    def test_load_set_from_a_path(self):
+        with tempfile.NamedTemporaryFile(
+                "w", suffix=".jsonl", delete=False, encoding="utf-8") as fh:
+            fh.write('{"text": "turn on the kitchen"}\n'
+                     "\n"
+                     '{"id": "x2", "text": "dim it"}\n')
+            path = fh.name
+        try:
+            rows = self._replay.load_set(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual([r["text"] for r in rows],
+                         ["turn on the kitchen", "dim it"])
+        self.assertTrue(all(isinstance(r.get("id"), str) and r["id"]
+                            for r in rows))
+
+    def test_house_file_private_keys_are_not_areas(self):
+        house = {"Kitchen": {
+            "lights": [["Kitchen lights", "light.kitchen"]],
+            "climates": []},
+            "_states": [{"entity_id": "light.kitchen", "state": "on",
+                         "attributes": {"friendly_name": "Kitchen lights"}}]}
+        backend = self._replay.CliBackend(house)
+        areas = asyncio.run(backend.exposed())
+        self.assertEqual(sorted(areas), ["Kitchen"])  # "_states" is not a room
+        states = asyncio.run(backend.states(["light.kitchen", "light.gone"]))
+        self.assertIn("light.kitchen", states)
+        self.assertEqual(states["light.kitchen"]["state"], "on")
+        self.assertNotIn("light.gone", states)
+
+    def test_model_key_arrives_from_the_environment_only(self):
+        os.environ["HELM_TEST_MODEL_KEY"] = "k-from-env"
+        try:
+            cfg = self._replay.config_from_args(types.SimpleNamespace(
+                model_url="http://model.example/v1/chat", model_name="m",
+                api_key_env="HELM_TEST_MODEL_KEY", header=[], body_json=None,
+                no_thinking=True, timeout=30.0))
+        finally:
+            del os.environ["HELM_TEST_MODEL_KEY"]
+        self.assertEqual(cfg.api_key, "k-from-env")
+        cfg2 = self._replay.config_from_args(types.SimpleNamespace(
+            model_url="http://model.example/v1/chat", model_name="m",
+            api_key_env=None, header=[], body_json=None,
+            no_thinking=True, timeout=30.0))
+        self.assertIsNone(cfg2.api_key)
 
 
 if __name__ == "__main__":
