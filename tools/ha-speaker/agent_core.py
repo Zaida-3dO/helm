@@ -52,6 +52,47 @@ OFFLINE_TEXT = "My thinking side is offline right now."
 ERROR_TEXT = "That didn't work. Try asking again."
 TIMEOUT_TEXT = "That's taking longer than I expected. Try asking again."
 EMPTY_TEXT = "I didn't catch that."
+CONTROL_TEXT = "I couldn't do that."
+
+# --------------------------------------------------------------------------
+# the home-control gate: some sentences MUST be carried out by a tool before
+# any words are spoken, because a small model happily says "done" without
+# ever calling one. The classifier is a word table over the request text -
+# deliberately no model call; a wrong "no" here only lets an honest answer
+# through, while the gate itself never trusts a tool-less claim of success.
+
+_CONTROL_OBJECTS = frozenset("""
+light lights lighting lamp lamps bulb bulbs heating heater radiator boiler
+thermostat timer timers blind blinds curtain curtains shutter shutters
+""".split())
+
+# No bare "on"/"off": they would drag personal questions ("what is on my
+# calendar") into the house tools. A spoken command names an object or a real
+# control verb anyway; a miss here only falls back to today's behaviour,
+# while the gate never trusts tool-less words when it does fire.
+_CONTROL_ACTIONS = frozenset("""
+turn turns turned toggle switch switches dim dims brighten brightens darken
+brighter dimmer brightness colour color hue kelvin temperature set sets
+open closes
+""".split())
+
+_WORD_RE = re.compile(r"[a-z0-9']+")
+
+
+def is_home_control(text):
+    """True when the request words name a house object or a control action.
+    Reads count too - 'what temperature is the office' should come from the
+    house, not from the model's memory of last turn."""
+    if not isinstance(text, str) or not text.strip():
+        return False
+    tokens = set(_WORD_RE.findall(text.lower()))
+    return bool(tokens & (_CONTROL_OBJECTS | _CONTROL_ACTIONS))
+
+
+# Shown to the model when it answered a house request without using a tool.
+GUARD_REPROMPT_TEXT = ("You did not call a tool, but that request changes or"
+                       " reads the house. Call the right tool now instead of"
+                       " answering from memory.")
 
 # The tool the model uses to hand a personal or long request to Helm. This
 # module answers it itself; the house-control tools come from homecontrol.
@@ -85,9 +126,11 @@ Rules:
 - Answer first, in one to three short spoken sentences. Plain words. No markdown, no lists, no urls, no entity ids. Say numbers as a person would.
 - Ask a question back only when you truly cannot act without it.
 - Anything about the house (lights, heating, timers, what is on): use the tools. Never claim you did something a tool did not do.
+- "The [room] lights" means every light of that room: one call for the room, never one bulb at a time.
+- Jokes and small talk: answer briefly yourself; never say you cannot.
 - What chores or plants are due: call home_status. It reads only: never mark anything done by voice.
 - If no room is named in a request, use the asking room.
-- If a tool fails or cannot do it, say so in one short sentence."""
+- If a tool fails or has notes, say in one short sentence what worked and which devices could not."""
 
 # Only added when an ask_helm tool was actually handed to the model; with no
 # hub configured the tool and this line are both absent, so the model never
@@ -118,7 +161,10 @@ class Config:
     timeout_s: float = 30.0
     history_turns: int = 2
     history_ttl_s: float = 120.0
-    max_tool_rounds: int = 3
+    # rounds are model calls; several tool calls may share one round, and the
+    # home-control gate can spend one extra round forcing a tool - four keeps
+    # a whole-room command inside one spoken turn with room to spare
+    max_tool_rounds: int = 4
     escalate_url: str = None
     escalate_model: str = None
     record_text: bool = True
@@ -136,6 +182,10 @@ class TurnResult:
     escalate_text: str = None      # set when kind == escalate: what to ask Helm
     empty_final: bool = False      # tools worked but the model said nothing;
                                    # we spoke the tool's own sentence instead
+    guard_reprompt: bool = False   # a house request answered with no tool call
+                                   # was sent back once with the tool forced
+    guard_blocked: bool = False    # a success claim (or an all-failed run) was
+                                   # replaced by our own honest sentence
 
 
 # --------------------------------------------------------------------------
@@ -363,11 +413,11 @@ def prompt_hash(system_text, schemas):
 # --------------------------------------------------------------------------
 # model client
 
-def request_body(cfg, messages, schemas, model=None):
+def request_body(cfg, messages, schemas, model=None, tool_choice="auto"):
     body = {
         "model": model or cfg.model_name,
         "messages": messages,
-        "tool_choice": "auto",
+        "tool_choice": tool_choice,
         "max_tokens": int(cfg.max_tokens),
         "temperature": float(cfg.temperature),
     }
@@ -386,10 +436,14 @@ def _headers(cfg):
     return headers
 
 
-async def _chat(cfg, transport, url, messages, schemas, model, timings):
+async def _chat(cfg, transport, url, messages, schemas, model, timings,
+                force_tools=False):
     """One chat-completions call; the outcome is a state string plus the first
-    choice's pieces. Never raises: network pain becomes offline/timeout."""
-    data = json.dumps(request_body(cfg, messages, schemas, model)).encode("utf-8")
+    choice's pieces. Never raises: network pain becomes offline/timeout.
+    force_tools=true backs the home-control gate with tool_choice=required."""
+    choice = "required" if (force_tools and schemas) else "auto"
+    data = json.dumps(request_body(cfg, messages, schemas, model,
+                                   tool_choice=choice)).encode("utf-8")
     started = time.monotonic()
     try:
         status, raw = await transport.request(
@@ -435,13 +489,24 @@ def _brief(outcome):
         return {"ok": False, "error": "the tool returned no result"}
     out = {}
     for key in ("ok", "text", "error", "state", "brightness_pct", "temperature",
-                "mode", "candidates", "message"):
+                "mode", "candidates", "message", "notes"):
         if key in outcome:
             value = outcome[key]
             if isinstance(value, str) and len(value) > 200:
                 value = value[:200] + "..."
             out[key] = value
     return out or {"ok": bool(outcome.get("ok", False))}
+
+
+def _failure_sentence(collected):
+    """One honest spoken line for a house turn where every tool call failed:
+    the most recent plain-language reason from the tools themselves, or the
+    fixed short sentence if nothing speakable is there."""
+    for entry in reversed(collected or []):
+        reason = clean_reply(str(entry.get("error") or ""))
+        if reason and len(reason) <= 160:
+            return reason
+    return CONTROL_TEXT
 
 
 # --------------------------------------------------------------------------
@@ -453,6 +518,13 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
 
     tools duck-types homecontrol: .schemas -> OpenAI function defs without
     ask_helm; await .execute(name, args) -> plain dict with an "ok" bool.
+
+    Home-control gate: when the request words name a house object or action,
+    words may not be spoken over nothing - a tool call that succeeded has to
+    stand behind them. A tool-less answer is re-prompted once with the tool
+    forced; if even then no tool runs, the fixed CONTROL_TEXT goes instead of
+    any success claim. If every tool call failed, the honest sentence is built
+    from the tools' own reasons, never from the model's wording.
 
     If the model calls ask_helm, or its answer is unusable (empty, invalid tool
     calls twice, it kept calling tools past the budget, timed out or could not
@@ -484,7 +556,9 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
         + _history_messages(ctx, cfg, clock)
         + [{"role": "user", "content": str(text)}])
 
-    collected = []  # every tool attempt this turn: {name, args, ok, ms}
+    collected = []  # every tool attempt this turn: {name, args, ok, ms[, error]}
+    control_ask = is_home_control(text)
+    guard_state = {"reprompt": False, "blocked": False}
 
     def result(kind, sentence, escalate_text=None, model_used=cfg.model_name,
                empty_final=False):
@@ -492,8 +566,9 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
         return TurnResult(text=sentence, kind=kind, tool_calls=collected,
                           timings=timings, model_used=model_used,
                           prompt_hash=p_hash, tags=dict(tags or {}),
-                          escalate_text=escalate_text,
-                          empty_final=empty_final)
+                          escalate_text=escalate_text, empty_final=empty_final,
+                          guard_reprompt=guard_state["reprompt"],
+                          guard_blocked=guard_state["blocked"])
 
     def give_up(state, used):
         sentence = {KIND_OFFLINE: OFFLINE_TEXT, KIND_TIMEOUT: TIMEOUT_TEXT,
@@ -502,16 +577,53 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
                 else KIND_ERROR)
         return result(kind, sentence, model_used=used)
 
-    async def attempt(url, model_name):
+    async def attempt(url, model_name, guarded=True):
         """Work one endpoint until it answers or dies. Returns a state dict:
-        answer | escalate | empty | unreliable | rounds | offline | timeout |
-        error."""
+        answer | escalate | empty | unreliable | rounds | guard_none |
+        offline | timeout | error. ``guarded`` is False for the escalation
+        endpoint only: that second brain re-derives its own answer (and in a
+        real entry escalate_url is unset, so house words run guarded once)."""
         msgs = [dict(m) for m in base_messages]
         bad_rounds = 0
         capped = False
         last_ok_text = None  # the sentence the last succeeding tool returned
+        force_tools = False  # set by the gate: next call demands a tool
+        reprompted = False
+
+        def gate(reply, raw_content, round_no):
+            """Words are about to be spoken for a house request. None lets
+            them through; otherwise returns the state that must go instead -
+            {"state": "retry"} means we appended the forced-tool prompt."""
+            nonlocal force_tools, reprompted
+            if not (guarded and control_ask):
+                return None
+            if any(c["ok"] for c in collected):
+                return None  # a tool really did carry this turn
+            if not collected:
+                if ends_with_question(reply):
+                    return None  # an honest ask-back claims no success
+                if not reprompted and schemas \
+                        and round_no < int(cfg.max_tool_rounds):
+                    msgs.append({"role": "assistant",
+                                 "content": raw_content or None})
+                    msgs.append({"role": "user",
+                                 "content": GUARD_REPROMPT_TEXT})
+                    reprompted = True
+                    force_tools = True
+                    guard_state["reprompt"] = True
+                    return {"state": "retry"}
+                guard_state["blocked"] = True
+                return {"state": "guard_none"}
+            # tools ran and every one failed: our own sentence from the
+            # tools' reasons, never the model's claim of success
+            guard_state["blocked"] = True
+            return {"state": "answer",
+                    "reply": _failure_sentence(collected)}
+
         for round_no in range(int(cfg.max_tool_rounds) + 1):
-            resp = await _chat(cfg, transport, url, msgs, schemas, model_name, timings)
+            resp = await _chat(cfg, transport, url, msgs, schemas, model_name,
+                               timings, force_tools=force_tools)
+            force_tools = False
             if resp["state"] in ("offline", "timeout"):
                 return {"state": resp["state"]}
             if resp["state"] != "ok":
@@ -539,6 +651,11 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
             if not house:
                 reply = clean_reply(content)
                 if reply:
+                    override = gate(reply, content, round_no)
+                    if override is not None:
+                        if override["state"] == "retry":
+                            continue
+                        return override
                     return {"state": "answer", "reply": reply}
                 if any(c["ok"] for c in collected):
                     # The house action already succeeded; a model that then
@@ -559,6 +676,12 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
                     spoken = clean_reply(last_ok_text or "") or "Done."
                     return {"state": "answer", "reply": spoken,
                             "empty_final": True}
+                if reply:
+                    # gate never retries past the cap - at this round a house
+                    # request with no worked tool is blocked outright
+                    override = gate(reply, content, round_no)
+                    if override is not None and override["state"] != "retry":
+                        return override
                 return ({"state": "answer", "reply": reply} if reply
                         else {"state": "rounds"})
             assistant_calls, tool_msgs, was_bad = [], [], False
@@ -569,13 +692,16 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
                                                      "arguments": json.dumps(args or {})}})
                 if err is not None:
                     was_bad = True
-                    collected.append({"name": name, "args": {}, "ok": False, "ms": 0})
+                    collected.append({"name": name, "args": {}, "ok": False,
+                                      "ms": 0,
+                                      "error": "bad arguments: " + err[:150]})
                     tool_msgs.append({"role": "tool", "tool_call_id": call_id,
                                       "content": json.dumps(
                                           {"ok": False, "error": "bad arguments: " + err})})
                 elif name not in known_names:
                     was_bad = True
-                    collected.append({"name": name, "args": args, "ok": False, "ms": 0})
+                    collected.append({"name": name, "args": args, "ok": False,
+                                      "ms": 0, "error": "unknown tool: " + name})
                     tool_msgs.append({"role": "tool", "tool_call_id": call_id,
                                       "content": json.dumps(
                                           {"ok": False, "error": "unknown tool: " + name})})
@@ -593,8 +719,15 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
                     if ok_now and isinstance(outcome.get("text"), str) \
                             and outcome["text"].strip():
                         last_ok_text = outcome["text"]
-                    collected.append({"name": name, "args": args,
-                                      "ok": ok_now, "ms": ms})
+                    entry = {"name": name, "args": args,
+                             "ok": ok_now, "ms": ms}
+                    if not ok_now:
+                        # kept so a failed house turn can be spoken honestly
+                        # from the tool's own reason rather than invented
+                        why = outcome.get("error") if isinstance(outcome, dict) \
+                            else None
+                        entry["error"] = str(why or "the call did not go through")[:200]
+                    collected.append(entry)
                     timings["tool_ms"].append(ms)
                     tool_msgs.append({"role": "tool", "tool_call_id": call_id,
                                       "content": json.dumps(_brief(outcome))})
@@ -606,13 +739,18 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
                 return {"state": "unreliable"}
         return {"state": "rounds"}
 
-    state = await attempt(cfg.model_url, cfg.model_name)
+    state = await attempt(cfg.model_url, cfg.model_name, guarded=True)
     if state["state"] == "answer":
         return result(KIND_ANSWER, state["reply"], model_used=cfg.model_name,
                       empty_final=bool(state.get("empty_final")))
     if state["state"] == KIND_ESCALATE:
         return result(KIND_ESCALATE, "", escalate_text=state["text"],
                       model_used=cfg.model_name)
+    if state["state"] == "guard_none":
+        # a house request the model refused to carry out with tools even when
+        # forced: the gate outranks the endpoint retry - no words that could
+        # claim a success nobody performed, from either endpoint this turn
+        return result(KIND_ERROR, CONTROL_TEXT)
 
     # Unusable on the main endpoint (empty, unreliable, out of rounds - which
     # includes thinking that stopped at the token cap without answering - or a
@@ -620,7 +758,7 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
     # benchmark's "the 4B gets it wrong, Flash picks it up" case.
     if cfg.escalate_url:
         fb_name = cfg.escalate_model or cfg.model_name
-        state = await attempt(cfg.escalate_url, fb_name)
+        state = await attempt(cfg.escalate_url, fb_name, guarded=False)
         if state["state"] == "answer":
             return result(KIND_ANSWER, state["reply"], model_used="escalate",
                           empty_final=bool(state.get("empty_final")))

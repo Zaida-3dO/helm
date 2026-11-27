@@ -191,10 +191,14 @@ class AgentCoreTest(unittest.TestCase):
         self.assertEqual(r.text, agent_core.ERROR_TEXT)
 
     def test_thinking_block_stripped(self):
+        # (the ask stays house-free: a control sentence with no worked tool
+        # now goes through the gate, which would bury what this tests)
         r, _, _ = run_case([msg_text(
-            "<think>The user wants the kitchen lights. I should call light."
-            "</think>The kitchen lights are on.")])
-        self.assertEqual(r.text, "The kitchen lights are on.")
+            "<think>The user wants a joke. I should tell one."
+            "</think>Here is one: why did the bulb turn down? Too bright.")],
+            text="tell me something funny")
+        self.assertEqual(r.text,
+                         "Here is one: why did the bulb turn down? Too bright.")
 
     def test_unclosed_thinking_leaves_nothing(self):
         r, _, _ = run_case([msg_text("<think>endless reasoning about bulbs")],
@@ -205,7 +209,8 @@ class AgentCoreTest(unittest.TestCase):
     def test_markdown_lists_and_urls_cleaned(self):
         r, _, _ = run_case([msg_text(
             "**On.**\n- first option\n- second option\n"
-            "Details at https://example.com/x and [a link](http://y.z)")])
+            "Details at https://example.com/x and [a link](http://y.z)")],
+            text="what are my options?")
         self.assertNotIn("*", r.text)
         self.assertNotIn("http", r.text)
         self.assertNotIn("\n", r.text)
@@ -214,7 +219,7 @@ class AgentCoreTest(unittest.TestCase):
     def test_overlong_reply_cut_near_sentence_boundary(self):
         long = " ".join("Sentence number %d explains the house settings." % i
                         for i in range(30))
-        r, _, _ = run_case([msg_text(long)])
+        r, _, _ = run_case([msg_text(long)], text="tell me a long story")
         self.assertLessEqual(len(r.text), 325)
         self.assertTrue(r.text.startswith("Sentence number 0"))
 
@@ -261,7 +266,7 @@ class AgentCoreTest(unittest.TestCase):
             {"user": "older question", "spoken": "older answer", "ts": -500},
             {"user": "dim it", "spoken": "Dimmed.", "ts": 0},
         ]
-        r, tr, _ = run_case([msg_text("Done.")], ctx=ctx)
+        r, tr, _ = run_case([msg_text("Done.")], text="how are you?", ctx=ctx)
         msgs = tr.seen[0]["body"]["messages"]
         roles = [m["content"] for m in msgs if m["role"] == "user"]
         self.assertIn("dim it", roles)
@@ -300,7 +305,7 @@ class AgentCoreTest(unittest.TestCase):
 
     def test_headers_and_extra_body_pass_through(self):
         r, tr, _ = run_case(
-            [msg_text("Okay.")],
+            [msg_text("Good morning to you too.")], text="good morning",
             cfg_extra={"api_key": "secret-token",
                        "extra_headers": {"X-Strata-Priority": "now"},
                        "extra_body": {"think": True, "format": "markdown"}})
@@ -323,11 +328,110 @@ class AgentCoreTest(unittest.TestCase):
         self.assertEqual(len(r.timings["tool_ms"]), 1)
 
     def test_tags_and_prompt_hash_carried_through(self):
-        r1, _, _ = run_case([msg_text("Hi.")], tags={"arm": "A", "run": 3})
-        r2, _, _ = run_case([msg_text("Hi.")], tags={"arm": "A", "run": 3})
+        r1, _, _ = run_case([msg_text("Hi.")], text="hello there",
+                            tags={"arm": "A", "run": 3})
+        r2, _, _ = run_case([msg_text("Hi.")], text="hello there",
+                            tags={"arm": "A", "run": 3})
         self.assertEqual(r1.tags, {"arm": "A", "run": 3})
         self.assertEqual(len(r1.prompt_hash), 16)
         self.assertEqual(r1.prompt_hash, r2.prompt_hash)
+
+
+class HomeControlGateTest(unittest.TestCase):
+    """The hallucination gate from the first real speaker test: house words
+    may not be spoken over nothing. No tool call -> the model is sent back
+    once with the tool forced; still none -> a fixed honest line, kind error.
+    Every tool failed -> the tools' own reason is spoken, never the model's
+    success claim. Chit-chat (the joke turn) must sail past untouched."""
+
+    def test_classifier_table(self):
+        # one table, no model call: control sentences and reads are gated,
+        # chat and personal asks are not
+        cases = [
+            ("Turn on the home office lights to red.", True),
+            ("Turn off the home office lights", True),
+            ("What's the temperature in the home office?", True),  # read too
+            ("dim the bedroom lamps", True),
+            ("set a timer for five minutes", True),
+            ("make the reading lamp brighter", True),
+            ("tell me a short joke", False),
+            ("how are you today", False),
+            ("what is on my calendar", False),   # never 'on' alone
+            ("what do we have for dinner?", False),
+        ]
+        for text, want in cases:
+            self.assertEqual(agent_core.is_home_control(text), want, text)
+
+    def test_false_success_claim_is_forced_once_then_works(self):
+        r, tr, tools = run_case(
+            [msg_text("Home office lights are on and set to red."),  # the lie
+             msg_tool([{"id": "1", "name": "light",
+                        "args": {"target": "home office lights",
+                                 "action": "set", "color": "red"}}]),
+             msg_text("All three home office lights are red now.")],
+            text="Turn on the home office lights to red.",
+            tools_kwargs={"outcomes": [{"ok": True, "text": "done"}]})
+        self.assertEqual(r.kind, agent_core.KIND_ANSWER)
+        self.assertEqual(r.text, "All three home office lights are red now.")
+        self.assertTrue(r.guard_reprompt)
+        self.assertFalse(r.guard_blocked)
+        self.assertEqual(len(tools.calls), 1)
+        # only the second model call demanded a tool; and it was told why
+        choices = [s["body"]["tool_choice"] for s in tr.seen]
+        self.assertEqual(choices, ["auto", "required", "auto"])
+        last_user = tr.seen[1]["body"]["messages"][-1]
+        self.assertEqual(last_user["role"], "user")
+        self.assertIn("did not call a tool", last_user["content"])
+
+    def test_still_no_tool_after_forcing_speaks_fixed_line(self):
+        r, tr, tools = run_case(
+            [msg_text("The home office lights are definitely on."),
+             msg_text("Yes, they are on and red.")],
+            text="Turn on the home office lights to red.",
+            cfg_extra={"escalate_url": "http://flash/v1/chat/completions"})
+        self.assertEqual(r.kind, agent_core.KIND_ERROR)
+        self.assertEqual(r.text, agent_core.CONTROL_TEXT)
+        self.assertTrue(r.guard_reprompt and r.guard_blocked)
+        self.assertEqual(tools.calls, [])
+        # the gate outranks endpoint retry: no answer from either brain can
+        # claim a house change nobody made
+        self.assertEqual([s["url"] for s in tr.seen],
+                         ["http://main/v1/chat/completions"] * 2)
+
+    def test_every_tool_failed_speaks_the_tools_own_reason(self):
+        r, _, tools = run_case(
+            [msg_tool([{"id": "1", "name": "light",
+                        "args": {"target": "Cellar", "action": "on"}}]),
+             msg_text("Done, the cellar lights are on!")],
+            text="turn on the cellar lights",
+            tools_kwargs={"outcomes": [{"ok": False, "error":
+                                        "I don't know a light named 'Cellar'."}]})
+        self.assertEqual(r.kind, agent_core.KIND_ANSWER)
+        self.assertEqual(r.text, "I don't know a light named 'Cellar'.")
+        self.assertTrue(r.guard_blocked)
+        self.assertFalse(r.guard_reprompt)
+        self.assertEqual(len(tools.calls), 1)
+
+    def test_honest_ask_back_without_tools_is_not_blocked(self):
+        # an ambiguity question claims no success: it passes even though a
+        # room-less "turn on the lights" looks like a control request
+        r, tr, _ = run_case([msg_text("Which room?")], text="turn on the lights")
+        self.assertEqual(r.kind, agent_core.KIND_ANSWER)
+        self.assertEqual(r.text, "Which room?")
+        self.assertFalse(r.guard_reprompt or r.guard_blocked)
+        self.assertEqual(len(tr.seen), 1)
+
+    def test_chitchat_never_reaches_the_gate(self):
+        # the joke turn: one request, tool_choice auto, no forcing
+        r, tr, _ = run_case(
+            [msg_text("Why don't scientists trust atoms? Because they make"
+                      " up everything.")],
+            text="tell me a short joke")
+        self.assertEqual(r.kind, agent_core.KIND_ANSWER)
+        self.assertIn("atoms", r.text)
+        self.assertFalse(r.guard_reprompt or r.guard_blocked)
+        self.assertEqual(len(tr.seen), 1)
+        self.assertEqual(tr.seen[0]["body"]["tool_choice"], "auto")
 
 
 class PromptSizeTest(unittest.TestCase):

@@ -100,6 +100,13 @@ class StageLog:
         # benchmark can tell that answer apart from a generated one
         if getattr(result, "empty_final", False):
             record["empty_final"] = True
+        # the home-control gate: words forced back through a tool call
+        # (guard_reprompt) and/or a success claim replaced by our own honest
+        # sentence (guard_blocked) - rows the benchmark must not count as clean
+        if getattr(result, "guard_reprompt", False):
+            record["guard_reprompt"] = True
+        if getattr(result, "guard_blocked", False):
+            record["guard_blocked"] = True
         self.writer.append(record)
         return record
 
