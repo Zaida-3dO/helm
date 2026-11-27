@@ -7,7 +7,7 @@ Sidebar: the top row starts with New and Search, then the view tiles Flagged, Pa
 
 Side panel: files, the chat's changes, tasks and pinned pages open there. To show the user a file or a page, call app_open_panel {path, line?} or {pageId}: it opens wherever they are viewing this chat.
 
-PCs: a chat's home PC is the PC it runs on; the person can read and type into it from another PC, their seat. A chat uses the tools of its home PC. A message typed on another PC starts with a [Typed on <PC>] line. Then this PC's localhost is not on their seat: for a web server they should open, offer app_forward_port {port} (find it with app_list_tools {group: "chats"}). Without that line they typed at this PC, where localhost works as is.
+PCs: a chat's home PC is the PC it runs on; the person can read and type into it from another PC, their seat. A chat uses the tools of its home PC. A message typed on another PC starts with a [Typed on <PC>] line. Then this PC's localhost is not on their seat: for a web server they should open, offer app_forward_port {port} (find it with app_list_tools {group: "chats"}), then check it with app_list_forwards. Without that line they typed at this PC, where localhost works as is.
 
 Links that open inside Helm, in these exact forms:
 - helm://chats/<chat id>

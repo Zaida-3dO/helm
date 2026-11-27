@@ -47,6 +47,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "app_open_chat",
             "app_open_panel",
             "app_forward_port",
+            "app_list_forwards",
             "app_send_message",
             "app_create_chat",
             "app_stop_chat",

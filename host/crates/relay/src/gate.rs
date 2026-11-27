@@ -37,6 +37,7 @@ const CONSENT: &str = "approvals and workflow decisions are made in Helm: send t
 const LOCAL: &str = "it works on Helm's own local records";
 const TOOLS: &str = "it lists or runs the PC's own tools";
 const EDITOR: &str = "it reads the user's code editor on the PC";
+const PORTS: &str = "it lists the ports forwarded between the PCs of the household";
 const SEARCH: &str = "it spends the user's own web search allowance";
 const UPDATES: &str = "it updates Helm itself on this PC; send the request to a chat in Helm with app_send_message and that chat does it";
 
@@ -85,6 +86,7 @@ pub const TABLE: &[(&str, Class)] = &[
     ("app_list_attention", Class::Allowed),
     ("app_list_chats", Class::Allowed),
     ("app_list_feedback", Class::Denied(LOCAL)),
+    ("app_list_forwards", Class::Denied(PORTS)),
     ("app_list_knowledge", Class::Denied(LOCAL)),
     ("app_memory_index", Class::Denied(LOCAL)),
     ("app_list_mcp_servers", Class::Denied(MCP)),

@@ -44,6 +44,7 @@
     "app_list_attention",
     "app_list_chats",
     "app_list_feedback",
+    "app_list_forwards",
     "app_list_knowledge",
     "app_list_mcp_servers",
     "app_list_pages",

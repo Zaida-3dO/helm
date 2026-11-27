@@ -61,7 +61,7 @@ pub fn who_text(conn: &Connection, chat_id: &str) -> rusqlite::Result<Option<Str
 
 /// Where the person is: a message typed on another PC of the household says so in its first
 /// line, and a server on this PC's localhost is not on theirs.
-pub const TYPED_ON: &str = "A message typed on another PC of the household starts with a [Typed on <PC>] line: a localhost address here is then not on the person's PC, so offer app_forward_port; without that line they are at this PC and localhost works as it is.";
+pub const TYPED_ON: &str = "A message typed on another PC of the household starts with a [Typed on <PC>] line: a localhost address here is then not on the person's PC, so offer app_forward_port (and check it with app_list_forwards); without that line they are at this PC and localhost works as it is.";
 
 /// The text from its parts; empty parts are left out.
 pub fn compose(me: &Profile, device: Option<&str>, others: &[String]) -> String {
@@ -114,8 +114,8 @@ mod tests {
                 "You are working with Alex (their Helm profile). Prefers plain words.\nCalled Al. \
                  This chat runs on Desk under that computer's Claude sign-in. A message typed on \
                  another PC of the household starts with a [Typed on <PC>] line: a localhost \
-                 address here is then not on the person's PC, so offer app_forward_port; without \
-                 that line they are at this PC and localhost works as it is. Other people in this \
+                 address here is then not on the person's PC, so offer app_forward_port (and \
+                 check it with app_list_forwards); without that line they are at this PC and localhost works as it is. Other people in this \
                  household: Sam, Jo. Their chats and memories may be read when you are asked to or it helps: \"my\" and \"I\" mean Alex, a named person means that person. Credential and token stores are never read.",
             ),
             (
@@ -128,7 +128,7 @@ mod tests {
                 "  ",
                 Some("Laptop"),
                 &[][..],
-                "You are working with Alex (their Helm profile). This chat runs on Laptop under that computer's Claude sign-in. A message typed on another PC of the household starts with a [Typed on <PC>] line: a localhost address here is then not on the person's PC, so offer app_forward_port; without that line they are at this PC and localhost works as it is.",
+                "You are working with Alex (their Helm profile). This chat runs on Laptop under that computer's Claude sign-in. A message typed on another PC of the household starts with a [Typed on <PC>] line: a localhost address here is then not on the person's PC, so offer app_forward_port (and check it with app_list_forwards); without that line they are at this PC and localhost works as it is.",
             ),
         ] {
             let mut p = alex.clone();
