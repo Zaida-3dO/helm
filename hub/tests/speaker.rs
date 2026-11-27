@@ -883,6 +883,100 @@ async fn a_talk_stays_one_session_until_it_idles_out() {
     assert_ne!(fresh["session"].as_str().unwrap(), session);
 }
 
+/// Two speakers talk through one hub interleaved, on the five-minute idle default: each speaker's
+/// second message within the window carries on its own talk (not the other's), each talk has a
+/// session of its own, and after the idle both close — after which every new utterance starts a
+/// fresh talk.
+#[tokio::test]
+async fn two_speakers_interleave_their_talks_and_each_idles_on_its_own() {
+    let idle = Duration::from_secs(300);
+    let hub = start(Opts {
+        idle,
+        ..Opts::default()
+    })
+    .await;
+    let mut ws = pc(&hub, (true, true, true)).await;
+    let ask = |id: &'static str, text: &'static str, token: &'static str| {
+        let hub = &hub;
+        async move {
+            http(
+                hub,
+                "POST",
+                "/speaker/turn",
+                Some(token),
+                "application/json",
+                &turn_body(id, text, 0, Some("kitchen")),
+            )
+            .await
+        }
+    };
+
+    // Speaker 1 (bedroom token) opens a talk.
+    assert_eq!(ask("turn-0101", "First from one.", BEDROOM).await.status, 202);
+    let first = next_where(&mut ws, "speaker 1's first turn", |f| {
+        f["type"] == "voice" && f["id"] == "turn-0101"
+    })
+    .await;
+    let s1 = first["session"].as_str().unwrap().to_owned();
+    send(
+        &mut ws,
+        json!({"type": "voice_ack", "id": "turn-0101", "lane": "speaker", "personId": "1"}),
+    )
+    .await;
+    send(&mut ws, final_answer("turn-0101", "One answered.")).await;
+
+    // Speaker 2 (kitchen token, same room name) starts its own talk in the middle of speaker 1's.
+    assert_eq!(ask("turn-0102", "First from two.", KITCHEN).await.status, 202);
+    let second = next_where(&mut ws, "speaker 2's turn", |f| {
+        f["type"] == "voice" && f["id"] == "turn-0102"
+    })
+    .await;
+    let s2 = second["session"].as_str().unwrap().to_owned();
+    assert_ne!(s2, s1, "a second speaker has a talk of its own");
+    send(
+        &mut ws,
+        json!({"type": "voice_ack", "id": "turn-0102", "lane": "speaker", "personId": "1"}),
+    )
+    .await;
+    send(&mut ws, final_answer("turn-0102", "Two answered.")).await;
+
+    // Speaker 1 again well inside five minutes: the same talk carries on.
+    assert_eq!(ask("turn-0103", "Back to one.", BEDROOM).await.status, 202);
+    let again = next_where(&mut ws, "speaker 1's second turn", |f| {
+        f["type"] == "voice" && f["id"] == "turn-0103"
+    })
+    .await;
+    assert_eq!(again["session"], json!(s1), "its second message continues its talk");
+    send(
+        &mut ws,
+        json!({"type": "voice_ack", "id": "turn-0103", "lane": "speaker", "personId": "1"}),
+    )
+    .await;
+    send(&mut ws, final_answer("turn-0103", "One again.")).await;
+
+    // Idle past five minutes: both talks close, each with its own id.
+    hub.bridge()
+        .tick(now_ms() + idle.as_millis() as i64 + 1_000);
+    let mut closed: Vec<String> = drain(&mut ws, 400)
+        .await
+        .into_iter()
+        .filter(|f| f["type"] == "speaker_session_closed")
+        .map(|f| f["sessionId"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    closed.sort();
+    let mut want = vec![s1.clone(), s2.clone()];
+    want.sort();
+    assert_eq!(closed, want, "both talks idle out on their own");
+
+    // The next utterance after the idle starts a fresh talk for that speaker.
+    assert_eq!(ask("turn-0104", "Fresh start.", BEDROOM).await.status, 202);
+    let fresh = next_where(&mut ws, "the new turn", |f| {
+        f["type"] == "voice" && f["id"] == "turn-0104"
+    })
+    .await;
+    assert_ne!(fresh["session"].as_str().unwrap(), s1);
+}
+
 /// A record travels the lane like a turn but wants no answer: it is taken at once, sent again
 /// until Helm acknowledges it, waits for a line when none is up, keeps its talk open until it is
 /// taken, and the same id is never stored twice.
