@@ -990,6 +990,14 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
         # claim a success nobody performed, from either endpoint this turn
         return result(KIND_ERROR, CONTROL_TEXT)
 
+    if (cfg.escalate_url and guard_state["reprompt"]
+            and state["state"] in ("error", "empty", "unreliable", "rounds")):
+        # the second brain is no side door for a turn the gate already forced
+        # once: an endpoint that rejects tool_choice=required (HTTP 400) or
+        # answers the forced round with nothing must not end in ungated words
+        # from the escalation endpoint - the honest fixed line closes instead
+        return result(KIND_ERROR, CONTROL_TEXT)
+
     # Unusable on the main endpoint (empty, unreliable, out of rounds - which
     # includes thinking that stopped at the token cap without answering - or a
     # dead endpoint): exactly one retry on the escalation endpoint. This is the

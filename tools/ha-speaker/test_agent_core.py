@@ -754,6 +754,24 @@ class HomeControlGateTest(unittest.TestCase):
         self.assertEqual([c[0] for c in tools.calls], ["light"])
         self.assertEqual(r.text, "Bright and on.")
 
+    def test_forced_round_rejection_or_emptiness_never_escalates(self):
+        # an endpoint that refuses tool_choice=required (HTTP 400) or answers
+        # the forced round with nothing must not hand the turn to a second
+        # ungated brain: the fixed honest sentence closes it.
+        for bad in ({"status": 400, "msg": {}}, {"msg": {"content": ""}}):
+            with self.subTest(str(bad)):
+                r, tr, _ = run_case(
+                    [msg_text("Done, the kitchen lights are on."), bad,
+                     msg_text("The kitchen is nice and bright now.")],
+                    cfg_extra={"escalate_url":
+                               "http://flash/v1/chat/completions"})
+                self.assertEqual(r.kind, agent_core.KIND_ERROR)
+                self.assertEqual(r.text, agent_core.CONTROL_TEXT)
+                self.assertTrue(r.guard_reprompt)
+                self.assertEqual(
+                    [s["url"] for s in tr.seen],
+                    ["http://main/v1/chat/completions"] * 2)
+
 
 class PromptSizeTest(unittest.TestCase):
     def test_system_prompt_under_250_tokens(self):
