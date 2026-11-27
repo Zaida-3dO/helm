@@ -1185,6 +1185,99 @@ fn map_session(r: &rusqlite::Row<'_>) -> rusqlite::Result<(StackSession, Option<
     ))
 }
 
+/// A hand-over for a channel that rolls its chats over early and needs no model turn to carry
+/// the work (a voice lane does this): `new` is a chat the caller has just started, and it takes
+/// over `old`. Everything a finished roll over leaves behind stays as it is — both stack links,
+/// the succession row its other readers use, the old chat's archive, its composer and its place
+/// in the sidebar — followed by the same notices (`sidebar`, both chat records, the actor stop,
+/// attention). Errors when either chat is gone or archived already, when `old` has a successor
+/// of its own, or when `new` already belongs to a stack: nothing moves in any of those cases, so
+/// the caller keeps using `old`. The checks run inside the write, before any link, so a refusal
+/// never leaves half the hand-over applied.
+pub fn link_successor(rt: &ChatRuntime, old: &str, new: &str) -> Result<(), String> {
+    if old == new {
+        return Err("The chat cannot take over itself.".to_owned());
+    }
+    let now = helm_core::now_ms();
+    let changed = rt
+        .db()
+        .write(|tx| -> rusqlite::Result<Result<Vec<String>, String>> {
+            let old_row: Option<(Option<String>, Option<String>, i64)> = tx
+                .query_row(
+                    "SELECT stack_id, next_session_id, archived FROM chats WHERE id = ?1",
+                    [old],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            let Some((stack, next, archived)) = old_row else {
+                return Ok(Err("The chat to carry over does not exist.".to_owned()));
+            };
+            if archived != 0 {
+                return Ok(Err("The chat to carry over is already archived.".to_owned()));
+            }
+            if next.is_some() {
+                return Ok(Err("The chat has already been carried over.".to_owned()));
+            }
+            let new_row: Option<(Option<String>, i64)> = tx
+                .query_row(
+                    "SELECT prev_session_id, archived FROM chats WHERE id = ?1",
+                    [new],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            match new_row {
+                None => return Ok(Err("The successor chat does not exist.".to_owned())),
+                Some((Some(_), _)) => {
+                    return Ok(Err(
+                        "The successor is already in a roll-over stack.".to_owned()
+                    ))
+                }
+                Some((_, 1)) => {
+                    return Ok(Err("The successor is already archived.".to_owned()));
+                }
+                Some((None, _)) => {}
+            }
+            // The checks above leave nothing for the archive to refuse but a vanished chat,
+            // which this same transaction has just ruled out — so links and archive cannot
+            // part company. The successor stands where the old chat stood: the sidebar place
+            // joins the roll over's own writes here rather than in its earlier pass, because
+            // this flow is one write start to finish.
+            let stack = stack.unwrap_or_else(|| old.to_owned());
+            let archived = link_and_archive(tx, old, new, &stack, now)?;
+            match archived {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Ok(Err("The chat to carry over is already archived.".to_owned()))
+                }
+                Err(r) => return Ok(Err(r.message)),
+            }
+            carry_composer(tx, old, new, now)?;
+            take_place(tx, old, new, now).map(Ok)
+        })
+        .map_err(|e| e.to_string())??;
+    if !changed.is_empty() {
+        rt.sh
+            .events
+            .emit(AppEvent::new("sidebar").with("chatIds", json!(changed)));
+    }
+    // Both records move (the successor inherits its place, the old one archives), so both rows
+    // go out under fresh revisions; then what `chat_archive` does after its write.
+    let rev = rt.sh.clock.next();
+    for id in [old, new] {
+        if let Ok(Some(rec)) = rt.db().snapshot(|tx| crate::store::get_chat(tx, id, rev)) {
+            rt.sh.events.emit(
+                ChatEvent::Chat {
+                    chat: Box::new(rec),
+                }
+                .to_app_event(),
+            );
+        }
+    }
+    rt.archived(old);
+    rt.publish_attention();
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1745,97 +1838,4 @@ mod tests {
         assert_eq!(lone.sessions[0].title, "Alone");
         assert!(db.snapshot(|tx| stack_of(tx, "nope")).unwrap().is_none());
     }
-}
-
-/// A hand-over for a channel that rolls its chats over early and needs no model turn to carry
-/// the work (a voice lane does this): `new` is a chat the caller has just started, and it takes
-/// over `old`. Everything a finished roll over leaves behind stays as it is — both stack links,
-/// the succession row its other readers use, the old chat's archive, its composer and its place
-/// in the sidebar — followed by the same notices (`sidebar`, both chat records, the actor stop,
-/// attention). Errors when either chat is gone or archived already, when `old` has a successor
-/// of its own, or when `new` already belongs to a stack: nothing moves in any of those cases, so
-/// the caller keeps using `old`. The checks run inside the write, before any link, so a refusal
-/// never leaves half the hand-over applied.
-pub fn link_successor(rt: &ChatRuntime, old: &str, new: &str) -> Result<(), String> {
-    if old == new {
-        return Err("The chat cannot take over itself.".to_owned());
-    }
-    let now = helm_core::now_ms();
-    let changed = rt
-        .db()
-        .write(|tx| -> rusqlite::Result<Result<Vec<String>, String>> {
-            let old_row: Option<(Option<String>, Option<String>, i64)> = tx
-                .query_row(
-                    "SELECT stack_id, next_session_id, archived FROM chats WHERE id = ?1",
-                    [old],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .optional()?;
-            let Some((stack, next, archived)) = old_row else {
-                return Ok(Err("The chat to carry over does not exist.".to_owned()));
-            };
-            if archived != 0 {
-                return Ok(Err("The chat to carry over is already archived.".to_owned()));
-            }
-            if next.is_some() {
-                return Ok(Err("The chat has already been carried over.".to_owned()));
-            }
-            let new_row: Option<(Option<String>, i64)> = tx
-                .query_row(
-                    "SELECT prev_session_id, archived FROM chats WHERE id = ?1",
-                    [new],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?;
-            match new_row {
-                None => return Ok(Err("The successor chat does not exist.".to_owned())),
-                Some((Some(_), _)) => {
-                    return Ok(Err(
-                        "The successor is already in a roll-over stack.".to_owned()
-                    ))
-                }
-                Some((_, 1)) => {
-                    return Ok(Err("The successor is already archived.".to_owned()));
-                }
-                Some((None, _)) => {}
-            }
-            // The checks above leave nothing for the archive to refuse but a vanished chat,
-            // which this same transaction has just ruled out — so links and archive cannot
-            // part company. The successor stands where the old chat stood: the sidebar place
-            // joins the roll over's own writes here rather than in its earlier pass, because
-            // this flow is one write start to finish.
-            let stack = stack.unwrap_or_else(|| old.to_owned());
-            let archived = link_and_archive(tx, old, new, &stack, now)?;
-            match archived {
-                Ok(true) => {}
-                Ok(false) => {
-                    return Ok(Err("The chat to carry over is already archived.".to_owned()))
-                }
-                Err(r) => return Ok(Err(r.message)),
-            }
-            carry_composer(tx, old, new, now)?;
-            take_place(tx, old, new, now).map(Ok)
-        })
-        .map_err(|e| e.to_string())??;
-    if !changed.is_empty() {
-        rt.sh
-            .events
-            .emit(AppEvent::new("sidebar").with("chatIds", json!(changed)));
-    }
-    // Both records move (the successor inherits its place, the old one archives), so both rows
-    // go out under fresh revisions; then what `chat_archive` does after its write.
-    let rev = rt.sh.clock.next();
-    for id in [old, new] {
-        if let Ok(Some(rec)) = rt.db().snapshot(|tx| crate::store::get_chat(tx, id, rev)) {
-            rt.sh.events.emit(
-                ChatEvent::Chat {
-                    chat: Box::new(rec),
-                }
-                .to_app_event(),
-            );
-        }
-    }
-    rt.archived(old);
-    rt.publish_attention();
-    Ok(())
 }

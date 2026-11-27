@@ -436,7 +436,7 @@ fn kept_ready(c: &Ctx, now: i64) -> Vec<String> {
                 )
                 .optional()
             })
-            .map(|found| found.map_or(true, |a| a != 0))
+            .map(|found| found.is_none_or(|a| a != 0))
             .unwrap_or(true);
         if gone || person_typed(&c.db, &k.chat_id, k.closed_at) {
             speaker::unkeep_chat(&c.paths.chats, &k.chat_id);
@@ -970,7 +970,7 @@ impl SpeakerSink for HouseSpeaker {
                     // real leftover and waits in the kept list instead.
                     let began = Instant::now();
                     while matches!(
-                        holding.as_deref(),
+                        holding,
                         Some("a turn still running") | Some("a message not delivered yet")
                     ) && began.elapsed() < CLOSE_SETTLE
                     {

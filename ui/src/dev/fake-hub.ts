@@ -137,6 +137,10 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         v.maxTokens = Number(a.maxTokens);
         v.watch = a.watch === 'off' || a.watch === 'flags+done' ? a.watch : 'flags';
         if (typeof a.takeVoice === 'boolean') v.takeVoice = a.takeVoice;
+        v.quickModel = typeof a.quickModel === 'string' ? a.quickModel.trim() : '';
+        v.quickEffort = typeof a.quickEffort === 'string' ? a.quickEffort.trim() : '';
+        v.quickRollAt = Number(a.quickRollAt) || 0;
+        v.deepRollAt = Number(a.deepRollAt) || 0;
         return v;
       }
       case 'relay_speaker_get':
@@ -149,6 +153,10 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         sp.previousHours = Number(a.previousHours) || 0;
         if (typeof a.lean === 'boolean') sp.lean = a.lean;
         if (typeof a.boardId === 'string') sp.boardId = a.boardId.trim();
+        sp.quickModel = typeof a.quickModel === 'string' ? a.quickModel.trim() : '';
+        sp.quickEffort = typeof a.quickEffort === 'string' ? a.quickEffort.trim() : '';
+        sp.quickRollAt = Number(a.quickRollAt) || 0;
+        sp.deepRollAt = Number(a.deepRollAt) || 0;
         return sp;
       }
       case 'relay_speaker_reset': {

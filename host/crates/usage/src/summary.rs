@@ -391,8 +391,12 @@ pub struct DigestEnv<'a> {
     pub local_window: &'a dyn Fn(&str) -> Option<u64>,
     /// What the user said each local model works well up to (tokens) and which model it suggests
     /// in its place: (comfort, step-up), both None when unset.
-    pub local_fit: &'a dyn Fn(&str) -> (Option<u64>, Option<String>),
+    pub local_fit: LocalFit<'a>,
 }
+
+/// A lookup of what the user said about one local model: (comfort size in tokens, the model it
+/// suggests in its place), each None when unset.
+pub type LocalFit<'a> = &'a dyn Fn(&str) -> (Option<u64>, Option<String>);
 
 /// Build the digest.
 pub fn digest(db: &Database, a: &Value, compare: &str, env: &DigestEnv) -> ToolResult {
@@ -514,7 +518,7 @@ pub fn chat_context(
     db: &Database,
     chat_id: &str,
     local_window: &dyn Fn(&str) -> Option<u64>,
-    local_fit: &dyn Fn(&str) -> (Option<u64>, Option<String>),
+    local_fit: LocalFit<'_>,
 ) -> Result<(String, Option<String>, Value), rusqlite::Error> {
     let (model_id, provider, ctx) = db.snapshot::<_, rusqlite::Error>(|tx| {
         let (model_id, provider): (String, Option<String>) = tx.query_row(

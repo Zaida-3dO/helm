@@ -244,7 +244,7 @@ fn word_path(word: &str) -> Option<String> {
     // Git Bash drive form `/<letter>/rest`. A plain POSIX `/usr/...` is not it: its first run of
     // letters is longer than one.
     if b.len() >= 4 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b'/' {
-        return Some(format!("{}/{}", &w[1..2].to_ascii_lowercase(), &w[2..]));
+        return Some(format!("{}:{}", w[1..2].to_ascii_lowercase(), &w[2..]));
     }
     // A UNC share as written, and a home-relative word (kept plain; it only ever matches when
     // the header spells it the same way).
@@ -487,7 +487,7 @@ fn starts_with_command(want: &[String], segment: &str) -> bool {
             break;
         }
     }
-    let got: Vec<String> = tokens.take(want.len()).map(|t| exec_name(t)).collect();
+    let got: Vec<String> = tokens.take(want.len()).map(exec_name).collect();
     got.len() == want.len() && got.iter().zip(want).all(|(g, w)| g == w)
 }
 
@@ -724,7 +724,7 @@ pub fn message_note(profile_dir: &Path, chat_id: &str, gen: u64, _now_ms: i64) -
             return None;
         }
         s.set_gen(chat_id, gen);
-        Some(s.launch_map(chat_id)?)
+        s.launch_map(chat_id)
     })?;
     let who = crate::launch::who(chat_id);
     let facts = Facts::of(&who, None);
@@ -1069,7 +1069,8 @@ mod tests {
         let long = INLINE_RULE_CHARS + 1;
         let f = coding();
         // (trigger pairs, always, body length in chars, chat facts, expected decision)
-        let cases: Vec<(Vec<(&str, &str)>, bool, usize, Facts, Decision)> = vec![
+        type Case<'a> = (Vec<(&'a str, &'a str)>, bool, usize, Facts, Decision);
+        let cases: Vec<Case> = vec![
             // No trigger: today's behaviour, byte for byte.
             (vec![], false, 50, f.clone(), Decision::Full),
             (vec![], false, long, f.clone(), Decision::Line),

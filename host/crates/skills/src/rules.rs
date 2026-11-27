@@ -622,6 +622,7 @@ fn new_file_name(root: &Path, title: &str) -> io::Result<String> {
 /// given, rewrites every trigger key to match it — an all-empty `RuleWhen` clears the trigger
 /// keys, and unknown header lines survive either way (a rewrite without `when` leaves them alone).
 /// `max_text` caps the text.
+#[allow(clippy::too_many_arguments)]
 pub fn write(
     root: &Path,
     path: Option<&str>,
@@ -792,10 +793,15 @@ mod tests {
         assert_eq!(body, "# T\n\nplain text\n");
 
         // Chat-only conditions say no moment; folders do.
-        let mut w = RuleWhen::default();
-        w.kinds = vec!["coding".into()];
+        let w = RuleWhen {
+            kinds: vec!["coding".into()],
+            ..Default::default()
+        };
         assert!(!w.has_moment());
-        w.folders = vec!["C:\\work\\repo".into()];
+        let w = RuleWhen {
+            folders: vec!["C:\\work\\repo".into()],
+            ..Default::default()
+        };
         assert!(w.has_moment());
     }
 
@@ -915,11 +921,13 @@ mod tests {
     fn the_trigger_summary_reads_as_one_line_or_stays_empty() {
         let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 26).unwrap();
         assert_eq!(RuleWhen::default().summary(today), "");
-        let mut w = RuleWhen::default();
-        w.tools = vec!["Bash".into()];
-        w.commands = vec!["taskkill".into(), "pkill".into()];
-        w.kinds = vec!["coding".into()];
-        w.until = Some("2027-01-31".into());
+        let w = RuleWhen {
+            tools: vec!["Bash".into()],
+            commands: vec!["taskkill".into(), "pkill".into()],
+            kinds: vec!["coding".into()],
+            until: Some("2027-01-31".into()),
+            ..Default::default()
+        };
         assert_eq!(
             w.summary(today),
             "Bash: taskkill, pkill · coding · until 31 Jan 2027"

@@ -178,11 +178,7 @@ fn build_rule_matcher(layers: &[(&Path, &str)]) -> Option<String> {
             }
             // Commands only arrive through a shell; paths only through the file tools.
             if !w.commands.is_empty() {
-                alts.extend(
-                    ["Bash", "PowerShell", "Monitor"]
-                        .map(str::to_owned)
-                        .into_iter(),
-                );
+                alts.extend(["Bash", "PowerShell", "Monitor"].map(str::to_owned));
             }
             if !w.folders.is_empty() || !w.hosts.is_empty() {
                 alts.extend(
@@ -197,8 +193,7 @@ fn build_rule_matcher(layers: &[(&Path, &str)]) -> Option<String> {
                         "Bash",
                         "PowerShell",
                     ]
-                    .map(str::to_owned)
-                    .into_iter(),
+                    .map(str::to_owned),
                 );
             }
         }

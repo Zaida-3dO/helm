@@ -679,8 +679,7 @@ mod tests {
                 .map(str::to_owned)
         };
         let edit = |sql: &str| {
-            db.write(|tx| Ok::<_, rusqlite::Error>(tx.execute_batch(sql)?))
-                .unwrap();
+            db.write(|tx| tx.execute_batch(sql)).unwrap();
         };
         // A long-ago queued message holds the chat even though it predates any hand-over: only
         // the hand-over timings themselves are ignored here.

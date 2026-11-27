@@ -526,7 +526,7 @@ pub fn flush_held(rt: &ChatRuntime) -> usize {
              ORDER BY s.chat_id, s.created_at, s.id",
         )?;
         let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-        Ok::<_, rusqlite::Error>(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
     }) {
         Ok(rows) => rows,
         Err(e) => {

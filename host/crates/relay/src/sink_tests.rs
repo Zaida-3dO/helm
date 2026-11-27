@@ -3719,7 +3719,7 @@ async fn a_kept_speaker_chat_archives_when_its_leftovers_clear_or_a_typed_messag
     let held = crate::speaker::find(&paths.chats, "s-9").unwrap().chat_id;
     s.talk_closed(None, "s-9".to_owned()).await;
     assert!(!archived(&held), "the leftover flag holds the chat");
-    assert_eq!(kept_ids(), [held.clone()]);
+    assert_eq!(kept_ids(), [held.as_str()]);
 
     // The person dealt with it (the flag is gone) and half an hour of quiet passes: the next
     // delivery's sweep puts the chat away.
@@ -3754,7 +3754,7 @@ async fn a_kept_speaker_chat_archives_when_its_leftovers_clear_or_a_typed_messag
         .unwrap();
     let typed = crate::speaker::find(&paths.chats, "s-11").unwrap().chat_id;
     s.talk_closed(None, "s-11".to_owned()).await;
-    assert_eq!(kept_ids(), [typed.clone()]);
+    assert_eq!(kept_ids(), [typed.as_str()]);
     sql(
         &e.db,
         "DELETE FROM chat_flags WHERE chat_id = ?1",

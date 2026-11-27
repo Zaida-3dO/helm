@@ -586,7 +586,7 @@ fn look(
                 };
                 if !ch.policy.approvals
                     || !matches!(r.kind, AttentionKind::Approval | AttentionKind::Plan)
-                    || !wanted(&ch, &r.chat_id)
+                    || !wanted(ch, &r.chat_id)
                 {
                     continue;
                 }
@@ -629,7 +629,7 @@ fn look(
                 if member {
                     continue;
                 }
-                if !ch.policy.approvals || !wanted(&ch, &r.chat_id) {
+                if !ch.policy.approvals || !wanted(ch, &r.chat_id) {
                     continue;
                 }
                 out.push(approve::ConsentWaiting {

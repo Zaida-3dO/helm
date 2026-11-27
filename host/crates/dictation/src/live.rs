@@ -82,8 +82,11 @@ const RETRY_AFTER: Duration = Duration::from_secs(30);
 /// Whether a live session can run here, and why not when it cannot. A yes is kept for the life
 /// of the process: probing activates the speech service, which is not free. A no is asked again
 /// after [`RETRY_AFTER`], so fixing the cause in Windows Settings does not need a restart.
-pub fn available() -> (bool, Option<String>) {
-    static CACHE: Mutex<Option<(Instant, (bool, Option<String>))>> = Mutex::new(None);
+/// Whether it can run, and why not when it cannot; stamped with the moment of the probe.
+type Availability = (bool, Option<String>);
+
+pub fn available() -> Availability {
+    static CACHE: Mutex<Option<(Instant, Availability)>> = Mutex::new(None);
     let mut cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
     if let Some((at, answer)) = cache.as_ref() {
         if answer.0 || at.elapsed() < RETRY_AFTER {
