@@ -7,7 +7,8 @@
       "The Helm hub could not be reached for the whole turn.",
       "The machine behind voice is down entirely: both speech probes fail."
     ],
-    "covers": ["hubapi.OFFLINE_TEXT"]
+    "covers": ["hubapi.OFFLINE_TEXT"],
+    "shared": true
   },
   {
     "code": "thinking_offline",

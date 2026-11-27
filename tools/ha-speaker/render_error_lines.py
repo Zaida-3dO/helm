@@ -8,12 +8,15 @@ listens and where Home Assistant's ``www`` folder is reachable::
 For every entry whose file is missing: synthesise the words over the local
 speech service (``POST /v1/audio/speech``, wav out), convert with ffmpeg, and
 write ``<www>/<file>``. Existing files are never touched unless you pass
-``--force`` - which matters for the one reused older line whose flac is shared
-with a pre-existing automation. A voice change means: edit the voice file (or
-pass ``--voice``) and rerun with ``--force``.
+``--force`` - except entries marked ``"shared": true`` in the json (the one
+reused older line whose flac belongs to a pre-existing file too): --force
+never re-renders those, so a voice change cannot overwrite what other things
+reference. A voice change means: edit the voice file (or pass ``--voice``)
+and rerun with ``--force``.
 
-``--check`` only lists what is missing; it exits non-zero when anything is, so
-it doubles as the acceptance gate ("nothing missing").
+``--check`` lists every line whose file is missing, empty or does not read as
+a FLAC; it exits non-zero when anything is wrong, so it doubles as the
+acceptance gate ("nothing missing, all playable").
 
 Standard library only. The speech call goes through urllib and ffmpeg runs as
 an argv list (never a shell). The speech url is checked to be loopback: this
@@ -113,6 +116,17 @@ def wav_to_flac(wav_bytes, out_path):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+def _flac_ok(path):
+    """A line is there only if it reads as a FLAC: a zero-byte or truncated
+    transfer on the share would play as noise forever, and --check should see
+    that without any external tool."""
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(4) == b"fLaC"
+    except OSError:
+        return False
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--www", required=True,
@@ -123,9 +137,11 @@ def main(argv=None):
                     help="file whose first line names the current voice")
     ap.add_argument("--voice", help="the voice name, over --voice-file")
     ap.add_argument("--check", action="store_true",
-                    help="only list lines whose file is missing; change nothing")
+                    help="only list lines whose file is missing, empty or not "
+                         "a flac; change nothing")
     ap.add_argument("--force", action="store_true",
-                    help="re-render files that already exist (voice change)")
+                    help="re-render files that already exist (voice change); "
+                         "json-shared entries are never rewritten")
     args = ap.parse_args(argv)
 
     catalogue = errorlines.lines()
@@ -137,15 +153,21 @@ def main(argv=None):
     want = [(code, entry) for code, entry in catalogue.items()]
     total = len(want)
     if args.check:
-        missing = [entry["file"] for _, entry in want
-                   if not os.path.isfile(os.path.join(args.www, entry["file"]))]
-        for name in missing:
-            print("MISSING %s" % name)
-        if missing:
-            print("%d of %d lines are missing from %s"
-                  % (len(missing), total, args.www))
+        holes = []
+        for _, entry in want:
+            path = os.path.join(args.www, entry["file"])
+            if not os.path.isfile(path):
+                print("MISSING %s" % entry["file"])
+                holes.append(entry["file"])
+            elif not _flac_ok(path):
+                print("BAD %s (not a readable flac)" % entry["file"])
+                holes.append(entry["file"])
+        if holes:
+            print("%d of %d lines are missing or bad in %s"
+                  % (len(holes), total, args.www))
             return 1
-        print("all %d line files are present in %s" % (total, args.www))
+        print("all %d line files are present and read as flac in %s"
+              % (total, args.www))
         return 0
 
     voice = _read_voice(args)
@@ -153,9 +175,14 @@ def main(argv=None):
     done = skipped = 0
     for index, (code, entry) in enumerate(want, 1):
         target = os.path.join(args.www, entry["file"])
-        if os.path.isfile(target) and not args.force:
+        shared = bool(entry.get("shared"))
+        if os.path.isfile(target) and (shared or not args.force):
+            # a shared entry's file predates this catalogue and other things
+            # reference it: even --force (a voice change) never rewrites it
             skipped += 1
-            print("skip %s (%d of %d)" % (entry["file"], index, total))
+            print("skip %s (%d of %d%s)" % (
+                entry["file"], index, total,
+                ", shared - never rewritten" if shared else ""))
             continue
         wav = synthesise_wav(tts_url, entry["text"], voice)
         wav_to_flac(wav, target)

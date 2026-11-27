@@ -47,8 +47,11 @@ class FakeSpeech(http.server.BaseHTTPRequestHandler):
 
 
 class FakeFfmpeg:
-    """Stands in for subprocess.run: checks the argv shape and copies the
-    wav over to where the flac belongs."""
+    """Stands in for subprocess.run: checks the argv shape and writes a
+    flac-magic-prefixed copy of the wav where the flac belongs (a real
+    encoder would; --check reads that magic back)."""
+
+    MAGIC = b"fLaC"
 
     def __init__(self):
         self.cmds = []
@@ -60,7 +63,8 @@ class FakeFfmpeg:
             raise AssertionError("expected an ffmpeg argv list, got %r" % argv)
         src = argv[argv.index("-i") + 1]
         dst = argv[-1]
-        shutil.copyfile(src, dst)
+        with open(src, "rb") as fh_in, open(dst, "wb") as fh_out:
+            fh_out.write(self.MAGIC + fh_in.read())
         return subprocess.CompletedProcess(argv, 0)
 
 
@@ -136,14 +140,43 @@ class RenderFlowTest(unittest.TestCase):
         code, out, _runner = self._main("--voice", "tv")
         self.assertEqual(len(FakeSpeech.calls), base + 1)
         with open(target, "rb") as fh:
-            self.assertEqual(fh.read(), FakeSpeech.payload)
+            self.assertTrue(fh.read().startswith(FakeFfmpeg.MAGIC))
         code, out = self._capture_main(["--check"])
         self.assertEqual(code, 0)
         self.assertIn("all %d line files are present" % total, out)
 
-        # --force re-renders every line (the voice-change path)
+        # --force re-renders every line (the voice-change path) except the
+        # shared one: its flac predates this catalogue and other things use it
+        shared = [(c, e) for c, e in sorted(catalogue.items())
+                  if e.get("shared")]
+        self.assertTrue(shared)  # the reused old line is marked as such
+        shared_target = os.path.join(self.www, shared[0][1]["file"])
+        with open(shared_target, "wb") as fh:
+            fh.write(b"pre-existing shared bytes")
         code, out, _runner = self._main("--voice", "tv", "--force")
-        self.assertEqual(len(FakeSpeech.calls), base + 1 + total)
+        self.assertEqual(len(FakeSpeech.calls),
+                         base + 1 + total - len(shared))
+        with open(shared_target, "rb") as fh:
+            self.assertEqual(fh.read(), b"pre-existing shared bytes")
+        self.assertIn("shared - never rewritten", out)
+
+    def test_check_reads_the_files_not_just_their_names(self):
+        # an empty or truncated flac must not pass for a rendered line
+        total = len(errorlines.lines())
+        code, _out, _runner = self._main("--voice", "tv")
+        self.assertEqual(code, 0)
+        codes = sorted(errorlines.lines())
+        corrupt = errorlines.lines()[codes[0]]["file"]
+        empty = errorlines.lines()[codes[1]]["file"]
+        with open(os.path.join(self.www, corrupt), "wb") as fh:
+            fh.write(b"RIFFtruncated-noise")   # present, wrong shape
+        with open(os.path.join(self.www, empty), "wb") as fh:
+            pass                              # zero bytes
+        code, out = self._capture_main(["--check"])
+        self.assertEqual(code, 1)
+        self.assertIn("BAD %s" % corrupt, out)
+        self.assertIn("BAD %s" % empty, out)
+        self.assertIn("%d of %d lines are missing or bad" % (2, total), out)
 
     def _capture_main(self, extra):
         runner = FakeFfmpeg()
