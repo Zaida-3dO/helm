@@ -230,8 +230,8 @@ class TurnResult:
                                    # we spoke the tool's own sentence instead
     guard_reprompt: bool = False   # a house request answered with no tool call
                                    # was sent back once with the tool forced
-    guard_blocked: bool = False    # a success claim (or an all-failed run) was
-                                   # replaced by our own honest sentence
+    guard_blocked: bool = False    # what we spoke was replaced or joined by
+                                   # our own honest failure words
 
 
 # --------------------------------------------------------------------------
@@ -548,13 +548,38 @@ def _brief(outcome):
     return out or {"ok": bool(outcome.get("ok", False))}
 
 
+# Our own wiring messages: true in the records, meaningless out loud. They
+# never reach the speaker - an internal failure falls back to CONTROL_TEXT.
+_INTERNAL_FAILURES = ("bad arguments:", "unknown tool:", "the light action",
+                      "the climate action", "the timer action",
+                      "home_status needs", "the tool itself failed")
+
+
+def _speakable_failure(entry):
+    """One recorded failed call in words a person may be told, or None when
+    the reason is internal plumbing. An ambiguity error's candidate list rides
+    along in brackets, so the spoken line can actually ask something useful."""
+    raw = str(entry.get("error") or "")
+    low = raw.strip().lower()
+    if any(low.startswith(m) for m in _INTERNAL_FAILURES):
+        return None
+    reason = clean_reply(raw)
+    if not reason or len(reason) > 160:
+        return None
+    cands = [str(c)[:40] for c in (entry.get("candidates") or [])[:4]]
+    if cands:
+        reason += " (%s)" % ", ".join(dict.fromkeys(cands))
+    return reason
+
+
 def _failure_sentence(collected):
     """One honest spoken line for a house turn where every tool call failed:
-    the most recent plain-language reason from the tools themselves, or the
-    fixed short sentence if nothing speakable is there."""
+    the most recent plain-language reason from the tools themselves - with
+    their offered candidates - or the fixed short sentence if nothing
+    speakable is there."""
     for entry in reversed(collected or []):
-        reason = clean_reply(str(entry.get("error") or ""))
-        if reason and len(reason) <= 160:
+        reason = _speakable_failure(entry)
+        if reason:
             return reason
     return CONTROL_TEXT
 
@@ -570,11 +595,14 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
     ask_helm; await .execute(name, args) -> plain dict with an "ok" bool.
 
     Home-control gate: when the request words name a house object or action,
-    words may not be spoken over nothing - a tool call that succeeded has to
-    stand behind them. A tool-less answer is re-prompted once with the tool
-    forced; if even then no tool runs, the fixed CONTROL_TEXT goes instead of
-    any success claim. If every tool call failed, the honest sentence is built
-    from the tools' own reasons, never from the model's wording.
+    words may not be spoken over nothing - a write request needs a successful
+    WRITE call standing behind it (a read proves only that a read worked). A
+    single clean question claiming no success is always allowed through. A
+    tool-less claim is re-prompted once with the tool forced; if even then no
+    tool runs, the fixed CONTROL_TEXT goes instead of any success claim. If
+    every tool call failed, the honest sentence is built from the tools' own
+    reasons and candidates, never from the model's wording; when only part of
+    the ask worked, the failures are appended to the model's own sentence.
 
     If the model calls ask_helm, or its answer is unusable (empty, invalid tool
     calls twice, it kept calling tools past the budget, timed out or could not
@@ -657,15 +685,33 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
             if not (guarded and control_ask):
                 return None
             if carried():
+                failed = [c for c in collected if not c["ok"]]
+                if failed:
+                    # partial success: the model's sentence may ride, but a
+                    # failed part of the ask is appended in the tools' own
+                    # words - "kitchen and bedroom are off" must not hide
+                    # that the bedroom call never went through
+                    notes = [n for n in (_speakable_failure(c) for c in failed)
+                             if n and n.lower() not in reply.lower()]
+                    if notes:
+                        guard_state["blocked"] = True  # our words joined in
+                        joiner = " " if reply[-1] in ".!?" else ". "
+                        return {"state": "answer",
+                                "reply": clean_reply(
+                                    reply + joiner + "Not done: "
+                                    + "; ".join(dict.fromkeys(notes)))}
                 return None  # a tool really did carry this turn
+            if _pure_question(reply):
+                # an honest ask-back claims no success - and when every call
+                # failed with its own "which one?" the model's fuller wording
+                # of that question is the most useful line there is
+                return None
             if collected and not any(c["ok"] for c in collected):
                 # tools ran and every one failed: our own sentence from the
                 # tools' reasons, never the model's claim of success
                 guard_state["blocked"] = True
                 return {"state": "answer",
                         "reply": _failure_sentence(collected)}
-            if _pure_question(reply):
-                return None  # an honest ask-back claims no success
             # nothing has run at all, or only reads worked for an ask that
             # wanted a change: those words claim something nobody did
             if not reprompted and schemas \
@@ -792,6 +838,13 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
                         why = outcome.get("error") if isinstance(outcome, dict) \
                             else None
                         entry["error"] = str(why or "the call did not go through")[:200]
+                        cands = outcome.get("candidates") \
+                            if isinstance(outcome, dict) else None
+                        if isinstance(cands, list) and cands:
+                            # an ambiguity ask-back is only useful out loud
+                            # with the options that came back with it
+                            entry["candidates"] = [str(x)[:60]
+                                                   for x in cands[:8]]
                     collected.append(entry)
                     timings["tool_ms"].append(ms)
                     tool_msgs.append({"role": "tool", "tool_call_id": call_id,

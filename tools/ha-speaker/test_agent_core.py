@@ -408,6 +408,97 @@ class HomeControlGateTest(unittest.TestCase):
         self.assertEqual([s["url"] for s in tr.seen],
                          ["http://main/v1/chat/completions"] * 2)
 
+    def test_model_ask_back_survives_a_failed_ambiguity(self):
+        # every call failed with "which one did you mean?" plus candidates:
+        # the model's fuller question is the useful line, not the bare tool
+        # error - it claims no success, so it must be spoken as asked.
+        r, tr, tools = run_case(
+            [msg_tool([{"id": "1", "name": "light",
+                        "args": {"target": "desk light", "action": "on"}}]),
+             msg_text("Which one did you mean - the Study one or the"
+                      " Bedroom one?")],
+            text="turn on the desk light",
+            tools_kwargs={"outcomes": [{"ok": False,
+                                        "error": "which one did you mean?",
+                                        "candidates": ["Desk light"]}]})
+        self.assertEqual(r.kind, agent_core.KIND_ANSWER)
+        self.assertTrue(r.text.startswith("Which one did you mean"))
+        self.assertFalse(r.guard_blocked or r.guard_reprompt)
+
+    def test_failure_sentence_names_the_offered_candidates(self):
+        # with no useful question from the model, our own line must carry the
+        # options: a spoken "which one did you mean?" without them is useless.
+        r, _, tools = run_case(
+            [msg_tool([{"id": "1", "name": "light",
+                        "args": {"target": "desk light", "action": "on"}}]),
+             msg_text("Done, the desk light is on.")],
+            text="turn on the desk light",
+            tools_kwargs={"outcomes": [{"ok": False,
+                                        "error": "which one did you mean?",
+                                        "candidates": ["Desk light",
+                                                       "Bed light"]}]})
+        self.assertEqual(r.text,
+                         "which one did you mean? (Desk light, Bed light)")
+        self.assertTrue(r.guard_blocked)
+
+    def test_internal_tool_errors_are_never_spoken(self):
+        # our own wiring messages stay in the records; the speaker gets the
+        # fixed honest sentence instead of "bad arguments: ..." or tool names.
+        for why in ("bad arguments: no JSON object found in arguments",
+                    "unknown tool: HassTurnOn",
+                    "the light action must be one of: on, off, toggle,"
+                    " set, status"):
+            with self.subTest(why):
+                r, _, _ = run_case(
+                    [msg_tool([{"id": "1", "name": "light",
+                                "args": {"target": "Kitchen",
+                                         "action": "party"}}]),
+                     msg_text("Done, it is playing party lights.")],
+                    text="turn the kitchen light to party mode",
+                    tools_kwargs={"outcomes": [{"ok": False, "error": why}]})
+                self.assertEqual(r.kind, agent_core.KIND_ANSWER)
+                self.assertEqual(r.text, agent_core.CONTROL_TEXT)
+                self.assertTrue(r.guard_blocked)
+                # the raw reason stays in the records
+                self.assertIn(why.split(":")[0], r.tool_calls[0]["error"])
+
+    def test_partial_failure_honesty_joins_the_claim(self):
+        # kitchen worked, cellar did not: the claim rides, but the failed part
+        # is appended in the tool's own words - never silently trusted.
+        r, _, _ = run_case(
+            [msg_tool([{"id": "1", "name": "light",
+                        "args": {"target": "Kitchen", "action": "off"}},
+                       {"id": "2", "name": "light",
+                        "args": {"target": "Cellar", "action": "off"}}]),
+             msg_text("Kitchen and cellar lights are off.")],
+            text="turn off the kitchen and cellar lights",
+            tools_kwargs={"outcomes": [{"ok": True, "text": "kitchen off"},
+                                       {"ok": False,
+                                        "error": "I don't know a light"
+                                                 " called 'Cellar'."}]})
+        self.assertEqual(r.kind, agent_core.KIND_ANSWER)
+        self.assertTrue(r.text.startswith("Kitchen and cellar lights are off."))
+        self.assertIn("don't know a light", r.text)
+        self.assertTrue(r.guard_blocked)
+
+    def test_partial_notes_not_repeated_when_already_said(self):
+        # the model echoed the failure itself: no double note.
+        r, _, _ = run_case(
+            [msg_tool([{"id": "1", "name": "light",
+                        "args": {"target": "Kitchen", "action": "off"}},
+                       {"id": "2", "name": "light",
+                        "args": {"target": "Cellar", "action": "off"}}]),
+             msg_text("Kitchen is off; I don't know a light called 'Cellar'.")],
+            text="turn off the kitchen and cellar lights",
+            tools_kwargs={"outcomes": [{"ok": True, "text": "kitchen off"},
+                                       {"ok": False,
+                                        "error": "I don't know a light"
+                                                 " called 'Cellar'."}]})
+        self.assertEqual(r.text,
+                         "Kitchen is off; I don't know a light called"
+                         " 'Cellar'.")
+        self.assertFalse(r.guard_blocked)
+
     def test_every_tool_failed_speaks_the_tools_own_reason(self):
         r, _, tools = run_case(
             [msg_tool([{"id": "1", "name": "light",
