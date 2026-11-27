@@ -354,23 +354,58 @@ class HomeControlGateTest(unittest.TestCase):
     Every tool failed -> the tools' own reason is spoken, never the model's
     success claim. Chit-chat (the joke turn) must sail past untouched."""
 
+    GATE_CTX = {
+        "areas": {
+            "Home Office": {"lights": ["Desk lamp", "Main light"],
+                            "climates": ["Office heater"]},
+            "Kitchen": {"lights": ["Kitchen lights"], "climates": []},
+        },
+        "history": [{"user": "turn on the lights", "spoken": "Which room?",
+                     "ts": 0}],
+    }
+
     def test_classifier_table(self):
         # one table, no model call: control sentences and reads are gated,
-        # chat and personal asks are not
+        # chat and personal asks are not; pairing is what triggers, single
+        # words never (review item 4 negatives stay False while the coverage
+        # misses - colour/percent/comfort words and bare names answering our
+        # own ask-back - now hit)
         cases = [
-            ("Turn on the home office lights to red.", True),
-            ("Turn off the home office lights", True),
-            ("What's the temperature in the home office?", True),  # read too
-            ("dim the bedroom lamps", True),
-            ("set a timer for five minutes", True),
-            ("make the reading lamp brighter", True),
-            ("tell me a short joke", False),
-            ("how are you today", False),
-            ("what is on my calendar", False),   # never 'on' alone
-            ("what do we have for dinner?", False),
+            ("Turn on the home office lights to red.", True, None),
+            ("Turn off the home office lights", True, None),
+            ("What's the temperature in the home office?", True, self.GATE_CTX),
+            ("dim the bedroom lamps", True, None),
+            ("set a timer for five minutes", True, None),
+            ("make the reading lamp brighter", True, None),
+            ("make the office red", True, None),        # verb + colour word
+            ("now make them blue", True, None),         # pronoun is fine too
+            ("kitchen to fifty percent", True, self.GATE_CTX),  # no verb
+            ("put the kitchen on", True, self.GATE_CTX),
+            ("it's cold in here", True, None),          # comfort word alone
+            ("make it warmer in here", True, None),
+            ("the home office", True, self.GATE_CTX),   # answering "Which room?"
+            ("tell me a short joke", False, None),
+            ("how are you today", False, None),
+            ("what is on my calendar", False, None),    # never 'on' alone
+            ("what do we have for dinner?", False, self.GATE_CTX),
+            ("tell me a joke about a lamp", False, self.GATE_CTX),
+            ("set a reminder to call mum at five", False, self.GATE_CTX),
+            ("whose turn is it to cook", False, None),
+            ("what time does the shop open", False, self.GATE_CTX),
+            ("what's the temperature outside", False, self.GATE_CTX),
+            ("is it light outside", False, self.GATE_CTX),
+            # a bare room name with no ask-back behind it stays unclassified:
+            # only answering our own question turns a name into a request
+            ("the home office", False, {"areas": self.GATE_CTX["areas"]}),
         ]
-        for text, want in cases:
-            self.assertEqual(agent_core.is_home_control(text), want, text)
+        for text, want, ctx in cases:
+            self.assertEqual(agent_core.is_home_control(text, ctx), want,
+                             text)
+
+    def test_percent_word_alone_never_triggers(self):
+        # "what percentage of the budget..." stays personal even with context
+        self.assertFalse(agent_core.is_home_control(
+            "what percentage is rent", self.GATE_CTX))
 
     def test_false_success_claim_is_forced_once_then_works(self):
         r, tr, tools = run_case(
@@ -668,6 +703,56 @@ class HomeControlGateTest(unittest.TestCase):
                 self.assertFalse(r.guard_reprompt or r.guard_blocked)
                 self.assertEqual(tools.calls, [])
                 self.assertEqual(len(tr.seen), 1)
+
+    def test_percent_to_a_named_room_is_carried_by_a_write(self):
+        # "kitchen to fifty percent" once slipped past the gate entirely: no
+        # verb in it. Named room plus a number demands a change like any
+        # other ask, and only a write can carry it.
+        r, tr, tools = run_case(
+            [msg_text("Sure - half brightness coming up."),
+             msg_tool([{"id": "1", "name": "light",
+                        "args": {"target": "Kitchen", "action": "set",
+                                 "brightness_pct": 50}}]),
+             msg_text("The kitchen is at fifty now.")],
+            text="kitchen to fifty percent",
+            tools_kwargs={"outcomes": [{"ok": True, "text": "at fifty"}]})
+        self.assertTrue(r.guard_reprompt)
+        self.assertEqual([c[0] for c in tools.calls], ["light"])
+        self.assertEqual(r.text, "The kitchen is at fifty now.")
+
+    def test_percent_claim_backed_only_by_a_read_is_blocked(self):
+        # the forced round answered with a read: still no write, so the claim
+        # never rides - only CONTROL_TEXT does.
+        r, tr, tools = run_case(
+            [msg_text("Sure, half brightness now."),
+             msg_tool([{"id": "1", "name": "home_state",
+                        "args": {"target": "Kitchen"}}]),
+             msg_text("The kitchen lights are on at fifty.")],
+            text="kitchen to fifty percent",
+            cfg_extra={"escalate_url": None},
+            tools_kwargs={"outcomes": [{"ok": True, "text": "2 lights on"}]})
+        self.assertEqual(r.kind, agent_core.KIND_ERROR)
+        self.assertEqual(r.text, agent_core.CONTROL_TEXT)
+        self.assertTrue(r.guard_reprompt and r.guard_blocked)
+        self.assertEqual([c[0] for c in tools.calls], ["home_state"])
+
+    def test_answer_to_our_own_ask_back_continues_the_request(self):
+        # "Which room?" then "the living room": the second turn was never
+        # gated at all; now it inherits the house request it answers.
+        ctx = dict(FIX_CTX)
+        ctx["history"] = [{"user": "turn on the lights",
+                           "spoken": "Which room?", "ts": 0}]
+        r, tr, tools = run_case(
+            [msg_text("Done, the living room is bright now."),
+             msg_tool([{"id": "1", "name": "light",
+                        "args": {"target": "Living Room",
+                                 "action": "on"}}]),
+             msg_text("Bright and on.")],
+            text="the living room", ctx=ctx,
+            tools_kwargs={"outcomes": [{"ok": True, "text": "room on"}]})
+        self.assertTrue(r.guard_reprompt)
+        self.assertEqual([c[0] for c in tools.calls], ["light"])
+        self.assertEqual(r.text, "Bright and on.")
 
 
 class PromptSizeTest(unittest.TestCase):

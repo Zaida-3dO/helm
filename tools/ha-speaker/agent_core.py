@@ -61,6 +61,9 @@ CONTROL_TEXT = "I couldn't do that."
 # ever calling one. The classifier is a word table over the request text -
 # deliberately no model call; a wrong "no" here only lets an honest answer
 # through, while the gate itself never trusts a tool-less claim of success.
+# A single word is never enough: what triggers is a PAIRING - a control verb
+# with something to act on (an object word or one of the exposed names), or a
+# named room/device together with a colour, percent or degrees word.
 
 _CONTROL_OBJECTS = frozenset("""
 light lights lighting lamp lamps bulb bulbs heating heater radiator boiler
@@ -69,12 +72,25 @@ thermostat timer timers blind blinds curtain curtains shutter shutters
 
 # No bare "on"/"off": they would drag personal questions ("what is on my
 # calendar") into the house tools. A spoken command names an object or a real
-# control verb anyway; a miss here only falls back to today's behaviour,
-# while the gate never trusts tool-less words when it does fire.
+# control verb anyway; a miss here only lets the answer through, while the
+# gate never trusts tool-less words when it does fire.
 _CONTROL_ACTIONS = frozenset("""
 turn turns turned toggle switch switches dim dims brighten brightens darken
-brighter dimmer brightness colour color hue kelvin temperature set sets
-open closes
+brighter dimmer brightness colour color hue kelvin temperature set sets put
+puts make makes open closes
+""".split())
+
+# Words that pair with a named room instead of an object word, and comfort
+# complaints ("it's cold in here"), which are heating requests even when the
+# speaker never says the word "heater".
+_COLOUR_WORDS = frozenset("""
+red orange yellow green teal cyan blue purple pink magenta white brown black
+""".split())
+
+_HOUSE_OTHER_WORDS = _COLOUR_WORDS | frozenset(("percent", "degrees"))
+
+_COMFORT_WORDS = frozenset("""
+cold hot freezing boiling warmer cooler
 """.split())
 
 # Verbs that ask for something to be changed (as opposed to colour/kelvin and
@@ -88,14 +104,39 @@ set sets put puts make makes open closes
 _WORD_RE = re.compile(r"[a-z0-9']+")
 
 
-def is_home_control(text):
-    """True when the request words name a house object or a control action.
-    Reads count too - 'what temperature is the office' should come from the
-    house, not from the model's memory of last turn."""
+def is_home_control(text, ctx=None):
+    """True when the request words point at the house. Reads count too - 'what
+    temperature is the office' should come from the house, not from the
+    model's memory of last turn. The pairing rule keeps house-worded personal
+    talk out ("a joke about a lamp", "what time does the shop open"). With a
+    turn context, exposed area and device names count as objects, and a bare
+    name right after our own ask-back continues the request it answered."""
     if not isinstance(text, str) or not text.strip():
         return False
     tokens = set(_WORD_RE.findall(text.lower()))
-    return bool(tokens & (_CONTROL_OBJECTS | _CONTROL_ACTIONS))
+    if tokens & _COMFORT_WORDS:
+        return True
+    names = _names_house_item(text, ctx)
+    has_verb = bool(tokens & _CONTROL_ACTIONS)
+    other = bool(tokens & _HOUSE_OTHER_WORDS)
+    if has_verb and (tokens & _CONTROL_OBJECTS or names or other):
+        return True
+    return bool(names and (other or _answering_own_ask_back(ctx)))
+
+
+def _answering_own_ask_back(ctx):
+    """The last line the speaker itself said asked a question back, right
+    after a house request: then the next bare room name IS that request."""
+    for item in reversed((ctx or {}).get("history") or []):
+        if not isinstance(item, dict):
+            continue
+        spoken = item.get("spoken")
+        if not (isinstance(spoken, str) and spoken.strip()):
+            continue
+        user = item.get("user")
+        return (bool(spoken.rstrip().endswith("?"))
+                and isinstance(user, str) and is_home_control(user))
+    return False
 
 
 # Each recorded tool call carries its character so the gate can tell "the ask
@@ -191,13 +232,16 @@ def _names_house_item(text, ctx):
 
 
 def _forceable(text, ctx):
-    """Only demand a forced tool call when the sentence both uses a control
-    verb and names something to act on - a house object word or one of the
-    exposed names. A joke about a lamp is not an order for a lamp."""
+    """Only demand a forced tool call when the sentence names something to
+    act on: a control verb plus an object word or exposed name (a joke about
+    a lamp has no verb and is not an order for a lamp), or - with no verb at
+    all - an exposed name plus a colour/percent intent like "kitchen to fifty
+    percent"."""
     toks = set(_WORD_RE.findall(str(text).lower()))
-    if not (toks & _CONTROL_ACTIONS):
-        return False
-    return bool(toks & _CONTROL_OBJECTS) or _names_house_item(text, ctx)
+    if toks & _CONTROL_ACTIONS:
+        return bool(toks & _CONTROL_OBJECTS) or _names_house_item(text, ctx)
+    return (_names_house_item(text, ctx)
+            and bool(toks & _HOUSE_OTHER_WORDS))
 
 # The tool the model uses to hand a personal or long request to Helm. This
 # module answers it itself; the house-control tools come from homecontrol.
@@ -694,8 +738,12 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
         + [{"role": "user", "content": str(text)}])
 
     collected = []  # every tool attempt this turn: {name, args, kind, ok, ms[...]}
-    control_ask = is_home_control(text)
-    want_write = bool(set(_WORD_RE.findall(str(text).lower())) & _WRITE_VERBS)
+    control_ask = is_home_control(text, ctx)
+    text_words = set(_WORD_RE.findall(str(text).lower()))
+    # "kitchen to fifty percent" carries no verb but demands a change all the
+    # same; degrees words stay reads ("how many degrees in the office?")
+    want_write = bool(text_words & _WRITE_VERBS) or (
+        control_ask and "percent" in text_words)
     # a forced tool round only makes sense when the sentence names a target
     can_force = _forceable(text, ctx)
     guard_state = {"reprompt": False, "blocked": False}
