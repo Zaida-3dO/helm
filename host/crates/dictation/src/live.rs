@@ -699,16 +699,17 @@ impl Engine for WinRtEngine {
         let began = Instant::now();
         const START_DEADLINE: Duration = Duration::from_secs(8);
         let mut first_failure: Option<windows::core::Error> = None;
-        let mut attempts = 0usize;
-        for tag in candidate_languages(self.language.as_deref()) {
-            if attempts > 0 && began.elapsed() >= START_DEADLINE {
+        for (attempt, tag) in candidate_languages(self.language.as_deref())
+            .into_iter()
+            .enumerate()
+        {
+            if attempt > 0 && began.elapsed() >= START_DEADLINE {
                 log::warn!(
                     "live dictation: giving up on further languages after {} s",
                     began.elapsed().as_secs()
                 );
                 break;
             }
-            attempts += 1;
             let label = tag.as_deref().unwrap_or("the default language");
             let recognizer = match create_recognizer(tag.as_deref()) {
                 Ok(r) => r,
