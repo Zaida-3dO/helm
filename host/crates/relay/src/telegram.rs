@@ -286,6 +286,12 @@ pub trait ChatPort {
     fn facts(&self, chat_id: &str) -> Option<ChatFacts>;
     /// Start a new chat with this title; its id.
     fn create(&self, title: &str) -> Result<String, String>;
+    /// The chat an archived chat was rolled over into, if it was and that successor is still
+    /// there. A tag whose chat is archived follows one instead of treating "archived" as gone;
+    /// `None` (the default for ports that know no links) means start fresh, as before.
+    fn successor(&self, _chat_id: &str) -> Option<String> {
+        None
+    }
 }
 
 /// The tag file inside the profile.
@@ -340,7 +346,14 @@ pub fn active_chat(
     profile: Option<&str>,
     now: i64,
 ) -> Result<(String, bool), String> {
-    if let Some(tag) = load_tag(path) {
+    if let Some(mut tag) = load_tag(path) {
+        if crate::voice::follow_successor(port, &mut tag.chat_id, &mut tag.tokens_at_start) {
+            // The chat was archived by a roll over whose successor is live: the tag moves there
+            // once and the conversation carries on. A hand-archived chat with no successor does
+            // not move, and stays "start fresh".
+            save_tag(path, Some(&tag))
+                .map_err(|_| "The Telegram chat tag could not be saved.".to_owned())?;
+        }
         if expired(&tag, port.facts(&tag.chat_id), policy, now).is_none() {
             return Ok((tag.chat_id, false));
         }

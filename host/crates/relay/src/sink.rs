@@ -428,6 +428,128 @@ pub(crate) fn chat_facts(db: &Database, chat_id: &str) -> Option<ChatFacts> {
     .flatten()
 }
 
+/// The live chat an archived chat was rolled over into: follow `next_session_id` while each link
+/// is itself archived, at most [`crate::voice::MAX_FOLLOW_HOPS`] steps, and answer the first that
+/// is not archived (or has been restored). `None` when the chain ends in a missing or still-archived
+/// chat, or never starts: today's "gone". The relay tags use this so a roll-over never silently
+/// drops a Telegram, voice or speaker tag.
+pub(crate) fn live_successor(db: &Database, chat_id: &str) -> Option<String> {
+    db.snapshot(|tx| {
+        let start = tx
+            .query_row(
+                "SELECT archived, next_session_id FROM chats WHERE id = ?1",
+                [chat_id],
+                |r| Ok((r.get::<_, bool>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        let mut cur = match start {
+            Some((false, _)) => return Ok(None), // not rolled away from
+            Some((true, Some(n))) if n != chat_id => n,
+            _ => return Ok(None),
+        };
+        for _ in 0..crate::voice::MAX_FOLLOW_HOPS {
+            let row = tx
+                .query_row(
+                    "SELECT archived, next_session_id FROM chats WHERE id = ?1",
+                    [&cur],
+                    |r| Ok((r.get::<_, bool>(0)?, r.get::<_, Option<String>>(1)?)),
+                )
+                .optional()?;
+            match row {
+                None => return Ok(None),
+                Some((false, _)) => return Ok(Some(cur)),
+                Some((true, Some(n))) if n != cur => cur = n,
+                _ => return Ok(None),
+            }
+        }
+        // Still archived after eight links: stop following and let the tag start fresh.
+        Ok(None)
+    })
+    .ok()
+    .flatten()
+}
+
+/// One line naming a chat for a pointer note: its title and its last plain answer, cut to 300
+/// characters together (the speaker lane's own shape for the same idea). `None` when the chat is
+/// gone or never answered anything.
+pub(crate) fn live_pointer(db: &Database, chat_id: &str) -> Option<String> {
+    db.snapshot(|tx| {
+        let title: Option<String> = tx
+            .query_row("SELECT title FROM chats WHERE id = ?1", [chat_id], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .flatten();
+        let said: Option<String> = tx
+            .query_row(
+                "SELECT text FROM messages WHERE chat_id = ?1 AND role = 'assistant'
+                 AND active = 1 AND text != '' AND status != 'error'
+                 ORDER BY id DESC LIMIT 1",
+                [chat_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap_or(None);
+        let title = title.filter(|t| !t.trim().is_empty())?;
+        let said = said.filter(|s| !s.trim().is_empty())?;
+        Ok::<_, rusqlite::Error>(Some(
+            crate::telegram::cut_chars(&format!("{title} — {said}"), 300).0,
+        ))
+    })
+    .ok()
+    .flatten()
+}
+
+/// The chat's first context reading — what the newest reply that reports usage held on the way in
+/// (input + cache reads + cache writes), oldest such reply. The floor for a channel roll-over size:
+/// nothing below what the chat carried into its very first turn counts as growth.
+pub(crate) fn first_context(db: &Database, chat_id: &str) -> Option<u64> {
+    let row: Option<(i64, i64, i64)> = db
+        .snapshot(|tx| {
+            tx.query_row(
+                "SELECT COALESCE(json_extract(details, '$.usage.inputTokens'), 0),
+                        COALESCE(json_extract(details, '$.usage.cacheReadTokens'), 0),
+                        COALESCE(json_extract(details, '$.usage.cacheWriteTokens'), 0)
+                 FROM messages
+                 WHERE chat_id = ?1 AND role = 'assistant' AND active = 1
+                   AND json_extract(details, '$.usage') IS NOT NULL
+                 ORDER BY timestamp ASC, id ASC LIMIT 1",
+                [chat_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+        })
+        .ok()
+        .flatten()?;
+    let n = |v: i64| u64::try_from(v).unwrap_or(0);
+    Some(n(row.0) + n(row.1) + n(row.2))
+}
+
+/// The last assistant answer and the newest non-error one, for a carry-over note or a pointer:
+/// role rows only, the four most recent exchanges (eight rows), oldest first. `(who, said)` pairs
+/// with `who` in {"They", "Helm"}.
+pub(crate) fn last_exchanges(db: &Database, chat_id: &str) -> Vec<(&'static str, String)> {
+    db.snapshot(|tx| {
+        let mut st = tx.prepare(
+            "SELECT role, text FROM messages
+             WHERE chat_id = ?1 AND active = 1 AND role IN ('user', 'assistant')
+               AND trim(text) <> ''
+             ORDER BY id DESC LIMIT 8",
+        )?;
+        let rows = st
+            .query_map([chat_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok::<_, rusqlite::Error>(rows)
+    })
+    .unwrap_or_default()
+    .into_iter()
+    .rev()
+    .map(|(role, text)| (if role == "user" { "They" } else { "Helm" }, text))
+    .collect()
+}
+
 /// The active Telegram chat, as Settings shows it.
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -539,6 +661,10 @@ impl RealPort<'_> {
 impl ChatPort for RealPort<'_> {
     fn facts(&self, chat_id: &str) -> Option<ChatFacts> {
         chat_facts(self.db, chat_id)
+    }
+
+    fn successor(&self, chat_id: &str) -> Option<String> {
+        live_successor(self.db, chat_id)
     }
 
     fn create(&self, title: &str) -> Result<String, String> {
@@ -749,6 +875,10 @@ pub struct Ctx {
     pub answered_path: PathBuf,
     /// Alerts other chats sent the user since the last message ([`telegram::SentNote`]).
     pub sent_path: PathBuf,
+    /// The board every chat arriving from the hub is shown on — one setting for all channels
+    /// (Telegram, phone voice and room speakers), kept in the speaker policy; `None`: the app's
+    /// own choice.
+    pub board_id: Option<String>,
 }
 
 /// How far apart two repair chats for the same service may be. The hub rate-limits its own
@@ -942,7 +1072,7 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
         new_chat_effort: c.new_chat_effort.clone(),
         ignored: Mutex::new(None),
         profile_id: Some(c.profile_id.clone()),
-        board_id: None,
+        board_id: c.board_id.clone(),
     };
     let who = profile_name(&c.db, &c.profile_id);
     let (chat, _created) =
@@ -1471,6 +1601,13 @@ impl ChatSink {
             answered,
             answered_path: paths.answered,
             sent_path: paths.sent,
+            // One board for every chat arriving from the hub; it lives in the speaker policy and
+            // is read fresh per delivery, so a change applies to the next message.
+            board_id: crate::speaker::load_file(
+                &crate::speaker::paths(&self.profile_dir, &profile.id).policy,
+            )
+            .board()
+            .map(str::to_owned),
         })
     }
 

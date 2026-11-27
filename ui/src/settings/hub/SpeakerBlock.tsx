@@ -17,6 +17,14 @@ type Choice = { value: string; title: string; subtitle?: string };
 
 const PREVIOUS_MIN = 0;
 const PREVIOUS_MAX = 72;
+// A lane's roll-over size: tokens, or 0 to leave it off (the host checks the same range).
+const ROLL_MIN = 4_000;
+const ROLL_MAX = 200_000;
+
+function rollValid(raw: string): boolean {
+  const n = Number(raw);
+  return Number.isInteger(n) && (n === 0 || (n >= ROLL_MIN && n <= ROLL_MAX));
+}
 
 function errorText(e: unknown): string {
   return String((e as { message?: unknown })?.message ?? e);
@@ -59,6 +67,8 @@ export function SpeakerBlock({ profileId }: { profileId: string | null }) {
   const ops = useMemo(() => hubOps(shell.api), [shell.api]);
   const [speaker, setSpeaker] = useState<SpeakerSettings | null>(null);
   const [previous, setPrevious] = useState('');
+  const [quickRoll, setQuickRoll] = useState('');
+  const [deepRoll, setDeepRoll] = useState('');
   const [models, setModels] = useState<{ id: string; name: string; description?: string }[]>([]);
   const [boards, setBoards] = useState<{ id: string; name: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -67,6 +77,8 @@ export function SpeakerBlock({ profileId }: { profileId: string | null }) {
   const show = useCallback((v: SpeakerSettings) => {
     setSpeaker(v);
     setPrevious(String(v.previousHours));
+    setQuickRoll(String(v.quickRollAt));
+    setDeepRoll(String(v.deepRollAt));
   }, []);
 
   useEffect(() => {
@@ -187,8 +199,105 @@ export function SpeakerBlock({ profileId }: { profileId: string | null }) {
       )}
       {speaker && (
         <SettingRow
-          title="Board for new speaker chats"
-          description="Where a new room-speaker chat is shown, so what the house talked about with nobody at the screen can be found. App default leaves it to the same rules as any other new chat."
+          title="Model for quick answers"
+          description="A turn marked quick opens its talk's chat on this model — a small local one answers fastest. Leave it unset and quick turns open like deep ones. A later deep turn moves that chat up to the model above."
+        >
+          <Picker
+            settings
+            label="Model for quick answers"
+            testId="hub-speaker-quick-model"
+            value={speaker.quickModel}
+            options={modelChoices(models, speaker.quickModel)}
+            searchable
+            disabled={busy}
+            onChange={(v) => save({ quickModel: v })}
+          />
+        </SettingRow>
+      )}
+      {speaker && (
+        <SettingRow
+          title="Effort for quick answers"
+          description="How hard the quick model thinks. Medium keeps thinking on while staying fast."
+        >
+          <Picker
+            settings
+            label="Effort for quick answers"
+            testId="hub-speaker-quick-effort"
+            value={speaker.quickEffort}
+            options={effortChoices(speaker.quickEffort)}
+            disabled={busy}
+            onChange={(v) => save({ quickEffort: v })}
+          />
+        </SettingRow>
+      )}
+      {speaker && (
+        <SettingRow
+          title="Roll a talk's chat over at"
+          description="When the next turn arrives to a chat this grown, it continues in a fresh one with a short carry-over note — no model turn, nothing lost. One size for each lane; 0 leaves it off."
+        >
+          <label className="hub-limit">
+            Quick
+            <input
+              type="number"
+              min={0}
+              max={ROLL_MAX}
+              step={1000}
+              aria-label="Quick lane roll-over size"
+              data-testid="hub-speaker-quick-roll"
+              value={quickRoll}
+              onChange={(e) => setQuickRoll(e.target.value)}
+            />
+          </label>
+          <label className="hub-limit">
+            Deep
+            <input
+              type="number"
+              min={0}
+              max={ROLL_MAX}
+              step={1000}
+              aria-label="Deep lane roll-over size"
+              data-testid="hub-speaker-deep-roll"
+              value={deepRoll}
+              onChange={(e) => setDeepRoll(e.target.value)}
+            />
+          </label>
+          <Button
+            variant="secondary"
+            disabled={busy || !rollValid(quickRoll) || !rollValid(deepRoll) || (Number(quickRoll) === speaker.quickRollAt && Number(deepRoll) === speaker.deepRollAt)}
+            onClick={() => save({ quickRollAt: Number(quickRoll), deepRollAt: Number(deepRoll) })}
+          >
+            Save
+          </Button>
+        </SettingRow>
+      )}
+      {speaker && (!rollValid(quickRoll) || !rollValid(deepRoll)) && (
+        <div className="ui-field-error">A roll-over size must be {ROLL_MIN} to {ROLL_MAX.toLocaleString()} tokens, or 0 to leave it off.</div>
+      )}
+      {speaker && speaker.kept.length > 0 && (
+        <SettingRow
+          testId="hub-speaker-kept"
+          title="Kept after their talk"
+          description="These chats ended a talk with something still in them. Each puts itself away once nothing holds it and it has been quiet for half an hour — unless you write in it first."
+        >
+          {speaker.kept.map((k) => (
+            <Button
+              key={k.chatId}
+              variant="secondary"
+              disabled={busy}
+              onClick={() => {
+                shell.select(k.chatId);
+                shell.closeDialog(SETTINGS_DIALOG);
+              }}
+            >
+              Open {k.title}
+            </Button>
+          ))}
+        </SettingRow>
+      )}
+      {speaker && (
+        <SettingRow
+          title="Board for chats that arrive from the hub"
+          description="Where a new room-speaker, phone-voice or Telegram chat is shown, so what the house talked about with nobody at the screen can be found. One board for all three. App default leaves it to the same rules as any other new chat."
         >
           <Picker
             settings

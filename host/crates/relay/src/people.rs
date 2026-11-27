@@ -128,6 +128,7 @@ pub fn voice_paths(profile_dir: &Path, profile_id: &str) -> voice::Paths {
     let dir = person_dir(profile_dir, profile_id);
     voice::Paths {
         tag: dir.join("voice-chat.json"),
+        tag_quick: dir.join("voice-chat-quick.json"),
         policy: dir.join("voice-policy.json"),
         heard: voice_heard::path_in(&dir),
         folder: voice::folder(profile_dir),

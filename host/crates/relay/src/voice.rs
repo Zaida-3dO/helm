@@ -32,6 +32,16 @@ const MINUTE_MS: i64 = 60 * 1000;
 pub const IDLE_MINUTES: std::ops::RangeInclusive<i64> = 15..=1440;
 pub const AGE_HOURS: std::ops::RangeInclusive<i64> = 1..=720;
 pub const TOKENS: std::ops::RangeInclusive<u64> = 10_000..=5_000_000;
+/// The roll-over sizes Settings accepts (on top of 0, which turns rolling off). They stand apart
+/// from the global roll-over rule because a small local model reads a long talk badly long before
+/// that rule's floor.
+pub const ROLL_AT: std::ops::RangeInclusive<u64> = 4_000..=200_000;
+
+/// How much room above the chat's first context reading a roll-over size may sit, so a chat whose
+/// system prompt alone is near the size cannot roll on every turn.
+pub const ROLL_FLOOR_ROOM: u64 = 4_000;
+/// The most to quote of the last exchanges in a carry-over note.
+pub const MAX_CARRY_CHARS: usize = 1_500;
 
 /// The longest answer sent for reading in chat mode.
 pub const MAX_CHAT_CHARS: usize = 30_000;
@@ -59,6 +69,27 @@ impl Mode {
             Mode::Chat
         } else {
             Mode::Conversation
+        }
+    }
+}
+
+/// Which lane a turn asked for: a quick one on the small model saved for quick turns, or a deep
+/// one on the model saved for new voice chats. An absent or unknown urgency means deep, so an
+/// older phone behaves exactly as before. The two lanes keep separate chats so switching between
+/// them never reloads a GPU mid-conversation or trips a model change refused as too large.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Lane {
+    Quick,
+    #[default]
+    Deep,
+}
+
+impl Lane {
+    /// `quick` is the quick lane; anything else (including nothing) is deep.
+    pub fn parse(s: Option<&str>) -> Self {
+        match s.map(str::trim) {
+            Some(t) if t.eq_ignore_ascii_case("quick") => Lane::Quick,
+            _ => Lane::Deep,
         }
     }
 }
@@ -100,6 +131,21 @@ pub struct PolicyFile {
     /// default — the home profile takes it, every other profile starts off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub take_voice: Option<bool>,
+    /// The model a quick turn opens its chat with; blank: no quick lane, quick turns open like
+    /// deep ones.
+    #[serde(default)]
+    pub quick_model: String,
+    /// The effort a quick turn opens its chat with (the thinking it does on a local model comes
+    /// from this); blank: the app's usual new-chat effort.
+    #[serde(default = "default_quick_effort")]
+    pub quick_effort: String,
+    /// A quick-lane chat whose last context reading reaches this size is rolled over when the next
+    /// turn arrives; 0 never rolls.
+    #[serde(default = "default_roll_quick")]
+    pub quick_roll_at: u64,
+    /// The same for a deep-lane chat.
+    #[serde(default = "default_roll_deep")]
+    pub deep_roll_at: u64,
 }
 
 fn default_model() -> String {
@@ -117,6 +163,15 @@ fn default_age() -> i64 {
 fn default_tokens() -> u64 {
     300_000
 }
+fn default_quick_effort() -> String {
+    "medium".to_owned()
+}
+fn default_roll_quick() -> u64 {
+    16_000
+}
+fn default_roll_deep() -> u64 {
+    48_000
+}
 
 impl Default for PolicyFile {
     fn default() -> Self {
@@ -128,6 +183,10 @@ impl Default for PolicyFile {
             max_tokens: default_tokens(),
             watch: WatchLevel::default(),
             take_voice: None,
+            quick_model: String::new(),
+            quick_effort: default_quick_effort(),
+            quick_roll_at: default_roll_quick(),
+            deep_roll_at: default_roll_deep(),
         }
     }
 }
@@ -163,8 +222,25 @@ impl PolicyFile {
         if self.model.chars().count() > 120 || self.model.chars().any(char::is_control) {
             return Err("The model must be a model id from the model picker.".into());
         }
+        if self.quick_model.chars().count() > 120 || self.quick_model.chars().any(char::is_control)
+        {
+            return Err("The quick-turn model must be a model id from the model picker.".into());
+        }
         if !self.effort.trim().is_empty() && !helm_chats::catalogue::is_effort(self.effort.trim()) {
             return Err("The effort must be low, medium, high, xhigh or max.".into());
+        }
+        if !self.quick_effort.trim().is_empty()
+            && !helm_chats::catalogue::is_effort(self.quick_effort.trim())
+        {
+            return Err("The quick-turn effort must be low, medium, high, xhigh or max.".into());
+        }
+        for size in [self.quick_roll_at, self.deep_roll_at] {
+            if size != 0 && !ROLL_AT.contains(&size) {
+                return Err(
+                    "A roll-over size must be 4,000 to 200,000 tokens, or 0 to leave it off."
+                        .into(),
+                );
+            }
         }
         Ok(TagPolicy {
             idle_ms: self.idle_minutes * MINUTE_MS,
@@ -173,12 +249,74 @@ impl PolicyFile {
         })
     }
 
-    /// The model and effort to hand a new voice chat, or `None` for each when blank.
-    pub fn new_chat(&self) -> (Option<&str>, Option<&str>) {
+    /// The model and effort to hand a new voice chat of `lane`, or `None` for each when blank.
+    /// A quick turn with no saved quick model opens exactly like a deep one: there is no quick
+    /// lane until the user picks its model.
+    pub fn new_chat(&self, lane: Lane) -> (Option<&str>, Option<&str>) {
         fn kept(s: &str) -> Option<&str> {
             Some(s.trim()).filter(|t| !t.is_empty())
         }
+        if lane == Lane::Quick {
+            match kept(&self.quick_model) {
+                Some(m) => return (Some(m), kept(&self.quick_effort)),
+                None => return (kept(&self.model), kept(&self.effort)),
+            }
+        }
         (kept(&self.model), kept(&self.effort))
+    }
+
+    /// The size at which a chat of `lane` rolls over when the next turn arrives; 0 leaves it off.
+    pub fn roll_at(&self, lane: Lane) -> u64 {
+        match lane {
+            Lane::Quick => self.quick_roll_at,
+            Lane::Deep => self.deep_roll_at,
+        }
+    }
+}
+
+/// Whether a turn arriving for a chat whose last context reading is `context` (first reading
+/// `first_context`) should open a successor instead: at or over the lane's size, with room above
+/// the chat's first reading so a long system prompt cannot make every turn roll. `None` readings
+/// mean nothing has been measured — no roll.
+pub fn roll_due(context: Option<u64>, first_context: Option<u64>, roll_at: u64) -> bool {
+    if roll_at == 0 {
+        return false;
+    }
+    let Some(size) = context else {
+        return false;
+    };
+    let floor = match first_context {
+        Some(first) => roll_at.max(first.saturating_add(ROLL_FLOOR_ROOM)),
+        None => roll_at,
+    };
+    size >= floor
+}
+
+/// The bracketed note a rolled-over channel chat's first message carries: the old chat's title and
+/// its last few exchanges in one hidden line. Written by Helm, so no model turn spends time or
+/// tokens on the hand-off. Quoted words lose their brackets and line breaks, as every one-line
+/// note does.
+pub fn carry_note(title: &str, exchanges: &[(&str, &str)]) -> String {
+    let flat = |s: &str| -> String {
+        s.replace(['[', ']'], "")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let body = cut_chars(
+        &exchanges
+            .iter()
+            .map(|(who, said)| format!("{who}: {}", flat(said)))
+            .collect::<Vec<_>>()
+            .join(" · "),
+        MAX_CARRY_CHARS,
+    )
+    .0;
+    let title = cut_chars(&flat(title), 200).0;
+    if body.is_empty() {
+        format!("[Carried over from \"{title}\": nothing was said before.]")
+    } else {
+        format!("[Carried over from \"{title}\": {body}]")
     }
 }
 
@@ -190,7 +328,10 @@ pub fn policy_path(profile_dir: &Path) -> PathBuf {
 /// folder its chats start in.
 #[derive(Clone)]
 pub struct Paths {
+    /// The deep lane's tag file (the one voice chats had before lanes).
     pub tag: PathBuf,
+    /// The quick lane's tag file; its own chat, limits and age.
+    pub tag_quick: PathBuf,
     pub policy: PathBuf,
     pub heard: PathBuf,
     pub folder: PathBuf,
@@ -285,12 +426,49 @@ pub fn expired(
     None
 }
 
-/// The tag while it holds, `None` once it has expired or when there is none.
+/// The chat a voice tag names while it holds, following a roll-over link out of an archived chat:
+/// `expired` reads the current facts through the port, which answers gone for an archived chat the
+/// roll-over moved on. An archived chat with no live successor still means start fresh.
 pub fn current(path: &Path, port: &dyn ChatPort, policy: &TagPolicy, now: i64) -> Option<VoiceTag> {
-    let tag = load_tag(path)?;
+    let mut tag = load_tag(path)?;
+    if follow_successor(port, &mut tag.chat_id, &mut tag.tokens_at_start) {
+        // The tag file moves to the live successor once, so later looks find it there.
+        let _ = save_tag(path, Some(&tag));
+    }
     expired(&tag, port.facts(&tag.chat_id), policy, now)
         .is_none()
         .then_some(tag)
+}
+
+/// Walk a roll-over chain out of an archived chat: while the tagged chat is archived and points at
+/// a successor, take it, up to [`MAX_FOLLOW_HOPS`]. Returns whether the tag moved. The token count
+/// restarts at the successor's own — the limit counts that chat's use, as for a fresh chat.
+pub(crate) const MAX_FOLLOW_HOPS: usize = 8;
+
+pub(crate) fn follow_successor(
+    port: &dyn ChatPort,
+    tag_chat: &mut String,
+    tokens: &mut u64,
+) -> bool {
+    let mut moved = false;
+    for _ in 0..MAX_FOLLOW_HOPS {
+        match port.facts(tag_chat) {
+            Some(f) if f.archived => {}
+            _ => break,
+        }
+        let Some(next) = port.successor(tag_chat) else {
+            break;
+        };
+        match port.facts(&next) {
+            Some(f) => {
+                *tag_chat = next;
+                *tokens = f.tokens;
+                moved = true;
+            }
+            None => break,
+        }
+    }
+    moved
 }
 
 /// The chat a message from the phone goes to: the tagged one while it holds, else a new one
@@ -378,18 +556,25 @@ pub fn mode_note(mode: Mode, continues: bool) -> String {
     }
 }
 
-/// What a voice message is stored with: the mode note, any notes of replies the user did not
-/// hear (bracketed single lines), a line saying how late a queued message is, then the message.
+/// What a voice message is stored with: the mode note, a pointer to the other lane's live chat if
+/// this one has just started (so "and the bedroom" still resolves across lanes), any notes of
+/// replies the user did not hear (bracketed single lines), a line saying how late a queued message
+/// is, then the message.
 pub fn delivered_text(
     mode: Mode,
     continues: bool,
     age_minutes: Option<i64>,
     heard_notes: &[String],
+    pointer: Option<&str>,
     text: &str,
 ) -> String {
     let mut out = String::new();
     out.push_str(&mode_note(mode, continues));
     out.push('\n');
+    if let Some(p) = pointer.filter(|p| !p.trim().is_empty()) {
+        let flat = p.replace(['[', ']'], "").trim().to_owned();
+        out.push_str(&format!("[The phone's other voice chat — {flat}]\n"));
+    }
     for note in heard_notes {
         out.push_str(note);
         out.push('\n');
@@ -509,11 +694,16 @@ mod tests {
     struct Port {
         chats: RefCell<HashMap<String, ChatFacts>>,
         created: RefCell<Vec<String>>,
+        /// Roll-over links the fake database carries, so a tag can follow them.
+        successors: RefCell<HashMap<String, String>>,
     }
 
     impl ChatPort for Port {
         fn facts(&self, id: &str) -> Option<ChatFacts> {
             self.chats.borrow().get(id).copied()
+        }
+        fn successor(&self, chat_id: &str) -> Option<String> {
+            self.successors.borrow().get(chat_id).cloned()
         }
         fn create(&self, title: &str) -> Result<String, String> {
             let id = format!("chat-{}", self.created.borrow().len() + 1);
@@ -565,7 +755,47 @@ mod tests {
             assert_eq!(tag.conversation != before.conversation, fresh);
         }
 
+        // An archived chat whose roll-over link names a live successor is not gone: the tag moves
+        // to it, token counting restarts there, and no new chat starts. A hand-archived chat with
+        // no successor still means start fresh (the row above).
+        let before = load_tag(&path).unwrap();
+        port.chats.borrow_mut().insert(
+            before.chat_id.clone(),
+            ChatFacts {
+                archived: true,
+                tokens: 5_000,
+            },
+        );
+        port.successors
+            .borrow_mut()
+            .insert(before.chat_id.clone(), "succ-1".into());
+        port.chats.borrow_mut().insert(
+            "succ-1".to_owned(),
+            ChatFacts {
+                archived: false,
+                tokens: 2_500,
+            },
+        );
+        now += MIN;
+        let (tag, created) = active_chat(&path, &port, &policy, None, now).unwrap();
+        assert!(
+            !created,
+            "the tag followed the roll-over link instead of starting a chat"
+        );
+        assert_eq!(tag.chat_id, "succ-1");
+        assert_eq!(
+            tag.tokens_at_start, 2_500,
+            "token use counts from the successor"
+        );
+        assert_eq!(
+            tag.conversation, before.conversation,
+            "the conversation carries on"
+        );
+        // The saved tag itself now names the successor.
+        assert_eq!(load_tag(&path).unwrap().chat_id, "succ-1");
+
         // A chat started without a name carries none: chat 2 came from the idle row, passed None.
+        // (Two more names went in since: one per fresh chat above.)
         assert_eq!(port.created.borrow()[1], "Phone voice 2027-01-15");
         // Age: a chat in steady use still ends at the age limit.
         let policy = PolicyFile {
@@ -643,20 +873,59 @@ mod tests {
             let e = f.check().unwrap_err();
             assert!(e.contains(word), "{e}");
         }
+        // The lane fields refuse a bad quick effort and sizes outside their own range (0 is off).
+        let too_big = PolicyFile {
+            deep_roll_at: 300_000,
+            ..PolicyFile::default()
+        };
+        assert!(too_big.check().unwrap_err().contains("roll-over size"));
+        let bad_effort = PolicyFile {
+            quick_effort: "sometimes".into(),
+            ..PolicyFile::default()
+        };
+        assert!(bad_effort
+            .check()
+            .unwrap_err()
+            .contains("quick-turn effort"));
+        let off = PolicyFile {
+            quick_roll_at: 0,
+            deep_roll_at: 0,
+            ..PolicyFile::default()
+        };
+        assert!(off.check().is_ok());
         let f = PolicyFile {
             model: String::new(),
             effort: "high".into(),
             idle_minutes: 60,
             watch: WatchLevel::FlagsDone,
+            quick_model: "local/small/quick-one".into(),
             ..Default::default()
         };
         save_policy(&path, &f).unwrap();
         assert_eq!(load_file(&path), f);
-        assert_eq!(f.new_chat(), (None, Some("high")));
+        assert_eq!(f.new_chat(Lane::Deep), (None, Some("high")));
         assert_eq!(
-            PolicyFile::default().new_chat(),
+            f.new_chat(Lane::Quick),
+            (Some("local/small/quick-one"), Some("medium"))
+        );
+        // No saved quick model: a quick turn opens exactly like a deep one.
+        let no_lane = PolicyFile {
+            quick_model: String::new(),
+            ..PolicyFile::default()
+        };
+        assert_eq!(
+            no_lane.new_chat(Lane::Quick),
             (Some("claude-sonnet-5-5"), Some("low"))
         );
+        assert_eq!(
+            PolicyFile::default().new_chat(Lane::Deep),
+            (Some("claude-sonnet-5-5"), Some("low"))
+        );
+        assert_eq!(PolicyFile::default().roll_at(Lane::Quick), 16_000);
+        assert_eq!(PolicyFile::default().roll_at(Lane::Deep), 48_000);
+        assert_eq!(Lane::parse(Some("QUICK ")), Lane::Quick);
+        assert_eq!(Lane::parse(None), Lane::Deep);
+        assert_eq!(Lane::parse(Some("deeper")), Lane::Deep);
         // Partial files fill in the defaults; unknown fields are refused.
         let part: PolicyFile = serde_json::from_str(r#"{"watch":"flags+done"}"#).unwrap();
         assert_eq!(part.watch, WatchLevel::FlagsDone);
@@ -671,6 +940,7 @@ mod tests {
             true,
             Some(7),
             &["[Not heard by the user: x]".to_owned()],
+            None,
             "  hello  ",
         );
         assert_eq!(
@@ -678,9 +948,38 @@ mod tests {
             "[Voice · conversation: speak it, short, no markup · continuing what they just said]\n[Not heard by the user: x]\n(sent 7 min ago, queued while Helm was offline)\nhello"
         );
         assert_eq!(
-            delivered_text(Mode::Chat, false, Some(0), &[], "hi"),
+            delivered_text(Mode::Chat, false, Some(0), &[], None, "hi"),
             "[Voice · chat: read on screen, formatting fine]\nhi"
         );
+        // A pointer to the other lane's live chat rides on the first message of a new one, and
+        // brackets in it never break its own line.
+        assert_eq!(
+            delivered_text(Mode::Conversation, false, None, &[], Some("Kitchen voice [x] — Done."), "and the lamp"),
+            "[Voice · conversation: speak it, short, no markup]\n[The phone's other voice chat — Kitchen voice x — Done.]\nand the lamp"
+        );
+        assert_eq!(
+            delivered_text(Mode::Conversation, false, None, &[], Some("   "), "hi"),
+            "[Voice · conversation: speak it, short, no markup]\nhi",
+            "an empty pointer adds nothing"
+        );
+        // The carry-over note quotes the last exchanges on one hidden line.
+        let note = carry_note(
+            "Phone voice Alex 2027-01-15",
+            &[("They", "lamp off\n[done]"), ("Helm", "Done.")],
+        );
+        assert_eq!(
+            note,
+            "[Carried over from \"Phone voice Alex 2027-01-15\": They: lamp off done · Helm: Done.]"
+        );
+        // Roll-over sizes: on at the size, off below it and when switched off, with the floor of
+        // first reading + room holding a big system prompt steady.
+        assert!(roll_due(Some(16_000), Some(500), 16_000));
+        assert!(!roll_due(Some(15_999), Some(500), 16_000));
+        assert!(!roll_due(Some(90_000), Some(500), 0));
+        assert!(!roll_due(None, None, 16_000));
+        // A chat whose first reading was already near the size cannot roll on every turn.
+        assert!(!roll_due(Some(14_900), Some(12_000), 13_000));
+        assert!(roll_due(Some(16_000), Some(12_000), 13_000));
         assert_eq!(submission_id("t1"), submission_id("t1"));
         assert_ne!(submission_id("t1"), submission_id("t2"));
         assert_ne!(submission_id("k1"), note_submission_id("k1"));

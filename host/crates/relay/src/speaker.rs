@@ -76,9 +76,24 @@ pub struct PolicyFile {
     #[serde(default)]
     pub lean: bool,
     /// The board a new speaker chat is shown on; `None` leaves it to the app (the board over the
-    /// speaker folder, else the default board).
+    /// speaker folder, else the default board). One setting for every chat that arrives from the
+    /// hub — phone voice, room speakers and Telegram alike.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub board_id: Option<String>,
+    /// The model a quick turn opens its talk's chat with; blank: no quick lane, quick turns open
+    /// like deep ones.
+    #[serde(default)]
+    pub quick_model: String,
+    /// The effort a quick turn opens its talk's chat with; blank: the app's usual new-chat effort.
+    #[serde(default = "default_quick_effort")]
+    pub quick_effort: String,
+    /// A quick-lane talk whose chat reaches this context size is rolled over when the next turn
+    /// arrives; 0 never rolls.
+    #[serde(default = "default_roll_quick")]
+    pub quick_roll_at: u64,
+    /// The same for a deep-lane talk.
+    #[serde(default = "default_roll_deep")]
+    pub deep_roll_at: u64,
 }
 
 fn default_model() -> String {
@@ -90,6 +105,15 @@ fn default_effort() -> String {
 fn default_previous() -> i64 {
     12
 }
+fn default_quick_effort() -> String {
+    "medium".to_owned()
+}
+fn default_roll_quick() -> u64 {
+    16_000
+}
+fn default_roll_deep() -> u64 {
+    48_000
+}
 
 impl Default for PolicyFile {
     fn default() -> Self {
@@ -100,6 +124,10 @@ impl Default for PolicyFile {
             previous_hours: default_previous(),
             lean: false,
             board_id: None,
+            quick_model: String::new(),
+            quick_effort: default_quick_effort(),
+            quick_roll_at: default_roll_quick(),
+            deep_roll_at: default_roll_deep(),
         }
     }
 }
@@ -121,10 +149,28 @@ impl PolicyFile {
         }) {
             return Err("The board must be a board id, or left unset.".into());
         }
+        if self.quick_model.chars().count() > 120 || self.quick_model.chars().any(char::is_control)
+        {
+            return Err("The quick-turn model must be a model id from the model picker.".into());
+        }
+        if !self.quick_effort.trim().is_empty()
+            && !helm_chats::catalogue::is_effort(self.quick_effort.trim())
+        {
+            return Err("The quick-turn effort must be low, medium, high, xhigh or max.".into());
+        }
+        for size in [self.quick_roll_at, self.deep_roll_at] {
+            if size != 0 && !crate::voice::ROLL_AT.contains(&size) {
+                return Err(
+                    "A roll-over size must be 4,000 to 200,000 tokens, or 0 to leave it off."
+                        .into(),
+                );
+            }
+        }
         Ok(())
     }
 
-    /// The board a new speaker chat is shown on, if one is chosen.
+    /// The board chats that arrive from the hub are shown on, if one is chosen. One setting for
+    /// every channel: phone voice, room speakers and Telegram alike.
     pub fn board(&self) -> Option<&str> {
         self.board_id
             .as_deref()
@@ -132,12 +178,32 @@ impl PolicyFile {
             .filter(|b| !b.is_empty())
     }
 
-    /// The model and effort to hand a new speaker chat, or `None` for each when blank.
-    pub fn new_chat(&self) -> (Option<&str>, Option<&str>) {
+    /// The model and effort to hand a new talk's chat for `lane`, or `None` for each when blank.
+    /// A quick turn with no saved quick model opens exactly like a deep one.
+    pub fn new_chat(&self, lane: crate::voice::Lane) -> (Option<&str>, Option<&str>) {
         fn kept(s: &str) -> Option<&str> {
             Some(s.trim()).filter(|t| !t.is_empty())
         }
+        if lane == crate::voice::Lane::Quick {
+            match kept(&self.quick_model) {
+                Some(m) => return (Some(m), kept(&self.quick_effort)),
+                None => return (kept(&self.model), kept(&self.effort)),
+            }
+        }
         (kept(&self.model), kept(&self.effort))
+    }
+
+    /// The size at which a talk's chat rolls over when the next turn arrives; 0 leaves it off.
+    pub fn roll_at(&self, lane: crate::voice::Lane) -> u64 {
+        match lane {
+            crate::voice::Lane::Quick => self.quick_roll_at,
+            crate::voice::Lane::Deep => self.deep_roll_at,
+        }
+    }
+
+    /// Whether the quick lane is a real second model rather than the deep one under another name.
+    pub fn has_quick_lane(&self) -> bool {
+        !self.quick_model.trim().is_empty()
     }
 }
 
@@ -185,6 +251,20 @@ pub struct Talk {
     /// archived, when the talk ends.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub leftover: bool,
+    /// The talk's chat was opened on the quick lane's model. A later deep turn moves that one chat
+    /// up to the deep model (upgrade only); once moved, this goes off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quick: bool,
+}
+
+/// A talk whose chat outlived the talk because something was still held in it: it waits to be put
+/// away on its own once nothing holds it and it has been quiet.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Kept {
+    pub chat_id: String,
+    /// When the talk ended (epoch milliseconds); the quiet clock starts here.
+    pub closed_at: i64,
 }
 
 /// The talks this profile has open, oldest first, plus the one that ended last.
@@ -195,6 +275,10 @@ pub struct Talks {
     /// The talk that ended most recently, so the next one can be told about it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous: Option<Previous>,
+    /// Talk chats kept open past their talk (something was held in them). They are swept and put
+    /// away once nothing holds them and they have been quiet for a while.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept: Vec<Kept>,
 }
 
 /// The last finished talk, as a new one may be told about it.
@@ -240,9 +324,17 @@ pub fn talk_chat(
     room: Option<&str>,
     profile: Option<&str>,
     now: i64,
+    quick: bool,
 ) -> Result<(Talk, bool), String> {
     let mut talks = load_talks(path);
-    if let Some(t) = talks.talks.iter().find(|t| t.session == session) {
+    if let Some(t) = talks.talks.iter_mut().find(|t| t.session == session) {
+        // A chat archived by a roll-over whose successor is live is not gone: the talk moves to
+        // it. A chat archived because the person put it away (no successor) still starts a new one.
+        let mut tokens = 0;
+        if crate::voice::follow_successor(port, &mut t.chat_id, &mut tokens) {
+            save_talks(path, &talks)
+                .map_err(|_| "The speaker talk list could not be saved.".to_owned())?;
+        }
         if port.facts(&t.chat_id).is_some_and(|f| !f.archived) {
             return Ok((t.clone(), false));
         }
@@ -255,6 +347,7 @@ pub fn talk_chat(
         started_at: now,
         room: room.map(str::to_owned),
         leftover: false,
+        quick,
     };
     talks.talks.push(talk.clone());
     while talks.talks.len() > TALKS_KEPT {
@@ -301,6 +394,57 @@ pub fn mark_leftover(path: &Path, session: &str) -> bool {
     save_talks(path, &talks).is_ok()
 }
 
+/// A talk's chat was rolled over into `new_chat` (an early roll-over the hub-side channel does):
+/// the talk follows its own link, keeping the talk on one live chat.
+pub fn retalk(path: &Path, session: &str, new_chat: &str) -> bool {
+    let mut talks = load_talks(path);
+    let Some(t) = talks.talks.iter_mut().find(|t| t.session == session) else {
+        return false;
+    };
+    t.chat_id = new_chat.to_owned();
+    save_talks(path, &talks).is_ok()
+}
+
+/// A deep turn arrived for a talk whose chat opened on the quick model: once its chat is moved up
+/// to the deep model (or refused), this marks that done, so the move happens once per talk.
+pub fn mark_deep(path: &Path, session: &str) -> bool {
+    let mut talks = load_talks(path);
+    let Some(t) = talks.talks.iter_mut().find(|t| t.session == session) else {
+        return false;
+    };
+    if !t.quick {
+        return true;
+    }
+    t.quick = false;
+    save_talks(path, &talks).is_ok()
+}
+
+/// A talk's chat is kept past the talk because something was held in it.
+pub fn keep_chat(path: &Path, chat_id: &str, closed_at: i64) {
+    let mut talks = load_talks(path);
+    if talks.kept.iter().any(|k| k.chat_id == chat_id) {
+        return;
+    }
+    talks.kept.push(Kept {
+        chat_id: chat_id.to_owned(),
+        closed_at,
+    });
+    while talks.kept.len() > TALKS_KEPT {
+        talks.kept.remove(0);
+    }
+    let _ = save_talks(path, &talks);
+}
+
+/// A kept chat is dealt with (put away, or handed to the person because they wrote in it): it
+/// leaves the list.
+pub fn unkeep_chat(path: &Path, chat_id: &str) {
+    let mut talks = load_talks(path);
+    if talks.kept.iter().any(|k| k.chat_id == chat_id) {
+        talks.kept.retain(|k| k.chat_id != chat_id);
+        let _ = save_talks(path, &talks);
+    }
+}
+
 /// The talk tagged for `session`, if this PC has one.
 pub fn find(path: &Path, session: &str) -> Option<Talk> {
     load_talks(path)
@@ -310,11 +454,19 @@ pub fn find(path: &Path, session: &str) -> Option<Talk> {
 }
 
 /// Every chat this profile's speaker talks are working in, so a reset or a settings change can
-/// act on them and forget the list.
+/// act on them and forget the list. The kept chats (talks that ended with something held) empty too.
 pub fn take_all(path: &Path) -> Vec<Talk> {
     let t = load_talks(path);
     let _ = save_talks(path, &Talks::default());
     t.talks
+}
+
+/// Every chat kept past its talk, with when its talk ended — a reset puts these away as well.
+pub fn take_kept(path: &Path) -> Vec<Kept> {
+    let mut t = load_talks(path);
+    let out = std::mem::take(&mut t.kept);
+    let _ = save_talks(path, &t);
+    out
 }
 
 /// The talk that ended last, when it is recent enough to be named to the next one.
@@ -470,13 +622,18 @@ mod tests {
     #[derive(Default)]
     struct Port {
         made: std::cell::RefCell<Vec<String>>,
+        archived: std::cell::RefCell<std::collections::HashSet<String>>,
+        successors: std::cell::RefCell<std::collections::HashMap<String, String>>,
     }
     impl ChatPort for Port {
         fn facts(&self, id: &str) -> Option<crate::telegram::ChatFacts> {
             (!id.starts_with("gone")).then_some(crate::telegram::ChatFacts {
-                archived: false,
+                archived: self.archived.borrow().contains(id),
                 tokens: 10,
             })
+        }
+        fn successor(&self, id: &str) -> Option<String> {
+            self.successors.borrow().get(id).cloned()
         }
         fn create(&self, title: &str) -> Result<String, String> {
             self.made.borrow_mut().push(title.to_owned());
@@ -597,8 +754,16 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("speaker-chats.json");
         let port = Port::default();
-        let (first, made) =
-            talk_chat(&file, &port, "s-1", Some("kitchen"), Some("Alex"), T0).unwrap();
+        let (first, made) = talk_chat(
+            &file,
+            &port,
+            "s-1",
+            Some("kitchen"),
+            Some("Alex"),
+            T0,
+            false,
+        )
+        .unwrap();
         assert!(made);
         assert_eq!(first.chat_id, "chat-1");
         // The same talk keeps its chat; another talk on another speaker gets its own.
@@ -609,13 +774,24 @@ mod tests {
             Some("kitchen"),
             Some("Alex"),
             T0 + 60_000,
+            false,
         )
         .unwrap();
         assert!(!made);
         assert_eq!(again.chat_id, "chat-1");
         let (other, made) =
-            talk_chat(&file, &port, "s-2", None, Some("Alex"), T0 + 61_000).unwrap();
+            talk_chat(&file, &port, "s-2", None, Some("Alex"), T0 + 61_000, true).unwrap();
         assert!(made && other.chat_id != first.chat_id);
+        assert!(
+            !first.quick && find(&file, "s-2").unwrap().quick,
+            "the lane is recorded"
+        );
+        // A quick turn's chat opened on the quick model; a deep talk upgrade marks it moved once.
+        assert!(mark_deep(&file, "s-2") && !find(&file, "s-2").unwrap().quick);
+        assert!(
+            !mark_deep(&file, "s-9"),
+            "a talk this PC never made is not marked"
+        );
         // The hub says talk one ended: it leaves the list, and the next talk can be told about
         // it. Ending a talk this PC never made changes nothing.
         let ended = end_talk(
@@ -647,6 +823,32 @@ mod tests {
         // cannot be marked.
         assert!(mark_leftover(&file, "s-2") && !mark_leftover(&file, "s-9"));
         assert!(find(&file, "s-2").unwrap().leftover);
+        // An archived talk chat with a live successor is not gone: the talk follows the link
+        // (the roll-over case) instead of opening another chat.
+        port.archived.borrow_mut().insert("chat-2".to_owned());
+        port.successors
+            .borrow_mut()
+            .insert("chat-2".to_owned(), "succ-9".to_owned());
+        let (followed, made) =
+            talk_chat(&file, &port, "s-2", None, Some("Alex"), T0 + 62_000, true).unwrap();
+        assert!(!made && followed.chat_id == "succ-9");
+        // No successor: hand-archived still means start fresh.
+        port.archived.borrow_mut().insert("succ-9".to_owned());
+        let (fresh, made) =
+            talk_chat(&file, &port, "s-2", None, Some("Alex"), T0 + 63_000, false).unwrap();
+        assert!(made && fresh.chat_id != first.chat_id && fresh.chat_id != "succ-9");
+        // Kept chats are listed, kept once, and leave the list when dealt with.
+        keep_chat(&file, "chat-1", T0 + 700_000);
+        keep_chat(&file, "chat-1", T0 + 700_000);
+        assert_eq!(load_talks(&file).kept.len(), 1);
+        unkeep_chat(&file, "chat-1");
+        assert!(load_talks(&file).kept.is_empty());
+        keep_chat(&file, "kept-1", T0 + 700_000);
+        let kept = take_kept(&file);
+        assert_eq!(
+            kept.iter().map(|k| k.chat_id.as_str()).collect::<Vec<_>>(),
+            ["kept-1"]
+        );
         // Reset empties the list and hands back the chats to archive.
         let all = take_all(&file);
         assert_eq!(all.len(), 1);
@@ -659,9 +861,41 @@ mod tests {
     fn settings_are_checked_and_default_to_the_small_local_model() {
         let f = PolicyFile::default();
         assert_eq!(f.model, DEFAULT_MODEL);
-        assert_eq!(f.new_chat(), (Some(DEFAULT_MODEL), Some("low")));
+        assert_eq!(
+            f.new_chat(crate::voice::Lane::Deep),
+            (Some(DEFAULT_MODEL), Some("low"))
+        );
         assert!(f.check().is_ok());
         assert!(takes_speaker(&f, true) && !takes_speaker(&f, false));
+        // The quick lane defaults to blank — no second model until the user picks one — with
+        // thinking on by default and small roll-over sizes.
+        assert!(f.quick_model.is_empty() && f.quick_effort == "medium");
+        assert_eq!((f.quick_roll_at, f.deep_roll_at), (16_000, 48_000));
+        assert!(!f.has_quick_lane());
+        let lanes = PolicyFile {
+            quick_model: "local/small/quick-one".into(),
+            ..PolicyFile::default()
+        };
+        assert!(lanes.has_quick_lane());
+        assert_eq!(
+            lanes.new_chat(crate::voice::Lane::Quick),
+            (Some("local/small/quick-one"), Some("medium"))
+        );
+        assert_eq!(
+            f.new_chat(crate::voice::Lane::Quick),
+            (Some(DEFAULT_MODEL), Some("low"))
+        );
+        // An older settings file reads with the lane fields defaulted, and they round-trip.
+        let with_lane: PolicyFile = serde_json::from_str(
+            r#"{"model":"m","effort":"low","quickModel":"q","quickEffort":"high","deepRollAt":0}"#,
+        )
+        .unwrap();
+        assert!(with_lane.check().is_ok());
+        assert_eq!(
+            with_lane.new_chat(crate::voice::Lane::Quick),
+            (Some("q"), Some("high"))
+        );
+        assert_eq!(with_lane.roll_at(crate::voice::Lane::Deep), 0);
         // Lean is off and no board is chosen until Settings says so; a chosen board is trimmed.
         assert!(!f.lean && f.board().is_none());
         let chosen = PolicyFile {

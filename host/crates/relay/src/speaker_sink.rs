@@ -2,7 +2,10 @@
 //!
 //! **In.** [`HouseSpeaker`] takes each turn the hub forwards and puts it into the chat of that
 //! turn's talk ([`crate::speaker::talk_chat`]), one chat per talk on one speaker, titled
-//! `HA speaker <room> voice <date>`. It is stored through the chats crate's host send with origin
+//! `HA speaker <room> voice <date>`. A turn says whether it wants the quick or the deep answer
+//! (absent: deep): a new talk's chat opens on that lane's model, a later deep turn moves a quick
+//! chat up to the deep model once, and when a talk's chat outgrows its lane the next turn arrives
+//! in a fresh linked successor with a host-written carry-over note. It is stored through the chats crate's host send with origin
 //! `speaker`, so it never counts as consent and an approval, plan or trust prompt is never
 //! answered by it. Its submission id is fixed per turn id, so a turn delivered twice is stored
 //! once, and it is acknowledged to the hub only once it is stored.
@@ -19,15 +22,20 @@
 //! **Records.** An exchange the speaker answered by itself arrives as a record
 //! ([`HouseSpeaker::record`]). It is written into its talk's chat as a plain transcript — the
 //! question as a speaker message, a line on what was done, the spoken answer — with no model run,
-//! stored once per record id and acknowledged to the hub once it is stored. A talk's first
-//! message, whether a record or a turn, makes its chat; a chosen board in the speaker settings is
-//! where that chat is shown.
+//! stored once per record id and acknowledged to the hub once it is stored. Anything the record
+//! says the person still has to act on becomes the chat's attention flag ("needs you"), which is
+//! also what holds the chat open past the talk. A talk's first message, whether a record or a
+//! turn, makes its chat; the one board setting for chats arriving from the hub (phone voice and
+//! Telegram included) is where that chat is shown.
 //!
 //! **When a talk ends.** The hub says a speaker has gone quiet ([`SpeakerSink::talk_closed`]):
-//! that talk's chat is archived, unless something is left open in it (the speaker said so in a
-//! record, or the chat has an attention flag, an open wait or a board item linked), and what was
-//! last said there is kept short so the next talk on that speaker can be told about it while it
-//! is still recent.
+//! that talk's chat is archived, unless something still holds it open — an attention flag, a
+//! pending approval, a queued message, a running turn or helper, a draft, a pin, the open window
+//! ([`helm_chats::finished::keeps_open`]) — in which case it joins the profile's kept list and is
+//! put away by itself once nothing holds it and it has been quiet for half an hour (checked on
+//! every delivery and close, and every ten minutes). A message the person types in it makes it an
+//! ordinary chat that never auto-archives. What was last said in a finished talk is kept short so
+//! the next talk on that speaker can be told about it while it is still recent.
 //!
 //! Settings → Hub's speaker section reads and writes this profile's policy through
 //! [`speaker_view`], [`save`], and [`reset`]; the policy is re-read on every delivery, so a change
@@ -139,7 +147,9 @@ pub fn place(c: &Ctx, turn: &SpeakerTurn, now: i64) -> Result<Placed, String> {
             Placed::Already
         });
     }
-    let (model, effort) = c.file.new_chat();
+    let lane = crate::voice::Lane::parse(turn.urgency.as_deref());
+    let quick_lane = lane == crate::voice::Lane::Quick && c.file.has_quick_lane();
+    let (model, effort) = c.file.new_chat(lane);
     let port = RealPort {
         db: &c.db,
         rt: &c.rt,
@@ -154,19 +164,91 @@ pub fn place(c: &Ctx, turn: &SpeakerTurn, now: i64) -> Result<Placed, String> {
         board_id: c.file.board().map(str::to_owned),
     };
     let who = profile_name(&c.db, &c.profile_id);
-    let (talk, _made) = speaker::talk_chat(
+    let (mut talk, made) = speaker::talk_chat(
         &c.paths.chats,
         &port,
         &turn.session,
         turn.room.as_deref(),
         who.as_deref(),
         now,
+        quick_lane,
     )?;
     let ignored = port
         .ignored
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .take();
+    // A deep turn on a chat that opened on the quick model moves that one chat up to the deep
+    // model (upgrade only, once per talk). A refused change is logged, not fatal: the turn goes
+    // to the chat as it stands.
+    if !made && lane == crate::voice::Lane::Deep && talk.quick {
+        let mut args = json!({ "chatId": talk.chat_id });
+        if let Some(m) = &model {
+            args["model"] = json!(m);
+        }
+        if let Some(e) = &effort {
+            args["effort"] = json!(e);
+        }
+        if args.get("model").is_some() || args.get("effort").is_some() {
+            match c.handle.block_on(c.ops.invoke("chat_set_model", args)) {
+                Ok(_) => {
+                    speaker::mark_deep(&c.paths.chats, &turn.session);
+                    talk.quick = false;
+                }
+                Err(e) => log::warn!(
+                    "relay: the speaker chat could not move to its deep model: {}",
+                    e.message
+                ),
+            }
+        }
+    }
+    // The talk's chat has outgrown its lane: a fresh chat in the same lane, linked as its
+    // successor, with this turn's words carried over in a host-written note. No model turn, so
+    // there is no race with the next utterance.
+    let mut carry = None;
+    if !made {
+        let old = talk.chat_id.clone();
+        let size =
+            c.db.snapshot(|tx| helm_chats::turn_usage::context_reported_at(tx, &old))
+                .ok()
+                .flatten();
+        let first = crate::sink::first_context(&c.db, &old);
+        if crate::voice::roll_due(size.map(|(n, _)| n), first, c.file.roll_at(lane)) {
+            let title =
+                c.db.snapshot(|tx| {
+                    tx.query_row("SELECT title FROM chats WHERE id = ?1", [&old], |r| {
+                        r.get::<_, String>(0)
+                    })
+                    .optional()
+                    .unwrap_or_default()
+                    .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            let exchanges = crate::sink::last_exchanges(&c.db, &old);
+            let pairs: Vec<(&str, &str)> =
+                exchanges.iter().map(|(r, t)| (*r, t.as_str())).collect();
+            match port.create(&speaker::chat_title(
+                turn.room.as_deref(),
+                who.as_deref(),
+                now,
+            )) {
+                Ok(new_id) => {
+                    if let Err(e) = helm_chats::rollover::link_successor(&c.rt, &old, &new_id) {
+                        log::warn!("relay: the speaker chat roll-over could not link {old}: {e}");
+                    } else {
+                        carry = Some(crate::voice::carry_note(&title, &pairs));
+                        talk.chat_id = new_id.clone();
+                        if !speaker::retalk(&c.paths.chats, &turn.session, &new_id) {
+                            log::warn!(
+                                "relay: the speaker talk could not follow its own roll-over"
+                            );
+                        }
+                    }
+                }
+                Err(e) => log::warn!("relay: the speaker roll-over started no fresh chat: {e}"),
+            }
+        }
+    }
     let baseline = max_row(&c.db, &talk.chat_id);
     let (said, _) = cut_chars(&turn.text, speaker::MAX_TEXT_CHARS);
     // A new talk may be told which talk came before it, unless this is that same talk.
@@ -182,6 +264,10 @@ pub fn place(c: &Ctx, turn: &SpeakerTurn, now: i64) -> Result<Placed, String> {
         turn.context.as_deref(),
         &said,
     );
+    if let Some(note) = &carry {
+        // What the rolled-over chat was saying, in front of the new words.
+        text = format!("{note}\n{text}");
+    }
     // The chat opened without the model saved for it: say so in the chat, where the agent and the
     // user can see it.
     if let Some(why) = &ignored {
@@ -222,7 +308,9 @@ pub fn place(c: &Ctx, turn: &SpeakerTurn, now: i64) -> Result<Placed, String> {
 /// Write one recorded exchange into its talk's chat. Runs on a blocking thread, like [`place`].
 /// The same record twice (the hub sends it again until it is acknowledged) writes nothing more.
 pub fn place_record(c: &Ctx, rec: &SpeakerRecord, now: i64) -> Result<(), String> {
-    let (model, effort) = c.file.new_chat();
+    // A record carries no urgency: a talk that starts with one opens on the deep lane; an
+    // existing talk's chat (quick or deep) is joined as it stands.
+    let (model, effort) = c.file.new_chat(crate::voice::Lane::Deep);
     let port = RealPort {
         db: &c.db,
         rt: &c.rt,
@@ -244,9 +332,24 @@ pub fn place_record(c: &Ctx, rec: &SpeakerRecord, now: i64) -> Result<(), String
         rec.room.as_deref(),
         who.as_deref(),
         now,
+        false,
     )?;
     if !rec.leftover.is_empty() {
         speaker::mark_leftover(&c.paths.chats, &rec.session);
+        // The items the speaker could not finish become the chat's flag, so they show up under
+        // "needs you" and hold the chat open when its talk ends (an agent or a later record may
+        // already have filed a flag; this one replaces it).
+        let reason = cut_chars(&rec.leftover.join("; "), 500).0;
+        let question = "Left over from the speaker";
+        let filed =
+            c.db.write(|tx| {
+                helm_chats::flags::file(tx, &talk.chat_id, question, &reason, "normal", now)
+            })
+            .ok()
+            .flatten();
+        if filed.is_some_and(|f| f != helm_chats::flags::Filed::Duplicate) {
+            c.rt.publish_attention();
+        }
     }
     let (asked, _) = cut_chars(&rec.text, speaker::MAX_TEXT_CHARS);
     let (said, _) = cut_chars(&rec.answer, speaker::MAX_TEXT_CHARS);
@@ -276,22 +379,92 @@ pub fn place_record(c: &Ctx, rec: &SpeakerRecord, now: i64) -> Result<(), String
     Ok(())
 }
 
-/// Whether a chat has something open that its owner should still see: an attention flag its
-/// agent filed, a wait still open, or a board item it is linked to. Reads each separately, so a
-/// missing table (an install without that feature) only means "nothing there".
-fn has_open_items(db: &Database, chat: &str) -> bool {
-    const ASKS: [&str; 3] = [
-        "SELECT EXISTS(SELECT 1 FROM chat_flags WHERE chat_id = ?1)",
-        "SELECT EXISTS(SELECT 1 FROM agent_waits WHERE chat_id = ?1 AND state = 'open')",
-        "SELECT EXISTS(SELECT 1 FROM item_chat_links WHERE chat_id = ?1)",
-    ];
+/// How long a kept chat must have been quiet, with nothing holding it, before it is put away.
+const KEEP_QUIET_MS: i64 = 30 * 60_000;
+/// The interval of the sweep over kept chats (deliveries and closes also run it).
+const KEEP_SWEEP: Duration = Duration::from_secs(600);
+/// How long a close waits for the talk's last turn to settle before deciding keep-or-archive.
+const CLOSE_SETTLE: Duration = Duration::from_secs(4);
+
+/// Whether the person typed into this chat after `since` — a message of their own, as opposed to
+/// another channel delivery or a card answer.
+fn person_typed(db: &Database, chat: &str, since: i64) -> bool {
     db.snapshot(|tx| {
-        Ok::<_, rusqlite::Error>(ASKS.iter().any(|q| {
-            tx.query_row(q, [chat], |r| r.get::<_, bool>(0))
-                .unwrap_or(false)
-        }))
+        tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM submissions s
+             JOIN submission_meta m ON m.submission_id = s.id
+             WHERE s.chat_id = ?1 AND s.created_at > ?2 AND m.origin IN ('typed', 'user'))",
+            rusqlite::params![chat, since],
+            |r| r.get::<_, bool>(0),
+        )
+        .unwrap_or(false)
     })
     .unwrap_or(false)
+}
+
+/// The chat the person has open in the window (an open chat is never swept away).
+fn window_open_chat(tx: &rusqlite::Transaction<'_>) -> Option<String> {
+    helm_core::prefs::read(tx, "selection")?
+        .get("chatId")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// Decide what to do now with the chats this profile's ended talks left behind: unkeep the ones
+/// that are gone or that the person took over (a typed message makes an ordinary chat, never
+/// auto-archived), and name the ones to put away — nothing holds them any more
+/// ([`helm_chats::finished::keeps_open`]) and they have been quiet past [`KEEP_QUIET_MS`] since
+/// their talk closed. The caller archives the named chats and unkeeps each once that lands, so a
+/// refusal is simply tried again next time.
+fn kept_ready(c: &Ctx, now: i64) -> Vec<String> {
+    let talks = speaker::load_talks(&c.paths.chats);
+    if talks.kept.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for k in &talks.kept {
+        let gone =
+            c.db.snapshot(|tx| {
+                tx.query_row(
+                    "SELECT archived FROM chats WHERE id = ?1",
+                    [&k.chat_id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .optional()
+            })
+            .map(|found| found.map_or(true, |a| a != 0))
+            .unwrap_or(true);
+        if gone || person_typed(&c.db, &k.chat_id, k.closed_at) {
+            speaker::unkeep_chat(&c.paths.chats, &k.chat_id);
+            continue;
+        }
+        let holding =
+            c.db.snapshot(|tx| {
+                let open = window_open_chat(tx);
+                helm_chats::finished::keeps_open(tx, &k.chat_id, open.as_deref())
+            })
+            .ok()
+            .flatten();
+        if holding.is_some() {
+            continue;
+        }
+        let stamp =
+            c.db.snapshot(|tx| {
+                tx.query_row(
+                    "SELECT MAX(c.updated_at, COALESCE(
+                        (SELECT a.last_activity_at FROM chat_activity a WHERE a.chat_id = c.id), 0))
+                     FROM chats c WHERE c.id = ?1",
+                    [&k.chat_id],
+                    |r| r.get::<_, i64>(0),
+                )
+            })
+            .unwrap_or(now);
+        if now - stamp.max(k.closed_at) < KEEP_QUIET_MS {
+            continue;
+        }
+        out.push(k.chat_id.clone());
+    }
+    out
 }
 
 /// What Settings → Hub's speaker section shows.
@@ -311,8 +484,28 @@ pub struct SpeakerView {
     pub previous_hours: i64,
     /// Whether speaker chats run lean (a thin prompt, few tools).
     pub lean: bool,
-    /// The board a new speaker chat is shown on; blank: the app's own choice.
+    /// The board chats that arrive from the hub are shown on; blank: the app's own choice. One
+    /// setting for every channel — phone voice, room speakers and Telegram alike.
     pub board_id: String,
+    /// The model a quick turn opens its talk's chat with; blank: no quick lane — quick turns open
+    /// like deep ones.
+    pub quick_model: String,
+    /// The effort a quick turn opens its talk's chat with; blank: the same as any other new chat.
+    pub quick_effort: String,
+    /// The context size at which each lane's chat rolls over when the next turn arrives; 0 is off.
+    pub quick_roll_at: u64,
+    pub deep_roll_at: u64,
+    /// Talks kept open past their close because something was held in them.
+    pub kept: Vec<KeptView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeptView {
+    pub chat_id: String,
+    pub title: String,
+    /// When the talk ended (epoch milliseconds).
+    pub closed_at: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -360,6 +553,31 @@ pub fn speaker_view(db: &Database, profile_dir: &std::path::Path, profile_id: &s
         .ok()
         .flatten()
         .is_some_and(|h| h.id == profile_id);
+    let talks_file = speaker::load_talks(&paths.chats);
+    let kept = db
+        .snapshot(|tx| {
+            Ok::<_, rusqlite::Error>(
+                talks_file
+                    .kept
+                    .iter()
+                    .map(|k| {
+                        let title: Option<String> = tx
+                            .query_row("SELECT title FROM chats WHERE id = ?1", [&k.chat_id], |r| {
+                                r.get(0)
+                            })
+                            .optional()
+                            .unwrap_or(None)
+                            .flatten();
+                        KeptView {
+                            chat_id: k.chat_id.clone(),
+                            title: title.unwrap_or_else(|| "Speaker".into()),
+                            closed_at: k.closed_at,
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .unwrap_or_default();
     SpeakerView {
         talks,
         model: file.model.trim().to_owned(),
@@ -368,6 +586,11 @@ pub fn speaker_view(db: &Database, profile_dir: &std::path::Path, profile_id: &s
         previous_hours: file.previous_hours,
         lean: file.lean,
         board_id: file.board().unwrap_or_default().to_owned(),
+        quick_model: file.quick_model.trim().to_owned(),
+        quick_effort: file.quick_effort.trim().to_owned(),
+        quick_roll_at: file.quick_roll_at,
+        deep_roll_at: file.deep_roll_at,
+        kept,
     }
 }
 
@@ -390,6 +613,9 @@ pub struct HouseSpeaker {
     serial: tokio::sync::Mutex<()>,
     /// The chats being mirrored, oldest first, at most [`MAX_MIRRORS`].
     watching: Mutex<Vec<(String, tokio::task::JoinHandle<()>)>>,
+    /// Whether the kept-chat interval task has been started (lazily, on the first delivery or
+    /// close, once ops and a runtime are in place).
+    sweeper: std::sync::atomic::AtomicBool,
 }
 
 impl HouseSpeaker {
@@ -401,6 +627,7 @@ impl HouseSpeaker {
             profile_dir,
             serial: tokio::sync::Mutex::new(()),
             watching: Mutex::new(Vec::new()),
+            sweeper: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -457,19 +684,53 @@ impl HouseSpeaker {
         ops: &Arc<dyn OpInvoker>,
         profile: helm_profiles::store::Profile,
     ) -> Ctx {
-        let paths = speaker::paths(&self.profile_dir, &profile.id);
-        let file = speaker::load_file(&paths.policy);
-        Ctx {
-            rt: (**rt).clone(),
-            db: db.clone(),
-            ops: ops.clone(),
-            handle: tokio::runtime::Handle::current(),
-            person: profile.hub_person_id.unwrap_or_default(),
-            profile_id: profile.id,
-            folder: plain_path(&paths.folder),
-            paths,
-            file,
+        build_ctx(rt, db, ops, &self.profile_dir, profile)
+    }
+
+    /// Sweep one profile's kept chats (the ones ended talks left behind) right now: those with
+    /// nothing holding them and quiet past [`KEEP_QUIET_MS`] are archived here; a refusal is
+    /// tried again at the next tick. Returns how many went away.
+    async fn sweep_kept(&self, c: &Ctx) -> usize {
+        let now = helm_core::now_ms();
+        let cc = c.clone();
+        let ready = tokio::task::spawn_blocking(move || kept_ready(&cc, now))
+            .await
+            .unwrap_or_default();
+        let mut done = 0;
+        for id in ready {
+            match c.ops.invoke("chat_archive", json!({ "chatId": &id })).await {
+                Ok(_) => {
+                    speaker::unkeep_chat(&c.paths.chats, &id);
+                    done += 1;
+                }
+                Err(e) => log::warn!(
+                    "relay: a kept speaker chat could not be put away: {}",
+                    e.message
+                ),
+            }
         }
+        done
+    }
+
+    /// Start the interval watch over kept chats, once, when ops and a runtime are in place.
+    fn start_sweeper(&self) {
+        if self.sweeper.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        let Some(ops) = self.ops.get().cloned() else {
+            return;
+        };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        if self.sweeper.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return;
+        }
+        handle.spawn(sweeper_loop(
+            self.exec.clone(),
+            self.profile_dir.clone(),
+            ops,
+        ));
     }
 
     /// The profiles that could hold this talk: the person's, when the hub named one, else every
@@ -526,11 +787,20 @@ impl HouseSpeaker {
     }
 
     /// Start over, as Settings' speaker section asks: every talk this profile holds ends, its
-    /// chat is put away, and its mirror stops. Returns how many talks ended.
+    /// chat is put away, and its mirror stops — including the chats older talks left behind.
+    /// Returns how many talks ended.
     pub async fn reset(&self, profile_id: &str) -> Result<usize, String> {
         let c = self.ctx_for_profile(profile_id)?;
+        // The kept list first: `take_all` clears the whole file.
+        let kept = speaker::take_kept(&c.paths.chats);
         let talks = speaker::take_all(&c.paths.chats);
         let n = talks.len();
+        for k in kept {
+            let _ = c
+                .ops
+                .invoke("chat_archive", json!({ "chatId": k.chat_id }))
+                .await;
+        }
         for t in talks {
             self.stop_mirror(&t.chat_id);
             let _ = c
@@ -542,10 +812,76 @@ impl HouseSpeaker {
     }
 }
 
+/// The per-profile context, outside `HouseSpeaker` so the interval sweep can build it too.
+fn build_ctx(
+    rt: &Arc<ChatRuntime>,
+    db: &Arc<Database>,
+    ops: &Arc<dyn OpInvoker>,
+    profile_dir: &std::path::Path,
+    profile: helm_profiles::store::Profile,
+) -> Ctx {
+    let paths = speaker::paths(profile_dir, &profile.id);
+    let file = speaker::load_file(&paths.policy);
+    Ctx {
+        rt: (**rt).clone(),
+        db: db.clone(),
+        ops: ops.clone(),
+        handle: tokio::runtime::Handle::current(),
+        person: profile.hub_person_id.unwrap_or_default(),
+        profile_id: profile.id,
+        folder: plain_path(&paths.folder),
+        paths,
+        file,
+    }
+}
+
+/// The kept-chat watch: every [`KEEP_SWEEP`], for every profile on this PC, put away the chats
+/// ended talks left behind once nothing holds them and they have gone quiet.
+async fn sweeper_loop(exec: Arc<AppExecutor>, profile_dir: PathBuf, ops: Arc<dyn OpInvoker>) {
+    let mut every = tokio::time::interval(KEEP_SWEEP);
+    every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        every.tick().await;
+        let Some(w) = exec.wiring() else { continue };
+        let (Some(rt), Some(db)) = (
+            w.services.get::<ChatRuntime>(),
+            w.services.get::<Database>(),
+        ) else {
+            continue;
+        };
+        let profiles = db
+            .snapshot(|tx| helm_profiles::store::list(tx))
+            .ok()
+            .unwrap_or_default();
+        for p in profiles {
+            let c = build_ctx(rt, db, &ops, &profile_dir, p);
+            if speaker::load_talks(&c.paths.chats).kept.is_empty() {
+                continue;
+            }
+            let now = helm_core::now_ms();
+            let cc = c.clone();
+            let ready = match tokio::task::spawn_blocking(move || kept_ready(&cc, now)).await {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            for id in ready {
+                if ops
+                    .invoke("chat_archive", json!({ "chatId": &id }))
+                    .await
+                    .is_ok()
+                {
+                    speaker::unkeep_chat(&c.paths.chats, &id);
+                }
+            }
+        }
+    }
+}
+
 impl SpeakerSink for HouseSpeaker {
     fn deliver<'a>(&'a self, turn: SpeakerTurn) -> BoxFut<'a, Result<(), String>> {
         Box::pin(async move {
             let _guard = self.serial.lock().await;
+            self.start_sweeper();
             let c = self.ctx(turn.person.as_deref())?;
             let c2 = c.clone();
             let t2 = turn.clone();
@@ -557,25 +893,32 @@ impl SpeakerSink for HouseSpeaker {
                     // The chat is a speaker chat through its folder alone: that is what gives it
                     // the prompt that answers to be spoken.
                     self.watch(&c, &chat, baseline, &turn.id);
-                    Ok(())
                 }
-                Placed::Already => Ok(()),
+                Placed::Already => {}
             }
+            // The same look as the interval task: a kept chat whose holds have cleared usually
+            // goes away on the next delivery rather than at the next tick.
+            self.sweep_kept(&c).await;
+            Ok(())
         })
     }
 
     fn record<'a>(&'a self, rec: SpeakerRecord) -> BoxFut<'a, Result<(), String>> {
         Box::pin(async move {
             let _guard = self.serial.lock().await;
+            self.start_sweeper();
             let c = self.ctx(rec.person.as_deref())?;
             tokio::task::spawn_blocking(move || place_record(&c, &rec, helm_core::now_ms()))
                 .await
-                .map_err(|_| "The delivery did not finish.".to_owned())?
+                .map_err(|_| "The delivery did not finish.".to_owned())??;
+            self.sweep_kept(&c).await;
+            Ok(())
         })
     }
 
     fn talk_closed<'a>(&'a self, person: Option<String>, session: String) -> BoxFut<'a, ()> {
         Box::pin(async move {
+            self.start_sweeper();
             let Ok(w) = self.exec.wiring().ok_or(STARTING) else {
                 return;
             };
@@ -600,16 +943,42 @@ impl SpeakerSink for HouseSpeaker {
                 .unwrap_or(None);
                 let Some(talk) = ended else { continue };
                 // Its answer is no longer wanted: the talk is over, whatever the mirror was about
-                // to say, and the chat is put away so the next talk starts a fresh one. A chat
-                // with something still open in it stays where its owner can see it.
+                // to say. The chat is put away so the next talk starts a fresh one — unless
+                // something still holds it ([`helm_chats::finished::keeps_open`]), in which case
+                // it joins the kept list and its own quiet sweep puts it away later.
                 self.stop_mirror(&talk.chat_id);
                 let db3 = c.db.clone();
                 let chat = talk.chat_id.clone();
-                let open = talk.leftover
-                    || tokio::task::spawn_blocking(move || has_open_items(&db3, &chat))
-                        .await
-                        .unwrap_or(false);
-                if !open {
+                let holding = tokio::task::spawn_blocking(move || {
+                    let ask = || {
+                        db3.snapshot(|tx| {
+                            let open = window_open_chat(tx);
+                            helm_chats::finished::keeps_open(tx, &chat, open.as_deref())
+                        })
+                        .ok()
+                        .flatten()
+                    };
+                    let mut holding = ask();
+                    // A talk that closes right after its last turn: give a running turn or a
+                    // message still on its way a few seconds to settle, so the common close
+                    // just after the final answer still archives. Anything deeper-holding is a
+                    // real leftover and waits in the kept list instead.
+                    let began = Instant::now();
+                    while matches!(
+                        holding.as_deref(),
+                        Some("a turn still running") | Some("a message not delivered yet")
+                    ) && began.elapsed() < CLOSE_SETTLE
+                    {
+                        std::thread::sleep(Duration::from_millis(150));
+                        holding = ask();
+                    }
+                    holding
+                })
+                .await
+                .unwrap_or(None);
+                if holding.is_some() || talk.leftover {
+                    speaker::keep_chat(&c.paths.chats, &talk.chat_id, now);
+                } else {
                     let _ = c
                         .ops
                         .invoke("chat_archive", json!({ "chatId": talk.chat_id }))
