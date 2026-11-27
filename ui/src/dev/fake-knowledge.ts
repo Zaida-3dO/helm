@@ -9,12 +9,36 @@
 //   ?memories=none      the host has no memories op: the section is left out
 
 import { ApiError } from '../api/client.ts';
-import type { AgentRow, KnowledgeLayer, LayerSkill, RulesBudget, RuleRow, SkillSource, SourceProjects } from '../settings/skills/api.ts';
+import type { RuleWhen } from '../api/generated/skills/RuleWhen.ts';
+import type { AgentRow, KnowledgeLayer, LayerSkill, RulePreviewRow, RulesBudget, RuleRow, SkillSource, SourceProjects } from '../settings/skills/api.ts';
+import { dateLabel, localToday, ruleDates, ruleHasTrigger } from '../settings/skills/layers.ts';
 import type { FakeOpHandler } from './fakeHost.ts';
 
 function param(name: string): string | null {
   return typeof location === 'undefined' ? null : new URLSearchParams(location.search).get(name);
 }
+
+const emptyWhen = (): RuleWhen => ({
+  show: null, otherwise: null, before: null,
+  folders: [], hosts: [], pcs: [], tools: [], commands: [], kinds: [], people: [],
+  from: null, until: null, review: null, problems: [],
+});
+
+/** Reads op input as whole trigger keys: missing lists become empty, blanks drop out. */
+function normWhen(v: unknown): RuleWhen {
+  const o = (v ?? {}) as Record<string, unknown>;
+  const list = (k: string): string[] => (Array.isArray(o[k]) ? (o[k] as unknown[]).map((s) => String(s)).map((s) => s.trim()).filter(Boolean) : []);
+  const one = (k: string): string | null => (typeof o[k] === 'string' && (o[k] as string).trim() ? String(o[k]).trim() : null);
+  return {
+    show: one('show'), otherwise: one('otherwise'), before: one('before'),
+    folders: list('folders'), hosts: list('hosts'), pcs: list('pcs'), tools: list('tools'),
+    commands: list('commands'), kinds: list('kinds'), people: list('people'),
+    from: one('from'), until: one('until'), review: one('review'), problems: [],
+  };
+}
+
+const normPath = (p: string): string => p.replace(/\\/g, '/').toLowerCase().replace(/\/+$/, '');
+const globToRe = (pat: string): RegExp => new RegExp(`^${pat.split('*').map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`, 'i');
 
 interface Rule {
   path: string;
@@ -22,6 +46,7 @@ interface Rule {
   text: string;
   revision: number;
   always?: boolean;
+  when?: RuleWhen;
 }
 
 interface Layer {
@@ -48,6 +73,27 @@ export function knowledgeFakeOps(): { prefixes: string[]; handler: FakeOpHandler
         rules: [
           { path: 'rules/commits.md', title: 'Commit messages', text: 'Write commit messages in plain words, one change per commit.', revision: 1, always: true },
           { path: 'rules/careful-deletes.md', title: 'Careful deletes', text: 'Look at what a delete removes before running it.', revision: 1 },
+          {
+            path: 'rules/no-named-kills.md',
+            title: 'No kills by name',
+            text: 'Kill a process by its id, never by its name. Name kills take down every process of that image on the machine.',
+            revision: 1,
+            when: { ...emptyWhen(), tools: ['Bash'], commands: ['taskkill', 'pkill'], before: 'stop' },
+          },
+          {
+            path: 'rules/tone-tablet.md',
+            title: 'Plain words on shared screens',
+            text: 'Anything read aloud or shown on a household screen reads as speech to a person.',
+            revision: 1,
+            when: { ...emptyWhen(), kinds: ['household'], otherwise: 'line' },
+          },
+          {
+            path: 'rules/old-habit.md',
+            title: 'Old habit',
+            text: 'An old instruction kept to check on later.',
+            revision: 1,
+            when: { ...emptyWhen(), review: '2025-06-01' },
+          },
         ],
         skills: [
           { name: 'review-pr', description: 'Review a pull request against the repo conventions.' },
@@ -57,7 +103,13 @@ export function knowledgeFakeOps(): { prefixes: string[]; handler: FakeOpHandler
       },
     ],
     [HOME, { rules: [{ path: 'rules/short-answers.md', title: 'Short answers', text: 'Keep answers short and lead with the result.', revision: 1 }], skills: [{ name: 'weekly-plan', description: 'Plan the week from the open tasks.' }], agents: [] }],
-    [SAM, { rules: [], skills: [], agents: [{ name: 'tutor', description: 'Explains code step by step.' }] }],
+    [SAM, {
+      rules: [
+        { path: 'rules/winter-note.md', title: 'Winter note', text: 'A seasonal reminder kept past its end so it can be deleted by hand.', revision: 1, when: { ...emptyWhen(), until: '2026-01-31' } },
+      ],
+      skills: [],
+      agents: [{ name: 'tutor', description: 'Explains code step by step.' }],
+    }],
   ]);
   const linkedSkills: Record<string, { name: string; description: string }[]> = {
     src1: [
@@ -78,8 +130,59 @@ export function knowledgeFakeOps(): { prefixes: string[]; handler: FakeOpHandler
     if (!l) throw new ApiError('bad_args', 'The layer is `everyone` or `profile:<id>`.');
     return l;
   };
-  const ruleRow = (r: Rule): RuleRow => ({ path: r.path, title: r.title, size: r.text.length + r.title.length + 4, revision: String(r.revision), tooLarge: false, always: r.always === true });
+  // The host builds the one-line trigger summary; the fake reads it back from the stored keys.
+  const today = localToday();
+  const summaryOf = (w: RuleWhen | undefined): string => {
+    if (!ruleHasTrigger(w) || !w) return '';
+    const parts: string[] = [];
+    for (const key of ['folders', 'hosts', 'pcs', 'tools', 'commands', 'kinds', 'people'] as const) {
+      if (w[key].length) parts.push(`${key === 'commands' ? '' : `${key} `}${w[key].join(', ')}`);
+    }
+    if (w.show) parts.push(`show ${w.show}`);
+    if (w.otherwise) parts.push(`otherwise ${w.otherwise}`);
+    if (w.before === 'stop') parts.push('stops the first matching call');
+    for (const [key, iso] of [['from', w.from], ['until', w.until], ['review', w.review]] as const) {
+      if (iso) parts.push(`${key} ${dateLabel(iso, today)}`);
+    }
+    return parts.join(' · ');
+  };
+  const ruleRow = (r: Rule): RuleRow => ({ path: r.path, title: r.title, size: r.text.length + r.title.length + 4, revision: String(r.revision), tooLarge: false, always: r.always === true, when: r.when ?? emptyWhen(), whenSummary: summaryOf(r.when) });
   const agentRow = (key: string, a: { name: string; description: string }): AgentRow => ({ ...a, path: `C:/Helm/knowledge/${key}/agents/${a.name}.md` });
+
+  // Which rules a described chat would get at launch. Roughly the host's decision walk, small on
+  // purpose: no folder means no kind was derived, so a plain chat reads as household.
+  const previewRow = (r: Rule, layerKey: string, args: { folder?: string; kind?: string; person?: string; tool?: string; command?: string }): RulePreviewRow => {
+    const w = r.when ?? emptyWhen();
+    const folder = args.folder?.trim() ?? '';
+    const kind = (args.kind || (folder ? 'coding' : 'household')).toLowerCase();
+    let decision: RulePreviewRow['decision'] = 'full';
+    let why = 'no When: every chat gets it';
+    if (ruleHasTrigger(w)) {
+      why = '';
+      const d = ruleDates(w, today);
+      if (d.expired) { decision = 'hidden'; why = `ended on ${dateLabel(w.until, today)}`; }
+      else if (d.notYet) { decision = 'hidden'; why = `starts on ${dateLabel(w.from, today)}`; }
+      else if (w.kinds.length && !w.kinds.some((k) => k.toLowerCase() === kind)) { decision = 'hidden'; why = `kinds says ${w.kinds.join(', ')} — this chat is ${kind}`; }
+      else if (w.people.length && !w.people.some((p) => p.toLowerCase() === (args.person ?? '').toLowerCase())) { decision = 'hidden'; why = `people says ${w.people.join(', ')}`; }
+      else {
+        const moment = [w.folders, w.hosts, w.tools, w.commands].some((l) => l.length > 0);
+        const folderFired = !!folder && w.folders.some((f) => normPath(folder) === normPath(f) || normPath(folder).startsWith(`${normPath(f)}/`));
+        if (moment && !folderFired) {
+          decision = w.otherwise === 'line' ? 'line' : 'hidden';
+          why = `waits for ${(['folders', 'hosts', 'tools', 'commands'] as const).filter((k) => w[k].length > 0).join(' or ')}`;
+        } else {
+          why = moment ? 'its folder matches already' : 'its When fits this chat';
+          decision = r.always === true || w.show === 'full' ? 'full' : w.show === 'line' ? 'line' : 'full';
+        }
+      }
+    }
+    const tool = args.tool?.trim() ?? '';
+    const command = args.command?.trim() ?? '';
+    const fires =
+      (tool !== '' && w.tools.some((p) => globToRe(p).test(tool))) ||
+      (command !== '' && w.commands.some((c) => command.toLowerCase().includes(c.toLowerCase())));
+    return { path: r.path, layer: layerKey, title: r.title, decision, fires, why };
+  };
 
   const view = (key: string): KnowledgeLayer => {
     const l = need(key);
@@ -136,15 +239,23 @@ export function knowledgeFakeOps(): { prefixes: string[]; handler: FakeOpHandler
           if (a.revision !== undefined && String(a.revision) !== String(existing.revision)) throw new ApiError('conflict', 'That rule changed since it was read.');
           Object.assign(existing, { title, text, revision: existing.revision + 1 });
           if (a.always !== undefined) existing.always = Boolean(a.always);
+          if (a.when !== undefined) existing.when = normWhen(a.when);
           changed(key);
           return { rule: ruleRow(existing) };
         }
         let path = `rules/${slug(title)}.md`;
         for (let n = 2; l.rules.some((x) => x.path === path); n++) path = `rules/${slug(title)}-${n}.md`;
-        const made: Rule = { path, title, text, revision: 1, always: Boolean(a.always) };
+        const made: Rule = { path, title, text, revision: 1, always: Boolean(a.always), ...(a.when !== undefined ? { when: normWhen(a.when) } : {}) };
         l.rules.push(made);
         changed(key);
         return { rule: ruleRow(made) };
+      }
+      case 'knowledge_rules_preview': {
+        const key = String(a.layer);
+        need(key);
+        const lists: [string, Rule[]][] = key === 'everyone' ? [['everyone', need('everyone').rules]] : [['everyone', need('everyone').rules], [key, need(key).rules]];
+        const described = a as { folder?: string; kind?: string; person?: string; tool?: string; command?: string };
+        return { rules: lists.flatMap(([layerKey, list]) => list.map((r) => previewRow(r, layerKey, described))) };
       }
       case 'knowledge_delete': {
         const key = String(a.layer);
