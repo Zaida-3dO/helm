@@ -74,6 +74,10 @@ pub fn enabled(tx: &Transaction<'_>) -> bool {
 pub struct Cand {
     pub id: String,
     pub busy: bool,
+    /// A turn is actually on its way: the status is starting, running or stopping. `busy` also
+    /// counts a chat that stopped or was interrupted, which holds nothing of a real turn — for
+    /// example when the local server went away, a GPU hold ended it, or the Stop button was hit.
+    pub running: bool,
     pub archived: bool,
     pub side: bool,
     pub pinned: bool,
@@ -236,8 +240,10 @@ fn candidate(
     ))?;
     let facts = st
         .query_row(params![id, at], |r| {
+            let status = ChatStatus::parse(&r.get::<_, String>(0)?);
             Ok(Cand {
-                busy: ChatStatus::parse(&r.get::<_, String>(0)?) != ChatStatus::Idle,
+                busy: status != ChatStatus::Idle,
+                running: status.is_busy(),
                 archived: r.get(1)?,
                 side: r.get(2)?,
                 pinned: r.get(3)?,
@@ -434,7 +440,7 @@ pub fn keeps_open(
     if c.queued {
         return Ok(Some("a message not delivered yet"));
     }
-    if c.busy {
+    if c.running {
         return Ok(Some("a turn still running"));
     }
     if c.helpers {
@@ -695,7 +701,7 @@ mod tests {
         assert_eq!(ask(None).as_deref(), Some("a message not delivered yet"));
         edit("DELETE FROM submissions WHERE id = 's1';");
         assert_eq!(ask(None), None, "quiet and idle: nothing holds it");
-        edit("UPDATE chats SET status = 'working' WHERE id = 'k';");
+        edit("UPDATE chats SET status = 'running' WHERE id = 'k';");
         assert_eq!(ask(None).as_deref(), Some("a turn still running"));
         edit("UPDATE chats SET status = 'idle', draft = 'half a thought' WHERE id = 'k';");
         assert_eq!(
@@ -722,6 +728,9 @@ mod tests {
         edit("UPDATE chats SET archived = 1 WHERE id = 'k';");
         assert_eq!(ask(None), None);
         edit("UPDATE chats SET archived = 0 WHERE id = 'k';");
+        // The approval added above still waits: clear it so this check looks at the window hold,
+        // which comes later in the order than an approval does.
+        edit("DELETE FROM consent_requests;");
         assert_eq!(
             ask(Some("k")).as_deref(),
             Some("the person has the chat open")

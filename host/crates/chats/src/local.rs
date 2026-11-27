@@ -149,15 +149,19 @@ pub struct GpuHold {
 }
 
 impl GpuHold {
-    /// The refusal an agent gets when it tries to wake a local model while the hold is on.
-    pub fn refusal(&self) -> String {
+    /// The note an agent gets when its send was saved instead of waking a local model while the
+    /// hold is on. The message will go over by itself when the hold ends, so the wording must
+    /// rule out sending it again — an agent that "retries after it ends" would put it through
+    /// twice.
+    pub fn held_note(&self) -> String {
         use chrono::TimeZone;
         let until = chrono::Local
             .timestamp_millis_opt(self.until)
             .single()
             .map_or_else(|| "it ends".to_owned(), |t| t.format("%H:%M").to_string());
         format!(
-            "a GPU hold is on: {}, until {until}; retry after it ends",
+            "a GPU hold is on: {}, until {until}; the message is saved and goes over by itself \
+             when the hold ends, do not send it again",
             self.reason
         )
     }

@@ -4296,7 +4296,7 @@ mod tests {
         let why = r_local["result"]["held"].as_str().unwrap_or_default();
         assert!(
             why.contains("a GPU hold is on: Benchmark running")
-                && why.contains("retry after it ends"),
+                && why.contains("goes over by itself when the hold ends, do not send it again"),
             "{why}"
         );
         // A chat on Claude is not affected.
