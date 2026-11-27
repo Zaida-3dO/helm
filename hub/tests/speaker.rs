@@ -443,6 +443,8 @@ async fn a_spoken_turn_travels_the_lane_and_comes_back_once() {
     assert_eq!(r.body["stt"], json!(true));
     assert_eq!(r.body["helm"], json!("online"));
     assert!(r.body["session"].is_null());
+    // The status says this hub takes an urgency on each turn.
+    assert_eq!(r.body["urgency"], json!(true));
 
     // A clip is heard at the speech server, asked at the front of its queue.
     let r = http(
@@ -493,9 +495,11 @@ async fn a_spoken_turn_travels_the_lane_and_comes_back_once() {
                 Some("bedroom"),
             ))
             .unwrap();
-            // The speaker's last exchanges ride along, and it says it handed the turn over.
+            // The speaker's last exchanges ride along, it says it handed the turn over, and it
+            // asks for the deep lane to answer it.
             b["context"] = json!("Turn the lamp on. Done.");
             b["origin"] = json!("escalation");
+            b["urgency"] = json!("deep");
             b.to_string().into_bytes()
         },
     )
@@ -527,6 +531,8 @@ async fn a_spoken_turn_travels_the_lane_and_comes_back_once() {
     assert_eq!(frame["until"], Value::Null);
     assert_eq!(frame["context"], json!("Turn the lamp on. Done."));
     assert_eq!(frame["origin"], json!("escalation"));
+    // The lane the speaker asked for rides down to Helm; the hub does not read it.
+    assert_eq!(frame["urgency"], json!("deep"));
     let session = frame["session"].as_str().unwrap().to_owned();
     assert!(!session.is_empty());
 
@@ -640,23 +646,31 @@ async fn a_spoken_turn_travels_the_lane_and_comes_back_once() {
     })
     .await;
     assert_ne!(frame["session"].as_str().unwrap(), session);
-    assert!(frame["context"].is_null() && frame["origin"].is_null());
+    // A plain call names none of context, origin or urgency: all three go down the line null.
+    assert!(frame["context"].is_null() && frame["origin"].is_null() && frame["urgency"].is_null());
 
-    // An origin other than escalation, or a context that is too long (the end of it is kept), is
-    // handled before anything runs.
-    let mut bad: Value =
-        serde_json::from_slice(&turn_body("turn-0003", "Words.", 0, None)).unwrap();
-    bad["origin"] = json!("shouting");
-    let r = http(
-        &hub,
-        "POST",
-        "/speaker/turn",
-        Some(BEDROOM),
-        "application/json",
-        bad.to_string().as_bytes(),
-    )
-    .await;
-    assert_eq!(r.status, 400);
+    // An origin other than escalation, an urgency that is neither quick nor deep, or a context
+    // that is too long (the end of it is kept) is handled before anything runs.
+    for (field_name, bad_value, want) in [
+        ("origin", json!("shouting"), "escalation"),
+        ("urgency", json!("hasty"), "quick or deep"),
+    ] {
+        let mut bad: Value =
+            serde_json::from_slice(&turn_body("turn-0003", "Words.", 0, None)).unwrap();
+        bad[field_name] = bad_value.clone();
+        let r = http(
+            &hub,
+            "POST",
+            "/speaker/turn",
+            Some(BEDROOM),
+            "application/json",
+            bad.to_string().as_bytes(),
+        )
+        .await;
+        assert_eq!(r.status, 400, "{field_name}={bad_value}");
+        let said = r.body["error"].as_str().unwrap_or("");
+        assert!(said.contains(want), "{field_name}: {said:?} lacks {want:?}");
+    }
     let mut long: Value =
         serde_json::from_slice(&turn_body("turn-0004", "Words.", 0, None)).unwrap();
     long["context"] = json!(format!("{}END", "x".repeat(5_000)));

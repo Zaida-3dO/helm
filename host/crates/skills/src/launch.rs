@@ -9,13 +9,15 @@
 use crate::layers::Layer;
 use crate::plugins::{self, Clash};
 use crate::rules::{self, RuleEntry};
+use crate::triggers::{self, Decision, Facts};
 use crate::{agents, examples};
 use helm_core::db::Database;
 use helm_hosttools::AddendumSection;
 use helm_workers::contrib::LaunchCtx;
 use rusqlite::OptionalExtension;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// The rule text a launch carries, before the rest are listed by path instead.
 pub const RULES_PROMPT_CAP: usize = 32 * 1024;
@@ -42,6 +44,12 @@ pub struct ChatKnowledge {
     pub profile: Option<ProfileRef>,
     /// The folder project the chat runs in.
     pub project_id: Option<String>,
+    /// The folder the chat runs in (its project's path); None for chats with none. Rule triggers
+    /// and the kind of chat are read from it.
+    pub cwd: Option<String>,
+    /// True when the Orchestrator is in effect for this chat; the app decides, since only it can
+    /// load that setting.
+    pub orchestrating: bool,
 }
 
 /// Answers who a chat is for.
@@ -94,9 +102,22 @@ impl ChatLookup for DbLookup {
                     .optional()?
                     .flatten()
                     .filter(|p| !p.is_empty());
+                // The folder the chat runs in: its project's path, when it has one.
+                // Tolerated on error: an older schema without projects simply says no folder.
+                let cwd = tx
+                    .query_row(
+                        "SELECT p.path FROM chats c JOIN projects p ON p.id = c.project_id WHERE c.id = ?1",
+                        [chat_id],
+                        |r| r.get::<_, Option<String>>(0),
+                    )
+                    .optional()
+                    .unwrap_or(None)
+                    .filter(|p| !p.is_empty());
                 Ok::<_, rusqlite::Error>(ChatKnowledge {
                     profile,
                     project_id,
+                    cwd,
+                    orchestrating: false,
                 })
             })
             .unwrap_or_default()
@@ -127,6 +148,56 @@ pub struct Resolved {
     pub setting_sources: Option<Vec<String>>,
     /// Names two sources gave one plugin; the first is loaded.
     pub clashes: Vec<Clash>,
+    /// A Claude Code hook matcher (a regex) for the tool calls any rule with a moment trigger
+    /// cares about, so its worker registers the PreToolUse hook at all. `None` when no rule needs
+    /// one; it is fixed at worker start and only that chat's own layers feed it.
+    pub rule_matcher: Option<String>,
+}
+
+/// The matcher for one chat's layers: every `tools:` glob of a rule with a moment trigger, plus
+/// the tools that carry `commands:` (shells) or look at paths (`folders`/`hosts` rules).
+fn build_rule_matcher(layers: &[(&Path, &str)]) -> Option<String> {
+    let mut alts: BTreeSet<String> = BTreeSet::new();
+    for (root, layer_key) in layers {
+        for r in load_rules(root, layer_key) {
+            let w = &r.front.when;
+            if !w.has_moment() {
+                continue;
+            }
+            for p in &w.tools {
+                let re = triggers::glob_to_regex(p);
+                if !re.is_empty() {
+                    alts.insert(re);
+                }
+            }
+            // Commands only arrive through a shell; paths only through the file tools.
+            if !w.commands.is_empty() {
+                alts.extend(
+                    ["Bash", "PowerShell", "Monitor"]
+                        .map(str::to_owned)
+                        .into_iter(),
+                );
+            }
+            if !w.folders.is_empty() || !w.hosts.is_empty() {
+                alts.extend(
+                    [
+                        "Read",
+                        "Write",
+                        "Edit",
+                        "MultiEdit",
+                        "NotebookEdit",
+                        "Glob",
+                        "Grep",
+                        "Bash",
+                        "PowerShell",
+                    ]
+                    .map(str::to_owned)
+                    .into_iter(),
+                );
+            }
+        }
+    }
+    (!alts.is_empty()).then(|| alts.into_iter().collect::<Vec<_>>().join("|"))
 }
 
 /// The layer launch for `who`: collect the skills, merge the agents, build the plugin folders.
@@ -134,10 +205,12 @@ pub struct Resolved {
 pub fn resolve(profile_dir: &Path, who: &ChatKnowledge) -> Resolved {
     examples::seed(profile_dir);
     let collected = plugins::collect(profile_dir, who);
-    let mut roots: Vec<PathBuf> = vec![Layer::Everyone.root(profile_dir)];
+    let mut layers: Vec<Layer> = vec![Layer::Everyone];
     if let Some(p) = &who.profile {
-        roots.push(Layer::Profile(p.id.clone()).root(profile_dir));
+        layers.push(Layer::Profile(p.id.clone()));
     }
+    let roots: Vec<PathBuf> = layers.iter().map(|l| l.root(profile_dir)).collect();
+    let keys: Vec<String> = layers.iter().map(Layer::key).collect();
     let root_refs: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
     let agents = agents::launch_json(&root_refs);
     let built = plugins::build(profile_dir, &collected.skills, &agents).unwrap_or_else(|e| {
@@ -153,6 +226,13 @@ pub fn resolve(profile_dir: &Path, who: &ChatKnowledge) -> Resolved {
             .is_some_and(|p| !p.is_home)
             .then(|| GUEST_SETTING_SOURCES.map(str::to_owned).to_vec()),
         clashes: collected.clashes,
+        rule_matcher: build_rule_matcher(
+            &roots
+                .iter()
+                .zip(&keys)
+                .map(|(r, k)| (r.as_path(), k.as_str()))
+                .collect::<Vec<_>>(),
+        ),
     }
 }
 
@@ -166,6 +246,7 @@ pub fn for_chat(profile_dir: &Path, chat_id: &str) -> Resolved {
 pub const INLINE_RULE_CHARS: usize = 800;
 
 /// One rule as the prompt carries it.
+#[derive(Clone)]
 pub struct Loaded {
     pub entry: RuleEntry,
     pub file: PathBuf,
@@ -173,14 +254,12 @@ pub struct Loaded {
     pub front: rules::Front,
     /// Its name as a help topic (`rule/<name>`): the file's name, kept apart across layers.
     pub topic: String,
+    /// What identifies this rule across layers and edits for the "already sent" record:
+    /// `<layer key>/<file>.md`.
+    pub key: String,
 }
 
 impl Loaded {
-    /// The prompt carries the whole rule.
-    fn inline(&self) -> bool {
-        self.front.always || self.body.chars().count() <= INLINE_RULE_CHARS
-    }
-
     /// What the rule is for, in one line of at most 100 characters: its header's summary, else its
     /// first sentences (not the ones that only repeat its title) until they say enough.
     pub fn summary(&self) -> String {
@@ -236,7 +315,92 @@ fn lead_sentences(body: &str, title: &str) -> String {
     out
 }
 
-fn load_rules(root: &Path) -> Vec<Loaded> {
+/// A layer's rules, read once and kept until the folder says otherwise: hundreds of rule files
+/// must not be re-read at every launch, budget check or tool call. An entry is rebuilt when two
+/// seconds have passed and the sorted (name, size, mtime) list differs from last time; inside
+/// those two seconds a change waits for the next walk. The hidden-character screen runs here, so
+/// what reaches a prompt is already screened.
+const RULE_INDEX_FRESH_SECS: u64 = 2;
+
+struct RuleIndexEntry {
+    at: std::time::Instant,
+    sig: Vec<(String, u64, i64)>,
+    rules: Vec<Loaded>,
+}
+
+static RULE_INDEX: Mutex<Option<HashMap<String, RuleIndexEntry>>> = Mutex::new(None);
+
+/// Test seam: drop every cached layer index. Production relies on the fresh window to notice a
+/// changed folder; tests write rules and read them back in the same breath.
+#[cfg(test)]
+pub(crate) fn clear_rule_index() {
+    if let Some(map) = RULE_INDEX
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_mut()
+    {
+        map.clear();
+    }
+}
+
+/// The (name, size, mtime) list of the rule folder, sorted; a folder that cannot be read lists
+/// nothing.
+fn rule_signature(root: &Path) -> Vec<(String, u64, i64)> {
+    let Ok(read) = std::fs::read_dir(rules::rules_dir(root)) else {
+        return Vec::new();
+    };
+    let mut sig: Vec<(String, u64, i64)> = read
+        .flatten()
+        .filter(|e| rules::file_name_of(&e.file_name().to_string_lossy()).is_ok())
+        .filter_map(|e| {
+            let meta = fs_symlink_meta(&e.path())?;
+            Some((
+                e.file_name().to_string_lossy().into_owned(),
+                meta.len(),
+                meta.modified()
+                    .ok()
+                    .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0),
+            ))
+        })
+        .collect();
+    sig.sort();
+    sig
+}
+
+fn fs_symlink_meta(path: &Path) -> Option<std::fs::Metadata> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if helm_platform::fs::is_link_like(&meta) || !meta.is_file() {
+        return None;
+    }
+    Some(meta)
+}
+
+fn load_rules(root: &Path, layer_key: &str) -> Vec<Loaded> {
+    let sig = rule_signature(root);
+    let mut guard = RULE_INDEX.lock().unwrap_or_else(|p| p.into_inner());
+    let map = guard.get_or_insert_with(HashMap::new);
+    let key = root.to_string_lossy().to_lowercase();
+    if let Some(e) = map.get(&key) {
+        // Inside the fresh window a change waits; outside it, no signature change keeps the old.
+        if e.at.elapsed().as_secs() < RULE_INDEX_FRESH_SECS || e.sig == sig {
+            return e.rules.clone();
+        }
+    }
+    let rules = read_rules(root, layer_key);
+    map.insert(
+        key,
+        RuleIndexEntry {
+            at: std::time::Instant::now(),
+            sig,
+            rules: rules.clone(),
+        },
+    );
+    rules
+}
+
+fn read_rules(root: &Path, layer_key: &str) -> Vec<Loaded> {
     rules::list_with_text(root)
         .into_iter()
         .filter_map(|(entry, text)| {
@@ -252,13 +416,11 @@ fn load_rules(root: &Path) -> Vec<Loaded> {
             }
             let body = rules::body_of(&text);
             let front = rules::split_front(&text).0;
-            let stem = entry
-                .path
-                .trim_start_matches("rules/")
-                .trim_end_matches(".md")
-                .to_owned();
+            let file = entry.path.trim_start_matches("rules/").to_owned();
+            let stem = file.strip_suffix(".md").unwrap_or(&file).to_owned();
             (!body.is_empty()).then(|| Loaded {
-                file: rules::rules_dir(root).join(entry.path.trim_start_matches("rules/")),
+                file: rules::rules_dir(root).join(&file),
+                key: format!("{layer_key}/{file}"),
                 entry,
                 body,
                 front,
@@ -274,10 +436,11 @@ fn load_rules(root: &Path) -> Vec<Loaded> {
 pub fn rule_groups(profile_dir: &Path, who: &ChatKnowledge) -> Vec<(String, Vec<Loaded>)> {
     let mut groups: Vec<(String, Vec<Loaded>)> = vec![(
         "Rules for everyone".to_owned(),
-        load_rules(&Layer::Everyone.root(profile_dir)),
+        load_rules(&Layer::Everyone.root(profile_dir), &Layer::Everyone.key()),
     )];
     if let Some(p) = &who.profile {
-        let mut own = load_rules(&Layer::Profile(p.id.clone()).root(profile_dir));
+        let layer = Layer::Profile(p.id.clone());
+        let mut own = load_rules(&layer.root(profile_dir), &layer.key());
         for r in &mut own {
             if groups[0].1.iter().any(|e| e.topic == r.topic) {
                 r.topic = format!("me-{}", r.topic);
@@ -289,12 +452,15 @@ pub fn rule_groups(profile_dir: &Path, who: &ChatKnowledge) -> Vec<(String, Vec<
 }
 
 /// What the prompt does with one rule: carry it whole, list it on one line, or (once the cap is
-/// reached) leave it out of the text and name its file at the end.
+/// reached) leave it out of the text and name its file at the end. A rule this chat has no part
+/// in — a failing chat condition, or a moment trigger that has not fired — is Hidden: it appears
+/// nowhere, and arrives later by note if it ever applies.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Fit {
     Whole,
     Line,
     Over,
+    Hidden,
 }
 
 /// A whole rule as the prompt carries it.
@@ -303,25 +469,28 @@ fn whole_rule(r: &Loaded) -> String {
 }
 
 /// The one walk the prompt text and the budget share: for each group, in rule order, how the
-/// prompt treats each rule. A short rule (or one marked `always`) goes whole until `cap` bytes of
-/// whole-rule text are used; longer ones are one line each; whole rules past the cap fall to the
-/// file list.
-fn rule_fits(groups: &[(String, Vec<Loaded>)], cap: usize) -> Vec<Vec<Fit>> {
+/// prompt treats each rule for this chat. A trigger decides Full, Line or Hidden first; a short
+/// whole rule (or one marked `always`) then goes in until `cap` bytes of whole-rule text are
+/// used, longer ones stay one line each, and whole rules past the cap fall to the file list.
+fn rule_fits(groups: &[(String, Vec<Loaded>)], cap: usize, facts: &Facts) -> Vec<Vec<Fit>> {
     let mut used = 0usize;
     let mut out = Vec::with_capacity(groups.len());
     for (_, rules) in groups {
         let mut fits = Vec::with_capacity(rules.len());
         for r in rules {
-            if !r.inline() {
-                fits.push(Fit::Line);
-                continue;
-            }
-            let len = whole_rule(r).len();
-            if used + len <= cap {
-                used += len;
-                fits.push(Fit::Whole);
-            } else {
-                fits.push(Fit::Over);
+            match triggers::at_launch(&r.front.when, r.front.always, r.body.chars().count(), facts)
+            {
+                Decision::Hidden => fits.push(Fit::Hidden),
+                Decision::Line => fits.push(Fit::Line),
+                Decision::Full => {
+                    let len = whole_rule(r).len();
+                    if used + len <= cap {
+                        used += len;
+                        fits.push(Fit::Whole);
+                    } else {
+                        fits.push(Fit::Over);
+                    }
+                }
             }
         }
         out.push(fits);
@@ -330,11 +499,16 @@ fn rule_fits(groups: &[(String, Vec<Loaded>)], cap: usize) -> Vec<Vec<Fit>> {
 }
 
 /// How much of the whole-rule cap one chat's rules use: (bytes used, cap). Settings reads this so
-/// the figure it warns about is exactly what a chat's prompt goes through.
+/// the figure it warns about is exactly what a chat's prompt goes through. Triggered rules that
+/// this chat never gets count as nothing.
 pub fn rules_budget(profile_dir: &Path, who: &ChatKnowledge) -> (usize, usize) {
+    let facts = Facts::of(who, None);
     let groups = rule_groups(profile_dir, who);
     let mut used = 0usize;
-    for ((_, rules), fits) in groups.iter().zip(rule_fits(&groups, RULES_PROMPT_CAP)) {
+    for ((_, rules), fits) in groups
+        .iter()
+        .zip(rule_fits(&groups, RULES_PROMPT_CAP, &facts))
+    {
         for (r, fit) in rules.iter().zip(fits) {
             if fit == Fit::Whole {
                 used += whole_rule(r).len();
@@ -344,19 +518,42 @@ pub fn rules_budget(profile_dir: &Path, who: &ChatKnowledge) -> (usize, usize) {
     (used, RULES_PROMPT_CAP)
 }
 
-/// The `rules` section's text: the Everyone rules, then the person's, then the guidance. A short
-/// rule (or one marked `always`) goes in whole until `cap` bytes of rule text are used; the others
-/// are one line each, with the topic that has the rest.
-pub fn rules_text(profile_dir: &Path, who: &ChatKnowledge, cap: usize) -> String {
+/// The line shown when the chat's prompt left triggered rules out entirely.
+pub const HELD_BACK: &str = "More rules are kept back and arrive with the message or tool call \
+                             they cover, marked [Helm rule]; follow them as you would these.";
+
+/// What a `Fit` means for the sent-record: what the chat was actually given.
+fn fit_decision(fit: Fit) -> Decision {
+    match fit {
+        Fit::Whole => Decision::Full,
+        Fit::Hidden => Decision::Hidden,
+        _ => Decision::Line,
+    }
+}
+
+/// The `rules` section's text plus the per-rule decisions it showed (rule key, decision and
+/// revision), which the launch records so later notes can diff against it. A rule with no
+/// trigger walks exactly as before; a triggered one shows what its trigger promises for this
+/// chat, and rules kept back add one line.
+fn render_rules(
+    profile_dir: &Path,
+    who: &ChatKnowledge,
+    cap: usize,
+) -> (String, Vec<(String, Decision, String)>) {
+    let facts = Facts::of(who, None);
     let groups = rule_groups(profile_dir, who);
-    let fits = rule_fits(&groups, cap);
+    let fits = rule_fits(&groups, cap, &facts);
     let mut parts: Vec<String> = Vec::new();
     let mut overflow: Vec<String> = Vec::new();
+    let mut decisions: Vec<(String, Decision, String)> = Vec::new();
+    let mut held_back = false;
     for ((heading, rules), fits) in groups.iter().zip(&fits) {
         let mut block = String::new();
         let mut listed = String::new();
         for (r, fit) in rules.iter().zip(fits) {
+            decisions.push((r.key.clone(), fit_decision(*fit), r.entry.revision.clone()));
             match fit {
+                Fit::Hidden => held_back = true,
                 Fit::Line => listed.push_str(&format!(
                     "\n- {}: {} (app_help rule/{})",
                     r.entry.title,
@@ -386,8 +583,34 @@ pub fn rules_text(profile_dir: &Path, who: &ChatKnowledge, cap: usize) -> String
                 .join("\n")
         ));
     }
+    if held_back {
+        parts.push(HELD_BACK.to_owned());
+    }
     parts.push(GUIDANCE.to_owned());
-    parts.join("\n\n")
+    (parts.join("\n\n"), decisions)
+}
+
+/// The `rules` section's text: the Everyone rules, then the person's, then the guidance. A short
+/// rule (or one marked `always`) goes in whole until `cap` bytes of rule text are used; the others
+/// are one line each, with the topic that has the rest. Rules a trigger keeps from this chat do
+/// not appear at all.
+pub fn rules_text(profile_dir: &Path, who: &ChatKnowledge, cap: usize) -> String {
+    render_rules(profile_dir, who, cap).0
+}
+
+/// The decisions one chat's launch would be shown now, as the message path diffs against them.
+pub fn launch_decisions(
+    profile_dir: &Path,
+    who: &ChatKnowledge,
+) -> Vec<(String, Decision, String)> {
+    render_rules(profile_dir, who, RULES_PROMPT_CAP).1
+}
+
+/// The decision one rule reaches for a chat at launch; the `app_help rule` index uses it to list
+/// exactly what the prompt showed.
+pub fn shown_at_launch(r: &Loaded, facts: &Facts) -> bool {
+    triggers::at_launch(&r.front.when, r.front.always, r.body.chars().count(), facts)
+        != Decision::Hidden
 }
 
 /// The `rules` system-prompt section. Order 6 puts it first among the addendum's sections, ahead
@@ -418,11 +641,15 @@ impl AddendumSection for RulesSection {
 
     fn text(&self, ctx: &LaunchCtx<'_>) -> Option<String> {
         examples::seed(&self.profile_dir);
-        Some(rules_text(
-            &self.profile_dir,
-            &self.lookup.of_chat(ctx.chat_id),
-            RULES_PROMPT_CAP,
-        ))
+        // The worker reports the folder it really runs in; prefer it over the recorded one.
+        let mut who = self.lookup.of_chat(ctx.chat_id);
+        if !ctx.cwd.is_empty() {
+            who.cwd = Some(ctx.cwd.to_owned());
+        }
+        let (text, decisions) = render_rules(&self.profile_dir, &who, RULES_PROMPT_CAP);
+        // What this chat was just shown: later messages and tool calls diff against this.
+        triggers::record_launch(ctx.chat_id, decisions);
+        Some(text)
     }
 }
 
@@ -516,6 +743,7 @@ mod tests {
         let home = ChatKnowledge {
             profile: person("alex", "Alex", true),
             project_id: Some("p1".into()),
+            ..ChatKnowledge::default()
         };
         let r = resolve(&data, &home);
         let names = loaded(&r);
@@ -551,6 +779,7 @@ mod tests {
         let guest = ChatKnowledge {
             profile: person("sam", "Sam", false),
             project_id: None,
+            ..ChatKnowledge::default()
         };
         let r = resolve(&data, &guest);
         assert_eq!(
@@ -638,5 +867,76 @@ mod tests {
             rules_budget(&tmp.path().join("empty"), &ChatKnowledge::default()),
             (0, RULES_PROMPT_CAP)
         );
+
+        // Triggers. This chat has no folder and no orchestrator, so it is a household chat: a
+        // coding-only rule is kept back, one with only moment conditions stays back until its
+        // folder matches, and the prompt adds one line saying so.
+        let plain = rules_text(&data, &home, RULES_PROMPT_CAP);
+        write(
+            &everyone.join("rules/coding-only.md"),
+            "---\nkinds: coding\n---\n# Diff first\n\nRead the diff before editing.\n",
+        );
+        write(
+            &alex.join("rules/in-repo.md"),
+            &format!(
+                "---\nfolders: {}\ntools: app_save_rule, mcp__*browser*\ncommands: git push\n---\n# Repo work\n\nStay in the repo.\n",
+                tmp.path().join("repo").display()
+            ),
+        );
+        clear_rule_index();
+        let trig = rules_text(&data, &home, RULES_PROMPT_CAP);
+        assert!(plain.ends_with(GUIDANCE) && !plain.contains(HELD_BACK));
+        assert!(
+            !trig.contains("Diff first") && trig.contains(HELD_BACK),
+            "{trig}"
+        );
+        assert!(
+            !trig.contains("Stay in the repo"),
+            "folder unmatched at launch"
+        );
+        // Everything a chat got before triggers existed comes through byte-identically; only
+        // the kept-back line is inserted.
+        let restored = trig.replace(&format!("{HELD_BACK}\n\n"), "");
+        assert_eq!(restored, plain);
+
+        // In the folder the rule names it fires at launch and goes in whole; the budget of a
+        // chat with no folder counts only what that chat gets.
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let in_repo = ChatKnowledge {
+            cwd: Some(repo.to_string_lossy().into_owned()),
+            ..home.clone()
+        };
+        let shown = rules_text(&data, &in_repo, RULES_PROMPT_CAP);
+        assert!(shown.contains("### Repo work") && shown.contains("Stay in the repo."));
+        // The budget of the chat with no folder still counts only what that chat gets: the two
+        // whole rules, with both triggered rules (hidden for it) contributing nothing.
+        assert_eq!(rules_budget(&data, &home), (whole_sum, RULES_PROMPT_CAP));
+
+        // The matcher this chat's worker would start with: tool globs converted, shells added
+        // for commands, and `None` when no rule watches a moment.
+        let m = resolve(&data, &home).rule_matcher.unwrap();
+        assert!(
+            m.contains("(^|__)app_save_rule$") && m.contains("mcp__.*browser.*"),
+            "{m}"
+        );
+        assert!(
+            m.contains("Bash") && m.contains("PowerShell") && m.contains("Monitor"),
+            "{m}"
+        );
+        assert_eq!(
+            resolve(&tmp.path().join("empty"), &ChatKnowledge::default()).rule_matcher,
+            None
+        );
+
+        // What the launch records is one entry per rule with its decision and revision; a hidden
+        // trigger lands as Hidden.
+        let dec = launch_decisions(&data, &home);
+        assert!(dec
+            .iter()
+            .any(|(k, d, _)| { k == "everyone/coding-only.md" && *d == Decision::Hidden }));
+        assert!(dec
+            .iter()
+            .any(|(k, d, _)| k == "everyone/b-style.md" && *d == Decision::Full));
     }
 }

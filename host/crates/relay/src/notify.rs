@@ -15,14 +15,16 @@
 //! note its agent gets with the user's next message, so a reply to an alert makes sense there.
 //!
 //! The same watcher sends approval asks when approving from Telegram is on ([`crate::approve`]),
-//! for waiting prompts and for settings changes a chat staged for Approve. A staged change is
-//! asked while the user is away or talking to Helm over Telegram or voice; at the PC the card in
-//! Helm is the place to answer.
+//! for waiting prompts and for settings changes a chat staged for Approve. Every kind reads one
+//! routing decision ([`approve::on_telegram`]): the ask goes to the place the person is — their
+//! own Telegram chat, a voice conversation, a stated away, or last seen over Telegram — and at
+//! the keys in Helm it waits for its card there instead. Never to both.
 
 use crate::approve;
 use crate::client::{LineHandle, LineState};
 use crate::sink::ChatSink;
 use crate::telegram;
+use helm_afk::monitor::Source;
 use helm_chats::types::{AttentionKind, AttentionRow, AttentionSummary, ContextKind};
 use helm_chats::ChatRuntime;
 use helm_core::db::Database;
@@ -352,6 +354,35 @@ fn ask(ctx: &ToolCtx, a: Value) -> ToolResult {
             "Helm's line to the hub is not connected (Settings → Hub), so nothing was asked.",
         ));
     }
+    // The same one routing decision the watcher reads: a question reaches the phone only when
+    // the person is there — not while they sit at the keys in Helm, where it belongs instead.
+    let now = helm_core::now_ms();
+    let tg_here = ch.tg_chat.as_deref() == Some(ctx.caller_chat_id.as_str());
+    let voice_here = crate::voice::load_tag(&crate::people::voice_paths(&dir, &ch.profile_id).tag)
+        .is_some_and(|t| t.chat_id == ctx.caller_chat_id);
+    let origin = if tg_here {
+        approve::Surface::Telegram
+    } else if voice_here {
+        approve::Surface::Voice
+    } else {
+        approve::Surface::Pc
+    };
+    let away_declared = matches!(
+        ctx.services
+            .get::<helm_afk::AfkService>()
+            .and_then(|a| a.open_source()),
+        Some(Source::Manual | Source::ScreenLock | Source::Sleep)
+    );
+    let presence = approve::Presence {
+        telegram_at: sink.seen.at(&ch.profile_id),
+        desktop_at: helm_afk::signals::idle_secs().map(|s| now - (s as i64) * 1000),
+    };
+    if !approve::on_telegram(origin, &presence, away_declared, now) {
+        return Err(ToolError::refused(
+            "Nothing was asked: the user works at this PC in Helm and has not shown up over \
+             Telegram lately. Ask it here, where Helm can show it to them.",
+        ));
+    }
     if !BUDGET.take(helm_core::now_ms()) {
         return Err(ToolError::refused(format!(
             "{MAX_PER_HOUR} Telegram messages were already sent in the last hour, so nothing was asked."
@@ -399,8 +430,10 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
              own Telegram account for this question. Their typed replies are not answers. Ask \
              only for a real decision, in a short plain-English question with no ids, hashes or \
              jargon, and short option labels. Only when the user has turned on Approve from \
-             Telegram in Settings → Hub; refused, with nothing asked, when it is off or Helm's \
-             line to the hub is not connected.",
+             Telegram in Settings → Hub, and only where they are: Helm asks on Telegram while \
+             their last activity was there or they are away from this PC, and refuses with \
+             nothing asked while they work at the keys in Helm (ask it in this chat then), when \
+             approving is off, or when Helm's line to the hub is not connected.",
             json!({
                 "type": "object",
                 "properties": {
@@ -465,6 +498,7 @@ struct Look {
     settled: HashMap<String, String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn look(
     rt: &ChatRuntime,
     afk: &helm_afk::AfkService,
@@ -472,9 +506,43 @@ fn look(
     dir: &Path,
     kinds: Option<&helm_consent::AllowKinds>,
     open: &[String],
+    seen: &HashMap<String, i64>,
 ) -> Look {
     let chans = channels(db, dir);
-    let away = afk.open_source().is_some();
+    let now = helm_core::now_ms();
+    let src = afk.open_source();
+    let away = src.is_some();
+    // Only a span that states the person left this PC counts for asking on the phone: AFK set
+    // by hand, a locked screen, or sleep. Idle alone does not — nobody clicking lately is what
+    // watching an agent looks like at the keys, and it used to mirror cards to the phone.
+    let away_declared = matches!(
+        src,
+        Some(Source::Manual | Source::ScreenLock | Source::Sleep)
+    );
+    let desktop_at = helm_afk::signals::idle_secs().map(|s| now - (s as i64) * 1000);
+    // The one routing decision of the look: which surface this request's ask belongs to.
+    let wanted = |ch: &Channel, chat: &str| -> bool {
+        let tg_here = ch.tg_chat.as_deref() == Some(chat);
+        let voice_here =
+            crate::voice::load_tag(&crate::people::voice_paths(dir, &ch.profile_id).tag)
+                .is_some_and(|t| t.chat_id == chat);
+        let origin = if tg_here {
+            approve::Surface::Telegram
+        } else if voice_here {
+            approve::Surface::Voice
+        } else {
+            approve::Surface::Pc
+        };
+        approve::on_telegram(
+            origin,
+            &approve::Presence {
+                telegram_at: seen.get(&ch.profile_id).copied(),
+                desktop_at,
+            },
+            away_declared,
+            now,
+        )
+    };
     let any_alerts = chans.iter().any(|c| c.policy.away_alerts);
     let any_approvals = chans.iter().any(|c| c.policy.approvals);
     // Which profile owns each chat matters only to an alert or an ask; otherwise skip the scan.
@@ -516,11 +584,10 @@ fn look(
                 else {
                     continue;
                 };
-                if !ch.policy.approvals {
-                    continue;
-                }
-                let here = away || ch.tg_chat.as_deref() == Some(r.chat_id.as_str());
-                if !here || !matches!(r.kind, AttentionKind::Approval | AttentionKind::Plan) {
+                if !ch.policy.approvals
+                    || !matches!(r.kind, AttentionKind::Approval | AttentionKind::Plan)
+                    || !wanted(&ch, &r.chat_id)
+                {
                     continue;
                 }
                 for i in rt
@@ -539,7 +606,6 @@ fn look(
             Some(out)
         })
         .flatten();
-    let now = helm_core::now_ms();
     let consent = (any_approvals && waiting.is_some())
         .then(|| {
             let pending = helm_consent::store::pending_all(db, kinds?, now).ok()?;
@@ -563,13 +629,7 @@ fn look(
                 if member {
                     continue;
                 }
-                let voice =
-                    crate::voice::load_tag(&crate::people::voice_paths(dir, &ch.profile_id).tag)
-                        .map(|t| t.chat_id);
-                let here = away
-                    || ch.tg_chat.as_deref() == Some(r.chat_id.as_str())
-                    || voice.as_deref() == Some(r.chat_id.as_str());
-                if !ch.policy.approvals || !here {
+                if !ch.policy.approvals || !wanted(&ch, &r.chat_id) {
                     continue;
                 }
                 out.push(approve::ConsentWaiting {
@@ -628,12 +688,13 @@ pub fn watch_away(
         loop {
             every.tick().await;
             let (rt2, afk, dir, db2) = (rt.clone(), afk.clone(), profile_dir.clone(), db.clone());
-            let (kinds, open) = (
+            let (kinds, open, seen) = (
                 services.get::<helm_consent::AllowKinds>(),
                 sink.asks.consent_ids(),
+                sink.seen.snapshot(),
             );
             let Ok(found) = tokio::task::spawn_blocking(move || {
-                look(&rt2, &afk, &db2, &dir, kinds.as_deref(), &open)
+                look(&rt2, &afk, &db2, &dir, kinds.as_deref(), &open, &seen)
             })
             .await
             else {
@@ -658,7 +719,9 @@ pub fn watch_away(
                     }
                 }
                 Some(waiting) if online => {
-                    let step = sink.asks.step(waiting, approve::new_id);
+                    let step = sink
+                        .asks
+                        .step(waiting, helm_core::now_ms(), approve::new_id);
                     for (id, person, text, options) in step.ask {
                         if !line.telegram_ask(&person, &id, &text, &options) {
                             sink.asks.unsent(&id);

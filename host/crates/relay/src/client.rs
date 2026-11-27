@@ -189,9 +189,8 @@ pub struct VoiceTurn {
     /// The hub person this turn is for, verified by the hub. `None`: an older hub, which
     /// means the PC's own (home) person.
     pub person: Option<String>,
-    /// `"quick"` or `"deep"`: which lane of the voice settings answers it — the quick lane opens
-    /// on a smaller model, the deep one on the model saved for new voice chats. `None`: an older
-    /// phone, which means deep (today's behaviour).
+    /// The lane the phone asked for (`quick` or `deep`), as the hub sent it. `None`: the hub
+    /// said nothing, which means the deep lane; a sink reads any other value as deep too.
     pub urgency: Option<String>,
 }
 
@@ -238,9 +237,8 @@ pub struct SpeakerTurn {
     pub context: Option<String>,
     /// The speaker tried to answer this turn itself and handed it over.
     pub escalated: bool,
-    /// `"quick"` or `"deep"`: which lane of the speaker settings opens the talk's chat — the
-    /// quick lane on a smaller model, the deep lane on the saved one. `None`: an older speaker,
-    /// which means deep (today's behaviour).
+    /// The lane the speaker asked for (`quick` or `deep`). `None`: it did not say, which means
+    /// the deep lane; a sink reads any other value as deep too.
     pub urgency: Option<String>,
 }
 
@@ -2323,9 +2321,9 @@ mod tests {
         task.abort();
     }
 
-    /// A speaker turn carries what was said before it and whether it was handed over; a speaker
-    /// record reaches the sink whole and is acknowledged once stored (on the speaker lane), never
-    /// when the sink refuses it, and never twice at once.
+    /// A speaker turn carries what was said before it, whether it was handed over and which lane
+    /// it asked for; a speaker record reaches the sink whole and is acknowledged once stored (on
+    /// the speaker lane), never when the sink refuses it, and never twice at once.
     #[tokio::test]
     async fn speaker_turns_and_records_reach_their_sink_and_are_acknowledged_once_stored() {
         let (url, hub) = fake_hub().await;
@@ -2344,7 +2342,7 @@ mod tests {
         ws.send(send(json!({
             "type": "voice", "lane": "speaker", "id": "t1", "text": "and the bedroom",
             "session": "s-1", "room": "kitchen", "context": "Lamp on. Done.",
-            "origin": "escalation", "sentAt": 5
+            "origin": "escalation", "urgency": "deep", "sentAt": 5
         })))
         .await
         .unwrap();
@@ -2362,12 +2360,21 @@ mod tests {
         {
             let turns = speaker.turns.lock().unwrap();
             assert_eq!(
-                (turns[0].context.as_deref(), turns[0].escalated),
-                (Some("Lamp on. Done."), true)
+                (
+                    turns[0].context.as_deref(),
+                    turns[0].escalated,
+                    turns[0].urgency.as_deref()
+                ),
+                (Some("Lamp on. Done."), true, Some("deep"))
             );
+            // The second turn carried none of the three.
             assert_eq!(
-                (turns[1].context.as_deref(), turns[1].escalated),
-                (None, false)
+                (
+                    turns[1].context.as_deref(),
+                    turns[1].escalated,
+                    turns[1].urgency.as_deref()
+                ),
+                (None, false, None)
             );
         }
 
@@ -2468,6 +2475,7 @@ mod tests {
             next(&mut ws).await,
             json!({"type": "voice_ack", "id": "t1"})
         );
+        // The hub said no lane for this one: it reaches the sink as `None`, meaning deep.
         assert_eq!(
             voice.got.lock().unwrap()[0],
             VoiceTurn {
@@ -2484,8 +2492,12 @@ mod tests {
         );
 
         // Not taken: no acknowledgement, and the hub's resend is tried again and then answered.
+        // This frame asks for the quick lane, which reaches the sink unchanged.
         voice.refuse.store(true, Ordering::SeqCst);
-        let again = json!({"type": "voice", "id": "t2", "mode": "conversation", "text": "x"});
+        let again = json!({
+            "type": "voice", "id": "t2", "mode": "conversation",
+            "text": "x", "urgency": "quick"
+        });
         ws.send(send(again.clone())).await.unwrap();
         wait(2).await;
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2496,6 +2508,10 @@ mod tests {
             json!({"type": "voice_ack", "id": "t2"})
         );
         assert_eq!(voice.got.lock().unwrap().len(), 3);
+        assert_eq!(
+            voice.got.lock().unwrap()[1].urgency.as_deref(),
+            Some("quick")
+        );
 
         // A resend that arrives while the first is still being delivered is dropped.
         voice.hold.store(true, Ordering::SeqCst);

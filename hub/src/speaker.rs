@@ -183,6 +183,8 @@ struct TurnRec {
     context: Option<String>,
     /// `escalation` when the speaker could not answer by itself and handed the turn over.
     origin: Option<String>,
+    /// `quick` or `deep`, as the speaker asked; sent down to Helm unchanged.
+    urgency: Option<String>,
     /// When Helm acknowledged the turn, and when its answer came in (the hub's clock).
     acked: Option<i64>,
     answered: Option<i64>,
@@ -334,6 +336,9 @@ pub struct SpeakerTurn {
     pub context: Option<String>,
     /// `escalation` when the speaker handed the turn over after trying itself.
     pub origin: Option<String>,
+    /// `quick` or `deep`: which model the speaker would like Helm to answer with. Absent means
+    /// deep, and an older speaker never sends it. The hub does not read it; it rides along.
+    pub urgency: Option<String>,
 }
 
 /// What a `/speaker/record` call carries: one exchange the speaker answered without Helm.
@@ -393,6 +398,7 @@ fn turn_frame(t: &TurnRec, person: i64) -> Value {
         "until": Value::Null,
         "context": t.context,
         "origin": t.origin,
+        "urgency": t.urgency,
     })
 }
 
@@ -618,6 +624,7 @@ impl SpeakerBridge {
                     head_since: None,
                     context: t.context.clone(),
                     origin: t.origin.clone(),
+                    urgency: t.urgency.clone(),
                     acked: None,
                     answered: None,
                 },
@@ -1166,6 +1173,7 @@ mod tests {
             head_since: None,
             context: None,
             origin: None,
+            urgency: None,
             acked: None,
             answered: None,
         };
@@ -1180,20 +1188,27 @@ mod tests {
         assert_eq!(f["session"], json!("s-1"));
         assert_eq!(f["room"], Value::Null);
         assert_eq!(f["area"], json!("Study"));
-        // No context and no origin: both are there, and null.
+        // No context, no origin and no urgency: all three are there, and null.
         assert_eq!(
-            (f["context"].clone(), f["origin"].clone()),
-            (Value::Null, Value::Null)
+            (
+                f["context"].clone(),
+                f["origin"].clone(),
+                f["urgency"].clone()
+            ),
+            (Value::Null, Value::Null, Value::Null)
         );
-        // A handed-over turn carries what the speaker said just before, and says so.
+        // A handed-over turn carries what the speaker said just before, says so, and can ask
+        // for its lane.
         let handed = TurnRec {
             context: Some("lights on; and the bedroom".into()),
             origin: Some("escalation".into()),
+            urgency: Some("deep".into()),
             ..t
         };
         let f = turn_frame(&handed, 7);
         assert_eq!(f["context"], json!("lights on; and the bedroom"));
         assert_eq!(f["origin"], json!("escalation"));
+        assert_eq!(f["urgency"], json!("deep"));
     }
 
     /// A record frame is the exchange as the speaker sent it, with the session and the person

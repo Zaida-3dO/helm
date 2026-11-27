@@ -147,8 +147,9 @@ fn too_long() -> Response {
     refused(StatusCode::PAYLOAD_TOO_LARGE, "That recording is too long.")
 }
 
-/// `POST /voice/turn?turn=<id>&mode=conversation|chat[&continues=<id>]`: a new turn, as audio
-/// (`audio/ogg` or `audio/wav`) or as typed text (`application/json`, `{"text": "..."}`).
+/// `POST /voice/turn?turn=<id>&mode=conversation|chat[&continues=<id>][&urgency=quick|deep]`:
+/// a new turn, as audio (`audio/ogg` or `audio/wav`) or as typed text (`application/json`,
+/// `{"text": "..."}`).
 async fn post_turn(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let (parts, body) = req.into_parts();
     let (client, bridge) = match gate(&state, &parts.headers) {
@@ -165,6 +166,13 @@ async fn post_turn(State(state): State<Arc<AppState>>, req: Request) -> Response
     let continues = query_value(query, "continues")
         .filter(|c| !c.is_empty())
         .map(str::to_owned);
+    // The lane the phone asks for. Absent means deep (an older phone sends no urgency); any other
+    // value is refused, never guessed at. The hub does not read it: it rides along to Helm.
+    let urgency = match query_value(query, "urgency") {
+        None => None,
+        Some(u @ ("quick" | "deep")) => Some(u.to_owned()),
+        Some(_) => return bad_request("The urgency must be quick or deep."),
+    };
     let content_type = parts
         .headers
         .get(header::CONTENT_TYPE)
@@ -244,6 +252,7 @@ async fn post_turn(State(state): State<Arc<AppState>>, req: Request) -> Response
         mode,
         continues,
         text,
+        urgency,
     };
     match bridge.begin_turn(client.person_id, new, now_ms()) {
         Begin::New { helm_online } => {
@@ -343,6 +352,9 @@ async fn get_status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
         "helm": if status.helm_online { "online" } else { "offline" },
         "version": voice::VERSION,
         "stt": status.stt,
+        // This hub takes an urgency on each turn. A phone shows the quick/deep choice only when
+        // it sees this; an older hub has no such field at all.
+        "urgency": true,
     });
     if let Some(pc) = bridge.pc(client.person_id, now_ms()) {
         body["pc"] = pc;

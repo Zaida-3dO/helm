@@ -10,6 +10,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { generatedName } from "../src/mcp/naming.ts";
+import { OWNER_STEP_LINE, SIGN_IN_LINE, sentenceOf } from "../src/mcp/browser.ts";
 import { createMcpBridge } from "../src/mcp/index.ts";
 import type { Json, ResolvedServer } from "../src/mcp/types.ts";
 
@@ -66,10 +67,12 @@ test("a needs_owner refusal raises the flag and the Telegram ask, and renews unt
   );
   const flag = h.asks.find((a) => a.operation === "app_flag_attention")!.args;
   assert.match(String(flag.reason), /shop\.example/, "the site host names the ask");
-  assert.match(String(flag.reason), /attached\.needs_owner/, "the broker's own sentence is relayed");
+  assert.match(String(flag.reason), /yours to do in your own browser/, "a plain line for the person, not the agent's refusal prose");
+  assert.ok(!String(flag.reason).includes("needs_owner"), "the broker's data shape never rides along");
   assert.equal(flag.priority, "high");
   const tg = h.asks.find((a) => a.operation === "app_telegram_ask")!.args;
   assert.deepEqual(tg.options, ["Done", "Not yet"]);
+  assert.ok(!String(tg.question).includes("{"), "the card text is plain, not JSON");
 
   // A repeat refusal while the hold is open is not a second ask.
   await h.bridge.call(generatedName("browser", "browser_act"), { lease_key: "L1", action: "click", target: "Basket" });
@@ -107,6 +110,26 @@ test("a sign-in request carries the broker's sentence, and only the browser pres
   await p.bridge.call(generatedName("browser", "browser_sign_in"), { lease_key: "L1", action: "request", what: "x" });
   assert.deepEqual(p.asks, []);
   p.bridge.close();
+});
+
+test("the card line is always a plain sentence for the person — raw data never", () => {
+  // (the broker's answer text, the worker's fallback for that situation, the expected line)
+  const rows: [string, string, string][] = [
+    ['{"relay":"the shop wants you to sign in; do it in your browser, then say done"}', SIGN_IN_LINE, "the shop wants you to sign in; do it in your browser, then say done"],
+    ['{"outcome":"accepted","value":{"wait_seconds":600,"relay":"the router page needs a sign-in"}}', SIGN_IN_LINE, "the router page needs a sign-in"],
+    // An answer that only carries its own shape is never quoted at the person: their line.
+    ['{"attached":{"needs_owner":true},"hint":"call browser_sign_in","wait_seconds":600}', OWNER_STEP_LINE, OWNER_STEP_LINE],
+    ['[{"needs_owner":true}]', SIGN_IN_LINE, SIGN_IN_LINE],
+    // Prose relays, minus a refusal's mechanism tag.
+    ["refused (attached.needs_owner): this step is the owner's to do in their own browser", "fallback line", "this step is the owner's to do in their own browser"],
+  ];
+  for (const [answer, fallback, want] of rows) {
+    const out = sentenceOf(answer, fallback);
+    assert.equal(out, want, answer.slice(0, 40));
+    assert.ok(!out.includes("{") && !out.includes("}"), `no data shape reaches the card: ${out}`);
+  }
+  // A phone-sized cap either way.
+  assert.equal(sentenceOf("x".repeat(500), SIGN_IN_LINE).length, 240);
 });
 
 test("a release ends a hold, and a hold that outlasts the cap renews no more", async () => {

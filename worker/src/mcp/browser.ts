@@ -3,9 +3,10 @@
 // The broker runs the user's own browser. Some steps stay the person's — a sign-in, or a
 // consequential step on their attached browser, which comes back as `attached.needs_owner`. When
 // that happens the chat's worker:
-// - files the chat's attention item (the broker's own sentence, and the site's host when it saw
+// - files the chat's attention item (a plain human sentence, and the site's host when it saw
 //   the navigation) so the chat lists under "needs you" on the PC and over the device link, and
-// - asks on Telegram with "Done" / "Not yet", so the person can answer from wherever they are.
+// - asks with "Done" / "Not yet": the host puts that ask only where the person is — Telegram
+//   when they last showed up there or are away from the PC; nowhere extra while they sit at it.
 //   The tap comes back to the chat as a note; the agent then calls `browser_sign_in` with
 //   action "done" for the same lease and carries on.
 // - keeps the broker lease alive in the meantime: `browser_status` with the lease key is the
@@ -78,21 +79,41 @@ export interface HoldEvent {
   sentence: string;
 }
 
-function sentenceOf(text: string): string {
-  // A successful sign-in request answers with an object carrying the sentence to relay; a
-  // refusal is plain text. Either way: one trimmed line, never more than the phone fits.
-  let s = text.trim();
+/** What the person is told when a broker answer carries no sentence to relay. A card must read
+ * as plain text with buttons: raw JSON never reaches it, whatever the server answered. */
+export const OWNER_STEP_LINE = "This step is yours to do in your own browser — say when it is done.";
+export const SIGN_IN_LINE = "Your browser needs a sign-in — do it there, then say done.";
+
+/** The human sentence a broker answer carries: `relay`, `sentence` or `message` at the top level
+ * or one level down (`value`, `result`, `data`). An answer that only carries its own shape
+ * yields nothing here, so the caller's plain line is used instead. */
+function relayedSentence(text: string): string {
+  let j: unknown;
   try {
-    const j = JSON.parse(s) as Record<string, unknown>;
-    for (const k of ["relay", "sentence", "message"]) {
-      if (typeof j[k] === "string" && (j[k] as string).trim()) {
-        s = (j[k] as string).trim();
-        break;
-      }
-    }
+    j = JSON.parse(text.trim());
   } catch {
-    /* plain text */
+    return "";
   }
+  if (!j || typeof j !== "object" || Array.isArray(j)) return "";
+  const o = j as Record<string, unknown>;
+  for (const box of [o, o.value, o.result, o.data]) {
+    if (!box || typeof box !== "object") continue;
+    for (const k of ["relay", "sentence", "message"]) {
+      const v = (box as Record<string, unknown>)[k];
+      if (typeof v === "string" && v.trim()) return v.replace(/\s+/g, " ").trim().slice(0, 240);
+    }
+  }
+  return "";
+}
+
+/** One trimmed plain line for the person's card, never a data shape. */
+export function sentenceOf(text: string, fallback: string): string {
+  const relayed = relayedSentence(text);
+  if (relayed) return relayed;
+  // Prose stays prose (minus a refusal's mechanism tag); anything that is still shaped like
+  // JSON falls back to the worker's own line rather than quoting the server.
+  const s = text.trim().replace(/^refused\s*\([^)]*\):\s*/i, "");
+  if (!s || s.startsWith("{") || s.startsWith("[") || /"\s*:\s/.test(s)) return fallback;
   return s.replace(/\s+/g, " ").slice(0, 240);
 }
 
@@ -110,10 +131,12 @@ export function holdEvent(
   const lease = typeof args.lease_key === "string" ? args.lease_key : "";
   if (!lease) return null;
   if ((tool === "browser_act" || tool === "browser_evaluate") && isError && text.includes("needs_owner")) {
-    return { kind: "needs_owner", serverId, leaseKey: lease, sentence: sentenceOf(text) };
+    // The refusal prose is written for the agent; the card is read by a person, so only a
+    // sentence the broker offers for them relays — otherwise the worker's own line.
+    return { kind: "needs_owner", serverId, leaseKey: lease, sentence: relayedSentence(text) || OWNER_STEP_LINE };
   }
   if (tool === "browser_sign_in" && args.action === "request" && !isError) {
-    return { kind: "sign_in", serverId, leaseKey: lease, sentence: sentenceOf(text) };
+    return { kind: "sign_in", serverId, leaseKey: lease, sentence: sentenceOf(text, SIGN_IN_LINE) };
   }
   return null;
 }

@@ -1509,6 +1509,9 @@ pub struct ChatSink {
     watching: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     /// Approvals asked on Telegram and not yet answered ([`crate::approve`]).
     pub asks: crate::approve::Asks,
+    /// When each profile's person last reached Helm over Telegram (message, tap or stop), for
+    /// the ask routing decision ([`crate::approve::on_telegram`]). In memory only.
+    pub seen: crate::approve::Seen,
     /// When each hub service's last repair chat was opened, so a standing outage gets one an hour.
     repair: Mutex<HashMap<String, i64>>,
     /// The repair chat last opened for each hub service, so a `service_up` report can tell it
@@ -1535,6 +1538,7 @@ impl ChatSink {
             serial: tokio::sync::Mutex::new(()),
             answered: Mutex::new(HashMap::new()),
             asks: crate::approve::Asks::default(),
+            seen: crate::approve::Seen::default(),
             watching: Mutex::new(HashMap::new()),
             repair: Mutex::new(HashMap::new()),
             repair_chats: Arc::new(Mutex::new(HashMap::new())),
@@ -1850,6 +1854,9 @@ impl TelegramSink for ChatSink {
             // One at a time: two messages with no tag must not start two chats.
             let _turn = self.serial.lock().await;
             let c = self.ctx(msg.person.as_deref())?;
+            // The person showed up over Telegram just now: the ask routing reads this clock
+            // to decide whether an ask belongs on the phone or in Helm ([`crate::approve`]).
+            self.seen.note(&c.profile_id, helm_core::now_ms());
             // A working-mode command is answered between the phone and Helm: it opens no chat,
             // sets no tag and starts no watch. One with a picture or file attached is left as a
             // message, so nothing the person sent is silently dropped.
@@ -1900,6 +1907,7 @@ impl TelegramSink for ChatSink {
             let Ok(c) = self.ctx(person.as_deref()) else {
                 return;
             };
+            self.seen.note(&c.profile_id, helm_core::now_ms());
             let Some(tag) = telegram::load_tag(&c.tag_path) else {
                 return;
             };
@@ -2001,6 +2009,8 @@ impl TelegramSink for ChatSink {
                 up.notify(&who, &nothing);
                 return;
             };
+            // A tap is a touch too: the person is answering from Telegram right now.
+            self.seen.note(&c.profile_id, helm_core::now_ms());
             if !telegram::load_approvals(&c.policy_path) {
                 up.notify(
                     &c.person,
