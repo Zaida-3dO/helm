@@ -3667,6 +3667,90 @@ async fn a_new_chats_first_message_carries_the_startup_text_and_a_started_chat_i
     );
 }
 
+/// A rule that was not there when the chat's prompt was built arrives hidden on the next message,
+/// with one visible Rules row, and never again in the same context. The harness has no rules
+/// section of its own, so the test records the launch itself — a launch that showed nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rule_added_after_the_launch_rides_the_next_message_once() {
+    use crate::types::SendOrigin;
+    let mut h = harness();
+    let chat = h.create().await;
+    // A first message with no rules anywhere: nothing about rules rides it.
+    let rt = h.rt.clone();
+    let c2 = chat.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::submit::chat_send(&rt, send_args(&c2, SendOrigin::Composer, json!({})), None)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    assert!(
+        p.get("context").is_none(),
+        "a plain first message carries no hidden context"
+    );
+    ack(&w, &p).await;
+    w.emit(json!({"type": "agent_start"})).await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("idle", |h| h.status(&chat) == "idle").await;
+    // The launch showed no rules; now one joins the everyone layer.
+    helm_skills::triggers::record_launch(&chat, Vec::new());
+    let dir = h.profile.path("knowledge/everyone/rules");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("keep-notes.md"),
+        "---\nsummary: End reports with the folder.\n---\n# Keep notes\n\nAlways end a report with the folder it covers.\n",
+    )
+    .unwrap();
+    let rt = h.rt.clone();
+    let c2 = chat.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::submit::chat_send(&rt, send_args(&c2, SendOrigin::Action, json!({})), None)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let p = w.expect("prompt").await;
+    let ctx = p["context"].as_str().unwrap_or_default().to_owned();
+    assert!(
+        ctx.contains("[Helm rule]"),
+        "the new rule rides the message: {ctx}"
+    );
+    assert!(ctx.contains("Keep notes"), "whole, with its text");
+    assert_eq!(
+        h.col("SELECT text FROM messages WHERE role = 'context' AND json_extract(details, '$.contextKind') = 'rules'"),
+        ["Rules added: Keep notes"],
+        "one visible Rules row"
+    );
+    ack(&w, &p).await;
+    w.emit(json!({"type": "agent_start"})).await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("idle", |h| h.status(&chat) == "idle").await;
+    // The same context again: the rule was spent, nothing rides and no second row appears.
+    let rt = h.rt.clone();
+    let c2 = chat.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::submit::chat_send(&rt, send_args(&c2, SendOrigin::Action, json!({})), None)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let p = w.expect("prompt").await;
+    assert!(
+        p.get("context").is_none(),
+        "a spent rule does not ride again in the same context"
+    );
+    assert_eq!(
+        h.col("SELECT text FROM messages WHERE role = 'context' AND json_extract(details, '$.contextKind') = 'rules'"),
+        ["Rules added: Keep notes"],
+        "still just the one row"
+    );
+}
+
 /// An approval puts the chat in Needs you and on the badge; answering it takes it off.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn attention_follows_the_waiting_tracker() {
