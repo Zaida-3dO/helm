@@ -503,7 +503,7 @@ fn hold_waiting(rt: &ChatRuntime, chat_id: &str) -> Option<String> {
         .ok()
         .flatten()
         .unwrap_or(false);
-    local.then_some(hold.refusal())
+    local.then_some(hold.held_note())
 }
 
 /// Hand over everything a GPU hold kept from its chat: saved submissions of local-model chats,
