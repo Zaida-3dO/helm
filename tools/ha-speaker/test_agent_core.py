@@ -865,6 +865,37 @@ class RobustnessTest(unittest.TestCase):
         self.assertTrue(r.empty_final)
         self.assertIn("kitchen lights", r.text)
 
+    def test_worked_write_then_late_model_failure_speaks_the_done_work(self):
+        # the light went on in one round; then the next model call died -
+        # slow, refused or non-200 makes no difference. The change stands:
+        # an error line here would send the person to do it a second time.
+        for late in ("timeout", "offline",
+                          {"status": 503, "msg": {}}):
+            with self.subTest(str(late)):
+                r, _, _ = run_case(
+                    [msg_tool([{"id": "1", "name": "light",
+                                "args": {"target": "Kitchen",
+                                         "action": "on"}}]),
+                     late],
+                    tools_kwargs={"outcomes": [{"ok": True, "text": "turned on "
+                                              "the kitchen lights"}]})
+                self.assertEqual(r.kind, agent_core.KIND_ANSWER)
+                self.assertTrue(r.empty_final)
+                self.assertIn("kitchen lights", r.text)
+
+    def test_late_failure_with_nothing_worked_behind_it_is_still_an_error(self):
+        # control rows: only a read had succeeded (or nothing at all), so the
+        # honest failure line still applies exactly as before
+        for late in ("timeout", {"status": 503, "msg": {}}):
+            with self.subTest(str(late)):
+                r, _, _ = run_case(
+                    [msg_tool([{"id": "1", "name": "home_state",
+                                "args": {"target": "Kitchen"}}]),
+                     late],
+                    text="what lights are on?",
+                    tools_kwargs={"outcomes": [{"ok": True}]})
+                self.assertNotEqual(r.kind, agent_core.KIND_ANSWER)
+
     def test_silence_without_any_worked_tool_escalates(self):
         r, tr, _ = run_case(
             [msg_tool([{"id": "1", "name": "light",

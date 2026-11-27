@@ -851,10 +851,18 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
             resp = await _chat(cfg, transport, url, msgs, schemas, model_name,
                                timings, force_tools=force_tools)
             force_tools = False
-            if resp["state"] in ("offline", "timeout"):
-                return {"state": resp["state"]}
-            if resp["state"] != "ok":
-                return {"state": "error"}
+            dead = (resp["state"] if resp["state"] in ("offline", "timeout")
+                    else "error" if resp["state"] != "ok" else None)
+            if dead is not None:
+                # the model died mid-turn. If the change this sentence asked
+                # for already went through an earlier round, that work stands
+                # and speaks its own line - a late failure must not send the
+                # person off to do it again (same shape as said-nothing):
+                if want_write and carried():
+                    return {"state": "answer",
+                            "reply": clean_reply(last_ok_text or "") or "Done.",
+                            "empty_final": True}
+                return {"state": dead}
             content = resp.get("content") or ""
             if resp.get("finish_reason") == "length":
                 capped = True
