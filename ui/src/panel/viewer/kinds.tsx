@@ -210,7 +210,9 @@ registerLinkRoute('file', (req, ctx) => {
  *  by the host's message. */
 registerLinkRoute('path', async (req, ctx) => {
   try {
-    const r = await ops().pathResolve(req.path, ctx.chatId);
+    // Resolve against the session that wrote the link (its folder may differ from the window's);
+    // the tab opens in the chat the window shows.
+    const r = await ops().pathResolve(req.path, ctx.resolveIn ?? ctx.chatId);
     const path = displayPath(r.path);
     const data: FileTabData = { path };
     if (r.kind === 'file' && req.line) data.line = req.line;

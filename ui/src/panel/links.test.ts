@@ -145,18 +145,20 @@ test('file, page and panel links pass the gate only in their strict forms, and o
   const offs = [
     registerLinkRoute('page', (req, ctx) => (seen.push(`page ${req.pageId} ${ctx.chatId}`), req.pageId === 'abc' ? true : 'That page is no longer pinned.')),
     registerLinkRoute('panel', (req) => (seen.push(`panel ${req.view}`), true)),
-    registerLinkRoute('path', (req, ctx) => (seen.push(`path ${req.path}:${req.line} ${ctx.chatId}`), true)),
+    registerLinkRoute('path', (req, ctx) => (seen.push(`path ${req.path}:${req.line} ${ctx.chatId}/${ctx.resolveIn ?? ''}`), true)),
   ];
   try {
     assert.deepEqual(await handleLink(helm('helm://pages/abc'), { chatId: 'c1' }), { ok: true, action: 'page' });
     assert.deepEqual(await handleLink(helm('helm://pages/gone'), { chatId: 'c1' }), { ok: false, reason: 'That page is no longer pinned.' });
     assert.deepEqual(await handleLink(helm('helm://panel/changes'), { chatId: 'c1' }), { ok: true, action: 'panel' });
     assert.deepEqual(await handleLink(helm('helm://files/src%2Fa.ts:7'), { chatId: 'c2' }), { ok: true, action: 'path' });
+    // A link written by an earlier session of a roll-over resolves there but belongs to the shown chat.
+    assert.deepEqual(await handleLink(helm('helm://files/src%2Fa.ts:9'), { chatId: 'c2', resolveIn: 's9' }), { ok: true, action: 'path' });
     assert.equal((await handleLink(helm('helm://files/%5C%5Chost%5Cx'), { chatId: 'c2' })).ok, false);
   } finally {
     offs.forEach((off) => off());
   }
-  assert.deepEqual(seen, ['page abc c1', 'page gone c1', 'panel changes', 'path src/a.ts:7 c2']);
+  assert.deepEqual(seen, ['page abc c1', 'page gone c1', 'panel changes', 'path src/a.ts:7 c2/', 'path src/a.ts:9 c2/s9']);
   assert.deepEqual(outside, [], 'no Helm link ever leaves the app');
 });
 

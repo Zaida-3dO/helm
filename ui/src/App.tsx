@@ -173,9 +173,12 @@ export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers:
       return remoteHostOf(chat, devices.snapshot.list, devices.snapshot.selfUid);
     };
     const noRoom = 'The side panel has no room for another tab.';
+    // The PC a link's file lives on is decided by the session that wrote the link, not by the
+    // chat in the window: an earlier session of a roll-over may have run on a different PC.
+    const resolveId = (ctx: { chatId: string | null; resolveIn?: string | null }) => ctx.resolveIn ?? ctx.chatId;
     const offPage = registerLinkRoute('page', async (req, ctx) => {
       const pages = pageOps(api);
-      const host = await hostOf(ctx.chatId);
+      const host = await hostOf(resolveId(ctx));
       if (host) {
         // The list names only the person's own pins; a pin of someone else's still opens by id.
         const listed = await pages.devicePages().catch(() => null);
@@ -189,7 +192,7 @@ export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers:
     // Panel links (`helm://panel/changes|files|tasks`) show that view for the chat.
     const offPanel = registerLinkRoute('panel', async (req, ctx) => {
       if (req.view === 'tasks') {
-        const host = await hostOf(ctx.chatId);
+        const host = await hostOf(resolveId(ctx));
         return openTasks(api, undefined, host ? ctx.chatId : null) || noRoom;
       }
       if (!ctx.chatId) return 'Open a chat first: that view belongs to a chat.';

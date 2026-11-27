@@ -371,8 +371,10 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       // Every link click goes through the panel's gate, which validates it before acting and
       // shows any refusal in the shell's toast slot itself. File and page links resolve against
       // the session that wrote the row carrying the link — an earlier session of a roll-over
-      // window may run elsewhere than the one shown in the window; without a session it is this chat.
-      onLink: (t: LinkTarget, sessionId?: string) => void handleLink(t, { chatId: sessionId ?? chatId }),
+      // window may run elsewhere than the one shown in the window; without a session it is this
+      // chat. The opened tab still goes to the window's own chat: resolving where a file lives
+      // and opening where a person can see it are two different chats for an earlier row.
+      onLink: (t: LinkTarget, sessionId?: string) => void handleLink(t, { chatId, resolveIn: sessionId ?? chatId }),
       openCards,
       setCardOpen,
     }),

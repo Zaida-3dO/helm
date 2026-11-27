@@ -213,6 +213,13 @@ export type LinkOutcome = { ok: true; action: GateResult['action'] } | { ok: fal
 
 export interface LinkContext {
   chatId: string | null;
+  /**
+   * The session the link was written by, when it differs from the chat shown in the window: an
+   * earlier session of a roll-over window. Path resolution and host lookup run against it, since
+   * its files live where that session ran; tabs still open in `chatId`'s panel set, which is the
+   * one the window shows. Without this the tab would land in the archived session's own set.
+   */
+  resolveIn?: string | null;
   /** Set when the link sits inside a vault note shown in the panel. */
   from?: { vault: string; path: string };
 }
