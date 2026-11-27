@@ -876,7 +876,9 @@ pub fn message_note(profile_dir: &Path, chat_id: &str, gen: u64, _now_ms: i64) -
             .iter()
             .chain(delivered.iter())
             .filter(|(key, (d, _))| {
-                rank(*d) > 0 && !current.iter().any(|c| c.key == **key) && !reported.contains(key.as_str())
+                rank(*d) > 0
+                    && !current.iter().any(|c| c.key == **key)
+                    && !reported.contains(key.as_str())
             })
             .map(|(key, _)| (key.clone(), key_stem(key))),
     );
@@ -915,7 +917,10 @@ pub fn message_note(profile_dir: &Path, chat_id: &str, gen: u64, _now_ms: i64) -
         let mut names: Vec<&str> = gone.iter().map(|(_, stem)| stem.as_str()).collect();
         names.sort();
         names.dedup(); // two layers may name the same rule; say it once, report both keys
-        row_parts.push(format!("These rules no longer apply here: {}", names.join(", ")));
+        row_parts.push(format!(
+            "These rules no longer apply here: {}",
+            names.join(", ")
+        ));
     }
     Some(RuleNote {
         context: context.trim_start().to_owned(),
@@ -1860,22 +1865,42 @@ mod tests {
         std::fs::remove_file(rules.join("kind.md")).unwrap();
         crate::launch::clear_rule_index();
         let note = message_note(dir, chat, 0, 0).expect("deleted rule");
-        assert!(note.row.contains("no longer apply here: kind"), "{}", note.row);
-        assert!(!note.row.contains("sleep"), "already said once: {}", note.row);
+        assert!(
+            note.row.contains("no longer apply here: kind"),
+            "{}",
+            note.row
+        );
+        assert!(
+            !note.row.contains("sleep"),
+            "already said once: {}",
+            note.row
+        );
         mark_message_sent(chat, &note);
         assert!(message_note(dir, chat, 0, 0).is_none());
 
         // A deleted rule that comes back rides as added again — and its next going-away is
         // worth saying afresh.
-        std::fs::write(rules.join("sleep.md"), "# Sleep tight\n\nLights out at nine.\n").unwrap();
+        std::fs::write(
+            rules.join("sleep.md"),
+            "# Sleep tight\n\nLights out at nine.\n",
+        )
+        .unwrap();
         crate::launch::clear_rule_index();
         let note = message_note(dir, chat, 0, 0).expect("re-added rule");
-        assert!(note.row.contains("Rules added: Sleep tight"), "{}", note.row);
+        assert!(
+            note.row.contains("Rules added: Sleep tight"),
+            "{}",
+            note.row
+        );
         mark_message_sent(chat, &note);
         std::fs::remove_file(rules.join("sleep.md")).unwrap();
         crate::launch::clear_rule_index();
         let note = message_note(dir, chat, 0, 0).expect("gone again after coming back");
-        assert!(note.row.contains("no longer apply here: sleep"), "{}", note.row);
+        assert!(
+            note.row.contains("no longer apply here: sleep"),
+            "{}",
+            note.row
+        );
         mark_message_sent(chat, &note);
 
         // A new context generation sends marked rules and gone rows again.

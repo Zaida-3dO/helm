@@ -869,8 +869,17 @@ mod tests {
         .unwrap();
         assert!(!made);
         assert_eq!(again.chat_id, "chat-1");
-        let (other, made) =
-            talk_chat(&file, &port, "s-2", None, None, Some("Alex"),T0 + 61_000, true).unwrap();
+        let (other, made) = talk_chat(
+            &file,
+            &port,
+            "s-2",
+            None,
+            None,
+            Some("Alex"),
+            T0 + 61_000,
+            true,
+        )
+        .unwrap();
         assert!(made && other.chat_id != first.chat_id);
         assert!(
             !first.quick && find(&file, "s-2").unwrap().quick,
@@ -920,7 +929,11 @@ mod tests {
             &policy,
             T0 + 700_000 + 45 * MINUTE_MS
         ));
-        assert!(!previous_usable(&prev, &policy, T0 + 700_000 + 12 * HOUR_MS));
+        assert!(!previous_usable(
+            &prev,
+            &policy,
+            T0 + 700_000 + 12 * HOUR_MS
+        ));
         assert_eq!(
             previous_pointer(&prev),
             "HA speaker kitchen voice 2027-01-15 — It is 7:20. (chat chat-1)"
@@ -933,9 +946,14 @@ mod tests {
         assert!(same_room(prev.room.as_deref(), None) && same_room(None, Some("study")));
         // And it belongs to the speaker who ended, not just the room: a second speaker in the
         // same kitchen keeps its own pointer; an unnamed device stays lenient (older hubs).
-        assert!(same_speaker(prev.device.as_deref(), Some("Kitchen Display")));
+        assert!(same_speaker(
+            prev.device.as_deref(),
+            Some("Kitchen Display")
+        ));
         assert!(!same_speaker(prev.device.as_deref(), Some("bedroom phone")));
-        assert!(same_speaker(prev.device.as_deref(), None) && same_speaker(None, Some("study speaker")));
+        assert!(
+            same_speaker(prev.device.as_deref(), None) && same_speaker(None, Some("study speaker"))
+        );
         let off = PolicyFile {
             previous_hours: 0,
             ..PolicyFile::default()
@@ -951,13 +969,31 @@ mod tests {
         port.successors
             .borrow_mut()
             .insert("chat-2".to_owned(), "succ-9".to_owned());
-        let (followed, made) =
-            talk_chat(&file, &port, "s-2", None, None, Some("Alex"),T0 + 62_000, true).unwrap();
+        let (followed, made) = talk_chat(
+            &file,
+            &port,
+            "s-2",
+            None,
+            None,
+            Some("Alex"),
+            T0 + 62_000,
+            true,
+        )
+        .unwrap();
         assert!(!made && followed.chat_id == "succ-9");
         // No successor: hand-archived still means start fresh.
         port.archived.borrow_mut().insert("succ-9".to_owned());
-        let (fresh, made) =
-            talk_chat(&file, &port, "s-2", None, None, Some("Alex"),T0 + 63_000, false).unwrap();
+        let (fresh, made) = talk_chat(
+            &file,
+            &port,
+            "s-2",
+            None,
+            None,
+            Some("Alex"),
+            T0 + 63_000,
+            false,
+        )
+        .unwrap();
         assert!(made && fresh.chat_id != first.chat_id && fresh.chat_id != "succ-9");
         // Kept chats are listed, kept once, and leave the list when dealt with.
         keep_chat(&file, "chat-1", T0 + 700_000);

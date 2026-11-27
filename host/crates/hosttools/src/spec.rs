@@ -438,7 +438,11 @@ mod tests {
         // escape hatch can still find and call it.
         assert_eq!(tools[0], json!({"name": "app_telegram_send", "core": true}));
         assert_eq!(tools[1]["hidden"], json!(true));
-        assert_eq!(tools[1]["core"], json!(false), "a hidden tool keeps its core flag");
+        assert_eq!(
+            tools[1]["core"],
+            json!(false),
+            "a hidden tool keeps its core flag"
+        );
         assert_eq!(tools[2]["hidden"], json!(true));
         // None named: all hidden, none removed; a catalogue that is not a list is left alone.
         let mut none = all;
