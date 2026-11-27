@@ -37,9 +37,14 @@ export function ContextBar({ chat, rows, host, hasNewer, busy, onRollOver, onSwi
   const rollOverAt = useRolloverTokens();
   if (hasNewer || chat.archived || chat.sideSourceId) return null;
   const size = contextSize(rows, host, chat.id);
-  if (!size || (size.tokens < CONTEXT_SHOWN_TOKENS && (size.pct ?? 0) < SHOWN_PCT)) return null;
+  if (!size) return null;
   const { tokens, window, pct } = size;
   const verdict = contextVerdict(size, host, isLocalModelId(chat.model), rollOverAt);
+  // A local chat past its model's comfortable size always shows the line: a comfort size can
+  // sit under both show-thresholds, and hiding the warning there is what this fixes.
+  if (tokens < CONTEXT_SHOWN_TOKENS && (pct ?? 0) < SHOWN_PCT && verdict.kind === 'small') {
+    return null;
+  }
   const where = pct !== null ? ` of ${compactCount(window!)} (${Math.round(pct)}%)` : '';
   const label = `${compactCount(tokens)} tokens of context${where}`;
   const title =

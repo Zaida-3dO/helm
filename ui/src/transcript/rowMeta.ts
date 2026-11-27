@@ -126,8 +126,13 @@ export function contextVerdict(
   const comfort =
     host?.comfortTokens ??
     (isLocal && host?.windowTokens != null ? Math.floor((host.windowTokens * 7) / 10) : null);
-  if (isLocal && comfort !== null && host?.suggestModel && size.tokens >= comfort) {
-    return { kind: 'tooBig', comfort, suggest: host.suggestModel };
+  if (isLocal && comfort !== null && size.tokens >= comfort) {
+    // Past its model's comfortable size a local chat always reads as large — the percent rule
+    // alone would miss it when the comfort size sits below that share. With a named step-up
+    // model it is tooBig and carries the suggestion.
+    return host?.suggestModel
+      ? { kind: 'tooBig', comfort, suggest: host.suggestModel }
+      : { kind: 'large' };
   }
   const large =
     size.pct !== null

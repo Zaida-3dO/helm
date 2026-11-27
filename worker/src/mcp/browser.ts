@@ -84,9 +84,16 @@ export interface HoldEvent {
 export const OWNER_STEP_LINE = "This step is yours to do in your own browser — say when it is done.";
 export const SIGN_IN_LINE = "Your browser needs a sign-in — do it there, then say done.";
 
+/** Whether a line is data wearing prose's clothes: braces, brackets or a quoted key before a
+ * colon — compact JSON writes `"key":value` with no space at all. */
+function looksLikeData(s: string): boolean {
+  return s.includes("{") || s.includes("[") || /"\s*:/.test(s);
+}
+
 /** The human sentence a broker answer carries: `relay`, `sentence` or `message` at the top level
- * or one level down (`value`, `result`, `data`). An answer that only carries its own shape
- * yields nothing here, so the caller's plain line is used instead. */
+ * or one level down (`value`, `result`, `data`). An answer that only carries its own shape —
+ * or whose relayed field is itself JSON text — yields nothing here, so the caller's plain line
+ * is used instead. */
 function relayedSentence(text: string): string {
   let j: unknown;
   try {
@@ -100,7 +107,9 @@ function relayedSentence(text: string): string {
     if (!box || typeof box !== "object") continue;
     for (const k of ["relay", "sentence", "message"]) {
       const v = (box as Record<string, unknown>)[k];
-      if (typeof v === "string" && v.trim()) return v.replace(/\s+/g, " ").trim().slice(0, 240);
+      if (typeof v === "string" && v.trim() && !looksLikeData(v)) {
+        return v.replace(/\s+/g, " ").trim().slice(0, 240);
+      }
     }
   }
   return "";
@@ -111,9 +120,10 @@ export function sentenceOf(text: string, fallback: string): string {
   const relayed = relayedSentence(text);
   if (relayed) return relayed;
   // Prose stays prose (minus a refusal's mechanism tag); anything that is still shaped like
-  // JSON falls back to the worker's own line rather than quoting the server.
+  // JSON — anywhere in the line, spaced or compact — falls back to the worker's own line
+  // rather than quoting the server.
   const s = text.trim().replace(/^refused\s*\([^)]*\):\s*/i, "");
-  if (!s || s.startsWith("{") || s.startsWith("[") || /"\s*:\s/.test(s)) return fallback;
+  if (!s || looksLikeData(s)) return fallback;
   return s.replace(/\s+/g, " ").slice(0, 240);
 }
 

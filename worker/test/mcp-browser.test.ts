@@ -120,6 +120,9 @@ test("the card line is always a plain sentence for the person — raw data never
     // An answer that only carries its own shape is never quoted at the person: their line.
     ['{"attached":{"needs_owner":true},"hint":"call browser_sign_in","wait_seconds":600}', OWNER_STEP_LINE, OWNER_STEP_LINE],
     ['[{"needs_owner":true}]', SIGN_IN_LINE, SIGN_IN_LINE],
+    // Compact JSON wears no space after the colon: still data, wherever it sits.
+    ['{"outcome":"accepted","message":"{\\"outcome\\":\\"accepted\\"}"}', SIGN_IN_LINE, SIGN_IN_LINE],
+    ['see {"outcome":"accepted"} in the log', "fallback line", "fallback line"],
     // Prose relays, minus a refusal's mechanism tag.
     ["refused (attached.needs_owner): this step is the owner's to do in their own browser", "fallback line", "this step is the owner's to do in their own browser"],
   ];

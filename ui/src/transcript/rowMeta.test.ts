@@ -114,7 +114,9 @@ test('the verdict: quiet under the window, large near it, and outgrown only past
     ['claude at 95% earns the Roll over bar', 190_000, 200_000, reading(190_000, 200_000), false, 300_000, { kind: 'large' }],
     // A local chat follows the same rules when nobody set a comfort size or suggested anything.
     ['local at 75% of the window is large', 75_000, 100_000, reading(75_000, 100_000), true, 300_000, { kind: 'large' }],
-    ['a comfort size alone changes nothing without a suggestion', 80_000, 200_000, reading(80_000, 200_000, 60_000), true, 300_000, { kind: 'small' }],
+    // Past its comfort a local chat reads as large even with no step-up model named — the
+    // percent rule alone would miss it when the comfort sits lower than that share.
+    ['a comfort size past without a suggestion is still large', 80_000, 200_000, reading(80_000, 200_000, 60_000), true, 300_000, { kind: 'large' }],
     // Out of the comfort with a suggestion named: Switch first, and the banner carries both.
     ['past its comfort it names the step-up', 80_000, 200_000, reading(80_000, 200_000, 60_000, 'local/ollama/big'), true, 300_000, { kind: 'tooBig', comfort: 60_000, suggest: 'local/ollama/big' }],
     // At the size itself it has outgrown what works well.

@@ -359,19 +359,19 @@ function RuleEditor({ ops, layer, options, busy, run, confirm, other, rule, onCl
               </div>
               <div className="kn-field kn-field-col">
                 <span className="kn-label">Machines the work reaches</span>
-                <WordList testIdBase="knowledge-rule-when-hosts" ariaLabel="Machines the work reaches" placeholder="nas1, 192.0.2.10" values={when.hosts} onChange={(v) => set('hosts', v)} disabled={!loaded} />
+                <WordList testIdBase="knowledge-rule-when-hosts" ariaLabel="Machines the work reaches" placeholder="e.g. nas1, 192.0.2.10" values={when.hosts} onChange={(v) => set('hosts', v)} disabled={!loaded} />
               </div>
               <div className="kn-field kn-field-col">
                 <span className="kn-label">Only on these PCs</span>
-                <WordList testIdBase="knowledge-rule-when-pcs" ariaLabel="PC names this rule's chats run on" placeholder="pc-a" values={when.pcs} onChange={(v) => set('pcs', v)} disabled={!loaded} />
+                <WordList testIdBase="knowledge-rule-when-pcs" ariaLabel="PC names this rule's chats run on" placeholder="e.g. pc-a" values={when.pcs} onChange={(v) => set('pcs', v)} disabled={!loaded} />
               </div>
               <div className="kn-field kn-field-col">
                 <span className="kn-label">Tools to watch for</span>
-                <WordList testIdBase="knowledge-rule-when-tools" ariaLabel="Tool names to watch for" placeholder="Bash, PowerShell, Read, Edit, mcp__github__*" values={when.tools} onChange={(v) => set('tools', v)} disabled={!loaded} />
+                <WordList testIdBase="knowledge-rule-when-tools" ariaLabel="Tool names to watch for" placeholder="e.g. Bash, PowerShell, Read, Edit, mcp__github__*" values={when.tools} onChange={(v) => set('tools', v)} disabled={!loaded} />
               </div>
               <div className="kn-field kn-field-col">
                 <span className="kn-label">Commands to watch for</span>
-                <WordList testIdBase="knowledge-rule-when-commands" ariaLabel="Commands to watch for" placeholder="taskkill, pkill, git push" values={when.commands} onChange={(v) => set('commands', v)} disabled={!loaded} />
+                <WordList testIdBase="knowledge-rule-when-commands" ariaLabel="Commands to watch for" placeholder="e.g. taskkill, pkill, git push" values={when.commands} onChange={(v) => set('commands', v)} disabled={!loaded} />
               </div>
             </div>
             <div className="kn-field">
