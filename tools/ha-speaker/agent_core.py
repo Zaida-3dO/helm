@@ -76,6 +76,14 @@ brighter dimmer brightness colour color hue kelvin temperature set sets
 open closes
 """.split())
 
+# Verbs that ask for something to be changed (as opposed to colour/kelvin and
+# the rest, which are nouns a read question can carry too). A write request is
+# only carried by a tool call that actually wrote.
+_WRITE_VERBS = frozenset("""
+turn turns turned toggle switch switches dim dims brighten brightens darken
+set sets put puts make makes open closes
+""".split())
+
 _WORD_RE = re.compile(r"[a-z0-9']+")
 
 
@@ -87,6 +95,44 @@ def is_home_control(text):
         return False
     tokens = set(_WORD_RE.findall(text.lower()))
     return bool(tokens & (_CONTROL_OBJECTS | _CONTROL_ACTIONS))
+
+
+# Each recorded tool call carries its character so the gate can tell "the ask
+# really happened" from "a read happened to work". Everything that can change
+# the house is a write; status actions and the two room reads are reads.
+_WRITE_TOOLS = ("light", "climate", "timer")
+
+
+def _call_kind(name, args):
+    if name in ("home_state", "home_status"):
+        return "read"
+    if name in _WRITE_TOOLS:
+        action = str((args or {}).get("action") or "").lower()
+        return "read" if action == "status" else "write"
+    return "write"  # an unknown tool attempted a change until proven otherwise
+
+
+# Words that read like the ask was carried out. A reply carrying one may not be
+# spoken over a turn nothing wrote; a plain ask-back never carries one.
+_CLAIM_WORDS = frozenset("""
+done already finished all set turned switched changed made put moved
+opened closed off on now ready
+""".split())
+
+
+def _is_claim(text):
+    return bool(set(_WORD_RE.findall(str(text).lower())) & _CLAIM_WORDS)
+
+
+def _pure_question(reply):
+    """One clean question and nothing else: ends in '?', no other sentence end
+    inside, and no done-words. "Which room?" yes; "Done, the lights are red
+    now. Anything else?" no - that hides a success claim behind a question."""
+    if not ends_with_question(reply):
+        return False
+    if re.search(r"[.!]", reply):
+        return False
+    return not _is_claim(reply)
 
 
 # Shown to the model when it answered a house request without using a tool.
@@ -174,7 +220,7 @@ class Config:
 class TurnResult:
     text: str                      # what to speak (fixed sentence on failures)
     kind: str                      # answer | escalate | offline | error | timeout
-    tool_calls: list = field(default_factory=list)   # [{name, args, ok, ms}]
+    tool_calls: list = field(default_factory=list)   # [{name, args, kind, ok, ms}]
     timings: dict = field(default_factory=dict)      # prompt_ms, model_ms[], tool_ms[], total_ms
     model_used: str = None         # model name; "escalate" after the retry
     prompt_hash: str = None        # sha256 over version + system text + tool defs
@@ -560,8 +606,9 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
         + _history_messages(ctx, cfg, clock)
         + [{"role": "user", "content": str(text)}])
 
-    collected = []  # every tool attempt this turn: {name, args, ok, ms[, error]}
+    collected = []  # every tool attempt this turn: {name, args, kind, ok, ms[...]}
     control_ask = is_home_control(text)
+    want_write = bool(set(_WORD_RE.findall(str(text).lower())) & _WRITE_VERBS)
     guard_state = {"reprompt": False, "blocked": False}
 
     def result(kind, sentence, escalate_text=None, model_used=cfg.model_name,
@@ -594,6 +641,14 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
         force_tools = False  # set by the gate: next call demands a tool
         reprompted = False
 
+        def carried():
+            """Did a tool really carry this turn? A write request needs a
+            successful WRITE - a home_state read that happened to work proves
+            nothing about the change that was asked for."""
+            ok_calls = [c for c in collected if c["ok"]]
+            return bool(ok_calls) and (not want_write or any(
+                c.get("kind") == "write" for c in ok_calls))
+
         def gate(reply, raw_content, round_no):
             """Words are about to be spoken for a house request. None lets
             them through; otherwise returns the state that must go instead -
@@ -601,28 +656,30 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
             nonlocal force_tools, reprompted
             if not (guarded and control_ask):
                 return None
-            if any(c["ok"] for c in collected):
+            if carried():
                 return None  # a tool really did carry this turn
-            if not collected:
-                if ends_with_question(reply):
-                    return None  # an honest ask-back claims no success
-                if not reprompted and schemas \
-                        and round_no < int(cfg.max_tool_rounds):
-                    msgs.append({"role": "assistant",
-                                 "content": raw_content or None})
-                    msgs.append({"role": "user",
-                                 "content": GUARD_REPROMPT_TEXT})
-                    reprompted = True
-                    force_tools = True
-                    guard_state["reprompt"] = True
-                    return {"state": "retry"}
+            if collected and not any(c["ok"] for c in collected):
+                # tools ran and every one failed: our own sentence from the
+                # tools' reasons, never the model's claim of success
                 guard_state["blocked"] = True
-                return {"state": "guard_none"}
-            # tools ran and every one failed: our own sentence from the
-            # tools' reasons, never the model's claim of success
+                return {"state": "answer",
+                        "reply": _failure_sentence(collected)}
+            if _pure_question(reply):
+                return None  # an honest ask-back claims no success
+            # nothing has run at all, or only reads worked for an ask that
+            # wanted a change: those words claim something nobody did
+            if not reprompted and schemas \
+                    and round_no < int(cfg.max_tool_rounds):
+                msgs.append({"role": "assistant",
+                             "content": raw_content or None})
+                msgs.append({"role": "user",
+                             "content": GUARD_REPROMPT_TEXT})
+                reprompted = True
+                force_tools = True
+                guard_state["reprompt"] = True
+                return {"state": "retry"}
             guard_state["blocked"] = True
-            return {"state": "answer",
-                    "reply": _failure_sentence(collected)}
+            return {"state": "guard_none"}
 
         for round_no in range(int(cfg.max_tool_rounds) + 1):
             resp = await _chat(cfg, transport, url, msgs, schemas, model_name,
@@ -661,7 +718,7 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
                             continue
                         return override
                     return {"state": "answer", "reply": reply}
-                if any(c["ok"] for c in collected):
+                if carried():
                     # The house action already succeeded; a model that then
                     # says nothing (thinking ate the token budget) must not
                     # deny something that worked. Speak the tool's own line.
@@ -676,7 +733,7 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
                 # still calling tools past the budget: judge any text once and
                 # stop rather than looping forever.
                 reply = clean_reply(content)
-                if not reply and any(c["ok"] for c in collected):
+                if not reply and carried():
                     spoken = clean_reply(last_ok_text or "") or "Done."
                     return {"state": "answer", "reply": spoken,
                             "empty_final": True}
@@ -696,16 +753,19 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
                                                      "arguments": json.dumps(args or {})}})
                 if err is not None:
                     was_bad = True
-                    collected.append({"name": name, "args": {}, "ok": False,
-                                      "ms": 0,
+                    collected.append({"name": name, "args": {},
+                                      "kind": _call_kind(name, {}),
+                                      "ok": False, "ms": 0,
                                       "error": "bad arguments: " + err[:150]})
                     tool_msgs.append({"role": "tool", "tool_call_id": call_id,
                                       "content": json.dumps(
                                           {"ok": False, "error": "bad arguments: " + err})})
                 elif name not in known_names:
                     was_bad = True
-                    collected.append({"name": name, "args": args, "ok": False,
-                                      "ms": 0, "error": "unknown tool: " + name})
+                    collected.append({"name": name, "args": args,
+                                      "kind": _call_kind(name, args),
+                                      "ok": False, "ms": 0,
+                                      "error": "unknown tool: " + name})
                     tool_msgs.append({"role": "tool", "tool_call_id": call_id,
                                       "content": json.dumps(
                                           {"ok": False, "error": "unknown tool: " + name})})
@@ -724,6 +784,7 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
                             and outcome["text"].strip():
                         last_ok_text = outcome["text"]
                     entry = {"name": name, "args": args,
+                             "kind": _call_kind(name, args),
                              "ok": ok_now, "ms": ms}
                     if not ok_now:
                         # kept so a failed house turn can be spoken honestly

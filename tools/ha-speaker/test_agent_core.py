@@ -431,6 +431,86 @@ class HomeControlGateTest(unittest.TestCase):
         self.assertFalse(r.guard_reprompt or r.guard_blocked)
         self.assertEqual(len(tr.seen), 1)
 
+    def test_read_success_does_not_carry_a_write_request(self):
+        # was: a home_state that worked made the gate trust "the lights are
+        # now red" - a read proves nothing about a change that was never done.
+        r, tr, tools = run_case(
+            [msg_tool([{"id": "1", "name": "home_state",
+                        "args": {"target": "Kitchen"}}]),
+             msg_text("The kitchen lights are now red."),
+             msg_tool([{"id": "2", "name": "light",
+                        "args": {"target": "Kitchen", "action": "set",
+                                 "color": "red"}}]),
+             msg_text("Red now, all of them.")],
+            text="turn the kitchen lights to red",
+            tools_kwargs={"outcomes": [{"ok": True, "text": "2 lights on"},
+                                       {"ok": True, "text": "done"}]})
+        self.assertEqual(r.kind, agent_core.KIND_ANSWER)
+        self.assertEqual(r.text, "Red now, all of them.")
+        self.assertTrue(r.guard_reprompt)
+        self.assertFalse(r.guard_blocked)
+        self.assertEqual([c[0] for c in tools.calls], ["home_state", "light"])
+        # the forced call is exactly one round later than before
+        self.assertEqual([s["body"]["tool_choice"] for s in tr.seen],
+                         ["auto", "auto", "required", "auto"])
+        # every recorded call says whether it read or wrote
+        kinds = [c.get("kind") for c in r.tool_calls]
+        self.assertEqual(kinds, ["read", "write"])
+
+    def test_claim_question_sends_the_turn_back_to_the_gate(self):
+        # a success claim wearing a question mark at the end: the gate must
+        # see through it and force the tool once.
+        r, tr, tools = run_case(
+            [msg_text("Done, the kitchen lights are red now. Anything else?"),
+             msg_tool([{"id": "1", "name": "light",
+                        "args": {"target": "Kitchen", "action": "set",
+                                 "color": "red"}}]),
+             msg_text("Red now.")],
+            text="turn the kitchen lights to red",
+            tools_kwargs={"outcomes": [{"ok": True}]})
+        self.assertEqual(r.kind, agent_core.KIND_ANSWER)
+        self.assertEqual(r.text, "Red now.")
+        self.assertTrue(r.guard_reprompt)
+        self.assertFalse(r.guard_blocked)
+        self.assertEqual(len(tools.calls), 1)
+
+    def test_claim_question_never_spoken_even_after_forcing(self):
+        r, tr, _ = run_case(
+            [msg_text("Done, the kitchen lights are red now. Anything else?"),
+             msg_text("All set and red, alright?")],
+            text="turn the kitchen lights to red",
+            cfg_extra={"escalate_url": None})
+        self.assertEqual(r.kind, agent_core.KIND_ERROR)
+        self.assertEqual(r.text, agent_core.CONTROL_TEXT)
+        self.assertTrue(r.guard_reprompt and r.guard_blocked)
+        self.assertEqual(len(tr.seen), 2)
+
+    def test_call_kind_table(self):
+        cases = [
+            ("home_state", {"target": "Kitchen"}, "read"),
+            ("home_status", {"kind": "chores"}, "read"),
+            ("light", {"action": "status", "target": "Kitchen"}, "read"),
+            ("light", {"action": "on", "target": "Kitchen"}, "write"),
+            ("climate", {"action": "set", "target": "Kitchen"}, "write"),
+            ("timer", {"action": "start", "minutes": 1}, "write"),
+            ("timer", {"action": "status"}, "read"),
+            ("HassTurnOn", {}, "write"),   # unknown attempts: write until proven
+        ]
+        for name, args, want in cases:
+            self.assertEqual(agent_core._call_kind(name, args), want, name)
+
+    def test_pure_question_table(self):
+        cases = [
+            ("Which room?", True),
+            ("Which room? Which light?", True),   # two questions, no claims
+            ("Done, the lights are red now. Anything else?", False),
+            ("All set and red, alright?", False),  # single sentence, done-words
+            ("The kitchen is on.", False),
+            ("Which one did you mean?", True),
+        ]
+        for text, want in cases:
+            self.assertEqual(agent_core._pure_question(text), want, text)
+
     def test_chitchat_never_reaches_the_gate(self):
         # the joke turn: one request, tool_choice auto, no forcing
         r, tr, _ = run_case(
