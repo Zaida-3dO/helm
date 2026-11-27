@@ -83,6 +83,10 @@ struct Change {
     from: Value,
     to: Value,
     value: Value,
+    /// The key's own card lines (written from the host's records), when the generic rows would
+    /// not say what happens.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    lines: Vec<String>,
 }
 
 /// The canonical target: every staged change with the value it replaces.
@@ -125,6 +129,78 @@ fn label(key: &str) -> &str {
 /// A value in a sentence: switches as on and off, text as it is, "default" for a setting at
 /// its own behaviour (and "none" for the update folder).
 fn show(key: &str, v: &Value) -> String {
+    visible(&plain(key, v))
+}
+
+/// A value as one visible run: a line break, tab or other control character is shown as a mark
+/// and never ends the row, so one value is always one row of the card.
+fn visible(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\n' | '\r' | '\u{2028}' | '\u{2029}' => "\u{23ce}".to_owned(),
+            '\t' => " ".to_owned(),
+            // Control characters and the marks that reorder or hide text are shown as what they
+            // are: nothing on the card may change how the rest of it reads.
+            c if c.is_control()
+                || matches!(
+                    c,
+                    '\u{200b}'..='\u{200f}'
+                        | '\u{202a}'..='\u{202e}'
+                        | '\u{2060}'..='\u{2069}'
+                        | '\u{feff}'
+                ) =>
+            {
+                format!("<U+{:04X}>", c as u32)
+            }
+            c => c.to_string(),
+        })
+        .collect()
+}
+
+/// The longest a value runs in a row of the card; the rest of a longer one is shown whole under
+/// the rows.
+const ROW_VALUE: usize = 60;
+/// The most characters of full text shown under the rows; past it the card says how much more
+/// there is.
+const DETAIL_BUDGET: usize = 6_000;
+/// Longest line of the wrapped full text.
+const WRAP: usize = 220;
+
+/// `s` cut to `max` characters with a visible mark when it was longer.
+fn short(s: &str, max: usize) -> (String, bool) {
+    let n = s.chars().count();
+    if n <= max {
+        (s.to_owned(), false)
+    } else {
+        let head: String = s.chars().take(max).collect();
+        (format!("{head}\u{2026}"), true)
+    }
+}
+
+/// `s` as lines of at most `max` characters.
+fn wrapped(s: &str, max: usize) -> Vec<String> {
+    let chars: Vec<char> = s.chars().collect();
+    chars
+        .chunks(max)
+        .map(|c| c.iter().collect::<String>())
+        .collect()
+}
+
+/// Put `text` under the rows in full, as lines under `heading`, while the budget lasts; past it
+/// a line says how many characters were left out.
+fn full_text(details: &mut Vec<String>, heading: String, text: &str, budget: &mut usize) {
+    details.push(heading);
+    let n = text.chars().count();
+    let take = n.min(*budget);
+    let head: String = text.chars().take(take).collect();
+    details.extend(wrapped(&head, WRAP));
+    *budget -= take;
+    if take < n {
+        details.push(format!("\u{2026} ({} more characters not shown)", n - take));
+    }
+}
+
+fn plain(key: &str, v: &Value) -> String {
     match v {
         Value::Null if key == "updateSource" => "none".into(),
         Value::Null => "default".into(),
@@ -204,13 +280,19 @@ fn field_changes<'a>(from: &'a Value, to: &'a Value) -> Vec<(String, &'a Value, 
     out
 }
 
-/// The card's lines: the title, then one line per change. Every value is shown whole; a target
-/// whose lines would not fit is refused rather than cut.
-fn card_lines(s: &Staged) -> Result<Vec<String>, String> {
+/// The card: its lines (the title, then one row per change) and the full text of any value too
+/// long for its row. Every value is shown as one visible run, a long one cut in its row with a
+/// mark and given whole under the rows, so no change is ever refused for being long.
+fn card_lines(s: &Staged) -> (Vec<String>, Vec<String>) {
     let mut lines = vec![TITLE.to_owned()];
+    let mut details: Vec<String> = Vec::new();
+    let mut budget = DETAIL_BUDGET;
     if let Some((_, name)) = &s.person {
-        lines.push(format!(
-            "For {name}'s own copy of the settings that are a person's"
+        lines.extend(wrapped(
+            &visible(&format!(
+                "For {name}'s own copy of the settings that are a person's"
+            )),
+            WRAP,
         ));
     }
     if let Some(p) = &s.hub_pairing {
@@ -219,20 +301,26 @@ fn card_lines(s: &Staged) -> Result<Vec<String>, String> {
         } else {
             format!(" (fallback {})", host_port(&p.fallback))
         };
-        lines.push(format!(
-            "Pair with the hub at {}{fallback} as {} on {}",
-            host_port(&p.address),
-            p.person,
-            p.machine
+        lines.extend(wrapped(
+            &format!(
+                "Pair with the hub at {}{fallback} as {} on {}",
+                host_port(&p.address),
+                p.person,
+                p.machine
+            ),
+            WRAP,
         ));
-        lines.push(format!("One-time code read from the file {}", p.code_file));
+        lines.extend(wrapped(
+            &format!("One-time code read from the file {}", p.code_file),
+            WRAP,
+        ));
         lines.push(
             "Helm pairs only if the hub answers with the person and computer named here.".into(),
         );
         if !p.replaces.is_empty() {
-            lines.push(format!(
-                "This replaces the current pairing (as {}).",
-                p.replaces
+            lines.extend(wrapped(
+                &format!("This replaces the current pairing (as {}).", p.replaces),
+                WRAP,
             ));
         }
     }
@@ -242,6 +330,12 @@ fn card_lines(s: &Staged) -> Result<Vec<String>, String> {
         ));
     }
     for (key, c) in &s.settings {
+        if !c.lines.is_empty() {
+            for l in &c.lines {
+                lines.extend(wrapped(&visible(l), WRAP));
+            }
+            continue;
+        }
         // A setting that is an object shows the fields that change, not the whole of it.
         let parts = field_changes(&c.from, &c.to);
         let rows: Vec<(String, &Value, &Value)> = if parts.is_empty() {
@@ -253,27 +347,19 @@ fn card_lines(s: &Staged) -> Result<Vec<String>, String> {
                 .collect()
         };
         for (name, f, t) in rows {
+            let name = visible(&name);
             let (from, to) = (show(key, f), show(key, t));
-            let one = format!("{name}: {from} → {to}");
-            if one.chars().count() <= helm_consent::kinds::MAX_SUMMARY_LINE {
-                lines.push(one);
+            let ((sf, cut_f), (st, cut_t)) = (short(&from, ROW_VALUE), short(&to, ROW_VALUE));
+            if cut_f || cut_t {
+                lines.push(format!("{name}: {sf} \u{2192} {st} (in full below)"));
+                full_text(&mut details, format!("{name} now:"), &from, &mut budget);
+                full_text(&mut details, format!("{name} after:"), &to, &mut budget);
             } else {
-                lines.push(format!("{name} now: {from}"));
-                lines.push(format!("{name} after: {to}"));
+                lines.push(format!("{name}: {from} \u{2192} {to}"));
             }
         }
     }
-    let fits = lines
-        .iter()
-        .all(|l| l.chars().count() <= helm_consent::kinds::MAX_SUMMARY_LINE)
-        && lines.join("\n").chars().count() <= helm_consent::kinds::MAX_SUMMARY;
-    if !fits {
-        return Err(
-            "These changes are too long to show on one card: stage fewer, or use shorter values."
-                .into(),
-        );
-    }
-    Ok(lines)
+    (lines, details)
 }
 
 /// The kind's canonical target: the staged changes as this module built them, and their card.
@@ -282,12 +368,12 @@ fn card_lines(s: &Staged) -> Result<Vec<String>, String> {
 fn canonical(_tx: &Transaction<'_>, _chat: &str, target: &Value) -> Result<Canonical, String> {
     let staged: Staged = serde_json::from_value(target.clone())
         .map_err(|_| "Stage these changes with app_stage_settings.".to_owned())?;
-    let lines = card_lines(&staged)?;
+    let (lines, details) = card_lines(&staged);
     Ok(Canonical {
         target: serde_json::to_value(&staged).map_err(|e| e.to_string())?,
         summary: lines.join("\n"),
         fixed_form: String::new(),
-        details: Vec::new(),
+        details,
     })
 }
 
@@ -507,10 +593,14 @@ fn build(
         )?;
         let mut unchanged: Vec<String> = Vec::new();
         for ((key, value), w) in wanted.iter().zip(would) {
+            let lines = w.card.clone().unwrap_or_default();
             let from = effective(key, w.before.as_ref());
             let to = effective(key, w.after.as_ref());
             if from == to {
-                unchanged.push(format!("{key} is already {}", show(key, &to)));
+                unchanged.push(format!(
+                    "{key} is already {}",
+                    short(&show(key, &to), ROW_VALUE).0
+                ));
             }
             staged.settings.insert(
                 key.clone(),
@@ -518,6 +608,7 @@ fn build(
                     from,
                     to,
                     value: value.clone(),
+                    lines,
                 },
             );
         }
@@ -528,7 +619,6 @@ fn build(
             ));
         }
     }
-    card_lines(&staged)?;
     Ok(staged)
 }
 

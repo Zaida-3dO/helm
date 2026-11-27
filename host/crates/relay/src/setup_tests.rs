@@ -74,9 +74,11 @@ fn env_with(own_hub_ok: bool) -> Env {
     }
     let rules = crate::pref_rules::pref_rules(&s, &events);
     s.insert(Arc::new(helm_hosttools::PrefRules(rules)));
-    s.insert(Arc::new(helm_hosttools::SettingsExtensions(vec![
-        crate::settings_extension(&profile.dir),
-    ])));
+    let mut extensions = vec![crate::settings_extension(&profile.dir)];
+    extensions.extend(helm_profiles::settings_keys::settings_extensions(
+        &Services::new(),
+    ));
+    s.insert(Arc::new(helm_hosttools::SettingsExtensions(extensions)));
     s.insert(Arc::new(profile));
     s.insert(Arc::new(platform));
     s.insert(db.clone());
@@ -602,6 +604,183 @@ fn any_approval_setting_is_staged_applied_and_left_for_the_users_undo() {
     assert_eq!(
         show("localServers", &servers),
         "Mine at http://127.0.0.1:9, folder D:/S (off); Other at http://127.0.0.1:8, preset Fast"
+    );
+}
+
+/// A value is one row of the card however odd or long it is: a line break or a text-reordering
+/// mark cannot add or hide a row, and a long value is cut in its row with a mark and given whole
+/// under the rows, never refused for its length.
+#[test]
+fn a_value_is_one_row_of_the_card_however_odd_or_long_it_is() {
+    let e = env();
+    let policy = |to: &str| Staged {
+        settings: BTreeMap::from([(
+            "gatekeeper".to_owned(),
+            Change {
+                from: json!({"policy": "Old."}),
+                to: json!({"policy": to}),
+                value: json!({"policy": to}),
+                lines: Vec::new(),
+            },
+        )]),
+        ..Staged::default()
+    };
+    let long = "Ask me first. ".repeat(70);
+    let huge = "x".repeat(9000);
+    // (the new policy, whether the row points to the full text, text the full text must hold)
+    for (to, in_full, expect) in [
+        ("Ask me first.", false, ""),
+        (
+            "Ask me first.\nNothing else on this card changes.\r\nOr this.",
+            false,
+            "",
+        ),
+        ("a\u{202e}b\u{1b}[31mc\u{200b}", false, ""),
+        (long.as_str(), true, "Ask me first. Ask me first."),
+        (huge.as_str(), true, "more characters not shown"),
+    ] {
+        let target = serde_json::to_value(policy(to)).unwrap();
+        let card =
+            e.db.snapshot(|tx| {
+                canonical(tx, "home", &target).map_err(rusqlite::Error::InvalidParameterName)
+            })
+            .unwrap();
+        let rows: Vec<&str> = card.summary.lines().collect();
+        assert_eq!(rows.len(), 2, "one title and one row: {rows:?}");
+        assert!(
+            rows[1].starts_with("gatekeeper.policy: Old. \u{2192} "),
+            "{rows:?}"
+        );
+        assert!(
+            card.summary
+                .chars()
+                .all(|c| c == '\n' || !c.is_control() && !('\u{202a}'..='\u{202e}').contains(&c)),
+            "{:?}",
+            card.summary
+        );
+        assert!(rows
+            .iter()
+            .all(|l| l.chars().count() <= helm_consent::kinds::MAX_SUMMARY_LINE));
+        assert_eq!(rows[1].ends_with("(in full below)"), in_full, "{rows:?}");
+        assert_eq!(card.details.is_empty(), !in_full);
+        assert!(card.details.join("\n").contains(expect), "{expect}");
+        assert!(card.details.iter().all(|l| l.chars().count() <= 240));
+    }
+    let odd = policy("Ask.\nNothing else changes.");
+    let (lines, _) = card_lines(&odd);
+    assert!(
+        lines[1].contains('\u{23ce}'),
+        "the break is shown: {lines:?}"
+    );
+}
+
+/// Removing a profile is one card that names the profile, says where its chats go and that there
+/// is no Undo, however many profiles there are; Approve removes exactly that one.
+#[test]
+fn removing_a_profile_is_one_clear_card_however_many_profiles_there_are() {
+    let e = env();
+    let ids: Vec<(String, String)> = e
+        .db
+        .write(|tx| {
+            let mut out = Vec::new();
+            for (n, name) in ["Bea", "Cato", "Dara", "Eliot", "Fenella-with-a-long-name"]
+                .iter()
+                .enumerate()
+            {
+                let p = helm_profiles::store::create(tx, name, None, None, 3 + n as i64)?;
+                out.push((p.id, p.name));
+            }
+            // Two chats of Cato's move to Home with him.
+            for c in ["c1", "c2"] {
+                tx.execute(
+                    "INSERT INTO chats(id, project_id, created_at, updated_at) VALUES (?1, 'p', 1, 1)",
+                    [c],
+                )?;
+            }
+            helm_profiles::store::assign(tx, &["c1".into(), "c2".into()], &out[1].0)?;
+            Ok::<_, helm_profiles::store::ProfileError>(out)
+        })
+        .unwrap();
+    let (cato_id, _) = ids[1].clone();
+    // Home, Alex and five more: a list of every name and id is far past one row.
+    let staged = e
+        .stage("home", json!({"deleteProfile": {"id": cato_id}}))
+        .unwrap();
+    assert_eq!(staged["state"], "pending");
+    let lines: Vec<String> = serde_json::from_value(staged["changes"].clone()).unwrap();
+    let said = lines.join("\n");
+    assert!(said.contains("Remove the profile Cato"), "{said}");
+    assert!(
+        said.contains("Its 2 chats (0 working now) move to"),
+        "{said}"
+    );
+    assert!(said.contains("there is no Undo"), "{said}");
+    assert!(
+        !said.contains("Bea"),
+        "only the removed profile is named: {said}"
+    );
+    let outcome = e.approve(staged["requestId"].as_str().unwrap());
+    assert!(outcome.starts_with("Applied."), "{outcome}");
+    let left: Vec<String> =
+        e.db.snapshot(|tx| {
+            tx.prepare("SELECT name FROM profiles ORDER BY name")?
+                .query_map([], |r| r.get(0))?
+                .collect()
+        })
+        .unwrap();
+    assert_eq!(left.len(), 6);
+    assert!(!left.contains(&"Cato".to_owned()) && left.contains(&"Bea".to_owned()));
+    // The chats are the home profile's now, and no Undo is offered for the removal.
+    let owner: String =
+        e.db.snapshot(|tx| {
+            tx.query_row("SELECT profile_id FROM chats WHERE id = 'c1'", [], |r| {
+                r.get(0)
+            })
+        })
+        .unwrap();
+    let home: String =
+        e.db.snapshot(|tx| {
+            tx.query_row("SELECT id FROM profiles WHERE is_home = 1", [], |r| {
+                r.get(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(owner, home);
+    let ring: i64 =
+        e.db.snapshot(|tx| {
+            tx.query_row(
+                "SELECT COUNT(*) FROM settings_changes WHERE key = 'deleteProfile'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(ring, 0, "a removal has no Undo, so the ring holds none");
+}
+
+/// The home person's older single-person policy file is not lost when a chat is the first to
+/// change it: the change lands on that file, and the move into the person's folder keeps it.
+#[test]
+fn a_chats_first_change_keeps_the_older_policy_file_of_the_home_person() {
+    let e = env();
+    let dir = e
+        .services
+        .get::<helm_core::profile::Profile>()
+        .unwrap()
+        .dir
+        .clone();
+    let older = crate::telegram::policy_path(&dir);
+    std::fs::create_dir_all(older.parent().unwrap()).unwrap();
+    std::fs::write(&older, r#"{"maxAgeHours": 12, "maxTokens": 400000}"#).unwrap();
+    e.update("home", json!({"telegram": {"model": "opus"}}))
+        .unwrap();
+    let kept = crate::telegram::load_file(&older);
+    assert_eq!((kept.max_age_hours, kept.new_chat().0), (12, Some("opus")));
+    crate::people::migrate(&dir, &e.db);
+    let moved = e.telegram_policy("home");
+    assert_eq!(
+        (moved.max_age_hours, moved.new_chat().0),
+        (12, Some("opus"))
     );
 }
 

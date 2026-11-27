@@ -134,6 +134,36 @@ fn save(tx: &Transaction<'_>, v: &Value, prune: bool) -> Result<Value, String> {
     list_value(tx)
 }
 
+/// What the card says about removing a profile: whose it is, how many chats move to the home
+/// profile (and how many of them are working), whether the asking chat is one, and that there is
+/// no Undo. Written from Helm's own records.
+fn removal_card(tx: &Transaction<'_>, chat: &str, value: &Value) -> Vec<String> {
+    let Some(id) = value.get("id").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    let Ok(Some(p)) = store::get(tx, id) else {
+        return Vec::new();
+    };
+    let count = |sql: &str| -> i64 { tx.query_row(sql, [id], |r| r.get(0)).unwrap_or(0) };
+    let chats = count("SELECT COUNT(*) FROM chats WHERE profile_id = ?1 AND archived = 0");
+    let running = count(
+        "SELECT COUNT(*) FROM chats WHERE profile_id = ?1 AND archived = 0 AND status IN ('starting', 'running', 'stopping')",
+    );
+    let home = store::home(tx)
+        .ok()
+        .flatten()
+        .map_or_else(|| "the home profile".to_owned(), |h| h.name);
+    let mut lines = vec![format!("Remove the profile {} ({})", p.name, p.id)];
+    lines.push(format!(
+        "Its {chats} chats ({running} working now) move to {home}."
+    ));
+    if crate::chat_owner_profile(tx, chat).as_deref() == Some(id) {
+        lines.push("The chat asking is one of them.".to_owned());
+    }
+    lines.push("The profile is gone for good: there is no Undo.".to_owned());
+    lines
+}
+
 /// The extensions to register.
 pub fn settings_extensions(services: &Services) -> Vec<Arc<dyn SettingsExtension>> {
     let poke = services.get::<helm_skills::sync::Trigger>();
@@ -178,9 +208,8 @@ pub fn settings_extensions(services: &Services) -> Vec<Arc<dyn SettingsExtension
             names(tx)
         },
     )
-    .restoring(|_, _, _| {
-        Err("A removed profile cannot be brought back: its chats are with the home profile now.".into())
-    })
+    .without_undo()
+    .card(removal_card)
     .after_commit(move || {
         if let Some(t) = &poke_again {
             t.poke();

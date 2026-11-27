@@ -184,7 +184,12 @@ fn card_summary(summary: &str, details: &[String], applying: bool) -> String {
     if lines.is_empty() {
         lines.push(String::new());
     }
-    cut(&lines.join("\n"), MAX_SUMMARY)
+    let cap = if applying {
+        crate::kinds::MAX_APPLYING_SUMMARY
+    } else {
+        MAX_SUMMARY
+    };
+    cut(&lines.join("\n"), cap)
 }
 
 /// The first line of a summary: the card's title.

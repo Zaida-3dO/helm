@@ -18,10 +18,13 @@ use std::sync::Arc;
 /// Longest host summary on a card. An ordinary kind's summary is one line of at most
 /// [`MAX_SUMMARY_LINE`]; an applying kind's is a title and one line per change.
 pub const MAX_SUMMARY: usize = 1_200;
+/// Longest host summary (with its detail lines) on the card of an applying kind: a card that
+/// changes several settings may run long, and a value too long for its row is shown whole below.
+pub const MAX_APPLYING_SUMMARY: usize = 9_000;
 /// Longest single line of a summary.
 pub const MAX_SUMMARY_LINE: usize = 240;
 /// Longest serialised canonical target.
-pub const MAX_TARGET: usize = 20_000;
+pub const MAX_TARGET: usize = 200_000;
 
 /// What the host built for one target.
 #[derive(Clone, Debug, PartialEq)]
