@@ -26,6 +26,7 @@ import hashlib
 import json
 import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 
 
@@ -135,10 +136,68 @@ def _pure_question(reply):
     return not _is_claim(reply)
 
 
-# Shown to the model when it answered a house request without using a tool.
-GUARD_REPROMPT_TEXT = ("You did not call a tool, but that request changes or"
-                       " reads the house. Call the right tool now instead of"
-                       " answering from memory.")
+# Honest non-doing words ("Sorry, I didn't catch what to turn off."). They
+# promise no success; forcing a guessed action over one of them would act on
+# a mishearing, which is exactly what must never happen.
+_DECLINE_WORDS = frozenset("""
+sorry cannot cant can't dont don't didnt didn't unsure unclear misheard
+missed catch nope
+""".split())
+
+_DECLINE_PHRASE = re.compile(r"\b(not sure|no idea|i missed)\b")
+
+
+def _declines(reply):
+    low = str(reply).lower()
+    return bool(set(_WORD_RE.findall(low)) & _DECLINE_WORDS) \
+        or bool(_DECLINE_PHRASE.search(low))
+
+
+# Shown to the model when it answered a house-sounding request without using a
+# tool. The second sentence matters: not every house-worded line is about the
+# house ("a joke about a lamp"), and forcing a tool over those does harm.
+GUARD_REPROMPT_TEXT = ("You did not call a tool. If this request changes or"
+                       " reads the house, call the right tool now instead of"
+                       " answering from memory; if it is not about the house,"
+                       " just answer plainly.")
+
+
+# --------------------------------------------------------------------------
+# finding the house's own names inside a spoken sentence: a control verb plus
+# a named target is the only thing worth forcing a tool over.
+
+def _norm_words(text):
+    """Lower-case text with accents and punctuation folded away, so a device
+    or area label from the house list can be looked for inside a sentence."""
+    s = unicodedata.normalize("NFKD", str(text).lower())
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return " ".join(re.sub(r"[^a-z0-9']+", " ", s).split())
+
+
+def _names_house_item(text, ctx):
+    """True when the sentence contains an exposed area or device name this
+    speaker was actually told about (name list from the turn context)."""
+    t = _norm_words(text)
+    if not t:
+        return False
+    for area, entry in ((ctx or {}).get("areas") or {}).items():
+        entry = entry or {}
+        for word in [area] + list(entry.get("lights") or []) \
+                 + list(entry.get("climates") or []):
+            name = _norm_words(word)
+            if len(name) >= 3 and name in t:
+                return True
+    return False
+
+
+def _forceable(text, ctx):
+    """Only demand a forced tool call when the sentence both uses a control
+    verb and names something to act on - a house object word or one of the
+    exposed names. A joke about a lamp is not an order for a lamp."""
+    toks = set(_WORD_RE.findall(str(text).lower()))
+    if not (toks & _CONTROL_ACTIONS):
+        return False
+    return bool(toks & _CONTROL_OBJECTS) or _names_house_item(text, ctx)
 
 # The tool the model uses to hand a personal or long request to Helm. This
 # module answers it itself; the house-control tools come from homecontrol.
@@ -637,6 +696,8 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
     collected = []  # every tool attempt this turn: {name, args, kind, ok, ms[...]}
     control_ask = is_home_control(text)
     want_write = bool(set(_WORD_RE.findall(str(text).lower())) & _WRITE_VERBS)
+    # a forced tool round only makes sense when the sentence names a target
+    can_force = _forceable(text, ctx)
     guard_state = {"reprompt": False, "blocked": False}
 
     def result(kind, sentence, escalate_text=None, model_used=cfg.model_name,
@@ -712,6 +773,17 @@ async def run_turn(cfg, transport, tools, ctx, text, tags=None, clock=time.time)
                 guard_state["blocked"] = True
                 return {"state": "answer",
                         "reply": _failure_sentence(collected)}
+            if _declines(reply):
+                # an honest "sorry, I didn't catch that" stands as spoken:
+                # forcing a tool over a mishearing would act on the guess
+                return None
+            claim = _is_claim(reply)
+            if not (claim or can_force):
+                # an ordinary answer to house-worded words that are not about
+                # doing anything in the house - a joke about a lamp, a
+                # reminder for mum, the hour the shop opens: the gate only
+                # guards actions on something the sentence names
+                return None
             # nothing has run at all, or only reads worked for an ask that
             # wanted a change: those words claim something nobody did
             if not reprompted and schemas \

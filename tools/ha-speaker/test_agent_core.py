@@ -614,6 +614,61 @@ class HomeControlGateTest(unittest.TestCase):
         self.assertEqual(len(tr.seen), 1)
         self.assertEqual(tr.seen[0]["body"]["tool_choice"], "auto")
 
+    def test_joke_about_a_lamp_never_reaches_the_gate(self):
+        # review case: this turn once answered itself with a FORCED
+        # `light toggle` that really executed. A joke names an object but
+        # asks for no action - the gate must not grab it.
+        r, tr, tools = run_case(
+            [msg_text("Why did the lamp go broke? Because it lost its"
+                      " shade.")],
+            text="tell me a joke about a lamp")
+        self.assertEqual(r.kind, agent_core.KIND_ANSWER)
+        self.assertIn("shade", r.text)
+        self.assertFalse(r.guard_reprompt or r.guard_blocked)
+        self.assertEqual(tools.calls, [])
+        self.assertEqual(len(tr.seen), 1)
+        self.assertEqual(tr.seen[0]["body"]["tool_choice"], "auto")
+
+    def test_declined_mishearing_is_never_pushed_into_a_guess(self):
+        # B6 guard: the model's honest "didn't catch that" must be spoken as
+        # it stands; a forced tool over it would act on a guess.
+        r, tr, tools = run_case(
+            [msg_text("Sorry, I didn't catch what to turn off."),
+             msg_tool([{"id": "1", "name": "light",
+                        "args": {"target": "Kitchen",
+                                 "action": "toggle"}}]),
+             msg_text("Done, that is off now.")],
+            text="turn off the hallway")
+        self.assertEqual(r.kind, agent_core.KIND_ANSWER)
+        self.assertEqual(r.text, "Sorry, I didn't catch what to turn off.")
+        self.assertFalse(r.guard_reprompt or r.guard_blocked)
+        self.assertEqual(tools.calls, [])
+        self.assertEqual(len(tr.seen), 1)
+
+    def test_house_worded_personal_asks_stay_personal(self):
+        # every review negative: one model call, plain answer, no tool forced,
+        # nothing blocked - the gate guards actions on named things only
+        cases = [
+            ("set a reminder to call mum at five",
+             "I will pass that one to Helm for your phone."),
+            ("whose turn is it to cook",
+             "That I truly cannot tell you from here."),
+            ("what time does the shop open",
+             "It opens at nine and closes at six."),
+            ("what's the temperature outside",
+             "I cannot feel weather through a wall, sorry."),
+            ("is it light outside",
+             "The kitchen window will tell you better than I can."),
+        ]
+        for text, answer in cases:
+            with self.subTest(text):
+                r, tr, tools = run_case([msg_text(answer)], text=text)
+                self.assertEqual(r.kind, agent_core.KIND_ANSWER)
+                self.assertEqual(r.text, answer)
+                self.assertFalse(r.guard_reprompt or r.guard_blocked)
+                self.assertEqual(tools.calls, [])
+                self.assertEqual(len(tr.seen), 1)
+
 
 class PromptSizeTest(unittest.TestCase):
     def test_system_prompt_under_250_tokens(self):
