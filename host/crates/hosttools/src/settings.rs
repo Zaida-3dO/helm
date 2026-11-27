@@ -43,9 +43,20 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              before    TEXT,
              after     TEXT,
              at        INTEGER NOT NULL,
-             undone    INTEGER NOT NULL DEFAULT 0
+             undone    INTEGER NOT NULL DEFAULT 0,
+             person    TEXT
          );",
-    )
+    )?;
+    // A table made before changes could name a person gains the column.
+    let has: bool = tx.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('settings_changes') WHERE name = 'person'",
+        [],
+        |r| r.get::<_, i64>(0).map(|n| n > 0),
+    )?;
+    if !has {
+        tx.execute_batch("ALTER TABLE settings_changes ADD COLUMN person TEXT;")?;
+    }
+    Ok(())
 }
 
 /// The entry of `customColours` this device is showing: the active profile's id, or "default"
@@ -92,13 +103,45 @@ fn extensions(services: &helm_ipc::Services) -> SettingsExtensions {
         .unwrap_or_default()
 }
 
-/// The extension for the person who owns `chat` when the setting is theirs alone, else `x`.
+/// The extension for the person a setting is read or changed for: the one `person` names (a
+/// profile id) when a call names someone, else the person who owns `chat`. A setting that is not
+/// a person's is `x` itself.
 fn bound(
     tx: &Transaction<'_>,
     x: &Arc<dyn SettingsExtension>,
     chat: &str,
+    person: Option<&str>,
 ) -> Arc<dyn SettingsExtension> {
-    x.for_chat(tx, chat).unwrap_or_else(|| x.clone())
+    match person {
+        Some(p) => x.for_person(tx, p).or_else(|| x.for_chat(tx, chat)),
+        None => x.for_chat(tx, chat),
+    }
+    .unwrap_or_else(|| x.clone())
+}
+
+/// The profile id a call's `person` names (a profile's id or its name), or `None` when the call
+/// names no one. Naming a person is how a call reaches that person's copy of a setting.
+fn named_person(tx: &Transaction<'_>, a: &Value) -> Result<Option<String>, String> {
+    use rusqlite::OptionalExtension;
+    let Some(who) = a.get("person") else {
+        return Ok(None);
+    };
+    let who = who
+        .as_str()
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .ok_or("person is a profile's name or id.")?;
+    let found: Option<String> = tx
+        .query_row(
+            "SELECT id FROM profiles WHERE id = ?1 OR name = ?1 COLLATE NOCASE LIMIT 1",
+            [who],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    found
+        .map(Some)
+        .ok_or_else(|| format!("No person called {who:?}: the profiles key lists them."))
 }
 
 /// The value at a dotted path, if there is one.
@@ -143,6 +186,7 @@ fn get_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
     let db = db(ctx)?;
     let ext = extensions(&ctx.services);
     db.snapshot(|tx| {
+        let person = named_person(tx, &a).map_err(rusqlite::Error::InvalidParameterName)?;
         let mut visible = direct_pref_keys();
         visible.extend(approval_pref_keys());
         visible.extend(ext.keys());
@@ -167,7 +211,7 @@ fn get_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
                 settings.insert(k.clone(), Value::Null);
                 options.insert(k.clone(), credentials_options());
             } else if let Some(owner) = ext.owner(k) {
-                let x = bound(tx, owner, &ctx.caller_chat_id);
+                let x = bound(tx, owner, &ctx.caller_chat_id, person.as_deref());
                 settings.insert(k.clone(), x.read(tx, k));
                 if let Some(o) = x.describe(k) {
                     options.insert(k.clone(), o);
@@ -235,6 +279,11 @@ fn update_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
     let rules = rules(&ctx.services);
     let now = helm_core::now_ms();
     let chat = ctx.caller_chat_id.clone();
+    // Naming a person reaches their own copy of a setting that is a person's.
+    let person = db
+        .snapshot(|tx| Ok::<_, rusqlite::Error>(named_person(tx, &a)))
+        .map_err(sql)?
+        .map_err(ToolError::refused)?;
     // One transaction per key, alphabetically, stopping at the first failure.
     let mut applied = Map::new();
     let mut recorded = Vec::new();
@@ -242,7 +291,18 @@ fn update_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
     for k in keys {
         let v = &changes[k];
         let r = db.write(|tx| {
-            let (before, after) = match change_key(tx, &ext, &rules, &chat, k, v, By::Chat) {
+            let (before, after) = match change_key(
+                tx,
+                &ext,
+                &rules,
+                Acting {
+                    chat: &chat,
+                    person: person.as_deref(),
+                },
+                k,
+                v,
+                By::Chat,
+            ) {
                 Ok(c) => c,
                 Err(why) => return Ok(Err(why)),
             };
@@ -250,7 +310,15 @@ fn update_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
             if before == after {
                 return Ok(Ok((None, before, after)));
             }
-            let id = insert_change(tx, &chat, k, before.as_ref(), after.as_ref(), now)?;
+            let id = insert_change(
+                tx,
+                &chat,
+                person.as_deref(),
+                k,
+                before.as_ref(),
+                after.as_ref(),
+                now,
+            )?;
             Ok::<_, rusqlite::Error>(Ok((Some(id), before, after)))
         });
         match r {
@@ -325,6 +393,14 @@ pub enum By {
     Check,
 }
 
+/// Who a change is made for: the chat asking, and the person it names (a profile id) when it
+/// reaches another person's own copy of a setting.
+#[derive(Clone, Copy)]
+struct Acting<'a> {
+    chat: &'a str,
+    person: Option<&'a str>,
+}
+
 /// A setting's value before and after a change; `None` is the default in use.
 type Change = (Option<Value>, Option<Value>);
 
@@ -336,11 +412,12 @@ fn change_key(
     tx: &Transaction<'_>,
     ext: &SettingsExtensions,
     rules: &PrefRules,
-    chat: &str,
+    acting: Acting<'_>,
     key: &str,
     v: &Value,
     by: By,
 ) -> Result<Change, String> {
+    let (chat, person) = (acting.chat, acting.person);
     if serde_json::to_vec(v).map(|b| b.len()).unwrap_or(usize::MAX) > MAX_VALUE_BYTES {
         return Err(format!("The value for {key} is too large."));
     }
@@ -349,7 +426,7 @@ fn change_key(
         return Err(hidden_refusal(key, &at));
     }
     let acc = access(key).ok_or_else(|| not_a_setting(key))?;
-    let owner = ext.owner(key).map(|x| bound(tx, x, chat));
+    let owner = ext.owner(key).map(|x| bound(tx, x, chat, person));
     match by {
         By::Chat => {
             let touched = owner
@@ -428,6 +505,7 @@ pub fn apply_approved(
     services: &helm_ipc::Services,
     events: &dyn helm_ipc::EventSink,
     chat: &str,
+    person: Option<&str>,
     changes: &[(String, Value)],
     commit: bool,
 ) -> Result<Vec<Approved>, String> {
@@ -443,20 +521,22 @@ pub fn apply_approved(
         done.clear();
         for (key, v) in changes {
             let by = if commit { By::Approved } else { By::Check };
-            let (before, after) = match change_key(tx, &ext, &rules, chat, key, v, by) {
-                Ok(c) => c,
-                Err(why) => {
-                    // The error rolls back what the earlier keys stored.
-                    refused = Some(why);
-                    return Err(rusqlite::Error::StatementChangedRows(1));
-                }
-            };
+            let (before, after) =
+                match change_key(tx, &ext, &rules, Acting { chat, person }, key, v, by) {
+                    Ok(c) => c,
+                    Err(why) => {
+                        // The error rolls back what the earlier keys stored.
+                        refused = Some(why);
+                        return Err(rusqlite::Error::StatementChangedRows(1));
+                    }
+                };
             let change_id = if before == after {
                 None
             } else {
                 Some(insert_change(
                     tx,
                     chat,
+                    person,
                     key,
                     before.as_ref(),
                     after.as_ref(),
@@ -541,19 +621,22 @@ fn hidden_refusal(key: &str, at: &str) -> String {
 fn insert_change(
     tx: &Transaction<'_>,
     chat: &str,
+    person: Option<&str>,
     key: &str,
     before: Option<&Value>,
     after: Option<&Value>,
     now: i64,
 ) -> rusqlite::Result<i64> {
     tx.execute(
-        "INSERT INTO settings_changes(chat_id, key, before, after, at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO settings_changes(chat_id, key, before, after, at, person)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             chat,
             key,
             before.map(Value::to_string),
             after.map(Value::to_string),
-            now
+            now,
+            person
         ],
     )?;
     let id = tx.last_insert_rowid();
@@ -578,7 +661,7 @@ pub fn record_external_change(
     let chat = ctx.caller_chat_id.clone();
     let now = helm_core::now_ms();
     let id = db
-        .write(|tx| insert_change(tx, &chat, key, Some(&before), Some(&after), now))
+        .write(|tx| insert_change(tx, &chat, None, key, Some(&before), Some(&after), now))
         .map_err(sql)?;
     ctx.events.emit(
         AppEvent::new("external_settings")
@@ -600,7 +683,7 @@ pub(crate) fn changes_list(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError>
     let db = ctx.services.need::<Database>()?;
     db.snapshot(|tx| {
         let mut st = tx.prepare(
-            "SELECT id, chat_id, key, before, after, at, undone FROM settings_changes ORDER BY id DESC",
+            "SELECT id, chat_id, key, before, after, at, undone, person FROM settings_changes ORDER BY id DESC",
         )?;
         let rows = st
             .query_map([], |r| {
@@ -612,6 +695,7 @@ pub(crate) fn changes_list(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError>
                     "after": parse_json(r.get(4)?),
                     "at": r.get::<_, i64>(5)?,
                     "undone": r.get::<_, bool>(6)?,
+                    "person": r.get::<_, Option<String>>(7)?,
                 }))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -637,7 +721,7 @@ pub(crate) fn undo(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
             let mut plan = Vec::new();
             for id in &ids {
                 let row = tx.query_row(
-                    "SELECT key, before, after, undone, chat_id FROM settings_changes WHERE id = ?1",
+                    "SELECT key, before, after, undone, chat_id, person FROM settings_changes WHERE id = ?1",
                     [id],
                     |r| {
                         Ok((
@@ -646,10 +730,11 @@ pub(crate) fn undo(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                             r.get::<_, Option<String>>(2)?,
                             r.get::<_, bool>(3)?,
                             r.get::<_, String>(4)?,
+                            r.get::<_, Option<String>>(5)?,
                         ))
                     },
                 );
-                let Ok((key, before, after, undone, chat)) = row else {
+                let Ok((key, before, after, undone, chat, person)) = row else {
                     return Ok(Err(ApiError::conflict("That change is no longer listed.")));
                 };
                 if undone {
@@ -657,19 +742,19 @@ pub(crate) fn undo(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                         "{key} was already undone."
                     ))));
                 }
-                plan.push((*id, key, parse_json(before), after, chat));
+                plan.push((*id, key, parse_json(before), after, chat, person));
             }
             // Two changes to one setting cannot both be undone to a defined value.
-            for (i, (_, k, _, _, _)) in plan.iter().enumerate() {
-                if plan[..i].iter().any(|(_, x, _, _, _)| x == k) {
+            for (i, (_, k, _, _, _, _)) in plan.iter().enumerate() {
+                if plan[..i].iter().any(|(_, x, _, _, _, _)| x == k) {
                     return Ok(Err(ApiError::bad_args(format!(
                         "Two of these changes are to {k}; undo them one at a time."
                     ))));
                 }
             }
-            for (_, key, _, after, chat) in &plan {
+            for (_, key, _, after, chat, person) in &plan {
                 let now = match ext.owner(key) {
-                    Some(x) => Some(bound(tx, x, chat).read(tx, key)),
+                    Some(x) => Some(bound(tx, x, chat, person.as_deref()).read(tx, key)),
                     None => prefs::read(tx, key),
                 };
                 if now != after.as_ref().and_then(|a| serde_json::from_str(a).ok()) {
@@ -679,9 +764,9 @@ pub(crate) fn undo(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                 }
             }
             let mut changed = Map::new();
-            for (id, key, before, _, chat) in plan {
+            for (id, key, before, _, chat, person) in plan {
                 match ext.owner(&key) {
-                    Some(x) => bound(tx, x, &chat)
+                    Some(x) => bound(tx, x, &chat, person.as_deref())
                         .restore(tx, &key, &before)
                         .map_err(rusqlite::Error::InvalidParameterName)?,
                     None => prefs::set_raw(tx, &key, &before)
@@ -776,8 +861,8 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::read(
             "app_get_settings",
-            "Read every Helm setting a chat can reach, with its current value (null means the default in use). options gives each key's type, allowed values or limits, default and what it does. A setting is either one you change yourself (app_update_settings) or one whose options say needsApproval (you stage it with app_stage_settings); there is no setting you are simply refused. keys narrows the list; a name that is no setting at all is listed under unavailable.",
-            json!({"type": "object", "properties": {"keys": {"type": "array", "items": {"type": "string"}, "maxItems": 64}}, "additionalProperties": false}),
+            "Read every Helm setting a chat can reach, with its current value (null means the default in use). options gives each key's type, allowed values or limits, default and what it does. A setting is either one you change yourself (app_update_settings) or one whose options say needsApproval (you stage it with app_stage_settings); there is no setting you are simply refused. keys narrows the list; a name that is no setting at all is listed under unavailable. person (a profile name or id) reads another person's own copy of the settings that belong to a person (their Telegram, voice and speaker policy, their gatekeeper); without it you read your own person's.",
+            json!({"type": "object", "properties": {"keys": {"type": "array", "items": {"type": "string"}, "maxItems": 64}, "person": {"type": "string", "maxLength": 64}}, "additionalProperties": false}),
         ),
         get_settings,
     )
@@ -785,7 +870,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
         ToolSpec::write(
             "app_update_settings",
             "Change 1-16 Helm settings live: changes is {key: value}. Keys are applied alphabetically and the call stops at the first failure; the answer has each applied key's before and after. The user sees a notice with Undo. Read app_get_settings first: its options say what each key accepts, and a value outside them is refused with the allowed values. A key's value replaces the stored one whole, except fontSizes, sounds and orchestrator, where you send only the fields to change and the others keep their values; null restores the default. An option with hasEffect false is read by nothing yet, so changing it does nothing visible. Send the orchestrator key's changes the same way: only the fields to change. A key whose options say needsApproval, or a part of one listed under needsApprovalParts, is not changed here and nothing is applied: the answer is the exact app_stage_settings call to make, and the user approves it on one card. Act only when the user explicitly asked for this change, and report what changed. If the reply is lost, check the current values before trying again and never retry automatically.",
-            json!({"type": "object", "properties": {"changes": {"type": "object", "minProperties": 1, "maxProperties": 16}}, "required": ["changes"], "additionalProperties": false}),
+            json!({"type": "object", "properties": {"changes": {"type": "object", "minProperties": 1, "maxProperties": 16}, "person": {"type": "string", "maxLength": 64, "description": "A profile name or id: change that person's own copy of the settings that belong to a person, instead of your own person's."}}, "required": ["changes"], "additionalProperties": false}),
         )
         .large(),
         update_settings,
@@ -975,6 +1060,7 @@ mod tests {
                     &as_chat(chat).services,
                     &*e.sink,
                     chat,
+                    None,
                     &[(key.to_owned(), Value::Null)],
                     false,
                 );
@@ -1061,33 +1147,33 @@ mod tests {
         );
         // What a chat changes itself is not staged: it is told the call to make.
         let low = [("compactSidebar".to_owned(), json!(true))];
-        let never = apply_approved(&services, &*e.sink, "chat-1", &low, true).unwrap_err();
+        let never = apply_approved(&services, &*e.sink, "chat-1", None, &low, true).unwrap_err();
         assert!(never.contains("app_update_settings"), "{never}");
         // Checked up front with the key's own validators, and nothing kept.
         let want = [
             ("updateSource".to_owned(), json!("d:/dist")),
             ("newChatPermissionMode".to_owned(), json!("default")),
         ];
-        let dry = apply_approved(&services, &*e.sink, "chat-1", &want, false).unwrap();
+        let dry = apply_approved(&services, &*e.sink, "chat-1", None, &want, false).unwrap();
         assert_eq!(dry[0].after, Some(json!("D:/DIST")), "the rule's value");
         assert_eq!(
             (read("newChatPermissionMode"), e.sink.kinds().len()),
             (None, 0)
         );
         let bad = [("newChatPermissionMode".to_owned(), json!("plan"))];
-        let why = apply_approved(&services, &*e.sink, "chat-1", &bad, false).unwrap_err();
+        let why = apply_approved(&services, &*e.sink, "chat-1", None, &bad, false).unwrap_err();
         assert!(why.contains("\"acceptEdits\""), "{why}");
         // All or nothing: the second change fails, so the first is not kept either.
         let half = [
             ("newChatPermissionMode".to_owned(), json!("default")),
             ("updateSource".to_owned(), json!("nope")),
         ];
-        let why = apply_approved(&services, &*e.sink, "chat-1", &half, true).unwrap_err();
+        let why = apply_approved(&services, &*e.sink, "chat-1", None, &half, true).unwrap_err();
         assert!(why.contains("taken"), "{why}");
         assert_eq!(read("newChatPermissionMode"), None);
         // Approved: stored, announced to the interface and the rule, listed for the user's Undo.
         let shouts = SHOUTS.load(std::sync::atomic::Ordering::SeqCst);
-        let done = apply_approved(&services, &*e.sink, "chat-1", &want, true).unwrap();
+        let done = apply_approved(&services, &*e.sink, "chat-1", None, &want, true).unwrap();
         assert_eq!(read("newChatPermissionMode"), Some(json!("default")));
         assert_eq!(read("updateSource"), Some(json!("D:/DIST")));
         assert_eq!(SHOUTS.load(std::sync::atomic::Ordering::SeqCst), shouts + 1);
@@ -1350,10 +1436,18 @@ mod tests {
         }
         fn for_chat(
             &self,
-            _tx: &Transaction<'_>,
+            tx: &Transaction<'_>,
             chat: &str,
         ) -> Option<Arc<dyn crate::SettingsExtension>> {
-            Some(Arc::new(Fake(Some(chat.to_owned()))))
+            let who = crate::settings_ext::chat_profile(tx, chat)?;
+            self.for_person(tx, &who)
+        }
+        fn for_person(
+            &self,
+            _tx: &Transaction<'_>,
+            profile: &str,
+        ) -> Option<Arc<dyn crate::SettingsExtension>> {
+            Some(Arc::new(Fake(Some(profile.to_owned()))))
         }
         fn changed_event(&self, _key: &str) -> AppEvent {
             AppEvent::new("fake_changed")
@@ -1425,10 +1519,10 @@ mod tests {
             "localGameLiftMinutes".to_owned(),
             json!({"open": true, "level": 3}),
         )];
-        let dry = apply_approved(&c.services, &*e.sink, "chat-1", &staged, false).unwrap();
+        let dry = apply_approved(&c.services, &*e.sink, "chat-1", None, &staged, false).unwrap();
         assert_eq!(dry[0].after.as_ref().unwrap()["open"], true);
         assert!(e.sink.kinds().is_empty(), "checking announces nothing");
-        let done = apply_approved(&c.services, &*e.sink, "chat-1", &staged, true).unwrap();
+        let done = apply_approved(&c.services, &*e.sink, "chat-1", None, &staged, true).unwrap();
         assert_eq!(done[0].after.as_ref().unwrap()["level"], 3);
         e.sink.events.lock().unwrap().clear();
         // An extension key nobody gave an access to is no setting: a typo, not a policy.
@@ -1463,37 +1557,77 @@ mod tests {
     }
 
     /// A setting that belongs to a person is that person's copy for their chats: a second
-    /// person's chat changes theirs, and Undo puts back the copy the change came from.
+    /// person's chat changes theirs, Undo puts back the copy the change came from, and naming
+    /// the other person is how a call reaches theirs, to read and to change, with the same Undo.
     #[test]
-    fn each_person_changes_their_own_copy_of_a_per_person_key() {
+    fn each_person_changes_their_own_copy_of_a_per_person_key_and_reaches_the_others_by_naming() {
         let e = env();
-        let mut c = with_fake(&e);
-        let mut set = |chat: &str, level: i64| {
-            c.caller_chat_id = chat.into();
-            update_settings(
-                &c,
-                json!({"changes": {"localGameLiftMinutes": {"level": level}}}),
+        e.db.write(|tx| {
+            tx.execute_batch(
+                "CREATE TABLE profiles (id TEXT PRIMARY KEY, name TEXT, is_home INTEGER);
+                 INSERT INTO profiles VALUES ('home', 'Ann', 1), ('p-2', 'Bea', 0);
+                 ALTER TABLE chats ADD COLUMN profile_id TEXT;
+                 INSERT INTO projects (id, name, created_at) VALUES ('pr', 'P', 1);
+                 INSERT INTO chats (id, project_id, created_at, updated_at, profile_id)
+                 VALUES ('chat-1', 'pr', 1, 1, 'home'), ('chat-2', 'pr', 1, 1, 'p-2');",
             )
-            .unwrap()
-        };
-        let first = set("chat-1", 5);
-        set("chat-2", 7);
-        let level = |chat: &str| {
+        })
+        .unwrap();
+        let c = with_fake(&e);
+        let as_chat = |chat: &str| {
             let mut x = ctx(&e);
             x.services = c.services.clone();
             x.caller_chat_id = chat.into();
-            get_settings(&x, json!({"keys": ["localGameLiftMinutes"]})).unwrap()["settings"]
-                ["localGameLiftMinutes"]["level"]
+            x
+        };
+        let set = |chat: &str, person: Option<&str>, level: i64| {
+            let mut args = json!({"changes": {"localGameLiftMinutes": {"level": level}}});
+            if let Some(p) = person {
+                args["person"] = json!(p);
+            }
+            update_settings(&as_chat(chat), args)
+        };
+        let level = |chat: &str, person: Option<&str>| {
+            let mut args = json!({"keys": ["localGameLiftMinutes"]});
+            if let Some(p) = person {
+                args["person"] = json!(p);
+            }
+            get_settings(&as_chat(chat), args).unwrap()["settings"]["localGameLiftMinutes"]["level"]
                 .clone()
         };
-        assert_eq!((level("chat-1"), level("chat-2")), (json!(5), json!(7)));
+        let first = set("chat-1", None, 5).unwrap();
+        set("chat-2", None, 7).unwrap();
+        assert_eq!(
+            (level("chat-1", None), level("chat-2", None)),
+            (json!(5), json!(7))
+        );
         let mut o = op(&e);
         o.services = c.services.clone();
         let id = first["applied"]["localGameLiftMinutes"]["changeId"]
             .as_i64()
             .unwrap();
         undo(&o, json!({"changeIds": [id]})).unwrap();
-        assert_eq!((level("chat-1"), level("chat-2")), (json!(1), json!(7)));
+        assert_eq!(
+            (level("chat-1", None), level("chat-2", None)),
+            (json!(1), json!(7))
+        );
+        // Naming Bea (by name or by id) reads and changes hers from Ann's chat, and Undo goes
+        // back to hers.
+        assert_eq!(level("chat-1", Some("bea")), json!(7));
+        let theirs = set("chat-1", Some("Bea"), 9).unwrap();
+        assert_eq!(
+            (level("chat-2", None), level("chat-1", None)),
+            (json!(9), json!(1)),
+            "Ann's own copy is untouched"
+        );
+        assert_eq!(level("chat-1", Some("p-2")), json!(9));
+        let id = theirs["applied"]["localGameLiftMinutes"]["changeId"]
+            .as_i64()
+            .unwrap();
+        undo(&o, json!({"changeIds": [id]})).unwrap();
+        assert_eq!(level("chat-2", None), json!(7));
+        let why = set("chat-1", Some("Nobody"), 3).unwrap_err().public;
+        assert!(why.contains("No person called"), "{why}");
     }
 
     #[test]

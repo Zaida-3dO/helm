@@ -3,9 +3,9 @@
 //! They are for the user's explicit asks ("always do this", "remember that rule") and every one
 //! that changes something is filed in the change ring, so the user sees a notice with Undo
 //! ([`crate::undo`]). `scope` says whose layer: `me` (the default) is the calling chat's person,
-//! `everyone` is the layer every chat loads. Another person's layer is reached only with `person`:
-//! listing and reading it are open, and a change to it files an Approve card instead of writing
-//! ([`crate::for_person`]).
+//! `everyone` is the layer every chat loads. Another person's layer is not in a listing that names
+//! nobody; naming them with `person` lists, reads and changes it, with the same notice and Undo
+//! ([`crate::for_person`]). `scope` is a [`Scope`]: shared or personal.
 
 use crate::for_person::{self, Named};
 use crate::launch::{self, ChatKnowledge};
@@ -13,6 +13,7 @@ use crate::layers::{Kind, Layer};
 use crate::undo::{self, Restore};
 use crate::{agents, examples, plugins, rules};
 use helm_core::profile::Profile;
+use helm_core::scope::Scope;
 use helm_hosttools::registry::{HostToolRegistry, ToolCtx, ToolError, ToolResult};
 use helm_hosttools::spec::ToolSpec;
 use helm_ipc::AppEvent;
@@ -22,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 const EXPLICIT: &str = " Act only on the user's explicit request, and say in one short line where you saved it. The user is shown a notice with Undo.";
 const SCOPE_NOTE: &str = "`scope` is `me` (this chat's person, the default) or `everyone` (only when it clearly holds whoever is asking, or the user says it is for everyone).";
-const PERSON_NOTE: &str = "`person` is a profile name or id on this PC, for a rule or skill that belongs to another person: nothing is saved until the user approves a card that shows whose profile it is and the exact text. Do not combine it with `scope`; naming this chat's own person is the same as scope `me`.";
+const PERSON_NOTE: &str = "`person` is a profile name or id on this PC, for a rule or skill that belongs to another person: it is saved into their own layer at once, with a notice and Undo for the user. Do not combine it with `scope`; naming this chat's own person is the same as scope `me`.";
 const UNDO_NOTE: &str = "The user was shown a notice with Undo for this change.";
 
 pub(crate) fn profile_dir(ctx: &ToolCtx) -> Result<PathBuf, ToolError> {
@@ -48,21 +49,27 @@ fn str_arg<'a>(a: &'a Value, key: &str) -> Option<&'a str> {
 
 /// The layer a scope names for the calling chat, and its label in results.
 fn layer_of(who: &ChatKnowledge, scope: Option<&str>) -> Result<(Layer, &'static str), ToolError> {
-    match scope.unwrap_or("me") {
-        "everyone" => Ok((Layer::Everyone, "everyone")),
-        "me" => match &who.profile {
-            Some(p) => Ok((Layer::Profile(p.id.clone()), "me")),
+    let scope = match scope {
+        None => Scope::Personal,
+        Some(w) => {
+            Scope::parse(w).ok_or_else(|| ToolError::refused("scope is \"me\" or \"everyone\"."))?
+        }
+    };
+    match scope {
+        Scope::Shared => Ok((Layer::Everyone, scope.word())),
+        Scope::Personal => match &who.profile {
+            Some(p) => Ok((Layer::Profile(p.id.clone()), scope.word())),
             None => Err(ToolError::refused(
                 "This chat has no person, so it has no layer of its own. Use scope \"everyone\" if the user wants it for everyone.",
             )),
         },
-        _ => Err(ToolError::refused("scope is \"me\" or \"everyone\".")),
     }
 }
 
 /// What a `person` argument asks for. `Ok(None)` means carry on as the call stands (no `person`, or
 /// the chat's own person, which becomes `scope: me`); `Ok(Some(p))` is another person's profile,
-/// which only an Approve card may change. The call's arguments lose `person` either way.
+/// which a call changes by naming them, as it changes its own. The call's arguments lose
+/// `person` either way.
 fn person_of(
     ctx: &ToolCtx,
     who: &ChatKnowledge,
@@ -143,8 +150,9 @@ fn list_knowledge(ctx: &ToolCtx, mut a: Value) -> ToolResult {
     let data = profile_dir(ctx)?;
     examples::seed(&data);
     let who = launch::who(&ctx.caller_chat_id);
-    // Another person's layer is read here, never written: a change to it is an Approve card
-    // (`app_save_rule` with `person`). Naming this chat's own person is the same as `scope: me`.
+    // Another person's layer is read by naming them (`person`), and written the same way
+    // (`app_save_rule`, `app_remove_rule` with `person`). Naming this chat's own person is the
+    // same as `scope: me`.
     let other = person_of(ctx, &who, &mut a)?;
     if let Some(path) = str_arg(&a, "read") {
         return read_rule(&data, &who, other.as_ref(), path, str_arg(&a, "scope"));
@@ -254,7 +262,7 @@ fn read_rule(
 fn save_rule(ctx: &ToolCtx, mut a: Value) -> ToolResult {
     let who = launch::who(&ctx.caller_chat_id);
     if let Some(other) = person_of(ctx, &who, &mut a)? {
-        return for_person::stage_rule(ctx, &who, other, &a);
+        return for_person::save_rule(ctx, &who, other, &a);
     }
     let title = str_arg(&a, "title").ok_or_else(|| ToolError::refused("title is required."))?;
     let text = str_arg(&a, "text");
@@ -334,7 +342,7 @@ fn save_rule(ctx: &ToolCtx, mut a: Value) -> ToolResult {
     Ok(out)
 }
 
-/// A memory for another person: always an Approve card, never written here.
+/// A memory for another person, written at once as theirs.
 fn save_memory(ctx: &ToolCtx, a: Value) -> ToolResult {
     let who = launch::who(&ctx.caller_chat_id);
     let person = str_arg(&a, "person").ok_or_else(|| ToolError::refused("person is required."))?;
@@ -342,15 +350,19 @@ fn save_memory(ctx: &ToolCtx, a: Value) -> ToolResult {
         Named::Own => Err(ToolError::refused(
             "For this chat's own person use memory_write.",
         )),
-        Named::Other(p) => for_person::stage_memory(ctx, &who, p, &a),
+        Named::Other(p) => for_person::save_memory(ctx, &who, p, &a),
     }
 }
 
-fn remove_rule(ctx: &ToolCtx, a: Value) -> ToolResult {
-    let path = str_arg(&a, "path").ok_or_else(|| ToolError::refused("path is required."))?;
+fn remove_rule(ctx: &ToolCtx, mut a: Value) -> ToolResult {
     let data = profile_dir(ctx)?;
     let who = launch::who(&ctx.caller_chat_id);
-    let (layer, label) = locate(&data, &who, Kind::Rule, path, str_arg(&a, "scope"))?;
+    let other = person_of(ctx, &who, &mut a)?;
+    let path = str_arg(&a, "path").ok_or_else(|| ToolError::refused("path is required."))?;
+    let (layer, label) = match &other {
+        Some(p) => (Layer::Profile(p.id().to_owned()), "person"),
+        None => locate(&data, &who, Kind::Rule, path, str_arg(&a, "scope"))?,
+    };
     let before = undo::digest(&data);
     let restore = undo::stash(&data, &layer, Kind::Rule, path).map_err(io_error)?;
     if let Err(e) = rules::remove(&layer.root(&data), path) {
@@ -367,7 +379,7 @@ fn remove_rule(ctx: &ToolCtx, a: Value) -> ToolResult {
 fn add_skill(ctx: &ToolCtx, mut a: Value) -> ToolResult {
     let who = launch::who(&ctx.caller_chat_id);
     if let Some(other) = person_of(ctx, &who, &mut a)? {
-        return for_person::stage_skill(ctx, &who, other, &a);
+        return for_person::save_skill(ctx, &who, other, &a);
     }
     let path = str_arg(&a, "path").ok_or_else(|| ToolError::refused("path is required."))?;
     let data = profile_dir(ctx)?;
@@ -394,11 +406,15 @@ fn add_skill(ctx: &ToolCtx, mut a: Value) -> ToolResult {
     Ok(out)
 }
 
-fn remove_skill(ctx: &ToolCtx, a: Value) -> ToolResult {
-    let name = str_arg(&a, "name").ok_or_else(|| ToolError::refused("name is required."))?;
+fn remove_skill(ctx: &ToolCtx, mut a: Value) -> ToolResult {
     let data = profile_dir(ctx)?;
     let who = launch::who(&ctx.caller_chat_id);
-    let (layer, label) = locate(&data, &who, Kind::Skill, name, str_arg(&a, "scope"))?;
+    let other = person_of(ctx, &who, &mut a)?;
+    let name = str_arg(&a, "name").ok_or_else(|| ToolError::refused("name is required."))?;
+    let (layer, label) = match &other {
+        Some(p) => (Layer::Profile(p.id().to_owned()), "person"),
+        None => locate(&data, &who, Kind::Skill, name, str_arg(&a, "scope"))?,
+    };
     let before = undo::digest(&data);
     let restore = undo::stash(&data, &layer, Kind::Skill, name).map_err(io_error)?;
     if let Err(e) = crate::remove(&layer.root(&data), name) {
@@ -417,18 +433,14 @@ fn scope_schema(extra: &str) -> Value {
 }
 
 fn person_schema() -> Value {
-    json!({"type": "string", "minLength": 1, "maxLength": 64, "description": "Another person's profile name or id on this PC. Files an Approve card; nothing is saved until the user approves."})
-}
-
-fn reason_schema() -> Value {
-    json!({"type": "string", "minLength": 1, "maxLength": 1000, "description": "Why, in a sentence, shown with the card when `person` names another person."})
+    json!({"type": "string", "minLength": 1, "maxLength": 64, "description": "Another person's profile name or id on this PC, to change what is theirs (their own layer, which a listing without it leaves out). The user is shown a notice with Undo."})
 }
 
 pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::read(
             "app_list_knowledge",
-            "List the rules, skills and agents that apply to this chat: the ones for everyone and the ones for this chat's person (`scope`: me, everyone or all; default all). Rules are told to every chat at launch; skills load as plugins (loadedAs shows helm:name for everyone, personal:name for this person, project:name for a project's linked folders). `person` (a profile name or id on this PC) lists what applies to another person instead, read-only; to change their rules use app_save_rule with `person` (the user approves a card). `read` is the path of one rule (from the listing): its full text comes back instead of the listing, from `scope` or `person`.",
+            "List the rules, skills and agents that apply to this chat: the ones for everyone and the ones for this chat's person (`scope`: me, everyone or all; default all). Rules are told to every chat at launch; skills load as plugins (loadedAs shows helm:name for everyone, personal:name for this person, project:name for a project's linked folders). `person` (a profile name or id on this PC) lists what applies to another person instead; to change their rules or skills name them the same way (app_save_rule, app_add_skill, app_remove_rule, app_remove_skill with `person`), which writes at once with a notice and Undo for the user. `read` is the path of one rule (from the listing): its full text comes back instead of the listing, from `scope` or `person`.",
             json!({
                 "type": "object",
                 "properties": {
@@ -454,7 +466,6 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                     "text": {"type": "string", "minLength": 1, "maxLength": 16384},
                     "scope": scope_schema(""),
                     "person": person_schema(),
-                    "reason": reason_schema(),
                     "replace": {"type": "string", "maxLength": 128, "description": "The path of the rule to rewrite, such as rules/git-habits.md."},
                     "always": {"type": "boolean", "description": "true keeps a long rule whole in every chat's prompt instead of listing it by a line; use for short, essential rules. Omit to keep the rule's current setting."},
                     "when": {"type": "object", "description": "Trigger keys: folders, hosts, pcs, tools, commands, kinds, people, dates."}
@@ -468,15 +479,14 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .blocking(
         ToolSpec::write(
             "app_save_memory",
-            "Save a memory for another person in the household. Only for someone else: this chat's own person uses memory_write. Nothing is saved until the user approves a card that shows whose memory it becomes and the exact text; the memory is then shared with the household. Write the text in the third person and name the person, because it is saved under their name. Act only on the user's explicit request.",
+            "Save a memory for another person in the household. Only for someone else: this chat's own person uses memory_write. It is saved at once as that person's memory, shared with the household, and the hub keeps who saved it. Write the text in the third person and name the person, because it is saved under their name. Act only on the user's explicit request.",
             json!({
                 "type": "object",
                 "properties": {
                     "person": person_schema(),
                     "title": {"type": "string", "minLength": 1, "maxLength": 120},
                     "body": {"type": "string", "minLength": 1, "maxLength": 2000},
-                    "tags": {"type": "array", "items": {"type": "string", "maxLength": 40}, "maxItems": 8},
-                    "reason": reason_schema()
+                    "tags": {"type": "array", "items": {"type": "string", "maxLength": 40}, "maxItems": 8}
                 },
                 "required": ["person", "title", "body"],
                 "additionalProperties": false
@@ -494,7 +504,8 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "minLength": 1, "maxLength": 128},
-                    "scope": scope_schema("")
+                    "scope": scope_schema(""),
+                    "person": person_schema()
                 },
                 "required": ["path"],
                 "additionalProperties": false
@@ -513,8 +524,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                 "properties": {
                     "path": {"type": "string", "minLength": 1, "maxLength": 4096},
                     "scope": scope_schema(""),
-                    "person": person_schema(),
-                    "reason": reason_schema()
+                    "person": person_schema()
                 },
                 "required": ["path"],
                 "additionalProperties": false
@@ -532,7 +542,8 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "minLength": 1, "maxLength": 64},
-                    "scope": scope_schema("")
+                    "scope": scope_schema(""),
+                    "person": person_schema()
                 },
                 "required": ["name"],
                 "additionalProperties": false
@@ -930,26 +941,20 @@ mod tests {
         }
     }
 
-    /// Another person's rule or skill is never written by the tool: it files one card that names
-    /// their profile and shows the exact text, and only an approval writes it, if what the card
-    /// showed is still what is there.
+    /// Another person's knowledge is written by naming them, at once, with a notice and Undo for
+    /// the user: a rule, a skill and a memory, and removing a rule. A listing that names nobody
+    /// leaves their layer out, naming them reaches it, and nothing is a refusal for a missing right.
     #[test]
-    fn another_persons_knowledge_waits_for_an_approved_card() {
+    fn another_persons_knowledge_is_reached_by_naming_them() {
         let tmp = tempfile::tempdir().unwrap();
         let data = tmp.path().join("data");
         fs::create_dir_all(&data).unwrap();
         let mut dbreg = MigrationRegistry::new();
         dbreg.initializer("settings-changes", helm_hosttools::settings::init);
         dbreg.initializer("people-test", people_tables);
-        helm_consent::register_migrations(&mut dbreg);
         let db = Arc::new(Database::open(&data.join("t.db"), &dbreg).unwrap());
-        let mut kinds = helm_consent::AllowKinds::new();
-        crate::register_allow_kinds(&mut kinds);
-        let kinds = Arc::new(kinds);
         let mut services = helm_ipc::Services::new();
         services.insert(db.clone());
-        services.insert(kinds.clone());
-        services.insert(Arc::new(helm_consent::MaintenanceLock::default()));
         services.insert(Arc::new(Profile {
             dir: data.clone(),
             hash: String::new(),
@@ -961,41 +966,16 @@ mod tests {
         let mut reg = HostToolRegistry::new();
         register_host_tools(&mut reg);
         let run = |tool: &str, args: Value| call(&reg, &services, "alex-chat", tool, args);
-        let events: Arc<dyn helm_ipc::EventSink> = Arc::new(helm_ipc::NullSink);
-        let decide = |id: &str, decision| {
-            let d = helm_consent::decide_and_apply(
-                &services,
-                &events,
-                &helm_consent::ConsentDecideArgs {
-                    request_id: id.to_owned(),
-                    decision,
-                    grant_minutes: None,
-                    note: None,
-                },
-                "app",
-            )
-            .unwrap();
-            if let Some(h) = d.applying {
-                h.join().unwrap();
-            }
-        };
-        let card = |id: &str| helm_consent::store::get(&db, &kinds, id).unwrap().unwrap();
         let sam_rule = data.join("knowledge/people/sam/rules/team-style.md");
-        let rule = json!({
-            "title": "Team style",
-            "text": "Keep notes short.\nUse plain words.",
-            "person": "sam"
-        });
 
-        // The chat's own person (by name, any case) is the same as `scope: me`: written at once.
+        // The chat's own person (by name, any case) is the same as `scope: me`.
         let own = run(
             "app_save_rule",
             json!({"title": "Mine", "text": "x", "person": "ALEX"}),
         )
         .unwrap();
         assert_eq!(own["scope"], "me");
-        // Refusals stage nothing: both person and scope, an unknown person, a card too long to
-        // show, hidden characters.
+        // What is wrong with the call is refused, and nothing is written.
         for (args, why) in [
             (
                 json!({"title": "T", "text": "x", "person": "sam", "scope": "me"}),
@@ -1004,10 +984,6 @@ mod tests {
             (
                 json!({"title": "T", "text": "x", "person": "nobody"}),
                 "No person",
-            ),
-            (
-                json!({"title": "T", "text": "x".repeat(2000), "person": "sam"}),
-                "too long to show whole",
             ),
             (
                 json!({"title": "T", "text": "a\u{202e}b", "person": "sam"}),
@@ -1019,335 +995,109 @@ mod tests {
         }
         assert!(!sam_rule.exists());
 
-        // Another person's rule: a card naming their profile with the exact text; nothing written.
-        let staged = run("app_save_rule", rule.clone()).unwrap();
-        assert_eq!(staged["state"], "pending");
-        let id = staged["requestId"].as_str().unwrap().to_owned();
-        let shown = card(&id).summary;
-        for line in [
-            "Save a rule for Sam",
-            "This goes into Sam's own profile, not yours.",
-            "Title: Team style",
-            "Keep notes short.",
-            "Use plain words.",
-        ] {
-            assert!(shown.lines().any(|l| l == line), "{line}: {shown}");
-        }
-        assert!(!shown.contains("not linked"), "Sam is linked: {shown}");
-        assert!(!sam_rule.exists(), "staging writes nothing");
-
-        // Approve: written into Sam's layer, with the asking person named.
-        decide(&id, helm_consent::Decision::Allow);
+        // Another person's rule is written into their layer at once, and filed for Undo.
+        let saved = run(
+            "app_save_rule",
+            json!({"title": "Team style", "text": "Keep notes short.\nUse plain words.", "person": "sam"}),
+        )
+        .unwrap();
+        assert_eq!(saved["saved"], true, "{saved}");
+        assert!(saved["note"]
+            .as_str()
+            .unwrap()
+            .contains("Sam's rules (asked by Alex)"));
         assert!(fs::read_to_string(&sam_rule)
             .unwrap()
             .contains("Use plain words."));
-        let outcome = card(&id).outcome.unwrap();
-        assert!(
-            outcome
-                .starts_with("Applied. Saved the rule Team style to Sam's rules (asked by Alex)"),
-            "{outcome}"
-        );
-        assert!(!data
-            .join("knowledge/people/alex/rules/team-style.md")
-            .exists());
+        assert!(!saved["note"].as_str().unwrap().contains("not linked"));
 
-        // Another person's rules can be listed and read, never written by those calls: the list
-        // names whose it is, `read` returns the text without its title line, and the chat's own
-        // person (any case) reads its own layer. Refusals: an unknown person, person with scope,
-        // a rule the person does not have.
-        let listed = run("app_list_knowledge", json!({"person": "sam"})).unwrap();
-        assert_eq!(listed["person"], "Sam");
-        let sam_rows: Vec<(&str, &str)> = listed["rules"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|r| (r["scope"].as_str().unwrap(), r["path"].as_str().unwrap()))
-            .collect();
-        assert!(
-            sam_rows.contains(&("person", "rules/team-style.md")),
-            "{sam_rows:?}"
-        );
-        assert!(
-            !sam_rows.iter().any(|(_, p)| p.contains("mine")),
-            "this chat's own rules are not in Sam's list: {sam_rows:?}"
-        );
+        // A listing that names nobody leaves Sam's layer out; naming Sam shows it, and reads it.
+        let titles = |v: &Value| -> Vec<String> {
+            v["rules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["title"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let mine = run("app_list_knowledge", json!({})).unwrap();
+        assert!(!titles(&mine).contains(&"Team style".to_owned()));
+        let theirs = run("app_list_knowledge", json!({"person": "sam"})).unwrap();
+        assert!(titles(&theirs).contains(&"Team style".to_owned()));
         let read = run(
             "app_list_knowledge",
-            json!({"person": "Sam", "read": "rules/team-style.md"}),
+            json!({"person": "sam", "read": "rules/team-style.md"}),
         )
         .unwrap();
-        assert_eq!(
-            (read["person"].as_str(), read["scope"].as_str()),
-            (Some("Sam"), Some("person"))
-        );
-        assert_eq!(read["text"], "Keep notes short.\nUse plain words.");
-        let mine = run(
-            "app_list_knowledge",
-            json!({"person": "ALEX", "read": "rules/mine.md"}),
-        )
-        .unwrap();
-        assert_eq!(mine["scope"], "me");
-        for (args, why) in [
-            (json!({"person": "nobody"}), "No person"),
-            (json!({"person": "sam", "scope": "me"}), "not both"),
-            (
-                json!({"person": "sam", "read": "rules/none.md"}),
-                "Sam has no rule",
-            ),
-            (
-                json!({"person": "sam", "read": "../escape.md"}),
-                "not a rule file name",
-            ),
-        ] {
-            let msg = run("app_list_knowledge", args.clone()).unwrap_err().public;
-            assert!(msg.contains(why), "{args}: {msg}");
-        }
+        assert!(read["text"].as_str().unwrap().contains("plain words"));
 
-        // Deny writes nothing; a person not linked to the hub says so on the card.
-        let pat = run(
+        // Changing their rule, then removing it, by naming them.
+        run(
             "app_save_rule",
-            json!({"title": "Pat rule", "text": "Hello.", "person": "pat"}),
+            json!({"title": "Team style", "text": "Short notes.", "person": "sam",
+                   "replace": "rules/team-style.md"}),
         )
         .unwrap();
-        let pid = pat["requestId"].as_str().unwrap().to_owned();
-        assert!(card(&pid)
-            .summary
-            .contains("Pat is not linked to the hub, so this applies on this PC only."));
-        decide(&pid, helm_consent::Decision::Deny);
-        assert!(!data.join("knowledge/people/pat").exists());
-
-        // A replaced rule edited after the card was filed is refused, not overwritten.
-        let rewrite = run(
-            "app_save_rule",
-            json!({
-                "title": "Team style",
-                "text": "Be brief.",
-                "person": "sam",
-                "replace": "rules/team-style.md"
-            }),
-        )
-        .unwrap();
-        let rid = rewrite["requestId"].as_str().unwrap().to_owned();
-        assert!(card(&rid)
-            .summary
-            .contains("Replaces the rule \"Team style\" (rules/team-style.md)"));
-        rules::write(
-            &Layer::Profile("sam".into()).root(&data),
-            Some("rules/team-style.md"),
-            "Team style",
-            "Edited by Sam.",
-            None,
-            None,
-            None,
-            rules::MAX_AGENT_RULE_TEXT,
-        )
-        .unwrap();
-        decide(&rid, helm_consent::Decision::Allow);
-        assert!(card(&rid)
-            .outcome
-            .unwrap()
-            .starts_with("Nothing saved: the rule rules/team-style.md changed"));
         assert!(fs::read_to_string(&sam_rule)
             .unwrap()
-            .contains("Edited by Sam."));
-
-        // A staged rule carrying a When: the card states it in one line, and Approve writes the
-        // trigger keys into Sam's file.
-        let gated = run(
-            "app_save_rule",
-            json!({
-                "title": "Push carefully",
-                "text": "Ask before pushing.",
-                "person": "sam",
-                "when": {"commands": ["git push"], "kinds": ["coding"]}
-            }),
+            .contains("Short notes."));
+        let gone = run(
+            "app_remove_rule",
+            json!({"path": "rules/team-style.md", "person": "sam"}),
         )
         .unwrap();
-        let gid = gated["requestId"].as_str().unwrap().to_owned();
-        assert!(
-            card(&gid)
-                .summary
-                .lines()
-                .any(|l| l.starts_with("When:") && l.contains("git push")),
-            "{}",
-            card(&gid).summary
-        );
-        decide(&gid, helm_consent::Decision::Allow);
-        assert!(card(&gid)
-            .outcome
-            .unwrap_or_default()
-            .starts_with("Applied. Saved the rule Push carefully"));
-        let written =
-            fs::read_to_string(data.join("knowledge/people/sam/rules/push-carefully.md")).unwrap();
-        assert!(
-            written.contains("commands: git push") && written.contains("kinds: coding"),
-            "{written}"
-        );
+        assert_eq!(gone["scope"], "person");
+        assert!(!sam_rule.exists());
 
-        // A skill: the card shows the folder, description and file count; a folder changed in
-        // between is refused, an untouched one is copied in.
-        let src = tmp.path().join("picked/note-skill");
-        fs::create_dir_all(&src).unwrap();
+        // A skill for Sam: a folder with a SKILL.md, copied into their skills.
+        let folder = tmp.path().join("notes-skill");
+        fs::create_dir_all(&folder).unwrap();
         fs::write(
-            src.join("SKILL.md"),
-            "---\ndescription: Takes notes\n---\nSteps.\n",
+            folder.join("SKILL.md"),
+            "---\ndescription: Takes notes.\n---\nTake notes.",
         )
         .unwrap();
-        let skill = run(
+        let added = run(
             "app_add_skill",
-            json!({"path": src.to_string_lossy(), "person": "sam"}),
+            json!({"path": folder.to_str().unwrap(), "person": "sam"}),
         )
         .unwrap();
-        let kid = skill["requestId"].as_str().unwrap().to_owned();
-        let shown = card(&kid).summary;
-        for line in [
-            "Add the skill note-skill for Sam",
-            "Description:",
-            "Takes notes",
-            "Files: 1",
-        ] {
-            assert!(shown.lines().any(|l| l == line), "{line}: {shown}");
-        }
-        fs::write(src.join("extra.md"), "added later").unwrap();
-        decide(&kid, helm_consent::Decision::Allow);
-        assert!(card(&kid)
-            .outcome
-            .unwrap()
-            .starts_with("Nothing saved: the folder"));
-        assert!(!data.join("knowledge/people/sam/skills").exists());
-        let skill = run(
-            "app_add_skill",
-            json!({"path": src.to_string_lossy(), "person": "sam"}),
-        )
-        .unwrap();
-        let kid = skill["requestId"].as_str().unwrap().to_owned();
-        assert!(card(&kid).summary.lines().any(|l| l == "Files: 2"));
-        decide(&kid, helm_consent::Decision::Allow);
+        assert_eq!(added["saved"], true, "{added}");
         assert!(data
-            .join("knowledge/people/sam/skills/note-skill/extra.md")
+            .join("knowledge/people/sam/skills/notes-skill/SKILL.md")
             .is_file());
-        assert!(card(&kid)
-            .outcome
-            .unwrap()
-            .starts_with("Applied. Added the skill note-skill to Sam's skills"));
+        let removed = run(
+            "app_remove_skill",
+            json!({"name": "notes-skill", "person": "sam"}),
+        )
+        .unwrap();
+        assert_eq!(removed["scope"], "person");
 
-        // A memory for Sam: a card with the name, the exact text and the tags, and no write.
-        let memory = json!({
-            "person": "sam",
-            "title": "Sam's passport",
-            "body": "Sam's passport is in the blue folder.",
-            "tags": ["documents"]
-        });
-        let staged = run("app_save_memory", memory.clone()).unwrap();
-        assert_eq!(staged["state"], "pending");
-        let mid = staged["requestId"].as_str().unwrap().to_owned();
-        let shown = card(&mid).summary;
-        for line in [
-            "Save a memory for Sam",
-            "It becomes Sam's memory, shared with the household. Asked by Alex.",
-            "Title: Sam's passport",
-            "Tags: documents",
-            "Text:",
-            "Sam's passport is in the blue folder.",
-        ] {
-            assert!(shown.lines().any(|l| l == line), "{line}: {shown}");
-        }
-        assert!(!shown.contains("own words"), "{shown}");
-        assert_eq!(
-            (hub.writes.lock().unwrap().len(), *hub.asked.lock().unwrap()),
-            (0, 1),
-            "staging only asks whether the hub can save for someone else"
-        );
-
-        // First-person words are flagged on the card; Deny writes nothing.
-        let mut mine = memory.clone();
-        mine["body"] = json!("My passport is in the blue folder.");
-        let first = run("app_save_memory", mine).unwrap();
-        let fid = first["requestId"].as_str().unwrap().to_owned();
-        assert!(card(&fid)
-            .summary
-            .contains("The text says my, me or I: it will read as Sam's own words."));
-        decide(&fid, helm_consent::Decision::Deny);
-        assert!(hub.writes.lock().unwrap().is_empty());
-
-        // Approve: exactly one write, as the asker, for Sam, with the approval and the request's key.
-        decide(&mid, helm_consent::Decision::Allow);
-        {
-            let writes = hub.writes.lock().unwrap();
-            assert_eq!(writes.len(), 1);
-            let (person, tool, args, approved) = &writes[0];
-            assert_eq!(
-                (person.as_deref(), tool.as_str(), approved.as_str()),
-                (Some("hub-alex"), "memory_write", "hub-sam")
-            );
-            assert_eq!(
-                (
-                    args["for"].as_str(),
-                    args["scope"].as_str(),
-                    args["title"].as_str()
-                ),
-                (Some("hub-sam"), Some("everyone"), Some("Sam's passport"))
-            );
-            assert_eq!(args["name"], format!("saved-for-{mid}"));
-            assert_eq!(args["body"], "Sam's passport is in the blue folder.");
-        }
-        assert!(card(&mid)
-            .outcome
-            .unwrap()
-            .starts_with("Applied. Saved the memory Sam's passport for Sam (asked by Alex)."));
-
-        // A retry of the same request (an answer lost on the way back) writes nothing twice.
-        let events: Arc<dyn helm_ipc::EventSink> = Arc::new(helm_ipc::NullSink);
-        let target = json!({
-            "profileId": "sam", "profileName": "Sam", "linked": true, "askedBy": "Alex",
-            "rule": null, "skill": null,
-            "memory": { "title": "Sam's passport", "body": "Sam's passport is in the blue folder.",
-                        "tags": ["documents"], "forPerson": "hub-sam", "askerPerson": "hub-alex" }
-        });
-        let retried = helm_consent::Applier::apply(
-            &crate::for_person::KnowledgeApplier,
-            &helm_consent::ApplyJob {
-                services: &services,
-                events: &events,
-                request_id: &mid,
-                chat_id: "alex-chat",
-                target: &target,
-            },
-        );
-        assert!(retried.starts_with("Applied. Already saved"), "{retried}");
-        assert_eq!(hub.writes.lock().unwrap().len(), 1);
-
-        // Refusals file nothing: someone not on the hub, the chat's own person, a text too long
-        // for a card, hidden characters, and an older hub (also when it is downgraded after the
-        // card was filed: the write is then refused, not saved as the asker's own).
-        let before = *hub.asked.lock().unwrap();
-        let mut long = memory.clone();
-        long["body"] = json!("x".repeat(2000));
-        let mut hidden = memory.clone();
-        hidden["body"] = json!("a\u{202e}b");
-        let mut pat = memory.clone();
-        pat["person"] = json!("pat");
-        let mut own = memory.clone();
-        own["person"] = json!("alex");
-        for (args, why) in [
-            (pat, "not linked to the hub"),
-            (own, "use memory_write"),
-            (long, "too long to show whole"),
-            (hidden, "invisible"),
-        ] {
-            let msg = run("app_save_memory", args.clone()).unwrap_err().public;
-            assert!(msg.contains(why), "{args}: {msg}");
-        }
-        assert_eq!(*hub.asked.lock().unwrap(), before);
-        let mut again = memory.clone();
-        again["title"] = json!("Sam's passport again");
-        let staged = run("app_save_memory", again.clone()).unwrap();
-        let did = staged["requestId"].as_str().unwrap().to_owned();
+        // A memory for Sam goes to the hub as theirs, named for the request; a person with no hub
+        // person is told so, and an old hub is refused before anything is written.
+        let memory = json!({"person": "sam", "title": "Likes tea", "body": "Sam likes green tea.",
+                            "tags": ["drinks"]});
+        let saved = run("app_save_memory", memory.clone()).unwrap();
+        assert_eq!(saved["saved"], true, "{saved}");
+        let writes = hub.writes.lock().unwrap().clone();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].1, "memory_write");
+        assert_eq!(writes[0].2["for"], "hub-sam");
+        assert_eq!(writes[0].3, "hub-sam");
+        let why = run(
+            "app_save_memory",
+            json!({"person": "pat", "title": "T", "body": "Pat likes jam."}),
+        )
+        .unwrap_err()
+        .public;
+        assert!(why.contains("not linked to the hub"), "{why}");
         hub.old.store(true, std::sync::atomic::Ordering::SeqCst);
-        decide(&did, helm_consent::Decision::Allow);
-        assert!(card(&did).outcome.unwrap().starts_with("Nothing saved:"));
-        assert_eq!(hub.writes.lock().unwrap().len(), 1);
-        let msg = run("app_save_memory", again).unwrap_err().public;
-        assert!(msg.contains("Update the hub first"), "{msg}");
+        let why = run("app_save_memory", memory).unwrap_err().public;
+        assert!(why.contains("older than this Helm"), "{why}");
+        assert_eq!(
+            hub.writes.lock().unwrap().len(),
+            1,
+            "an old hub was written nothing"
+        );
     }
 }

@@ -372,9 +372,9 @@ impl McpStore {
         self.resolve_enabled_scoped(env, person, without_chat_person, false)
     }
 
-    /// As [`McpStore::resolve_enabled_where`], also leaving out the servers that belong to this
-    /// PC's own person (the signed-in browser) when `not_home` says the chat belongs to another
-    /// profile than the home one.
+    /// As [`McpStore::resolve_enabled_where`], for a chat of the home profile or of another one
+    /// (`not_home`), which decides whose Google accounts it sees. Every profile gets every enabled
+    /// server, the browser one included.
     pub fn resolve_enabled_scoped(
         &self,
         env: &dyn Fn(&str) -> Option<String>,
@@ -399,11 +399,7 @@ impl McpStore {
         let revision = revision_of(&servers);
         let resolved = servers
             .iter()
-            .filter(|s| {
-                s.enabled
-                    && !(without_chat_person && sends_chat_person(s))
-                    && !(not_home && is_home_only(s))
-            })
+            .filter(|s| s.enabled && !(without_chat_person && sends_chat_person(s)))
             .map(|s| {
                 let mut r = self.resolve_one(s, env, person, profile, not_home);
                 // Only Helm's own approve path may send this header; a chat's connection never
@@ -422,10 +418,7 @@ impl McpStore {
         self.load()
             .map(|l| {
                 l.iter().any(|s| {
-                    s.enabled
-                        && (sends_chat_person(s)
-                            || is_home_only(s)
-                            || refs(s).any(|r| !r.profiles.is_empty()))
+                    s.enabled && (sends_chat_person(s) || refs(s).any(|r| !r.profiles.is_empty()))
                 })
             })
             .unwrap_or(false)
@@ -801,12 +794,6 @@ fn adopt_broker_preset(s: &mut McpServer) {
     {
         s.preset = Some(crate::presets::BROKER_PRESET_ID.into());
     }
-}
-
-/// A server that reaches the home person's own things — the signed-in browser — and so goes to
-/// the chats of the home profile only, never to a household person's or a guest's.
-fn is_home_only(s: &McpServer) -> bool {
-    s.preset.as_deref() == Some(crate::presets::BROKER_PRESET_ID)
 }
 
 fn sends_chat_person(s: &McpServer) -> bool {
@@ -1630,7 +1617,7 @@ pub(crate) mod tests {
         for id in ["mix", "prog"] {
             let r = resolved.iter().find(|r| r.id == id).unwrap();
             let err = r.error.as_deref().unwrap_or_default();
-            assert!(err.contains("Enter it again"), "{id}: {err}");
+            assert!(err.contains("enter it again"), "{id}: {err}");
         }
         assert!(
             resolved

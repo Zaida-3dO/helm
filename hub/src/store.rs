@@ -9,7 +9,7 @@
 //!
 //! Every memory has an owner (a person id) and a visibility, `shared` (the default: the whole
 //! household sees it) or `private` (only its owner sees it, set on purpose). Reads that pass a
-//! viewer see their own memories plus shared ones; only the owner changes or deletes a memory. A memory with no
+//! viewer see their own memories plus shared ones, and another person's private ones when they name that person; a memory is changed or deleted the same way. A memory with no
 //! owner (stored before owners existed) is adopted by one person at start-up ([`Store::adopt_orphans`])
 //! and is invisible to everyone until then.
 
@@ -63,6 +63,9 @@ pub struct Embedding {
     pub values: Vec<f32>,
 }
 
+/// Whose a memory is: the same two values as the app's `Scope` (this crate stands alone, so it
+/// keeps its own copy of the type). `Shared` is everyone's; `Private` is the one person's, shown
+/// to others only when a call names that person, never a right they lack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Visibility {
     Private,

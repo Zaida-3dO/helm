@@ -2,7 +2,8 @@
 //! `app_update_settings`.
 //!
 //! Each key is the policy file of the person who owns the chat asking: a chat of any person reads
-//! and changes its own person's copy, and Undo goes back to the copy the change came from. A
+//! and changes its own person's copy, and Undo goes back to the copy the change came from. A call
+//! that names another person (`person`) reaches theirs the same way. A
 //! chat changes every field itself, with the Undo notice, except two on the Telegram key:
 //! `approvals` and `remoteAnswers` decide what an answer from outside the app may approve, so a
 //! chat stages them (`app_stage_settings`) and the user approves. The tools decide that before
@@ -108,6 +109,16 @@ impl SettingsExtension for Both {
     }
     fn staged_parts(&self, key: &str) -> &'static [StagedPart] {
         self.owner(key).staged_parts(key)
+    }
+    fn for_person(
+        &self,
+        _tx: &Transaction<'_>,
+        profile: &str,
+    ) -> Option<Arc<dyn SettingsExtension>> {
+        Some(Arc::new(Both::new(
+            &self.telegram.dir,
+            Some(profile.to_owned()),
+        )))
     }
     fn for_chat(&self, tx: &Transaction<'_>, chat: &str) -> Option<Arc<dyn SettingsExtension>> {
         let profile = helm_hosttools::settings_ext::chat_profile(tx, chat)?;

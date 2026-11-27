@@ -208,7 +208,7 @@ fn tool_list(client: &Client, opts: &Options) -> Vec<Value> {
     });
     let person = json!({
         "type": "string",
-        "description": "Whose memories: me or any (default: this person's own and the shared ones), or a person's name or id to see only what they wrote. Look at other people's memories only when the user asks."
+        "description": "Whose memories: me or any (default: this person's own and the shared ones), or a person's name or id to reach what they wrote, private ones included. Name another person only when the user asks."
     });
     let vector = json!({
         "type": "array", "items": { "type": "number" },
@@ -237,8 +237,9 @@ fn tool_list(client: &Client, opts: &Options) -> Vec<Value> {
         }),
         json!({
             "name": "memory_read",
-            "description": "Read one memory in full, by numeric id or by name; or a search hit by its `ref` (m:<id>, or d:<doc>#<chunk> for the chunk and `around` chunks either side).",
+            "description": "Read one memory in full, by numeric id or by name; or a search hit by its `ref` (m:<id>, or d:<doc>#<chunk> for the chunk and `around` chunks either side). Name `person` to read another person's private memory.",
             "inputSchema": { "type": "object", "properties": {
+                "person": person,
                 "id": { "type": ["integer", "string"], "description": "Numeric id, or the memory's name." },
                 "ref": { "type": "string", "description": "A ref from a search result." },
                 "around": { "type": "integer", "minimum": 0, "maximum": 10, "default": 1 }
@@ -276,9 +277,10 @@ fn tool_list(client: &Client, opts: &Options) -> Vec<Value> {
         if opts.allow_mutate {
             tools.push(json!({
                 "name": "memory_update",
-                "description": "Change fields of one of your memories. A new body without a new vector clears the old vector.",
+                "description": "Change fields of a memory: yours, a shared one, or another person's private one when you name `person` (their name or id). A new body without a new vector clears the old vector.",
                 "inputSchema": { "type": "object", "properties": {
                     "id": { "type": "integer" },
+                    "person": person,
                     "title": { "type": "string" },
                     "body": { "type": "string" },
                     "description": { "type": "string" },
@@ -292,9 +294,10 @@ fn tool_list(client: &Client, opts: &Options) -> Vec<Value> {
             }));
             tools.push(json!({
                 "name": "memory_delete",
-                "description": "Delete one of your memories permanently.",
+                "description": "Delete a memory permanently: yours, a shared one, or another person's private one when you name `person`.",
                 "inputSchema": { "type": "object", "properties": {
-                    "id": { "type": "integer" }
+                    "id": { "type": "integer" },
+                    "person": person
                 }, "required": ["id"] },
                 "annotations": { "destructiveHint": true }
             }));
@@ -331,8 +334,8 @@ fn call_tool(
         "memory_update" | "memory_delete" if !opts.allow_mutate => {
             return tool_error(format!("{name} is turned off on this hub"));
         }
-        "memory_update" => update(store, client, args),
-        "memory_delete" => delete(store, client, args),
+        "memory_update" => update(store, client, people, args),
+        "memory_delete" => delete(store, client, people, args),
         _ => return tool_error(format!("unknown tool {name:?}")),
     };
     match r {
@@ -461,14 +464,28 @@ fn person_arg(args: &Value, people: &[Person]) -> Result<Option<i64>, String> {
         .ok_or_else(|| format!("no person called {who:?}"))
 }
 
-/// A memory the caller may change: their own. Someone else's shared memory answers that only its
-/// owner can change it; someone else's private one is "not found", as for a read.
-fn owned_by(store: &Store, client: &Client, id: i64) -> Result<(), String> {
+/// The other person a call names with `person`, when it is someone else than the caller: asking
+/// for another person's own memories, private ones included, is an explicit request.
+fn named_other(args: &Value, client: &Client, people: &[Person]) -> Result<Option<i64>, String> {
+    Ok(person_arg(args, people)?.filter(|p| *p != client.person_id))
+}
+
+/// A memory the caller may change: their own, a shared one, or another person's private one when
+/// the call names that person. Otherwise it is "not found", as for a read.
+fn reachable(
+    store: &Store,
+    client: &Client,
+    people: &[Person],
+    args: &Value,
+    id: i64,
+) -> Result<(), String> {
     let m = store.get(id).map_err(store_err)?;
-    if m.owner_person == Some(client.person_id) {
+    let named = named_other(args, client, people)?;
+    if m.owner_person == Some(client.person_id)
+        || m.visibility == Visibility::Shared.as_str()
+        || (named.is_some() && m.owner_person == named)
+    {
         Ok(())
-    } else if m.visibility == Visibility::Shared.as_str() {
-        Err("only the person who wrote this memory can change it".into())
     } else {
         Err(store_err(StoreError::NotFound))
     }
@@ -920,6 +937,27 @@ fn read(store: &mut Store, client: &Client, people: &[Person], args: &Value) -> 
         },
         _ => return Err("id or ref is required".into()),
     };
+    // Another person's private memory, when the call names that person.
+    let m = match (m, named_other(args, client, people)?) {
+        (Err(StoreError::NotFound), Some(owner)) => {
+            let found = match args.get("id") {
+                Some(Value::Number(n)) => store.get(n.as_i64().unwrap_or_default()),
+                Some(Value::String(s)) => match s.parse::<i64>() {
+                    Ok(n) => store.get(n),
+                    Err(_) => store.get_by_owner_name(Some(owner), s),
+                },
+                _ => Err(StoreError::NotFound),
+            };
+            found.and_then(|m| {
+                if m.owner_person == Some(owner) {
+                    Ok(m)
+                } else {
+                    Err(StoreError::NotFound)
+                }
+            })
+        }
+        (other, _) => other,
+    };
     let m = m.map_err(store_err)?;
     let mut v = with_owner(json!(m), m.owner_person, people);
     if let Some(saver) = store.saved_by(m.id).map_err(store_err)? {
@@ -934,10 +972,16 @@ fn list(store: &mut Store, client: &Client, people: &[Person], args: &Value) -> 
     let tag = str_arg(args, "tag")?;
     let since = str_arg(args, "since")?;
     let limit = int_arg(args, "limit")?.unwrap_or(50).max(1) as usize;
+    // Naming another person reaches what they wrote, private ones included.
+    let named = person_arg(args, people)?;
+    let viewer = match named {
+        Some(p) if p != client.person_id => None,
+        _ => Some(client.person_id),
+    };
     let rows = store
         .list_by(
-            Some(client.person_id),
-            person_arg(args, people)?,
+            viewer,
+            named,
             tag.as_deref(),
             since.as_deref(),
             limit,
@@ -974,7 +1018,7 @@ fn find_person<'a>(who: &str, people: &'a [Person]) -> Option<&'a Person> {
 }
 
 /// The person a `memory_write` saves for (`for`), when it is someone other than the caller. It is
-/// honoured only on Helm's approved path: the request must also carry `X-Helm-Approved-For` naming
+/// honoured only on Helm's own path (`app_save_memory`): the request must also carry `X-Helm-Approved-For` naming
 /// the same person, and the token must hold the `peer` scope. The memory is then shared with the
 /// household, never private, because the saver could not see a private one any more.
 fn save_for<'a>(
@@ -994,7 +1038,7 @@ fn save_for<'a>(
         .and_then(|a| find_person(a, people))
         .is_some_and(|a| a.id == target.id);
     if !approved {
-        return Err("saving a memory for another person needs the user's approval: use Helm's app_save_memory"
+        return Err("saving a memory for another person goes through Helm's app_save_memory, which names them"
             .into());
     }
     if !client.has(Scope::Peer) {
@@ -1047,9 +1091,9 @@ fn write(
     }))
 }
 
-fn update(store: &mut Store, client: &Client, args: &Value) -> ToolResult {
+fn update(store: &mut Store, client: &Client, people: &[Person], args: &Value) -> ToolResult {
     let id = int_arg(args, "id")?.ok_or("id is required")?;
-    owned_by(store, client, id)?;
+    reachable(store, client, people, args, id)?;
     refuse_secret(args, &["title", "body", "description"])?;
     let patch = MemoryPatch {
         title: str_arg(args, "title")?,
@@ -1064,9 +1108,9 @@ fn update(store: &mut Store, client: &Client, args: &Value) -> ToolResult {
     Ok(json!({ "id": m.id, "updated_at": m.updated_at, "has_vector": m.dim.is_some() }))
 }
 
-fn delete(store: &mut Store, client: &Client, args: &Value) -> ToolResult {
+fn delete(store: &mut Store, client: &Client, people: &[Person], args: &Value) -> ToolResult {
     let id = int_arg(args, "id")?.ok_or("id is required")?;
-    owned_by(store, client, id)?;
+    reachable(store, client, people, args, id)?;
     store.delete(id).map_err(store_err)?;
     Ok(json!({ "id": id, "deleted": true }))
 }

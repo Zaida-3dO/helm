@@ -271,7 +271,7 @@ async fn pairing_connects_machines_side_by_side_and_a_revoke_drops_only_that_one
 }
 
 #[tokio::test]
-async fn memories_are_shared_unless_made_private_and_only_the_owner_changes_them() {
+async fn memories_are_shared_unless_made_private_and_a_private_one_is_reached_by_naming_its_owner() {
     let hub = start().await;
     let ann = add(&hub, "Ann", "desk", "memory:rw");
     let bea = add(&hub, "Bea", "laptop", "memory:rw");
@@ -341,16 +341,38 @@ async fn memories_are_shared_unless_made_private_and_only_the_owner_changes_them
     assert_eq!(read["structuredContent"]["mine"], false);
     assert_eq!(read["structuredContent"]["visibility"], "shared");
 
-    // Only the owner changes or deletes; a private memory looks absent to anyone else.
-    for (name, id) in [
-        ("memory_update", shared),
-        ("memory_update", secret),
-        ("memory_delete", shared),
-        ("memory_delete", secret),
-    ] {
+    // A private memory looks absent to anyone who does not name its owner; a shared one is the
+    // household's to change.
+    for (name, id) in [("memory_update", secret), ("memory_delete", secret)] {
         let r = tool(&hub, &bea, name, json!({ "id": id, "body": "mine now" })).await;
         assert_eq!(r["isError"], true, "{name} {id}: {r}");
     }
+    let r = tool(
+        &hub,
+        &bea,
+        "memory_update",
+        json!({ "id": shared, "body": "tomatoes, edited" }),
+    )
+    .await;
+    assert_eq!(r["isError"], false, "a shared memory is the household's: {r}");
+    // Naming the owner is the explicit request that reaches their private memory, to read and to
+    // change.
+    let read = tool(
+        &hub,
+        &bea,
+        "memory_read",
+        json!({ "id": secret, "person": "Ann" }),
+    )
+    .await;
+    assert_eq!(read["structuredContent"]["title"], "Gift plan", "{read}");
+    let r = tool(
+        &hub,
+        &bea,
+        "memory_update",
+        json!({ "id": secret, "person": "Ann", "body": "a better plan" }),
+    )
+    .await;
+    assert_eq!(r["isError"], false, "{r}");
     let r = tool(
         &hub,
         &ann,
@@ -1180,7 +1202,7 @@ async fn a_helm_acts_as_the_person_it_names_and_memories_say_who_wrote_them() {
     );
 
     // person: me and any are the memories the person may see; a name or id narrows them; someone
-    // else's private memory never crosses.
+    // else's private memory crosses only when the call names them.
     let (_, mine) = tool_as(&hub, &ann, Some(bea), "memory_list", json!({})).await;
     let any = json!({ "person": "any" });
     let (_, any) = tool_as(&hub, &ann, Some(bea), "memory_list", any).await;
@@ -1189,7 +1211,11 @@ async fn a_helm_acts_as_the_person_it_names_and_memories_say_who_wrote_them() {
     let by_id = json!({ "person": bea });
     let (_, beas) = tool_as(&hub, &ann, Some(bea), "memory_list", by_id).await;
     assert_eq!((count(&mine), count(&any)), (3, 3));
-    assert_eq!((count(&anns), owners(&anns)), (1, vec!["Ann".to_string()]));
+    // Naming a person reaches what they wrote, their private memory included.
+    assert_eq!(
+        (count(&anns), owners(&anns)),
+        (2, vec!["Ann".to_string(), "Ann".to_string()])
+    );
     assert_eq!(count(&beas), 2);
     let across = json!({ "query": "quokka", "person": "any" });
     let (_, r) = tool_as(&hub, &ann, Some(bea), "memory_search", across).await;
@@ -1311,9 +1337,9 @@ async fn a_memory_saved_for_someone_else_is_theirs_shared_and_needs_the_approved
     let mut stranger = save.clone();
     stranger["for"] = json!("Nobody");
     for (token, headers, args, why) in [
-        (&ann, &[][..], &save, "needs the user's approval"),
-        (&ann, &other[..], &save, "needs the user's approval"),
-        (&ann, &named_other[..], &save, "needs the user's approval"),
+        (&ann, &[][..], &save, "goes through Helm's app_save_memory"),
+        (&ann, &other[..], &save, "goes through Helm's app_save_memory"),
+        (&ann, &named_other[..], &save, "goes through Helm's app_save_memory"),
         (
             &ann,
             &[("x-helm-approved-for", "Bea")][..],

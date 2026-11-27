@@ -41,7 +41,7 @@ so set `HUB_LEGACY_PERSON` to the name you pair your own PC under **before the f
 `HUB_TOKENS` below; `helm-hub person merge` fixes a hub that started with the wrong one).
 
 **Scope and person.** `scope` on `memory_write` and `memory_update` is `everyone` (the default: the
-household sees it) or `me` (only the owner sees it, chosen on purpose); `private` and `shared`, and the older `visibility`, mean the same, and
+household sees it) or `me` (only the owner sees it by default, chosen on purpose; anyone who names the owner in `person` can still read and change it); `private` and `shared`, and the older `visibility`, mean the same, and
 naming two that disagree is an error. `person` on `memory_search` and `memory_list` is `me` or `any`
 (the default: the caller's own memories and the ones shared with everyone) or a person's name or id
 (only what that person wrote, among what the caller may see). Nothing crosses privacy: another

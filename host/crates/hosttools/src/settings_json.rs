@@ -192,6 +192,19 @@ impl SettingsExtension for JsonKey {
         Some(Arc::new(mine))
     }
 
+    fn for_person(
+        &self,
+        _tx: &Transaction<'_>,
+        profile: &str,
+    ) -> Option<Arc<dyn SettingsExtension>> {
+        if !self.per_person {
+            return None;
+        }
+        let mut theirs = self.clone();
+        theirs.profile = Some(profile.to_owned());
+        Some(Arc::new(theirs))
+    }
+
     fn changed_event(&self, _key: &str) -> AppEvent {
         AppEvent::new(self.event)
     }

@@ -41,6 +41,14 @@ impl Layer {
         valid_profile_id(id).then(|| Layer::Profile(id.to_owned()))
     }
 
+    /// Whose the layer is: everyone's (shared), or one person's (personal).
+    pub fn scope(&self) -> helm_core::scope::Scope {
+        match self {
+            Layer::Everyone => helm_core::scope::Scope::Shared,
+            Layer::Profile(_) => helm_core::scope::Scope::Personal,
+        }
+    }
+
     /// The name that crosses ops and files.
     pub fn key(&self) -> String {
         match self {

@@ -91,6 +91,30 @@ fn env_with(own_hub_ok: bool) -> Env {
 }
 
 impl Env {
+    /// Stage changes for the copy that belongs to `person`, a profile named by the chat.
+    fn stage_for(&self, chat: &str, person: &str, changes: Value) -> Result<Value, String> {
+        let mut reg = HostToolRegistry::new();
+        register_host_tools(&mut reg);
+        let helm_hosttools::ToolHandler::Blocking(f) = reg.get(TOOL).unwrap().handler.clone()
+        else {
+            panic!("blocking tool")
+        };
+        let ctx = ToolCtx {
+            caller_chat_id: chat.into(),
+            is_child: false,
+            tool_call_id: None,
+            origin: helm_hosttools::CallOrigin::Agent,
+            services: self.services.clone(),
+            events: self.sink.clone(),
+            ops: None,
+        };
+        f(
+            &ctx,
+            json!({"changes": changes, "person": person, "reason": "The user asked for this."}),
+        )
+        .map_err(|e| e.public)
+    }
+
     fn stage(&self, chat: &str, changes: Value) -> Result<Value, String> {
         let mut reg = HostToolRegistry::new();
         register_host_tools(&mut reg);
@@ -655,4 +679,57 @@ fn each_person_changes_their_own_channel_policy_and_stages_the_same_switches() {
         !e.telegram_policy("home").approvals,
         "the other person's copy is untouched"
     );
+    // Naming the other person reaches their copy: from the guest's chat, to change it directly
+    // and to stage the switch, and the card says whose copy it is.
+    let home_id: String =
+        e.db.snapshot(|tx| {
+            tx.query_row("SELECT id FROM profiles WHERE is_home = 1", [], |r| {
+                r.get(0)
+            })
+        })
+        .unwrap();
+    let mut args = json!({"changes": {"telegram": {"model": "sonnet"}}, "person": home_id});
+    let mut reg = HostToolRegistry::new();
+    helm_hosttools::settings::register_host_tools(&mut reg);
+    let helm_hosttools::ToolHandler::Blocking(f) =
+        reg.get("app_update_settings").unwrap().handler.clone()
+    else {
+        panic!("blocking tool")
+    };
+    let ctx = ToolCtx {
+        caller_chat_id: "guest".into(),
+        is_child: false,
+        tool_call_id: None,
+        origin: helm_hosttools::CallOrigin::Agent,
+        services: e.services.clone(),
+        events: e.sink.clone(),
+        ops: None,
+    };
+    f(&ctx, args.clone()).unwrap();
+    assert_eq!(e.telegram_policy("home").new_chat().0, Some("sonnet"));
+    assert_eq!(
+        e.telegram_policy("guest").new_chat().0,
+        Some("haiku"),
+        "the guest's own is untouched"
+    );
+    args["changes"] = json!({"telegram": {"remoteAnswers": true}});
+    assert!(f(&ctx, args)
+        .unwrap_err()
+        .public
+        .contains("app_stage_settings"));
+    let staged = e
+        .stage_for(
+            "guest",
+            &home_id,
+            json!({"telegram": {"remoteAnswers": true}}),
+        )
+        .unwrap();
+    assert!(
+        staged["changes"][0].as_str().unwrap().starts_with("For "),
+        "{staged}"
+    );
+    let outcome = e.approve(staged["requestId"].as_str().unwrap());
+    assert!(outcome.starts_with("Applied."), "{outcome}");
+    assert!(e.telegram_policy("home").remote_answers);
+    assert!(!e.telegram_policy("guest").remote_answers);
 }

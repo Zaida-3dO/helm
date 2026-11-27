@@ -675,7 +675,8 @@ fn embeddable(ctx: &Ctx, args: &mut Args) -> String {
     )
 }
 
-/// What a search asks for. `viewer` is who is asking: nothing of anyone else's private is seen.
+/// What a search asks for. `viewer` is who is asking: of anyone else's private docs only the
+/// ones of a person it names (`person`) are seen.
 #[derive(Debug, Clone, Default)]
 pub struct Query {
     pub viewer: i64,
@@ -743,7 +744,10 @@ pub struct Found {
 
 /// The conditions every candidate query shares, as ` AND ...` (the doc table is `d`).
 fn doc_conditions(q: &Query, args: &mut Args) -> String {
-    let mut sql = format!(" AND {}", privacy(&[q.viewer], args));
+    // Naming another person reaches what they wrote, private docs included.
+    let mut readers = vec![q.viewer];
+    readers.extend(q.person.filter(|p| *p != q.viewer));
+    let mut sql = format!(" AND {}", privacy(&readers, args));
     if !q.tiers.is_empty() {
         let marks: Vec<String> = q
             .tiers

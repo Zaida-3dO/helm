@@ -31,6 +31,7 @@ pub mod privfs;
 pub mod profile;
 pub mod recovery;
 pub mod revisions;
+pub mod scope;
 pub mod secrets;
 pub mod trail;
 pub mod usage_windows;

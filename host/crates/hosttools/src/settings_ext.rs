@@ -90,6 +90,17 @@ pub trait SettingsExtension: Send + Sync {
         None
     }
 
+    /// The same extension for the person whose profile is `profile`: how a call reaches another
+    /// person's copy of a setting that belongs to a person, by naming them. `None`: the setting is
+    /// not a person's.
+    fn for_person(
+        &self,
+        _tx: &Transaction<'_>,
+        _profile: &str,
+    ) -> Option<Arc<dyn SettingsExtension>> {
+        None
+    }
+
     /// The event that tells the interface this key changed.
     fn changed_event(&self, key: &str) -> AppEvent;
 

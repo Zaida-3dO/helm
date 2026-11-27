@@ -96,6 +96,10 @@ struct Staged {
     /// The page of Settings to open for the user to type a secret; the id from `CREDENTIALS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     credentials_page: Option<String>,
+    /// The person whose own copy of a setting that belongs to a person these changes are for
+    /// (a profile id and its name), when the request named one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    person: Option<(String, String)>,
 }
 
 /// The page and what it holds, for one id of `CREDENTIALS`.
@@ -204,6 +208,11 @@ fn field_changes<'a>(from: &'a Value, to: &'a Value) -> Vec<(String, &'a Value, 
 /// whose lines would not fit is refused rather than cut.
 fn card_lines(s: &Staged) -> Result<Vec<String>, String> {
     let mut lines = vec![TITLE.to_owned()];
+    if let Some((_, name)) = &s.person {
+        lines.push(format!(
+            "For {name}'s own copy of the settings that are a person's"
+        ));
+    }
     if let Some(p) = &s.hub_pairing {
         let fallback = if p.fallback.is_empty() {
             String::new()
@@ -461,6 +470,25 @@ fn build(
         return Err(format!("Stage at most {MAX_SETTINGS} settings at once."));
     }
     let mut staged = Staged::default();
+    if let Some(who) = args.get("person").and_then(Value::as_str) {
+        let db = services
+            .get::<Database>()
+            .ok_or("Staging settings is not available here.")?;
+        let found = db
+            .snapshot(|tx| {
+                use rusqlite::OptionalExtension;
+                tx.query_row(
+                    "SELECT id, name FROM profiles WHERE id = ?1 OR name = ?1 COLLATE NOCASE LIMIT 1",
+                    [who.trim()],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                )
+                .optional()
+            })
+            .map_err(|e| e.to_string())?;
+        staged.person = Some(found.ok_or_else(|| {
+            format!("No person called {who:?}: the profiles key of app_get_settings lists them.")
+        })?);
+    }
     if let Some(v) = changes.get(PAIRING) {
         staged.hub_pairing = Some(build_pairing(services, v)?);
     }
@@ -473,8 +501,10 @@ fn build(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     if !wanted.is_empty() {
-        let would =
-            helm_hosttools::settings::apply_approved(services, events, chat_id, &wanted, false)?;
+        let who = staged.person.as_ref().map(|p| p.0.as_str());
+        let would = helm_hosttools::settings::apply_approved(
+            services, events, chat_id, who, &wanted, false,
+        )?;
         let mut unchanged: Vec<String> = Vec::new();
         for ((key, value), w) in wanted.iter().zip(would) {
             let from = effective(key, w.before.as_ref());
@@ -583,6 +613,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                         "minProperties": 1,
                         "maxProperties": 18
                     },
+                    "person": {"type": "string", "maxLength": 64, "description": "A profile name or id: the changes are for that person's own copy of the settings that belong to a person."},
                     "reason": {"type": "string", "minLength": 1, "maxLength": 1000}
                 },
                 "required": ["changes", "reason"],
@@ -648,6 +679,7 @@ fn apply_staged(
             services,
             events.as_ref(),
             chat_id,
+            s.person.as_ref().map(|p| p.0.as_str()),
             &wanted,
             false,
         ) {
@@ -727,6 +759,7 @@ fn apply_staged(
             services,
             events.as_ref(),
             chat_id,
+            s.person.as_ref().map(|p| p.0.as_str()),
             &wanted,
             true,
         ) {

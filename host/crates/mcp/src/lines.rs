@@ -326,14 +326,23 @@ mod tests {
                 .iter()
                 .filter_map(|s| s["id"].as_str())
                 .collect();
-            assert_eq!(
+            assert!(
                 ids.contains(&"browser"),
-                chat != "c-sam",
-                "{chat}: the browser goes to the home person's chats only"
+                "{chat}: every profile gets the browser server"
             );
         }
         let guest = l.start_lines("c-guest", &services);
-        assert_eq!(guest[0]["servers"], json!([]), "c-guest");
+        let ids: Vec<&str> = guest[0]["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["id"].as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            ["browser"],
+            "c-guest: no server answers as someone else, and the browser is for every profile"
+        );
         // With the MCP master switch off, no chat gets any server.
         let db = services.get::<Database>().unwrap();
         db.write(|tx| {

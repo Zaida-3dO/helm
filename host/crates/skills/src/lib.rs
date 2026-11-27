@@ -32,11 +32,6 @@ pub mod undo;
 pub use ops::register_ops;
 pub use tools::register_host_tools;
 
-/// Add this crate's allow kinds (the card for knowledge saved into another person's profile).
-pub fn register_allow_kinds(k: &mut helm_consent::AllowKinds) {
-    for_person::register_allow_kinds(k);
-}
-
 use serde::Serialize;
 use std::fs;
 use std::io::{self, ErrorKind};

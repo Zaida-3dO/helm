@@ -123,8 +123,10 @@ chats may decide on their own). The bar is very high and almost no setting quali
   Personal (shown and applied only for the person or computer it was made for). Personal is only a
   default view so that nothing irrelevant clutters another person's screen; it is never a
   permission. Any other person or computer can still list, read, edit, copy, move or delete a
-  Personal item by naming the person or device in the call, with the same notice and Undo as any
-  direct change. Defaults may differ per person as long as each person can change their own.
+  Personal item by naming the person or device in the call (`person`), with the same notice and Undo
+  as any direct change. `helm_core::scope::Scope` (`Shared` or `Personal`) is the only way to say
+  which an item is: existing words (`everyone`, `me`) map onto it, and no code answers a missing
+  right. Defaults may differ per person as long as each person can change their own.
 
 ## CI
 

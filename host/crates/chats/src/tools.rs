@@ -4661,7 +4661,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn update_chat_regroups_and_nests_in_one_step_and_mutes_only_what_the_caller_made() {
+    async fn update_chat_regroups_and_nests_in_one_step_and_mutes_any_chat() {
         let (h, fake) = gated();
         let stub = Arc::new(Organize {
             inner: h.api.clone(),
@@ -4761,8 +4761,12 @@ mod tests {
             }
         };
         let rows = || h.col("SELECT chat_id FROM chat_mutes");
-        let denied = mute(&c, true).await;
-        assert_eq!(denied["ok"], false, "{denied}");
+        // Any chat may mute any chat, the creator or not.
+        let stranger = mute(&c, true).await;
+        assert_eq!(stranger["result"]["muted"], true, "{stranger}");
+        assert_eq!(rows(), std::slice::from_ref(&a));
+        let stranger = mute(&c, false).await;
+        assert_eq!(stranger["result"]["muted"], false, "{stranger}");
         assert!(rows().is_empty());
         let res = mute(&b, true).await;
         assert_eq!(res["result"]["muted"], true, "{res}");
