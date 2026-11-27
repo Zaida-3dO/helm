@@ -648,6 +648,7 @@ pub fn speaker_view(db: &Database, profile_dir: &std::path::Path, profile_id: &s
             .iter()
             .map(|t| (*t).to_owned())
             .collect(),
+        lean_tools_custom: file.lean_tools.is_some(),
         kept,
     }
 }
