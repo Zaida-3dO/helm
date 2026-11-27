@@ -176,6 +176,10 @@ export function serve(opts: ServeOptions): void {
         // The landing guard's answer to a guard_check (drivers/claude/guard.ts); no response.
         if (!driver.hostLine?.(cmd)) diag("guard_verdict ignored: nothing in this worker asked");
         return;
+      case "rule_verdict":
+        // The answer to a rule_check from the rule-notes hook (drivers/claude/rulenotes.ts); no response.
+        if (!driver.hostLine?.(cmd)) diag("rule_verdict ignored: nothing in this worker asked");
+        return;
       case "deliver_now":
       case "withdraw":
       case "stop_tool":

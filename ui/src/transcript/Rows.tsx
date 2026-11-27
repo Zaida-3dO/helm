@@ -131,6 +131,7 @@ const CONTEXT_LABEL: Record<string, string> = {
   interruption: 'Interruption',
   signIn: 'Sign-in',
   startup: 'Startup',
+  rules: 'Rules',
   queuePause: 'Paused',
   queueStop: 'Stopped',
 };

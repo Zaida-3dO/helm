@@ -988,6 +988,9 @@ pub enum ContextKind {
     /// The project's startup instructions were added to the chat's first message (or, after a
     /// roll over, the note to carry on with the startup that was already done).
     Startup,
+    /// Rules arrived with this message that the chat did not have at its start, or stopped
+    /// applying; or a tool call went out with a rule note beside it.
+    Rules,
 }
 
 /// The `details` bag of a message row. Every field is optional and absent when unset.

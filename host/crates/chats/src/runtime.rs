@@ -444,6 +444,9 @@ impl Spawner for ProcessSpawner {
         claude.plugin_dirs = knowledge.plugin_dirs;
         claude.agents_file = knowledge.agents_file;
         claude.setting_sources = knowledge.setting_sources;
+        // The hook matcher a chat's rule triggers need, if any: the worker only registers its
+        // rule-note hook when this arrives.
+        claude.rule_matcher = knowledge.rule_matcher;
         if let Some(l) = &req.local {
             apply_local_launch(&mut claude, &mut env, l)?;
         }

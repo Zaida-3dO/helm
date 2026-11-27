@@ -1590,6 +1590,10 @@ impl Actor {
 
     fn on_exit(&mut self, reason: String) {
         self.stop_ended = false;
+        // A launch record must not outlive its worker: the next send would diff against a dead
+        // launch and the relaunch would carry the fresh rules twice. The new worker's own launch
+        // records again from its prompt build.
+        helm_skills::triggers::with_sent(|s| s.end_worker(&self.chat_id));
         // The timers go with the worker, and a verdict could no longer be followed by a nudge.
         self.release_stop_hold(true);
         crate::hostcalls::sweep_tools_dir(&crate::hostcalls::tools_dir(
@@ -4329,6 +4333,36 @@ impl Actor {
             "notice" => {
                 if let Some(text) = str_of(&v, "text") {
                     self.context_row(ContextKind::Notice, &text);
+                }
+            }
+            "rules_shown" => {
+                // A tool call went out with a rule note beside it. Taking this line here also
+                // means the skills registry never sees it, so record the acknowledged notes here:
+                // a note that was never shown may come again, and one that was must not repeat.
+                if let Some(text) = str_of(&v, "text") {
+                    self.context_row(ContextKind::Rules, &text);
+                }
+                let agent = v
+                    .get("agentId")
+                    .and_then(Value::as_str)
+                    .filter(|a| !a.is_empty())
+                    .unwrap_or("root");
+                let keys: Vec<(String, String)> = v
+                    .get("keys")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|e| {
+                                Some((
+                                    e.get("key")?.as_str()?.to_owned(),
+                                    e.get("revision")?.as_str()?.to_owned(),
+                                ))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !keys.is_empty() {
+                    helm_skills::triggers::mark_tool_notes(&self.chat_id, agent, &keys);
                 }
             }
             "long_command" => {

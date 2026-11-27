@@ -1,0 +1,15 @@
+{
+  "description": "Tool calls through the rule-notes PreToolUse hook: a Read and two identical Bash calls in one turn, then after a compaction boundary a sub-agent's Read in a second turn, so a test can play the host (note, stop, no answer) and watch the epoch move.",
+  "steps": [
+    { "await": { "type": "user" }, "as": "p" },
+    { "init": {} },
+    { "hook": { "toolUseId": "n1", "tool": "Read", "input": { "file_path": "C:/work/repo/src/a.rs" }, "callback": "helm-rule-notes", "cwd": "C:/work/repo" } },
+    { "hook": { "toolUseId": "n2", "tool": "Bash", "input": { "command": "taskkill /IM node.exe" }, "callback": "helm-rule-notes", "cwd": "C:/work/repo" } },
+    { "hook": { "toolUseId": "n3", "tool": "Bash", "input": { "command": "taskkill /IM node.exe" }, "callback": "helm-rule-notes", "cwd": "C:/work/repo" } },
+    { "result": "first" },
+    { "await": { "type": "user" }, "as": "p2" },
+    { "emit": { "type": "system", "subtype": "compact_boundary", "session_id": "fake-session", "compact_metadata": { "trigger": "auto", "pre_tokens": 900 } } },
+    { "hook": { "toolUseId": "n4", "tool": "Read", "input": { "file_path": "C:/work/repo/src/b.rs" }, "callback": "helm-rule-notes", "agent": "sub-9" } },
+    { "result": "second" }
+  ]
+}
