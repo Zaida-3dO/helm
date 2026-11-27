@@ -105,13 +105,12 @@ impl HoldCell {
         self.slot().clone()
     }
 
-    /// The hold in force at `now`; one that has run out is dropped.
+    /// The hold in force at `now`. A pure read: it never drops anything, not even a hold that has
+    /// run out. Only the watch thread's tidy (`hold_tick`) removes one — and hands over what
+    /// waited for the card; if a plain read cleared an expired hold from memory first, the tidy
+    /// would find nothing to remove and the parked sends would wait forever.
     pub fn current(&self, now: i64) -> Option<Hold> {
-        let mut slot = self.slot();
-        if slot.as_ref().is_some_and(|h| h.until <= now) {
-            *slot = None;
-        }
-        slot.clone()
+        self.slot().clone().filter(|h| h.until > now)
     }
 }
 
@@ -181,6 +180,29 @@ impl LocalService {
         owner: Option<String>,
     ) -> Result<LockView, String> {
         let now = helm_core::now_ms();
+        // A live hold belongs to whoever set it. Another chat cannot take the card over: its
+        // later release would silently end the first holder's work (chat B holds, releases, and
+        // chat A's hold is gone). The owner may extend its own; a hold the person set in the app
+        // outranks chats both ways.
+        if let Some(live) = self.hold.current(now) {
+            let allowed = match (live.owner.as_deref(), owner.as_deref()) {
+                (None, Some(_)) => false,
+                (Some(o), Some(b)) => o == b,
+                _ => true,
+            };
+            if !allowed {
+                let who = if live.owner.is_some() {
+                    "another chat"
+                } else {
+                    "the user from the app"
+                };
+                return Err(format!(
+                    "a GPU hold is already on: \"{}\", set by {who}; only that holder, or the \
+                     user from the app, can end it — it ends by itself when its time comes",
+                    live.reason
+                ));
+            }
+        }
         let hold = Hold {
             reason: clean_reason(reason)?,
             until: expiry(hours, now)?,
@@ -198,15 +220,26 @@ impl LocalService {
     /// layer); `None` means the person did it from the app and any hold may be cleared. A hold
     /// with an owner belongs to that chat alone: another chat cannot end its work.
     pub fn clear_hold(&self, by: Option<&str>) -> Result<LockView, String> {
-        if let Some(h) = self.hold.current(helm_core::now_ms()) {
-            if let (Some(o), Some(by)) = (h.owner.as_deref(), by) {
-                if o != by {
+        // Ownership is checked with `peek`, not `current`: asking must never drop an ended hold
+        // itself — the watch thread's tidy does that once, together with handing over what waited.
+        if let Some(h) = self.hold.peek() {
+            match (h.owner.as_deref(), by) {
+                (Some(o), Some(b)) if o != b => {
                     return Err(
                         "that hold was set by another chat: only that chat, or the user from \
                          the app, can clear it; it ends by itself when its time comes."
                             .into(),
                     );
                 }
+                // A hold the person set in the app is theirs to end: no chat may release it.
+                (None, Some(_)) => {
+                    return Err(
+                        "that hold was set from the app: only the user can clear it there; \
+                         it ends by itself when its time comes."
+                            .into(),
+                    );
+                }
+                _ => {}
             }
         }
         if self.hold.clear() {
@@ -258,8 +291,8 @@ mod tests {
         // peek sees an ended hold too: the service still has a row to remove.
         assert_eq!(cell.peek(), Some(hold.clone()));
         assert_eq!(cell.current(1_000), None, "ends at its time");
-        assert_eq!(cell.current(0), None, "and stays ended");
-        cell.set(hold);
+        // Reading does not remove: the ended hold stays until the watch thread's tidy clears it.
+        assert_eq!(cell.peek(), Some(hold.clone()), "still there to be tidied");
         assert!(cell.clear());
         assert_eq!(cell.current(0), None);
     }

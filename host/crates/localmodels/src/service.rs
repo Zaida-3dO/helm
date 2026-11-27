@@ -1346,16 +1346,27 @@ impl LocalService {
     /// clears soon after.
     fn owner_gone(&self, owner: Option<&str>) -> bool {
         let Some(o) = owner else { return false };
+        // A failed read counts as "owner alive": a snapshot that could not run must not delete
+        // a valid hold. And an archived owner is gone only if no roll-over chain of successors
+        // leads back to a live chat — a roll-over archives the owner but the chat lives on in
+        // its successor, which still holds the card.
         !self
             .db
             .snapshot(|tx| {
                 tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM chats WHERE id = ?1 AND archived = 0)",
+                    "WITH RECURSIVE chain(id, archived, next) AS (
+                        SELECT id, archived, next_session_id FROM chats WHERE id = ?1
+                        UNION ALL
+                        SELECT c.id, c.archived, c.next_session_id
+                          FROM chats c JOIN chain h ON c.id = h.next
+                         WHERE h.archived != 0 AND h.next IS NOT NULL
+                     )
+                     SELECT EXISTS(SELECT 1 FROM chain WHERE archived = 0)",
                     [o],
                     |r| r.get::<_, bool>(0),
                 )
             })
-            .unwrap_or(false)
+            .unwrap_or(true)
     }
 
     /// The hold in force right now: still inside its time and, if a chat set it, that chat is

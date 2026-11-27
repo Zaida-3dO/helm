@@ -1751,6 +1751,20 @@ fn a_gpu_hold_has_an_owner_survives_a_restart_and_lifts_on_its_own() {
         "a stranger cannot end another chat's work"
     );
     assert_eq!(r.svc().gpu_hold().unwrap().reason, "Benchmark running");
+    // Nor can it be taken from under the holder while it is live: a second chat's set refuses,
+    // and the first hold stands on untouched.
+    assert!(
+        r.svc()
+            .set_hold("Mine now", None, Some("other-chat".into()))
+            .unwrap_err()
+            .contains("another chat"),
+        "a second chat cannot take over a live hold"
+    );
+    assert_eq!(
+        r.svc().gpu_hold().unwrap().reason,
+        "Benchmark running",
+        "the refusal changed nothing"
+    );
 
     // A restart: a fresh service over the same database reads the hold back, owner and all.
     let svc2 = r.service();
@@ -1778,12 +1792,25 @@ fn a_gpu_hold_has_an_owner_survives_a_restart_and_lifts_on_its_own() {
     let svc3 = r.service();
     assert_eq!(svc3.hold.peek(), None, "and its stored row went with it");
 
-    // A hold the person set (no owner) may be cleared by any release.
+    // A hold the person set from the app is theirs alone to end: a chat may not release it,
+    // while an app-side release (no `by`) clears it.
     let svc4 = r.service();
     svc4.attach_chats(chats.clone());
     svc4.set_hold("Movie night", None, None).unwrap();
     assert!(svc4.gpu_hold().unwrap().owner.is_none());
-    svc4.clear_hold(Some("any-chat")).unwrap();
+    // Nor may a chat take the card from under the person while it is on.
+    assert!(
+        svc4.set_hold("My job now", None, Some("some-chat".into()))
+            .unwrap_err()
+            .contains("user from the app"),
+        "the person's hold stands"
+    );
+    assert!(
+        svc4.clear_hold(Some("any-chat")).is_err(),
+        "a chat may not end a hold the person set"
+    );
+    assert!(svc4.gpu_hold().is_some());
+    svc4.clear_hold(None).unwrap();
     assert!(svc4.gpu_hold().is_none());
 
     // Time passing lifts a hold the same way, even if nothing read it since it ran out.
@@ -1806,4 +1833,28 @@ fn a_gpu_hold_has_an_owner_survives_a_restart_and_lifts_on_its_own() {
     svc4.hold_tick(helm_core::now_ms());
     let svc6 = r.service();
     assert_eq!(svc6.hold.peek(), None);
+
+    // A roll-over archives the owner row on purpose: the successor keeps the card held, so the
+    // hold is not lifted just because the old row went away.
+    made_chat("owner-7");
+    made_chat("succ-7");
+    svc4.set_hold("Long render", Some(1.0), Some("owner-7".into()))
+        .unwrap();
+    r.db.write(|tx| {
+        tx.execute(
+            "UPDATE chats SET archived = 1, next_session_id = 'succ-7' WHERE id = 'owner-7'",
+            [],
+        )
+    })
+    .unwrap();
+    assert!(
+        svc4.gpu_hold().is_some(),
+        "the chat lives on in its successor"
+    );
+    svc4.hold_tick(helm_core::now_ms());
+    assert_eq!(
+        svc4.gpu_hold().map(|h| h.reason),
+        Some("Long render".to_owned()),
+        "and the tidy agrees"
+    );
 }
